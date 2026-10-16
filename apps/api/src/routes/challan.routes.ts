@@ -8,7 +8,9 @@ import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { balanceOf, recordMovement } from '../services/stock.service'
+import { lockRow } from '../lib/lockRow'
 import { OPEN_ORDER_STATUSES } from '../services/salesOrder.service'
+import { closeCheck } from '../services/reconciliation.service'
 import { afterChallanCancelled, afterChallanDispatched } from '../services/garmentHooks.service'
 
 /**
@@ -447,6 +449,8 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
         referenceId: dc.id,
         transactionDate: dc.dcDate,
         notes: `Dispatched on ${dc.dcNumber}`,
+        // A draft dated last week and sent today goes out today in the ledger.
+        earlierDate: 'move-up',
       })
       if (part.sizeId) {
         await tx.salesOrderLineSize.updateMany({
@@ -467,11 +471,16 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
     where: { id: dc.soId },
     select: { status: true, lines: { select: { pendingQty: true, deliveredQty: true } }, _count: { select: { manufacturingOrders: { where: { status: { notIn: ['DRAFT', 'CLOSED'] } } } } } },
   })
-  const status = statusAfter(
+  let status = statusAfter(
     order.status,
     order.lines.map((l) => ({ pendingQty: Number(l.pendingQty), deliveredQty: Number(l.deliveredQty) })),
     order._count.manufacturingOrders > 0,
   )
+  // Everything sent on a job-work order does not close it while the
+  // customer's material is not all accounted for: it stays open, to be
+  // closed from the order once that is put right, or on a manager's exception.
+  const materialOpen = status === 'COMPLETED' && so.isJobWork && (await closeCheck(tx, dc.soId)).gaps.length > 0
+  if (materialOpen) status = 'PARTIALLY_DISPATCHED'
   await tx.salesOrder.update({ where: { id: dc.soId }, data: { status } })
   await tx.deliveryChallan.update({
     where: { id: dc.id },
@@ -571,6 +580,8 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
   const data = challanSchema.parse(req.body)
   const { before, after } = await prisma.$transaction(
     async (tx) => {
+      // Held first: a double click on "Save and dispatch" must find it gone.
+      await lockRow(tx, 'deliveryChallan', req.params.id)
       const before = await tx.deliveryChallan.findUnique({ where: { id: req.params.id }, include: challanInclude })
       if (!before) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
       if (before.status !== 'DRAFT') throw new AppError(`${before.dcNumber} has gone; it can no longer be changed`, 409, 'NOT_DRAFT')
@@ -631,6 +642,8 @@ router.post('/:id/delivered', requirePermission(MODULE, 'edit'), async (req: Aut
  * them off the order's sent, and sets the order's status back to match.
  */
 export async function cancelChallan(tx: Prisma.TransactionClient, dcId: string, userId: string, reason: string) {
+  // Two clicks at once would both find it out and bring the goods back twice.
+  await lockRow(tx, 'deliveryChallan', dcId)
   const before = await tx.deliveryChallan.findUnique({ where: { id: dcId }, include: challanInclude })
   if (!before) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
   if (before.status === 'CANCELLED') throw new AppError(`${before.dcNumber} is already cancelled`, 409, 'ALREADY_CANCELLED')
@@ -665,6 +678,7 @@ export async function cancelChallan(tx: Prisma.TransactionClient, dcId: string, 
         referenceType: 'DELIVERY_CHALLAN_CANCEL',
         referenceId: before.id,
         notes: `Cancelled ${before.dcNumber}: ${reason}`,
+        earlierDate: 'move-up',
       })
     }
     for (const line of before.lines) {

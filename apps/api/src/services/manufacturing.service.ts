@@ -210,7 +210,7 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     mo.so?.isJobWork
       ? (
           await db.customerGRNLine.findMany({
-            where: { grn: { customerId: mo.so.customerId, cancelledAt: null } },
+            where: { grn: { customerId: mo.so.customerId, status: 'POSTED' } },
             select: { itemId: true },
             distinct: ['itemId'],
           })

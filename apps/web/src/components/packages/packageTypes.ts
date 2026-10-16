@@ -22,7 +22,7 @@ export const packLabel = (t: string) => PACK_TYPES.find((p) => p.value === t)?.l
 export const STATUS: Record<string, { label: string; cls: string }> = {
   IN_STOCK: { label: 'In stock', cls: 'badge-success' },
   EMPTY: { label: 'Empty', cls: 'badge-neutral' },
-  SPLIT: { label: 'Split', cls: 'badge-info' },
+  SPLIT: { label: 'Retired (split)', cls: 'badge-info' },
   VOID: { label: 'Withdrawn', cls: 'badge-danger' },
 }
 
@@ -121,6 +121,8 @@ export interface PackageDetail {
   ownerCustomer: { id: string; name: string } | null
   parent: { id: string; code: string } | null
   children: Array<{ id: string; code: string; qty: string | number; status: string }>
+  /** A retired sticker (status SPLIT): the stickers now on what is left of its roll. */
+  replacedBy?: Array<{ code: string; qty: number }>
   grn: { grnNumber: string; grnDate: string; po: { supplier: { name: string } | null } | null } | null
   position: { inStore: number; inPackages: number; packages: number; loose: number }
   stores: Array<{ id: string; name: string }>

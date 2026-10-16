@@ -9,6 +9,7 @@ import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
 import { priceSalesCharges } from '../services/salesCharges'
+import { orderReconciliation } from '../services/reconciliation.service'
 
 /**
  * Sales invoices: the tax invoice for goods that have gone out on a challan.
@@ -47,6 +48,8 @@ const chargeSchema = z.object({
   chargeTypeId: z.string().min(1, 'Pick the charge'),
   amount: z.number().min(0, 'A charge cannot be negative'),
   gstRate: z.number().min(0).max(100).optional().nullable(),
+  /** This charge bills our own material used on a job-work order that bills it separately. */
+  ownMaterial: z.boolean().optional(),
 })
 
 export const invoiceSchema = z
@@ -97,7 +100,8 @@ const billableInclude = {
       charges: { include: { chargeType: { select: { id: true, name: true } } }, orderBy: { sortOrder: 'asc' } },
       invoices: {
         where: { status: { not: 'CANCELLED' } },
-        select: { id: true, invoiceNumber: true, otherCharges: true, charges: { select: { chargeTypeId: true, amount: true } } },
+        // A charge for our own material is not one of the order's charges, so it never counts against them.
+        select: { id: true, invoiceNumber: true, otherCharges: true, charges: { where: { ownMaterial: false }, select: { chargeTypeId: true, amount: true } } },
       },
     },
   },
@@ -224,6 +228,10 @@ async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: In
     }
   })
 
+  // A charge for our own material only where the order says it is billed separately.
+  if (data.charges?.some((c) => c.ownMaterial && c.amount > 0) && !(order.isJobWork && order.ownMaterialBilling === 'BILLED')) {
+    throw new AppError(`${order.soNumber} does not bill our own material separately, so the invoice carries no charge for it. Change the order if that was agreed with the customer.`, 400, 'OWN_MATERIAL_NOT_BILLED')
+  }
   const charges = await priceSalesCharges(tx, data.charges, isIntraState)
   const chargeTotal = round2(charges.reduce((s, c) => s + c.amount, 0))
   const sum = (k: 'cgst' | 'sgst' | 'igst') =>
@@ -242,7 +250,7 @@ async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: In
     placeOfSupplyCode,
     isIntraState,
     lines,
-    charges: charges.map(({ sortOrder: _s, ...c }) => c),
+    charges: charges.map(({ sortOrder: _s, ...c }) => ({ ...c, ownMaterial: !!data.charges?.find((x) => x.chargeTypeId === c.chargeTypeId)?.ownMaterial })),
     subtotal,
     discountAmount,
     taxableAmount,
@@ -289,10 +297,16 @@ router.get('/prepare', requirePermission(MODULE, 'create'), async (req, res) => 
   }
   const still = chargesStillToBill(dc)
   const today = new Date()
+  // A job-work order that bills our own material separately: what it cost, and what is still to bill.
+  const own =
+    order.isJobWork && order.ownMaterialBilling === 'BILLED'
+      ? (await prisma.$transaction((tx) => orderReconciliation(tx, order.id))).ownMaterial
+      : null
 
   res.json({
     success: true,
     data: {
+      ownMaterial: own && { cost: own.value, billed: own.billed, toBill: own.toBill, lines: own.lines },
       challan: {
         id: dc.id,
         dcNumber: dc.dcNumber,

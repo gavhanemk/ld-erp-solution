@@ -18,7 +18,9 @@ import {
   packageRules,
   positionsOf,
   racksIn,
+  replacementsOf,
   setRack,
+  splitOff,
   stickerDefaultsFrom,
   suggestQtys,
   trackedCategoryIds,
@@ -27,6 +29,7 @@ import {
 import { OUTWARD, OUTWARD_TYPES, loadOutward } from '../services/outward.service'
 import { INWARD_SOURCES, autoStickers, labelGroup, planStickers, restickStickers, sourceRefOf } from '../services/stickers.service'
 import { lockedBalanceOf } from '../services/stock.service'
+import { onceFor } from '../lib/onceFor'
 import { findOptions, findPackages, findSchema } from '../services/packageFind.service'
 import { fillJobCardBlanks } from '../services/jobCard.service'
 
@@ -100,6 +103,8 @@ const issueSchema = z.object({
   mrId: z.string().min(1, 'Choose the requisition'),
   lineId: z.string().min(1, 'Choose the requisition line'),
   qty,
+  /** The screen's id for this one press of Issue: a repeat of it issues nothing more. */
+  requestId: z.string().min(8).max(100).optional(),
 })
 const transferSchema = z.object({ toWarehouseId: z.string().min(1, 'Choose the store it goes to'), qty })
 const splitSchema = z.object({ qtys: z.array(qty).min(1, 'Enter at least one new package').max(200) })
@@ -137,6 +142,14 @@ const pkgInclude = {
 } satisfies Prisma.StockPackageInclude
 
 /** Everything the scan screen shows about one package, and what can be done with it. */
+/** A retired sticker scanned again: what took its place, so the right roll is picked up. */
+async function retiredMessage(tx: Prisma.TransactionClient, pkg: { id: string; code: string }, unit: string, outcome: string) {
+  const now = await replacementsOf(tx, pkg.id)
+  return now.length
+    ? `Sticker ${pkg.code} was retired when part of its roll went out. What is left of it is now ${now.map((n) => `${n.code} (${n.qty} ${unit})`.replace(' )', ')')).join(', ')}: scan that sticker instead. ${outcome}`
+    : `Sticker ${pkg.code} was retired when its roll was split, and nothing of it is left in stock. ${outcome}`
+}
+
 async function detail(id: string) {
   const pkg = await prisma.stockPackage.findUnique({
     where: { id },
@@ -189,6 +202,8 @@ async function detail(id: string) {
     // The racks already in use in its store, for the rack box to offer.
     racksIn(prisma, pkg.warehouseId),
   ])
+  // A retired sticker: the stickers now on what is left of its roll.
+  const replacedBy = pkg.status === 'SPLIT' ? await replacementsOf(prisma, pkg.id) : []
 
   const storeName = new Map(stores.map((s) => [s.id, s.name]))
   return {
@@ -199,6 +214,7 @@ async function detail(id: string) {
     grn,
     position,
     stores,
+    replacedBy,
     racks: racks.map((r) => r.rack),
     requisitions: wanting
       .map((l) => ({
@@ -494,7 +510,9 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
   if (!ids.length) throw new AppError('Choose the packages to print', 400, 'NO_IDS')
   const [company, rows] = await Promise.all([
     prisma.company.findFirst({ select: { name: true } }),
-    prisma.stockPackage.findMany({ where: { id: { in: ids } }, include: pkgInclude, orderBy: { code: 'asc' } }),
+    // Only stickers still on stock: a used-up, split or withdrawn code is
+    // never printed again, so it can never end up on another roll.
+    prisma.stockPackage.findMany({ where: { id: { in: ids }, status: 'IN_STOCK' }, include: pkgInclude, orderBy: { code: 'asc' } }),
   ])
   // A GRN's stickers, and the ones split from them, which keep its id.
   const fromGrn = (r: (typeof rows)[number]) => (r.sourceType === 'GRN' || r.grnLineId) && r.sourceId
@@ -551,8 +569,12 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           poNumber: g?.po?.poNumber ?? null,
           styleNo: r.grnLineId ? (styleOf.get(r.grnLineId) ?? null) : null,
           seq: seqOf.get(r.id) ?? null,
+          // Rejected at receipt: printed HOLD, so nobody takes it to the floor.
+          held: r.grade === 'R',
         }
       }),
+      // Asked for but not printed: used up, split or withdrawn.
+      skipped: ids.length - rows.length,
     },
   })
 })
@@ -606,8 +628,9 @@ async function outwardSpots(doc: Awaited<ReturnType<typeof loadOutward>>) {
     // Packages claiming more than the store now holds: what went out came from them.
     if (pos.loose >= -0.0005) continue
     const over = round3(-pos.loose)
+    // Held rolls (rejected at receipt) never leave on an outward like this: not suggested.
     const packages = await prisma.stockPackage.findMany({
-      where: { ...spot, status: 'IN_STOCK' },
+      where: { ...spot, status: 'IN_STOCK', grade: { not: 'R' } },
       select: { id: true, code: true, qty: true, lotNo: true, packType: true, createdAt: true },
       orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
     })
@@ -680,6 +703,7 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
         const unit = pkg.item.uom?.symbol ?? ''
         if (!spots.has(key)) throw new AppError(`${pkg.code} is not stock that went out on ${doc.number}.`, 400, 'WRONG_PACKAGE')
         if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is no longer in stock.`, 400, 'NOT_IN_STOCK')
+        if (pkg.grade === 'R') throw new AppError(`${pkg.code} is on hold (rejected at receipt), so it did not go out on ${doc.number}. Pick the roll that did.`, 409, 'HELD')
         if (t.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
 
         // No more off the packages than left without a scan: the rest of the
@@ -697,53 +721,29 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
         }
         taken.set(key, round3(room - t.qty))
 
-        const left = round3(Number(pkg.qty) - t.qty)
         const ref = { referenceType: OUTWARD[data.type].ledger, referenceId: doc.id, referenceNumber: doc.number, userId: req.user?.id ?? null }
+        // Part of a roll: the part that went and the rest each get a sticker
+        // of their own, and this one is retired. The rest's sticker is printed
+        // for the rack; one that moved, for the store it went to.
+        const { part, rest } = await splitOff(tx, pkg, t.qty, { notes: `to ${doc.to} on ${doc.number}`, unit, ...ref })
+        if (rest) reprint.push(rest.id)
         if (!moves) {
-          await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left, status: left <= 0 ? 'EMPTY' : 'IN_STOCK' } })
-          await recordPackageMove(tx, { packageId: pkg.id, type: 'ISSUED', qty: -t.qty, balanceAfter: left, warehouseId: pkg.warehouseId, notes: `To ${doc.to}`, ...ref })
-          if (left > 0) reprint.push(pkg.id)
-        } else if (left <= 0) {
-          // The whole roll went: it keeps its sticker, now in the other store, off its old rack.
-          await tx.stockPackage.update({ where: { id: pkg.id }, data: { warehouseId: doc.toWarehouseId!, rack: null } })
+          await tx.stockPackage.update({ where: { id: part.id }, data: { qty: 0, status: 'EMPTY' } })
+          await recordPackageMove(tx, { packageId: part.id, type: 'ISSUED', qty: -t.qty, balanceAfter: 0, warehouseId: pkg.warehouseId, notes: `To ${doc.to}`, ...ref })
+        } else {
+          // What went keeps a sticker, now in the other store, off its old rack.
+          await tx.stockPackage.update({ where: { id: part.id }, data: { warehouseId: doc.toWarehouseId!, rack: null } })
           await recordPackageMove(tx, {
-            packageId: pkg.id,
+            packageId: part.id,
             type: 'TRANSFERRED',
-            qty: Number(pkg.qty),
-            balanceAfter: Number(pkg.qty),
+            qty: part.qty,
+            balanceAfter: part.qty,
             warehouseId: pkg.warehouseId,
             toWarehouseId: doc.toWarehouseId,
             notes: `To ${doc.to}`,
             ...ref,
           })
-        } else {
-          // Part of it went: a new package in the other store, and the rest stays.
-          await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left } })
-          const [child] = await createPackages(tx, {
-            spot: { itemId: pkg.itemId, warehouseId: doc.toWarehouseId!, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId },
-            packType: pkg.packType,
-            qtys: [t.qty],
-            lotNo: pkg.lotNo,
-            sourceType: 'SPLIT',
-            sourceRef: doc.number,
-            parentId: pkg.id,
-            userId: req.user?.id ?? null,
-            fromPackage: true,
-            unit,
-            itemName: pkg.item.name,
-          })
-          await recordPackageMove(tx, {
-            packageId: pkg.id,
-            type: 'SPLIT',
-            qty: -t.qty,
-            balanceAfter: left,
-            warehouseId: pkg.warehouseId,
-            toWarehouseId: doc.toWarehouseId,
-            relatedPackageId: child.id,
-            notes: `${child.code} to ${doc.to}`,
-            ...ref,
-          })
-          reprint.push(pkg.id, child.id)
+          if (rest) reprint.push(part.id)
         }
       }
       return reprint
@@ -928,10 +928,27 @@ router.post('/restick', requirePermission(MODULE, 'create'), async (req: AuthReq
 })
 
 /** Counted once the print box opens on them: that is a print, opening the page is not. */
-router.post('/printed', requirePermission(MODULE, 'view'), async (req, res) => {
+router.post('/printed', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
   const { ids } = z.object({ ids: z.array(z.string().min(1)).min(1).max(500) }).parse(req.body)
-  const r = await prisma.stockPackage.updateMany({ where: { id: { in: ids } }, data: { printCount: { increment: 1 }, lastPrintedAt: new Date() } })
-  res.json({ success: true, data: { updated: r.count } })
+  const updated = await prisma.$transaction(async (tx) => {
+    const live = await tx.stockPackage.findMany({ where: { id: { in: ids }, status: 'IN_STOCK' }, select: { id: true, warehouseId: true, qty: true, printCount: true } })
+    if (!live.length) return 0
+    await tx.stockPackage.updateMany({ where: { id: { in: live.map((p) => p.id) } }, data: { printCount: { increment: 1 }, lastPrintedAt: new Date() } })
+    // The same code every time: a reprint is logged against it, never a new sticker.
+    await tx.stockPackageMove.createMany({
+      data: live.map((p) => ({
+        packageId: p.id,
+        type: 'PRINTED' as const,
+        qty: 0,
+        balanceAfter: p.qty,
+        warehouseId: p.warehouseId,
+        notes: p.printCount > 0 ? `Reprint ${p.printCount + 1}` : 'First print',
+        createdById: req.user?.id ?? null,
+      })),
+    })
+    return live.length
+  })
+  res.json({ success: true, data: { updated } })
 })
 
 router.post('/batch', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
@@ -975,11 +992,29 @@ router.post('/:id/rack', requirePermission(MODULE, 'edit'), async (req: AuthRequ
 /** Issuing from a scanned package against a requisition. The rest stays in the package. */
 router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = issueSchema.parse(req.body)
+  // Kept for the audit trail of a first issue; a repeat writes none.
+  let audit: { mr: unknown; handedOver: unknown } | null = null
   const result = await prisma.$transaction(
-    async (tx) => {
+    async (tx) => onceFor(tx, data.requestId, 'PACKAGE_ISSUE', req.user?.id ?? null, async () => {
       const pkg = await lockPackage(tx, req.params.id)
       const unit = pkg.item.uom?.symbol ?? ''
-      if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is ${pkg.status === 'EMPTY' ? 'empty' : pkg.status === 'SPLIT' ? 'split into other packages' : 'withdrawn'}; nothing can be issued from it.`, 400, 'NOT_IN_STOCK')
+      if (pkg.status === 'EMPTY') {
+        // Already used up: say where it went, so nobody hunts for the roll.
+        const last = await tx.stockPackageMove.findFirst({ where: { packageId: pkg.id, type: 'ISSUED' }, orderBy: { createdAt: 'desc' } })
+        throw new AppError(
+          last
+            ? `Sticker ${pkg.code} was already issued on ${last.createdAt.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })} to ${last.referenceNumber ?? 'a requisition'}${last.notes ? ` (${last.notes})` : ''}. No second issue was posted.`
+            : `Sticker ${pkg.code} is empty; nothing can be issued from it. No issue was posted.`,
+          409,
+          'ALREADY_ISSUED',
+        )
+      }
+      if (pkg.status === 'SPLIT') throw new AppError(await retiredMessage(tx, pkg, unit, 'Nothing was issued.'), 409, 'STICKER_RETIRED')
+      if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is withdrawn; nothing can be issued from it.`, 400, 'NOT_IN_STOCK')
+      // A held roll stays on the rack until an approver releases it or it goes back to the customer.
+      if (pkg.grade === 'R') {
+        throw new AppError(`${pkg.code} is on hold: rejected at receipt${pkg.sourceRef ? ` on ${pkg.sourceRef}` : ''}. It cannot be issued until an approver releases it.`, 409, 'HELD')
+      }
       if (data.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
       const line = await tx.materialRequisitionLine.findUnique({ where: { id: data.lineId }, select: { mrId: true, itemId: true, ownership: true, ownerCustomerId: true } })
       if (!line || line.mrId !== data.mrId) throw new AppError('That line is not on this requisition.', 400, 'WRONG_LINE')
@@ -989,31 +1024,66 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
       }
 
       // The issue itself, with every rule the Issue screen has.
-      const issued = await issueRequisition(tx, data.mrId, { lines: [{ lineId: data.lineId, issueQty: data.qty, warehouseId: pkg.warehouseId }] }, req.user)
+      // The scanned package comes down below, by itself: no other sticker is touched.
+      const issued = await issueRequisition(tx, data.mrId, { lines: [{ lineId: data.lineId, issueQty: data.qty, warehouseId: pkg.warehouseId }] }, req.user, { stickers: 'caller' })
 
-      const left = round3(Number(pkg.qty) - data.qty)
-      await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left, status: left <= 0 ? 'EMPTY' : 'IN_STOCK' } })
+      // Part of a roll: the part issued and the rest each get a sticker of
+      // their own and this one is retired, so no sticker ever says more than
+      // its roll holds and the old one cannot be issued from again.
+      const ref = { referenceType: 'MATERIAL_REQUISITION', referenceId: data.mrId, referenceNumber: issued.after.mrNumber }
+      const { part, rest } = await splitOff(tx, pkg, data.qty, { notes: `issued to ${issued.after.mrNumber}`, userId: req.user?.id ?? null, unit, ...ref })
+      await tx.stockPackage.update({ where: { id: part.id }, data: { qty: 0, status: 'EMPTY' } })
       await recordPackageMove(tx, {
-        packageId: pkg.id,
+        packageId: part.id,
         type: 'ISSUED',
         qty: -data.qty,
-        balanceAfter: left,
+        balanceAfter: 0,
         warehouseId: pkg.warehouseId,
-        referenceType: 'MATERIAL_REQUISITION',
-        referenceId: data.mrId,
-        referenceNumber: issued.after.mrNumber,
+        ...ref,
         notes: `To ${issued.after.department?.name ?? 'production'}`,
         userId: req.user?.id ?? null,
       })
-      return { pkg, left, unit, mrNumber: issued.after.mrNumber }
-    },
+      audit = { mr: issued.after, handedOver: issued.handedOver }
+      return {
+        pkgId: rest?.id ?? pkg.id,
+        scannedId: pkg.id,
+        code: pkg.code,
+        mrId: issued.after.id,
+        mrNumber: issued.after.mrNumber,
+        left: rest?.qty ?? 0,
+        issuedAs: part.code,
+        newSticker: rest,
+        message: rest
+          ? `${data.qty} ${unit} issued from ${pkg.code} against ${issued.after.mrNumber}, as ${part.code}. ${pkg.code} is retired: the ${rest.qty} ${unit} left is now ${rest.code}. Print its sticker and put it on the roll.`
+          : `${data.qty} ${unit} issued from ${pkg.code} against ${issued.after.mrNumber}. The package is now empty.`,
+      }
+    }),
     { timeout: 60_000, maxWait: 20_000 },
   )
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.pkg.id, after: { issued: data.qty, against: result.mrNumber, left: result.left } })
+  const done = result.result
+  if (audit) {
+    const a = audit as { mr: Record<string, unknown>; handedOver: unknown }
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'StockPackage',
+      entityId: done.scannedId ?? done.pkgId,
+      after: { issued: data.qty, against: done.mrNumber, issuedAs: done.issuedAs, left: done.left, newSticker: done.newSticker?.code ?? null },
+    })
+    // The requisition's own history shows the issue too, as a typed one would.
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'MaterialRequisition',
+      entityId: done.mrId,
+      after: { ...a.mr, handedOverNow: a.handedOver, byScanOf: done.code },
+    })
+  }
   res.json({
     success: true,
-    message: `${data.qty} ${result.unit} issued from ${result.pkg.code} against ${result.mrNumber}. ${result.left > 0 ? `${result.left} ${result.unit} left in it.` : 'The package is now empty.'}`,
-    data: await detail(result.pkg.id),
+    message: result.repeat ? `${done.message} (That was the same scan again: nothing more was issued.)` : done.message,
+    data: { ...(await detail(done.pkgId)), newSticker: done.newSticker ?? null },
+    repeat: result.repeat,
   })
 })
 
@@ -1028,6 +1098,7 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
       const pkg = await lockPackage(tx, req.params.id)
       const unit = pkg.item.uom?.symbol ?? ''
       if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} has nothing in it to move.`, 400, 'NOT_IN_STOCK')
+      if (pkg.grade === 'R') throw new AppError(`${pkg.code} is on hold (rejected at receipt), so it stays where it is until it is released or sent back.`, 409, 'HELD')
       if (data.toWarehouseId === pkg.warehouseId) throw new AppError(`${pkg.code} is already in ${pkg.warehouse.name}.`, 400, 'SAME_STORE')
       if (data.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
 
@@ -1040,75 +1111,45 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
           lines: [{ itemId: pkg.itemId, qty: data.qty, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId }],
         },
         req.user?.id ?? null,
+        // The scanned package moves itself below.
+        { stickers: 'caller' },
       )
-      const whole = Math.abs(data.qty - Number(pkg.qty)) < 1e-9
-      let moved = pkg.id
-      if (whole) {
-        // A rack belongs to the store it is in: put away again on arrival.
-        await tx.stockPackage.update({ where: { id: pkg.id }, data: { warehouseId: data.toWarehouseId, rack: null } })
-        await recordPackageMove(tx, {
-          packageId: pkg.id,
-          type: 'TRANSFERRED',
-          qty: 0,
-          balanceAfter: Number(pkg.qty),
-          warehouseId: pkg.warehouseId,
-          toWarehouseId: data.toWarehouseId,
-          referenceType: 'STOCK_TRANSFER',
-          referenceId: note.id,
-          referenceNumber: note.transferNumber,
-          userId: req.user?.id ?? null,
-        })
-      } else {
-        // Part of it: the part that goes becomes a package of its own, at the other store.
-        const left = round3(Number(pkg.qty) - data.qty)
-        await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left } })
-        const [child] = await createPackages(tx, {
-          spot: { itemId: pkg.itemId, warehouseId: data.toWarehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId },
-          packType: pkg.packType,
-          qtys: [data.qty],
-          lotNo: pkg.lotNo,
-          notes: `Part of ${pkg.code}, moved on ${note.transferNumber}`,
-          sourceType: 'SPLIT',
-          sourceId: pkg.sourceId,
-          sourceRef: pkg.sourceRef,
-          grnLineId: pkg.grnLineId,
-          parentId: pkg.id,
-          userId: req.user?.id ?? null,
-          fromPackage: true,
-          unit,
-          itemName: pkg.item.name,
-        })
-        await recordPackageMove(tx, {
-          packageId: pkg.id,
-          type: 'SPLIT',
-          qty: -data.qty,
-          balanceAfter: left,
-          warehouseId: pkg.warehouseId,
-          toWarehouseId: data.toWarehouseId,
-          referenceType: 'STOCK_TRANSFER',
-          referenceId: note.id,
-          referenceNumber: note.transferNumber,
-          relatedPackageId: child.id,
-          userId: req.user?.id ?? null,
-        })
-        moved = child.id
-      }
-      return { pkg, note, whole, moved, unit, to: note.toWarehouse.name }
+      // Part of it: the part that goes and the rest that stays each get a
+      // sticker of their own, and this one is retired.
+      const ref = { referenceType: 'STOCK_TRANSFER', referenceId: note.id, referenceNumber: note.transferNumber }
+      const { part, rest } = await splitOff(tx, pkg, data.qty, { notes: `moved to ${note.toWarehouse.name} on ${note.transferNumber}`, userId: req.user?.id ?? null, unit, ...ref })
+      // A rack belongs to the store it is in: put away again on arrival.
+      await tx.stockPackage.update({ where: { id: part.id }, data: { warehouseId: data.toWarehouseId, rack: null } })
+      await recordPackageMove(tx, {
+        packageId: part.id,
+        type: 'TRANSFERRED',
+        qty: 0,
+        balanceAfter: part.qty,
+        warehouseId: pkg.warehouseId,
+        toWarehouseId: data.toWarehouseId,
+        ...ref,
+        userId: req.user?.id ?? null,
+      })
+      return { pkg, note, part, rest, unit, to: note.toWarehouse.name }
     },
     { timeout: 60_000, maxWait: 20_000 },
   )
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.pkg.id, after: { moved: data.qty, to: result.to, note: result.note.transferNumber } })
-  const child = result.whole ? null : await prisma.stockPackage.findUnique({ where: { id: result.moved }, select: { id: true, code: true } })
+  const { pkg, part, rest } = result
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: pkg.id, after: { moved: data.qty, to: result.to, note: result.note.transferNumber, movedAs: part.code, restAs: rest?.code ?? null } })
   res.json({
     success: true,
-    message: result.whole
-      ? `${result.pkg.code} moved to ${result.to} on ${result.note.transferNumber}.`
-      : `${data.qty} ${result.unit} moved to ${result.to} as a new package ${child?.code}. Print its label and stick it on.`,
-    data: { ...(await detail(result.pkg.id)), newPackage: child },
+    message: rest
+      ? `${data.qty} ${result.unit} moved to ${result.to} as ${part.code}; the ${rest.qty} ${result.unit} left here is now ${rest.code}. ${pkg.code} is retired: print both new stickers and stick them on.`
+      : `${pkg.code} moved to ${result.to} on ${result.note.transferNumber}.`,
+    data: { ...(await detail(rest?.id ?? pkg.id)), newPackage: rest ? { id: part.id, code: part.code } : null, newPackages: rest ? [part, rest] : [] },
   })
 })
 
-/** Splitting or repacking: new packages cut from this one, each with its own label. */
+/**
+ * Splitting or repacking: new packages cut from this one, each with its own
+ * label. Whatever is not cut off goes on a new label too, and this one is
+ * retired — a sticker never stays on a roll holding less than it says.
+ */
 router.post('/:id/split', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = splitSchema.parse(req.body)
   const result = await prisma.$transaction(
@@ -1122,7 +1163,7 @@ router.post('/:id/split', requirePermission(MODULE, 'edit'), async (req: AuthReq
       const children = await createPackages(tx, {
         spot: { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId },
         packType: pkg.packType,
-        qtys: data.qtys,
+        qtys: left > 0.0005 ? [...data.qtys, left] : data.qtys,
         lotNo: pkg.lotNo,
         rack: pkg.rack,
         notes: `Split from ${pkg.code}`,
@@ -1135,15 +1176,17 @@ router.post('/:id/split', requirePermission(MODULE, 'edit'), async (req: AuthReq
         fromPackage: true,
         unit,
         itemName: pkg.item.name,
+        // A held roll's pieces are held too.
+        grade: pkg.grade,
       })
-      await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left, status: left <= 0 ? 'SPLIT' : 'IN_STOCK' } })
+      await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: 0, status: 'SPLIT' } })
       await recordPackageMove(tx, {
         packageId: pkg.id,
         type: 'SPLIT',
-        qty: -total,
-        balanceAfter: left,
+        qty: -Number(pkg.qty),
+        balanceAfter: 0,
         warehouseId: pkg.warehouseId,
-        notes: `Into ${children.map((c) => c.code).join(', ')}`,
+        notes: `Sticker retired: into ${children.map((c) => c.code).join(', ')}${left > 0.0005 ? ` (${children[children.length - 1].code} is the ${left} ${unit} that was left)` : ''}`,
         userId: req.user?.id ?? null,
       })
       return { pkg, children, left, unit }
@@ -1151,9 +1194,10 @@ router.post('/:id/split', requirePermission(MODULE, 'edit'), async (req: AuthReq
     { timeout: 60_000, maxWait: 20_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.pkg.id, after: { splitInto: result.children.map((c) => c.code) } })
+  const rest = result.left > 0.0005 ? result.children[result.children.length - 1] : null
   res.json({
     success: true,
-    message: `${result.pkg.code} split into ${result.children.length} new ${result.children.length === 1 ? 'package' : 'packages'}${result.left > 0 ? `; ${result.left} ${result.unit} stays in it` : ''}. Print the new labels.`,
+    message: `${result.pkg.code} split into ${result.children.length} new ${result.children.length === 1 ? 'package' : 'packages'}${rest ? `, ${rest.code} being the ${result.left} ${result.unit} that was left` : ''}. ${result.pkg.code} is retired: print the new labels.`,
     data: { ...(await detail(result.pkg.id)), newPackages: result.children.map((c) => ({ id: c.id, code: c.code, qty: Number(c.qty) })) },
   })
 })
@@ -1169,8 +1213,20 @@ router.post('/:id/correct', requirePermission(MODULE, 'edit'), async (req: AuthR
     const pkg = await lockPackage(tx, req.params.id)
     const unit = pkg.item.uom?.symbol ?? ''
     if (pkg.status === 'VOID') throw new AppError(`${pkg.code} was withdrawn.`, 400, 'VOID')
+    // An emptied or split sticker stays dead: bringing its code back would let
+    // a roll that already went to the floor be issued a second time. A roll
+    // found again is put on the books by a stock count, with a fresh sticker.
+    if (pkg.status !== 'IN_STOCK') {
+      throw new AppError(
+        `${pkg.code} is ${pkg.status === 'EMPTY' ? 'used up' : 'split into other packages'}, and a used sticker is never brought back. If the roll is really on the rack, record it in a stock count: it gets a new sticker.`,
+        409,
+        'STICKER_USED',
+      )
+    }
     const change = round3(data.qty - Number(pkg.qty))
     if (change > 0) {
+      // The same lock every movement of this stock takes, so the loose figure cannot change under us.
+      await lockedBalanceOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId })
       const pos = await positionOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId })
       if (change > pos.loose + 1e-9) {
         throw new AppError(

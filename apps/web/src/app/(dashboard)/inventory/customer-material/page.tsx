@@ -1,15 +1,17 @@
 'use client'
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import {
   Plus, Search, RefreshCw, AlertCircle, Ban, X, Download, Loader2, FileSpreadsheet, CalendarDays,
   List, LayoutDashboard, FileText, Boxes, AlertTriangle, Users, Warehouse as WarehouseIcon, PackageCheck,
   LineChart, Target, PieChart as PieIcon, Undo2, Printer, Ruler, Table2, Hourglass, XCircle, CheckCircle2,
+  Pencil, Send, BadgeCheck, CornerUpLeft, RotateCcw, ShieldCheck, ClipboardCheck,
 } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, can, currentUser } from '@/lib/api'
 import { CustomerMaterialDialog } from '@/components/inventory/CustomerMaterialDialog'
+import { CustomerGrnQcDialog } from '@/components/inventory/CustomerGrnQcDialog'
 import { ImportCustomerMaterialDialog } from '@/components/inventory/ImportCustomerMaterialDialog'
 import { CustomerReturnDialog } from '@/components/inventory/CustomerReturnDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
@@ -59,6 +61,15 @@ interface LineRow {
   notes: string | null
   cancelledAt: string | null
   cancelReason: string | null
+  /** DRAFT, SUBMITTED (waiting for QC), INSPECTED (waiting for stock approval), POSTED (approved, in stock) or CANCELLED. */
+  status: string
+  statusLabel: string
+  inspectedAt?: string | null
+  inspectedByName?: string | null
+  postedAt: string | null
+  postedByName?: string | null
+  receivedById?: string | null
+  correctionOfId: string | null
   customerId: string
   customerName: string
   soNumber: string | null
@@ -79,8 +90,13 @@ interface LineRow {
   departmentName: string | null
   challanQty: number
   receivedQty: number
-  /** Of what arrived, how much failed the check. In their stock, flagged to go back. */
+  /** Of what arrived, how much failed the check: held, never issued, until released or sent back. */
   rejectedQty?: number
+  rejectReason?: string | null
+  /** Of the rejected, how much an approver released for use. */
+  releasedQty?: number
+  /** Still held on this line. */
+  heldQty?: number
   batchNumber: string | null
   markings: string | null
 }
@@ -95,6 +111,8 @@ interface HeldRow {
   customerId: string
   customerName: string
   qty: number
+  /** Of `qty`, what is held (rejected at receipt): on the rack, not usable. */
+  onHold?: number
   lastMovedAt: string | null
   mainCategoryId: string
   mainCategoryName: string
@@ -150,13 +168,17 @@ const arrivalOf = (r: LineRow) =>
 
 const ARRIVAL_LABEL: Record<string, string> = { match: 'Matched their challan', short: 'Short', excess: 'More than challan' }
 
+/** A receipt's status, as the Status filter knows it: approved receipts are the "active" ones. */
+const RECEIPT_STATE: Record<string, string> = { DRAFT: 'draft', SUBMITTED: 'qc', INSPECTED: 'approval', POSTED: 'active', CANCELLED: 'cancelled' }
+const STATE_LABEL: Record<string, string> = { draft: 'Draft', qc: 'Waiting for QC', approval: 'Waiting for stock approval', active: 'Approved, in stock', cancelled: 'Cancelled' }
+
 const valueOf: Record<FilterKey, (r: AnyRow) => string> = {
   customer: (r) => r.customerId,
   store: (r) => r.warehouseId,
   category: (r) => r.mainCategoryId,
   department: (r) => r.departmentId ?? 'none',
   arrival: (r) => (isReceipt(r) ? arrivalOf(r) : 'n/a'),
-  status: (r) => (r.cancelledAt ? 'cancelled' : 'active'),
+  status: (r) => (r.cancelledAt ? 'cancelled' : isReceipt(r) ? (RECEIPT_STATE[r.status] ?? 'active') : 'active'),
 }
 
 const FILTERS: Array<{ key: FilterKey; label: string; labelOf: (r: AnyRow) => string; noneLabel?: string }> = [
@@ -165,7 +187,7 @@ const FILTERS: Array<{ key: FilterKey; label: string; labelOf: (r: AnyRow) => st
   { key: 'category', label: 'Category', labelOf: (r) => r.mainCategoryName },
   { key: 'department', label: 'Department', labelOf: (r) => r.departmentName ?? '', noneLabel: 'No department' },
   { key: 'arrival', label: 'Arrival', labelOf: (r) => (isReceipt(r) ? ARRIVAL_LABEL[arrivalOf(r)] : '') },
-  { key: 'status', label: 'Status', labelOf: (r) => (r.cancelledAt ? 'Cancelled' : 'Active') },
+  { key: 'status', label: 'Status', labelOf: (r) => (r.cancelledAt ? 'Cancelled' : isReceipt(r) ? (STATE_LABEL[RECEIPT_STATE[r.status] ?? 'active'] ?? 'Approved, in stock') : 'Active') },
 ]
 
 const qtyFmt = (v: number) => v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
@@ -228,13 +250,17 @@ function CustomerMaterialScreen() {
   const [rows, setRows] = useState<LineRow[]>([])
   const [held, setHeld] = useState<HeldRow[]>([])
   const [returns, setReturns] = useState<ReturnRow[]>([])
-  const [returning, setReturning] = useState<null | { customerId: string; warehouseId: string; itemId?: string }>(null)
+  const [returning, setReturning] = useState<null | { customerId: string; warehouseId: string; itemId?: string; grnId?: string; reason?: string }>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
   const [dialog, setDialog] = useState(false)
+  /** A draft or submitted receipt open for changes, by id. */
+  const [editing, setEditing] = useState<string | null>(null)
+  /** The receipt open for QC. */
+  const [qcFor, setQcFor] = useState<string | null>(null)
   /** A receipt just saved: its stickers, ready to print. */
   const [inward, setInward] = useState<InwardRef | null>(null)
   /** Stock that just went out: its labels, and the packages it came from. */
@@ -377,7 +403,10 @@ function CustomerMaterialScreen() {
     const noStatus = rows.filter((r) => passes(r, 'status'))
     const noArrival = rows.filter((r) => passes(r, 'arrival'))
     return {
-      receipts: new Set(shown.filter((r) => !r.cancelledAt).map((r) => r.receiptId)).size,
+      receipts: new Set(shown.filter((r) => r.status === 'POSTED').map((r) => r.receiptId)).size,
+      forQc: new Set(noStatus.filter((r) => r.status === 'SUBMITTED').map((r) => r.receiptId)).size,
+      forApproval: new Set(noStatus.filter((r) => r.status === 'INSPECTED').map((r) => r.receiptId)).size,
+      drafts: new Set(noStatus.filter((r) => r.status === 'DRAFT').map((r) => r.receiptId)).size,
       items: shown.length,
       customers: new Set(shown.map((r) => r.customerId)).size,
       mismatched: noArrival.filter((r) => !r.cancelledAt && arrivalOf(r) !== 'match').length,
@@ -418,6 +447,116 @@ function CustomerMaterialScreen() {
     } finally {
       setBusy(null)
     }
+  }
+
+  const mayApprove = can('inventory', 'approve')
+  const mayQc = can('inventory', 'edit')
+  const me = (currentUser() as { id?: string } | null)?.id ?? null
+
+  /**
+   * What can be done with a receipt where it stands: a draft is finished and
+   * handed to QC, QC checks it, an approver approves it into stock, and one in
+   * stock is corrected.
+   */
+  const receiptActions = (r: LineRow) => {
+    const spin = busy === r.receiptId
+    const icon = (i: ReactNode) => (spin ? <Loader2 size={14} className="animate-spin" /> : i)
+    const all = `all ${r.lineCount} ${r.lineCount === 1 ? 'item' : 'items'}`
+    const items: Array<{ key: string; label: string; icon: ReactNode; onClick?: () => void; href?: string; newTab?: boolean; danger?: boolean; disabled?: boolean }> = []
+    if (r.status === 'DRAFT') {
+      items.push({ key: 'edit', label: 'Edit', icon: <Pencil size={14} />, onClick: () => setEditing(r.receiptId), disabled: spin })
+      items.push({ key: 'submit', label: 'Hand over for QC', icon: icon(<Send size={14} />), onClick: () => void submit(r), disabled: spin })
+      items.push({ key: 'cancel', label: `Cancel (${all})`, icon: icon(<Ban size={14} />), onClick: () => void cancel(r), danger: true, disabled: spin })
+    } else if (r.status === 'SUBMITTED') {
+      // QC is someone other than whoever received it, unless an approver.
+      if (mayQc && (mayApprove || r.receivedById !== me)) items.push({ key: 'qc', label: 'Record QC', icon: <ClipboardCheck size={14} />, onClick: () => setQcFor(r.receiptId), disabled: spin })
+      // Whoever received it, or an approver, may still put the count right.
+      if (r.receivedById === me || mayApprove) items.push({ key: 'edit', label: 'Change what was received', icon: <Pencil size={14} />, onClick: () => setEditing(r.receiptId), disabled: spin })
+      if (mayQc) items.push({ key: 'back', label: 'Send back to receiving', icon: icon(<CornerUpLeft size={14} />), onClick: () => void sendBack(r), disabled: spin })
+      items.push({ key: 'cancel', label: `Cancel (${all})`, icon: icon(<Ban size={14} />), onClick: () => void cancel(r), danger: true, disabled: spin })
+    } else if (r.status === 'INSPECTED') {
+      if (mayApprove) items.push({ key: 'post', label: 'Approve into stock', icon: icon(<BadgeCheck size={14} />), onClick: () => void post(r), disabled: spin })
+      if (mayQc) items.push({ key: 'qc', label: mayApprove ? 'Review QC' : 'Check QC again', icon: <ClipboardCheck size={14} />, onClick: () => setQcFor(r.receiptId), disabled: spin })
+      if (mayApprove) items.push({ key: 'back', label: 'Send back to QC', icon: icon(<CornerUpLeft size={14} />), onClick: () => void sendBack(r), disabled: spin })
+      items.push({ key: 'cancel', label: `Cancel (${all})`, icon: icon(<Ban size={14} />), onClick: () => void cancel(r), danger: true, disabled: spin })
+    } else if (r.status === 'POSTED') {
+      items.push({ key: 'print', label: 'Print receipt', icon: <Printer size={14} />, href: `/print/customer-grn/${r.receiptId}`, newTab: true })
+      if ((r.heldQty ?? 0) > 0) {
+        if (mayApprove) items.push({ key: 'release', label: `Release from hold (${qtyFmt(r.heldQty ?? 0)} ${r.uom})`, icon: icon(<ShieldCheck size={14} />), onClick: () => void release(r), disabled: spin })
+        items.push({ key: 'return', label: 'Send rejected back to customer', icon: <Undo2 size={14} />, onClick: () => setReturning({ customerId: r.customerId, warehouseId: r.warehouseId, itemId: r.itemId, grnId: r.receiptId, reason: 'REJECTED' }) })
+      }
+      items.push({ key: 'correct', label: 'Cancel & correct', icon: icon(<RotateCcw size={14} />), onClick: () => void correct(r), disabled: spin })
+      items.push({ key: 'cancel', label: `Cancel receipt (${all})`, icon: icon(<Ban size={14} />), onClick: () => void cancel(r), danger: true, disabled: spin })
+    } else {
+      items.push({ key: 'print', label: 'Print receipt', icon: <Printer size={14} />, href: `/print/customer-grn/${r.receiptId}`, newTab: true })
+    }
+    return items
+  }
+
+  /** Runs one action on a receipt and reloads; the server's message is shown either way. */
+  const act = async (r: LineRow, run: () => Promise<{ message?: string }>, fallback: string) => {
+    setBusy(r.receiptId)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await run()
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : fallback)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const submit = (r: LineRow) => act(r, () => api.post(`/inventory/customer-grn/${r.receiptId}/submit`, {}), 'Could not hand it over.')
+  const post = (r: LineRow) => {
+    const lines = rows.filter((x) => x.receiptId === r.receiptId)
+    const said = lines
+      .map((x) => `• ${x.itemName}: ${qtyFmt(x.receivedQty - (x.rejectedQty ?? 0))} ${x.uom} passed${x.rejectedQty ? `, ${qtyFmt(x.rejectedQty)} rejected (${x.rejectReason ?? 'no reason'})` : ''}`)
+      .join('\n')
+    if (!confirm(`Approve ${r.grnNumber} into stock?\n\nQC${r.inspectedByName ? ` (${r.inspectedByName})` : ''} found:\n${said}\n\nWhat passed becomes ${r.customerName}'s usable stock; anything rejected is held apart. Its stickers are made now, and it is never edited again.`)) return
+    return act(
+      r,
+      async () => {
+        const res = await api.post<{ message?: string; data: { id: string } }>(`/inventory/customer-grn/${r.receiptId}/post`, {})
+        setInward({ type: 'CUSTOMER_GRN', id: res.data.id })
+        return res
+      },
+      'Could not approve it.',
+    )
+  }
+  const sendBack = (r: LineRow) => {
+    const reason = prompt(
+      r.status === 'SUBMITTED' ? `What needs counting again on ${r.grnNumber}? It goes back to receiving as a draft.` : `What should QC check again on ${r.grnNumber}?`,
+    )
+    if (!reason || reason.trim().length < 5) return
+    return act(r, () => api.post(`/inventory/customer-grn/${r.receiptId}/send-back`, { reason: reason.trim() }), 'Could not send it back.')
+  }
+  const correct = (r: LineRow) => {
+    const reason = prompt(
+      `What was wrong with ${r.grnNumber}?\n\nIt is cancelled — refused if any of it has been issued or sent back — and a copy opens as a draft for you to put right and post.`,
+    )
+    if (!reason || reason.trim().length < 5) return
+    return act(
+      r,
+      async () => {
+        const res = await api.post<{ message?: string; data: { id: string } }>(`/inventory/customer-grn/${r.receiptId}/correct`, { reason: reason.trim() })
+        setEditing(res.data.id)
+        return res
+      },
+      'Could not correct it.',
+    )
+  }
+  const release = (r: LineRow) => {
+    const held = r.heldQty ?? 0
+    const qtyText = prompt(`How much of the ${qtyFmt(held)} ${r.uom} of ${r.itemName} held on ${r.grnNumber} can be used after all?`, String(held))
+    if (!qtyText) return
+    const qty = Number(qtyText)
+    if (!(qty > 0) || qty > held + 1e-9) return setError(`Enter a quantity above nought and no more than the ${qtyFmt(held)} ${r.uom} held.`)
+    const reason = prompt(`Why can it be used? This is kept with the receipt.`)
+    if (!reason || reason.trim().length < 5) return
+    return act(r, () => api.post(`/inventory/customer-grn/${r.receiptId}/release`, { lineId: r.id, qty, reason: reason.trim() }), 'Could not release it.')
   }
 
   /** What the filters leave, as a spreadsheet: every item row with its receipt. */
@@ -731,7 +870,7 @@ function CustomerMaterialScreen() {
     rejectedLines.length > 0 && {
       icon: XCircle,
       tone: TONE.rose,
-      text: `${unitLine(rejectedQty)} rejected at the gate, waiting to go back`,
+      text: `${unitLine(rejectedQty)} rejected at QC, waiting to go back`,
     },
     oldest &&
       ageOf(oldest) > 0 && {
@@ -888,6 +1027,15 @@ function CustomerMaterialScreen() {
           <button className="btn-ghost" onClick={() => void load()} disabled={loading} title="Refresh">
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
+          {/* A customer's whole account of their material, to print or send them. */}
+          <Link
+            href={`/print/customer-material-statement${picked.customer?.length === 1 ? `?customerId=${picked.customer[0]}` : ''}`}
+            target="_blank"
+            className="btn-secondary"
+            title="Everything received, used, returned and still here, for one customer"
+          >
+            <FileText size={15} /> Statement
+          </Link>
           <button className="btn-secondary" onClick={() => setImporting(true)} title="Receipts from a spreadsheet">
             <FileSpreadsheet size={15} /> Import
           </button>
@@ -965,6 +1113,29 @@ function CustomerMaterialScreen() {
               active={isSet('status', ['cancelled'])}
             />
           </div>
+
+          {/* Receipts not in stock yet: QC's to check, an approver's to approve, a draft its writer's to finish. */}
+          {(figures.forQc > 0 || figures.forApproval > 0 || figures.drafts > 0) && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-foreground">
+              <Hourglass size={15} className="shrink-0 text-amber-600" />
+              {figures.forQc > 0 && (
+                <button type="button" className="font-medium hover:underline" onClick={() => toggleTo('status', ['qc'])}>
+                  {figures.forQc} {figures.forQc === 1 ? 'receipt is' : 'receipts are'} waiting for QC
+                </button>
+              )}
+              {figures.forApproval > 0 && (
+                <button type="button" className="font-medium hover:underline" onClick={() => toggleTo('status', ['approval'])}>
+                  {figures.forApproval} QC-checked, waiting for stock approval{mayApprove ? ' — approve or send back' : ''}
+                </button>
+              )}
+              {figures.drafts > 0 && (
+                <button type="button" className="text-muted-foreground hover:underline" onClick={() => toggleTo('status', ['draft'])}>
+                  {figures.drafts} {figures.drafts === 1 ? 'draft' : 'drafts'} not handed over
+                </button>
+              )}
+              <span className="text-xs text-muted-foreground">Their material is on hold — not in stock — until approved.</span>
+            </div>
+          )}
 
           <div className="glass-card overflow-hidden p-0">
             {loading && !rows.length ? (
@@ -1047,18 +1218,27 @@ function CustomerMaterialScreen() {
                           {/* Rejected at the gate: still in their stock, to go back on a return challan. */}
                           <td
                             className="whitespace-nowrap text-right text-sm tabular-nums"
-                            title={r.rejectedQty ? `Accepted ${qtyFmt(r.receivedQty - r.rejectedQty)} ${r.uom}. The rejected part is in their stock until it goes back on a return challan.` : undefined}
+                            title={r.rejectedQty ? `Accepted ${qtyFmt(r.receivedQty - r.rejectedQty)} ${r.uom}. The rejected part is held: never issued until an approver releases it or it goes back on a return.` : undefined}
                           >
                             {r.rejectedQty ? (
-                              <span className="text-red-500">
-                                {qtyFmt(r.rejectedQty)} {r.uom}
-                              </span>
+                              <>
+                                <span className="text-red-500">
+                                  {qtyFmt(r.rejectedQty)} {r.uom}
+                                </span>
+                                {r.rejectReason && <div className="max-w-[140px] truncate text-[10px] text-muted-foreground">{r.rejectReason}</div>}
+                                {r.status === 'POSTED' && (
+                                  <div className="text-[10px] text-muted-foreground">
+                                    {(r.heldQty ?? 0) > 0 ? <span className="text-amber-600">{qtyFmt(r.heldQty ?? 0)} held</span> : 'none held'}
+                                    {(r.releasedQty ?? 0) > 0 ? ` · ${qtyFmt(r.releasedQty ?? 0)} released` : ''}
+                                  </div>
+                                )}
+                              </>
                             ) : (
                               <span className="text-muted-foreground">—</span>
                             )}
                           </td>
                           <td className="whitespace-nowrap">
-                            {r.cancelledAt ? (
+                            {r.cancelledAt || r.status === 'CANCELLED' ? (
                               <>
                                 <span className="badge-neutral">Cancelled</span>
                                 {r.cancelReason && (
@@ -1067,32 +1247,41 @@ function CustomerMaterialScreen() {
                                   </div>
                                 )}
                               </>
+                            ) : r.status === 'DRAFT' ? (
+                              <>
+                                <span className="badge-neutral">Draft</span>
+                                <div className="text-[10px] text-muted-foreground">not on the books</div>
+                              </>
+                            ) : r.status === 'SUBMITTED' ? (
+                              <>
+                                <span className="badge-warning">Waiting for QC</span>
+                                <div className="text-[10px] text-muted-foreground">on hold, not in stock</div>
+                              </>
+                            ) : r.status === 'INSPECTED' ? (
+                              <>
+                                <span className="badge-warning">Waiting for approval</span>
+                                <div className="text-[10px] text-muted-foreground">QC by {r.inspectedByName ?? '—'}; not in stock yet</div>
+                              </>
                             ) : (
-                              <span className="badge-success">Received</span>
+                              <>
+                                <span className="badge-success">Approved</span>
+                                <div className="text-[10px] text-muted-foreground" title={r.postedByName ? `Approved by ${r.postedByName}` : undefined}>
+                                  {r.inspectedByName ? `QC by ${r.inspectedByName}` : 'no QC on record'}
+                                </div>
+                                {r.correctionOfId && <div className="text-[10px] text-muted-foreground">corrected copy</div>}
+                              </>
                             )}
                           </td>
                           <td className="max-w-[160px] truncate text-xs text-muted-foreground" title={r.markings ?? undefined}>
                             {r.markings ?? '—'}
                           </td>
                           <td className="whitespace-nowrap text-right">
-                            {/* A cancelled receipt has nothing left to do. */}
-                            {!r.cancelledAt && (
-                              <div className="flex justify-end gap-1.5">
-                                <ActionMenu
-                                  label={`Actions for ${r.grnNumber}`}
-                                  items={[
-                                    {
-                                      key: 'cancel',
-                                      label: `Cancel receipt (all ${r.lineCount} ${r.lineCount === 1 ? 'item' : 'items'})`,
-                                      icon: busy === r.receiptId ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />,
-                                      onClick: () => void cancel(r),
-                                      danger: true,
-                                      disabled: busy === r.receiptId,
-                                    },
-                                  ]}
-                                />
-                              </div>
-                            )}
+                            <div className="flex justify-end gap-1.5">
+                              <ActionMenu
+                                label={`Actions for ${r.grnNumber}`}
+                                items={receiptActions(r)}
+                              />
+                            </div>
                           </td>
                         </tr>
                       )
@@ -1490,6 +1679,14 @@ function CustomerMaterialScreen() {
                           </td>
                           <td className="whitespace-nowrap text-right">
                             <div className="flex justify-end gap-1.5">
+                              <Link
+                                href={`/print/customer-material-statement?customerId=${h.customerId}`}
+                                target="_blank"
+                                className="btn-secondary h-7 px-2.5 text-xs"
+                                title={`${h.customerName}'s material statement`}
+                              >
+                                <FileText size={13} /> Statement
+                              </Link>
                               <button
                                 type="button"
                                 className="btn-primary h-7 px-2.5 text-xs"
@@ -1510,11 +1707,28 @@ function CustomerMaterialScreen() {
         </>
       )}
 
-      {dialog && (
+      {(dialog || editing) && (
         <CustomerMaterialDialog
-          onClose={() => setDialog(false)}
+          receiptId={editing}
+          onClose={() => {
+            setDialog(false)
+            setEditing(null)
+          }}
           onSaved={(msg, stickers) => {
             setDialog(false)
+            setEditing(null)
+            setMessage(msg)
+            if (stickers) setInward(stickers)
+            void load()
+          }}
+        />
+      )}
+      {qcFor && (
+        <CustomerGrnQcDialog
+          receiptId={qcFor}
+          onClose={() => setQcFor(null)}
+          onDone={(msg, stickers) => {
+            setQcFor(null)
             setMessage(msg)
             if (stickers) setInward(stickers)
             void load()
@@ -1544,7 +1758,7 @@ function CustomerMaterialScreen() {
       {returning && (
         <CustomerReturnDialog
           held={held.map((h) => ({ ...h, customerName: h.customerName ?? 'Customer' }))}
-          receipts={[...new Map(rows.filter((r) => !r.cancelledAt).map((r) => [r.receiptId, { id: r.receiptId, grnNumber: r.grnNumber, customerId: r.customerId, date: r.receiptDate }])).values()]}
+          receipts={[...new Map(rows.filter((r) => r.status === 'POSTED').map((r) => [r.receiptId, { id: r.receiptId, grnNumber: r.grnNumber, customerId: r.customerId, date: r.receiptDate }])).values()]}
           start={returning.customerId ? returning : undefined}
           onClose={() => setReturning(null)}
           onSaved={(msg, out) => {

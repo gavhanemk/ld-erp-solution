@@ -94,7 +94,7 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
         orderBy: { challanDate: 'asc' },
         include: {
           jobWorker: { select: { name: true } },
-          lines: { select: { id: true, qty: true, unitRate: true, returnLines: { select: { consumedQty: true } } } },
+          lines: { select: { id: true, qty: true, unitRate: true, returnLines: { where: { jobWorkReturn: { cancelledAt: null } }, select: { consumedQty: true } } } },
         },
       }),
     ])

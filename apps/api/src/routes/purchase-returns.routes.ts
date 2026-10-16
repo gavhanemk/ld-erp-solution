@@ -7,6 +7,7 @@ import { writeAuditLog } from '../lib/audit'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, recordMovement } from '../services/stock.service'
+import { lockRow } from '../lib/lockRow'
 import { qcRejectedByGrnLine, qcSummaryOf, REJECTED_GRADE, creditReturn, uncreditReturn } from '../services/grnQc.service'
 import { returnReasonOptions } from '../lib/returnReasons'
 import {
@@ -417,6 +418,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
   const returnDate = data.returnDate ?? new Date()
 
   const result = await prisma.$transaction(async (tx) => {
+    // Two clicks at once would both find the quantity unclaimed and send the same rolls back twice.
+    await lockRow(tx, 'purchaseBill', data.billId)
     const bill = await tx.purchaseInvoice.findUnique({
       where: { id: data.billId },
       select: {
@@ -595,6 +598,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
           grade: p.grade,
           transactionDate: returnDate,
           notes: `Returned to supplier on ${returnNumber}${p.grade === REJECTED_GRADE ? ' (rejected on QC)' : ''}`,
+          // The labels window after it says which rolls went.
+          stickers: 'window',
         })
       }
     }
@@ -724,6 +729,7 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
   const { reason } = cancelReturnSchema.parse(req.body ?? {})
 
   const result = await prisma.$transaction(async (tx) => {
+    await lockRow(tx, 'purchaseReturn', req.params.id)
     const before = await tx.purchaseReturn.findUnique({
       where: { id: req.params.id },
       include: returnInclude,
@@ -764,6 +770,7 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
         unitRate: Number(m.unitRate ?? 0),
         grade: m.grade,
         notes: `${before.returnNumber} cancelled — goods back in stock${m.grade === REJECTED_GRADE ? ', held as rejected' : ''}`,
+        earlierDate: 'move-up',
       })
     }
     // The check that rejected them counts them as held again.

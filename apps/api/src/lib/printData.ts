@@ -60,6 +60,7 @@ const DEFAULT_TITLES: Record<string, string> = {
   DC: 'DELIVERY CHALLAN',
   JW: 'DELIVERY CHALLAN (JOB WORK)',
   CMR: 'DELIVERY CHALLAN (RETURN)',
+  CGRN: 'CUSTOMER MATERIAL RECEIPT',
   // Our own booking record of a supplier's invoice, not a tax invoice we issue.
   // Calling it one on paper would be claiming to have raised it.
   PB: 'PURCHASE BILL',
@@ -87,6 +88,10 @@ const DEFAULT_TITLES: Record<string, string> = {
   CUT: 'CUTTING SHEET',
   JC: 'JOB CARD',
   SHEET: 'PROCESS SHEET',
+  // Statements for people outside the mill: a customer's material with us,
+  // and a job worker's account of what they were sent and sent back.
+  CMS: 'CUSTOMER MATERIAL STATEMENT',
+  JWS: 'JOB WORK STATEMENT',
 }
 
 export async function getPrintHeader(docType: string): Promise<PrintHeader> {

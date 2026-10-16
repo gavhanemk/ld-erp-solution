@@ -23,6 +23,7 @@ import { api, ApiError, can } from '@/lib/api'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { MaterialExceptionDialog } from './MaterialExceptionDialog'
 import { OrderLinesView, type OrderLineView } from './OrderLinesView'
 import { OrderReconciliation } from './OrderReconciliation'
 import { OPEN_ORDER_STATUSES, salesOrderStatus } from './status'
@@ -71,6 +72,13 @@ export interface OrderDetailFull {
   cancelReason: string | null
   shortClosedAt: string | null
   shortCloseReason: string | null
+  /** Job work: our own trims on it covered by the job charge, or billed. */
+  ownMaterialBilling?: 'IN_JOB_CHARGE' | 'BILLED'
+  /** Closed or cancelled with the customer's material not all accounted for, on a manager's say. */
+  materialExceptionAt?: string | null
+  materialExceptionReason?: string | null
+  materialExceptionBy?: Person | null
+  materialExceptionSnapshot?: { gaps?: Array<{ text: string }> } | null
   customer: { id: string; name: string; gstin: string | null; billingCity: string | null; shippingCity: string | null }
   brand: { name: string; type: string }
   broker: { name: string; brokeragePercent: string | number | null } | null
@@ -83,6 +91,8 @@ export interface OrderDetailFull {
   lines: OrderLineView[]
   manufacturingOrders: Array<{ id: string; moNumber: string; status: string; totalPackedQty: string | number | null }>
   materialRequisitions: Array<{ id: string; mrNumber: string; status: string; closedAt: string | null }>
+  /** The customer's material received against it (job work). */
+  customerMaterial?: Array<{ id: string; grnNumber: string; status: string; receiptDate: string }>
   deliveryChallans: Array<{ id: string; dcNumber: string; dcDate: string; status: string }>
   invoices: Array<{ id: string; invoiceNumber: string; invoiceDate: string; totalAmount: string | number; status: string }>
 }
@@ -142,6 +152,8 @@ export function SalesOrderDetailDialog({
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [asking, setAsking] = useState<ReasonAction | null>(null)
+  /** A close or cancel refused for the customer's material, waiting on a manager's exception. */
+  const [exception, setException] = useState<{ action: 'short-close' | 'cancel'; reason: string } | null>(null)
   /** The server's figures when confirming needs a reason to release a credit hold. */
   const [holdNote, setHoldNote] = useState<string | null>(null)
   const [revision, setRevision] = useState<Revision | 'loading' | null>(null)
@@ -166,7 +178,7 @@ export function SalesOrderDetailDialog({
   useEffect(() => {
     if (!orderId) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !asking && !revision) onClose()
+      if (e.key === 'Escape' && !asking && !revision && !exception) onClose()
     }
     window.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
@@ -175,9 +187,31 @@ export function SalesOrderDetailDialog({
       window.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [orderId, onClose, asking, revision])
+  }, [orderId, onClose, asking, revision, exception])
 
   if (!orderId || !mounted) return null
+
+  /** Cancel, short-close or release, with its reason; a job-work order's material gap opens the exception window. */
+  const runReason = async (action: ReasonAction, reason: string) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await postReasonAction(orderId, action, reason)
+      const msg = res.message ?? 'Order updated'
+      setMessage(msg)
+      onChanged(msg)
+      await load(orderId)
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'MATERIAL_UNACCOUNTED' && (action === 'short-close' || action === 'cancel')) {
+        setException({ action, reason })
+      } else {
+        setError(err instanceof ApiError ? err.message : 'That could not be done.')
+      }
+    } finally {
+      setBusy(false)
+      setAsking(null)
+    }
+  }
 
   const act = async (run: () => Promise<{ message?: string }>, fallback: string) => {
     setBusy(true)
@@ -234,9 +268,14 @@ export function SalesOrderDetailDialog({
   }
 
   const o = order
-  const look = o ? salesOrderStatus(o) : null
   const dispatched = o ? o.lines.reduce((s, l) => s + Number(l.deliveredQty), 0) : 0
   const pieces = o ? o.lines.reduce((s, l) => s + Number(l.totalQty), 0) : 0
+  // Everything sent and still open: a job-work order waiting on its customer's material to close.
+  const look = o
+    ? o.status === 'PARTIALLY_DISPATCHED' && pieces > 0 && dispatched >= pieces
+      ? { label: 'All sent · to close', cls: 'badge-warning' }
+      : salesOrderStatus(o)
+    : null
   const started = o
     ? o.manufacturingOrders.some((m) => m.status !== 'CLOSED') || o.deliveryChallans.length > 0 || dispatched > 0
     : false
@@ -334,6 +373,15 @@ export function SalesOrderDetailDialog({
               },
             ]
           : []),
+        ...(o.materialExceptionAt
+          ? [
+              {
+                at: o.materialExceptionAt,
+                text: `Closed with the customer's material not all accounted for — a manager's exception${o.materialExceptionBy ? ` by ${o.materialExceptionBy.name}` : ''}: ${o.materialExceptionReason ?? ''}${o.materialExceptionSnapshot?.gaps?.length ? ` (${o.materialExceptionSnapshot.gaps.map((g) => g.text).join('; ')})` : ''}`,
+                version: null,
+              },
+            ]
+          : []),
       ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
     : []
 
@@ -345,6 +393,13 @@ export function SalesOrderDetailDialog({
           number: m.moNumber,
           detail: m.totalPackedQty ? `${Number(m.totalPackedQty).toLocaleString('en-IN')} packed` : '',
           status: words(m.status),
+        })),
+        ...(o.customerMaterial ?? []).map((g) => ({
+          key: g.id,
+          kind: 'Customer material receipt',
+          number: g.grnNumber,
+          detail: formatDate(g.receiptDate),
+          status: g.status === 'SUBMITTED' ? 'Waiting for approval' : words(g.status),
         })),
         ...o.materialRequisitions.map((m) => ({
           key: m.id,
@@ -395,6 +450,11 @@ export function SalesOrderDetailDialog({
                   {look && <span className={look.cls}>{look.label}</span>}
                   {late && <span className="badge-danger">Overdue</span>}
                   {o?.isJobWork && <span className="badge-purple">Job work</span>}
+                  {o?.isJobWork && (
+                    <span className="badge-neutral" title="Our own trims and thread used on it">
+                      {o.ownMaterialBilling === 'BILLED' ? 'Our trims billed separately' : 'Our trims in the job charge'}
+                    </span>
+                  )}
                 </div>
                 {o && (
                   <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
@@ -442,7 +502,8 @@ export function SalesOrderDetailDialog({
               )}
               {o && orderCan.shortClose(o) && started && (
                 <button className="btn-secondary" onClick={() => setAsking('short-close')} disabled={busy}>
-                  <Scissors size={15} /> Short-close
+                  {/* Everything sent: what is left is closing it, once its material is accounted for. */}
+                  <Scissors size={15} /> {dispatched >= pieces ? 'Close order' : 'Short-close'}
                 </button>
               )}
               {o && orderCan.cancel(o) && !started && (
@@ -668,7 +729,21 @@ export function SalesOrderDetailDialog({
           danger={asking === 'cancel'}
           busy={busy}
           onCancel={() => setAsking(null)}
-          onConfirm={(reason) => void act(() => postReasonAction(o.id, asking, reason), `${o.soNumber} updated`)}
+          onConfirm={(reason) => void runReason(asking, reason)}
+        />
+      )}
+      {exception && o && (
+        <MaterialExceptionDialog
+          order={o}
+          action={exception.action}
+          reason={exception.reason}
+          onCancel={() => setException(null)}
+          onDone={(msg) => {
+            setException(null)
+            setMessage(msg)
+            onChanged(msg)
+            void load(orderId)
+          }}
         />
       )}
 

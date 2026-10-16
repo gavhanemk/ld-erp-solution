@@ -231,7 +231,7 @@ export async function reviewOf(db: Db, c: { id: string; warehouseId: string; loo
     db.$queryRaw<Array<{ itemId: string; ownership: Ownership; ownerCustomerId: string | null; qty: number }>>`
       SELECT "itemId", ownership::text AS ownership, "ownerCustomerId", COALESCE(SUM("inQty" - "outQty"), 0)::float8 AS qty
       FROM ld_erp.stock_ledger
-      WHERE "warehouseId" = ${c.warehouseId} AND "sizeId" IS NULL AND grade = 'A'
+      WHERE "warehouseId" = ${c.warehouseId} AND "sizeId" IS NULL AND grade IN ('A', 'R')
       GROUP BY 1, 2, 3
       HAVING ROUND(SUM("inQty" - "outQty")::numeric, 3) <> 0`,
     packageRules(db as Prisma.TransactionClient),

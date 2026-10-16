@@ -1,8 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { CheckCircle2, Loader2, Printer, ScanLine } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { newRequestId } from '@/lib/utils'
 import { StepInput } from '@/components/ui/StepInput'
 import { StickerScanner } from './StickerSearch'
 import { STATUS, packCount, printLabels, qtyText, type PackageDetail } from './packageTypes'
@@ -15,6 +16,8 @@ interface Issued {
   item: string
   qty: number
   left: number
+  /** Part of the roll went: the new sticker for what is left on it, the scanned one now retired. */
+  newSticker: { id: string; code: string } | null
   unit: string
   /** "roll", "box": what it was. */
   kind: string
@@ -24,9 +27,9 @@ interface Issued {
 
 /**
  * Issuing an approved requisition by scanning its stickers: scan one, say how
- * much of it goes, press Issue — the store's stock comes down there and then,
- * and the sticker keeps the rest. Scan the next one straight after. A sticker
- * part-used gets a fresh one printed for what is left on it.
+ * much of it goes, press Issue — the store's stock comes down there and then.
+ * Scan the next one straight after. A roll only partly issued has its sticker
+ * retired, and what is left of it gets a new one, printed from here.
  */
 export function ScanIssue({
   mrId,
@@ -48,6 +51,11 @@ export function ScanIssue({
   const [issued, setIssued] = useState<Issued[]>([])
   // Bumped after each issue, so the scan box is fresh and focused for the next sticker.
   const [round, setRound] = useState(0)
+  // Set the moment Issue is pressed, before any state settles: a second Enter
+  // a scanner sends straight after the first is dropped here, and the id
+  // below makes the server issue once even if both got through.
+  const sending = useRef(false)
+  const requestId = useRef<string>('')
 
   const read = async (code: string) => {
     setError(null)
@@ -56,7 +64,13 @@ export function ScanIssue({
       const res = await api.get<{ data: PackageDetail }>(`/packages/scan/${encodeURIComponent(code)}`)
       const p = res.data
       const waiting = p.requisitions.find((r) => r.mrId === mrId)
-      if (p.status !== 'IN_STOCK') {
+      if (p.status === 'SPLIT') {
+        setError(
+          p.replacedBy?.length
+            ? `${p.code} is retired: part of its roll already went. What is left of it is now ${p.replacedBy.map((r) => `${r.code} (${qtyText(r.qty)} ${p.unit})`).join(', ')} — scan that sticker instead.`
+            : `${p.code} is retired, and nothing of its roll is left in stock.`,
+        )
+      } else if (p.status !== 'IN_STOCK') {
         setError(`${p.code} is ${STATUS[p.status]?.label.toLowerCase() ?? p.status}: there is nothing on it to issue.`)
       } else if (!waiting) {
         setError(
@@ -67,6 +81,7 @@ export function ScanIssue({
       } else {
         setPkg(p)
         setLine(waiting)
+        requestId.current = newRequestId()
         setQty(String(Math.round(Math.min(waiting.owed, p.qty) * 1000) / 1000))
         return
       }
@@ -83,13 +98,31 @@ export function ScanIssue({
   const problem = !pkg || !line ? null : !(n > 0) ? 'Enter how much goes.' : n > pkg.qty + 1e-9 ? `${pkg.code} has only ${qtyText(pkg.qty)} ${pkg.unit} on it.` : n > line.owed + 1e-9 ? `${mrNumber} needs only ${qtyText(line.owed)} ${pkg.unit} more.` : null
 
   const issue = async () => {
-    if (!pkg || !line || problem) return
+    if (!pkg || !line || problem || sending.current) return
+    sending.current = true
     setBusy(true)
     setError(null)
     try {
-      const res = await api.post<{ message: string; data: PackageDetail }>(`/packages/${pkg.id}/issue`, { mrId, lineId: line.lineId, qty: n })
+      const res = await api.post<{ message: string; data: PackageDetail & { newSticker: { id: string; code: string; qty: number } | null } }>(`/packages/${pkg.id}/issue`, {
+        mrId,
+        lineId: line.lineId,
+        qty: n,
+        requestId: requestId.current,
+      })
+      const fresh = res.data.newSticker
       setIssued((list) => [
-        { id: pkg.id, code: pkg.code, item: pkg.item.name, qty: n, left: res.data.qty, unit: pkg.unit, kind: packCount(1, pkg.packType).replace(/^1 /, ''), lot: pkg.lotNo, store: pkg.warehouse.name },
+        {
+          id: pkg.id,
+          code: pkg.code,
+          item: pkg.item.name,
+          qty: n,
+          left: fresh?.qty ?? 0,
+          newSticker: fresh ? { id: fresh.id, code: fresh.code } : null,
+          unit: pkg.unit,
+          kind: packCount(1, pkg.packType).replace(/^1 /, ''),
+          lot: pkg.lotNo,
+          store: pkg.warehouse.name,
+        },
         ...list,
       ])
       setPkg(null)
@@ -100,16 +133,17 @@ export function ScanIssue({
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not issue it.')
     } finally {
+      sending.current = false
       setBusy(false)
     }
   }
 
   return (
-    <div className="relative z-20 space-y-3 rounded-xl border border-border bg-card p-3">
+    <div className="relative z-20 space-y-3">
       <p className="flex flex-wrap items-center gap-x-2 text-sm">
         <ScanLine size={16} className="text-primary" />
-        <span className="font-semibold text-foreground">Scan stickers to issue</span>
-        <span className="text-muted-foreground">— each one comes out of stock the moment you press Issue.</span>
+        <span className="font-semibold text-foreground">Scan items to issue</span>
+        <span className="text-xs text-muted-foreground">each sticker comes out of stock the moment you press Issue</span>
       </p>
       {/* Typing finds this requisition's own items in stock: a word, a lot, a challan, a supplier. */}
       <StickerScanner
@@ -178,15 +212,20 @@ export function ScanIssue({
                   {qtyText(d.qty)} {d.unit} {d.item}
                 </span>{' '}
                 <span className="text-muted-foreground">
-                  {d.left > 0
-                    ? `issued from a ${d.kind}${d.lot ? ` (lot ${d.lot})` : ''} — ${qtyText(d.left)} ${d.unit} left on it in ${d.store}`
+                  {d.newSticker
+                    ? `issued from a ${d.kind}${d.lot ? ` (lot ${d.lot})` : ''} — the ${qtyText(d.left)} ${d.unit} left in ${d.store} is now ${d.newSticker.code}; ${d.code} is retired`
                     : `issued — the whole ${d.kind}${d.lot ? ` (lot ${d.lot})` : ''}, now out of ${d.store}`}
                 </span>{' '}
                 <span className="font-mono text-[11px] text-muted-foreground">{d.code}</span>
               </span>
-              {d.left > 0 && (
-                <button type="button" className="btn-secondary h-8 px-2.5 text-xs" onClick={() => printLabels([d.id])} title="The old sticker still shows what it held before">
-                  <Printer size={13} /> Print fresh sticker
+              {d.newSticker && (
+                <button
+                  type="button"
+                  className="btn-secondary h-8 px-2.5 text-xs"
+                  onClick={() => printLabels([d.newSticker!.id])}
+                  title={`Put it on the roll in place of ${d.code}`}
+                >
+                  <Printer size={13} /> Print {d.newSticker.code}
                 </button>
               )}
             </li>

@@ -6,7 +6,7 @@ import Link from 'next/link'
 import {
   Printer, Plus, Search, RefreshCw, AlertCircle, Ban, X, Download, Loader2, CalendarDays, List,
   LayoutDashboard, PackageCheck, Truck, AlarmClock, ShieldAlert, Recycle, Timer, Send, Factory, Hourglass,
-  LineChart, Target, Users, PieChart as PieIcon, Layers, ArrowRight, FileMinus } from 'lucide-react'
+  LineChart, Target, Users, PieChart as PieIcon, Layers, ArrowRight, FileMinus, FileText } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { SendJobWorkDialog, ReceiveJobWorkDialog } from '@/components/inventory/JobWorkDialogs'
 import { JobWorkDebitNoteDialog } from '@/components/inventory/JobWorkDebitNoteDialog'
@@ -85,6 +85,8 @@ interface LineRow {
   damagedUncharged?: number
   stillOutQty: number
   returnNumbers: string[]
+  /** The receipts against this line, still standing. */
+  returns?: Array<{ id: string; returnNumber: string }>
   lastReturnAt: string | null
   settledBy: Array<{ at: string; qty: number }>
 }
@@ -424,6 +426,26 @@ function JobWorkScreen() {
     setMessage(null)
     try {
       const res = await api.patch<{ message?: string }>(`/inventory/job-work/${r.challanId}/cancel`, { reason: reason.trim() })
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not cancel it.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** A receipt entered by mistake: what it brought in goes out again, and the challan is open again. */
+  const cancelReceipt = async (r: LineRow, ret: { id: string; returnNumber: string }) => {
+    const reason = prompt(
+      `Why is ${ret.returnNumber} being cancelled?\n\nWhat it brought into the store goes out again, and ${r.challanNumber} shows it as still at ${r.jobWorkerName}.`,
+    )
+    if (!reason || reason.trim().length < 5) return
+    setBusy(ret.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.patch<{ message?: string }>(`/inventory/job-work/returns/${ret.id}/cancel`, { reason: reason.trim() })
       await load()
       if (res.message) setMessage(res.message)
     } catch (err) {
@@ -865,6 +887,15 @@ function JobWorkScreen() {
           >
             {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
           </button>
+          {/* One job worker's account: sent, back, wasted, still with them. */}
+          <Link
+            href={`/print/job-work-statement${picked.worker?.length === 1 ? `?jobWorkerId=${picked.worker[0]}` : ''}`}
+            target="_blank"
+            className="btn-secondary"
+            title="What a job worker was sent, what came back and what they still hold"
+          >
+            <FileText size={15} /> Statement
+          </Link>
           <button className="btn-primary" onClick={() => setSending(true)}>
             <Plus size={15} /> Send out
           </button>
@@ -983,6 +1014,18 @@ function JobWorkScreen() {
                       // Pieces spoiled at the unit, not yet charged: a debit note to the job worker.
                       if (challanLines(r.challanId).some((l) => (l.damagedUncharged ?? 0) > 0) && can('purchase', 'create'))
                         actions.push({ key: 'charge', label: 'Charge damage to the job worker', icon: <FileMinus size={14} />, onClick: () => setCharging(r.challanId) })
+                      // Each receipt against the challan, once, for one entered by mistake.
+                      const receipts = [...new Map(challanLines(r.challanId).flatMap((l) => l.returns ?? []).map((x) => [x.id, x])).values()]
+                      if (can('inventory', 'edit'))
+                        for (const ret of receipts)
+                          actions.push({
+                            key: `cancel-${ret.id}`,
+                            label: `Cancel receipt ${ret.returnNumber}`,
+                            icon: busy === ret.id ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />,
+                            onClick: () => void cancelReceipt(r, ret),
+                            danger: true,
+                            disabled: busy === ret.id,
+                          })
                       if (untouched)
                         actions.push({
                           key: 'cancel',

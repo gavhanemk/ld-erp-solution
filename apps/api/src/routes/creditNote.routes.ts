@@ -8,7 +8,8 @@ import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
-import { recordMovement } from '../services/stock.service'
+import { assertStockUnused, recordMovement } from '../services/stock.service'
+import { lockRow } from '../lib/lockRow'
 import { syncInvoiceFromReceipts } from '../services/salesReceipt.service'
 import { fgRates } from './finishedGoods.routes'
 
@@ -336,11 +337,40 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
 
 /** Cancels a credit note inside the caller's transaction. */
 export async function cancelCreditNote(tx: Prisma.TransactionClient, id: string, userId: string, reason: string) {
+  // Two clicks at once would both find it open and take the goods out twice.
+  await lockRow(tx, 'creditNote', id)
   const before = await tx.creditNote.findUnique({ where: { id }, include: noteInclude })
   if (!before) throw new AppError('Credit note not found', 404, 'NOT_FOUND')
   if (before.status === 'CANCELLED') throw new AppError(`${before.noteNumber} is already cancelled`, 409, 'ALREADY_CANCELLED')
   // Returned goods leave the store again — refused if they have already gone on.
   if (before.type === 'RETURN' && before.warehouseId) {
+    await assertStockUnused(tx, { referenceId: before.id, label: before.noteNumber, suggestion: 'Leave the credit note as it is and send the goods out again on a new challan.' })
+    // Tagged pieces that came back on it: each must still be on the rack where it came back to.
+    const tagged = await tx.garment.findMany({ where: { creditNoteId: before.id }, select: { id: true, code: true, status: true, warehouseId: true, dcId: true } })
+    const moved = tagged.filter((g) => g.status !== 'IN_STOCK' || g.warehouseId !== before.warehouseId || g.dcId)
+    if (moved.length) {
+      throw new AppError(
+        `${moved.slice(0, 3).map((g) => g.code).join(', ')}${moved.length > 3 ? ` and ${moved.length - 3} more` : ''} came back on ${before.noteNumber} but ${moved.length === 1 ? 'has' : 'have'} moved on since, so it cannot be cancelled.`,
+        409,
+        'STOCK_ALREADY_USED',
+      )
+    }
+    if (tagged.length) {
+      // Back with the customer, on the challan they first went out on.
+      const inv = before.invoiceId ? await tx.salesInvoice.findUnique({ where: { id: before.invoiceId }, select: { dcId: true } }) : null
+      await tx.garment.updateMany({ where: { id: { in: tagged.map((g) => g.id) } }, data: { status: 'DISPATCHED', dcId: inv?.dcId ?? null, creditNoteId: null } })
+      await tx.garmentEvent.createMany({
+        data: tagged.map((g) => ({
+          garmentId: g.id,
+          type: 'DISPATCHED' as const,
+          referenceType: 'CREDIT_NOTE_CANCEL',
+          referenceId: before.id,
+          referenceNumber: before.noteNumber,
+          notes: `${before.noteNumber} cancelled: ${reason}`,
+          createdById: userId,
+        })),
+      })
+    }
     // Exactly what came back goes out again: same size, grade and owner.
     const ins = await tx.stockLedger.findMany({ where: { referenceType: 'CREDIT_NOTE', referenceId: before.id, inQty: { gt: 0 } } })
     for (const row of ins) {
@@ -357,6 +387,7 @@ export async function cancelCreditNote(tx: Prisma.TransactionClient, id: string,
         referenceType: 'CREDIT_NOTE_CANCEL',
         referenceId: before.id,
         notes: `Cancelled ${before.noteNumber}: ${reason}`,
+        earlierDate: 'move-up',
       })
     }
   }

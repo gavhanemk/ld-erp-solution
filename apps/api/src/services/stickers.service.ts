@@ -50,6 +50,8 @@ export interface StickerGroup {
   grnLineId?: string | null
   /** Keep this pack type and quantity as the item's own, for next time. */
   remember?: boolean
+  /** 'R': held stock, rejected at receipt; its stickers are held too. */
+  grade?: string
 }
 
 /** An inward document, and — when the document alone cannot say — what came in on it. */
@@ -131,6 +133,7 @@ export async function labelGroup(
     userId,
     unit: item.uom?.symbol ?? '',
     itemName: item.name,
+    grade: g.grade ?? 'A',
   })
   // "Remember for this item": what one package is, and — when they were all
   // the same, give or take a smaller last one — how much a sticker holds.
@@ -171,6 +174,8 @@ type Came = {
   /** How a GRN line came packed — 5 bundles of 100 — when the receipt said. */
   packType?: PackType | null
   packQtys?: number[]
+  /** 'R' for what came in held (rejected at a customer's receipt). */
+  grade?: string
 }
 
 /** What came in on one inward document: its GRN lines, the lines given, or its rows on the stock ledger. */
@@ -199,12 +204,12 @@ async function whatCameIn(data: InwardQuery): Promise<Came[]> {
   // Every inward writes its rows on the ledger, so that is where to read it.
   const rows = await prisma.stockLedger.findMany({
     where: { referenceType: LEDGER_REF[data.sourceType], referenceId: data.sourceId, inQty: { gt: 0 }, sizeId: null },
-    select: { itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, inQty: true, batchNumber: true },
+    select: { itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, inQty: true, batchNumber: true, grade: true },
     orderBy: { createdAt: 'asc' },
   })
   const byKey = new Map<string, Came>()
   for (const r of rows) {
-    const key = [r.itemId, r.warehouseId, r.ownership, r.ownerCustomerId ?? '', r.batchNumber ?? ''].join('|')
+    const key = [r.itemId, r.warehouseId, r.ownership, r.ownerCustomerId ?? '', r.batchNumber ?? '', r.grade].join('|')
     const had = byKey.get(key)
     if (had) had.qty = round3(had.qty + Number(r.inQty))
     else
@@ -216,6 +221,7 @@ async function whatCameIn(data: InwardQuery): Promise<Came[]> {
         qty: Number(r.inQty),
         lotNo: r.batchNumber,
         grnLineId: null,
+        grade: r.grade,
       })
   }
   return [...byKey.values()]
@@ -257,14 +263,14 @@ export async function planStickers(data: InwardQuery) {
       _sum: { initialQty: true },
     }),
     prisma.stockPackage.groupBy({
-      by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],
+      by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId', 'grade'],
       where: { sourceType: data.sourceType, sourceId: data.sourceId, status: { not: 'VOID' } },
       _sum: { initialQty: true },
     }),
   ])
   const doneByLine = new Map(byLine.map((r) => [r.grnLineId, Number(r._sum.initialQty ?? 0)]))
-  const spotKey = (x: { itemId: string; warehouseId: string; ownership: string; ownerCustomerId: string | null }) =>
-    [x.itemId, x.warehouseId, x.ownership, x.ownerCustomerId ?? ''].join('|')
+  const spotKey = (x: { itemId: string; warehouseId: string; ownership: string; ownerCustomerId: string | null; grade?: string }) =>
+    [x.itemId, x.warehouseId, x.ownership, x.ownerCustomerId ?? '', x.grade ?? 'A'].join('|')
   const doneBySpot = new Map(bySpot.map((r) => [spotKey(r), Number(r._sum.initialQty ?? 0)]))
 
   const targets = []
@@ -285,7 +291,8 @@ export async function planStickers(data: InwardQuery) {
     // none has one yet and they add up to what is to be stickered.
     const packs = c.packQtys?.length && done <= 0.0005 && Math.abs(round3(c.packQtys.reduce((x, q) => x + q, 0)) - max) <= 0.0005 ? c.packQtys : null
     targets.push({
-      key: c.grnLineId ?? [c.itemId, c.warehouseId, c.ownership, c.ownerCustomerId ?? '', c.lotNo ?? ''].join('|'),
+      key: c.grnLineId ?? [c.itemId, c.warehouseId, c.ownership, c.ownerCustomerId ?? '', c.lotNo ?? '', c.grade ?? 'A'].join('|'),
+      grade: c.grade ?? 'A',
       itemId: c.itemId,
       itemCode: item.code,
       item: item.name,
@@ -334,7 +341,7 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
           const done = await tx.stockPackage.aggregate({
             where: t.grnLineId
               ? { grnLineId: t.grnLineId, status: { not: 'VOID' } }
-              : { ...spot, sourceType: query.sourceType, sourceId: query.sourceId, status: { not: 'VOID' } },
+              : { ...spot, grade: t.grade, sourceType: query.sourceType, sourceId: query.sourceId, status: { not: 'VOID' } },
             _sum: { initialQty: true },
           })
           const remaining = round3(t.came - Number(done._sum.initialQty ?? 0))
@@ -353,6 +360,7 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
                 qtys: t.qtys,
                 lotNo: t.lotNo,
                 grnLineId: t.grnLineId,
+                grade: t.grade,
               },
               { type: query.sourceType, id: query.sourceId, ref: plan.sourceRef },
               userId,
@@ -385,8 +393,26 @@ export async function withdrawStickers(
   reason: string,
   userId: string | null,
 ): Promise<number> {
+  // Its own stickers, and every one split from them since: a roll cut in two
+  // is still the receipt's goods, and must not stay on the rack without them.
+  // Only in the stores it came into: the cancel takes stock out of those, and
+  // a piece already sent on to another store is not part of it.
+  const [own, came] = await Promise.all([
+    tx.stockPackage.findMany({ where: { sourceType: source.type, sourceId: source.id }, select: { id: true } }),
+    tx.stockLedger.findMany({ where: { referenceId: source.id, inQty: { gt: 0 } }, select: { warehouseId: true }, distinct: ['warehouseId'] }),
+  ])
+  const stores = came.map((r) => r.warehouseId)
+  const family = new Set(own.map((p) => p.id))
+  for (let parents = [...family]; parents.length; ) {
+    const children = await tx.stockPackage.findMany({ where: { parentId: { in: parents } }, select: { id: true } })
+    parents = children.map((c) => c.id).filter((id) => !family.has(id))
+    parents.forEach((id) => family.add(id))
+  }
+  // Locked, then read: a roll being scanned out at this moment either goes
+  // first and is not withdrawn, or waits and finds it withdrawn.
+  if (family.size) await tx.$queryRaw`SELECT id FROM ld_erp.stock_packages WHERE id = ANY(${[...family]}::text[]) FOR UPDATE`
   const live = await tx.stockPackage.findMany({
-    where: { sourceType: source.type, sourceId: source.id, status: 'IN_STOCK' },
+    where: { id: { in: [...family] }, status: 'IN_STOCK', warehouseId: { in: stores } },
     select: { id: true, qty: true, warehouseId: true },
   })
   for (const p of live) {

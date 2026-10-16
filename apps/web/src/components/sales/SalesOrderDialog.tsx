@@ -174,6 +174,7 @@ interface SavedOrder {
   discountAmount: string | number
   otherCharges: string | number
   isJobWork: boolean
+  ownMaterialBilling?: 'IN_JOB_CHARGE' | 'BILLED'
   notes: string | null
   terms: string | null
   charges: Array<{ chargeTypeId: string; amount: string | number; gstRate: string | number }>
@@ -372,6 +373,8 @@ export function SalesOrderDialog({
   // ── The order ──────────────────────────────────────────────────────────
   const [saved, setSaved] = useState<SavedOrder | null>(null)
   const [isJobWork, setIsJobWork] = useState(false)
+  /** Job work: our own trims used on it covered by the job charge, or billed to the customer, as agreed. */
+  const [ownBilling, setOwnBilling] = useState<'IN_JOB_CHARGE' | 'BILLED'>('IN_JOB_CHARGE')
   const [customerId, setCustomerId] = useState('')
   const [orderDate, setOrderDate] = useState(today())
   const [deliveryDate, setDeliveryDate] = useState('')
@@ -458,6 +461,7 @@ export function SalesOrderDialog({
     setError(null)
     setSaved(null)
     setIsJobWork(false)
+    setOwnBilling('IN_JOB_CHARGE')
     setCustomerId('')
     setOrderDate(today())
     setDeliveryDate('')
@@ -546,6 +550,7 @@ export function SalesOrderDialog({
           const o = order.data
           setSaved(o)
           setIsJobWork(o.isJobWork)
+          setOwnBilling(o.ownMaterialBilling ?? 'IN_JOB_CHARGE')
           setCustomerId(o.customerId)
           setOrderDate(day(o.orderDate))
           setDeliveryDate(day(o.deliveryDate))
@@ -959,6 +964,7 @@ export function SalesOrderDialog({
     const body = {
       customerId,
       isJobWork,
+      ownMaterialBilling: isJobWork ? ownBilling : 'IN_JOB_CHARGE',
       orderDate,
       deliveryDate: deliveryDate || null,
       customerPORef: poRef.trim() || null,
@@ -1490,6 +1496,28 @@ export function SalesOrderDialog({
                       <option value="job">Job work (customer&apos;s fabric)</option>
                     </SmartSelect>
                   </Field>
+                  {isJobWork && (
+                    <Field
+                      label="Our trims on it"
+                      icon={Package}
+                      htmlFor="so-own-material"
+                      help={
+                        ownBilling === 'BILLED'
+                          ? 'Their cost is shown on the order and offered as a charge on each invoice.'
+                          : 'The job charge covers our trims and thread; their cost is still tracked on the order.'
+                      }
+                    >
+                      <SmartSelect
+                        id="so-own-material"
+                        className="form-input pl-9"
+                        value={ownBilling}
+                        onChange={(e) => setOwnBilling(e.target.value as 'IN_JOB_CHARGE' | 'BILLED')}
+                      >
+                        <option value="IN_JOB_CHARGE">In the job charge</option>
+                        <option value="BILLED">Billed separately (agreed with the customer)</option>
+                      </SmartSelect>
+                    </Field>
+                  )}
 
                   <Field label="Broker" icon={Handshake} htmlFor="so-broker">
                     <SmartSelect id="so-broker" className="form-input pl-9" value={brokerId} onChange={(e) => pickBroker(e.target.value)}>

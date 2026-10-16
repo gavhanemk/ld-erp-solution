@@ -69,9 +69,13 @@ export const REASON_ACTIONS: Record<
   },
 }
 
-export function postReasonAction(orderId: string, action: ReasonAction, reason: string) {
+/**
+ * `materialException`: closing or cancelling a job-work order whose customer
+ * material is not all accounted for — a manager's reason for doing it anyway.
+ */
+export function postReasonAction(orderId: string, action: ReasonAction, reason: string, materialException?: string) {
   if (action === 'release') return confirmOrder(orderId, reason)
-  return api.post<{ message?: string }>(`/sales/orders/${orderId}/${action}`, { reason })
+  return api.post<{ message?: string }>(`/sales/orders/${orderId}/${action}`, { reason, ...(materialException ? { materialException } : {}) })
 }
 
 /**
