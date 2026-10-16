@@ -106,24 +106,51 @@ from payment status.
 
 **How a customer's receipt works now (CGRN).** The order is optional: a
 customer's lorry can arrive before the paperwork, and material received with
-no order stays unassigned — it is never counted as any order's. The store
-enters the count (their challan quantity, what arrived, what was rejected and
-why) and either saves a draft or hands it over; an approver (inventory approve
-— Admin, MD, Store Manager) checks it and posts it, and only then is anything
-on the books: the accepted part as the customer's usable stock at no value,
-the rejected part held apart in the same store (grade R), each with its own
-stickers, the held ones marked HOLD. Held material is never issued, moved or
-reserved; it leaves either released for use by an approver, with a reason, or
-back to the customer on a return marked "Rejected". A posted receipt is never
-edited: it is cancelled — refused once any of it was issued or sent back — and
-a corrected copy opened as a draft. A customer's material can only be
-requisitioned, issued or sent to a job worker for an open job-work order of
-that same customer, and cutting takes the panels' owner from the fabric
-actually issued, refusing fabric that is partly ours and partly a customer's.
-The order's reconciliation counts only its own receipts and requisitions,
-compares cutting with the BOM, and lists our own material used on it at cost.
-Open: question 8 under "Open questions" — whether a separate inspection step (receive, then inspect)
-is wanted; today the inspection is the approver's check before posting.
+no order stays unassigned — it is never counted as any order's. Three steps,
+decided 16 Oct 2026:
+
+1. **Receiving** — the store enters their challan quantity and what arrived,
+   saves a draft or hands it over for QC.
+2. **QC inspection** — someone other than whoever received it (an approver may
+   check their own count) says, line by line, how much is rejected and why;
+   the rest passes.
+3. **Stock approval** — an approver (inventory approve — Admin, MD, Store
+   Manager) approves it into stock, or sends it back to QC or receiving.
+
+Until approval the material is on hold — on our floor, not in stock — so
+nothing can draw on it. On approval the part that passed becomes the
+customer's usable stock at no value, and the rejected part is held apart in
+the same store (grade R), each with its own stickers, the held ones marked
+HOLD. Held material is never issued, moved or reserved; it leaves either
+released for use by an approver, with a reason, or back to the customer on a
+return marked "Rejected". An approved receipt is never edited: it is
+cancelled — refused once any of it was issued or sent back — and a corrected
+copy opened as a draft. A customer's material can only be requisitioned,
+issued or sent to a job worker for an open job-work order of that same
+customer, and cutting takes the panels' owner from the fabric actually issued,
+refusing fabric that is partly ours and partly a customer's.
+
+**Stickers on part rolls.** Whenever part of a roll goes — issued, moved,
+returned, released — its sticker is retired and both parts get new stickers:
+the part that went, and the rest, which waits on "Ready to print". A sticker
+therefore always says what its roll holds, and a retired one scanned again
+names its replacement and issues nothing.
+
+**Closing a job-work order.** The order's reconciliation counts only its own
+receipts and requisitions, and compares cutting with the BOM. Every metre of
+the customer's material must end somewhere — used or wasted in cutting, sent
+back, or used at a job worker — before the order is closed or cancelled.
+Material still with us, on the floor uncut, or missing stops it. Sending
+everything does not close it either: the order stays open until the material
+is put right. A manager who approves both orders and stock may close it anyway
+as an exception, with a reason. The reason, the manager and what was missing
+are kept on the order and in the audit trail.
+
+**Our own trims on a job-work order.** Their cost is always tracked on the
+order. Each order says whether the job charge covers them or they are billed
+separately, as agreed with the customer. When they are billed, each invoice
+offers the cost still to bill as a charge, from the Charges master, so GST
+comes from the charge type and the order shows what is billed and what is not.
 
 A fourth, related path: **DC Returnable** — material sent out to a vendor
 against a PO, carrying a lorry receipt number, with its own column for when
@@ -808,9 +835,10 @@ guess at:
 7. **GST rates beyond garments at 5%** — still needs the CA's written
    confirmation (already flagged in PROJECT_STATUS.md).
 8. **Receive vs inspect, one screen or two, for Job Work GRN and GRN JW
-   Customer** — decided one way for Purchase GRN (§2); worth asking
-   again when those two get built, since a job worker returning goods may
-   not suit the same answer.
+   Customer** — decided one way for Purchase GRN (§2). For GRN JW Customer,
+   answered 16 Oct 2026: two steps — receiving, QC inspection, then stock
+   approval, the material on hold until approved (see §2). Still open for Job
+   Work GRN, when that is built.
 
 ---
 
