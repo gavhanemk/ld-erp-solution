@@ -4,6 +4,7 @@ import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
 import { createRouting, deleteRouting, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
+import { styleOrderStages } from '../services/styleOrders.service'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import * as categoryImport from '../services/categoryImport.service'
 import * as styleImport from '../services/styleImport.service'
@@ -2077,6 +2078,11 @@ router.get('/routings', requirePermission(MODULE, 'view'), async (req, res) => {
 /** The fabrics a routing can be cut from: fabric items with stock records, and what is on hand. */
 router.get('/routings/fabrics', requirePermission(MODULE, 'view'), async (_req, res) => {
   res.json({ success: true, data: await fabricStock(prisma) })
+})
+
+/** A style's orders one by one, each with where it is on its own route — for the style's routing page. */
+router.get('/style-orders/:styleId', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await styleOrderStages(prisma, req.params.styleId) })
 })
 
 router.get('/routings/:id', requirePermission(MODULE, 'view'), async (req, res) => {

@@ -30,13 +30,62 @@ import {
   Route,
   Shirt,
   Trash2,
+  X,
 } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { RoutingFormDialog, type Routing } from '@/components/masters/RoutingFormDialog'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { moStatus } from '@/components/production/status'
-import { changed, describe, pcs, STEP_STATE, STYLE_STATE, when, type StyleDetail, type TrackStep } from './track'
+import { changed, describe, pcs, STEP_STATE, STYLE_STATE, when, type StepState, type StyleDetail, type TrackStep } from './track'
+
+/** One order of the style on its own, as GET /masters/style-orders/:styleId gives it. */
+interface StageOrder {
+  lineId: string
+  moId: string
+  moNumber: string
+  status: string
+  color: string
+  planned: number
+  staged: boolean
+  finished: boolean
+  counted: boolean
+  done: number
+  total: number
+  at: { key: string; name: string; completed: number; state: StepState } | null
+  steps: Array<{
+    key: string
+    name: string
+    kind: string
+    isQcStep: boolean
+    execution: 'IN_HOUSE' | 'OUTSOURCED'
+    department: string | null
+    workstation: string | null
+    ratePerPiece: number | null
+    state: StepState
+    completed: number
+  }>
+}
+
+/** A step as the list shows it, for all the orders together or for one. */
+interface ViewStep {
+  key: string
+  name: string
+  again: boolean
+  department: string | null
+  workstation: string | null
+  execution: 'IN_HOUSE' | 'OUTSOURCED'
+  isQcStep: boolean
+  optional: boolean
+  ratePerPiece: number | null
+  instructions: string | null
+  state: StepState
+  completed: number
+  note: string | null
+  noteAt: string | null
+  /** The style's own step, for its note: only while all orders are shown. */
+  track: TrackStep | null
+}
 
 /**
  * One style's page under Masters → Routings: the routing it follows — its
@@ -49,6 +98,10 @@ import { changed, describe, pcs, STEP_STATE, STYLE_STATE, when, type StyleDetail
  * the top, four figures under it, then the steps — one compact row each, with
  * its line or outside unit, rate, pieces through it and state — and the
  * orders side by side on a wide screen.
+ *
+ * The figures are every order of the style together until an order is
+ * picked: then the steps and figures are that order's alone, on the route it
+ * was planned with, and each order's row says where it is.
  *
  * Until 15 Oct 2026 each step had a Start and a Stop pressed by hand, and a
  * timer; the business took them off.
@@ -63,12 +116,21 @@ export function StyleTracker({ styleId }: { styleId: string }) {
   const [noteText, setNoteText] = useState('')
   const [form, setForm] = useState<{ record: Routing | null; preset: { styleId: string; from: Routing | null } | null } | null>(null)
   const [deleting, setDeleting] = useState(false)
+  /** Each order on its own; null until read, or when it could not be. */
+  const [orders, setOrders] = useState<StageOrder[] | null>(null)
+  /** The order line picked to be shown alone. */
+  const [focus, setFocus] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await api.get<{ data: StyleDetail }>(`/masters/style-tracking/${styleId}`)
+      const [res, per] = await Promise.all([
+        api.get<{ data: StyleDetail }>(`/masters/style-tracking/${styleId}`),
+        // The page stands without it: then the orders show as before, all together.
+        api.get<{ data: StageOrder[] }>(`/masters/style-orders/${styleId}`).catch(() => null),
+      ])
       setD(res.data)
+      setOrders(per?.data ?? null)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?')
     } finally {
@@ -147,9 +209,6 @@ export function StyleTracker({ styleId }: { styleId: string }) {
   }
 
   const look = STYLE_STATE[d.overall.state]
-  const live = d.steps.filter((s) => s.state !== 'SKIPPED')
-  const lastLive = live[live.length - 1]
-  const pct = d.overall.total ? Math.round((d.overall.done / d.overall.total) * 100) : 0
   const planned = d.production.planned
   const routing = d.routing
   const ownRouting = routing && d.applies === 'STYLE'
@@ -167,6 +226,117 @@ export function StyleTracker({ styleId }: { styleId: string }) {
       : d.applies === 'CATEGORY'
         ? `Shared by every ${routing?.category} style — it has none of its own.`
         : 'Shared by any style without one of its own — it has none of its own.'
+
+  // One order picked: the page reads for it alone, on its own route.
+  const fo = focus && orders ? (orders.find((o) => o.lineId === focus) ?? null) : null
+  const countedOrders = (orders ?? []).filter((o) => o.counted)
+  const fromTrack = (s: TrackStep): ViewStep => ({
+    key: s.key,
+    name: s.name,
+    again: s.occurrence > 1,
+    department: s.department?.name ?? null,
+    workstation: s.workstation?.name ?? null,
+    execution: s.execution,
+    isQcStep: s.isQcStep,
+    optional: s.skip === 'OPTIONAL',
+    ratePerPiece: s.ratePerPiece == null ? null : Number(s.ratePerPiece),
+    instructions: s.instructions,
+    state: s.state,
+    completed: s.completed,
+    note: s.note,
+    noteAt: s.noteAt,
+    track: s,
+  })
+  const viewSteps: ViewStep[] = !fo
+    ? d.steps.map(fromTrack)
+    : fo.staged
+      ? fo.steps.map((s) => ({ ...s, again: !s.key.endsWith('#1'), optional: false, instructions: null, note: null, noteAt: null, track: null }))
+      : d.steps.map((s) => ({ ...fromTrack(s), state: (fo.finished ? 'DONE' : 'NOT_STARTED') as StepState, completed: 0, note: null, noteAt: null, track: null }))
+  // The order's own route against the routing as it is now: it may have been planned before a change.
+  const routeDiffers = !!fo && fo.staged && fo.steps.map((s) => s.key).join('|') !== d.steps.map((s) => s.key).join('|')
+  const viewLive = viewSteps.filter((s) => s.state !== 'SKIPPED')
+  const viewDone = fo ? viewLive.filter((s) => s.state === 'DONE').length : d.overall.done
+  const viewTotal = fo ? viewLive.length : d.overall.total
+  // All orders together: how many are not yet through the step the style is at.
+  const behind = current
+    ? countedOrders.filter((o) => {
+        if (o.finished) return false
+        if (!o.staged) return true
+        const here = o.steps.find((x) => x.key === current.key)
+        return !!here && here.state !== 'DONE' && here.state !== 'SKIPPED'
+      }).length
+    : 0
+  const view = {
+    steps: viewSteps,
+    current: viewSteps.find((s) => s.state !== 'DONE' && s.state !== 'SKIPPED') ?? null,
+    planned: fo ? fo.planned : planned,
+    done: viewDone,
+    total: viewTotal,
+    pct: viewTotal ? Math.round((viewDone / viewTotal) * 100) : 0,
+    last: viewLive[viewLive.length - 1] ?? null,
+    atLabel: fo ? 'This order is at' : 'Earliest open step',
+    atValue: fo
+      ? fo.finished
+        ? 'All steps done'
+        : !fo.staged
+          ? 'Not started'
+          : (fo.at?.name ?? 'All steps done')
+      : d.overall.state === 'DONE'
+        ? 'All done'
+        : (d.overall.step ?? '—'),
+    atSub: fo
+      ? fo.finished
+        ? 'Completed'
+        : !fo.staged
+          ? 'Its stages are not loaded yet'
+          : fo.at
+            ? `${pcs(fo.at.completed)} of ${pcs(fo.planned)} pcs through it`
+            : 'Every step done'
+      : d.overall.state === 'IN_PROGRESS'
+        ? orders
+          ? `${behind} of ${countedOrders.length} ${countedOrders.length === 1 ? 'order is' : 'orders are'} not through it yet`
+          : 'The first step not every order is through'
+        : describe(d.overall),
+  }
+
+  // The orders table: one row an order line, with where it is when that is known.
+  const rows = orders
+    ? orders.map((o) => ({ key: o.lineId, moId: o.moId, moNumber: o.moNumber, status: o.status, color: o.color, planned: o.planned, staged: o.staged, order: o as StageOrder | null }))
+    : d.production.orders.map((o, i) => ({ key: `${o.moId}-${o.color}-${i}`, moId: o.moId, moNumber: o.moNumber, status: o.status, color: o.color, planned: o.planned, staged: o.staged, order: null as StageOrder | null }))
+  const whereIs = (r: (typeof rows)[number]) => {
+    const o = r.order
+    if (!o) return r.staged ? 'Loaded' : <span className="text-muted-foreground">Not loaded yet</span>
+    if (o.finished || (o.staged && !o.at)) {
+      return (
+        <span className="inline-flex items-center gap-1 text-emerald-500">
+          <CheckCircle2 size={12} /> {o.staged ? 'All steps done' : 'Completed, steps not recorded'}
+        </span>
+      )
+    }
+    if (!o.staged || !o.at) return <span className="text-muted-foreground">Not started · stages not loaded</span>
+    const share = o.planned ? Math.min(100, Math.round((o.at.completed / o.planned) * 100)) : 0
+    return (
+      <div>
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-foreground font-medium">At {o.at.name}</span>
+          <span className="text-muted-foreground font-mono text-[10px] tabular-nums">
+            {pcs(o.at.completed)}/{pcs(o.planned)}
+          </span>
+        </div>
+        <div className="bg-secondary mt-1 h-1 w-full overflow-hidden rounded-full" aria-hidden>
+          <div className="bg-primary h-full rounded-full" style={{ width: `${share}%` }} />
+        </div>
+      </div>
+    )
+  }
+  /** Picks an order to show alone, or back to all of them; on a narrow screen, up to its steps. */
+  const pick = (key: string) => {
+    if (!orders) return
+    const next = focus === key ? null : key
+    setFocus(next)
+    setNoteFor(null)
+    if (next && window.innerWidth < 1536) document.getElementById('style-steps')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   // What the ⋯ beside Edit holds: a copy to start another routing from, and the screens around this one.
   const more: RowAction[] = [
@@ -233,7 +403,7 @@ export function StyleTracker({ styleId }: { styleId: string }) {
             </span>
             <p className="text-foreground flex items-center gap-1.5 text-sm">
               <BarChart3 size={14} className="text-muted-foreground" aria-hidden />
-              {describe(d.overall)}
+              {d.overall.state === 'IN_PROGRESS' ? `All orders: earliest open step ${d.overall.step}` : describe(d.overall)}
             </p>
           </div>
         </div>
@@ -311,40 +481,61 @@ export function StyleTracker({ styleId }: { styleId: string }) {
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           {figure(
             <ListChecks size={22} />,
-            'Steps done',
+            fo ? 'Steps done — this order' : 'Steps done — all orders',
             <>
-              {d.overall.done} <span className="text-muted-foreground text-base font-normal">of {d.overall.total}</span>
+              {view.done} <span className="text-muted-foreground text-base font-normal">of {view.total}</span>
             </>,
             <div className="mt-1.5 flex items-center gap-2">
               <div className="bg-secondary h-1.5 flex-1 overflow-hidden rounded-full" aria-hidden>
-                <div className="bg-primary h-full rounded-full" style={{ width: `${pct}%` }} />
+                <div className="bg-primary h-full rounded-full" style={{ width: `${view.pct}%` }} />
               </div>
-              <span className="text-xs tabular-nums">{pct}%</span>
+              <span className="text-xs tabular-nums">{view.pct}%</span>
             </div>,
           )}
-          {figure(
-            <MapPin size={22} />,
-            'Current stage',
-            d.overall.state === 'IN_PROGRESS' ? d.overall.step : d.overall.state === 'DONE' ? 'All done' : (d.overall.step ?? '—'),
-            d.overall.state === 'IN_PROGRESS' ? 'The first step not yet done' : describe(d.overall),
-          )}
-          {figure(<Box size={22} />, 'Units planned', pcs(planned), `${d.production.orders.length} order ${d.production.orders.length === 1 ? 'line' : 'lines'}`)}
-          {figure(<CircleCheck size={22} />, 'Through the last step', lastLive ? pcs(lastLive.completed) : '—', lastLive ? `completed at ${lastLive.name}` : 'No steps yet')}
+          {figure(<MapPin size={22} />, view.atLabel, view.atValue, view.atSub)}
+          {figure(<Box size={22} />, fo ? 'Units on this order' : 'Units planned', pcs(view.planned), fo ? `${fo.moNumber} · ${fo.color}` : `${countedOrders.length || d.production.orders.length} order ${(countedOrders.length || d.production.orders.length) === 1 ? 'line' : 'lines'}`)}
+          {figure(<CircleCheck size={22} />, 'Through the last step', view.last ? pcs(view.last.completed) : '—', view.last ? `completed at ${view.last.name}` : 'No steps yet')}
         </div>
       )}
 
       <div className={cn('grid gap-4', routing && '2xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]')}>
         {routing && (
-          <section className="glass-card min-w-0 p-4" aria-label="Steps">
-            <h2 className="text-foreground mb-3 flex items-center gap-2 text-lg font-semibold">
-              <ListOrdered size={18} className="text-primary" /> Steps
-            </h2>
+          <section id="style-steps" className="glass-card min-w-0 scroll-mt-4 p-4" aria-label="Steps">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-foreground flex items-center gap-2 text-lg font-semibold">
+                <ListOrdered size={18} className="text-primary" /> Steps
+              </h2>
+              {fo ? (
+                <span className="border-primary/40 bg-primary/5 text-foreground inline-flex items-center gap-2 rounded-full border py-0.5 pl-3 pr-1 text-xs">
+                  Showing <span className="font-mono font-semibold">{fo.moNumber}</span> alone · {pcs(fo.planned)} pcs
+                  <button type="button" className="btn-ghost h-6 px-2 text-xs" onClick={() => setFocus(null)}>
+                    <X size={12} /> All orders
+                  </button>
+                </span>
+              ) : (
+                <span className="text-muted-foreground text-xs">
+                  All {countedOrders.length || d.production.orders.length} orders together · {pcs(planned)} pcs. Pick an order to see it alone.
+                </span>
+              )}
+            </div>
+            {fo && !fo.staged && (
+              <p className="text-muted-foreground mb-2 text-xs">
+                {fo.finished
+                  ? `${fo.moNumber} was completed without its stages being loaded, so the floor recorded nothing step by step for it.`
+                  : `${fo.moNumber}'s stages are not loaded yet, so nothing has been recorded on the floor for it.`}
+              </p>
+            )}
+            {fo && fo.staged && routeDiffers && (
+              <p className="text-muted-foreground mb-2 text-xs">
+                This order keeps the route it was planned with, so its steps differ from the routing as it is now.
+              </p>
+            )}
             <ol className="space-y-2">
-              {d.steps.map((s, i) => {
+              {view.steps.map((s, i) => {
                 const st = STEP_STATE[s.state]
-                const busy = busyKey === s.key
-                const share = planned ? Math.min(100, Math.round((s.completed / planned) * 100)) : 0
-                const isCurrent = current?.key === s.key
+                const busy = !!s.track && busyKey === s.key
+                const share = view.planned ? Math.min(100, Math.round((s.completed / view.planned) * 100)) : 0
+                const isCurrent = view.current?.key === s.key
                 return (
                   <li key={s.key} className={cn('border-border bg-card rounded-xl border px-3 py-2.5', s.state === 'SKIPPED' && 'opacity-75')}>
                     <div className="grid grid-cols-[2.25rem_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 sm:grid-cols-[2.25rem_minmax(0,1.3fr)_4.5rem_minmax(7rem,1fr)_auto]">
@@ -367,31 +558,31 @@ export function StyleTracker({ styleId }: { styleId: string }) {
                       <div className="min-w-0">
                         <p className="text-foreground truncate text-sm font-semibold" title={s.instructions ? `Instructions: ${s.instructions}` : undefined}>
                           {s.name}
-                          {s.occurrence > 1 && <span className="text-muted-foreground font-normal"> (again)</span>}
+                          {s.again && <span className="text-muted-foreground font-normal"> (again)</span>}
                           {s.instructions && <Info size={12} className="text-muted-foreground ml-1 inline" aria-label="has instructions" />}
                         </p>
                         <p className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                          {s.department && <span>{s.department.name}</span>}
+                          {s.department && <span>{s.department}</span>}
                           {s.execution === 'OUTSOURCED' ? (
-                            <span className="badge-purple">Outside unit{s.workstation ? `: ${s.workstation.name}` : ''}</span>
+                            <span className="badge-purple">Outside unit{s.workstation ? `: ${s.workstation}` : ''}</span>
                           ) : s.workstation ? (
-                            <span>Line: {s.workstation.name}</span>
+                            <span>Line: {s.workstation}</span>
                           ) : null}
                           {s.isQcStep && <span className="badge-info">Check</span>}
-                          {s.skip === 'OPTIONAL' && <span>Optional</span>}
+                          {s.optional && <span>Optional</span>}
                           {/* On a phone the rate sits here; on a wide screen it has its own column. */}
-                          {s.ratePerPiece != null && <span className="tabular-nums sm:hidden">₹{Number(s.ratePerPiece).toLocaleString('en-IN')} / pc</span>}
+                          {s.ratePerPiece != null && <span className="tabular-nums sm:hidden">₹{s.ratePerPiece.toLocaleString('en-IN')} / pc</span>}
                         </p>
                       </div>
 
                       <span className="text-muted-foreground hidden text-xs tabular-nums sm:block">
-                        {s.ratePerPiece != null ? `₹${Number(s.ratePerPiece).toLocaleString('en-IN')} / pc` : '—'}
+                        {s.ratePerPiece != null ? `₹${s.ratePerPiece.toLocaleString('en-IN')} / pc` : '—'}
                       </span>
 
                       <div className="col-span-3 min-w-0 sm:col-span-1">
                         <p className="text-muted-foreground text-right font-mono text-[11px] tabular-nums">
                           {pcs(s.completed)}
-                          {planned > 0 && <> of {pcs(planned)}</>}
+                          {view.planned > 0 && <> of {pcs(view.planned)}</>}
                         </p>
                         <div className="bg-secondary mt-1 h-1.5 w-full overflow-hidden rounded-full" aria-hidden>
                           <div className={cn('h-full rounded-full', s.state === 'DONE' ? 'bg-emerald-500' : 'bg-primary')} style={{ width: `${share}%` }} />
@@ -401,7 +592,7 @@ export function StyleTracker({ styleId }: { styleId: string }) {
 
                       <div className="col-start-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-start-auto">
                         <span className={cn(st.badge, 'whitespace-nowrap')}>{s.state === 'NOT_STARTED' ? 'Pending' : st.label}</span>
-                        {canNote && (
+                        {canNote && s.track && (
                           <button
                             className={cn('btn-ghost h-7 w-7 justify-center p-0', s.note && 'text-primary')}
                             onClick={() => {
@@ -427,7 +618,7 @@ export function StyleTracker({ styleId }: { styleId: string }) {
                         </span>
                       </p>
                     )}
-                    {noteFor === s.key && (
+                    {s.track && noteFor === s.key && (
                       <div className="mt-2 space-y-2 pl-12">
                         <textarea
                           className="form-input text-xs"
@@ -439,7 +630,7 @@ export function StyleTracker({ styleId }: { styleId: string }) {
                           autoFocus
                         />
                         <div className="flex items-center gap-2">
-                          <button className="btn-primary h-7 px-2.5 text-xs" onClick={() => void saveNote(s)} disabled={busy}>
+                          <button className="btn-primary h-7 px-2.5 text-xs" onClick={() => void saveNote(s.track!)} disabled={busy}>
                             Save note
                           </button>
                           <button className="btn-ghost h-7 px-2.5 text-xs" onClick={() => setNoteFor(null)} disabled={busy}>
@@ -465,10 +656,10 @@ export function StyleTracker({ styleId }: { styleId: string }) {
               Open manufacturing orders <ArrowRight size={12} />
             </Link>
             <p className="text-muted-foreground w-full text-[11px]">
-              Where each step stands, and the units completed, come from the production floor&apos;s records for every order of this style.
+              Where each order is comes from the production floor&apos;s records. Pick an order to see its steps alone; pick it again to see all orders together.
             </p>
           </div>
-          {d.production.orders.length === 0 ? (
+          {rows.length === 0 ? (
             <p className="text-muted-foreground text-sm">No manufacturing orders for this style yet. Units completed appear here once an order&apos;s stages are loaded and work is recorded on its sheets.</p>
           ) : (
             <div className="overflow-x-auto">
@@ -477,28 +668,36 @@ export function StyleTracker({ styleId }: { styleId: string }) {
                   <tr>
                     <th>Order</th>
                     <th>Colour</th>
-                    <th className="whitespace-nowrap !text-right">Pieces planned</th>
+                    <th className="whitespace-nowrap !text-right">Pieces</th>
                     <th>Status</th>
-                    <th>Stages</th>
+                    <th className="whitespace-nowrap">Where it is</th>
                     <th className="sr-only">Open</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {d.production.orders.map((o, i) => {
+                  {rows.map((o) => {
                     const mo = moStatus(o.status)
+                    const picked = focus === o.key
                     return (
-                      <tr key={`${o.moId}-${o.color}-${i}`}>
-                        <td className="whitespace-nowrap font-mono text-xs">{o.moNumber}</td>
+                      <tr
+                        key={o.key}
+                        onClick={() => pick(o.key)}
+                        className={cn('cursor-pointer', picked && 'bg-primary/10')}
+                        aria-selected={picked}
+                        title={picked ? 'Showing this order alone — pick it again for all orders' : 'Show this order alone'}
+                      >
+                        <td className={cn('whitespace-nowrap font-mono text-xs', picked && 'text-primary font-semibold')}>{o.moNumber}</td>
                         <td className="whitespace-nowrap text-xs">{o.color}</td>
                         <td className="whitespace-nowrap text-right font-mono text-xs tabular-nums">{pcs(o.planned)}</td>
                         <td className="whitespace-nowrap text-xs">
                           <span className={mo.cls}>{mo.label}</span>
                           {o.status === 'CLOSED' && <span className="text-muted-foreground"> not counted</span>}
                         </td>
-                        <td className="whitespace-nowrap text-xs">{o.staged ? 'Loaded' : <span className="text-muted-foreground">Not loaded yet</span>}</td>
+                        <td className="min-w-[9rem] text-xs">{whereIs(o)}</td>
                         <td className="text-right">
                           <Link
                             href={`/production/orders?open=${o.moId}`}
+                            onClick={(e) => e.stopPropagation()}
                             className="text-muted-foreground hover:text-primary inline-flex h-7 w-7 items-center justify-center rounded-md"
                             aria-label={`Open ${o.moNumber}`}
                             title={`Open ${o.moNumber}`}
