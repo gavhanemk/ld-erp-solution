@@ -910,27 +910,30 @@ export async function styleTrace(id: string) {
 // ── Advanced search: pieces by customer, style, order, colour, size, status, date ──
 
 /**
- * What the filters can offer: only what has tagged pieces, with the links
- * between them — an order's customer, an MO's order and styles — so picking a
- * customer can narrow the order list to theirs.
+ * What the filters can offer, with the links between them — an order's
+ * customer, an MO's order and styles — so picking a customer can narrow the
+ * order list to theirs.
+ *
+ * Customers, orders, MOs and styles come from every manufacturing order, tagged
+ * or not: each has a whole story to open even before a garment tag is made.
+ * Colours and sizes only narrow the tagged pieces, so they come from those.
  */
 export async function filterOptions() {
-  const [byMo, byItem, bySize] = await Promise.all([
-    prisma.garment.groupBy({ by: ['moId'], _count: { _all: true } }),
+  const [byItem, bySize] = await Promise.all([
     prisma.garment.groupBy({ by: ['itemId'], _count: { _all: true } }),
     prisma.garment.groupBy({ by: ['sizeId'], _count: { _all: true } }),
   ])
   const [mos, items, sizes] = await Promise.all([
     prisma.manufacturingOrder.findMany({
-      where: { id: { in: byMo.map((r) => r.moId) } },
       select: {
         id: true,
         moNumber: true,
         soId: true,
         so: { select: { soNumber: true, customerPORef: true, customer: { select: { id: true, name: true } } } },
-        lines: { select: { styleId: true } },
+        lines: { select: { styleId: true, style: { select: { id: true, code: true, name: true } } } },
       },
       orderBy: { createdAt: 'desc' },
+      take: 2000,
     }),
     prisma.item.findMany({ where: { id: { in: byItem.map((r) => r.itemId) } }, select: { color: true, style: { select: { id: true, code: true, name: true } } } }),
     prisma.size.findMany({ where: { id: { in: bySize.map((r) => r.sizeId).filter((x): x is string => !!x) } }, select: { id: true, code: true, sequence: true }, orderBy: { sequence: 'asc' } }),
@@ -943,6 +946,7 @@ export async function filterOptions() {
     sos.set(m.soId, { id: m.soId, soNumber: m.so.soNumber, poRef: m.so.customerPORef, customerId: m.so.customer.id, customer: m.so.customer.name })
   }
   const styles = new Map<string, { id: string; code: string; name: string }>()
+  for (const m of mos) for (const l of m.lines) styles.set(l.style.id, l.style)
   for (const i of items) if (i.style) styles.set(i.style.id, i.style)
   return {
     customers: [...customers.values()].sort((a, b) => a.name.localeCompare(b.name)),

@@ -100,6 +100,20 @@ function TraceScreen() {
       .then((r) => setOptions(r.data))
       .catch(() => {})
   }, [])
+  // One order, MO, customer or style picked: its whole story is a click away, tagged pieces or not.
+  const story = useMemo<{ target: Target; title: string; what: string } | null>(() => {
+    if (!options) return null
+    const mo = filters.fm ? options.mos.find((m) => m.id === filters.fm) : undefined
+    if (mo) return { target: { kind: 'mo', id: mo.id }, title: mo.moNumber, what: 'materials, purchase, every stage and dispatch' }
+    const so = filters.fo ? options.sos.find((s) => s.id === filters.fo) : undefined
+    if (so) return { target: { kind: 'so', id: so.id }, title: so.soNumber, what: 'materials, purchase, every stage and dispatch' }
+    const c = filters.fc ? options.customers.find((x) => x.id === filters.fc) : undefined
+    if (c) return { target: { kind: 'c', id: c.id }, title: c.name, what: 'all their orders and how far each has got' }
+    const s = filters.fs ? options.styles.find((x) => x.id === filters.fs) : undefined
+    if (s) return { target: { kind: 's', id: s.id }, title: s.code, what: 'every order it was made on and where its pieces are' }
+    return null
+  }, [options, filters.fm, filters.fo, filters.fc, filters.fs])
+
   const setFilters = (patch: Partial<Filters>) => {
     const next = { ...filters, ...patch }
     const qs = new URLSearchParams()
@@ -294,7 +308,19 @@ function TraceScreen() {
 
       <FilterBar options={options} f={filters} set={setFilters} clear={() => router.replace('/inventory/trace')} />
 
-      {!target && filtering && <PieceResults f={filters} typed={typed} set={setFilters} open={open} />}
+      {!target && story && (
+        <div className="glass-card flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+          <p className="text-sm">
+            <span className="text-foreground font-semibold">{story.title}</span>
+            <span className="text-muted-foreground"> — its whole story: {story.what}</span>
+          </p>
+          <button type="button" className="btn-primary h-9 px-3 text-sm" onClick={() => open(story.target)}>
+            <History size={15} /> Open its story
+          </button>
+        </div>
+      )}
+
+      {!target && filtering && <PieceResults f={filters} typed={typed} set={setFilters} open={open} storyAbove={!!story} />}
 
       {results && (
         <div className="glass-card overflow-hidden p-0">

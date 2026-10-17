@@ -27,7 +27,8 @@ const STATES = ['IN_STOCK', 'PACKED', 'DISPATCHED', 'SCRAPPED', 'VOID'] as const
  * Narrowing down to the pieces wanted: customer, order, MO, style, colour,
  * size, where they are and when they went into finished goods. Each list only
  * offers what the others leave possible — a customer's own orders, an order's
- * own MOs.
+ * own MOs. Customers, orders, MOs and styles include those with no tagged
+ * pieces yet; the page offers their whole story instead.
  */
 export function FilterBar({ options, f, set, clear }: { options: FilterOptions | null; f: Filters; set: (patch: Partial<Filters>) => void; clear: () => void }) {
   const o = options
@@ -148,7 +149,7 @@ interface PieceRow {
  * The pieces the filters — and what is typed in the box — leave: counted by
  * where they are, 50 a page; a piece opens its whole history.
  */
-export function PieceResults({ f, typed, set, open }: { f: Filters; typed: string; set: (patch: Partial<Filters>) => void; open: (t: Target) => void }) {
+export function PieceResults({ f, typed, set, open, storyAbove = false }: { f: Filters; typed: string; set: (patch: Partial<Filters>) => void; open: (t: Target) => void; storyAbove?: boolean }) {
   const [page, setPage] = useState(1)
   const [data, setData] = useState<{ total: number; notPrinted: number; pages: number; counts: Record<string, number>; rows: PieceRow[] } | null>(null)
   const printed = useAfterPrint()
@@ -229,7 +230,11 @@ export function PieceResults({ f, typed, set, open }: { f: Filters; typed: strin
         )}
       </div>
       {data && !data.rows.length ? (
-        <p className="text-muted-foreground p-6 text-center text-sm">No pieces match. Loosen a filter, or change what is typed.</p>
+        <p className="text-muted-foreground p-6 text-center text-sm">
+          {storyAbove
+            ? 'No tagged pieces here yet: pieces show once their garment tags are made. Open its story above for its materials, stages and dispatch.'
+            : 'No pieces match. Loosen a filter, or change what is typed.'}
+        </p>
       ) : (
         <div className="max-h-[60vh] overflow-auto">
           <table className="data-table table-compact min-w-full">
