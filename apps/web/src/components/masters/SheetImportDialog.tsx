@@ -80,7 +80,8 @@ export function SheetImportDialog<R extends SheetRowPlan, S extends SheetSummary
 }: {
   config: SheetImportConfig<R, S>
   onClose: () => void
-  onImported: () => void
+  /** Called with what the import answered, for a screen that does more with it. */
+  onImported: (data: unknown) => void
 }) {
   const [file, setFile] = useState<{ name: string; data: string } | null>(null)
   const [checking, setChecking] = useState(false)
@@ -142,7 +143,7 @@ export function SheetImportDialog<R extends SheetRowPlan, S extends SheetSummary
         confirm: true,
       })
       setDone({ message: res.message, created: config.created(res.data) })
-      onImported()
+      onImported(res.data)
     } catch (err) {
       setError(apiErrorMessage(err, 'The import did not go through. Nothing was saved.'))
     } finally {

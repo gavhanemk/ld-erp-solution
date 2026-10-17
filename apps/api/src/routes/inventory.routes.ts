@@ -31,6 +31,7 @@ import {
   adjustmentSchema,
   cancelCustomerGrnSchema,
   postCustomerGrnSchema,
+  postManyCustomerGrnSchema,
   inspectCustomerGrnSchema,
   sendBackCustomerGrnSchema,
   releaseCustomerGrnSchema,
@@ -2842,8 +2843,11 @@ export async function createCustomerGrn(
   tx: Prisma.TransactionClient,
   data: ReturnType<typeof createCustomerGrnSchema.parse>,
   userId: string | null,
-  /** Posted unless said otherwise: the import, and every receipt before drafts, book on save. */
-  status: 'DRAFT' | 'SUBMITTED' | 'POSTED' = 'POSTED',
+  /**
+   * Posted unless said otherwise, as every receipt before drafts was. The
+   * import makes them INSPECTED: no QC, waiting for stock approval.
+   */
+  status: 'DRAFT' | 'SUBMITTED' | 'INSPECTED' | 'POSTED' = 'POSTED',
   extra: { correctionOfId?: string } = {},
 ) {
   const when = data.receiptDate ?? new Date()
@@ -3201,6 +3205,48 @@ router.post('/customer-grn/:id/post', requirePermission(MODULE, 'approve'), asyn
 })
 
 /**
+ * An approver approving several receipts into stock at once — a sheet's
+ * worth, or every receipt waiting. Each is approved on its own, exactly as
+ * one at a time: one that cannot be (its order closed, its customer switched
+ * off, already approved) is reported and the rest still go in.
+ */
+router.post('/customer-grn/post-many', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { ids } = postManyCustomerGrnSchema.parse(req.body ?? {})
+  const userId = req.user?.id ?? null
+  const numbers = new Map(
+    (await prisma.customerGRN.findMany({ where: { id: { in: ids } }, select: { id: true, grnNumber: true } })).map((g) => [g.id, g.grnNumber]),
+  )
+  const approved: Array<{ id: string; grnNumber: string; stickers: number }> = []
+  const refused: Array<{ id: string; grnNumber: string; message: string }> = []
+  for (const id of [...new Set(ids)]) {
+    try {
+      const grn = await prisma.$transaction(async (tx) => {
+        await postCustomerGrn(tx, id, userId)
+        return tx.customerGRN.findUniqueOrThrow({ where: { id }, include: customerGrnInclude })
+      })
+      const made = await autoStickers({ sourceType: 'CUSTOMER_GRN', sourceId: grn.id }, userId)
+      await writeAuditLog(req, { module: MODULE, action: 'APPROVE', entityType: 'CustomerGRN', entityId: grn.id, after: grn })
+      approved.push({ id, grnNumber: grn.grnNumber, stickers: made.count })
+    } catch (err) {
+      if (!(err instanceof AppError)) throw err
+      refused.push({ id, grnNumber: numbers.get(id) ?? 'A receipt', message: err.message })
+    }
+  }
+  const stickers = approved.reduce((n, a) => n + a.stickers, 0)
+  res.json({
+    success: true,
+    message: [
+      approved.length ? `${approved.length} ${approved.length === 1 ? 'receipt' : 'receipts'} approved into stock.` : 'Nothing was approved.',
+      stickers ? `${stickers} ${stickers === 1 ? 'sticker is' : 'stickers are'} on Ready to print.` : '',
+      refused.length ? `${refused.length} could not be: ${refused.map((r) => r.grnNumber).join(', ')}.` : '',
+    ]
+      .filter(Boolean)
+      .join(' '),
+    data: { approved, refused },
+  })
+})
+
+/**
  * Handing a receipt back a step. QC sends one waiting for it back to
  * receiving, to be counted again; an approver sends one waiting for approval
  * back to QC — or, with `to: RECEIVING`, to receiving. Going back clears the
@@ -3441,16 +3487,18 @@ router.post('/customer-grn/import', requirePermission(MODULE, 'create'), async (
   if (summary.problems) {
     throw new AppError('Some rows have problems. Fix them in the sheet and try again; nothing was imported.', 400, 'IMPORT_PROBLEMS')
   }
-  // Imported receipts go straight onto the books, so importing is posting: an approver's.
-  assertMayPost(req)
+  // A sheet skips QC but not approval: its receipts wait for stock approval,
+  // and nothing is in stock until an approver approves them, together or one
+  // by one. So anyone who may receive may import.
+  const note = `Imported from ${fileName}: no QC; waits for stock approval.`
 
-  // All or nothing: one bad receipt and none of them are booked.
+  // All or nothing: one bad receipt and none of them are saved.
   const created = await prisma.$transaction(
     async (tx) => {
-      const out: Array<{ code: string; name: string }> = []
+      const out: Array<{ id: string; code: string; name: string }> = []
       for (const r of receipts) {
-        const grn = await createCustomerGrn(tx, createCustomerGrnSchema.parse(r), req.user?.id ?? null)
-        out.push({ code: grn.grnNumber, name: `${grn.customer.name} · ${grn.lines.length} ${grn.lines.length === 1 ? 'item' : 'items'}` })
+        const grn = await createCustomerGrn(tx, createCustomerGrnSchema.parse({ ...r, inspectionNotes: note }), req.user?.id ?? null, 'INSPECTED')
+        out.push({ id: grn.id, code: grn.grnNumber, name: `${grn.customer.name} · ${grn.lines.length} ${grn.lines.length === 1 ? 'item' : 'items'}` })
       }
       return out
     },
@@ -3467,7 +3515,7 @@ router.post('/customer-grn/import', requirePermission(MODULE, 'create'), async (
   res.status(201).json({
     success: true,
     message: created.length
-      ? `Imported ${created.length} ${created.length === 1 ? 'receipt' : 'receipts'}.`
+      ? `Imported ${created.length} ${created.length === 1 ? 'receipt' : 'receipts'}. ${created.length === 1 ? 'It waits' : 'They wait'} for stock approval: nothing is in stock until an approver approves ${created.length === 1 ? 'it' : 'them'}.`
       : 'Nothing to import: every receipt in the sheet is already in the system.',
     data: { summary, created },
   })

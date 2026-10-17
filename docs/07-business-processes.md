@@ -116,6 +116,15 @@ decided 16 Oct 2026:
    the rest passes.
 3. **Stock approval** — an approver (inventory approve — Admin, MD, Store
    Manager) approves it into stock, or sends it back to QC or receiving.
+   Several can be approved together with "Approve several", each on its own:
+   one that cannot be is listed with the reason and keeps waiting.
+
+Receipts imported from a spreadsheet skip QC (decided 16 Oct 2026) but not
+approval: anyone in the store can import a sheet, its receipts wait for stock
+approval marked "from a sheet, no QC", and an approver approves them in bulk —
+straight after importing, or later. A rejected quantity on the sheet needs its
+reason in the "Reject Reason" column. One that is wrong goes back to
+receiving as a draft.
 
 Until approval the material is on hold — on our floor, not in stock — so
 nothing can draw on it. On approval the part that passed becomes the

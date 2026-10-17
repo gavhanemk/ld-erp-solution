@@ -35,7 +35,7 @@ const qty = (v: number | null) =>
 const config: SheetImportConfig<RowPlan, Summary> = {
   icon: PackageOpen,
   title: 'Import customer material',
-  subtitle: "From a spreadsheet: what customers have sent in. It goes into stock under their name, never into our stock value.",
+  subtitle: "From a spreadsheet: what customers have sent in. It skips QC and waits for stock approval; once approved it is in stock under their name, never in our stock value.",
   importPath: '/inventory/customer-grn/import',
   templatePath: (current) => `/inventory/customer-grn/import-template?withCurrent=${current}`,
   templates: {
@@ -90,10 +90,17 @@ const config: SheetImportConfig<RowPlan, Summary> = {
       <span className="badge-info">{count(s.lines, 'item', 'items')}</span>
     </>
   ),
-  toDo: (s) => (s.receipts ? [`${count(s.receipts, 'receipt', 'receipts')} with ${count(s.lines, 'item', 'items')}`] : []),
+  toDo: (s) => (s.receipts ? [`${count(s.receipts, 'receipt', 'receipts')} with ${count(s.lines, 'item', 'items')}, to wait for stock approval`] : []),
   created: (data) => (data as { created: Array<{ code: string; name: string }> }).created,
 }
 
-export function ImportCustomerMaterialDialog({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {
-  return <SheetImportDialog config={config} onClose={onClose} onImported={onImported} />
+/** The receipts a sheet made: they wait for stock approval. */
+export function ImportCustomerMaterialDialog({ onClose, onImported }: { onClose: () => void; onImported: (receiptIds: string[]) => void }) {
+  return (
+    <SheetImportDialog
+      config={config}
+      onClose={onClose}
+      onImported={(data) => onImported(((data as { created?: Array<{ id?: string }> } | null)?.created ?? []).flatMap((c) => (c.id ? [c.id] : [])))}
+    />
+  )
 }

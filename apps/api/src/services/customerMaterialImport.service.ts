@@ -9,7 +9,9 @@ import { createCustomerGrnSchema } from '../schemas/inventory.schemas'
  *
  * One row per item. Rows for the same customer, store, day and challan number
  * are one receipt, as they would be one lorry. Everything is checked and shown
- * row by row first; then either every receipt is booked or none is.
+ * row by row first; then either every receipt is saved or none is. They skip
+ * QC and wait for stock approval: nothing is in stock until an approver
+ * approves them, a sheet's worth at once or one by one.
  *
  * A challan already booked for that customer (the same number, not cancelled)
  * is skipped rather than booked twice: importing the same sheet again, or the
@@ -42,6 +44,7 @@ export type CmKey =
   | 'challanQty'
   | 'arrivedQty'
   | 'rejectedQty'
+  | 'rejectReason'
   | 'markings'
 type Raw = Partial<Record<CmKey, string>>
 
@@ -63,6 +66,7 @@ export const CM_COLUMNS: SheetColumn<CmKey>[] = [
   { key: 'challanQty', head: 'Their Challan Qty', width: 12, note: 'What their challan says. Empty means the same as arrived.' },
   { key: 'arrivedQty', head: 'Arrived Qty *', width: 12, note: 'What actually came off the lorry. This is what goes into stock.' },
   { key: 'rejectedQty', head: 'Rejected Qty', width: 12, note: 'Of what arrived, how much failed the check. It stays in their stock, flagged to go back. Empty means none.' },
+  { key: 'rejectReason', head: 'Reject Reason', width: 22, note: 'Why it was rejected: torn, stained, wrong shade. Needed when Rejected Qty is filled.' },
   { key: 'markings', head: 'Their Markings', width: 20 },
 ]
 
@@ -113,6 +117,7 @@ export function cmRow(r: Record<string, unknown>, l: Record<string, unknown>): R
     challanQty: Number(l.challanQty),
     arrivedQty: Number(l.receivedQty),
     rejectedQty: Number(l.rejectedQty ?? 0),
+    rejectReason: text(l.rejectReason),
     markings: text(l.markings),
   }
 }
@@ -245,6 +250,7 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
     if (rejected !== null && (Number.isNaN(rejected) || rejected < 0)) problems.push(`Rejected Qty "${raw.rejectedQty}" is not a number.`)
     else if (rejected !== null && arrived !== null && !Number.isNaN(arrived) && rejected > arrived)
       problems.push(`Rejected Qty ${rejected} is more than arrived. Rejected is part of what arrived.`)
+    else if (rejected && !Number.isNaN(rejected) && !raw.rejectReason?.trim()) problems.push('Reject Reason is empty. Say why it was rejected.')
     if (arrived === null) problems.push('Arrived Qty is empty.')
     else if (Number.isNaN(arrived) || arrived <= 0) problems.push(`Arrived Qty "${raw.arrivedQty}" has to be a number above 0.`)
     if (onChallan !== null && (Number.isNaN(onChallan) || onChallan < 0)) problems.push(`Their Challan Qty "${raw.challanQty}" is not a number.`)
@@ -317,6 +323,7 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
         challanQty: plan.challanQty ?? plan.arrivedQty,
         receivedQty: plan.arrivedQty,
         rejectedQty: rejected !== null && !Number.isNaN(rejected) ? rejected : 0,
+        rejectReason: rejected ? raw.rejectReason?.trim() || null : null,
         markings: raw.markings || null,
       })
     }
