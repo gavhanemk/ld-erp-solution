@@ -477,6 +477,7 @@ export function ManufacturingOrderDetailDialog({
               </Section>
 
               <Section
+                id="mo-materials"
                 icon={ClipboardList}
                 title="Materials from the BOM"
                 actions={
@@ -729,6 +730,7 @@ export function ManufacturingOrderDetailDialog({
                 mo={{ id: mo.id, moNumber: mo.moNumber, status: mo.status, heldAt: mo.heldAt, progress: mo.progress, steps: mo.steps ?? [] }}
                 flow={flow}
                 materialsIssued={mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0)}
+                requisitionsRaised={mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED')}
                 onLoadStages={() => setSettingRoute(true)}
                 onChanged={(msg) => void refresh(msg)}
               />

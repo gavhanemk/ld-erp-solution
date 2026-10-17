@@ -11,6 +11,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { MODULE_WORDS, moduleReportsHref } from '@/components/reports/modules'
 
 /**
  * The picker.
@@ -29,14 +30,6 @@ interface ReportSummary {
   columns: Array<{ key: string; label: string }>
 }
 
-const MODULE_WORDS: Record<string, string> = {
-  purchase: 'Purchase',
-  sales: 'Sales',
-  inventory: 'Inventory',
-  production: 'Production',
-  accounts: 'Accounts',
-  hr: 'HR & Payroll',
-}
 
 export default function ReportsPage() {
   const [reports, setReports] = useState<ReportSummary[]>([])
@@ -63,6 +56,19 @@ export default function ReportsPage() {
   useEffect(() => {
     void load()
   }, [load])
+
+  // Back from a report, the list opens on that report's module.
+  useEffect(() => {
+    const m = new URLSearchParams(window.location.search).get('module')
+    if (m) setOpenModule(m)
+  }, [])
+
+  /** Opens or shuts a module, and keeps it in the address so coming back finds it open. */
+  const toggleModule = (module: string) => {
+    const next = openModule === module ? null : module
+    setOpenModule(next)
+    window.history.replaceState(null, '', next ? moduleReportsHref(next) : '/reports')
+  }
 
   const byModule = reports.reduce<Record<string, ReportSummary[]>>((acc, r) => {
     ;(acc[r.module] ??= []).push(r)
@@ -121,7 +127,7 @@ export default function ReportsPage() {
             <div key={module} className="space-y-3">
               <button
                 type="button"
-                onClick={() => setOpenModule(open ? null : module)}
+                onClick={() => toggleModule(module)}
                 aria-expanded={open}
                 className={`glass-card hover:border-primary/40 group flex w-full items-center gap-3 p-4 text-left transition-colors ${
                   open ? 'border-primary/40' : ''
