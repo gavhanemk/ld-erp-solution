@@ -9,6 +9,7 @@ import { formatRupees } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SizeQtyGrid, sumSizes, type SizeOption } from '@/components/sales/SizeQtyGrid'
+import { useEscape } from '@/lib/useEscape'
 
 interface ItemOption {
   id: string
@@ -114,19 +115,18 @@ export function FinishedGoodsDialog({
       .catch(() => {})
   }
 
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!saving) onClose()
+  }, open)
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !saving) onClose()
-    }
-    window.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      window.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [open, onClose, saving])
+  }, [open])
 
   useEffect(() => {
     if (!open) return
@@ -142,12 +142,13 @@ export function FinishedGoodsDialog({
     setLoading(true)
     void (async () => {
       try {
-        const [it, st, sg, wh, so] = await Promise.all([
+        const [it, st, sg, wh, so, lastIn] = await Promise.all([
           fetchEveryPage<ItemOption>((p) => `/masters/items?type=FINISHED_GOOD&active=true&limit=200&page=${p}&sort=name&order=asc`),
           fetchEveryPage<StyleOption>((p) => `/masters/styles?limit=200&page=${p}`),
           fetchEveryPage<SizeGroupOption>((p) => `/masters/size-groups?limit=200&page=${p}`),
           api.get<{ data: WarehouseOption[] }>('/masters/warehouses?active=true&limit=100'),
           api.get<{ data: OrderOption[] }>('/sales/orders/options?open=1').catch(() => ({ data: [] as OrderOption[] })),
+          api.get<{ data: Array<{ warehouseId: string }> }>('/finished-goods?limit=1').catch(() => ({ data: [] as Array<{ warehouseId: string }> })),
         ])
         if (!alive) return
         setItems(it.rows)
@@ -155,8 +156,10 @@ export function FinishedGoodsDialog({
         setSizeGroups(sg.rows)
         setWarehouses(wh.data)
         setOrders(so.data.filter((o) => ['CONFIRMED', 'IN_PRODUCTION', 'PARTIALLY_DISPATCHED'].includes(o.status)))
-        // The finished-goods store, when one is named so; otherwise the only one.
-        const fg = wh.data.find((w) => /finish/i.test(w.name)) ?? (wh.data.length === 1 ? wh.data[0] : null)
+        // Where finished goods went in last time (the mill keeps them in "Store",
+        // not a store of their own); else one named for them; else the only one.
+        const last = wh.data.find((w) => w.id === lastIn.data[0]?.warehouseId)
+        const fg = last ?? wh.data.find((w) => /finish/i.test(w.name)) ?? (wh.data.length === 1 ? wh.data[0] : null)
         setWarehouseId(fg?.id ?? '')
         if (presetMoId) await fillFromOrder(presetMoId, () => alive)
       } catch (err) {
