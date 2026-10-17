@@ -7,6 +7,7 @@ import { api, ApiError, masterResource } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ReportDashboard, TONE, type Analysis, type Tone } from '@/components/reports/Dashboard'
 import { PivotTable } from '@/components/reports/PivotTable'
+import { MODULE_WORDS, moduleReportsHref } from '@/components/reports/modules'
 import { FilterBar, type Filter } from '@/components/reports/FilterBar'
 import { describeReport, downloadReport } from '@/lib/reportDownload'
 import { formatDate } from '@/lib/utils'
@@ -90,6 +91,8 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const [message, setMessage] = useState<string | null>(null)
   /** What the report's own Pivot sheet defaults to, so the on-screen one opens the same way. */
   const [pivotDefaults, setPivotDefaults] = useState<{ rows?: string; values?: string }>({})
+  /** The report's module, for the way back to that module's reports. */
+  const [module, setModule] = useState<string | null>(null)
 
   // The definition, for the filter bar. Fetched from the same registry the
   // server runs from, so a filter added there appears here with no change.
@@ -99,11 +102,13 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         const res = await api.get<{
           data: Array<{
             id: string
+            module: string
             filters: Filter[]
             pivot?: { rows: string | string[]; values: string[] }
           }>
         }>('/reports')
         const mine = res.data.find((r) => r.id === id)
+        setModule(mine?.module ?? null)
         setFilters(mine?.filters ?? [])
         const rowsSpec = mine?.pivot?.rows
         setPivotDefaults({
@@ -183,10 +188,10 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
       <div className="page-header flex-wrap gap-3">
         <div className="min-w-0">
           <Link
-            href="/reports"
+            href={module ? moduleReportsHref(module) : '/reports'}
             className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-xs"
           >
-            <ArrowLeft size={13} /> All reports
+            <ArrowLeft size={13} /> {module ? `${MODULE_WORDS[module] ?? module} reports` : 'All reports'}
           </Link>
           <h1 className="page-title mt-1">{result?.report.title ?? 'Report'}</h1>
           {result && <p className="page-subtitle hidden sm:block">{result.report.description}</p>}
