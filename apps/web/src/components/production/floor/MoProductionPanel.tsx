@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Circle, ClipboardList, Factory, Pause, Play, Route } from 'lucide-react'
+import { AlertTriangle, ArrowUp, CheckCircle2, Circle, ClipboardList, Factory, Lock, Pause, Play, Route } from 'lucide-react'
 import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
@@ -33,6 +33,7 @@ export function MoProductionPanel({
   mo,
   flow,
   materialsIssued,
+  requisitionsRaised = false,
   onLoadStages,
   onChanged,
 }: {
@@ -40,6 +41,8 @@ export function MoProductionPanel({
   /** The whole order's route and figures, for changing its stages. */
   flow: Flow | null
   materialsIssued: boolean
+  /** A requisition is raised for the order, issued or not. */
+  requisitionsRaised?: boolean
   onLoadStages: () => void
   onChanged: (message: string) => void
 }) {
@@ -122,7 +125,13 @@ export function MoProductionPanel({
             1,
             materialsIssued,
             'Materials issued',
-            materialsIssued ? 'The store has issued materials to this order.' : mo.status === 'DRAFT' ? 'Release the order, then raise its requisition below.' : 'Raise the requisition in the materials list below and have the store issue it. Production starts after that.',
+            materialsIssued
+              ? 'The store has issued materials to this order.'
+              : mo.status === 'DRAFT'
+                ? 'Release the order, then raise its requisitions in Materials from the BOM above.'
+                : requisitionsRaised
+                  ? 'Requisitions are raised; waiting for the store to issue them (Inventory → Requisitions). Production starts after that.'
+                  : 'Raise the requisitions in Materials from the BOM above, and have the store issue them. Production starts after that.',
           )}
           {step(
             2,
@@ -156,11 +165,30 @@ export function MoProductionPanel({
             ) : (
               <div className="space-y-1.5">
                 <p>The stages come from the routing for the style; they can be changed for this order.</p>
-                {live && can('production', 'edit') && (
-                  <button type="button" className="btn-primary h-7 px-2.5 text-xs" disabled={!materialsIssued} title={materialsIssued ? undefined : 'Issue the materials first'} onClick={onLoadStages}>
-                    <Route size={13} /> Set up stages
-                  </button>
-                )}
+                {live && can('production', 'edit') &&
+                  (materialsIssued ? (
+                    <button type="button" className="btn-primary h-7 px-2.5 text-xs" onClick={onLoadStages}>
+                      <Route size={13} /> Set up stages
+                    </button>
+                  ) : (
+                    // Stages are loaded once materials are issued (12 Oct 2026). Said in words,
+                    // not only in a tooltip on a button that looks as if it works.
+                    <div className="border-border bg-secondary/40 flex flex-wrap items-center gap-2 rounded-lg border border-dashed px-2.5 py-2">
+                      <span className="text-muted-foreground inline-flex items-center gap-1.5">
+                        <Lock size={13} className="shrink-0" />
+                        Set up stages once the store has issued this order&apos;s materials{requisitionsRaised ? '' : ' — raise the requisitions first'}.
+                      </span>
+                      {!requisitionsRaised && (
+                        <button
+                          type="button"
+                          className="btn-secondary h-7 px-2.5 text-xs"
+                          onClick={() => document.getElementById('mo-materials')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                        >
+                          <ArrowUp size={13} /> Go to materials
+                        </button>
+                      )}
+                    </div>
+                  ))}
               </div>
             ),
           )}

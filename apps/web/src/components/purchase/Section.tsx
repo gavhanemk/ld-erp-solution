@@ -32,6 +32,7 @@ export function Section({
   foldable = false,
   openByDefault = true,
   summary,
+  id,
 }: {
   icon: React.ElementType
   title: string
@@ -55,6 +56,8 @@ export function Section({
   openByDefault?: boolean
   /** Shown on the closed header, so a folded panel still says what it holds. */
   summary?: React.ReactNode
+  /** For a link that scrolls to this panel. */
+  id?: string
 }) {
   const [open, setOpen] = useState(openByDefault)
   const shut = foldable && !open
@@ -78,7 +81,7 @@ export function Section({
   )
 
   return (
-    <section className="border-border bg-card rounded-xl border">
+    <section id={id} className="border-border bg-card scroll-mt-4 rounded-xl border">
       <div
         className={`flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 ${
           shut ? '' : 'border-border/70 border-b'
