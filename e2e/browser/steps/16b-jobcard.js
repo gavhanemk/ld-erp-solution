@@ -1,0 +1,15 @@
+// Production → Job Cards: one per colour, made with the stages; the header fills itself in.
+await h.say(`Step 13 · Job card ${S.jobCard} — made by itself, header filled from the order, BOM and fabric lot`)
+await h.go('/production/job-cards')
+await h.beat(1500)
+await page.locator('tbody tr').filter({ hasText: S.jobCard }).first().click()
+await h.sleep(1500)
+const d = h.dlg()
+await h.beat(3000)
+await h.type(d.getByLabel('Design no.'), 'D-' + S.mo.slice(-2))
+await h.beat(1000)
+await h.click('Save job card', d)
+await h.sleep(1500)
+const vals = {}
+for (const l of ['Order no.', 'Project ID', 'Fabric quality', 'Lot no.', 'Metres', 'Average (m per piece)', 'Ratio']) vals[l] = await h.dlg().getByLabel(l).inputValue().catch(() => '?')
+return JSON.stringify(vals)

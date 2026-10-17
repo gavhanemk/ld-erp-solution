@@ -1,0 +1,17 @@
+// MO → Set up stages from the routing (open now that the store has issued the materials).
+await h.say(`Step 12 · ${S.mo} — the materials are issued, so "Set up stages" is open; the stages come from the routing`)
+await h.go('/production/orders?open=' + S.moId); await h.sleep(1500)
+let d = h.dlg()
+await d.getByRole('heading', { name: 'Production' }).scrollIntoViewIfNeeded(); await h.beat(2500)
+await h.click('Set up stages', d); await h.sleep(1200)
+d = h.dlg()
+await h.beat(3500)
+await d.getByRole('button', { name: 'Save stages' }).first().click()
+await h.sleep(2500)
+d = h.dlg()
+const sec = d.locator('section').filter({ has: page.getByRole('heading', { name: 'Production' }) }).first()
+await sec.scrollIntoViewIfNeeded().catch(() => {})
+await h.beat(3000)
+const t = (await sec.innerText()).replace(/\s+/g, ' ')
+S.jobCard = (t.match(/MO-\d{4}-\d{4}-JC\d+/) || [])[0]
+return t.slice(0, 400)

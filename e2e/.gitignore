@@ -1,0 +1,4 @@
+node_modules/
+demo-db/data/
+shots/
+*.log
