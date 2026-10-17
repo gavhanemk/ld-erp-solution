@@ -1,9 +1,10 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, IndianRupee, Loader2, Paperclip, Receipt, X } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { Section } from '@/components/purchase/Section'
 import {
@@ -166,13 +167,10 @@ export function RecordQuoteDialog({
     }
   }, [problems, quote, enquiry, piNumber, piDate, validUntil, remark, rows, onSaved])
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !saving) onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, saving])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!saving) onClose()
+  })
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">

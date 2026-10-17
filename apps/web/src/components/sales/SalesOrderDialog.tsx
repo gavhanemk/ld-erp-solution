@@ -29,6 +29,7 @@ import {
 import { api, ApiError, can, currentUser } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatDate, formatRupees } from '@/lib/utils'
+import { useEscape } from '@/lib/useEscape'
 import { Section } from '@/components/purchase/Section'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -416,20 +417,19 @@ export function SalesOrderDialog({
   const [amendReason, setAmendReason] = useState('')
   const [error, setError] = useState<string | null>(null)
 
-  // Escape closes, and the page behind does not scroll while the form is up.
+  // Escape closes this form only (not the windows behind it), and the page
+  // behind does not scroll while the form is up.
+  useEscape(() => {
+    if (!saving && !releaseAsk) onClose()
+  }, open)
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !saving && !releaseAsk) onClose()
-    }
-    window.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      window.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [open, onClose, saving, releaseAsk])
+  }, [open])
 
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
   const styleById = useMemo(() => new Map(styles.map((s) => [s.id, s])), [styles])

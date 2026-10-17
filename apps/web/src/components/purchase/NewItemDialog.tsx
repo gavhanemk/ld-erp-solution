@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, Boxes, IndianRupee, Loader2, Package, X } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { uomFormFields } from '@/components/masters/uomFormFields'
 import { Section } from '@/components/purchase/Section'
@@ -188,13 +189,10 @@ export function NewItemDialog({
     onCreated,
   ])
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !saving) onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, saving])
+  // Escape closes this window only — not the form behind it.
+  useEscape(() => {
+    if (!saving) onClose()
+  })
 
   return createPortal(
     /* Above the form that opened it, and narrower — it is one short question,

@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, apiErrorMessage, can, masterResource } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
@@ -242,18 +243,17 @@ export function ReturnChallanDialog({
     }
   }, [billId])
 
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!saving) onClose()
+  })
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !saving) onClose()
-    }
-    document.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      document.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [onClose, saving])
+  }, [])
 
   const lineById = useMemo(() => new Map((data?.lines ?? []).map((l) => [l.billLineId, l])), [data])
   const reasonByKey = useMemo(

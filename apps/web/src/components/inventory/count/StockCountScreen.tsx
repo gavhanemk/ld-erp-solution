@@ -10,6 +10,7 @@ import { Scanner } from '@/components/packages/Scanner'
 import { RackInput, useRacks } from '@/components/packages/RackInput'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { useEscape } from '@/lib/useEscape'
 import {
   ADJ_STATUS,
   COUNT_STATUS,
@@ -505,11 +506,10 @@ function FinishDialog({ count, onClose, onDone }: { count: OpenCount; onClose: (
   const [scope, setScope] = useState<'STORE' | 'SCANNED'>('STORE')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onClose()
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [busy, onClose])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!busy) onClose()
+  })
 
   const finish = async () => {
     setBusy(true)

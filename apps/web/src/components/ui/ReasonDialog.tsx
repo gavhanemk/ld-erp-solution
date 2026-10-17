@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertTriangle, Loader2 } from 'lucide-react'
+import { useEscape } from '@/lib/useEscape'
 
 /**
  * Asks why, before an action that needs a reason on record — cancelling,
@@ -41,6 +42,8 @@ export function ReasonDialog({
 }) {
   const [reason, setReason] = useState('')
   const tooShort = requireReason && reason.trim().length < minLength
+  // Escape cancels this box only — not the windows behind it.
+  useEscape(onCancel)
 
   return createPortal(
     <div
@@ -77,7 +80,6 @@ export function ReasonDialog({
               onChange={(e) => setReason(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !tooShort && !busy) onConfirm(reason.trim())
-                if (e.key === 'Escape') onCancel()
               }}
               placeholder={placeholder}
               autoFocus
@@ -85,13 +87,7 @@ export function ReasonDialog({
           </label>
         )}
 
-        <div
-          className="mt-5 flex justify-end gap-2"
-          onKeyDown={(e) => {
-            if (requireReason) return
-            if (e.key === 'Escape') onCancel()
-          }}
-        >
+        <div className="mt-5 flex justify-end gap-2">
           <button type="button" className="btn-secondary" onClick={onCancel} disabled={busy}>
             Cancel
           </button>

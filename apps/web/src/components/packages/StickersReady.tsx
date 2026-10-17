@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Printer, Tags, X } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { openPrintTab, printLabels, qtyText } from './packageTypes'
 import type { InwardRef } from './InwardStickers'
 import { ChangeStickers } from './ChangeStickers'
@@ -72,11 +73,10 @@ function ReadyWindow({
   // One item's stickers being changed: how many, and how much on each.
   const [changing, setChanging] = useState<Ready['groups'][number] | null>(null)
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !changing && onClose()
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, changing])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!changing) onClose()
+  })
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm sm:left-[var(--sidebar-current-width)]">

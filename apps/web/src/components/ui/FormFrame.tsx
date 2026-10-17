@@ -3,6 +3,7 @@
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, X, type LucideIcon } from 'lucide-react'
+import { useEscape } from '@/lib/useEscape'
 
 /**
  * The frame every data-entry form sits in, the one the purchase order drew.
@@ -49,19 +50,18 @@ export function FormFrame({
   primaryInHeader?: boolean
   children: React.ReactNode
 }) {
-  // Escape closes, and the page behind must not scroll while the form is up.
+  // Escape closes this form only — not the windows behind it.
+  useEscape(() => {
+    if (!busy) onClose()
+  })
+  // The page behind must not scroll while the form is up.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) onClose()
-    }
-    document.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      document.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [onClose, busy])
+  }, [])
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">

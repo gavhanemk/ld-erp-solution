@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { X, Loader2, AlertCircle, BadgeCheck } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { useEscape } from '@/lib/useEscape'
 
 /**
  * Approving several customer receipts into stock at once.
@@ -74,11 +75,10 @@ export function ApproveCustomerReceiptsDialog({
     setTicked((t) => new Set([...t].filter((id) => receipts.some((r) => r.id === id))))
   }, [receipts])
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !saving && onClose()
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, saving])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!saving) onClose()
+  })
 
   const picked = receipts.filter((r) => ticked.has(r.id))
   const imported = receipts.filter((r) => r.imported).length

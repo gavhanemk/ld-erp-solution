@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { createPortal } from 'react-dom'
 import { MoreHorizontal } from 'lucide-react'
+import { useEscape } from '@/lib/useEscape'
 
 /** One line of a row's actions menu. */
 export interface RowAction {
@@ -81,19 +82,15 @@ export function ActionMenu({
 
   // A menu anchored to a row must not float away from it. Anything that moves
   // the row under it — a scroll, a resize — shuts it, and so does Escape.
+  useEscape(() => setOpen(false), open)
   useEffect(() => {
     if (!open) return
     const shut = () => setOpen(false)
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
     window.addEventListener('resize', shut)
     window.addEventListener('scroll', shut, true)
-    window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('resize', shut)
       window.removeEventListener('scroll', shut, true)
-      window.removeEventListener('keydown', onKey)
     }
   }, [open])
 

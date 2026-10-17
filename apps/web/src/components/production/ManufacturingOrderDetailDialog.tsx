@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, Info, Layers, Loader2, PackageCheck, Pencil, Send, X, Scissors } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { useEscape } from '@/lib/useEscape'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
@@ -225,19 +226,18 @@ export function ManufacturingOrderDetailDialog({
     void loadPlan(moId, next)
   }
 
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!busy && !closing) onClose()
+  }, Boolean(moId))
   useEffect(() => {
     if (!moId) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy && !closing) onClose()
-    }
-    window.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      window.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [moId, onClose, busy, closing])
+  }, [moId])
 
   const refresh = async (msg: string) => {
     setMessage(msg)

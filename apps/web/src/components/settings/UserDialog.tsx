@@ -6,6 +6,7 @@ import { ApiError } from '@/lib/api'
 import { settingsApi, type SettingsRole, type SettingsUser } from '@/lib/settingsApi'
 import { Field, Notice } from './ui'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { useEscape } from '@/lib/useEscape'
 
 /** Add someone, or change their details. Passwords are handled separately. */
 export function UserDialog({
@@ -47,19 +48,16 @@ export function UserDialog({
     setFormError(null)
   }, [open, user])
 
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose, open)
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      document.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
 

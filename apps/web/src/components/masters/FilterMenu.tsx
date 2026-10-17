@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, Search, X } from 'lucide-react'
+import { useEscape } from '@/lib/useEscape'
 
 export interface FilterChoice {
   value: string
@@ -36,20 +37,16 @@ export function FilterMenu({
   const rootRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // Closes on a click anywhere else, and on Escape.
+  // Closes on a click anywhere else, and on Escape (the menu only, while open).
+  useEscape(() => setOpen(false), open)
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent) => {
       if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
     }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
     }
   }, [open])
 

@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { Section } from '@/components/purchase/Section'
@@ -519,14 +520,10 @@ export function PurchaseEnquiryDialog({
     onSaved,
   ])
 
-  /** Escape closes, as every other dialog in the module does. */
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !saving) onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, saving])
+  /** Escape closes this window only — not the ones behind it. */
+  useEscape(() => {
+    if (!saving) onClose()
+  })
 
   return createPortal(
     /* The module's own shell: offset past the sidebar so the menu stays
