@@ -234,9 +234,7 @@ export function MoProductionPanel({
                             } hover:bg-secondary`}
                             title={`Open the ${s.name} sheet`}
                           >
-                            <span className="text-foreground font-medium">
-                              {s.sequence}. {s.name}
-                            </span>
+                            <span className="text-foreground font-medium">{s.name}</span>
                             <span className="text-muted-foreground block tabular-nums">
                               {s.kind === 'CUTTING' ? `cut ${pcs(f.completed)}` : `in ${pcs(f.received)} · out ${pcs(s.kind === 'PACKING' ? f.packed + f.sentOn : f.sentOn)}`}
                               {here ? ` · ${pcs(here)} here` : ''}

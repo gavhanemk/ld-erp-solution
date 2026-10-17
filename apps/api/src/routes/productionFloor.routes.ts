@@ -40,7 +40,7 @@ import { flowSummary } from '../services/floorView.service'
 import { processCode } from '../services/challanNo'
 import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
-import { createCutting, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
+import { createCutting, cuttingContractors, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
 import { ensureJobCards, fillJobCardBlanks, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
 
 /**
@@ -621,6 +621,11 @@ router.get('/stage-sheets', requirePermission(MODULE, 'view'), async (req, res) 
   const p = page(req)
   const out = await stageSheets(prisma, { stage, q: text(req.query.q), show: text(req.query.show), operationId, ...p })
   res.json({ success: true, data: out.data, pagination: { ...p, total: out.total, pages: Math.ceil(out.total / p.limit) || 1 } })
+})
+
+/** GET /cutting-contractors — every cutting contractor named before, latest first, for the pick list. */
+router.get('/cutting-contractors', requirePermission(MODULE, 'view'), async (_req, res) => {
+  res.json({ success: true, data: await cuttingContractors(prisma) })
 })
 
 /** POST /orders/:id/cutting-issues — sizes issued to a cutting contractor, on the cutting sheet. */

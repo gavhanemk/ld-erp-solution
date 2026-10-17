@@ -7,6 +7,7 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { SuggestInput } from '@/components/ui/SuggestInput'
 import { pcs, type JobCardDetail } from './types'
 
 /**
@@ -58,8 +59,25 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
     }
   }, [d.mo.id])
 
-  // Contractors named before on this order, to pick from.
-  const known = [...new Set(d.cuttings.map((c) => c.cutterName).filter(Boolean) as string[])]
+  // Every contractor named before, on any order, to pick from — this order's first.
+  const [everyone, setEveryone] = useState<Array<{ name: string; cuts: number }>>([])
+  useEffect(() => {
+    let alive = true
+    api
+      .get<{ data: Array<{ name: string; cuts: number }> }>('/production/cutting-contractors')
+      .then((res) => alive && setEveryone(res.data))
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
+  const known = useMemo(() => {
+    const here = [...new Set(d.cuttings.map((c) => c.cutterName).filter(Boolean) as string[])]
+    const rest = everyone.filter((c) => !here.some((h) => h.toLowerCase() === c.name.toLowerCase()))
+    return [...here.map((name) => ({ value: name, label: 'on this order' })), ...rest.map((c) => ({ value: c.name, label: `${c.cuts} ${c.cuts === 1 ? 'cutting' : 'cuttings'} before` }))]
+  }, [d.cuttings, everyone])
+  // A name nobody has used before is fine, but worth a second look for spelling.
+  const typedNew = !!cutterName.trim() && !known.some((k) => k.value.toLowerCase() === cutterName.trim().replace(/\s+/g, ' ').toLowerCase())
   const cutting = d.steps.find((s) => s.kind === 'CUTTING')
   const sizes = useMemo(
     () =>
@@ -136,12 +154,8 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
         <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="block sm:col-span-2">
             <span className="form-label">Cutting contractor</span>
-            <input className="form-input" list="cutters" value={cutterName} maxLength={120} placeholder="Ramesh (cutting master)" onChange={(e) => setCutterName(e.target.value)} />
-            <datalist id="cutters">
-              {known.map((k) => (
-                <option key={k} value={k} />
-              ))}
-            </datalist>
+            <SuggestInput className="form-input" value={cutterName} maxLength={120} placeholder="Ramesh (cutting master)" onValueChange={setCutterName} suggestions={known} aria-label="Cutting contractor" />
+            {typedNew && known.length > 0 && <span className="form-help">A new contractor. Check the spelling: the same name written two ways counts as two people.</span>}
           </label>
           <label className="block">
             <span className="form-label">Issued on</span>

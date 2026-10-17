@@ -377,6 +377,27 @@ export async function dispatch(tx: Tx, moId: string, d: z.infer<typeof dispatchS
   })
 
   const when = d.dispatchDate ?? new Date()
+  // Pieces leaving a working step straight from in hand were worked on there.
+  // Record that first, as the step's own work, so its sheet, its report and
+  // its piece-rate wages count them — not "sent on, never processed".
+  const handWork = takes.filter((l) => l.hand > 0)
+  if (handWork.length) {
+    await postEvent(tx, {
+      moId,
+      type: 'PROCESS',
+      stepId: from.id,
+      reworkStepId: null,
+      reason: null,
+      personName: d.issuedBy,
+      eventDate: when,
+      notes: 'Recorded as done when sent on',
+      createdById: userId,
+      moves: handWork.flatMap((l): Move[] => [
+        { stepId: from.id, bundleId: l.bundleId, bucket: 'WIP', qty: -l.hand },
+        { stepId: from.id, bundleId: l.bundleId, bucket: 'DONE', qty: l.hand },
+      ]),
+    })
+  }
   // Out to a unit: the job-work challan's own series, one run for GST. On our
   // floor: the sending department's challan on this order, e.g. STI/2627-0001/01.
   const transferNumber = vendorId ? await nextDocumentNumber(tx, 'JW', when) : await nextChallanNo(tx, mo, { stepId: from.id })
@@ -409,8 +430,8 @@ export async function dispatch(tx: Tx, moId: string, d: z.infer<typeof dispatchS
     personName: d.issuedBy,
     createdById: userId,
     moves: takes.flatMap((l): Move[] => [
-      { stepId: from.id, bundleId: l.bundleId, bucket: 'DONE', qty: -l.done },
-      { stepId: from.id, bundleId: l.bundleId, bucket: 'WIP', qty: -l.hand },
+      // What came from in hand was booked done just above.
+      { stepId: from.id, bundleId: l.bundleId, bucket: 'DONE', qty: -(l.done + l.hand) },
       // An outside unit does not count in on our system: the pieces are in
       // its hands from the challan.
       vendorId ? { stepId: to.id, bundleId: l.bundleId, bucket: 'WIP', qty: l.qty, vendorId } : { stepId: to.id, bundleId: l.bundleId, bucket: 'TRANSIT', qty: l.qty },
