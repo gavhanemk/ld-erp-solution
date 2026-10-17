@@ -18,6 +18,8 @@ import { materialConsumption } from './definitions/material-consumption'
 import { requisitionFulfilment } from './definitions/requisition-fulfilment'
 import { jobWorkPending } from './definitions/job-work-pending'
 import { jobWorkOrders } from './definitions/job-work-orders'
+import { itc04Sent } from './definitions/itc04-sent'
+import { itc04Received } from './definitions/itc04-received'
 import { customerMaterialStock } from './definitions/customer-material-stock'
 import { stockCountVariance } from './definitions/stock-count-variance'
 
@@ -53,6 +55,8 @@ export const REPORTS: ReportDefinition[] = [
   requisitionFulfilment,
   jobWorkPending,
   jobWorkOrders,
+  itc04Sent,
+  itc04Received,
   customerMaterialStock,
   stockCountVariance,
   ...SALES_REPORTS,

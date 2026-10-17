@@ -66,6 +66,10 @@ export interface ReportFilter {
   optionsFrom?: 'suppliers' | 'customers' | 'items' | 'warehouses' | 'itemCategories'
   /** For `select` with a fixed list. */
   options?: Array<{ value: string; label: string }>
+  /** For `select`: what choosing nothing means, when it is not "All …". */
+  emptyLabel?: string
+  /** For `select`: a box wide enough for long choices. */
+  wide?: boolean
   help?: string
 }
 

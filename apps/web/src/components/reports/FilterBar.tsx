@@ -28,6 +28,10 @@ export interface Filter {
   required?: boolean
   optionsFrom?: string
   options?: Array<{ value: string; label: string }>
+  /** What choosing nothing means, when it is not "All …". */
+  emptyLabel?: string
+  /** A box wide enough for long choices. */
+  wide?: boolean
   help?: string
 }
 
@@ -164,11 +168,11 @@ export function FilterBar({
           key={f.key}
           title={f.help}
           aria-label={f.label}
-          className={`${CONTROL} w-[9.5rem]`}
+          className={`${CONTROL} ${f.wide ? 'w-[15rem]' : 'w-[9.5rem]'}`}
           value={values[f.key] ?? ''}
           onChange={(e) => set(f.key, e.target.value)}
         >
-          <option value="">All {plural(f.label)}</option>
+          <option value="">{f.emptyLabel ?? `All ${plural(f.label)}`}</option>
           {(f.options ?? []).map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
