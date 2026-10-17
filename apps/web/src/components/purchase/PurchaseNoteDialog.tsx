@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, apiErrorMessage, ApiError, can, masterResource } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { Section } from '@/components/purchase/Section'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import {
@@ -957,14 +958,8 @@ export function PurchaseNoteDialog({
     }
   }
 
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose, open)
 
   if (!open || typeof document === 'undefined') return null
 

@@ -287,6 +287,7 @@ const formFields: FormField[] = [
       resource: 'hsn-codes',
       valueKey: 'code',
       label: (r) => `${String(r.description ?? '')} · GST ${Number(r.gstRate)}%`,
+      notListed: (code) => `${code} is not in Masters → HSN / SAC Codes yet, so it carries no GST rate. Add it there first.`,
     },
     help: 'GST comes from this code in Masters → HSN / SAC Codes',
   },

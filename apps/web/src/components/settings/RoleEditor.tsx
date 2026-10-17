@@ -5,6 +5,7 @@ import { X, Loader2, ShieldCheck } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { settingsApi, type PermissionModule, type SettingsRole } from '@/lib/settingsApi'
 import { Field, Notice } from './ui'
+import { useEscape } from '@/lib/useEscape'
 
 /**
  * The permission matrix.
@@ -46,19 +47,16 @@ export function RoleEditor({
     setFormError(null)
   }, [open, role])
 
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose, open)
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      document.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [open, onClose])
+  }, [open])
 
   const readOnly = Boolean(role?.unrestricted)
 

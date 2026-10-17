@@ -149,7 +149,6 @@ export function JobCardView({ jobCardId, onClose, onChanged }: { jobCardId: stri
                   <table className="data-table w-full min-w-[760px]">
                     <thead>
                       <tr className="bg-secondary">
-                        <th>#</th>
                         <th>Form</th>
                         <th>Department</th>
                         <th style={{ textAlign: 'right' }}>In</th>
@@ -167,7 +166,6 @@ export function JobCardView({ jobCardId, onClose, onChanged }: { jobCardId: stri
                         const balance = f ? f.inHand + f.waiting + f.atVendor + f.inTransit : 0
                         return (
                           <tr key={s.id} className={s.skippedAt ? 'opacity-60' : undefined}>
-                            <td className="text-xs tabular-nums">{s.sequence}</td>
                             <td className="text-xs font-medium">
                               {s.name} {stage === 'QC' ? 'check sheet' : 'sheet'}
                               {s.execution === 'OUTSOURCED' && <span className="badge-purple ml-1.5">Outside</span>}

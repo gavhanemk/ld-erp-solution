@@ -5000,6 +5000,14 @@ export async function jobWorkDebitNote(tx: Prisma.TransactionClient, returnId: s
   if (lines.every((l) => l.unitPrice <= 0)) {
     throw new AppError("Say what each damaged piece is charged at. A customer's material carries no value of ours, so there is none to take.", 400, 'NO_RATE')
   }
+  // Their challan number is the note's reference to them, but a supplier's
+  // reference can sit on one note only. When an earlier note already carries
+  // it (two receipts on one of their challans, or a number they reused), the
+  // number goes in the wording instead of refusing the charge.
+  const theirs = jwr.theirChallanNo?.trim() || null
+  const taken = theirs
+    ? await tx.purchaseNote.findFirst({ where: { supplierId: jwr.challan.jobWorkerId, supplierDocNo: theirs }, select: { id: true } })
+    : null
   const note = await createPurchaseNoteIn(
     tx,
     createNoteSchema.parse({
@@ -5008,9 +5016,9 @@ export async function jobWorkDebitNote(tx: Prisma.TransactionClient, returnId: s
       issuedBy: 'OUR_COMPANY',
       docType: 'OUR_DEBIT_NOTE',
       supplierId: jwr.challan.jobWorkerId,
-      withoutBillReason: `Damage at job work, ${jwr.returnNumber} against ${jwr.challan.challanNumber}`,
+      withoutBillReason: `Damage at job work, ${jwr.returnNumber} against ${jwr.challan.challanNumber}${theirs ? `, their challan ${theirs}` : ''}`,
       noteDate: new Date(),
-      supplierDocNo: jwr.theirChallanNo ?? undefined,
+      supplierDocNo: theirs && !taken ? theirs : undefined,
       notes: data.notes ?? undefined,
       lines: lines.filter((l) => l.unitPrice > 0),
     }),

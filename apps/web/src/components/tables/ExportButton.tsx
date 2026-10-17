@@ -11,6 +11,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import type { ExportFormat } from '@/lib/export'
+import { useEscape } from '@/lib/useEscape'
 
 /**
  * Takes a list off the screen and into a spreadsheet.
@@ -66,19 +67,16 @@ export function ExportButton({
     })
   }
 
+  // Escape shuts the menu only, while it is open.
+  useEscape(() => setOpen(false), open)
   useEffect(() => {
     if (!open) return
     const shut = () => setOpen(false)
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
     window.addEventListener('resize', shut)
     window.addEventListener('scroll', shut, true)
-    window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('resize', shut)
       window.removeEventListener('scroll', shut, true)
-      window.removeEventListener('keydown', onKey)
     }
   }, [open])
 

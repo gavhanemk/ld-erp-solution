@@ -85,7 +85,7 @@ export function SheetView({
                   } ${s.skippedAt ? 'opacity-60' : ''}`}
                   title={`${stageOf(s) === 'QC' ? 'Check' : s.department.name}${s.execution === 'OUTSOURCED' ? ' · outside unit' : ''}`}
                 >
-                  <span className="tabular-nums">{s.sequence}</span> {s.name}
+                  {s.name}
                   {f?.state === 'DONE' ? <span className="text-primary">✓</span> : here > 0 ? <span className="badge-info px-1.5 py-0 text-[10px]">{pcs(here)}</span> : null}
                 </button>
               )

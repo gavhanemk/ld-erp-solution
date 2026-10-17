@@ -287,6 +287,37 @@ export const cutterIssueSchema = z.object({
  * than is left to cut of each size, counting what other contractors already
  * have in hand.
  */
+/**
+ * A contractor's name as it was first written. "ramesh cutting works" and
+ * "Ramesh  Cutting Works" are one person, and two spellings split what they
+ * cut and what they are paid, so a name typed again is matched ignoring case
+ * and spacing and saved the way it was first written.
+ */
+export async function canonicalCutter(db: Db, typed: string) {
+  const clean = typed.trim().replace(/\s+/g, ' ')
+  if (!clean) return clean
+  const first = await db.cuttingOrder.findFirst({
+    where: { cutterName: { equals: clean, mode: 'insensitive' } },
+    select: { cutterName: true },
+    orderBy: { createdAt: 'asc' },
+  })
+  return first?.cutterName ?? clean
+}
+
+/** Every cutting contractor named on any order, latest first, for the pick list. */
+export async function cuttingContractors(db: Db) {
+  const rows = await db.cuttingOrder.groupBy({
+    by: ['cutterName'],
+    where: { cutterName: { not: null } },
+    _count: { _all: true },
+    _max: { cutDate: true },
+  })
+  return rows
+    .filter((r) => r.cutterName?.trim())
+    .map((r) => ({ name: r.cutterName as string, cuts: r._count._all, lastCut: r._max.cutDate }))
+    .sort((a, b) => (b.lastCut?.getTime() ?? 0) - (a.lastCut?.getTime() ?? 0))
+}
+
 export async function issueToCutter(tx: Db, moId: string, d: z.infer<typeof cutterIssueSchema>, userId: string, opts: { mayApprove?: boolean } = {}) {
   await lockMo(tx, moId)
   const prep = await cuttingPrep(tx, moId)
@@ -346,7 +377,7 @@ export async function issueToCutter(tx: Db, moId: string, d: z.infer<typeof cutt
       noOfLayers: d.noOfLayers ?? null,
       lotNo: d.lotNo || null,
       ratio: d.ratio || null,
-      cutterName: d.cutterName,
+      cutterName: await canonicalCutter(tx, d.cutterName),
       plannedBreakup: Object.keys(planned).length ? planned : undefined,
       plannedPieces: pieces,
       actualPieces: 0,
@@ -496,7 +527,7 @@ export async function createCutting(
       noOfLayers: data.noOfLayers ?? null,
       lotNo: data.lotNo || null,
       ratio: data.ratio || null,
-      cutterName: data.cutterName || null,
+      cutterName: data.cutterName ? await canonicalCutter(tx, data.cutterName) : null,
       bundleSize,
       plannedBreakup: Object.keys(plannedBreakup).length ? plannedBreakup : undefined,
       plannedPieces: Object.keys(plannedBreakup).length ? Object.values(plannedBreakup).reduce((s, n) => s + n, 0) : line?.totalQty ?? mo.totalPlannedQty,

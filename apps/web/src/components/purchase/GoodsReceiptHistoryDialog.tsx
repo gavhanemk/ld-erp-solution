@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, Calendar, Loader2, PackageCheck, Truck, X } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 
 interface HistoryLine {
   id: string
@@ -105,13 +106,8 @@ export function GoodsReceiptHistoryDialog({
     }
   }, [poId])
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose)
 
   /**
    * The order line by line, read back through its deliveries.

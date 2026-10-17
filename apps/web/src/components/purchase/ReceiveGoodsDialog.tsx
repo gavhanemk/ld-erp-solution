@@ -14,6 +14,7 @@ import {
   FileText,
   Paperclip,
   Pencil,
+  CheckCheck,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import {
@@ -1193,6 +1194,25 @@ export function ReceiveGoodsDialog({
     []
   )
 
+  /*
+   * "All of it came": one press puts each line's still-due quantity in its
+   * first store, instead of retyping figures the challan already matches.
+   * Lines start blank so nothing is assumed; this is the store keeper saying
+   * so. A quantity already typed is what was counted, and stays as it is.
+   */
+  const fillAsOrdered = () =>
+    setEntries((prev) => {
+      const next = { ...prev }
+      for (const line of order?.lines ?? []) {
+        const due = num(line.qty) - num(line.receivedQty)
+        const rows = next[line.id] ?? []
+        if (due <= 0 || line.shortClosed || !rows.length || rows.some((a) => String(a.received).trim() !== '')) continue
+        next[line.id] = rows.map((a, i) => (i === 0 ? { ...a, received: String(due) } : a))
+      }
+      return next
+    })
+  const canFillAsOrdered = !editing && (order?.lines ?? []).some((line) => !line.shortClosed && num(line.qty) - num(line.receivedQty) > 0 && (entries[line.id] ?? []).every((a) => String(a.received).trim() === ''))
+
   const setField = (patch: Partial<Delivery>) => setDelivery((prev) => ({ ...prev, ...patch }))
 
   /*
@@ -1842,7 +1862,22 @@ export function ReceiveGoodsDialog({
           )}
 
           {order && !loadingOrder && (
-            <Section icon={PackageCheck} title="What Arrived">
+            <Section
+              icon={PackageCheck}
+              title="What Arrived"
+              actions={
+                canFillAsOrdered ? (
+                  <button
+                    type="button"
+                    className="btn-secondary h-8 px-3 text-xs"
+                    onClick={fillAsOrdered}
+                    title="Put each line's still-due quantity in the blank Received boxes"
+                  >
+                    <CheckCheck size={14} /> Received as ordered
+                  </button>
+                ) : undefined
+              }
+            >
               <div className="border-border hidden overflow-x-auto rounded-lg border sm:block">
                 {/* A floor, so the columns scroll rather than squash. Most of
                 them are figures being typed into, and a number box squeezed to

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, Loader2, Receipt, Save, X } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { uomFormFields } from '@/components/masters/uomFormFields'
 import { Section } from '@/components/purchase/Section'
@@ -221,13 +222,10 @@ export function ExpenseHeadDialog({
     onSaved,
   ])
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !saving) onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, saving])
+  // Escape closes this window only — not the form behind it.
+  useEscape(() => {
+    if (!saving) onClose()
+  })
 
   return createPortal(
     <div className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm">

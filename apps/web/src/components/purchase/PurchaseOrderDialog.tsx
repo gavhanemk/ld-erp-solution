@@ -35,6 +35,7 @@ import {
 import { Section } from '@/components/purchase/Section'
 import type { EnquiryQuote, EnquiryRecord as EnquiryLite } from '@/components/purchase/enquiryTypes'
 import { api, apiErrorMessage, ApiError, can, masterResource, type Paginated } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } from '@/components/purchase/IndentItemsDialog'
@@ -517,6 +518,19 @@ function Row({ label, value }: { label: string; value: number }) {
       <span className="text-muted-foreground">{label}</span>
       <span className="text-foreground tabular-nums">{inr(value)}</span>
     </div>
+  )
+}
+
+/** The last rate an item was bought at, under its rate box; one press to take it while the box is empty. */
+function LastRate({ rate, use }: { rate: number; use?: () => void }) {
+  return use ? (
+    <p className="whitespace-nowrap text-[10px]">
+      <button type="button" onClick={use} className="text-primary font-medium hover:underline" title="Put this rate in the box">
+        Use last {inr(rate)}
+      </button>
+    </p>
+  ) : (
+    <p className="text-muted-foreground whitespace-nowrap text-[10px]">Last {inr(rate)}</p>
   )
 }
 
@@ -1052,23 +1066,20 @@ export function PurchaseOrderDialog({
     }
   }, [open, record?.id])
 
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose, open)
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKey)
     // The page behind must not scroll while this is open, or closing the form
     // leaves the list somewhere the clerk did not put it.
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     const focusTimer = setTimeout(() => firstFieldRef.current?.focus(), 50)
     return () => {
-      document.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
       clearTimeout(focusTimer)
     }
-  }, [open, onClose])
+  }, [open])
 
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
   const supplier = suppliers.find((s) => s.id === supplierId)
@@ -2797,19 +2808,19 @@ export function PurchaseOrderDialog({
                               aria-label={`Row ${i + 1} rate`}
                             />
                             {/* The last rate this item was bought at, shown but
-                              never typed into the box. That is the whole point
-                              of it: the buyer sees what it went for last time
-                              and decides, rather than sending an order at a
-                              price nobody looked at.
+                              never typed into the box by itself. That is the
+                              whole point of it: the buyer sees what it went for
+                              last time and decides, rather than sending an
+                              order at a price nobody looked at. While the box is
+                              empty it is one press to take — still the buyer's
+                              choice, without retyping a figure on the screen.
 
                               Only when there is a history. A first-time
                               purchase has nothing to say here, and "Last —"
                               would just be a row of noise. */}
                             {lastRate && (
                               <div className="mt-0.5 text-right">
-                                <p className="text-muted-foreground whitespace-nowrap text-[10px]">
-                                  Last {inr(num(lastRate.unitRate))}
-                                </p>
+                                <LastRate rate={num(lastRate.unitRate)} use={String(line.unitRate).trim() === '' ? () => setLine(i, { unitRate: String(num(lastRate.unitRate)) }) : undefined} />
                                 <button
                                   type="button"
                                   onClick={() => setHistoryFor(line.itemId)}
@@ -3115,9 +3126,7 @@ export function PurchaseOrderDialog({
                           />
                           {lastRate && (
                             <div>
-                              <p className="text-muted-foreground whitespace-nowrap text-[10px]">
-                                Last {inr(num(lastRate.unitRate))}
-                              </p>
+                              <LastRate rate={num(lastRate.unitRate)} use={String(line.unitRate).trim() === '' ? () => setLine(i, { unitRate: String(num(lastRate.unitRate)) }) : undefined} />
                               <button
                                 type="button"
                                 onClick={() => setHistoryFor(line.itemId)}

@@ -1,9 +1,10 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2, Tags, X } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { PACK_TYPES, parseSizes, qtyText, splitEvenly } from './packageTypes'
@@ -43,11 +44,10 @@ export function ChangeStickers({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onClose()
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [busy, onClose])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!busy) onClose()
+  })
 
   const qtys = differ ? parseSizes(sizes) : splitEvenly(line.qty, Math.floor(Number(count) || 0))
   const total = Math.round(qtys.reduce((s, q) => s + q, 0) * 1000) / 1000

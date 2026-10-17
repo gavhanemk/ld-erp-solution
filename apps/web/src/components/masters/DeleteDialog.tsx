@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { AlertTriangle, ArrowRight, Loader2, Trash2, X } from 'lucide-react'
 import { api, apiErrorMessage, masterResource } from '@/lib/api'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { useEscape } from '@/lib/useEscape'
 
 interface Check {
   /** What has to move to another record, e.g. "1 operation". */
@@ -86,13 +87,10 @@ export function DeleteDialog({
     }
   }, [resource, id])
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) onClose()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose, busy])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!busy) onClose()
+  })
 
   const needsTarget = Boolean(check?.move.length)
   const refused = check?.refuse ?? []

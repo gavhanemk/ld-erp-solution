@@ -21,6 +21,7 @@ import {
   X, Scale } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate, formatRupees } from '@/lib/utils'
+import { useEscape } from '@/lib/useEscape'
 import { Section } from '@/components/purchase/Section'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { MaterialExceptionDialog } from './MaterialExceptionDialog'
@@ -175,19 +176,18 @@ export function SalesOrderDetailDialog({
     if (orderId) void load(orderId)
   }, [orderId, load])
 
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!asking && !revision && !exception) onClose()
+  }, Boolean(orderId))
   useEffect(() => {
     if (!orderId) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !asking && !revision && !exception) onClose()
-    }
-    window.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      window.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [orderId, onClose, asking, revision, exception])
+  }, [orderId])
 
   if (!orderId || !mounted) return null
 

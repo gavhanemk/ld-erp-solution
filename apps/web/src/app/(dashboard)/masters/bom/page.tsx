@@ -23,6 +23,7 @@ import {
 import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { cn, formatDate, formatRupees } from '@/lib/utils'
 import { useAppSettings } from '@/lib/appSettings'
+import { useEscape } from '@/lib/useEscape'
 import { BomFormDialog, type Bom } from '@/components/masters/BomFormDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
@@ -866,12 +867,8 @@ function CopyBomDialog({ source, onClose, onCopied }: CopyProps) {
     setError(null)
   }, [source])
 
-  useEffect(() => {
-    if (!source) return
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [source, onClose])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose, Boolean(source))
 
   if (!source) return null
 

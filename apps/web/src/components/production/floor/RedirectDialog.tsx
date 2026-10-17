@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, Loader2, Shuffle, X } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import type { FlowTransfer } from './types'
 
 interface Option {
@@ -69,11 +70,10 @@ export function RedirectDialog({
     }
   }, [transfer.id])
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onClose()
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [busy, onClose])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!busy) onClose()
+  })
 
   const save = async () => {
     setError(null)

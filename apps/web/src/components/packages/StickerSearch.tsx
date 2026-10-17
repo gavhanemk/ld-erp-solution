@@ -135,6 +135,9 @@ export function StickerScanner({
       return true
     }
     if (e.key === 'Escape') {
+      // Closes the list only; the window around it stays open.
+      e.preventDefault()
+      e.stopPropagation()
       setHits(null)
       return true
     }

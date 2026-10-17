@@ -4,10 +4,11 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState }
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import {
   Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer, FileText,
-  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock, Undo2 } from 'lucide-react'
+  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock, Undo2, ThumbsUp, Layers } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { ProcessDialog, type ProcessTab } from '@/components/inventory/ProcessDialog'
+import { BulkRequisitionDialog, type BulkAction } from '@/components/inventory/BulkRequisitionDialog'
 import { ReservationsView } from '@/components/inventory/ReservationsView'
 import { IndentsView } from '@/components/inventory/IndentsView'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
@@ -115,12 +116,13 @@ const qtyFmt = (v: number) =>
  * Where a requisition stands. One word each, in the order they happen, so the
  * status filter and the figures read the same as the badge on the row.
  */
-type StageKey = 'approval' | 'arrived' | 'handover' | 'partly' | 'purchase' | 'issued' | 'closed' | 'cancelled' | 'refused'
+type StageKey = 'approval' | 'arrived' | 'handover' | 'split' | 'partly' | 'purchase' | 'issued' | 'closed' | 'cancelled' | 'refused'
 
 const STAGE: Record<StageKey, { label: string; cls: string; who: string }> = {
   approval: { label: 'Waiting for approval', cls: 'badge-warning', who: 'Approver' },
   arrived: { label: 'Arrived — ready to issue', cls: 'badge-success', who: 'Store' },
   handover: { label: 'To be issued', cls: 'badge-info', who: 'Store' },
+  split: { label: 'Part to issue, rest with buyer', cls: 'badge-info', who: 'Store' },
   partly: { label: 'Part issued', cls: 'badge-warning', who: 'Store' },
   purchase: { label: 'Waiting for purchase', cls: 'badge-info', who: 'Buyer' },
   issued: { label: 'Issued', cls: 'badge-success', who: '' },
@@ -130,7 +132,7 @@ const STAGE: Record<StageKey, { label: string; cls: string; who: string }> = {
 }
 const STAGE_ORDER = Object.keys(STAGE) as StageKey[]
 /** Still somebody's to do. */
-const OPEN_STAGES: StageKey[] = ['approval', 'arrived', 'handover', 'partly', 'purchase']
+const OPEN_STAGES: StageKey[] = ['approval', 'arrived', 'handover', 'split', 'partly', 'purchase']
 
 function stageKey(mr: Requisition): StageKey {
   if (mr.closedAt) return mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'closed' : 'cancelled'
@@ -142,7 +144,10 @@ function stageKey(mr: Requisition): StageKey {
   if (owedLines.length && owedLines.every((l) => buyQtyOf(l) >= Number(l.requestedQty) - Number(l.issuedQty) - 1e-9))
     // Bought, and some of it is now in the store: the store's move, not the buyer's.
     return owedLines.some((l) => (l.available ?? 0) > 0) ? 'arrived' : 'purchase'
-  return partlyIssued(mr) ? 'partly' : 'handover'
+  if (partlyIssued(mr)) return 'partly'
+  // Some of it is in the store to give now and the rest is on the indent: the
+  // store's move first, and the badge says the buyer has the rest.
+  return owedLines.some((l) => buyQtyOf(l) > 0) ? 'split' : 'handover'
 }
 
 /**
@@ -171,6 +176,8 @@ function nextStep(mr: Requisition, key: StageKey, isMine: boolean, iApproved: bo
       const full = mr.lines.filter((l) => Number(l.issuedQty) >= Number(l.requestedQty)).length
       return `${full} of ${mr.lines.length} ${mr.lines.length === 1 ? 'line' : 'lines'} issued in full. Press Process to issue the rest, or close it if it is no longer wanted.`
     }
+    case 'split':
+      return 'Part of it is in the store to issue now; the rest is on the indent for the buyer. Press Process to issue what is here.'
     case 'handover':
       // Raised, approved and issued by three different people (the Admin may
       // do all three), so the two who have had their say are told whose turn it is.
@@ -330,6 +337,8 @@ function RequisitionsScreen() {
   const [returning, setReturning] = useState<Requisition | null>(null)
   /** Stock that just went out: its labels, and the packages it came from. */
   const [outward, setOutward] = useState<OutwardRef | null>(null)
+  /** Several requisitions taken through one step together. */
+  const [bulk, setBulk] = useState<BulkAction | null>(null)
   /** A return from the floor just saved: stickers for what came back, ready to print. */
   const [inward, setInward] = useState<InwardRef | null>(null)
 
@@ -509,7 +518,7 @@ function RequisitionsScreen() {
     const byStage = rows.filter((mr) => passes(mr, 'stage'))
     const inStage = (keys: StageKey[]) => byStage.filter((mr) => keys.includes(fact(mr).stage))
     const approval = inStage(['approval'])
-    const handover = inStage(['arrived', 'handover', 'partly'])
+    const handover = inStage(['arrived', 'handover', 'split', 'partly'])
     const purchase = inStage(['purchase'])
     const late = rows.filter((mr) => passes(mr, 'need') && fact(mr).need === 'late')
     // Totals per unit across the requisitions, never adding metres to pieces.
@@ -786,6 +795,18 @@ function RequisitionsScreen() {
 
   const pages = Math.ceil(shown.length / PAGE) || 1
   const pageRows = shown.slice((page - 1) * PAGE, page * PAGE)
+
+  // Several at once, from what the list shows: an MO raises one requisition
+  // per department, and each through its own window was slow work.
+  const owedOf = (l: Line) => Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
+  const shortNotBought = (l: Line) => owedOf(l) - (l.available ?? 0) > 1e-9 && buyQtyOf(l) + 1e-9 < owedOf(l) - (l.available ?? 0)
+  const together: Record<BulkAction, Requisition[]> = {
+    approve: can('inventory', 'approve') ? shown.filter((mr) => fact(mr).stage === 'approval') : [],
+    indent: can('inventory', 'edit') ? shown.filter((mr) => ['handover', 'split', 'partly'].includes(fact(mr).stage) && mr.lines.some(shortNotBought)) : [],
+    issue: can('inventory', 'edit')
+      ? shown.filter((mr) => ['arrived', 'handover', 'split', 'partly'].includes(fact(mr).stage) && mr.lines.some((l) => owedOf(l) > 1e-9 && (l.available ?? 0) > 0))
+      : [],
+  }
   const COLS = 13
 
   return (
@@ -890,14 +911,14 @@ function RequisitionsScreen() {
           label="To be issued"
           value={String(figures.handover)}
           sub={
-            isSet('stage', ['arrived', 'handover', 'partly'])
+            isSet('stage', ['arrived', 'handover', 'split', 'partly'])
               ? 'showing only these · click to show all'
               : figures.handover
                 ? `${figures.handoverQty ?? 'nothing'} for the store to give`
                 : 'nothing waiting at the store'
           }
-          onClick={() => toggleTo('stage', ['arrived', 'handover', 'partly'])}
-          active={isSet('stage', ['arrived', 'handover', 'partly'])}
+          onClick={() => toggleTo('stage', ['arrived', 'handover', 'split', 'partly'])}
+          active={isSet('stage', ['arrived', 'handover', 'split', 'partly'])}
         />
         <KpiTile
           icon={ShoppingCart}
@@ -987,6 +1008,29 @@ function RequisitionsScreen() {
           </span>
         </div>
       </div>
+
+      {(together.approve.length > 0 || together.indent.length > 0 || together.issue.length > 0) && (
+        <div className="glass-card flex flex-wrap items-center gap-2 px-4 py-2.5">
+          <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
+            <Layers size={14} /> Several at once, from the list shown:
+          </span>
+          {together.approve.length > 0 && (
+            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setBulk('approve')}>
+              <ThumbsUp size={13} /> Approve {together.approve.length}
+            </button>
+          )}
+          {together.indent.length > 0 && (
+            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setBulk('indent')}>
+              <ShoppingCart size={13} /> Put short items on the indent ({together.indent.length})
+            </button>
+          )}
+          {together.issue.length > 0 && (
+            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setBulk('issue')}>
+              <PackageCheck size={13} /> Issue what is in stock ({together.issue.length})
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="glass-card overflow-hidden p-0">
         {loading && rows.length === 0 ? (
@@ -1220,6 +1264,15 @@ function RequisitionsScreen() {
             if (stickers) setInward(stickers)
             void load()
           }}
+        />
+      )}
+      {bulk && (
+        <BulkRequisitionDialog
+          action={bulk}
+          mrs={together[bulk]}
+          onClose={() => setBulk(null)}
+          onDone={() => void load()}
+          onLabels={(o) => setOutward(o)}
         />
       )}
       {outward && (

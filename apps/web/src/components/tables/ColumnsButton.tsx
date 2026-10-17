@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Columns3, RotateCcw } from 'lucide-react'
+import { useEscape } from '@/lib/useEscape'
 
 /**
  * Which of a table's optional columns are on, and a place to change that.
@@ -46,19 +47,16 @@ export function ColumnsButton({
     })
   }
 
+  // Escape shuts the menu only, while it is open.
+  useEscape(() => setOpen(false), open)
   useEffect(() => {
     if (!open) return
     const shut = () => setOpen(false)
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
     window.addEventListener('resize', shut)
     window.addEventListener('scroll', shut, true)
-    window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('resize', shut)
       window.removeEventListener('scroll', shut, true)
-      window.removeEventListener('keydown', onKey)
     }
   }, [open])
 

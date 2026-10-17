@@ -2,7 +2,9 @@
 
 import { useMemo, useState } from 'react'
 import { ChevronDown, ChevronUp, LayoutGrid } from 'lucide-react'
+import { Cell, Pie, PieChart, ResponsiveContainer } from 'recharts'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { PALETTE } from '@/components/dashboard/DashKit'
 
 /**
  * Totals by group, on screen.
@@ -14,9 +16,12 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
  * about what "the report" contains.
  *
  * Read like the dashboard's ranking panels: each group's name with its figure
- * right beside it and a bar for its share, two columns on a wide screen —
- * never a name on the far left and its figure on the far right. Split by a
- * second field, it is a compact table sized to its figures.
+ * right beside it and a bar for its share — never a name on the far left and
+ * its figure on the far right. The other half of a wide screen shows the same
+ * totals as a picture: a ring of the biggest groups' shares with what stands
+ * out, one sentence when there is only one group, or the total of each unit
+ * when the units differ — so neither half is left empty. Split by a second
+ * field, it is a compact table sized to its figures.
  *
  * Quantities are added only within the same unit: 6,226 pcs and 537.2 mtr
  * are two figures, never "6,763.2". A quantity column without a unit of its
@@ -69,6 +74,10 @@ const pct = (share: number) => (share > 0 && share < 0.005 ? '<1%' : `${Math.rou
 const NONE = '__none__'
 /** Groups shown before "Show all". */
 const FIRST = 12
+/** Groups drawn in the ring in their own colour; the rest are one grey slice. */
+const RING = 6
+const OTHERS = '#94a3b8'
+const colourOf = (i: number) => (i < RING ? PALETTE[i % PALETTE.length] : OTHERS)
 
 export function PivotTable({
   columns,
@@ -212,78 +221,133 @@ export function PivotTable({
         </p>
       ) : split ? (
         // A second field: a compact table sized to its figures, scrolling sideways when wide.
-        <div className="max-h-[32rem] overflow-auto px-4 py-3">
-          <table className="subtable w-auto min-w-[20rem]">
-            <thead>
-              <tr>
-                <th className="bg-secondary sticky left-0 top-0 z-20 max-w-[16rem]">{rowCol!.label}</th>
-                {pivot.colLabels.map((c) => (
-                  <th key={c} className="sticky top-0 z-10 whitespace-nowrap pl-6 text-right">
-                    {c}
-                  </th>
+        // With a few columns it leaves room, so the picture of the totals sits beside it.
+        pivot.colLabels.length <= 4 ? (
+          <div className="grid md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+            <div className="max-h-[32rem] overflow-auto px-4 py-3">
+              <table className="subtable w-auto min-w-[20rem]">
+                <thead>
+                  <tr>
+                    <th className="bg-secondary sticky left-0 top-0 z-20 max-w-[16rem]">{rowCol!.label}</th>
+                    {pivot.colLabels.map((c) => (
+                      <th key={c} className="sticky top-0 z-10 whitespace-nowrap pl-6 text-right">
+                        {c}
+                      </th>
+                    ))}
+                    {pivot.colLabels.length > 1 && <th className="sticky top-0 z-10 pl-6 text-right">Total</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {shown.map((r) => (
+                    <tr key={r}>
+                      <td className="bg-card sticky left-0 z-10 max-w-[16rem] truncate font-medium" title={r}>
+                        {r}
+                      </td>
+                      {pivot.colLabels.map((c) => (
+                        <td key={c} className="whitespace-nowrap pl-6 text-right tabular-nums">
+                          {formatSums(pivot.grid.get(r)?.get(c), valueCol!)}
+                        </td>
+                      ))}
+                      {pivot.colLabels.length > 1 && <td className="whitespace-nowrap pl-6 text-right font-semibold tabular-nums">{formatSums(pivot.rowTotals.get(r), valueCol!)}</td>}
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td className="bg-card sticky left-0">Total</td>
+                    {pivot.colLabels.map((c) => (
+                      <td key={c} className="whitespace-nowrap pl-6 text-right tabular-nums">
+                        {formatSums(pivot.colTotals.get(c), valueCol!)}
+                      </td>
+                    ))}
+                    {pivot.colLabels.length > 1 && <td className="whitespace-nowrap pl-6 text-right tabular-nums">{formatSums(pivot.grand, valueCol!)}</td>}
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            <div className="border-border/60 border-t px-4 py-4 md:border-l md:border-t-0">
+              <Picture pivot={pivot} valueCol={valueCol!} noun={rowCol!.label} />
+            </div>
+          </div>
+        ) : (
+          <div className="max-h-[32rem] overflow-auto px-4 py-3">
+            <table className="subtable w-auto min-w-[20rem]">
+              <thead>
+                <tr>
+                  <th className="bg-secondary sticky left-0 top-0 z-20 max-w-[16rem]">{rowCol!.label}</th>
+                  {pivot.colLabels.map((c) => (
+                    <th key={c} className="sticky top-0 z-10 whitespace-nowrap pl-6 text-right">
+                      {c}
+                    </th>
+                  ))}
+                  {pivot.colLabels.length > 1 && <th className="sticky top-0 z-10 pl-6 text-right">Total</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((r) => (
+                  <tr key={r}>
+                    <td className="bg-card sticky left-0 z-10 max-w-[16rem] truncate font-medium" title={r}>
+                      {r}
+                    </td>
+                    {pivot.colLabels.map((c) => (
+                      <td key={c} className="whitespace-nowrap pl-6 text-right tabular-nums">
+                        {formatSums(pivot.grid.get(r)?.get(c), valueCol!)}
+                      </td>
+                    ))}
+                    {pivot.colLabels.length > 1 && <td className="whitespace-nowrap pl-6 text-right font-semibold tabular-nums">{formatSums(pivot.rowTotals.get(r), valueCol!)}</td>}
+                  </tr>
                 ))}
-                {pivot.colLabels.length > 1 && <th className="sticky top-0 z-10 pl-6 text-right">Total</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {shown.map((r) => (
-                <tr key={r}>
-                  <td className="bg-card sticky left-0 z-10 max-w-[16rem] truncate font-medium" title={r}>
-                    {r}
-                  </td>
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td className="bg-card sticky left-0">Total</td>
                   {pivot.colLabels.map((c) => (
                     <td key={c} className="whitespace-nowrap pl-6 text-right tabular-nums">
-                      {formatSums(pivot.grid.get(r)?.get(c), valueCol!)}
+                      {formatSums(pivot.colTotals.get(c), valueCol!)}
                     </td>
                   ))}
-                  {pivot.colLabels.length > 1 && <td className="whitespace-nowrap pl-6 text-right font-semibold tabular-nums">{formatSums(pivot.rowTotals.get(r), valueCol!)}</td>}
+                  {pivot.colLabels.length > 1 && <td className="whitespace-nowrap pl-6 text-right tabular-nums">{formatSums(pivot.grand, valueCol!)}</td>}
                 </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr>
-                <td className="bg-card sticky left-0">Total</td>
-                {pivot.colLabels.map((c) => (
-                  <td key={c} className="whitespace-nowrap pl-6 text-right tabular-nums">
-                    {formatSums(pivot.colTotals.get(c), valueCol!)}
-                  </td>
-                ))}
-                {pivot.colLabels.length > 1 && <td className="whitespace-nowrap pl-6 text-right tabular-nums">{formatSums(pivot.grand, valueCol!)}</td>}
-              </tr>
-            </tfoot>
-          </table>
-        </div>
+              </tfoot>
+            </table>
+          </div>
+        )
       ) : (
-        // One figure per group: name and figure side by side, a bar for its share.
-        <div className="px-4 py-2">
-          {/* Down the first column, then the second, so the biggest read top to bottom. */}
-          <ul className="gap-x-10 md:columns-2">
-            {shown.map((r) => {
-              const share = pivot.shareOf(r)
-              return (
-                <li key={r} className="border-border/40 break-inside-avoid border-b py-2">
-                  <div className="flex items-baseline justify-between gap-3">
-                    <span className="text-foreground min-w-0 truncate text-sm" title={r}>
-                      {r}
-                    </span>
-                    <span className="text-foreground whitespace-nowrap text-sm font-semibold tabular-nums">{formatSums(pivot.rowTotals.get(r), valueCol!)}</span>
-                  </div>
-                  {share != null && (
-                    <div className="mt-1 flex items-center gap-2" aria-hidden>
-                      <div className="bg-secondary h-1.5 flex-1 overflow-hidden rounded-full">
-                        <div className="bg-primary h-full rounded-full" style={{ width: `${Math.max(1, Math.round(share * 100))}%` }} />
-                      </div>
-                      <span className="text-muted-foreground w-9 text-right text-[11px] tabular-nums">{pct(share)}</span>
+        // One figure per group: name and figure side by side, a bar for its share;
+        // the same totals as a picture beside them.
+        <div className="grid md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+          <div className="px-4 py-2">
+            <ul>
+              {shown.map((r, i) => {
+                const share = pivot.shareOf(r)
+                return (
+                  <li key={r} className="border-border/40 border-b py-2">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-foreground flex min-w-0 items-center gap-2 text-sm" title={r}>
+                        {share != null && <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: colourOf(i) }} aria-hidden />}
+                        <span className="truncate">{r}</span>
+                      </span>
+                      <span className="text-foreground whitespace-nowrap text-sm font-semibold tabular-nums">{formatSums(pivot.rowTotals.get(r), valueCol!)}</span>
                     </div>
-                  )}
-                </li>
-              )
-            })}
-          </ul>
-          {/* The total sits under the first column, at its width, so it reads like the rows above it. */}
-          <div className="flex items-baseline justify-between gap-3 py-2.5 md:w-[calc(50%-1.25rem)]">
-            <span className="text-foreground text-sm font-semibold">Total</span>
-            <span className="text-foreground text-right text-sm font-semibold tabular-nums">{formatSums(pivot.grand, valueCol!)}</span>
+                    {share != null && (
+                      <div className="mt-1 flex items-center gap-2" aria-hidden>
+                        <div className="bg-secondary h-1.5 flex-1 overflow-hidden rounded-full">
+                          <div className="h-full rounded-full" style={{ width: `${Math.max(1, Math.round(share * 100))}%`, background: colourOf(i) }} />
+                        </div>
+                        <span className="text-muted-foreground w-9 text-right text-[11px] tabular-nums">{pct(share)}</span>
+                      </div>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+            <div className="flex items-baseline justify-between gap-3 py-2.5">
+              <span className="text-foreground text-sm font-semibold">Total</span>
+              <span className="text-foreground text-right text-sm font-semibold tabular-nums">{formatSums(pivot.grand, valueCol!)}</span>
+            </div>
+          </div>
+          <div className="border-border/60 border-t px-4 py-4 md:border-l md:border-t-0">
+            <Picture pivot={pivot} valueCol={valueCol!} noun={rowCol!.label} />
           </div>
         </div>
       )}
@@ -301,6 +365,103 @@ export function PivotTable({
           These figures are in different units, so each unit is added up on its own.
         </p>
       )}
+    </div>
+  )
+}
+
+type Pivot = {
+  rowLabels: string[]
+  rowTotals: Map<string, Sums>
+  grand: Sums
+  mixed: boolean
+  shareOf: (label: string) => number | null
+}
+
+/** "Supplier" becomes "supplier", but "HSN code" keeps its capitals. */
+const lower = (s: string) => s.replace(/^([A-Z])(?![A-Z])/, (c) => c.toLowerCase())
+/** "4 customers", "2 categories", "1 supplier". */
+const countOf = (n: number, word: string) =>
+  `${n} ${n === 1 ? word : /[^aeiou]y$/.test(word) ? `${word.slice(0, -1)}ies` : /(s|x|ch|sh)$/.test(word) ? `${word}es` : `${word}s`}`
+
+/**
+ * The totals as a picture, for the other half of the panel: what a glance
+ * should take away. A ring of the biggest groups' shares with the total in
+ * the middle; one sentence when one group holds it all; each unit's total
+ * when the units differ and shares would mean nothing.
+ */
+function Picture({ pivot, valueCol, noun }: { pivot: Pivot; valueCol: PivotColumn; noun: string }) {
+  const n = pivot.rowLabels.length
+  const what = lower(noun)
+  if (pivot.mixed) {
+    return (
+      <div className="flex h-full flex-col justify-center gap-3">
+        <p className="text-muted-foreground text-xs">
+          Added up unit by unit, across {countOf(n, what)}
+        </p>
+        <div className="flex flex-wrap gap-x-8 gap-y-3">
+          {[...pivot.grand]
+            .filter(([, v]) => Math.abs(v) > 0.0005)
+            .map(([unit, v]) => (
+              <div key={unit || '-'}>
+                <p className="text-foreground text-2xl font-semibold tabular-nums">{v.toLocaleString('en-IN', { maximumFractionDigits: 3 })}</p>
+                <p className="text-muted-foreground text-xs">{unit || 'without a unit'}</p>
+              </div>
+            ))}
+        </div>
+      </div>
+    )
+  }
+  if (n === 1) {
+    return (
+      <div className="flex h-full flex-col justify-center gap-1">
+        <p className="text-muted-foreground text-xs">One {what} this time</p>
+        <p className="text-foreground text-2xl font-semibold tabular-nums">{formatSums(pivot.grand, valueCol)}</p>
+        <p className="text-foreground text-sm">
+          All of it is <span className="font-semibold">{pivot.rowLabels[0]}</span>. Pick another Group by to see how it splits.
+        </p>
+      </div>
+    )
+  }
+  const shares = pivot.rowLabels.map((r) => ({ label: r, share: pivot.shareOf(r), value: [...(pivot.rowTotals.get(r) ?? new Map<string, number>()).values()][0] ?? 0 }))
+  const drawable = shares.every((x) => x.share != null)
+  const rest = shares.slice(RING)
+  const ring = [...shares.slice(0, RING), ...(rest.length ? [{ label: `${rest.length} more`, share: 0, value: rest.reduce((t, x) => t + x.value, 0) }] : [])]
+  const topThree = shares.slice(0, 3).reduce((t, x) => t + (x.share ?? 0), 0)
+  const facts = [
+    { label: countOf(n, what), value: formatSums(pivot.grand, valueCol), sub: 'in all' },
+    { label: 'Biggest', value: shares[0].label, sub: shares[0].share != null ? `${pct(shares[0].share)} of the total` : formatSums(pivot.rowTotals.get(shares[0].label), valueCol) },
+    ...(n > 3 && drawable ? [{ label: 'Top three together', value: pct(topThree), sub: n - 3 === 1 ? `the one other makes up ${pct(1 - topThree)}` : `the other ${n - 3} make up ${pct(1 - topThree)}` }] : []),
+  ]
+  return (
+    <div className="flex h-full flex-col items-center gap-5 sm:flex-row">
+      {drawable && (
+        <div className="relative h-44 w-44 shrink-0">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie data={ring} dataKey="value" nameKey="label" innerRadius="68%" outerRadius="98%" paddingAngle={2} stroke="none" isAnimationActive={false}>
+                {ring.map((d, i) => (
+                  <Cell key={d.label} fill={colourOf(i)} />
+                ))}
+              </Pie>
+            </PieChart>
+          </ResponsiveContainer>
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-5 text-center">
+            <span className="text-foreground text-sm font-semibold tabular-nums">{formatSums(pivot.grand, valueCol)}</span>
+            <span className="text-muted-foreground text-[11px]">total</span>
+          </div>
+        </div>
+      )}
+      <dl className="w-full min-w-0 flex-1 space-y-3">
+        {facts.map((x) => (
+          <div key={x.label} className="min-w-0">
+            <dt className="text-muted-foreground text-[11px] uppercase tracking-wide">{x.label}</dt>
+            <dd className="text-foreground truncate text-sm font-semibold" title={x.value}>
+              {x.value}
+            </dd>
+            <dd className="text-muted-foreground text-xs">{x.sub}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   )
 }

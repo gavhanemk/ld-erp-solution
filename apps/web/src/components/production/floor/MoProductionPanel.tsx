@@ -234,9 +234,7 @@ export function MoProductionPanel({
                             } hover:bg-secondary`}
                             title={`Open the ${s.name} sheet`}
                           >
-                            <span className="text-foreground font-medium">
-                              {s.sequence}. {s.name}
-                            </span>
+                            <span className="text-foreground font-medium">{s.name}</span>
                             <span className="text-muted-foreground block tabular-nums">
                               {s.kind === 'CUTTING' ? `cut ${pcs(f.completed)}` : `in ${pcs(f.received)} · out ${pcs(s.kind === 'PACKING' ? f.packed + f.sentOn : f.sentOn)}`}
                               {here ? ` · ${pcs(here)} here` : ''}
@@ -253,7 +251,7 @@ export function MoProductionPanel({
         </ol>
         {staged && (
           <p className="text-muted-foreground mt-3 flex items-center gap-1.5 text-xs">
-            <ClipboardList size={13} /> The same sheets are on Production → Cutting Sheets, Stitching Sheets, Other Process Sheets and Quality Control; the handovers on Process Transfers.
+            <ClipboardList size={13} /> The same sheets are on Production → Production Stages, one tab per process; the handovers on Process Transfers.
           </p>
         )}
         {mo.heldAt && (

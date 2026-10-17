@@ -7,6 +7,7 @@ import { ROW_CAP, type ReportParams, type ReportResult } from '../reports/types'
 import { periodLabel } from '../reports/definitions/shared'
 import { buildCsv, buildWorkbook } from '../reports/workbook'
 import { describeFilters, type AppliedFilter } from '../reports/filters'
+import { countsInWords } from '../reports/wording'
 
 const router = Router()
 
@@ -59,13 +60,16 @@ async function runReport(
 
   // The filter names are resolved inside the same transaction as the rows, so
   // the caption cannot describe a supplier who was renamed halfway through.
-  return prisma.$transaction(
+  const out = await prisma.$transaction(
     async (tx) => ({
       result: await def.run({ prisma, tx, params, rowCap: ROW_CAP }),
       applied: await describeFilters(def, params, tx),
     }),
     { timeout: 120_000, maxWait: 15_000 }
   )
+  // "across 1 bills" reads as "across 1 bill", on screen and in the workbook alike.
+  out.result.analysis = countsInWords(out.result.analysis)
+  return out
 }
 
 function guard(id: string, req: AuthRequest) {

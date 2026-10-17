@@ -36,6 +36,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { ApiError, can, masterResource, type Paginated, type Single } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
@@ -238,6 +239,8 @@ export interface FormField {
     resource: string
     valueKey: string
     label: (row: Record<string, unknown>) => string
+    /** Said under the box when what is typed is not in the list: what follows from that, and where to add it. */
+    notListed?: (typed: string) => string
   }
   /** Forces capitals as you type — GSTIN, PAN, IFSC and codes are never lower case. */
   uppercase?: boolean
@@ -453,29 +456,22 @@ export function MasterFormDialog<T extends { id: string }>({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, fields, watchedKey])
 
-  // Escape closes, and the page behind must not scroll while the dialog is up.
+  // Escape closes this form only — opened over another dialog, the one
+  // underneath stays open.
+  useEscape(() => {
+    // Escape in an open dropdown list closes that list, not the form.
+    if ((document.activeElement as HTMLElement | null)?.closest?.('[data-radix-popper-content-wrapper]')) return
+    onClose()
+  }, open)
+  // The page behind must not scroll while the dialog is up.
   useEffect(() => {
     if (!open) return
-    // Opened over another dialog, Escape is caught first and kept here, so it
-    // closes this form and leaves the one underneath open.
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
-      // Escape in an open dropdown list closes that list, not the form.
-      if ((e.target as HTMLElement | null)?.closest?.('[data-radix-popper-content-wrapper]')) return
-      if (stacked) {
-        e.stopPropagation()
-        e.stopImmediatePropagation()
-      }
-      onClose()
-    }
-    document.addEventListener('keydown', onKey, stacked)
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      document.removeEventListener('keydown', onKey, stacked)
       document.body.style.overflow = previousOverflow
     }
-  }, [open, onClose, stacked])
+  }, [open])
 
   if (!open) return null
 
@@ -925,6 +921,12 @@ function Field({
   }`
   // Out of its limits is said as it is typed, not only on Save.
   const problem = error || rangeProblem(field, value)
+  // Typed, the list has loaded, and it is not on it: say what that means.
+  const typed = String(value ?? '').trim()
+  const notListed =
+    field.suggestFrom?.notListed && typed && options && !options.some((o) => o.value.toLowerCase() === typed.toLowerCase())
+      ? field.suggestFrom.notListed(typed)
+      : null
   const invalid = Boolean(problem)
   const noMinus = type === 'number' && !field.allowNegative && (field.min ?? 0) >= 0
   const inputClass = `form-input placeholder:text-muted-foreground/60 ${invalid ? 'border-red-500/60' : ''}`
@@ -1078,6 +1080,8 @@ function Field({
 
       {problem ? (
         <p className="form-help !text-red-400">{problem}</p>
+      ) : notListed ? (
+        <p className="form-help warn-text">{notListed}</p>
       ) : (field.liveHelp?.(value) ?? field.help) ? (
         <p className="form-help">{field.liveHelp?.(value) ?? field.help}</p>
       ) : null}

@@ -29,6 +29,7 @@ import {
 import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { cn, formatDate, formatRupees } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { useEscape } from '@/lib/useEscape'
 
 export interface BomLineSize {
   id?: string
@@ -433,17 +434,16 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
     }
   }, [open, step, styleId, frozen])
 
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose, open)
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
-    document.addEventListener('keydown', onKey)
     const prev = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      document.removeEventListener('keydown', onKey)
       document.body.style.overflow = prev
     }
-  }, [open, onClose])
+  }, [open])
 
   /**
    * The item list is one page of active items, which is not enough on its own:

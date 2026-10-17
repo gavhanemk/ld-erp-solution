@@ -6,6 +6,7 @@ import { AlertCircle, ClipboardCheck, Loader2, Plus, ScanLine, Search, X } from 
 import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { Pagination } from '@/components/tables/Pagination'
+import { useEscape } from '@/lib/useEscape'
 import { ADJ_STATUS, COUNT_STATUS, type CountRow, type CountStatus, when } from './countTypes'
 
 const FILTERS: Array<{ key: '' | CountStatus; label: string }> = [
@@ -204,11 +205,10 @@ function StartCount({ onClose, onStarted }: { onClose: () => void; onStarted: (i
       .then((r) => setStores(r.data))
       .catch(() => setStores([]))
   }, [])
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onClose()
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [busy, onClose])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!busy) onClose()
+  })
 
   const start = async () => {
     if (!warehouseId) return setError('Pick the store being counted.')

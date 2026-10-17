@@ -12,6 +12,22 @@ export class AppError extends Error {
   }
 }
 
+/**
+ * A unique rule broken, in words. Prisma names the columns
+ * ("supplierId,supplierDocNo already exists"), which tells nobody at a desk
+ * what to change. The column typed in is named; the ones it is unique within
+ * (the ...Id columns) say where: "That supplier doc no is already used for
+ * this supplier."
+ */
+export function duplicateMessage(target: unknown): string {
+  const fields = (Array.isArray(target) ? target : String(target ?? '').split(',')).map((f) => String(f).trim()).filter(Boolean)
+  const words = (f: string) => f.replace(/Id$/, '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase()
+  const typed = fields.filter((f) => !/Id$/.test(f)).map(words)
+  const within = fields.filter((f) => /Id$/.test(f)).map(words)
+  if (!typed.length) return 'That is already saved once. Check whether it was entered before, then change it and save again.'
+  return `That ${typed.join(' and ')} is already used${within.length ? ` for this ${within.join(' and ')}` : ''}. Change it and save again.`
+}
+
 export const errorHandler = (
   err: Error | AppError,
   req: Request,
@@ -64,7 +80,7 @@ export const errorHandler = (
     if (prismaErr.code === 'P2002') {
       return res.status(409).json({
         success: false,
-        message: `${prismaErr.meta?.target} already exists`,
+        message: duplicateMessage(prismaErr.meta?.target),
         code: 'DUPLICATE_ENTRY',
       })
     }

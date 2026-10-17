@@ -20,6 +20,7 @@ import {
   Tag,
 } from 'lucide-react'
 import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 // The same panel the order and receipt forms are built from, so all three
 // read as one module rather than three people's ideas of a form.
 import { Section } from '@/components/purchase/PurchaseOrderDialog'
@@ -872,19 +873,16 @@ export function PurchaseBillDialog({
     if (filterGrn && !grns.some((g) => g.id === filterGrn)) setFilterGrn('')
   }, [grns, filterPo, filterChallan, filterBill, filterGrn])
 
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose, open)
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      document.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [open, onClose])
+  }, [open])
 
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
   const chargeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])

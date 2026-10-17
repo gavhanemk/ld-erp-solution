@@ -233,7 +233,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
       ) : result ? (
         <>
           <p className="text-muted-foreground text-xs">
-            {result.periodLabel} · {result.rowCount.toLocaleString('en-IN')} rows
+            {result.periodLabel} · {result.rowCount.toLocaleString('en-IN')} {result.rowCount === 1 ? 'row' : 'rows'}
             {result.truncated && (
               <span className="text-amber-400">
                 {' '}

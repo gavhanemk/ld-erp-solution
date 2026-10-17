@@ -20,6 +20,7 @@ import {
 import { api, ApiError, masterResource } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatDate, formatRupees } from '@/lib/utils'
+import { useEscape } from '@/lib/useEscape'
 import { Section } from '@/components/purchase/Section'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -155,19 +156,18 @@ export function RecordReceiptDialog({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!saving) onClose()
+  }, open)
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !saving) onClose()
-    }
-    window.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      window.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [open, onClose, saving])
+  }, [open])
 
   // Opening: a clean form, the customers and the accounts.
   useEffect(() => {

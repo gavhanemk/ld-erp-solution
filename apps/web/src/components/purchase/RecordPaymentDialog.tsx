@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
@@ -119,6 +120,9 @@ export function RecordPaymentDialog({
       if (a.status === 'fulfilled') setAccounts(a.value.data)
     })()
   }, [])
+
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose)
 
   const isCheque = mode === 'CHEQUE' || mode === 'PDC'
   const isCash = mode === 'CASH'
@@ -272,9 +276,6 @@ export function RecordPaymentDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="pay-dialog-title"
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') onClose()
-        }}
       >
         {/* The same chrome the order, receipt and bill forms wear. */}
         <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">

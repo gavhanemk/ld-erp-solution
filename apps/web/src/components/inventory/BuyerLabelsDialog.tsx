@@ -6,6 +6,7 @@ import { Barcode, Loader2, Printer, Save, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { useEscape } from '@/lib/useEscape'
 import {
   PATTERN_PARTS,
   buyerBarcode,
@@ -46,11 +47,10 @@ export function BuyerLabelsDialog({ moId, onClose, onSaved }: { moId: string; on
       .then((r) => take(r.data))
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not open the buyer stickers.'))
   }, [moId])
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onClose()
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [busy, onClose])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!busy) onClose()
+  })
 
   const mfd = useMemo(() => (data ? new Date(data.mfd) : new Date()), [data])
   const setP = (patch: Partial<LabelProfile>) => setProfile((p) => (p ? { ...p, ...patch } : p))

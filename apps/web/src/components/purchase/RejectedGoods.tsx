@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import { AlertCircle, CheckCircle2, Loader2, PackageX, Search, Truck, Undo2, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReturnChallanDialog } from './ReturnChallanDialog'
 
@@ -313,11 +314,10 @@ function UseAfterAll({ row, onClose, onDone }: { row: RejectedRow; onClose: () =
   const n = Number(amount) || 0
   const problem = !(n > 0) ? 'Say how much is used after all.' : n > held + 1e-9 ? `Only ${qty(held)} ${row.item.unit} is held.` : reason.trim().length < 5 ? 'Say why it can be used after all.' : null
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onClose()
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [busy, onClose])
+  // Escape closes this window only — not the ones behind it.
+  useEscape(() => {
+    if (!busy) onClose()
+  })
 
   const save = async () => {
     if (problem) return

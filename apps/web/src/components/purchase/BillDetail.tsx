@@ -21,6 +21,7 @@ import { Section } from './PurchaseOrderDialog'
 import type { BillAttachment, PurchaseBill } from './PurchaseBillDialog'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { useEscape } from '@/lib/useEscape'
 import { DOC_WORDS, NOTE_STATUS, REASON_WORDS, type NoteStatus } from './noteTypes'
 
 const inr = (v: string | number | null | undefined) =>
@@ -354,6 +355,8 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
   const adjusted = Number(bill.noteAdjustment ?? 0)
 
   const files = billFiles(bill)
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose)
 
   return createPortal(
     // The same shell the order, receipt and bill forms use: offset past the
@@ -370,9 +373,6 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
         aria-modal="true"
         aria-labelledby="bill-detail-title"
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') onClose()
-        }}
       >
         <div className="border-border flex shrink-0 items-start justify-between gap-4 border-b px-4 py-2.5">
           <div className="flex min-w-0 items-start gap-2.5">
@@ -828,6 +828,8 @@ export function BillFilesDialog({
   onClose: () => void
 }) {
   const files = billFiles(trail)
+  // Escape closes this window only — not the ones behind it.
+  useEscape(onClose)
 
   return createPortal(
     <div
@@ -840,9 +842,6 @@ export function BillFilesDialog({
         aria-modal="true"
         aria-labelledby="bill-files-title"
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') onClose()
-        }}
       >
         <div className="border-border flex shrink-0 items-start justify-between gap-4 border-b px-4 py-2.5">
           <div className="flex min-w-0 items-start gap-2.5">

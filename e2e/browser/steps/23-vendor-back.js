@@ -1,0 +1,20 @@
+// Stitching sheet (outside): the unit sends the stitched pieces back with its challan and its bill.
+const c = S.cfg
+await h.say(`Step 17 · Job work back — ${c.unit} returns all 60 stitched, with their challan and their bill for 60 × ₹45`)
+let d = h.dlg()
+await h.click('Back from them', d); await h.sleep(1200); d = h.dlg()
+await d.getByRole('button', { name: 'All accepted' }).click()
+await h.beat(1000)
+await h.type(d.getByLabel('Their challan no.'), c.unitChallan)
+await h.type(d.getByLabel('Counted by'), 'Suresh (stitching)')
+const charged = d.getByLabel('Pieces charged')
+if ((await charged.inputValue()) === '0') await h.type(charged, '60')
+await h.type(d.getByLabel('Their bill no.'), c.unitBill)
+await h.type(d.getByLabel('Bill date'), h.day())
+await h.beat(2000)
+const btn = d.getByRole('button', { name: /^Record/ }).first()
+const label = await btn.innerText()
+await btn.click()
+await h.sleep(2000)
+await h.beat(1500)
+return label
