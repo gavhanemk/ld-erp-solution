@@ -17,6 +17,7 @@ import { stockAgeing } from './definitions/stock-ageing'
 import { materialConsumption } from './definitions/material-consumption'
 import { requisitionFulfilment } from './definitions/requisition-fulfilment'
 import { jobWorkPending } from './definitions/job-work-pending'
+import { jobWorkOrders } from './definitions/job-work-orders'
 import { customerMaterialStock } from './definitions/customer-material-stock'
 import { stockCountVariance } from './definitions/stock-count-variance'
 
@@ -51,6 +52,7 @@ export const REPORTS: ReportDefinition[] = [
   materialConsumption,
   requisitionFulfilment,
   jobWorkPending,
+  jobWorkOrders,
   customerMaterialStock,
   stockCountVariance,
   ...SALES_REPORTS,
