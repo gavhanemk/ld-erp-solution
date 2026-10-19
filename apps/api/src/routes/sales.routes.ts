@@ -792,8 +792,9 @@ export async function prepareOrder(
       igst += tax
     }
   })
-  // Charges: each from the charge master, taxed at its own rate.
-  const charges = await priceSalesCharges(tx, data.charges, isIntraState)
+  // Charges: each from the charge master, taxed at the goods' rate.
+  const goods = data.lines.map((_l, i) => ({ taxable: lineTotals[i] * discountFactor, gstRate: gstRates[i] }))
+  const charges = await priceSalesCharges(tx, data.charges, isIntraState, goods)
   const chargeTotal = round2(charges.reduce((s, c) => s + c.amount, 0))
   cgst = round2(cgst + charges.reduce((s, c) => s + c.cgst, 0))
   sgst = round2(sgst + charges.reduce((s, c) => s + c.sgst, 0))

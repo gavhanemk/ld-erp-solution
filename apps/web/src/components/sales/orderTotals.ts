@@ -6,9 +6,10 @@
  *
  *   gross (pieces × rate) − line discounts = value; − the order's discount =
  *   taxable value of the goods, spread back across the lines for their GST;
- *   + charges, each taxed at its own rate; + GST; + other charges (no GST);
- *   rounded to the rupee.
+ *   + charges, each taxed at the goods' rate (chargeShare.ts); + GST; + other
+ *   charges (no GST); rounded to the rupee.
  */
+import { priceCharge, type GoodsAtRate } from './chargeShare'
 
 /** Job work is a service: SAC 9988, at 5% unless typed otherwise or set in the HSN master. */
 export const JOB_WORK_SAC = '9988'
@@ -46,8 +47,8 @@ export function orderTotals(a: {
   isJobWork: boolean
   hsnIndex: Map<string, { gstRate: string | number }>
   billDiscount: number
-  /** Only charges with a type and an amount are priced. */
-  charges: Array<{ amount: number; gstRate: number }>
+  /** Only charges with a type and an amount are priced; the master's rate is used only with no goods to follow. */
+  charges: Array<{ amount: number; fallbackRate: number }>
   /** Inside the state, across it, or not known yet (no customer). */
   intra: boolean | undefined
   otherCharges: number
@@ -75,6 +76,7 @@ export function orderTotals(a: {
   }
 
   let goodsTax = 0
+  const goods: GoodsAtRate[] = []
   const lines = priced.map((p) => {
     // Garments carry one rate up to a price per piece and another above it.
     let gst: number | null = null
@@ -89,22 +91,19 @@ export function orderTotals(a: {
     const tax = base * ((gst ?? 0) / 100)
     goodsTax += tax
     if (gst != null && base > 0) addRate(gst, base, tax)
+    if (gst != null) goods.push({ taxable: base, gstRate: gst })
     return { gst, gross: p.gross, amount: p.amount }
   })
 
-  // Each charge's tax split and rounded on its own, as each one is stored.
+  // Each charge at the goods' rate, its shares' tax split and rounded on its own, as stored.
   const charges = a.charges.map((c) => {
     const amount = round2(c.amount || 0)
-    const raw = (amount * c.gstRate) / 100
-    const cgst = a.intra ? round2(raw / 2) : 0
-    const sgst = a.intra ? round2(raw / 2) : 0
-    const igst = a.intra === false ? round2(raw) : 0
-    const tax = a.intra === undefined ? round2(raw) : cgst + sgst + igst
-    return { amount, rate: c.gstRate, cgst, sgst, igst, tax }
+    const priced = priceCharge(amount, goods, c.fallbackRate, a.intra)
+    return { amount, ...priced }
   })
   const priceable = charges.filter((c) => c.amount > 0)
   const chargeTotal = round2(priceable.reduce((s, c) => s + c.amount, 0))
-  for (const c of priceable) addRate(c.rate, c.amount, c.tax)
+  for (const c of priceable) for (const part of c.parts) addRate(part.gstRate, part.amount, part.tax)
 
   const cgst = a.intra ? round2(goodsTax / 2 + priceable.reduce((s, c) => s + c.cgst, 0)) : 0
   const sgst = a.intra ? round2(goodsTax / 2 + priceable.reduce((s, c) => s + c.sgst, 0)) : 0

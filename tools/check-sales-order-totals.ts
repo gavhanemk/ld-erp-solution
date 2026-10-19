@@ -4,7 +4,7 @@
 // the server saves what prepareOrder works out. They are meant to be the same
 // figures, worked the same way. This prices a handful of orders both ways and
 // compares every total — inside the state and across it, line and order
-// discounts, charges at their own rates and with a rate typed over, other
+// discounts, charges at the goods' rate (a rate typed over is ignored), other
 // charges, job work with the SAC looked up in the HSN master, a line taxed at
 // a typed rate, and an exempt one. Then it checks the rules the server adds:
 // sizes for a garment made in sizes, and no shipment date before the order.
@@ -105,7 +105,7 @@ async function main() {
       isJobWork: !!o.isJobWork,
       hsnIndex,
       billDiscount: o.discount ?? 0,
-      charges: (o.charges ?? []).map((c) => ({ amount: c.amount, gstRate: c.gstRate ?? typeRate(c.id) })),
+      charges: (o.charges ?? []).map((c) => ({ amount: c.amount, fallbackRate: typeRate(c.id) })),
       intra: o.pos === home,
       otherCharges: o.other ?? 0,
       brokerPct: 0,

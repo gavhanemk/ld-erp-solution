@@ -866,8 +866,7 @@ export function SalesOrderDialog({
     })
     const chargeRows = charges.map((c) => {
       const type = chargeTypeById.get(c.chargeTypeId)
-      const rate = c.gstRate !== '' ? Number(c.gstRate) || 0 : Number(type?.defaultGstRate ?? 0)
-      return { ...c, type, value: Number(c.amount) || 0, rate }
+      return { ...c, type, value: Number(c.amount) || 0 }
     })
     const priceable = chargeRows.filter((c) => c.type && c.value > 0)
     const t = orderTotals({
@@ -884,7 +883,8 @@ export function SalesOrderDialog({
       isJobWork,
       hsnIndex,
       billDiscount: Number(billDiscount) || 0,
-      charges: priceable.map((c) => ({ amount: c.value, gstRate: c.rate })),
+      // Charges take the goods' rate; the master's rate only with no goods to follow.
+      charges: priceable.map((c) => ({ amount: c.value, fallbackRate: Number(c.type?.defaultGstRate ?? 0) })),
       intra: context?.placeOfSupply?.isIntraState,
       otherCharges: Number(otherCharges) || 0,
       brokerPct: Number(brokerPct) || 0,
@@ -895,7 +895,7 @@ export function SalesOrderDialog({
       // Each charge row with the GST it carries, for the row's own line.
       chargeRows: chargeRows.map((c) => {
         const k = priceable.indexOf(c)
-        return { ...c, tax: k >= 0 ? t.charges[k].tax : 0 }
+        return { ...c, tax: k >= 0 ? t.charges[k].tax : 0, rateText: k >= 0 ? t.charges[k].rateText : '' }
       }),
       pieces: priced.reduce((s, p) => s + p.qty, 0),
     }
@@ -981,7 +981,7 @@ export function SalesOrderDialog({
       terms: terms.trim() || null,
       charges: totals.chargeRows
         .filter((c) => c.type && c.value > 0)
-        .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.value, gstRate: c.gstRate !== '' ? c.rate : null })),
+        .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.value })),
       otherCharges: totals.other,
       quotationId: fromQuote?.id ?? null,
       confirm,
@@ -2004,7 +2004,7 @@ export function SalesOrderDialog({
                                   .filter((ct) => !taken.has(ct.id))
                                   .map((ct) => (
                                     <option key={ct.id} value={ct.id}>
-                                      {ct.name} @ {Number(ct.defaultGstRate)}%
+                                      {ct.name}
                                     </option>
                                   ))}
                               </SmartSelect>
@@ -2016,16 +2016,6 @@ export function SalesOrderDialog({
                                 onValueChange={(v) => setCharge(c.key, { amount: v })}
                                 aria-label={`Charge ${i + 1} amount`}
                               />
-                              <StepInput
-                                decimals
-                                max={100}
-                                className="form-input h-8 w-14 shrink-0 text-right text-xs tabular-nums"
-                                placeholder={c.type ? String(Number(c.type.defaultGstRate)) : 'GST%'}
-                                value={c.gstRate}
-                                onValueChange={(v) => setCharge(c.key, { gstRate: v })}
-                                aria-label={`Charge ${i + 1} GST rate`}
-                                title="GST % on this charge"
-                              />
                               <button
                                 type="button"
                                 onClick={() => setCharges((cs) => cs.filter((x) => x.key !== c.key))}
@@ -2036,7 +2026,7 @@ export function SalesOrderDialog({
                               </button>
                               {c.type && c.value > 0 && (
                                 <span className="text-muted-foreground basis-full pr-7 text-right text-[11px] tabular-nums">
-                                  GST {c.rate}% on it: {inr(c.tax)}
+                                  GST at the goods&apos; rate, {c.rateText}: {inr(c.tax)}
                                 </span>
                               )}
                             </div>

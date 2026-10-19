@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import type { ReportDefinition, ReportFilter } from '../types'
 import { byMonth, dateRangeFilters, dayRange, mean, round2, searchFilter, topWithRest } from './shared'
+import { chargeShares } from '../../services/salesCharges'
 
 /**
  * The Sales reports. Each is one register a person would otherwise add up by
@@ -569,7 +570,7 @@ export const outwardHsnSummary: ReportDefinition = {
   id: 'sales-hsn-summary',
   module: 'sales',
   title: 'Outward Supplies by HSN (GSTR-1)',
-  description: 'Sales in the period by HSN code and GST rate — pieces, taxable value and tax — less credit notes, with the charges billed on invoices, as the HSN summary of GSTR-1 asks for it.',
+  description: 'Sales in the period by HSN code and GST rate — pieces, taxable value and tax — less credit notes, the charges billed with the goods included, as the HSN summary of GSTR-1 asks for it.',
   filters: [...dateRangeFilters],
   columns: [
     { key: 'hsnCode', label: 'HSN', type: 'text', width: 10 },
@@ -588,7 +589,7 @@ export const outwardHsnSummary: ReportDefinition = {
     const [lines, credits, charges] = await Promise.all([
       tx.salesInvoiceLine.findMany({
         where: { invoice: billed },
-        select: { hsnCode: true, gstRate: true, qty: true, taxableValue: true, cgst: true, sgst: true, igst: true },
+        select: { invoiceId: true, hsnCode: true, gstRate: true, qty: true, taxableValue: true, cgst: true, sgst: true, igst: true },
       }),
       tx.creditNoteLine.findMany({
         where: { note: { status: 'ISSUED', ...(range ? { noteDate: range } : {}) } },
@@ -596,11 +597,11 @@ export const outwardHsnSummary: ReportDefinition = {
       }),
       tx.salesInvoiceCharge.findMany({
         where: { invoice: billed, amount: { gt: 0 } },
-        select: { amount: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } },
+        select: { invoiceId: true, amount: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } },
       }),
     ])
     const m = new Map<string, { hsnCode: string; rate: number; qty: number; taxable: number; cgst: number; sgst: number; igst: number; credited: number }>()
-    const add = (l: (typeof lines)[number], sign: 1 | -1) => {
+    const add = (l: Omit<(typeof lines)[number], 'invoiceId'>, sign: 1 | -1) => {
       const key = `${l.hsnCode ?? '—'}|${Number(l.gstRate)}`
       const e = m.get(key) ?? { hsnCode: l.hsnCode ?? '—', rate: Number(l.gstRate) / 100, qty: 0, taxable: 0, cgst: 0, sgst: 0, igst: 0, credited: 0 }
       e.qty += sign * Number(l.qty)
@@ -613,17 +614,33 @@ export const outwardHsnSummary: ReportDefinition = {
     }
     lines.forEach((l) => add(l, 1))
     credits.forEach((l) => add(l, -1))
-    // Charges billed on invoices (transport, packing) carry GST too. They have
-    // no SAC code here, so they are listed by name, as the invoice prints them.
+    // Charges billed on invoices (transport, packing) are taxed at the goods'
+    // rate, so they count under those goods' HSN codes, invoice by invoice, as
+    // the invoice prints them. One billed at a rate of its own keeps its name.
+    const goodsOf = new Map<string, Array<{ hsnCode: string | null; gstRate: number; taxable: number; cgst: number; sgst: number; igst: number }>>()
+    for (const l of lines) {
+      const list = goodsOf.get(l.invoiceId) ?? []
+      list.push({ hsnCode: l.hsnCode, gstRate: Number(l.gstRate), taxable: Number(l.taxableValue), cgst: Number(l.cgst), sgst: Number(l.sgst), igst: Number(l.igst) })
+      goodsOf.set(l.invoiceId, list)
+    }
+    const chargesOf = new Map<string, Array<{ name: string; gstRate: number; amount: number; cgst: number; sgst: number; igst: number }>>()
     for (const c of charges) {
-      const name = `${c.chargeType.name} (charge)`
-      const key = `charge|${c.chargeType.name}|${Number(c.gstRate)}`
-      const e = m.get(key) ?? { hsnCode: name, rate: Number(c.gstRate) / 100, qty: 0, taxable: 0, cgst: 0, sgst: 0, igst: 0, credited: 0 }
-      e.taxable += Number(c.amount)
-      e.cgst += Number(c.cgst)
-      e.sgst += Number(c.sgst)
-      e.igst += Number(c.igst)
-      m.set(key, e)
+      const list = chargesOf.get(c.invoiceId) ?? []
+      list.push({ name: c.chargeType.name, gstRate: Number(c.gstRate), amount: Number(c.amount), cgst: Number(c.cgst), sgst: Number(c.sgst), igst: Number(c.igst) })
+      chargesOf.set(c.invoiceId, list)
+    }
+    let chargeRows = 0
+    for (const [invoiceId, list] of chargesOf) {
+      for (const sh of chargeShares(goodsOf.get(invoiceId) ?? [], list)) {
+        const key = sh.charge ? sh.key : `${sh.hsn}|${sh.rate}`
+        const e = m.get(key) ?? { hsnCode: sh.charge ? `${sh.hsn} (charge)` : sh.hsn, rate: sh.rate / 100, qty: 0, taxable: 0, cgst: 0, sgst: 0, igst: 0, credited: 0 }
+        if (sh.charge) chargeRows++
+        e.taxable += sh.taxable
+        e.cgst += sh.cgst
+        e.sgst += sh.sgst
+        e.igst += sh.igst
+        m.set(key, e)
+      }
     }
     const rows = [...m.values()].map((e) => ({ ...e, qty: round2(e.qty), taxable: round2(e.taxable), cgst: round2(e.cgst), sgst: round2(e.sgst), igst: round2(e.igst), credited: round2(e.credited) }))
     const taxable = round2(rows.reduce((s, r) => s + r.taxable, 0))
@@ -638,9 +655,10 @@ export const outwardHsnSummary: ReportDefinition = {
         ],
         panels: [{ title: 'Taxable by HSN', question: 'composition', format: 'money', points: rank(rows, (r) => r.hsnCode, (r) => r.taxable) }],
         insights: [],
-        caveats: charges.length
-          ? ['Charges billed on invoices (transport, packing) are listed by name, as the invoice prints them: put in the SAC code for each when filing.']
-          : [],
+        caveats: [
+          ...(charges.length ? ['Charges billed on invoices (transport, packing) are counted under the HSN of the goods they went with, at the goods’ rate.'] : []),
+          ...(chargeRows ? ['A charge billed at a rate of its own (before 19 Oct 2026) is listed by name: put in its SAC code when filing.'] : []),
+        ],
       },
     }
   },

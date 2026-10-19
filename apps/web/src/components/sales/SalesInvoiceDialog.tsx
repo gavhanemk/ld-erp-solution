@@ -24,6 +24,7 @@ import { api, ApiError } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
+import { priceCharge } from './chargeShare'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
@@ -298,12 +299,15 @@ export function SalesInvoiceDialog({
       const t = split((value * l.gstRate) / 100)
       return { ...l, gross: gross[i], value, tax: t.cgst + t.sgst + t.igst, ...t }
     })
+    // Each charge at the goods' rate, a share per rate the goods carry, as the server stores it.
+    const goods = lines.map((l) => ({ taxable: l.value, gstRate: l.gstRate }))
     const chargeRows = charges.map((c) => {
       const type = chargeTypeById.get(c.chargeTypeId)
       const amount = Number(c.amount) || 0
-      const rate = c.gstRate !== '' ? Number(c.gstRate) || 0 : Number(type?.defaultGstRate ?? 0)
-      const t = split((amount * rate) / 100)
-      return { ...c, type, value: amount, rate, ...t }
+      // Our own trims are goods of their own, at their own rate; any other charge takes the goods' rate.
+      const own = c.ownMaterial ? (c.gstRate !== '' ? Number(c.gstRate) || 0 : Number(type?.defaultGstRate ?? 0)) : null
+      const p = priceCharge(amount, own != null ? [] : goods, own ?? Number(type?.defaultGstRate ?? 0), !!intra)
+      return { ...c, type, value: amount, rateText: p.rateText, cgst: p.cgst, sgst: p.sgst, igst: p.igst }
     })
     const live = chargeRows.filter((c) => c.type && c.value > 0)
     const chargeTotal = round2(live.reduce((s, c) => s + c.value, 0))
@@ -375,7 +379,12 @@ export function SalesInvoiceDialog({
         eWayBillDate: eWayBillDate || null,
         charges: totals.chargeRows
           .filter((c) => c.type && c.value > 0)
-          .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.value, gstRate: c.gstRate !== '' ? c.rate : null, ownMaterial: !!c.ownMaterial })),
+          .map((c) => ({
+            chargeTypeId: c.chargeTypeId,
+            amount: c.value,
+            gstRate: c.ownMaterial && c.gstRate !== '' ? Number(c.gstRate) || 0 : null,
+            ownMaterial: !!c.ownMaterial,
+          })),
         otherCharges: totals.other,
         notes: notes.trim() || null,
         terms: terms.trim() || null,
@@ -639,7 +648,7 @@ export function SalesInvoiceDialog({
                                   .filter((ct) => !taken.has(ct.id))
                                   .map((ct) => (
                                     <option key={ct.id} value={ct.id}>
-                                      {ct.name} @ {Number(ct.defaultGstRate)}%
+                                      {ct.name}
                                     </option>
                                   ))}
                               </SmartSelect>
@@ -651,16 +660,25 @@ export function SalesInvoiceDialog({
                                 onValueChange={(v) => setCharge(c.key, { amount: v })}
                                 aria-label={`Charge ${i + 1} amount`}
                               />
-                              <StepInput
-                                decimals
-                                max={100}
-                                className="form-input h-8 w-14 shrink-0 text-right text-xs tabular-nums"
-                                placeholder={c.type ? String(Number(c.type.defaultGstRate)) : 'GST%'}
-                                value={c.gstRate}
-                                onValueChange={(v) => setCharge(c.key, { gstRate: v })}
-                                aria-label={`Charge ${i + 1} GST rate`}
-                                title="GST % on this charge"
-                              />
+                              {c.ownMaterial ? (
+                                <StepInput
+                                  decimals
+                                  max={100}
+                                  className="form-input h-8 w-14 shrink-0 text-right text-xs tabular-nums"
+                                  placeholder={c.type ? String(Number(c.type.defaultGstRate)) : 'GST%'}
+                                  value={c.gstRate}
+                                  onValueChange={(v) => setCharge(c.key, { gstRate: v })}
+                                  aria-label={`Charge ${i + 1} GST rate`}
+                                  title="GST % on our own trims"
+                                />
+                              ) : (
+                                <span
+                                  className="text-muted-foreground w-20 shrink-0 text-right text-[11px] tabular-nums"
+                                  title="A charge billed with the goods takes the goods' GST rate"
+                                >
+                                  {c.type && c.value > 0 ? `GST ${c.rateText}` : ''}
+                                </span>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => setCharges((cs) => cs.filter((x) => x.key !== c.key))}
