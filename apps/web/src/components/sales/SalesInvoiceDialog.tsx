@@ -82,6 +82,8 @@ interface Prepared {
   charges: Array<{ chargeTypeId: string; name: string; amount: number; gstRate: number }>
   otherCharges: number
   defaults: { invoiceDate: string; dueDate: string }
+  /** India dates: today, and the year's last invoice, which a new one may not be dated before. */
+  dateRange?: { today: string; yearStart: string; lastInvoice: { invoiceNumber: string; day: string } | null }
   /** A job-work order that bills our own trims separately: their cost, what is billed, what is left to bill. */
   ownMaterial?: { cost: number; billed: number; toBill: number; lines: Array<{ item: { name: string; uom: string | null }; qty: number; value: number }> } | null
 }
@@ -229,7 +231,7 @@ export function SalesInvoiceDialog({
         const d = p.data
         setPrep(d)
         setChargeTypes(ct.rows.filter((x) => x.isActive && x.applyOnSale).sort((a, b) => a.name.localeCompare(b.name)))
-        setInvoiceDate(day(d.defaults.invoiceDate))
+        setInvoiceDate(d.dateRange?.today ?? day(d.defaults.invoiceDate))
         setDueDate(day(d.defaults.dueDate))
         setBillingAddress(d.order.billingAddress || d.customer.billingAddress)
         setShippingAddress(d.challan.deliveryAddress || d.order.deliveryAddress || '')
@@ -284,8 +286,15 @@ export function SalesInvoiceDialog({
       prep.order.subtotal > 0 ? round2(Math.min(subtotal, (prep.order.discountAmount * subtotal) / prep.order.subtotal)) : 0
     const taxable = round2(subtotal - discount)
     const factor = subtotal > 0 ? taxable / subtotal : 1
+    // The rounding's leftover paisa goes on the biggest line, as the server does.
+    const values = gross.map((g) => round2(g * factor))
+    const drift = round2(taxable - values.reduce((s, v) => s + v, 0))
+    if (drift !== 0) {
+      const biggest = values.indexOf(Math.max(...values))
+      values[biggest] = round2(values[biggest] + drift)
+    }
     const lines = prep.lines.map((l, i) => {
-      const value = round2(gross[i] * factor)
+      const value = values[i]
       const t = split((value * l.gstRate) / 100)
       return { ...l, gross: gross[i], value, tax: t.cgst + t.sgst + t.igst, ...t }
     })
@@ -324,17 +333,29 @@ export function SalesInvoiceDialog({
   }, [prep, charges, chargeTypeById, otherCharges])
 
   const chargeNoType = totals?.chargeRows.find((c) => !c.type && c.value > 0)
+  // The server checks the same; an earlier year's date is left to it, as that year has its own series.
+  const range = prep?.dateRange
+  const todayIn = range?.today
+  const last = range?.lastInvoice
+  const beforeLast =
+    range && last && invoiceDate && invoiceDate >= range.yearStart && invoiceDate < last.day
+      ? `${last.invoiceNumber} is dated ${formatDate(last.day)}, and invoice numbers run in date order. Date this one ${formatDate(last.day)} or later.`
+      : null
   const blocker = !prep
     ? null
     : prep.placeOfSupplyProblem
       ? prep.placeOfSupplyProblem
       : !invoiceDate
         ? 'Give the invoice a date.'
-        : dueDate && dueDate < invoiceDate
-          ? 'The due date cannot be before the invoice date.'
-          : chargeNoType
-            ? 'Pick which charge the amount in the totals is for.'
-            : null
+        : todayIn && invoiceDate > todayIn
+          ? 'An invoice cannot be dated in the future.'
+          : beforeLast
+            ? beforeLast
+            : dueDate && dueDate < invoiceDate
+              ? 'The due date cannot be before the invoice date.'
+              : chargeNoType
+                ? 'Pick which charge the amount in the totals is for.'
+                : null
 
   const save = async () => {
     if (!prep || !totals || blocker) return
@@ -419,7 +440,7 @@ export function SalesInvoiceDialog({
                     <div className="form-input text-muted-foreground pl-9 font-mono">Given when saved</div>
                   </Field>
                   <Field label="Invoice date" htmlFor="inv-date">
-                    <input id="inv-date" type="date" className="form-input" value={invoiceDate} min={day(o.orderDate)} onChange={(e) => pickInvoiceDate(e.target.value)} />
+                    <input id="inv-date" type="date" className="form-input" value={invoiceDate} min={day(o.orderDate)} max={prep.dateRange?.today} onChange={(e) => pickInvoiceDate(e.target.value)} />
                   </Field>
                   <Field label={`Due date (${prep.customer.creditDays} days' credit)`} htmlFor="inv-due">
                     <input id="inv-due" type="date" className="form-input" value={dueDate} min={invoiceDate || undefined} onChange={(e) => setDueDate(e.target.value)} />

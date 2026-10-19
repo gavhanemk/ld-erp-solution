@@ -37,6 +37,44 @@ const MODULE = 'sales'
 const round2 = (n: number) => Math.round(n * 100) / 100
 const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
 
+const IST = 330 * 60_000
+/** A moment's calendar day in India, as YYYY-MM-DD: what the person billing calls "the date". */
+const istDay = (d: Date) => new Date(d.getTime() + IST).toISOString().slice(0, 10)
+const shortDay = (iso: string) =>
+  new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
+
+/** The first and the last-plus-one moments, in India, of the financial year a date falls in. */
+function yearAround(d: Date, startMonth: number) {
+  const ist = new Date(d.getTime() + IST)
+  const startYear = ist.getUTCMonth() + 1 >= startMonth ? ist.getUTCFullYear() : ist.getUTCFullYear() - 1
+  return {
+    gte: new Date(Date.UTC(startYear, startMonth - 1, 1) - IST),
+    lt: new Date(Date.UTC(startYear + 1, startMonth - 1, 1) - IST),
+  }
+}
+
+/**
+ * The latest invoice in the financial year of a date, cancelled ones aside.
+ * Invoice numbers run in date order through the year, so a new invoice is
+ * never dated before it (GST expects one consecutive series).
+ */
+async function lastInvoiceOfYear(db: Prisma.TransactionClient | typeof prisma, date: Date) {
+  const company = await db.company.findFirst({ select: { fyStartMonth: true } })
+  const year = yearAround(date, company?.fyStartMonth ?? 4)
+  const last = await db.salesInvoice.findFirst({
+    where: { status: { not: 'CANCELLED' }, invoiceDate: year },
+    orderBy: [{ invoiceDate: 'desc' }, { createdAt: 'desc' }],
+    select: { invoiceNumber: true, invoiceDate: true },
+  })
+  return { yearStart: istDay(year.gte), last: last && { invoiceNumber: last.invoiceNumber, day: istDay(last.invoiceDate) } }
+}
+
+/** For the form: today in India, the year's first day, and its last invoice. */
+async function dateRangeFor(today: Date) {
+  const { yearStart, last } = await lastInvoiceOfYear(prisma, today)
+  return { today: istDay(today), yearStart, lastInvoice: last }
+}
+
 /** Sales and Accounts both read invoices. */
 function mustSee(req: AuthRequest) {
   if (!userCan(req.user, MODULE, 'view') && !userCan(req.user, 'accounts', 'view')) {
@@ -201,9 +239,17 @@ async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: In
     orderSubtotal > 0 ? round2(Math.min(subtotal, (Number(order.discountAmount) * subtotal) / orderSubtotal)) : 0
   const taxableAmount = round2(subtotal - discountAmount)
   const factor = subtotal > 0 ? taxableAmount / subtotal : 1
+  // Each line's share, rounded. Whatever paisa the rounding leaves goes on the
+  // biggest line, so the lines add up to the invoice's taxable total exactly.
+  const values = bills.map((b) => round2(b.gross * factor))
+  const drift = round2(taxableAmount - values.reduce((s, v) => s + v, 0))
+  if (drift !== 0) {
+    const biggest = values.indexOf(Math.max(...values))
+    values[biggest] = round2(values[biggest] + drift)
+  }
 
   const lines = bills.map((b, i) => {
-    const taxableValue = round2(b.gross * factor)
+    const taxableValue = values[i]
     const tax = (taxableValue * b.gstRate) / 100
     const cgst = isIntraState ? round2(tax / 2) : 0
     const sgst = isIntraState ? round2(tax / 2) : 0
@@ -365,6 +411,8 @@ router.get('/prepare', requirePermission(MODULE, 'create'), async (req, res) => 
       charges: still.charges,
       otherCharges: still.otherCharges,
       defaults: { invoiceDate: today, dueDate: addDays(today, c.creditDays ?? 0) },
+      /** The dates the invoice may take, in India: from the year's last invoice (or the order) up to today. */
+      dateRange: await dateRangeFor(today),
     },
   })
 })
@@ -624,6 +672,18 @@ export async function createInvoice(tx: Prisma.TransactionClient, data: InvoiceI
   const invoiceDate = data.invoiceDate ?? new Date()
   if (invoiceDate < new Date(order.orderDate.toDateString())) {
     throw new AppError(`The invoice cannot be dated before the order, ${order.soNumber}`, 400, 'BEFORE_ORDER')
+  }
+  const onDay = istDay(invoiceDate)
+  if (onDay > istDay(new Date())) {
+    throw new AppError('An invoice cannot be dated in the future. Date it today or earlier.', 400, 'FUTURE_DATE')
+  }
+  const { last } = await lastInvoiceOfYear(tx, invoiceDate)
+  if (last && onDay < last.day) {
+    throw new AppError(
+      `${last.invoiceNumber} is dated ${shortDay(last.day)}, and invoice numbers have to run in date order. Date this one ${shortDay(last.day)} or later.`,
+      400,
+      'BEFORE_LAST_INVOICE',
+    )
   }
   const invoiceNumber = await nextDocumentNumber(tx, 'INV', invoiceDate)
   const created = await tx.salesInvoice.create({
