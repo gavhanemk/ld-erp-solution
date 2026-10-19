@@ -91,6 +91,18 @@ const sizeOf = (line, sizeId) => line?.sizes?.find((s) => s.sizeId === sizeId)
 const sizes = (map, codes) => Object.entries(codes).map(([code, qty]) => ({ sizeId: map[code], qty }))
 
 // The business's pricing, worked out independently of the API.
+// A charge billed with the goods takes the goods' rate, shared across their
+// rates by taxable value, the biggest share taking the rounding paisa.
+function chargeParts(amount, goods) {
+  const by = new Map()
+  for (const g of goods) if (g.taxable > 0) by.set(g.rate, (by.get(g.rate) ?? 0) + g.taxable)
+  const total = sum([...by.values()])
+  const parts = [...by.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([rate, t]) => ({ rate, amount: r2((amount * t) / total) }))
+  const drift = r2(amount - sum(parts, (x) => x.amount))
+  if (drift) parts[0].amount = r2(parts[0].amount + drift)
+  return parts.filter((x) => x.amount !== 0)
+}
+const taxParts = (parts, intra) => parts.map((x) => { const tax = (x.amount * x.rate) / 100; return { cgst: intra ? r2(tax / 2) : 0, sgst: intra ? r2(tax / 2) : 0, igst: intra ? 0 : r2(tax) } })
 function priceOrder({ lines, discountAmount = 0, charges = [], intra }) {
   const lt = lines.map((l) => l.qty * l.price * (1 - (l.disc ?? 0) / 100))
   const subtotal = r2(sum(lt))
@@ -100,7 +112,8 @@ function priceOrder({ lines, discountAmount = 0, charges = [], intra }) {
   const rates = lines.map((l) => rateFor(l.hsn, l.price * (1 - (l.disc ?? 0) / 100) * f))
   let cgst = 0, sgst = 0, igst = 0
   lines.forEach((_, i) => { const tax = (lt[i] * f * rates[i]) / 100; if (intra) { cgst += tax / 2; sgst += tax / 2 } else igst += tax })
-  const ch = charges.map((c) => { const tax = (c.amount * c.rate) / 100; return { amount: c.amount, cgst: intra ? r2(tax / 2) : 0, sgst: intra ? r2(tax / 2) : 0, igst: intra ? 0 : r2(tax) } })
+  const goods = lines.map((_, i) => ({ taxable: lt[i] * f, rate: rates[i] }))
+  const ch = charges.map((c) => { const t = taxParts(chargeParts(c.amount, goods), intra); return { amount: c.amount, cgst: r2(sum(t, (x) => x.cgst)), sgst: r2(sum(t, (x) => x.sgst)), igst: r2(sum(t, (x) => x.igst)) } })
   cgst = r2(cgst + sum(ch, (c) => c.cgst)); sgst = r2(sgst + sum(ch, (c) => c.sgst)); igst = r2(igst + sum(ch, (c) => c.igst))
   const raw = taxable + r2(sum(ch, (c) => c.amount)) + cgst + sgst + igst
   const total = Math.round(raw)
@@ -113,7 +126,8 @@ function priceInvoice({ lines, orderSubtotal, orderDiscount, charges = [], intra
   const taxable = r2(subtotal - discount)
   const f = subtotal > 0 ? taxable / subtotal : 1
   const ls = lines.map((l, i) => { const tv = r2(gross[i] * f); const tax = (tv * l.rate) / 100; return { key: l.key, tv, cgst: intra ? r2(tax / 2) : 0, sgst: intra ? r2(tax / 2) : 0, igst: intra ? 0 : r2(tax) } })
-  const ch = charges.map((c) => { const tax = (c.amount * c.rate) / 100; return { amount: c.amount, cgst: intra ? r2(tax / 2) : 0, sgst: intra ? r2(tax / 2) : 0, igst: intra ? 0 : r2(tax) } })
+  const goods = ls.map((l, i) => ({ taxable: l.tv, rate: lines[i].rate }))
+  const ch = charges.flatMap((c) => taxParts(chargeParts(c.amount, goods), intra).map((t, k, all) => ({ amount: k === 0 ? c.amount : 0, ...t })))
   const cgst = r2(sum(ls, (l) => l.cgst) + sum(ch, (c) => c.cgst)), sgst = r2(sum(ls, (l) => l.sgst) + sum(ch, (c) => c.sgst)), igst = r2(sum(ls, (l) => l.igst) + sum(ch, (c) => c.igst))
   const raw = taxable + r2(sum(ch, (c) => c.amount)) + cgst + sgst + igst
   const total = Math.round(raw)
@@ -160,9 +174,9 @@ check('Q7', 'HSN 6205 slab: ₹2,800 less 15% (₹2,380) is 5%, ₹2,501 is 18%,
 check('Q7', `Delhi buyer: all IGST (₹${qcWant.igst}), no CGST/SGST`, QC && near(QC.igst, qcWant.igst) && N(QC.cgst) === 0 && N(QC.sgst) === 0, JSON.stringify(QC && { c: QC.cgst, s: QC.sgst, i: QC.igst }))
 const qd = await call('POST', '/sales/quotations', { customerId: METRO.id, discountAmount: 2000, lines: [{ itemId: SHI.id, qty: 10, unitPrice: 2600 }] }, SALES)
 check('Q7', 'a bill discount that brings ₹2,600 down to ₹2,400 a piece takes it back to 5%', qd.status === 201 && N(qd.body?.data?.lines?.[0]?.gstRate) === 5, `${err(qd)} rate ${qd.body?.data?.lines?.[0]?.gstRate}`)
-// Probe: the chino's HSN, 6203, at the same ₹2,600 a piece.
+// The chino's HSN, 6203, carries the same slab (added 19 Oct 2026).
 const qe = await call('POST', '/sales/quotations', { customerId: METRO.id, lines: [{ itemId: TRO.id, qty: 10, unitPrice: 2600 }] }, SALES)
-if (qe.status === 201 && N(qe.body?.data?.lines?.[0]?.gstRate) === 5) note('Q7', `trousers (HSN ${TRO.hsn}) at ₹2,600 a piece are taxed 5%: the HSN master gives ${TRO.hsn} no ₹2,500 price limit, while ${SHI.hsn} has one (5% / 18% above ₹2,500). Master data to confirm, not code.`)
+check('Q7', `trousers (HSN ${TRO.hsn}) at ₹2,600 a piece are 18%, the same slab as shirts`, qe.status === 201 && N(qe.body?.data?.lines?.[0]?.gstRate) === 18, `${err(qe)} rate ${qe.body?.data?.lines?.[0]?.gstRate}`)
 for (const x of [QC, qd.body?.data, qe.body?.data]) if (x?.id) await call('POST', `/sales/quotations/${x.id}/lost`, { reason: 'Test quotation for the price slab' }, SALES)
 
 // ════════════════ O. The sales order from the won quotation ════════════════
@@ -184,7 +198,7 @@ const qbAfter = (await call('GET', `/sales/quotations/${QB?.id}`)).body?.data
 check('O2', 'the quotation is marked won and points at the order', qbAfter?.status === 'WON' && qbAfter?.orders?.some((o) => o.id === SO1?.id), JSON.stringify(qbAfter && { s: qbAfter.status, o: qbAfter.orders }))
 check('O2', "the quotation's rates and GST rates carry onto the order lines", QB_LINES.every((l) => { const ql = QB?.lines?.find((x) => x.itemId === l.itemId), ol = lineOf(SO1, l.itemId); return ol && near(ol.unitPrice, ql?.unitPrice) && near(ol.gstRate, ql?.gstRate) }), JSON.stringify(SO1?.lines?.map((l) => ({ p: l.unitPrice, g: l.gstRate }))))
 check('O2', 'same goods, same discount: the order taxable equals the quotation taxable', SO1 && near(SO1.taxableAmount, QB?.taxableAmount) && near(SO1.discountAmount, QB?.discountAmount), `${SO1?.taxableAmount} vs ${QB?.taxableAmount}`)
-check('O3', `order totals with ₹500 transport at ${TRANSPORT.rate}%: CGST ₹${so1Want.cgst}, SGST ₹${so1Want.sgst}, total ₹${so1Want.total} (round-off ${so1Want.roundOff})`, SO1 && near(SO1.cgst, so1Want.cgst) && near(SO1.sgst, so1Want.sgst) && N(SO1.igst) === 0 && near(SO1.totalAmount, so1Want.total) && near(SO1.roundOff, so1Want.roundOff) && SO1.placeOfSupplyCode === CO.state, JSON.stringify(SO1 && { c: SO1.cgst, s: SO1.sgst, i: SO1.igst, t: SO1.totalAmount, ro: SO1.roundOff, pos: SO1.placeOfSupplyCode }))
+check('O3', `order totals with ₹500 transport at the goods' rates (5% and 18%, by value): CGST ₹${so1Want.cgst}, SGST ₹${so1Want.sgst}, total ₹${so1Want.total} (round-off ${so1Want.roundOff})`, SO1 && near(SO1.cgst, so1Want.cgst) && near(SO1.sgst, so1Want.sgst) && N(SO1.igst) === 0 && near(SO1.totalAmount, so1Want.total) && near(SO1.roundOff, so1Want.roundOff) && SO1.placeOfSupplyCode === CO.state, JSON.stringify(SO1 && { c: SO1.cgst, s: SO1.sgst, i: SO1.igst, t: SO1.totalAmount, ro: SO1.roundOff, pos: SO1.placeOfSupplyCode }))
 const so1Edit = await call('PATCH', `/sales/orders/${SO1?.id}`, so1Body({ notes: `Pack 10 to a carton (run ${RUN})` }), SALES)
 check('O4', 'a draft is edited whole and stays a draft', so1Edit.status === 200 && so1Edit.body?.data?.status === 'DRAFT' && so1Edit.body?.data?.notes?.includes(RUN), err(so1Edit))
 const so1c = await call('POST', `/sales/orders/${SO1?.id}/confirm`, {}, SALES)
@@ -532,7 +546,17 @@ const CN2 = must(cn2r, 'the rate-difference credit note')
 const i1c = await invRow(INV1.id)
 check('C7', `${CN2.noteNumber}: ₹100 + 5% on the paid ${INV1.invoiceNumber} moves no stock; all ₹105 stays with the customer as credit`, near(CN2.totalAmount, 105) && N(CN2.onAccount) === 105 && i1c.status === 'PAID' && i1c.credited === 0 && Number((await q(`SELECT COUNT(*)::int n FROM stock_ledger WHERE "referenceId"=$1`, [CN2.id]))[0].n) === 0, JSON.stringify({ t: CN2.totalAmount, on: CN2.onAccount, inv: i1c }))
 check('C7', 'that credit shows on the customer\'s outstanding as held', near(await onAcc(ORIENT.id), heldA + 105) && near((await call('GET', `/sales/receipts/outstanding?q=${encodeURIComponent('Orient Overseas')}`, null, SALES)).body?.data?.find((r) => r.customer.id === ORIENT.id)?.onAccount, heldA + 105))
-note('C7', `there is no way to apply ${CN2.noteNumber}'s ₹105 credit to a later invoice: /receipts/:id/allocate takes only a receipt's advance, and nothing else in the API touches a credit note's onAccount except cancelling it.`)
+const i2pre = await invRow(INV2.id)
+const kApply = await call('POST', `/sales/credit-notes/${CN2.id}/apply`, { allocations: [{ invoiceId: INV2.id, amount: 50 }] }, KEEPER)
+check('C8', 'the store keeper cannot apply credit', kApply.status === 403, err(kApply))
+const tooMuch = await call('POST', `/sales/credit-notes/${CN2.id}/apply`, { allocations: [{ invoiceId: INV2.id, amount: 106 }] }, SALES)
+check('C8', `no more than the ₹105 ${CN2.noteNumber} holds can be applied`, tooMuch.status === 400 && tooMuch.body?.code === 'MORE_THAN_HELD', err(tooMuch))
+const metroInv = await call('POST', `/sales/credit-notes/${CN2.id}/apply`, { allocations: [{ invoiceId: INV3B.id, amount: 10 }] }, SALES)
+check('C8', "nor set against another customer's invoice", metroInv.status === 400 && metroInv.body?.code === 'WRONG_CUSTOMER', err(metroInv))
+const applied = await call('POST', `/sales/credit-notes/${CN2.id}/apply`, { allocations: [{ invoiceId: INV2.id, amount: 50 }] }, SALES)
+const i2ap = await invRow(INV2.id)
+check('C8', `₹50 of it set against ${INV2.invoiceNumber}: the invoice owes ₹50 less, the note holds ₹55`, applied.status === 200 && near(applied.body?.data?.onAccount, 55) && near(i2ap.credited, i2pre.credited + 50) && near(i2ap.balance, i2pre.balance - 50) && applied.body?.data?.allocations?.some((a) => a.invoice?.invoiceNumber === INV2.invoiceNumber), `${err(applied)} ${JSON.stringify(i2ap)}`)
+check('C8', 'the credit held on the outstanding goes down by the same ₹50', near(await onAcc(ORIENT.id), heldA + 55))
 const metroM = await stk(SHI, 'M'), fgsB = await bal(FGS.id, null)
 const cn3r = await call('POST', '/sales/credit-notes', { invoiceId: INV3B.id, type: 'RETURN', warehouseId: STORE.id, reason: 'Wrong shade in one piece each', lines: [{ invoiceLineId: il(INV3B, SHI.id).id, sizes: sizes(SS, { M: 1 }) }, { invoiceLineId: il(INV3B, FGS.id).id, qty: 1 }] }, SALES)
 const CN3 = must(cn3r, 'the Delhi return')
@@ -588,11 +612,11 @@ if (pDc && !near(pDc.value, r2(N(INV1.taxableAmount)))) note('R3', `${DC1.dcNumb
 const pInv = (await pr(`/sales/invoices/${INV1.id}/print`)).body?.data
 const hs = pInv?.hsnSummary ?? []
 check('R4', 'invoice print: GSTINs, place of supply, e-way bill no. and date, total and tax in words', pInv?.company?.gstin === CO.gstin && pInv?.invoice?.customer?.gstin === ORIENT.gstin && !!pInv?.placeOfSupplyState && pInv?.invoice?.eWayBillNumber === `EWB${RUN}01` && !!pInv?.invoice?.eWayBillDate && /rupees/i.test(pInv?.totalInWords ?? '') && /rupees/i.test(pInv?.taxInWords ?? '') && pInv?.taxMode === 'CGST_SGST', JSON.stringify(pInv && { w: pInv.totalInWords, tw: pInv.taxInWords }))
-check('R4', `invoice print: HSN-wise tax summary (${TRO.hsn} at 5%, ${SHI.hsn} at 18%, transport)`, hs.some((h) => h.hsn === TRO.hsn && h.rate === 5) && hs.some((h) => h.hsn === SHI.hsn && h.rate === 18) && hs.some((h) => /transport/i.test(h.hsn)), JSON.stringify(hs))
+const inv1Charges = r2(sum(INV1.charges ?? [], (c) => N(c.amount)))
+check('R4', `invoice print: HSN-wise tax summary (${TRO.hsn} at 5%, ${SHI.hsn} at 18%), the transport counted under its goods`, hs.some((h) => h.hsn === TRO.hsn && h.rate === 5) && hs.some((h) => h.hsn === SHI.hsn && h.rate === 18) && !hs.some((h) => /transport/i.test(h.hsn)) && near(sum(hs, (h) => h.taxable), r2(N(INV1.taxableAmount) + inv1Charges), 0.02) && near(sum(hs, (h) => h.cgst + h.sgst + h.igst), r2(N(INV1.cgst) + N(INV1.sgst) + N(INV1.igst)), 0.03), JSON.stringify(hs))
+check('R4', `the transport on ${INV1.invoiceNumber} is split by the goods' rates: one row at 5%, one at 18%`, (INV1.charges ?? []).filter((c) => c.chargeTypeId === TRANSPORT.id).map((c) => N(c.gstRate)).sort((a, b) => a - b).join() === '5,18', JSON.stringify(INV1.charges))
 check('R4', 'invoice print: the company\'s bank details for payment', !!pInv?.company?.bankAccount && !!pInv?.company?.bankIFSC && pInv?.company?.bankAccount === CO.bankAccount, JSON.stringify(pInv?.company && { a: pInv.company.bankAccount, i: pInv.company.bankIFSC, show: pInv.template?.showBankDetails }))
 if (pInv && pInv.template?.showBankDetails === false) note('R4', 'the INV template in Settings → Documents has bank details switched off, so the printed invoice will not show them.')
-const transportRow = hs.find((h) => /transport/i.test(h.hsn))
-if (transportRow) note('R4', `the transport charge prints in the HSN summary under its name ("${transportRow.hsn}") with no HSN/SAC code, taxed at its own ${transportRow.rate}%; the goods it carries are at 5% and 18%.`)
 const pCn = (await pr(`/sales/credit-notes/${CN2.id}/print`)).body?.data
 check('R5', 'credit note print: the invoice it reduces, HSN, total in words', pCn?.note?.invoice?.invoiceNumber === INV1.invoiceNumber && pCn?.note?.lines?.every((l) => l.hsnCode) && /rupees/i.test(pCn?.totalInWords ?? '') && pCn?.company?.gstin === CO.gstin, JSON.stringify(pCn && { i: pCn.note?.invoice?.invoiceNumber, w: pCn.totalInWords }))
 const pR = (await pr(`/sales/receipts/${R2.id}/print`)).body?.data
@@ -636,14 +660,15 @@ const [g] = await q(`SELECT
    (SELECT COALESCE(SUM(c.cgst+c.sgst+c.igst),0) FROM sales_invoice_charges c JOIN sales_invoices i ON i.id=c."invoiceId" WHERE i.status<>'CANCELLED' AND i."invoiceDate" BETWEEN $1 AND $2)::float8 charges,
    (SELECT COALESCE(SUM(l.cgst+l.sgst+l.igst),0) FROM credit_note_lines l JOIN credit_notes n ON n.id=l."noteId" WHERE n.status='ISSUED' AND n."noteDate" BETWEEN $1 AND $2)::float8 credits`, [from, to])
 const hsnTax = r2(sum(hsnRows, (r) => r.cgst + r.sgst + r.igst))
-const goodsTax = r2(sum(hsnRows.filter((r) => !String(r.hsnCode).endsWith('(charge)')), (r) => r.cgst + r.sgst + r.igst))
-check('R10', `HSN summary: ${SHI.hsn} at 18% present, goods tax = invoice lines less credit notes (₹${r2(g.lines - g.credits)})`, hsnRows.some((r) => r.hsnCode === SHI.hsn && near(r.rate, 0.18)) && near(goodsTax, r2(g.lines - g.credits), 0.05), `report goods ${goodsTax}, lines ${g.lines}, credits ${g.credits}`)
-check('R10', 'the transport charge has its own row, by name', hsnRows.some((r) => r.hsnCode === 'Transport Charges (charge)' && r.taxable > 0), JSON.stringify(hsnRows.map((r) => r.hsnCode)))
+check('R10', `HSN summary: ${SHI.hsn} at 18% and ${TRO.hsn} at 5% present`, hsnRows.some((r) => r.hsnCode === SHI.hsn && near(r.rate, 0.18)) && hsnRows.some((r) => r.hsnCode === TRO.hsn && near(r.rate, 0.05)), JSON.stringify(hsnRows.map((r) => [r.hsnCode, r.rate])))
 check('R10', `HSN summary covers all GST invoiced in the period, charges included (₹${r2(g.lines + g.charges - g.credits)})`, near(hsnTax, r2(g.lines + g.charges - g.credits), 0.05), `report ₹${hsnTax} leaves out ₹${r2(g.charges)} GST on invoice charges (transport, packing)`)
 
 // ════════════════ Tidy: what this run left owed is paid, the extra credit cancelled ════════════════
+const i2beforeTidy = await invRow(INV2.id)
 const cnTidy = await call('POST', `/sales/credit-notes/${CN2.id}/cancel`, { reason: 'Test credit note, tidied at the end of the run' }, SALES)
+const i2afterTidy = await invRow(INV2.id)
 check('T1', 'a rate-difference credit note is cancelled: the credit held goes back to nothing', cnTidy.status === 200 && N(cnTidy.body?.data?.onAccount) === 0, err(cnTidy))
+check('T1', `and the ₹50 it set against ${INV2.invoiceNumber} comes off it again`, near(i2afterTidy.credited, i2beforeTidy.credited - 50) && (i2beforeTidy.status === 'PAID' || near(i2afterTidy.balance, i2beforeTidy.balance + 50)), `${JSON.stringify(i2beforeTidy)} → ${JSON.stringify(i2afterTidy)}`)
 const settled = []
 for (const [cid, invs, adv] of [[ORIENT.id, [INV2, INV4], R3], [METRO.id, [INV3B], null]]) {
   const owe = []
@@ -656,16 +681,30 @@ for (const [cid, invs, adv] of [[ORIENT.id, [INV2, INV4], R3], [METRO.id, [INV3B
     owe[0].amount = r2(owe[0].amount - fromAdv)
   }
   const pay = owe.filter((o) => o.amount > 0)
-  // Delhi pays by a post-dated cheque, a fortnight ahead.
-  const pdc = cid === METRO.id
-  const settle = pay.length ? must(await call('POST', '/sales/receipts', { customerId: cid, amount: r2(sum(pay, (o) => o.amount)), allocations: pay, bankAccountId: BANK.id, ...(pdc ? { mode: 'PDC', chequeNo: '7' + `${RUN}`.slice(-5), chequeDate: day(15).toISOString() } : { mode: 'NEFT', referenceNo: `UTR${RUN}Z${cid.slice(-3)}` }) }, SALES), 'the settling receipt') : null
-  if (settle) settled.push(`${settle.receiptNumber}${pdc ? ' (PDC)' : ''}`)
+  // Delhi first hands over a post-dated cheque, a fortnight ahead: it is held.
+  if (cid === METRO.id && pay.length) {
+    const amount = r2(sum(pay, (o) => o.amount))
+    const pdcBody = { customerId: cid, mode: 'PDC', amount, bankAccountId: BANK.id, chequeNo: '7' + `${RUN}`.slice(-5), chequeDate: day(15).toISOString() }
+    const withInv = await call('POST', '/sales/receipts', { ...pdcBody, allocations: pay }, SALES)
+    check('T3', `a cheque dated ${ymd(day(15))} cannot settle invoices yet`, withInv.status === 400 && withInv.body?.code === 'CHEQUE_HELD', err(withInv))
+    const before = await Promise.all(invs.map((i) => invRow(i.id)))
+    const ctxBefore = (await call('GET', `/sales/customers/${cid}/context?value=0`, null, SALES)).body?.data?.credit
+    const pdcR = await call('POST', '/sales/receipts', pdcBody, SALES)
+    const PDC = must(pdcR, 'the post-dated cheque')
+    const after = await Promise.all(invs.map((i) => invRow(i.id)))
+    const ctxAfter = (await call('GET', `/sales/customers/${cid}/context?value=0`, null, SALES)).body?.data?.credit
+    check('T3', `${PDC.receiptNumber} is recorded and held: the invoices still owe the same`, /held until/i.test(pdcR.body?.message ?? '') && near(PDC.onAccount, amount) && after.every((s, k) => s.status === before[k].status && near(s.balance, before[k].balance)), `${pdcR.body?.message} ${JSON.stringify(after)}`)
+    check('T3', 'the credit check does not count it before its date', near(ctxAfter?.onAccount, ctxBefore?.onAccount), JSON.stringify({ b: ctxBefore?.onAccount, a: ctxAfter?.onAccount }))
+    const early = await call('POST', `/sales/receipts/${PDC.id}/allocate`, { allocations: pay }, SALES)
+    const earlyClear = await call('POST', `/sales/receipts/${PDC.id}/cleared`, {}, SALES)
+    check('T3', 'it cannot be applied, nor marked cleared, before its date', early.status === 409 && early.body?.code === 'CHEQUE_HELD' && earlyClear.status === 409 && earlyClear.body?.code === 'CHEQUE_HELD', `${err(early)} / ${err(earlyClear)}`)
+    must(await call('POST', `/sales/receipts/${PDC.id}/reverse`, { reason: 'Test cheque, taken back at the end of the run' }, SALES), 'take the test cheque back')
+    settled.push(`${PDC.receiptNumber} (post-dated, reversed)`)
+  }
+  const settle = pay.length ? must(await call('POST', '/sales/receipts', { customerId: cid, amount: r2(sum(pay, (o) => o.amount)), allocations: pay, bankAccountId: BANK.id, mode: 'NEFT', referenceNo: `UTR${RUN}Z${cid.slice(-3)}` }, SALES), 'the settling receipt') : null
+  if (settle) settled.push(settle.receiptNumber)
   const states = await Promise.all(invs.map((i) => invRow(i.id)))
   check('T2', `${invs.map((i) => i.invoiceNumber).join(', ')} paid in full at the end of the run`, states.every((s) => s.status === 'PAID' && s.balance === 0), JSON.stringify(states))
-  if (pdc && settle) {
-    if (states.every((s) => s.status === 'PAID')) note('T2', `${settle.receiptNumber}, a post-dated cheque for ${ymd(day(15))}, marked ${invs.map((i) => i.invoiceNumber).join(', ')} PAID the day it was recorded: the invoice leaves the outstanding and ageing, and stops counting against the credit limit, before the cheque can even be banked (receipt.routes.ts createReceipt settles PDCs at once).`)
-    await call('POST', `/sales/receipts/${settle.id}/cleared`, {}, SALES)
-  }
 }
 
 const nos = (...xs) => xs.filter(Boolean).join(', ')
