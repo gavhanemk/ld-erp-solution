@@ -7,6 +7,7 @@ import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
+import { heldUntil, longDay, notHeld } from '../lib/cheques'
 import {
   MAX_FILES_PER_DOCUMENT,
   MAX_FILE_BYTES,
@@ -27,10 +28,12 @@ import { planAllocations, syncInvoiceFromReceipts, writeAllocations } from '../s
  * account as an advance, and is applied later as invoices are raised.
  *
  * TDS the customer deducted settles an invoice exactly as cash does: they
- * paid it to the government for us. A cheque or a post-dated cheque settles
- * its invoices when it is recorded, and is marked cleared when the bank
- * credits it. A cheque that bounces, or a receipt put in by mistake, is
- * reversed with a reason — never deleted — and its invoices are owed again.
+ * paid it to the government for us. A cheque settles its invoices when it
+ * is recorded, and is marked cleared when the bank credits it. A cheque dated
+ * after today is held instead (lib/cheques.ts): it settles nothing and counts
+ * for nothing until its date, then is applied like an advance. A cheque that
+ * bounces, or a receipt put in by mistake, is reversed with a reason — never
+ * deleted — and its invoices are owed again.
  *
  * The receipt number is taken after every check, so a refused receipt uses
  * none. Sales and Accounts both work here: either module's rights will do.
@@ -177,7 +180,7 @@ router.get('/open-invoices', async (req: AuthRequest, res) => {
       },
       orderBy: [{ invoiceDate: 'asc' }, { createdAt: 'asc' }],
     }),
-    prisma.paymentReceipt.aggregate({ where: { customerId, status: 'POSTED' }, _sum: { onAccount: true } }),
+    prisma.paymentReceipt.aggregate({ where: { customerId, status: 'POSTED', ...notHeld() }, _sum: { onAccount: true } }),
   ])
   res.json({
     success: true,
@@ -222,7 +225,7 @@ router.get('/outstanding', async (req: AuthRequest, res) => {
     }),
     prisma.paymentReceipt.groupBy({
       by: ['customerId'],
-      where: { status: 'POSTED', onAccount: { gt: 0 }, ...(q ? { customer: { name: { contains: q, mode: 'insensitive' } } } : {}) },
+      where: { status: 'POSTED', onAccount: { gt: 0 }, ...notHeld(), ...(q ? { customer: { name: { contains: q, mode: 'insensitive' } } } : {}) },
       _sum: { onAccount: true },
     }),
     prisma.creditNote.groupBy({
@@ -318,7 +321,7 @@ router.get('/summary', async (req: AuthRequest, res) => {
       _sum: { amount: true },
       _count: true,
     }),
-    prisma.paymentReceipt.aggregate({ where: { status: 'POSTED', onAccount: { gt: 0 } }, _sum: { onAccount: true }, _count: true }),
+    prisma.paymentReceipt.aggregate({ where: { status: 'POSTED', onAccount: { gt: 0 }, ...notHeld() }, _sum: { onAccount: true }, _count: true }),
   ])
   res.json({
     success: true,
@@ -419,6 +422,15 @@ export async function createReceipt(tx: Prisma.TransactionClient, data: ReceiptI
   await checkAccount(tx, data.bankAccountId)
   const when = data.receiptDate ?? new Date()
   const amount = round2(data.amount)
+  // A cheque dated after today is held: it settles nothing until its date.
+  const held = heldUntil({ mode: data.mode, chequeDate: data.chequeDate ?? null })
+  if (held && (data.allocations ?? []).some((a) => a.amount > 0 || (a.tdsAmount ?? 0) > 0)) {
+    throw new AppError(
+      `The cheque is dated ${longDay(held)}, so it is kept in hand and settles no invoice until then. Save it without invoices, and apply it from ${longDay(held)}.`,
+      400,
+      'CHEQUE_HELD',
+    )
+  }
   // Every check before anything is written, so a refused receipt takes no number.
   const planned = await planAllocations(tx, customer.id, data.allocations ?? [])
   const cash = round2(planned.reduce((s, a) => s + a.amount, 0))
@@ -457,6 +469,14 @@ router.post('/', async (req: AuthRequest, res) => {
   await writeAuditLog(req, { module: 'sales', action: 'CREATE', entityType: 'PaymentReceipt', entityId: receipt.id, after: receipt })
   const settled = receipt.allocations.map((a) => a.invoice.invoiceNumber)
   const left = Number(receipt.onAccount)
+  const held = heldUntil(receipt)
+  if (held) {
+    return res.status(201).json({
+      success: true,
+      message: `${receipt.receiptNumber}: cheque for ₹${Number(receipt.amount).toLocaleString('en-IN')} from ${receipt.customer.name}, held until ${longDay(held)}. Apply it to the invoices from that date.`,
+      data: receipt,
+    })
+  }
   res.status(201).json({
     success: true,
     message: `${receipt.receiptNumber}: ₹${Number(receipt.amount).toLocaleString('en-IN')} from ${receipt.customer.name}${
@@ -472,9 +492,20 @@ export async function allocateReceipt(
   id: string,
   allocations: Array<{ invoiceId: string; amount: number; tdsAmount?: number }>,
 ) {
-  const receipt = await tx.paymentReceipt.findUnique({ where: { id }, select: { id: true, receiptNumber: true, customerId: true, status: true, onAccount: true, tdsAmount: true } })
+  const receipt = await tx.paymentReceipt.findUnique({
+    where: { id },
+    select: { id: true, receiptNumber: true, customerId: true, status: true, onAccount: true, tdsAmount: true, mode: true, chequeNo: true, chequeDate: true },
+  })
   if (!receipt) throw new AppError('Receipt not found', 404, 'NOT_FOUND')
   if (receipt.status !== 'POSTED') throw new AppError(`${receipt.receiptNumber} is reversed`, 409, 'REVERSED')
+  const held = heldUntil(receipt)
+  if (held) {
+    throw new AppError(
+      `Cheque ${receipt.chequeNo ?? ''} on ${receipt.receiptNumber} is dated ${longDay(held)}. It is held until then: apply it on or after that date.`,
+      409,
+      'CHEQUE_HELD',
+    )
+  }
   const wanted = round2(allocations.reduce((s, a) => s + a.amount, 0))
   if (wanted > Number(receipt.onAccount)) {
     throw new AppError(
@@ -515,6 +546,8 @@ router.post('/:id/cleared', async (req: AuthRequest, res) => {
   if (!IS_CHEQUE.has(before.mode)) throw new AppError(`${before.receiptNumber} is not a cheque`, 409, 'NOT_A_CHEQUE')
   if (before.status !== 'POSTED') throw new AppError(`${before.receiptNumber} is reversed`, 409, 'REVERSED')
   if (before.isChequeCleared) throw new AppError(`${before.receiptNumber} is already cleared`, 409, 'ALREADY_CLEARED')
+  const held = heldUntil(before)
+  if (held) throw new AppError(`Cheque ${before.chequeNo ?? ''} is dated ${longDay(held)}: the bank can credit it only from that date.`, 409, 'CHEQUE_HELD')
   const after = await prisma.paymentReceipt.update({
     where: { id: before.id },
     data: { isChequeCleared: true, clearedAt: clearedAt ?? new Date() },

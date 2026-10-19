@@ -26,7 +26,7 @@ import { useAppSettings } from '@/lib/appSettings'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
-import { PAYMENT_MODES, modeLabel, receiptStatus } from '@/components/sales/status'
+import { PAYMENT_MODES, chequeHeld, modeLabel, receiptStatus } from '@/components/sales/status'
 import { RecordReceiptDialog, type ReceiptToApply } from '@/components/sales/RecordReceiptDialog'
 
 type Bucket = 'notDue' | 'd30' | 'd60' | 'd90' | 'over90'
@@ -289,7 +289,9 @@ export default function PaymentsReceivedPage() {
     const items: RowAction[] = [
       { key: 'print', label: 'Print receipt', icon: <Printer size={15} />, href: `/print/payment-receipt/${r.id}`, newTab: true },
     ]
-    if (r.status === 'POSTED' && Number(r.onAccount) > 0 && mayRecord) {
+    // A cheque dated after today is held: applied, and cleared, only from its date.
+    const held = chequeHeld(r)
+    if (r.status === 'POSTED' && Number(r.onAccount) > 0 && mayRecord && !held) {
       items.push({
         key: 'apply',
         label: 'Apply advance',
@@ -303,7 +305,7 @@ export default function PaymentsReceivedPage() {
           }),
       })
     }
-    if (r.status === 'POSTED' && (r.mode === 'CHEQUE' || r.mode === 'PDC') && !r.isChequeCleared && mayClear) {
+    if (r.status === 'POSTED' && (r.mode === 'CHEQUE' || r.mode === 'PDC') && !r.isChequeCleared && mayClear && !held) {
       items.push({ key: 'cleared', label: 'Mark cheque cleared', icon: <CheckCircle2 size={15} />, onClick: () => void markCleared(r) })
     }
     if (r.status === 'POSTED' && mayReverse) {
@@ -770,7 +772,7 @@ export default function PaymentsReceivedPage() {
                     <div className="mt-2 flex items-center justify-between gap-2 text-xs">
                       <span className="text-muted-foreground min-w-0 truncate">
                         {settledText(r) || 'Not applied yet'}
-                        {Number(r.onAccount) > 0 && r.status === 'POSTED' ? ` · ₹${money(r.onAccount)} on account` : ''}
+                        {Number(r.onAccount) > 0 && r.status === 'POSTED' ? ` · ₹${money(r.onAccount)} ${chequeHeld(r) ? 'held' : 'on account'}` : ''}
                       </span>
                       <ActionMenu label={`Actions for ${r.receiptNumber}`} items={rowActions(r)} />
                     </div>
@@ -840,7 +842,15 @@ export default function PaymentsReceivedPage() {
                           )}
                         </td>
                         <td className="col-wide text-right text-xs tabular-nums">
-                          {Number(r.onAccount) > 0 && r.status === 'POSTED' ? <span className="warn-text">{money(r.onAccount)}</span> : <span className="text-muted-foreground">—</span>}
+                          {Number(r.onAccount) > 0 && r.status === 'POSTED' ? (
+                            chequeHeld(r) ? (
+                              <span className="text-muted-foreground" title="Held until the date on the cheque">{money(r.onAccount)} held</span>
+                            ) : (
+                              <span className="warn-text">{money(r.onAccount)}</span>
+                            )
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
                         </td>
                         <td>
                           <span className={s.cls} title={r.status === 'REVERSED' ? r.reversalReason ?? undefined : undefined}>

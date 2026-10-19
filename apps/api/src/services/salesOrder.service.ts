@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient, SalesOrderStatus } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
+import { notHeld } from '../lib/cheques'
 
 type Db = PrismaClient | Prisma.TransactionClient
 
@@ -59,7 +60,8 @@ export async function creditPosition(
         invoices: { where: { status: { not: 'CANCELLED' } }, select: { totalAmount: true } },
       },
     }),
-    db.paymentReceipt.aggregate({ where: { customerId, status: 'POSTED' }, _sum: { onAccount: true } }),
+    // A cheque dated after today is held: it offsets nothing until its date.
+    db.paymentReceipt.aggregate({ where: { customerId, status: 'POSTED', ...notHeld() }, _sum: { onAccount: true } }),
     db.creditNote.aggregate({ where: { customerId, status: 'ISSUED' }, _sum: { onAccount: true } }),
   ])
 

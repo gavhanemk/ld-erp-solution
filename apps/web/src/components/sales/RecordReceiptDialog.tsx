@@ -25,7 +25,7 @@ import { Section } from '@/components/purchase/Section'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
-import { PAYMENT_MODES } from './status'
+import { PAYMENT_MODES, todayInIndia } from './status'
 
 interface CustomerOption {
   id: string
@@ -277,7 +277,9 @@ export function RecordReceiptDialog({
 
   const isCheque = IS_CHEQUE.has(mode)
   const isCash = mode === 'CASH'
-  const overRow = rows.find((r) => r.over)
+  // A cheque dated after today is kept in hand: it settles nothing until its date.
+  const held = !apply && isCheque && !!chequeDate && chequeDate > todayInIndia()
+  const overRow = held ? undefined : rows.find((r) => r.over)
 
   const blocker = !customerId
     ? 'Pick the customer the money came from.'
@@ -291,7 +293,7 @@ export function RecordReceiptDialog({
             ? 'Put in the cheque number and the date on the cheque.'
             : overRow
               ? `${overRow.inv.invoiceNumber}: more than the ₹${inr(overRow.owed)} still owed on it.`
-              : left < -0.005
+              : !held && left < -0.005
                 ? `₹${inr(cashApplied)} is applied, more than the ₹${inr(available)} ${apply ? 'on account' : 'received'}.`
                 : apply && cashApplied + tdsApplied <= 0
                   ? 'Put an amount against at least one invoice.'
@@ -301,7 +303,7 @@ export function RecordReceiptDialog({
     if (blocker) return
     setSaving(true)
     setError(null)
-    const allocations = rows
+    const allocations = (held ? [] : rows)
       .filter((r) => r.cash > 0 || r.tds > 0)
       .map((r) => ({ invoiceId: r.inv.id, amount: r.cash, tdsAmount: r.tds || undefined }))
     try {
@@ -463,10 +465,10 @@ export function RecordReceiptDialog({
                         />
                       </Field>
                     </div>
-                    {mode === 'PDC' && (
+                    {(mode === 'PDC' || held) && (
                       <p className="text-muted-foreground mt-2 flex items-start gap-1.5 text-xs">
-                        <Info size={13} className="mt-px shrink-0" />A post-dated cheque settles its invoices now; mark it cleared when the bank credits it,
-                        or reverse the receipt if it bounces.
+                        <Info size={13} className="mt-px shrink-0" />A cheque dated after today is kept in hand until its date: the invoices stay owed. From that
+                        date, apply it with Apply advance on the Receipts list, then mark it cleared when the bank credits it, or reverse it if it bounces.
                       </p>
                     )}
                   </Section>
@@ -477,7 +479,7 @@ export function RecordReceiptDialog({
                 icon={ReceiptText}
                 title="Invoices it settles"
                 actions={
-                  invoices.length > 0 ? (
+                  invoices.length > 0 && !held ? (
                     <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={settleOldestFirst} disabled={available <= 0}>
                       <Wand2 size={13} /> Settle oldest first
                     </button>
@@ -486,6 +488,12 @@ export function RecordReceiptDialog({
               >
                 {!customerId ? (
                   <p className="text-muted-foreground text-sm">Pick the customer to see what they owe.</p>
+                ) : held ? (
+                  <p className="text-muted-foreground flex items-start gap-1.5 text-sm">
+                    <Info size={14} className="mt-0.5 shrink-0" />
+                    The cheque is dated {formatDate(chequeDate)}, so it settles no invoice until then. From that date, apply it to the invoices with Apply
+                    advance on the Receipts list.
+                  </p>
                 ) : loadingInvoices ? (
                   <div className="skeleton h-24 w-full rounded-lg" />
                 ) : invoices.length === 0 ? (
@@ -558,7 +566,7 @@ export function RecordReceiptDialog({
                   </>
                 )}
 
-                {customerId && !loadingInvoices && (
+                {customerId && !loadingInvoices && !held && (
                   <div className="border-border bg-secondary/30 mt-3 grid grid-cols-2 gap-x-6 gap-y-1 rounded-lg border px-3 py-2 text-sm sm:grid-cols-4">
                     <div>
                       <p className="text-muted-foreground text-[11px]">Owed in all</p>
@@ -619,7 +627,11 @@ export function RecordReceiptDialog({
           ) : left > 0.005 && customerId ? (
             <p className="text-muted-foreground mr-auto flex max-w-xl basis-full items-start gap-1.5 text-xs sm:basis-auto">
               <Info size={13} className="mt-px shrink-0" />
-              <span>{formatRupees(left)} stays on account, to apply to later invoices.</span>
+              <span>
+                {held
+                  ? `${formatRupees(left)} is held until the date on the cheque, ${formatDate(chequeDate)}.`
+                  : `${formatRupees(left)} stays on account, to apply to later invoices.`}
+              </span>
             </p>
           ) : null}
           <button type="button" onClick={onClose} className="btn-secondary hidden sm:inline-flex" disabled={saving}>
