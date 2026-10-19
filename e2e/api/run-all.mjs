@@ -1,5 +1,5 @@
 // Runs every API scenario suite in turn against the demo, then a summary table.
-//   npm run test:api                 all six
+//   npm run test:api                 all seven
 //   npm run test:api -- cgrn itc04   only the suites whose file name holds one of these words
 // Exits non-zero when any check failed or any suite stopped early.
 import { spawn } from 'node:child_process'
@@ -14,6 +14,7 @@ const SUITES = [
   ['cgrn-cut-test.mjs', 'Cutting with mixed owners'],
   ['cgrn-import-test.mjs', 'Customer GRN sheet import'],
   ['itc04-test.mjs', 'ITC-04 reports'],
+  ['sales-test.mjs', 'Sales, quotation to cash'],
 ]
 
 required('E2E_EMAIL', 'the sign-in for the tests')
