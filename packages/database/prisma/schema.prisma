@@ -1531,6 +1531,8 @@ model SalesInvoice {
   lines       SalesInvoiceLine[]
   charges     SalesInvoiceCharge[]
   creditNotes CreditNote[]
+  /// Credit left over on other credit notes, set against this invoice.
+  creditApplied CreditNoteAllocation[]
 
   @@index([invoiceNumber])
   @@index([customerId])
@@ -4857,10 +4859,31 @@ model CreditNote {
   cancelReason      String?
 
   lines CreditNoteLine[]
+  /// Its credit held (onAccount) set against the customer's later invoices.
+  allocations CreditNoteAllocation[]
 
   @@index([customerId])
   @@index([invoiceId])
   @@map("credit_notes")
+}
+
+/// Credit a credit note left with the customer — beyond what its own invoice
+/// still owed — set against another of their invoices, as an advance is. The
+/// note's onAccount goes down by it and the invoice's creditedAmount up.
+/// Kept when the note is cancelled; cancelling undoes what it did.
+model CreditNoteAllocation {
+  id          String       @id @default(cuid())
+  noteId      String
+  note        CreditNote   @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  invoiceId   String
+  invoice     SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  amount      Decimal      @db.Decimal(12, 2)
+  createdById String?
+  createdAt   DateTime     @default(now())
+
+  @@index([noteId])
+  @@index([invoiceId])
+  @@map("credit_note_allocations")
 }
 
 model CreditNoteLine {

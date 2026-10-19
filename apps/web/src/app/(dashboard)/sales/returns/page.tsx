@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertCircle, Ban, CalendarDays, Info, Plus, Printer, RefreshCw, Search } from 'lucide-react'
+import { AlertCircle, Ban, CalendarDays, HandCoins, Info, Plus, Printer, RefreshCw, Search } from 'lucide-react'
 import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
@@ -10,6 +10,7 @@ import { formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { CreditNoteDialog } from '@/components/sales/CreditNoteDialog'
+import { ApplyCreditDialog } from '@/components/sales/ApplyCreditDialog'
 
 interface NoteRow {
   id: string
@@ -52,6 +53,7 @@ export default function ReturnsPage() {
   const [page, setPage] = useState(1)
   const [form, setForm] = useState<{ open: boolean; invoiceId: string | null }>({ open: false, invoiceId: null })
   const [cancelling, setCancelling] = useState<NoteRow | null>(null)
+  const [applying, setApplying] = useState<NoteRow | null>(null)
   const [acting, setActing] = useState(false)
 
   useEffect(() => {
@@ -107,6 +109,10 @@ export default function ReturnsPage() {
 
   const actions = (n: NoteRow): RowAction[] => {
     const items: RowAction[] = [{ key: 'print', label: 'Print credit note', icon: <Printer size={15} />, href: `/print/credit-note/${n.id}`, newTab: true }]
+    // Credit it left with the customer, set against their later invoices.
+    if (n.status === 'ISSUED' && Number(n.onAccount) > 0 && can('sales', 'create')) {
+      items.push({ key: 'apply', label: 'Apply credit', icon: <HandCoins size={15} />, onClick: () => setApplying(n) })
+    }
     if (n.status === 'ISSUED' && can('sales', 'approve')) items.push({ key: 'cancel', label: 'Cancel credit note', icon: <Ban size={15} />, danger: true, onClick: () => setCancelling(n) })
     return items
   }
@@ -230,7 +236,7 @@ export default function ReturnsPage() {
         <div className="border-border bg-secondary/40 flex items-start gap-2 border-t px-4 py-2">
           <Info size={14} className="text-primary mt-0.5 shrink-0" />
           <p className="text-muted-foreground text-xs">
-            A credit note reduces what its invoice owes; beyond that it stays with the customer as credit and counts like an advance. Cancelling one takes returned goods back out of the store.
+            A credit note reduces what its invoice owes; beyond that it stays with the customer as credit and counts like an advance, set against their later invoices with Apply credit. Cancelling one takes returned goods back out of the store.
           </p>
         </div>
       </div>
@@ -244,10 +250,20 @@ export default function ReturnsPage() {
           void load()
         }}
       />
+      {applying && (
+        <ApplyCreditDialog
+          note={{ id: applying.id, noteNumber: applying.noteNumber, customerId: applying.customer.id, customerName: applying.customer.name, held: Number(applying.onAccount) }}
+          onClose={() => setApplying(null)}
+          onSaved={(text) => {
+            setMessage({ text })
+            void load()
+          }}
+        />
+      )}
       {cancelling && (
         <ReasonDialog
           title={`Cancel ${cancelling.noteNumber}?`}
-          description={cancelling.type === 'RETURN' ? 'Its returned pieces go back out of the store, and the invoice owes what it did before.' : 'The invoice owes what it did before.'}
+          description={cancelling.type === 'RETURN' ? 'Its returned pieces go back out of the store, and every invoice it reduced owes what it did before.' : 'Every invoice it reduced owes what it did before.'}
           confirmLabel="Cancel credit note"
           placeholder="Entered against the wrong invoice"
           danger

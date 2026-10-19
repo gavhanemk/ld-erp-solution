@@ -774,6 +774,18 @@ export async function cancelInvoice(tx: Prisma.TransactionClient, id: string, us
     throw new AppError(`${before.invoiceNumber} has a credit note against it and cannot be cancelled`, 409, 'HAS_CREDIT_NOTES')
   }
   const after = await tx.salesInvoice.update({
+  // Credit held on another note, set against this invoice, settles it as cash would.
+  const creditApplied = await tx.creditNoteAllocation.findFirst({
+    where: { invoiceId: before.id, note: { status: 'ISSUED' } },
+    select: { note: { select: { noteNumber: true } } },
+  })
+  if (creditApplied) {
+    throw new AppError(
+      `${before.invoiceNumber} has credit from ${creditApplied.note.noteNumber} set against it. Cancel that credit note first, or raise a credit note.`,
+      409,
+      'HAS_PAYMENTS',
+    )
+  }
     where: { id: before.id },
     data: { status: 'CANCELLED', balanceAmount: 0, cancelledAt: new Date(), cancelledById: userId, cancelReason: reason },
     include: invoiceInclude,
