@@ -115,7 +115,7 @@ export function checkCredit(position: CreditPosition, orderValue: number): Credi
 }
 
 /** The warning an approver reads before releasing the order, figures included. */
-export function creditWarning(c: CreditCheck): string {
+export function creditWarning(c: CreditCheck, ending = 'Approving it needs a reason for releasing it.'): string {
   const rupees = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
   const why = c.isBlacklisted
     ? `${c.customerName} is marked blacklisted`
@@ -125,8 +125,45 @@ export function creditWarning(c: CreditCheck): string {
   return (
     `${why}. Unpaid invoices ${rupees(c.unpaid)}${overdue}, other open orders ${rupees(c.openOrders)}, ` +
     `this order ${rupees(c.orderValue)}${advance}: ${rupees(c.exposure)} in all. ` +
-    `Approving it needs a reason for releasing it.`
+    ending
   )
+}
+
+/**
+ * An amendment that raises a confirmed order's value is judged against the
+ * credit limit, as confirming it was. Only what is not yet invoiced counts:
+ * the invoiced part is among the unpaid invoices already.
+ *
+ * Someone who may release a hold (the Admin, or an approver who did not raise
+ * the order) makes the change with a reason, kept on the order; without one
+ * this answers CREDIT_HOLD with the figures, so the screen can ask. Anyone
+ * else is told a manager has to make it. A change that lowers the value, or
+ * keeps it, is never stopped. Returns what to write on the order.
+ */
+export async function creditForAmendment(
+  db: Prisma.TransactionClient,
+  order: { id: string; customerId: string; createdById: string; totalAmount: Prisma.Decimal | number },
+  newTotal: number,
+  userId: string,
+  opts: ConfirmOptions,
+): Promise<{ creditReleasedById: string; creditReleasedAt: Date; creditReleaseReason: string } | Record<string, never>> {
+  if (newTotal <= Number(order.totalAmount)) return {}
+  const invoiced = await db.salesInvoice.aggregate({
+    where: { soId: order.id, status: { not: 'CANCELLED' } },
+    _sum: { totalAmount: true },
+  })
+  const credit = checkCredit(
+    await creditPosition(db, order.customerId, order.id),
+    Math.max(0, newTotal - Number(invoiced._sum.totalAmount ?? 0)),
+  )
+  if (!credit.needsRelease) return {}
+  const mayRelease = opts.admin || (opts.canApprove && order.createdById !== userId)
+  if (!mayRelease) {
+    throw new AppError(creditWarning(credit, 'Someone with approval rights has to make this change, with a reason.'), 409, 'CREDIT_LIMIT')
+  }
+  const reason = opts.creditReleaseReason?.trim()
+  if (!reason) throw new AppError(creditWarning(credit, 'Saving the change needs a reason for releasing it.'), 409, 'CREDIT_HOLD')
+  return { creditReleasedById: userId, creditReleasedAt: new Date(), creditReleaseReason: reason }
 }
 
 interface ConfirmOptions {

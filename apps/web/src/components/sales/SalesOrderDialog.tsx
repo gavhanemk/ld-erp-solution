@@ -1016,7 +1016,8 @@ export function SalesOrderDialog({
           ? await api.post<{ message?: string; data: { id: string } }>(`/sales/orders/${saved.id}/amend`, {
               ...body,
               confirm: undefined,
-              creditReleaseReason: undefined,
+              // Asked for when the change takes the customer over their credit limit.
+              creditReleaseReason: creditReleaseReason || undefined,
               reason: amendReason.trim(),
             })
           : saved
@@ -2159,7 +2160,7 @@ export function SalesOrderDialog({
         <ReasonDialog
           title="Release the credit hold?"
           description={releaseAsk}
-          confirmLabel="Release and confirm"
+          confirmLabel={amend ? 'Release and save the change' : 'Release and confirm'}
           placeholder="Payment of ₹2 L promised by Friday"
           busy={saving !== null}
           onCancel={() => setReleaseAsk(null)}
