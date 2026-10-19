@@ -569,7 +569,7 @@ export const outwardHsnSummary: ReportDefinition = {
   id: 'sales-hsn-summary',
   module: 'sales',
   title: 'Outward Supplies by HSN (GSTR-1)',
-  description: 'Sales in the period by HSN code and GST rate — pieces, taxable value and tax — less credit notes, as the HSN summary of GSTR-1 asks for it.',
+  description: 'Sales in the period by HSN code and GST rate — pieces, taxable value and tax — less credit notes, with the charges billed on invoices, as the HSN summary of GSTR-1 asks for it.',
   filters: [...dateRangeFilters],
   columns: [
     { key: 'hsnCode', label: 'HSN', type: 'text', width: 10 },
@@ -584,14 +584,19 @@ export const outwardHsnSummary: ReportDefinition = {
 
   async run({ tx, params }) {
     const range = dayRange(params)
-    const [lines, credits] = await Promise.all([
+    const billed = { status: { not: 'CANCELLED' as const }, ...(range ? { invoiceDate: range } : {}) }
+    const [lines, credits, charges] = await Promise.all([
       tx.salesInvoiceLine.findMany({
-        where: { invoice: { status: { not: 'CANCELLED' }, ...(range ? { invoiceDate: range } : {}) } },
+        where: { invoice: billed },
         select: { hsnCode: true, gstRate: true, qty: true, taxableValue: true, cgst: true, sgst: true, igst: true },
       }),
       tx.creditNoteLine.findMany({
         where: { note: { status: 'ISSUED', ...(range ? { noteDate: range } : {}) } },
         select: { hsnCode: true, gstRate: true, qty: true, taxableValue: true, cgst: true, sgst: true, igst: true },
+      }),
+      tx.salesInvoiceCharge.findMany({
+        where: { invoice: billed, amount: { gt: 0 } },
+        select: { amount: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } },
       }),
     ])
     const m = new Map<string, { hsnCode: string; rate: number; qty: number; taxable: number; cgst: number; sgst: number; igst: number; credited: number }>()
@@ -608,6 +613,18 @@ export const outwardHsnSummary: ReportDefinition = {
     }
     lines.forEach((l) => add(l, 1))
     credits.forEach((l) => add(l, -1))
+    // Charges billed on invoices (transport, packing) carry GST too. They have
+    // no SAC code here, so they are listed by name, as the invoice prints them.
+    for (const c of charges) {
+      const name = `${c.chargeType.name} (charge)`
+      const key = `charge|${c.chargeType.name}|${Number(c.gstRate)}`
+      const e = m.get(key) ?? { hsnCode: name, rate: Number(c.gstRate) / 100, qty: 0, taxable: 0, cgst: 0, sgst: 0, igst: 0, credited: 0 }
+      e.taxable += Number(c.amount)
+      e.cgst += Number(c.cgst)
+      e.sgst += Number(c.sgst)
+      e.igst += Number(c.igst)
+      m.set(key, e)
+    }
     const rows = [...m.values()].map((e) => ({ ...e, qty: round2(e.qty), taxable: round2(e.taxable), cgst: round2(e.cgst), sgst: round2(e.sgst), igst: round2(e.igst), credited: round2(e.credited) }))
     const taxable = round2(rows.reduce((s, r) => s + r.taxable, 0))
     const tax = round2(rows.reduce((s, r) => s + r.cgst + r.sgst + r.igst, 0))
@@ -621,7 +638,9 @@ export const outwardHsnSummary: ReportDefinition = {
         ],
         panels: [{ title: 'Taxable by HSN', question: 'composition', format: 'money', points: rank(rows, (r) => r.hsnCode, (r) => r.taxable) }],
         insights: [],
-        caveats: ['Goods only: charges on invoices (transport, packing) are services with their own SAC codes and are not included here.'],
+        caveats: charges.length
+          ? ['Charges billed on invoices (transport, packing) are listed by name, as the invoice prints them: put in the SAC code for each when filing.']
+          : [],
       },
     }
   },
