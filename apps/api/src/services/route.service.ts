@@ -61,9 +61,10 @@ export interface Destination<T> {
 /**
  * Where pieces at one step go next: the next step of the order's route, in
  * the route's order. Nobody picks, so no step is ever passed by — to leave a
- * step out for one order, a production manager skips it on the order; to do
- * the steps in another order, the order's stages are changed ahead of the
- * pieces. Cutting is where pieces start, so nothing goes back to it. The last
+ * step out or do the steps in another order, the style's routing is changed
+ * in Masters → Routings and the order takes its new stages (routeFromRouting),
+ * ahead of the pieces. Cutting is where pieces start, so nothing goes back to
+ * it. The last
  * step — into finished goods — also takes only pieces that have been through
  * every other step, so nothing gets there half-made.
  *
@@ -282,6 +283,21 @@ export const editRouteSchema = z.object({
 })
 
 /**
+ * The steps of an order's route up to the furthest one pieces have reached —
+ * anything has ever moved through it, or an outside unit has been given work
+ * on it. Those stay as they are whatever the route becomes.
+ */
+async function reachedSteps<T extends { id: string }>(tx: Prisma.TransactionClient, moId: string, current: T[]) {
+  const [moved, given] = await Promise.all([
+    tx.wipEntry.groupBy({ by: ['stepId'], where: { moId } }),
+    tx.jobWorkOrder.findMany({ where: { moId }, select: { stepId: true } }),
+  ])
+  const touched = new Set([...moved.map((r) => r.stepId), ...given.map((g) => g.stepId)])
+  const lastTouched = current.reduce((at, s, i) => (touched.has(s.id) ? i : at), -1)
+  return current.slice(0, lastTouched + 1)
+}
+
+/**
  * Changes one order's own route. The steps up to the furthest one pieces have
  * reached stay where they are — only their instructions, rate and unit can
  * change. Everything after can be added, removed or reordered.
@@ -296,15 +312,7 @@ export async function editRoute(tx: Prisma.TransactionClient, moId: string, inpu
   )
   if (!current.length) throw new AppError('This order has no route yet. Pick a routing for it first.', 409, 'NO_ROUTE')
 
-  // A step anything has ever moved through, or that an outside unit has been
-  // given work on, stays.
-  const [moved, given] = await Promise.all([
-    tx.wipEntry.groupBy({ by: ['stepId'], where: { moId } }),
-    tx.jobWorkOrder.findMany({ where: { moId }, select: { stepId: true } }),
-  ])
-  const touched = new Set([...moved.map((r) => r.stepId), ...given.map((g) => g.stepId)])
-  const lastTouched = current.reduce((at, s, i) => (touched.has(s.id) ? i : at), -1)
-  const fixed = current.slice(0, lastTouched + 1)
+  const fixed = await reachedSteps(tx, moId, current)
 
   // The fixed steps lead the new route, unchanged in order.
   for (let i = 0; i < fixed.length; i++) {
@@ -384,6 +392,87 @@ export async function editRoute(tx: Prisma.TransactionClient, moId: string, inpu
     })
   }
   return { fixed: fixed.map((f) => f.name), steps: input.steps.length }
+}
+
+/**
+ * An order's stages taken afresh from its routing, after the routing was
+ * changed in Masters → Routings: which stages there are and their order come
+ * only from there. The stages the pieces have reached stay as they are; every
+ * stage after them is the routing's, in the routing's order, with the
+ * routing's settings. With `dryRun` nothing is written: it says what the
+ * stages are now and what they would become.
+ */
+export async function routeFromRouting(tx: Prisma.TransactionClient, moId: string, opts: { reason: string; dryRun?: boolean }) {
+  await lockMo(tx, moId)
+  const mo = await tx.manufacturingOrder.findUnique({
+    where: { id: moId },
+    select: {
+      moNumber: true,
+      routingId: true,
+      routingVersion: true,
+      steps: {
+        orderBy: { sequence: 'asc' },
+        select: { id: true, sequence: true, name: true, operationId: true, departmentId: true, kind: true, execution: true, workstationId: true, isQcStep: true, skip: true, ratePerPiece: true, instructions: true, skippedAt: true },
+      },
+    },
+  })
+  if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  if (!mo.routingId || !mo.steps.length) throw new AppError(`${mo.moNumber} has no stages from a routing yet. Set up its stages first.`, 409, 'NO_ROUTE')
+  const routing = await tx.routing.findUnique({ where: { id: mo.routingId }, select: routingSelect })
+  if (!routing) throw new AppError('The routing this order was planned on no longer exists.', 404, 'NOT_FOUND')
+
+  const fixed = await reachedSteps(tx, moId, mo.steps)
+  const fixedOps = new Set(fixed.map((f) => f.operationId))
+  const ahead = routing.steps.filter((r) => !fixedOps.has(r.operationId))
+  const steps: z.infer<typeof routeStepSchema>[] = [
+    ...fixed.map((f) => ({
+      id: f.id,
+      operationId: f.operationId,
+      departmentId: f.departmentId,
+      execution: f.execution,
+      workstationId: f.workstationId,
+      isQcStep: f.isQcStep,
+      skip: f.skip,
+      ratePerPiece: f.ratePerPiece == null ? null : Number(f.ratePerPiece),
+      instructions: f.instructions,
+    })),
+    ...ahead.map((r) => ({
+      id: null,
+      operationId: r.operationId,
+      departmentId: r.departmentId,
+      execution: r.execution,
+      workstationId: r.workstationId,
+      isQcStep: r.isQcStep || r.operation.kind === 'QC',
+      skip: r.operation.kind === 'CUTTING' ? ('NEVER' as const) : r.skip,
+      ratePerPiece: r.ratePerPiece != null ? Number(r.ratePerPiece) : r.operation.jobWorkRate != null ? Number(r.operation.jobWorkRate) : null,
+      instructions: r.instructions ?? r.operation.instructions,
+    })),
+  ]
+  const now = mo.steps.filter((x) => !x.skippedAt).map((x) => x.name)
+  const next = [...fixed.filter((x) => !x.skippedAt).map((x) => x.name), ...ahead.map((r) => r.operation.name)]
+  const result = { moNumber: mo.moNumber, routing: { code: routing.code, name: routing.name, version: routing.version }, loadedVersion: mo.routingVersion, kept: fixed.map((f) => f.name), now, next }
+  if (opts.dryRun) return result
+  await editRoute(tx, moId, { steps, reason: opts.reason })
+  await tx.manufacturingOrder.update({ where: { id: moId }, data: { routingVersion: routing.version } })
+  return result
+}
+
+/**
+ * The route an order is given, or changed to, must be its routing's: which
+ * stages and in what order come only from Masters → Routings. Settings of a
+ * stage — done outside, its unit, rate, instructions, check — can still be
+ * set for one order. Throws when `asked` has other stages, or another order.
+ */
+export function assertSameStages(asked: Array<{ operationId: string }>, allowed: Array<{ operationId: string }>, routingCode: string | null) {
+  const a = asked.map((s) => s.operationId).join('>')
+  const b = allowed.map((s) => s.operationId).join('>')
+  if (a !== b) {
+    throw new AppError(
+      `Which stages an order has, and their order, come from its routing. To change them, change ${routingCode ?? 'the routing'} in Masters → Routings, then take its new stages on the order.`,
+      409,
+      'STAGES_FROM_ROUTING',
+    )
+  }
 }
 
 /**

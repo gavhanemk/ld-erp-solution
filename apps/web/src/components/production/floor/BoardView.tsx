@@ -8,7 +8,9 @@ import {
   ExternalLink,
   Gavel,
   Info,
+  LayoutGrid,
   ListChecks,
+  Rows3,
   PackageCheck,
   PackageOpen,
   Scale,
@@ -28,7 +30,7 @@ import { CountInDialog } from './CountInDialog'
 import { SettleDialog } from './SettleDialog'
 import { SendOnDialog } from './SendOnDialog'
 import { SheetView } from './SheetView'
-import { RouteStrip } from './RouteStrip'
+import { RouteStrip, stripNote } from './RouteStrip'
 import type { TransferRow } from './TransferDetailDialog'
 import { useJobCard } from './useFlow'
 import { isCheck, pcs, type FlowTransfer, type StepFigures } from './types'
@@ -39,6 +41,10 @@ import { isCheck, pcs, type FlowTransfer, type StepFigures } from './types'
  * what to do next in plain words, each with the one button that does it.
  * The stages run strictly in the route's order, so the next stage is always
  * named; nobody has to work out where pieces go. A stage opens its sheet.
+ *
+ * The same job cards can be seen as rows instead: a table with a line each —
+ * where its pieces are, the first thing to do and its button. The choice is
+ * remembered on this computer. On a phone the board is always shown.
  */
 
 interface BoardStep {
@@ -248,6 +254,97 @@ function BoardRow({ c, h }: { c: BoardCard; h: Handlers }) {
   )
 }
 
+/** The job cards as a table: where the pieces are, the first thing to do, and its button. */
+function RowsTable({ rows, handlers }: { rows: BoardCard[]; handlers: (c: BoardCard) => Handlers }) {
+  return (
+    <div className="border-border overflow-x-auto rounded-lg border">
+      <table className="data-table w-full min-w-[960px]">
+        <thead>
+          <tr className="bg-secondary">
+            <th>Job card</th>
+            <th>Order</th>
+            <th>Where the pieces are</th>
+            <th>Next to do</th>
+            <th style={{ textAlign: 'right' }}>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((c) => {
+            const h = handlers(c)
+            const todos = todosOf(c, h)
+            const first = todos[0]
+            const late = !!c.mo.due && c.mo.due.slice(0, 10) < todayIso() && c.state !== 'DONE'
+            const where = c.steps
+              .filter((s) => !s.skipped)
+              .map((s) => ({ s, note: stripNote(s, s.kind === 'CUTTING' ? c.withCutters : 0) }))
+              .filter((x) => x.note.tone === 'here' || x.note.tone === 'coming' || x.note.tone === 'warn')
+            return (
+              <tr key={c.id} className="cursor-pointer align-top" onClick={() => h.sheet(null)}>
+                <td>
+                  <span className="text-foreground block font-mono text-xs font-semibold">{c.jobCardNumber}</span>
+                  <span className="text-muted-foreground block text-[11px]">
+                    {c.line.style.code} · {c.line.color} · {pcs(c.line.totalQty)} pcs
+                  </span>
+                  {c.mo.held && <span className="badge-warning mt-0.5 inline-block">On hold</span>}
+                </td>
+                <td className="text-xs">
+                  <span className="text-foreground block">{c.mo.moNumber}</span>
+                  <span className="text-muted-foreground block text-[11px]">
+                    {c.mo.so ? c.mo.so.customer.name : ''}
+                    {c.mo.due ? `${c.mo.so ? ' · ' : ''}due ${formatDate(c.mo.due)}` : ''}
+                  </span>
+                  {late && <span className="badge-danger mt-0.5 inline-block">Late</span>}
+                </td>
+                <td className="text-xs">
+                  {where.length ? (
+                    where.map((x) => (
+                      <span key={x.s.id} className="block whitespace-nowrap">
+                        <span className="text-foreground font-medium">{x.s.name}</span>
+                        <span className={x.note.tone === 'warn' ? 'text-amber-700' : 'text-muted-foreground'}>: {x.note.lines.join(', ')}</span>
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-muted-foreground">{c.state === 'DONE' ? 'All through' : '—'}</span>
+                  )}
+                  <span className="text-muted-foreground block text-[11px]">
+                    cut {pcs(c.cut)} · packed {pcs(c.packed)} of {pcs(c.line.totalQty)}
+                  </span>
+                </td>
+                <td className="max-w-[360px] text-xs">
+                  {first ? (
+                    <span className={first.tone === 'warn' ? 'text-destructive' : first.tone === 'info' ? 'text-muted-foreground' : 'text-foreground'}>{first.text}</span>
+                  ) : (
+                    <span className="text-muted-foreground">{c.state === 'DONE' ? 'Nothing left to do.' : 'Nothing waiting right now.'}</span>
+                  )}
+                  {todos.length > 1 && (
+                    <span className="text-muted-foreground block text-[11px]">
+                      and {todos.length - 1} more — open the job card to see {todos.length === 2 ? 'it' : 'them'}
+                    </span>
+                  )}
+                </td>
+                <td onClick={(e) => e.stopPropagation()}>
+                  <span className="flex items-center justify-end gap-1">
+                    {first?.action && (
+                      <button type="button" className={`${first.action.primary ? 'btn-primary' : 'btn-secondary'} h-8 whitespace-nowrap px-3 text-xs`} onClick={first.action.run}>
+                        <first.action.icon size={14} /> {first.action.label}
+                      </button>
+                    )}
+                    <button type="button" className="btn-ghost h-8 px-2" onClick={() => h.sheet(null)} title="Open the job card's sheets" aria-label={`Open ${c.jobCardNumber}`}>
+                      <ExternalLink size={14} />
+                    </button>
+                  </span>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+const LAYOUT_KEY = 'ld.transfers.jobCardsLayout'
+
 /** The transfer form for one stage of a job card, once the job card is loaded. */
 function SendLauncher({ jobCardId, stepId, onClose, onSaved }: { jobCardId: string; stepId: string; onClose: () => void; onSaved: (message: string, transferId: string) => void }) {
   const { detail, error } = useJobCard(jobCardId)
@@ -281,6 +378,23 @@ export function BoardView({ search, refreshKey, onSaved }: { search: string; ref
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [showDone, setShowDone] = useState(false)
+  // Board or rows: this viewer's own choice, kept on this computer.
+  const [layout, setLayout] = useState<'board' | 'rows'>('board')
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(LAYOUT_KEY) === 'rows') setLayout('rows')
+    } catch {
+      // Without storage the board is shown.
+    }
+  }, [])
+  const chooseLayout = (l: 'board' | 'rows') => {
+    setLayout(l)
+    try {
+      localStorage.setItem(LAYOUT_KEY, l)
+    } catch {
+      // Not kept; the choice still holds until the page is left.
+    }
+  }
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<Open | null>(null)
@@ -359,10 +473,30 @@ export function BoardView({ search, refreshKey, onSaved }: { search: string; ref
           <Info size={13} className="mt-px shrink-0" aria-hidden />
           Each job card&apos;s stages in the route&apos;s order. Pieces always go to the next stage; click a stage to open its sheet.
         </p>
-        <label className="text-muted-foreground flex items-center gap-2 text-xs">
-          <input type="checkbox" className="accent-primary" checked={showDone} onChange={(e) => setShowDone(e.target.checked)} />
-          Show finished job cards too
-        </label>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="text-muted-foreground flex items-center gap-2 text-xs">
+            <input type="checkbox" className="accent-primary" checked={showDone} onChange={(e) => setShowDone(e.target.checked)} />
+            Show finished job cards too
+          </label>
+          <div className="border-border bg-secondary hidden rounded-lg border p-0.5 md:inline-flex" role="group" aria-label="Show the job cards as">
+            {(
+              [
+                ['board', 'Board', LayoutGrid],
+                ['rows', 'Rows', Rows3],
+              ] as const
+            ).map(([key, label, Icon]) => (
+              <button
+                key={key}
+                type="button"
+                aria-pressed={layout === key}
+                onClick={() => chooseLayout(key)}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs ${layout === key ? 'bg-card text-foreground font-semibold shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                <Icon size={13} /> {label}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {loading && !rows ? (
@@ -375,6 +509,17 @@ export function BoardView({ search, refreshKey, onSaved }: { search: string; ref
         <p className="text-muted-foreground px-4 py-10 text-center text-sm">
           {search ? 'No job card matches that search.' : 'No job card is in production. Once an order’s stages are loaded, its job cards show here with their route.'}
         </p>
+      ) : layout === 'rows' ? (
+        <>
+          <div className="hidden md:block">
+            <RowsTable rows={rows} handlers={handlers} />
+          </div>
+          <div className="space-y-3 md:hidden">
+            {rows.map((c) => (
+              <BoardRow key={c.id} c={c} h={handlers(c)} />
+            ))}
+          </div>
+        </>
       ) : (
         rows.map((c) => <BoardRow key={c.id} c={c} h={handlers(c)} />)
       )}

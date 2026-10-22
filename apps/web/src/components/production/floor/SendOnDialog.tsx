@@ -232,7 +232,10 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
               </p>
               <p className="text-muted-foreground mt-1 flex items-start gap-1 text-xs">
                 <Info size={12} className="mt-px shrink-0" />
-                <span>Stages run in the route&apos;s order, so none is passed by. To leave {to.name} out of this order, a production manager skips it on the order&apos;s stages.</span>
+                <span>
+                  Stages run in the routing&apos;s order, so none is passed by. To leave {to.name} out or change the order, change the style&apos;s routing in Masters → Routings, then
+                  take its new stages on the order.
+                </span>
               </p>
             </>
           )}

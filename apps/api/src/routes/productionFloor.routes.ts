@@ -6,7 +6,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { getPrintHeader } from '../lib/printData'
-import { applyRouting, editRoute, editRouteSchema, passedBy, restoreStep, routeStepSchema, routingsFor, skipStep } from '../services/route.service'
+import { applyRouting, assertSameStages, editRoute, editRouteSchema, passedBy, routeFromRouting, routeStepSchema, routingsFor } from '../services/route.service'
 import {
   billSchema,
   cancelTransfer,
@@ -99,7 +99,9 @@ router.post('/orders/:id/routing', requirePermission(MODULE, 'edit'), async (req
       if (!issued) throw new AppError(`${mo.moNumber}'s materials have not been issued yet. Raise its requisition and have the store issue it, then load the stages.`, 409, 'MATERIALS_NOT_ISSUED')
     }
     const routing = await applyRouting(tx, req.params.id, routingId)
-    // Changed for this order before loading: nothing has moved yet, so every step is written as given.
+    // Settings changed for this order before loading — never which stages, nor their order: those are the routing's.
+    if (steps) assertSameStages(steps, routing.steps, routing.code)
+    // Nothing has moved yet, so every step is written as given.
     if (steps) await editRoute(tx, req.params.id, { steps: steps.map((s) => ({ ...s, id: null })), reason: `Set for ${mo.moNumber} when its stages were loaded` })
     if (mo.status !== 'DRAFT') await ensureJobCards(tx, req.params.id)
     const names = (await tx.mOStep.findMany({ where: { moId: req.params.id }, orderBy: { sequence: 'asc' }, select: { name: true } })).map((s) => s.name)
@@ -114,15 +116,24 @@ router.post('/orders/:id/routing', requirePermission(MODULE, 'edit'), async (req
   })
   res.json({
     success: true,
-    message: `Stages set: ${routing.names.join(' → ')}${steps ? ` (from ${routing.routing.code}, changed for this order)` : ` (from ${routing.routing.code})`}. Each colour's process sheets are ready, starting with cutting.`,
+    message: `Stages set: ${routing.names.join(' → ')} (from ${routing.routing.code}${steps ? ', with settings for this order' : ''}). Each colour's process sheets are ready, starting with cutting.`,
   })
 })
 
-/** PATCH /orders/:id/route — this order's own route changed, ahead of the pieces. */
+/**
+ * PATCH /orders/:id/route — the settings of this order's stages ahead of the
+ * pieces: done outside or here, unit, rate, instructions, check. Which stages
+ * there are and their order stay the routing's (see /route/from-routing).
+ */
 router.patch('/orders/:id/route', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = editRouteSchema.parse(req.body)
-  const mo = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { moNumber: true, status: true, steps: { orderBy: { sequence: 'asc' }, select: { name: true } } } })
+  const mo = await prisma.manufacturingOrder.findUnique({
+    where: { id: req.params.id },
+    select: { moNumber: true, status: true, routing: { select: { code: true } }, steps: { orderBy: { sequence: 'asc' }, select: { id: true, name: true, operationId: true } } },
+  })
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  assertSameStages(data.steps, mo.steps, mo.routing?.code ?? null)
+  if (data.steps.some((s, i) => s.id !== mo.steps[i].id)) assertSameStages([], mo.steps, mo.routing?.code ?? null)
   if (mo.status === 'CLOSED') throw new AppError(`${mo.moNumber} is closed.`, 409, 'NOT_OPEN')
   if (mo.status !== 'DRAFT' && !mayApprove(req)) throw new AppError(`${mo.moNumber} is on the floor: changing its route needs a production manager.`, 403, 'NEEDS_APPROVAL')
   const out = await prisma.$transaction((tx) => editRoute(tx, req.params.id, data), T)
@@ -135,20 +146,40 @@ router.patch('/orders/:id/route', requirePermission(MODULE, 'edit'), async (req:
     before: { route: mo.steps.map((s) => s.name) },
     after: { route: after.map((s) => s.name), reason: data.reason },
   })
-  res.json({ success: true, message: `${mo.moNumber}'s route is now ${after.map((s) => s.name).join(' → ')}.${out.fixed.length ? ` ${out.fixed.join(', ')} stayed as ${out.fixed.length === 1 ? 'it was' : 'they were'}: pieces have been through.` : ''}` })
+  res.json({ success: true, message: `${mo.moNumber}'s stages saved: ${after.map((s) => s.name).join(' → ')}.${out.fixed.length ? ` ${out.fixed.join(', ')} stayed as ${out.fixed.length === 1 ? 'it was' : 'they were'}: pieces have been through.` : ''}` })
 })
 
-router.post('/orders/:id/steps/:stepId/skip', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+/**
+ * GET /orders/:id/route/from-routing — what this order's stages would become
+ * if taken afresh from its routing: the stages the pieces have reached stay,
+ * the rest follow the routing as it is now.
+ */
+router.get('/orders/:id/route/from-routing', requirePermission(MODULE, 'view'), async (req, res) => {
+  // A dry run only reads, but it runs in a transaction for the order's lock; nothing is written.
+  const out = await prisma.$transaction((tx) => routeFromRouting(tx, req.params.id, { reason: 'preview', dryRun: true }), T)
+  res.json({ success: true, data: out })
+})
+
+/** POST /orders/:id/route/from-routing — the order's stages taken afresh from its routing, after it was changed. */
+router.post('/orders/:id/route/from-routing', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const { reason } = reasonSchema.parse(req.body)
-  const step = await prisma.$transaction((tx) => skipStep(tx, req.params.id, req.params.stepId, reason, { userId: req.user!.id, mayApprove: mayApprove(req) }), T)
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'MOStep', entityId: step.id, after: step })
-  res.json({ success: true, message: `${step.name} left out of the route: pieces now go past it. Anything already there finishes as normal.` })
-})
-
-router.post('/orders/:id/steps/:stepId/restore', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const step = await prisma.$transaction((tx) => restoreStep(tx, req.params.id, req.params.stepId, { mayApprove: mayApprove(req) }), T)
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'MOStep', entityId: step.id, after: step })
-  res.json({ success: true, message: `${step.name} is back on the route.` })
+  const mo = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { moNumber: true, status: true } })
+  if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  if (mo.status === 'CLOSED') throw new AppError(`${mo.moNumber} is closed.`, 409, 'NOT_OPEN')
+  if (mo.status !== 'DRAFT' && !mayApprove(req)) throw new AppError(`${mo.moNumber} is on the floor: changing its stages needs a production manager.`, 403, 'NEEDS_APPROVAL')
+  const out = await prisma.$transaction((tx) => routeFromRouting(tx, req.params.id, { reason }), T)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'ManufacturingOrder',
+    entityId: req.params.id,
+    before: { route: out.now, routingVersion: out.loadedVersion },
+    after: { route: out.next, routing: out.routing.code, routingVersion: out.routing.version, reason },
+  })
+  res.json({
+    success: true,
+    message: `${mo.moNumber} now follows ${out.routing.code} v${out.routing.version}: ${out.next.join(' → ')}.${out.kept.length ? ` ${out.kept.join(', ')} stayed as ${out.kept.length === 1 ? 'it was' : 'they were'}: pieces have been through.` : ''}`,
+  })
 })
 
 router.post('/orders/:id/hold', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {

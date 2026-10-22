@@ -166,9 +166,15 @@ the contractor, `COMPLETED` when received) · `ProductionBundle` ·
 route (`nextStepAfter`, which skips steps left out). Nobody picks a destination.
 (From 14 to 22 Oct 2026 the floor could pick any step the bundles had not been
 through; the user reversed that on 22 Oct after pieces reached Finishing
-without Stitching.) To leave a step out, a production manager skips it on the
-order; to change the order of steps, the order's stages are edited ahead of
-the pieces. A card made in those days that went past steps (`passedBy`) is
+without Stitching.) Which steps an order has, and their order, come only from
+its routing (user, 22 Oct): to leave a step out or reorder, the routing is
+changed in Masters → Routings, then the order takes its new stages
+(`routeFromRouting`, `POST /orders/:id/route/from-routing`) — the steps the
+pieces have reached stay, the rest are the routing's. Loading stages and
+`PATCH /route` only change a stage's settings (outside or here, unit, rate,
+instructions, check); a different list or order is refused
+(`STAGES_FROM_ROUTING`). The per-order skip/restore endpoints are gone;
+`skipStep` stays in the service for the checks. A card made in those days that went past steps (`passedBy`) is
 flagged on the board and the sheet; the pieces it brought cannot be sent on
 (`TAKE_BACK_FIRST`) until it is taken back.
 

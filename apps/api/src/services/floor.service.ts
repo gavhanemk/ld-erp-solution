@@ -213,7 +213,7 @@ export async function dispatch(tx: Tx, moId: string, d: z.infer<typeof dispatchS
         : asked.skippedAt
           ? `${asked.name} is left out of this order's route. From ${from.name} the pieces go to ${choice.step.name}.`
           : passed.length
-            ? `From ${from.name} the pieces go to ${choice.step.name} next: the stages run in the route's order, so ${passed.join(', ')} cannot be passed by. To leave a stage out of this order, a production manager skips it on the order's stages.`
+            ? `From ${from.name} the pieces go to ${choice.step.name} next: the stages run in the route's order, so ${passed.join(', ')} cannot be passed by. To leave a stage out or change their order, change the style's routing in Masters → Routings, then take its new stages on the order.`
             : `Pieces do not go back to ${asked.name}. From ${from.name} they go to ${choice.step.name}.`,
       409,
       'NOT_NEXT_STEP',
