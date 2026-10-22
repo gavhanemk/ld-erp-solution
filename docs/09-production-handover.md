@@ -164,6 +164,23 @@ the contractor, `COMPLETED` when received) · `ProductionBundle` ·
 
 **Only the next step.** A transfer always goes to the next step on the order's
 route (`nextStepAfter`, which skips steps left out). Nobody picks a destination.
+(From 14 to 22 Oct 2026 the floor could pick any step the bundles had not been
+through; the user reversed that on 22 Oct after pieces reached Finishing
+without Stitching.) To leave a step out, a production manager skips it on the
+order; to change the order of steps, the order's stages are edited ahead of
+the pieces. A card made in those days that went past steps (`passedBy`) is
+flagged on the board and the sheet; the pieces it brought cannot be sent on
+(`TAKE_BACK_FIRST`) until it is taken back.
+
+**Taking a transfer back.** `cancelTransfer` returns the pieces to the sender —
+while on their way, or after the count-in as long as the receiving step has not
+worked on them (the count-in is reversed first; `WORKED_ON` otherwise). A card
+counted in short or over stands.
+
+**The board.** Process Transfers opens on `GET /production/board`: each open
+job card's route with each step's figures, the cards to count in, short ones
+and flagged ones; the screen turns these into "next to do" lines with one
+button each.
 
 **Sending from hand.** At a working step on our floor (stitching, finishing,
 packing — `sendsFromHand`), pieces can go on straight from in hand, the way the

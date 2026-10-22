@@ -81,7 +81,11 @@ export function NewTransferDialog({ onClose, onSaved }: { onClose: () => void; o
           </SmartSelect>
         </label>
       </div>
-      {from && <p className="text-muted-foreground text-xs">From {from.name}: on the next screen, pick the step they go to.</p>}
+      {from && from.next && (
+        <p className="text-muted-foreground text-xs">
+          From {from.name} they go to {from.next.name}, the next stage of the route.
+        </p>
+      )}
     </FormFrame>
   )
 }

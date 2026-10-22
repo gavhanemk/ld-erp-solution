@@ -1,19 +1,18 @@
 'use client'
 
-import { ArrowRight, ClipboardCheck, ExternalLink, Printer, Scale, Send, Shuffle } from 'lucide-react'
+import { AlertTriangle, ArrowRight, ClipboardCheck, ExternalLink, Printer, Scale, Send, Undo2 } from 'lucide-react'
 import { can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { transferStatus } from './transferStatus'
-import { mayChangeWhere } from './RedirectDialog'
 import { pcs, sheetHref, type FlowTransfer } from './types'
 
 /**
  * One process transfer, in full: what was sent, from which department to
  * which (or to which outside unit), by whom and when, who counted it in, and
  * bundle by bundle what was sent and what arrived. From here it is counted
- * in, settled, printed, or its sheet opened.
+ * in, settled, printed, its sheet opened — or taken back, when it went wrong.
  */
 export type TransferRow = Omit<FlowTransfer, 'toStep' | 'fromStep'> & {
   fromStep: { id: string; name: string; department?: { name: string } }
@@ -22,21 +21,31 @@ export type TransferRow = Omit<FlowTransfer, 'toStep' | 'fromStep'> & {
   mo: { id: string; moNumber: string; so: { soNumber: string; customer: { name: string } } | null }
   jobCard: { id: string; jobCardNumber: string; designNo: string | null; moLine: { color: string; style: { code: string } } } | null
   createdBy?: { name: string } | null
+  /** Stages it went past on the route — only on cards made before the route's order was kept. */
+  passed?: string[]
 }
+
+/**
+ * Whether to offer "Take back" at all: a card on our own floor, not
+ * cancelled, and not counted in with a difference. Whether the receiving stage
+ * has worked on the pieces is the server's to say, when it is tried.
+ */
+export const mayTakeBack = (t: Pick<FlowTransfer, 'status' | 'vendor' | 'lines'>) =>
+  !t.vendor && ['DISPATCHED', 'PARTLY_RECEIVED', 'RECEIVED'].includes(t.status) && !t.lines.some((l) => l.shortQty > 0 || l.excessQty > 0)
 
 export function TransferDetailDialog({
   t,
   onClose,
   onCountIn,
   onSettle,
-  onRedirect,
+  onTakeBack,
 }: {
   t: TransferRow
   onClose: () => void
   onCountIn: () => void
   onSettle: () => void
-  /** Send it to another step instead. */
-  onRedirect?: () => void
+  /** Sent by mistake: the pieces go back to the department that sent them. */
+  onTakeBack?: () => void
 }) {
   const st = transferStatus(t)
   const sent = t.lines.reduce((s, l) => s + l.dispatchedQty, 0)
@@ -89,9 +98,9 @@ export function TransferDetailDialog({
               <ExternalLink size={15} /> {t.toStep.name} sheet
             </a>
           )}
-          {onRedirect && mayChangeWhere(t) && can('production', 'edit') && (
-            <button type="button" className="btn-secondary" onClick={onRedirect} title="Send these pieces to another step instead">
-              <Shuffle size={15} /> Change where it goes
+          {onTakeBack && mayTakeBack(t) && can('production', 'edit') && (
+            <button type="button" className="btn-secondary" onClick={onTakeBack} title="The pieces go back to the department that sent them">
+              <Undo2 size={15} /> Take back
             </button>
           )}
           <button type="button" className="btn-secondary" onClick={onClose}>
@@ -111,6 +120,15 @@ export function TransferDetailDialog({
         ))}
       </dl>
       {t.status === 'CANCELLED' && t.cancelReason && <p className="text-muted-foreground text-sm">Cancelled: {t.cancelReason}</p>}
+      {!!t.passed?.length && t.status !== 'CANCELLED' && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-700" />
+          <p className="text-foreground">
+            This card went from {t.fromStep.name} straight to {t.toStep.name}, past {t.passed.join(', ')}. Stages now run in the route&apos;s order: take it back, then send the
+            pieces on to {t.passed[0]}.
+          </p>
+        </div>
+      )}
 
       <Section icon={Send} title={`Bundles (${t.lines.length})`}>
         <div className="border-border overflow-x-auto rounded-lg border">

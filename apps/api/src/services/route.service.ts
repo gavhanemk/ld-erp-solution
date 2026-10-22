@@ -50,7 +50,7 @@ export interface Destination<T> {
   step: T
   /** The step pieces finish at, into finished goods. */
   last: boolean
-  /** The natural next one in the route's order. */
+  /** The next one in the route's order — always, now that the order is kept. */
   next: boolean
   /** How many more pieces of each bundle may go there. */
   caps: Record<string, number>
@@ -59,16 +59,17 @@ export interface Destination<T> {
 }
 
 /**
- * Where pieces at one step may go next. The order's route says which steps
- * there are; which one the pieces go to is the floor's choice: any step those
- * bundles have not all been through yet — printing before stitching or after,
- * as the work needs. Cutting is where pieces start, so nothing goes back to
- * it, and the last step — into finished goods — takes only pieces that have
- * been through every other step, so nothing gets there half-made.
+ * Where pieces at one step go next: the next step of the order's route, in
+ * the route's order. Nobody picks, so no step is ever passed by — to leave a
+ * step out for one order, a production manager skips it on the order; to do
+ * the steps in another order, the order's stages are changed ahead of the
+ * pieces. Cutting is where pieces start, so nothing goes back to it. The last
+ * step — into finished goods — also takes only pieces that have been through
+ * every other step, so nothing gets there half-made.
  *
- * Counted in pieces, bundle by bundle: a bundle of 10 with 6 sent to
- * stitching can still send 4 there. A bundle split off another carries on
- * from what its parent had been through.
+ * Counted in pieces, bundle by bundle: a bundle of 10 with 6 sent on can
+ * still send 4. A bundle split off another carries on from what its parent
+ * had been through. Empty when the step is the last one.
  */
 export function destinationsFrom<T extends RouteStep>(
   steps: T[],
@@ -90,29 +91,40 @@ export function destinationsFrom<T extends RouteStep>(
     if (own > 0 || !parent || depth > 5) return own
     return Math.min(qtyOf.get(bundleId) ?? 0, through(parent, stepId, depth + 1))
   }
-  const naturalNext = nextStepAfter(steps, fromId)?.id ?? null
 
-  return live
-    .filter((s) => s.id !== fromId && !starts.has(s.id))
-    .map((s) => {
-      const last = s.id === lastId
-      const others = live.filter((t) => !starts.has(t.id) && t.id !== s.id)
-      const caps: Record<string, number> = {}
-      const missing: Record<string, string[]> = {}
-      for (const b of bundles) {
-        const already = through(b.id, s.id)
-        let cap = b.qty - already
-        if (last) {
-          const done = others.length ? Math.min(...others.map((t) => through(b.id, t.id))) : b.qty
-          cap = Math.min(cap, done - already)
-          // The steps holding it back: some of its pieces have not been through them.
-          const short = others.filter((t) => through(b.id, t.id) <= already && through(b.id, t.id) < b.qty).map((t) => t.name)
-          if (short.length) missing[b.id] = short
-        }
-        caps[b.id] = Math.max(0, cap)
-      }
-      return { step: s, last, next: s.id === naturalNext, caps, missing }
-    })
+  const s = nextStepAfter(steps, fromId)
+  if (!s || starts.has(s.id)) return []
+  const last = s.id === lastId
+  const others = live.filter((t) => !starts.has(t.id) && t.id !== s.id)
+  const caps: Record<string, number> = {}
+  const missing: Record<string, string[]> = {}
+  for (const b of bundles) {
+    const already = through(b.id, s.id)
+    let cap = b.qty - already
+    if (last) {
+      const done = others.length ? Math.min(...others.map((t) => through(b.id, t.id))) : b.qty
+      cap = Math.min(cap, done - already)
+      // The steps holding it back: some of its pieces have not been through them.
+      const short = others.filter((t) => through(b.id, t.id) <= already && through(b.id, t.id) < b.qty).map((t) => t.name)
+      if (short.length) missing[b.id] = short
+    }
+    caps[b.id] = Math.max(0, cap)
+  }
+  return [{ step: s, last, next: true, caps, missing }]
+}
+
+/**
+ * Steps a transfer passed by: those on the route between where it left and
+ * where it went. Empty for a transfer that went to the next step. Transfers
+ * made before the route's order was kept strictly can have some; those
+ * pieces have to be taken back and sent on in order.
+ */
+export function passedBy<T extends RouteStep>(steps: T[], fromId: string, toId: string): T[] {
+  const list = ordered(steps)
+  const from = list.findIndex((s) => s.id === fromId)
+  const to = list.findIndex((s) => s.id === toId)
+  if (from < 0 || to <= from) return []
+  return list.slice(from + 1, to).filter((s) => !s.skippedAt)
 }
 
 /** A check: what comes out is passed or failed rather than made. */

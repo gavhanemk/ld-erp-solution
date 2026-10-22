@@ -6,7 +6,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { getPrintHeader } from '../lib/printData'
-import { applyRouting, editRoute, editRouteSchema, restoreStep, routeStepSchema, routingsFor, skipStep } from '../services/route.service'
+import { applyRouting, editRoute, editRouteSchema, passedBy, restoreStep, routeStepSchema, routingsFor, skipStep } from '../services/route.service'
 import {
   billSchema,
   cancelTransfer,
@@ -14,9 +14,6 @@ import {
   decide,
   decideSchema,
   destinationsOf,
-  redirectOptions,
-  redirectSchema,
-  redirectTransfer,
   dispatch,
   dispatchSchema,
   holdMo,
@@ -41,7 +38,7 @@ import { processCode } from '../services/challanNo'
 import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
 import { createCutting, cuttingContractors, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
-import { ensureJobCards, fillJobCardBlanks, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
+import { boardCards, ensureJobCards, fillJobCardBlanks, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
 
 /**
  * The floor: an order's stages, its job cards and their department sheets
@@ -216,6 +213,23 @@ const transferInclude = {
   },
 } satisfies Prisma.ProcessTransferInclude
 
+/**
+ * Transfers with the stages each passed by on its order's route — none for
+ * one sent in the route's order. Only transfers made before the order was
+ * kept strictly can have any; the screen offers to take those back.
+ */
+async function withPassed<T extends { moId: string; fromStepId: string; toStepId: string; isRework: boolean; status: string }>(rows: T[]) {
+  const moIds = [...new Set(rows.map((r) => r.moId))]
+  const steps = moIds.length
+    ? await prisma.mOStep.findMany({ where: { moId: { in: moIds } }, select: { id: true, moId: true, sequence: true, name: true, kind: true, isQcStep: true, execution: true, skippedAt: true } })
+    : []
+  return rows.map((r) => ({
+    ...r,
+    passed: r.isRework || r.status === 'CANCELLED' ? [] : passedBy(steps.filter((s) => s.moId === r.moId), r.fromStepId, r.toStepId).map((s) => s.name),
+  }))
+}
+
+
 const OPEN_TRANSFER: TransferStatus[] = ['DISPATCHED', 'PARTLY_RECEIVED', 'DISCREPANCY']
 
 /** The views of the transfers list, as its tabs name them. */
@@ -277,13 +291,13 @@ router.get('/transfers', requirePermission(MODULE, 'view'), async (req, res) => 
     prisma.processTransfer.findMany({ where, include: transferInclude, orderBy: { createdAt: 'desc' }, skip: (page - 1) * limit, take: limit }),
     prisma.processTransfer.count({ where }),
   ])
-  res.json({ success: true, data: rows, pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 } })
+  res.json({ success: true, data: await withPassed(rows), pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 } })
 })
 
 router.get('/transfers/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const t = await prisma.processTransfer.findUnique({ where: { id: req.params.id }, include: transferInclude })
   if (!t) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
-  res.json({ success: true, data: t })
+  res.json({ success: true, data: (await withPassed([t]))[0] })
 })
 
 /**
@@ -311,9 +325,9 @@ router.get('/transfers/:id/print', requirePermission(MODULE, 'view'), async (req
 })
 
 /**
- * Where pieces at a step may go next: every step on the order's route, with
- * how many pieces of each bundle may go there and, for the last step, what
- * each bundle still has to go through first.
+ * Where pieces at a step go next: the next step of the order's route (none
+ * from the last one), with how many pieces of each bundle may go there and,
+ * for the last step, what each bundle still has to go through first.
  */
 router.get('/orders/:id/destinations', requirePermission(MODULE, 'view'), async (req, res) => {
   const fromStepId = typeof req.query.fromStepId === 'string' ? req.query.fromStepId : ''
@@ -327,24 +341,6 @@ router.get('/orders/:id/destinations', requirePermission(MODULE, 'view'), async 
   res.json({
     success: true,
     data: list.map((c) => ({ stepId: c.step.id, name: c.step.name, last: c.last, next: c.next, caps: c.caps, missing: c.missing })),
-  })
-})
-
-/** Where a transfer could go instead, or why it cannot any more. */
-router.get('/transfers/:id/redirect-options', requirePermission(MODULE, 'view'), async (req, res) => {
-  res.json({ success: true, data: await redirectOptions(prisma, req.params.id) })
-})
-
-/** A transfer sent to another step instead — taking back its count-in, if nobody there has worked on the pieces yet. */
-router.post('/transfers/:id/redirect', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const data = redirectSchema.parse(req.body)
-  const out = await prisma.$transaction((tx) => redirectTransfer(tx, req.params.id, data, req.user!.id), T)
-  const t = await prisma.processTransfer.findUniqueOrThrow({ where: { id: out.transfer.id }, include: transferInclude })
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ProcessTransfer', entityId: out.old.id, after: { redirectedTo: t.transferNumber, toStep: t.toStep.name, reason: data.reason } })
-  res.json({
-    success: true,
-    message: `${out.old.transferNumber} cancelled; the same pieces now go to ${t.toStep.name} on ${t.transferNumber}. Print the new card for them.`,
-    data: t,
   })
 })
 
@@ -397,7 +393,7 @@ router.post('/transfers/:id/cancel', requirePermission(MODULE, 'edit'), async (r
   const { reason } = reasonSchema.parse(req.body)
   const t = await prisma.$transaction((tx) => cancelTransfer(tx, req.params.id, reason, req.user!.id), T)
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ProcessTransfer', entityId: t.id, after: t })
-  res.json({ success: true, message: `${t.transferNumber} cancelled: the pieces are back where they were sent from.`, data: t })
+  res.json({ success: true, message: `${t.transferNumber} taken back: the pieces are back where they were sent from.`, data: t })
 })
 
 // ─── Work at a step ───────────────────────────────────────────
@@ -606,6 +602,13 @@ router.get('/stage-report', requirePermission(MODULE, 'view'), async (req, res) 
   const from = s('from') ? new Date(`${s('from')}T00:00:00+05:30`) : undefined
   const to = s('to') ? new Date(`${s('to')}T23:59:59.999+05:30`) : undefined
   res.json({ success: true, data: await stageReport(prisma, { operationId, from, to, moId: s('moId') }) })
+})
+
+/** GET /board?q=&show=open|all — every open job card, its route, and where its pieces are stage by stage. */
+router.get('/board', requirePermission(MODULE, 'view'), async (req, res) => {
+  const p = page(req)
+  const out = await boardCards(prisma, { q: text(req.query.q), show: text(req.query.show), ...p })
+  res.json({ success: true, data: out.data, pagination: { ...p, total: out.total, pages: Math.ceil(out.total / p.limit) || 1 } })
 })
 
 router.get('/stage-tabs', requirePermission(MODULE, 'view'), async (_req, res) => {

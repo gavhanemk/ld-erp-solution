@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertCircle, ArrowRight, Ban, ClipboardCheck, ExternalLink, Plus, Printer, RefreshCw, Scale, Search, Shuffle } from 'lucide-react'
+import { AlertCircle, ArrowRight, ClipboardCheck, ExternalLink, Plus, Printer, RefreshCw, Scale, Search, Undo2 } from 'lucide-react'
 import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useAppSettings } from '@/lib/appSettings'
@@ -10,22 +10,25 @@ import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { CountInDialog } from '@/components/production/floor/CountInDialog'
 import { SettleDialog } from '@/components/production/floor/SettleDialog'
 import { NewTransferDialog } from '@/components/production/floor/NewTransferDialog'
-import { TransferDetailDialog, type TransferRow } from '@/components/production/floor/TransferDetailDialog'
 import { transferStatus } from '@/components/production/floor/transferStatus'
-import { RedirectDialog, mayChangeWhere } from '@/components/production/floor/RedirectDialog'
+import { BoardView } from '@/components/production/floor/BoardView'
+import { TransferDetailDialog, mayTakeBack, type TransferRow } from '@/components/production/floor/TransferDetailDialog'
 import { pcs, sheetHref, type FlowTransfer } from '@/components/production/floor/types'
 
 /**
  * Process transfers: every handover of a job card's bundles from one
- * department to the next — on our floor, counted in where it arrives, or out
- * to a unit on a job-work challan, back when the unit returns the pieces.
- * Tabs for what needs doing (to count in, short, at outside units) and what
- * is done; each row says in words where the transfer stands and has the one
- * button it needs.
+ * department to the next, in the route's order — on our floor, counted in
+ * where it arrives, or out to a unit on a job-work challan, back when the unit
+ * returns the pieces. It opens on the board: each job card's route with where
+ * its pieces are and what to do next. The other tabs are the transfer cards
+ * themselves — what needs doing (to count in, short, at outside units) and
+ * what is done; each row says in words where the transfer stands and has the
+ * one button it needs.
  */
 
-type View = 'count' | 'short' | 'units' | 'received' | 'all'
+type View = 'board' | 'count' | 'short' | 'units' | 'received' | 'all'
 const VIEWS: Array<{ key: View; label: string; empty: string }> = [
+  { key: 'board', label: 'Job cards', empty: '' },
   { key: 'count', label: 'To count in', empty: 'Nothing is waiting to be counted in. Transfers sent from one department to the next show here until the receiving department counts them in.' },
   { key: 'short', label: 'Short', empty: 'No transfer is short. One that arrived with fewer pieces than were sent shows here until it is settled.' },
   { key: 'units', label: 'At outside units', empty: 'Nothing is with an outside unit.' },
@@ -48,10 +51,10 @@ export default function TransfersPage() {
   const [detail, setDetail] = useState<TransferRow | null>(null)
   const [counting, setCounting] = useState<TransferRow | null>(null)
   const [settling, setSettling] = useState<TransferRow | null>(null)
-  const [cancelling, setCancelling] = useState<TransferRow | null>(null)
-  // Sent but not counted in: it can still go to another step.
-  const [redirecting, setRedirecting] = useState<TransferRow | null>(null)
+  // Sent by mistake: the pieces go back to the department that sent them.
+  const [takingBack, setTakingBack] = useState<TransferRow | null>(null)
   const [creating, setCreating] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
   const [busy, setBusy] = useState(false)
   const latest = useRef(0)
 
@@ -65,15 +68,13 @@ export default function TransfersPage() {
     try {
       const res = await api.get<{ data: Record<View, number> }>('/production/transfers/counts')
       setCounts(res.data)
-      // Open on what needs doing first.
-      setView((v) => v ?? (res.data.count ? 'count' : res.data.short ? 'short' : res.data.units ? 'units' : 'all'))
     } catch {
-      setView((v) => v ?? 'all')
+      // The tabs still work without their numbers.
     }
   }, [])
 
   const load = useCallback(async () => {
-    if (!view) return
+    if (!view || view === 'board') return
     const ticket = ++latest.current
     setLoading(true)
     setError(null)
@@ -93,6 +94,9 @@ export default function TransfersPage() {
   }, [page, rowsPerPage, view, debounced])
 
   useEffect(() => {
+    // Opens on the board; a link can open a tab of cards instead.
+    const asked = new URLSearchParams(window.location.search).get('view') as View | null
+    setView(asked && VIEWS.some((v) => v.key === asked) ? asked : 'board')
     void loadCounts()
   }, [loadCounts])
   useEffect(() => {
@@ -105,18 +109,19 @@ export default function TransfersPage() {
     setCreating(false)
     setDetail(null)
     setMessage(m)
+    setRefreshKey((k) => k + 1)
     void load()
     void loadCounts()
   }
-  const cancel = async (t: TransferRow, reason: string) => {
+  const takeBack = async (t: TransferRow, reason: string) => {
     setBusy(true)
     try {
       const res = await api.post<{ message?: string }>(`/production/transfers/${t.id}/cancel`, { reason })
-      setCancelling(null)
-      saved(res.message ?? 'Cancelled.')
+      setTakingBack(null)
+      saved(res.message ?? 'Taken back.')
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not cancel it.')
-      setCancelling(null)
+      setError(err instanceof ApiError ? err.message : 'Could not take it back.')
+      setTakingBack(null)
     } finally {
       setBusy(false)
     }
@@ -149,18 +154,19 @@ export default function TransfersPage() {
     return null
   }
 
-  const current = VIEWS.find((v) => v.key === view) ?? VIEWS[4]
+  const current = VIEWS.find((v) => v.key === view) ?? VIEWS[0]
   return (
     <div className="space-y-4">
       <div className="page-header">
         <div>
           <h1 className="page-title text-xl sm:text-2xl">Process Transfers</h1>
-          <p className="page-subtitle hidden sm:block">Bundles handed from one department to the next — counted in where they arrive, or out to an outside unit and back</p>
+          <p className="page-subtitle hidden sm:block">Bundles handed from one stage to the next, in the route&apos;s order — counted in where they arrive, or out to an outside unit and back</p>
         </div>
         <div className="flex items-center gap-2">
           <button
             className="btn-ghost"
             onClick={() => {
+              setRefreshKey((k) => k + 1)
               void load()
               void loadCounts()
             }}
@@ -223,18 +229,29 @@ export default function TransfersPage() {
             <Search size={14} className="text-muted-foreground" />
             <input
               className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder="Search transfer no., job card, order, bundle, department or unit…"
+              placeholder={view === 'board' ? 'Search job card, order, style, colour or customer…' : 'Search transfer no., job card, order, bundle, department or unit…'}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search"
             />
           </div>
-          <span className="text-muted-foreground ml-auto text-xs">
-            {total} {total === 1 ? 'transfer' : 'transfers'}
-          </span>
+          {view !== 'board' && (
+            <span className="text-muted-foreground ml-auto text-xs">
+              {total} {total === 1 ? 'transfer' : 'transfers'}
+            </span>
+          )}
         </div>
 
-        {loading && !rows.length ? (
+        {view === 'board' ? (
+          <BoardView
+            search={debounced}
+            refreshKey={refreshKey}
+            onSaved={(m) => {
+              setMessage(m)
+              void loadCounts()
+            }}
+          />
+        ) : loading && !rows.length ? (
           <div className="space-y-2 p-4">
             {[0, 1, 2].map((i) => (
               <div key={i} className="skeleton h-14 w-full rounded-lg" />
@@ -286,6 +303,7 @@ export default function TransfersPage() {
                             <span className="text-foreground font-medium">{t.toStep.name}</span>
                           </span>
                           {t.vendor && <span className="text-muted-foreground block text-[11px]">at {t.vendor.name} (outside unit)</span>}
+                          {!!t.passed?.length && <span className="warn-text block text-[11px]">Passed {t.passed.join(', ')}: take it back</span>}
                         </td>
                         <td className="text-right text-xs tabular-nums">
                           <span className="text-foreground font-semibold">{pcs(sent)}</span>
@@ -305,14 +323,14 @@ export default function TransfersPage() {
                             <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => print(t)} aria-label={`Print ${t.transferNumber}`} title="Print the card">
                               <Printer size={14} />
                             </button>
-                            {can('production', 'edit') && mayChangeWhere(t) && t.status !== 'RECEIVED' && (
-                              <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setRedirecting(t)} title="Send these pieces to another step instead">
-                                <Shuffle size={14} /> Change where it goes
-                              </button>
-                            )}
-                            {can('production', 'edit') && t.status === 'DISPATCHED' && !got && (
-                              <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive h-8 px-2" onClick={() => setCancelling(t)} aria-label={`Cancel ${t.transferNumber}`} title="Cancel">
-                                <Ban size={14} />
+                            {can('production', 'edit') && mayTakeBack(t) && (t.passed?.length || (t.status === 'DISPATCHED' && !got)) && (
+                              <button
+                                type="button"
+                                className={`h-8 px-2 text-xs ${t.passed?.length ? 'btn-secondary' : 'btn-ghost text-muted-foreground hover:text-destructive'}`}
+                                onClick={() => setTakingBack(t)}
+                                title="The pieces go back to the department that sent them"
+                              >
+                                <Undo2 size={14} /> Take back
                               </button>
                             )}
                           </span>
@@ -342,14 +360,15 @@ export default function TransfersPage() {
                     <p className="text-muted-foreground text-xs">
                       {t.jobCard ? `${t.jobCard.jobCardNumber} · ${t.jobCard.moLine.style.code} ${t.jobCard.moLine.color}` : t.mo.moNumber} · {pcs(sent)} pcs · {formatDate(t.dispatchDate)}
                     </p>
+                    {!!t.passed?.length && <p className="warn-text text-xs">Passed {t.passed.join(', ')}: take it back</p>}
                     <div className="flex flex-wrap items-center gap-1" onClick={(e) => e.stopPropagation()}>
                       {actionOf(t)}
                       <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => print(t)}>
                         <Printer size={14} /> Print
                       </button>
-                      {can('production', 'edit') && mayChangeWhere(t) && t.status !== 'RECEIVED' && (
-                        <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setRedirecting(t)}>
-                          <Shuffle size={14} /> Change where it goes
+                      {can('production', 'edit') && mayTakeBack(t) && (t.passed?.length || t.status === 'DISPATCHED') && (
+                        <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setTakingBack(t)}>
+                          <Undo2 size={14} /> Take back
                         </button>
                       )}
                     </div>
@@ -359,7 +378,7 @@ export default function TransfersPage() {
             </div>
           </>
         )}
-        <Pagination page={page} pages={Math.ceil(total / rowsPerPage) || 1} onPageChange={setPage} busy={loading} />
+        {view !== 'board' && <Pagination page={page} pages={Math.ceil(total / rowsPerPage) || 1} onPageChange={setPage} busy={loading} />}
       </div>
 
       {detail && (
@@ -374,8 +393,8 @@ export default function TransfersPage() {
             setSettling(detail)
             setDetail(null)
           }}
-          onRedirect={() => {
-            setRedirecting(detail)
+          onTakeBack={() => {
+            setTakingBack(detail)
             setDetail(null)
           }}
         />
@@ -391,25 +410,17 @@ export default function TransfersPage() {
           }}
         />
       )}
-      {redirecting && (
-        <RedirectDialog
-          transfer={redirecting}
-          onClose={() => setRedirecting(null)}
-          onDone={(m) => {
-            setRedirecting(null)
-            saved(m)
-          }}
-        />
-      )}
-      {cancelling && (
+      {takingBack && (
         <ReasonDialog
-          title={`Cancel ${cancelling.transferNumber}?`}
-          description="Nobody has counted it in, so the pieces go back to the department that sent them."
-          confirmLabel="Cancel the transfer"
+          title={`Take back ${takingBack.transferNumber}?`}
+          description={`The pieces go back to ${takingBack.fromStep.name}, as if never sent${
+            takingBack.lines.some((l) => l.receivedQty > 0) ? `; the count-in at ${takingBack.toStep.name} is undone first, refused if ${takingBack.toStep.name} has already worked on them` : ''
+          }. From there, send them on to the next stage in order.`}
+          confirmLabel="Take it back"
           danger
           busy={busy}
-          onCancel={() => setCancelling(null)}
-          onConfirm={(reason) => void cancel(cancelling, reason)}
+          onCancel={() => setTakingBack(null)}
+          onConfirm={(reason) => void takeBack(takingBack, reason)}
         />
       )}
     </div>

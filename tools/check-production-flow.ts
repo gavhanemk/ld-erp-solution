@@ -133,7 +133,7 @@ async function main() {
 
         // ── Cutting sheet: sizes issued to two contractors, received back cut ──
         const i1 = await issueToCutter(tx, mo.id, cutterIssueSchema.parse({ moLineId: card.moLineId, cutterName: 'Ramesh', lotNo: 'LOT-7', ratio: 'S2 M2', fabricItemId: fabric.id, fabricGiven: 300, planned: [{ sizeId: S1.id, qty: 120 }, { sizeId: S2.id, qty: 100 }] }), user.id)
-        check('issued to a contractor: with them, nothing cut yet', i1.status === 'IN_PROGRESS' && i1.actualPieces === 0 && i1.plannedPieces === 220 && i1.cutOrderNumber === `${mo.moNumber}-C1`)
+        check('issued to a contractor: with them, nothing cut yet', i1.status === 'IN_PROGRESS' && i1.actualPieces === 0 && i1.plannedPieces === 220 && /^CUT\/.+\/\d{2}$/.test(i1.cutOrderNumber), i1.cutOrderNumber)
         await refuses('not more than is left, counting what contractors have', () => issueToCutter(tx, mo.id, cutterIssueSchema.parse({ moLineId: card.moLineId, cutterName: 'Suresh', planned: [{ sizeId: S1.id, qty: 81 }] }), user.id), 'MORE_THAN_PLANNED')
         const i2 = await issueToCutter(tx, mo.id, cutterIssueSchema.parse({ moLineId: card.moLineId, cutterName: 'Suresh', fabricItemId: fabric.id, planned: [{ sizeId: S1.id, qty: 80 }, { sizeId: S2.id, qty: 100 }] }), user.id)
         let figs = (await jobCardDetail(tx, card.id))
@@ -151,7 +151,7 @@ async function main() {
 
         // ── Process transfer: cutting → stitching, counted in short, settled ──
         const { transfer: t1 } = await dispatch(tx, mo.id, dispatchSchema.parse({ fromStepId: CUT, lines: bundles.map((b) => ({ bundleId: b.id, qty: b.qty })), issuedBy: 'Ramesh' }), user.id)
-        check('the transfer is filed under the job card', t1.jobCardId === card.id && t1.transferNumber === `${mo.moNumber}-T1`)
+        check('the transfer is filed under the job card', t1.jobCardId === card.id && /^CUT\/.+\/\d{2}$/.test(t1.transferNumber), t1.transferNumber)
         const t1Lines = await tx.processTransferLine.findMany({ where: { transferId: t1.id }, orderBy: { bundle: { bundleNo: 'asc' } } })
         await receive(tx, t1.id, receiveSchema.parse({ lines: t1Lines.map((l, i) => ({ lineId: l.id, qty: i === 0 ? l.dispatchedQty - 3 : l.dispatchedQty })), close: true, receivedBy: 'Mahesh' }), user.id)
         await settleShort(tx, t1.id, settleSchema.parse({ lines: [{ lineId: t1Lines[0].id, qty: 3, outcome: 'FOUND' }], reason: 'found under the table' }), { userId: user.id, mayApprove: false })

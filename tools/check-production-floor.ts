@@ -212,7 +212,7 @@ async function main() {
         await refuses('not more than a bundle has done', () => dispatch(tx, mo.id, dispatchSchema.parse({ fromStepId: CUT, lines: [{ bundleId: b1[0].id, qty: 26 }] }), user.id), 'NOT_ENOUGH_PIECES')
         const t1Key = `k-t1-${stamp}`
         const { transfer: t1 } = await dispatch(tx, mo.id, dispatchSchema.parse({ fromStepId: CUT, lines: b1.map((b) => ({ bundleId: b.id, qty: 25 })), issuedBy: 'Suresh', clientKey: t1Key }), user.id)
-        check('numbered from the order, sent to stitching', t1.transferNumber === `${mo.moNumber}-T1` && t1.toStepId === STI && t1.status === 'DISPATCHED')
+        check('numbered on the cutting run of the order, sent to stitching', /^CUT\/.+\/\d{2}$/.test(t1.transferNumber) && t1.toStepId === STI && t1.status === 'DISPATCHED', t1.transferNumber)
         const dup = await dispatch(tx, mo.id, dispatchSchema.parse({ fromStepId: CUT, lines: b1.map((b) => ({ bundleId: b.id, qty: 25 })), clientKey: t1Key }), user.id)
         check('a transfer saved twice is sent once', dup.duplicate && (await tx.processTransfer.count({ where: { moId: mo.id } })) === 1)
         check('400 on the way to stitching', (await figures(mo.id))('Stitching').inTransit === 400)
@@ -274,7 +274,6 @@ async function main() {
         check('part counted in: partly received', (await tx.processTransfer.findUniqueOrThrow({ where: { id: t2.id } })).status === 'PARTLY_RECEIVED')
         await receive(tx, t2.id, receiveSchema.parse({ lines: t2Lines.slice(4).map((l) => ({ lineId: l.id, qty: 25 })) }), user.id)
         check('the rest counted in: received, no discrepancy', (await tx.processTransfer.findUniqueOrThrow({ where: { id: t2.id } })).status === 'RECEIVED')
-        await refuses('a received card cannot be cancelled', () => cancelTransfer(tx, t2.id, 'sent by mistake', user.id), 'ALREADY_RECEIVED')
 
         // ── QC: 180 pass, 12 rejected, 8 back to stitching for rework ──
         const qcIn = await sorted(mo.id, await at(mo.id, LQC, 'WIP'))
@@ -292,6 +291,7 @@ async function main() {
         )
         F = await figures(mo.id)
         check('QC: 200 in, 180 passed, 12 rejected, 8 in rework', F('Line QC').received === 200 && F('Line QC').completed === 180 && F('Line QC').rejected === 12 && F('Line QC').inRework === 8)
+        await refuses('a card cannot be taken back once its pieces are worked on', () => cancelTransfer(tx, t2.id, 'sent by mistake', user.id), 'WORKED_ON')
         moNow = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: mo.id } })
         check('the order shows rework required', moNow.progress === 'REWORK', moNow.progress ?? '')
         let flow = await flowSummary(tx, mo.id)
@@ -349,7 +349,8 @@ async function main() {
         // ── Packing: 190 in and packed ──
         const fqcDone = await sorted(mo.id, await at(mo.id, FQC, 'DONE'))
         const { transfer: t4 } = await dispatch(tx, mo.id, dispatchSchema.parse({ fromStepId: FQC, lines: fqcDone }), user.id)
-        await receive(tx, t4.id, receiveSchema.parse({ lines: (await tx.processTransferLine.findMany({ where: { transferId: t4.id } })).map((l) => ({ lineId: l.id, qty: l.dispatchedQty })) }), user.id)
+        // Final QC and packing are one department: the move is counted in as it is made.
+        if (t4.status !== 'RECEIVED') await receive(tx, t4.id, receiveSchema.parse({ lines: (await tx.processTransferLine.findMany({ where: { transferId: t4.id } })).map((l) => ({ lineId: l.id, qty: l.dispatchedQty })) }), user.id)
         await recordWork(tx, mo.id, PKG, workSchema.parse({ lines: (await at(mo.id, PKG, 'WIP')).map((r) => ({ bundleId: r.bundleId, done: r.qty })) }), user.id)
         const packedBundle = (await at(mo.id, PKG, 'DONE'))[0].bundleId
         await refuses('packing is the last step: nothing goes on from it', () => dispatch(tx, mo.id, dispatchSchema.parse({ fromStepId: PKG, lines: [{ bundleId: packedBundle, qty: 1 }] }), user.id), 'LAST_STEP')
