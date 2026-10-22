@@ -153,18 +153,18 @@ export function MoProductionPanel({
                 {flow?.mo.routing && (
                   <p>
                     From routing {flow.mo.routing.code} v{flow.mo.routing.version}
-                    {flow.mo.routing.latest !== flow.mo.routing.version ? ` (routing now v${flow.mo.routing.latest})` : ''}. Changes here are for this order only.
+                    {flow.mo.routing.latest !== flow.mo.routing.version ? ` — the routing is now v${flow.mo.routing.latest}: open Stages to take its new stages` : ''}. To change the stages or their order, change the routing in Masters → Routings.
                   </p>
                 )}
                 {live && flow && can('production', mo.status === 'DRAFT' ? 'edit' : 'approve') && (
                   <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOpen({ kind: 'route' })}>
-                    <Route size={13} /> Change stages
+                    <Route size={13} /> Stages
                   </button>
                 )}
               </div>
             ) : (
               <div className="space-y-1.5">
-                <p>The stages come from the routing for the style; they can be changed for this order.</p>
+                <p>The stages come from the style&apos;s routing in Masters → Routings, in its order.</p>
                 {live && can('production', 'edit') &&
                   (materialsIssued ? (
                     <button type="button" className="btn-primary h-7 px-2.5 text-xs" onClick={onLoadStages}>

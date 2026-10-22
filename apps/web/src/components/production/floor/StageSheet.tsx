@@ -190,6 +190,15 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   const tot = (k: keyof Pick<SheetRow, 'in' | 'processed' | 'out' | 'damaged' | 'rejected' | 'rework'>) => rows.reduce((s, r) => s + r[k], 0)
 
   const incoming = d.transfers.filter((t) => t.toStep.id === step.id && !t.vendor && (t.status === 'DISPATCHED' || t.status === 'PARTLY_RECEIVED'))
+  // Cards that brought pieces here past other stages, made before the route's order was kept: taken back before anything else.
+  const route = [...d.steps].sort((a, b) => a.sequence - b.sequence)
+  const passedOf = (t: FlowTransfer) => {
+    const i = route.findIndex((s) => s.id === t.fromStep.id)
+    const j = route.findIndex((s) => s.id === t.toStep.id)
+    return i < 0 || j <= i ? [] : route.slice(i + 1, j).filter((s) => !s.skippedAt).map((s) => s.name)
+  }
+  const cameWrong = d.transfers.filter((t) => t.toStep.id === step.id && !t.isRework && t.status !== 'CANCELLED' && passedOf(t).length > 0)
+  const sendOn = !!next && !cameWrong.length
   const short = d.transfers.filter((t) => t.toStep.id === step.id && t.status === 'DISCREPANCY')
   const outgoing = d.transfers.filter((t) => t.fromStep.id === step.id && t.status !== 'CANCELLED' && !t.isRework)
   const jwos = d.jobWorkOrders.filter((j) => j.step.id === step.id)
@@ -218,6 +227,18 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   // What waits here, each with the button that does it.
   const ready = (f?.waiting ?? 0) + (fromHand ? f?.inHand ?? 0 : 0)
   const steps: NextStep[] = []
+  for (const t of cameWrong) {
+    steps.push({
+      key: `wrong-${t.id}`,
+      tone: 'warn',
+      text: (
+        <>
+          <span className="font-mono text-xs">{t.transferNumber}</span> brought these pieces from {t.fromStep.name} straight here, past {passedOf(t).join(', ')}. Take it back to {t.fromStep.name}, then send them on in order.
+        </>
+      ),
+      actions: mayEdit ? [{ label: 'Take back', icon: Undo2, onClick: () => setOpen({ kind: 'cancelTransfer', transfer: t }) }] : [],
+    })
+  }
   for (const t of incoming) {
     const sent = t.lines.reduce((x, l) => x + l.dispatchedQty, 0)
     const got = t.lines.reduce((x, l) => x + l.receivedQty, 0)
@@ -255,12 +276,14 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   if (!outside && (f?.inHand ?? 0) > 0) {
     steps.push({
       key: 'hand',
-      text: check ? `${pcs(f!.inHand)} pcs here to check` : `${pcs(f!.inHand)} pcs here — when worked, ${next ? 'transfer them on to the next step you pick' : 'put them into finished goods'}; note any damaged`,
+      text: check
+        ? `${pcs(f!.inHand)} pcs here to check`
+        : `${pcs(f!.inHand)} pcs here — when worked, ${next ? `send them on to ${next.name}${next.execution === 'OUTSOURCED' ? ' (outside unit)' : ''}` : 'put them into finished goods'}; note any damaged`,
       actions: mayCreate
         ? check
           ? [{ label: 'Record the check', icon: ClipboardList, primary: true, onClick: () => setOpen({ kind: 'work' }) }]
           : [
-              ...(next ? [{ label: 'Transfer on', icon: Send, primary: true, onClick: () => setOpen({ kind: 'send' }) }] : []),
+              ...(sendOn ? [{ label: `Send to ${next!.name}`, icon: Send, primary: true, onClick: () => setOpen({ kind: 'send' }) }] : []),
               { label: 'Record work / damaged', icon: Hammer, onClick: () => setOpen({ kind: 'work' }) },
             ]
         : [],
@@ -269,11 +292,11 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   if ((f?.waiting ?? 0) > 0) {
     steps.push({
       key: 'ready',
-      text: `${pcs(f!.waiting)} pcs ${check ? 'passed' : 'done'} and ready ${step.last ? 'to go into finished goods' : 'to transfer on — pick the step they go to'}`,
+      text: `${pcs(f!.waiting)} pcs ${check ? 'passed' : 'done'} and ready ${step.last ? 'to go into finished goods' : next ? `to send on to ${next.name}` : 'to send on'}`,
       actions: step.last
         ? [{ label: 'Into finished goods', icon: PackageCheck, primary: true, onClick: () => window.location.assign(`/inventory/finished-goods?mo=${d.mo.id}`) }]
-        : mayCreate && next
-          ? [{ label: 'Transfer on', icon: Send, primary: true, onClick: () => setOpen({ kind: 'send' }) }]
+        : mayCreate && sendOn
+          ? [{ label: `Send to ${next!.name}`, icon: Send, primary: true, onClick: () => setOpen({ kind: 'send' }) }]
           : [],
     })
   }
@@ -557,7 +580,7 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
                       <Printer size={13} />
                     </button>
                     {mayEdit && t.status === 'DISPATCHED' && !t.lines.some((l) => l.receivedQty > 0) && (
-                      <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" aria-label={`Cancel ${t.transferNumber}`} onClick={() => setOpen({ kind: 'cancelTransfer', transfer: t })}>
+                      <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" aria-label={`Take back ${t.transferNumber}`} title="Take back" onClick={() => setOpen({ kind: 'cancelTransfer', transfer: t })}>
                         <Ban size={13} />
                       </button>
                     )}
@@ -612,13 +635,17 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
       )}
       {open?.kind === 'cancelTransfer' && (
         <ReasonDialog
-          title={`Cancel ${open.transfer.transferNumber}?`}
-          description="Nobody has counted it in, so the pieces come back here."
-          confirmLabel="Cancel the transfer"
+          title={`Take back ${open.transfer.transferNumber}?`}
+          description={
+            open.transfer.toStep.id === step.id
+              ? `The pieces go back to ${open.transfer.fromStep.name}, as if never sent; the count-in here is undone first. Refused if they have been worked on here.`
+              : 'Nobody has counted it in, so the pieces come back here.'
+          }
+          confirmLabel="Take it back"
           danger
           busy={busy}
           onCancel={() => setOpen(null)}
-          onConfirm={(reason) => void post(`/production/transfers/${open.transfer.id}/cancel`, { reason }, 'Cancelled.')}
+          onConfirm={(reason) => void post(`/production/transfers/${open.transfer.id}/cancel`, { reason }, 'Taken back.')}
         />
       )}
     </>

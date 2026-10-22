@@ -6,12 +6,14 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { CuttingSheet } from './CuttingSheet'
 import { StageSheet } from './StageSheet'
 import { useJobCard } from './useFlow'
-import { isCheck, pcs, stageOf } from './types'
+import { RouteStrip } from './RouteStrip'
+import { isCheck, pcs } from './types'
 
 /**
- * One job card's sheet for one stage, with the job card's other sheets a
- * click away along the top, in the order of its route. The cutting sheet and
- * the departments' sheets are worked from here.
+ * One job card's sheet for one stage, with its whole route along the top —
+ * each stage saying where the pieces are there — and every other sheet a
+ * click away on it. The cutting sheet and the departments' sheets are worked
+ * from here.
  */
 export function SheetView({
   jobCardId,
@@ -71,26 +73,13 @@ export function SheetView({
         <div className="skeleton h-72 w-full rounded-xl" />
       ) : (
         <>
-          <div className="-mx-1 flex gap-1 overflow-x-auto pb-1">
-            {d.steps.map((s) => {
-              const f = s.figures
-              const here = f ? f.inTransit + f.inHand + f.waiting + f.atVendor + f.inRework + f.damagedNow + f.rejectedNow : 0
-              return (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => setCurrent(s.id)}
-                  className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs ${
-                    s.id === current ? 'border-primary bg-primary/10 text-primary font-semibold' : 'border-border text-foreground hover:bg-secondary'
-                  } ${s.skippedAt ? 'opacity-60' : ''}`}
-                  title={`${stageOf(s) === 'QC' ? 'Check' : s.department.name}${s.execution === 'OUTSOURCED' ? ' · outside unit' : ''}`}
-                >
-                  {s.name}
-                  {f?.state === 'DONE' ? <span className="text-primary">✓</span> : here > 0 ? <span className="badge-info px-1.5 py-0 text-[10px]">{pcs(here)}</span> : null}
-                </button>
-              )
-            })}
-          </div>
+          <RouteStrip
+            steps={d.steps.map((s) => ({ id: s.id, name: s.name, kind: s.kind, execution: s.execution, skipped: !!s.skippedAt, figures: s.figures }))}
+            current={current}
+            onPick={setCurrent}
+            withCutters={d.cuttings.filter((c) => c.status === 'IN_PROGRESS').reduce((t, c) => t + c.plannedPieces, 0)}
+            label={`${d.card.jobCardNumber} route`}
+          />
           {message && (
             <div className="border-primary/40 bg-primary/5 rounded-lg border p-2.5">
               <p className="text-primary text-sm">{message}</p>

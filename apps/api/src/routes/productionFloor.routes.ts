@@ -6,7 +6,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { getPrintHeader } from '../lib/printData'
-import { applyRouting, editRoute, editRouteSchema, restoreStep, routeStepSchema, routingsFor, skipStep } from '../services/route.service'
+import { applyRouting, assertSameStages, editRoute, editRouteSchema, passedBy, routeFromRouting, routeStepSchema, routingsFor } from '../services/route.service'
 import {
   billSchema,
   cancelTransfer,
@@ -14,9 +14,6 @@ import {
   decide,
   decideSchema,
   destinationsOf,
-  redirectOptions,
-  redirectSchema,
-  redirectTransfer,
   dispatch,
   dispatchSchema,
   holdMo,
@@ -41,7 +38,7 @@ import { processCode } from '../services/challanNo'
 import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
 import { createCutting, cuttingContractors, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
-import { ensureJobCards, fillJobCardBlanks, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
+import { boardCards, ensureJobCards, fillJobCardBlanks, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
 
 /**
  * The floor: an order's stages, its job cards and their department sheets
@@ -102,7 +99,9 @@ router.post('/orders/:id/routing', requirePermission(MODULE, 'edit'), async (req
       if (!issued) throw new AppError(`${mo.moNumber}'s materials have not been issued yet. Raise its requisition and have the store issue it, then load the stages.`, 409, 'MATERIALS_NOT_ISSUED')
     }
     const routing = await applyRouting(tx, req.params.id, routingId)
-    // Changed for this order before loading: nothing has moved yet, so every step is written as given.
+    // Settings changed for this order before loading — never which stages, nor their order: those are the routing's.
+    if (steps) assertSameStages(steps, routing.steps, routing.code)
+    // Nothing has moved yet, so every step is written as given.
     if (steps) await editRoute(tx, req.params.id, { steps: steps.map((s) => ({ ...s, id: null })), reason: `Set for ${mo.moNumber} when its stages were loaded` })
     if (mo.status !== 'DRAFT') await ensureJobCards(tx, req.params.id)
     const names = (await tx.mOStep.findMany({ where: { moId: req.params.id }, orderBy: { sequence: 'asc' }, select: { name: true } })).map((s) => s.name)
@@ -117,15 +116,24 @@ router.post('/orders/:id/routing', requirePermission(MODULE, 'edit'), async (req
   })
   res.json({
     success: true,
-    message: `Stages set: ${routing.names.join(' → ')}${steps ? ` (from ${routing.routing.code}, changed for this order)` : ` (from ${routing.routing.code})`}. Each colour's process sheets are ready, starting with cutting.`,
+    message: `Stages set: ${routing.names.join(' → ')} (from ${routing.routing.code}${steps ? ', with settings for this order' : ''}). Each colour's process sheets are ready, starting with cutting.`,
   })
 })
 
-/** PATCH /orders/:id/route — this order's own route changed, ahead of the pieces. */
+/**
+ * PATCH /orders/:id/route — the settings of this order's stages ahead of the
+ * pieces: done outside or here, unit, rate, instructions, check. Which stages
+ * there are and their order stay the routing's (see /route/from-routing).
+ */
 router.patch('/orders/:id/route', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = editRouteSchema.parse(req.body)
-  const mo = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { moNumber: true, status: true, steps: { orderBy: { sequence: 'asc' }, select: { name: true } } } })
+  const mo = await prisma.manufacturingOrder.findUnique({
+    where: { id: req.params.id },
+    select: { moNumber: true, status: true, routing: { select: { code: true } }, steps: { orderBy: { sequence: 'asc' }, select: { id: true, name: true, operationId: true } } },
+  })
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  assertSameStages(data.steps, mo.steps, mo.routing?.code ?? null)
+  if (data.steps.some((s, i) => s.id !== mo.steps[i].id)) assertSameStages([], mo.steps, mo.routing?.code ?? null)
   if (mo.status === 'CLOSED') throw new AppError(`${mo.moNumber} is closed.`, 409, 'NOT_OPEN')
   if (mo.status !== 'DRAFT' && !mayApprove(req)) throw new AppError(`${mo.moNumber} is on the floor: changing its route needs a production manager.`, 403, 'NEEDS_APPROVAL')
   const out = await prisma.$transaction((tx) => editRoute(tx, req.params.id, data), T)
@@ -138,20 +146,40 @@ router.patch('/orders/:id/route', requirePermission(MODULE, 'edit'), async (req:
     before: { route: mo.steps.map((s) => s.name) },
     after: { route: after.map((s) => s.name), reason: data.reason },
   })
-  res.json({ success: true, message: `${mo.moNumber}'s route is now ${after.map((s) => s.name).join(' → ')}.${out.fixed.length ? ` ${out.fixed.join(', ')} stayed as ${out.fixed.length === 1 ? 'it was' : 'they were'}: pieces have been through.` : ''}` })
+  res.json({ success: true, message: `${mo.moNumber}'s stages saved: ${after.map((s) => s.name).join(' → ')}.${out.fixed.length ? ` ${out.fixed.join(', ')} stayed as ${out.fixed.length === 1 ? 'it was' : 'they were'}: pieces have been through.` : ''}` })
 })
 
-router.post('/orders/:id/steps/:stepId/skip', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+/**
+ * GET /orders/:id/route/from-routing — what this order's stages would become
+ * if taken afresh from its routing: the stages the pieces have reached stay,
+ * the rest follow the routing as it is now.
+ */
+router.get('/orders/:id/route/from-routing', requirePermission(MODULE, 'view'), async (req, res) => {
+  // A dry run only reads, but it runs in a transaction for the order's lock; nothing is written.
+  const out = await prisma.$transaction((tx) => routeFromRouting(tx, req.params.id, { reason: 'preview', dryRun: true }), T)
+  res.json({ success: true, data: out })
+})
+
+/** POST /orders/:id/route/from-routing — the order's stages taken afresh from its routing, after it was changed. */
+router.post('/orders/:id/route/from-routing', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const { reason } = reasonSchema.parse(req.body)
-  const step = await prisma.$transaction((tx) => skipStep(tx, req.params.id, req.params.stepId, reason, { userId: req.user!.id, mayApprove: mayApprove(req) }), T)
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'MOStep', entityId: step.id, after: step })
-  res.json({ success: true, message: `${step.name} left out of the route: pieces now go past it. Anything already there finishes as normal.` })
-})
-
-router.post('/orders/:id/steps/:stepId/restore', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const step = await prisma.$transaction((tx) => restoreStep(tx, req.params.id, req.params.stepId, { mayApprove: mayApprove(req) }), T)
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'MOStep', entityId: step.id, after: step })
-  res.json({ success: true, message: `${step.name} is back on the route.` })
+  const mo = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { moNumber: true, status: true } })
+  if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  if (mo.status === 'CLOSED') throw new AppError(`${mo.moNumber} is closed.`, 409, 'NOT_OPEN')
+  if (mo.status !== 'DRAFT' && !mayApprove(req)) throw new AppError(`${mo.moNumber} is on the floor: changing its stages needs a production manager.`, 403, 'NEEDS_APPROVAL')
+  const out = await prisma.$transaction((tx) => routeFromRouting(tx, req.params.id, { reason }), T)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'ManufacturingOrder',
+    entityId: req.params.id,
+    before: { route: out.now, routingVersion: out.loadedVersion },
+    after: { route: out.next, routing: out.routing.code, routingVersion: out.routing.version, reason },
+  })
+  res.json({
+    success: true,
+    message: `${mo.moNumber} now follows ${out.routing.code} v${out.routing.version}: ${out.next.join(' → ')}.${out.kept.length ? ` ${out.kept.join(', ')} stayed as ${out.kept.length === 1 ? 'it was' : 'they were'}: pieces have been through.` : ''}`,
+  })
 })
 
 router.post('/orders/:id/hold', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
@@ -216,6 +244,23 @@ const transferInclude = {
   },
 } satisfies Prisma.ProcessTransferInclude
 
+/**
+ * Transfers with the stages each passed by on its order's route — none for
+ * one sent in the route's order. Only transfers made before the order was
+ * kept strictly can have any; the screen offers to take those back.
+ */
+async function withPassed<T extends { moId: string; fromStepId: string; toStepId: string; isRework: boolean; status: string }>(rows: T[]) {
+  const moIds = [...new Set(rows.map((r) => r.moId))]
+  const steps = moIds.length
+    ? await prisma.mOStep.findMany({ where: { moId: { in: moIds } }, select: { id: true, moId: true, sequence: true, name: true, kind: true, isQcStep: true, execution: true, skippedAt: true } })
+    : []
+  return rows.map((r) => ({
+    ...r,
+    passed: r.isRework || r.status === 'CANCELLED' ? [] : passedBy(steps.filter((s) => s.moId === r.moId), r.fromStepId, r.toStepId).map((s) => s.name),
+  }))
+}
+
+
 const OPEN_TRANSFER: TransferStatus[] = ['DISPATCHED', 'PARTLY_RECEIVED', 'DISCREPANCY']
 
 /** The views of the transfers list, as its tabs name them. */
@@ -227,23 +272,81 @@ const VIEWS: Record<string, Prisma.ProcessTransferWhereInput> = {
   cancelled: { status: 'CANCELLED' },
 }
 
-/** GET /transfers/counts — how many transfers each tab of the list holds. */
-router.get('/transfers/counts', requirePermission(MODULE, 'view'), async (_req, res) => {
-  const [count, short, units, received, all] = await Promise.all([
-    prisma.processTransfer.count({ where: VIEWS.count }),
-    prisma.processTransfer.count({ where: VIEWS.short }),
-    prisma.processTransfer.count({ where: VIEWS.units }),
-    prisma.processTransfer.count({ where: VIEWS.received }),
-    prisma.processTransfer.count(),
-  ])
+/**
+ * The list's dropdown filters, the same for the list and its tab counts:
+ * from and to which stage (a process of the master), which outside unit (or
+ * our own floor only), whose order, which order, and sent between two dates.
+ */
+function transferFilters(query: Record<string, unknown>): Prisma.ProcessTransferWhereInput[] {
+  const and: Prisma.ProcessTransferWhereInput[] = []
+  const fromOp = text(query.fromOp)
+  if (fromOp) and.push({ fromStep: { operationId: fromOp } })
+  const toOp = text(query.toOp)
+  if (toOp) and.push({ toStep: { operationId: toOp } })
+  const unit = text(query.unit)
+  if (unit === 'none') and.push({ vendorId: null })
+  else if (unit === 'any') and.push({ vendorId: { not: null } })
+  else if (unit) and.push({ vendorId: unit })
+  const customerId = text(query.customerId)
+  if (customerId) and.push({ mo: { so: { customerId } } })
+  const from = text(query.from)
+  if (from) and.push({ dispatchDate: { gte: new Date(`${from}T00:00:00+05:30`) } })
+  const to = text(query.to)
+  if (to) and.push({ dispatchDate: { lte: new Date(`${to}T23:59:59.999+05:30`) } })
+  return and
+}
+
+/** GET /transfers/counts — how many transfers each tab of the list holds, under the same filters. */
+router.get('/transfers/counts', requirePermission(MODULE, 'view'), async (req, res) => {
+  const base = transferFilters(req.query)
+  const moId = text(req.query.moId)
+  if (moId) base.push({ moId })
+  const of = (w?: Prisma.ProcessTransferWhereInput) => prisma.processTransfer.count({ where: { AND: [...base, ...(w ? [w] : [])] } })
+  const [count, short, units, received, all] = await Promise.all([of(VIEWS.count), of(VIEWS.short), of(VIEWS.units), of(VIEWS.received), of()])
   res.json({ success: true, data: { count, short, units, received, all } })
 })
 
-/** GET /transfers — filters: moId, status, open=1, vendor=1|0, q, page, limit. */
+/**
+ * GET /transfers/filters — the choices for the screen's dropdowns: the stages
+ * (processes, cutting first, in the process master's order), the customers,
+ * styles and orders that have job cards (open orders first), and the outside
+ * units transfers have gone to.
+ */
+router.get('/transfers/filters', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const [ops, cards, units] = await Promise.all([
+    prisma.operation.findMany({ where: { moSteps: { some: { mo: { jobCards: { some: {} } } } } }, select: { id: true, name: true, kind: true, sortOrder: true } }),
+    prisma.jobCard.findMany({
+      take: 3000,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        mo: { select: { id: true, moNumber: true, status: true, so: { select: { customer: { select: { id: true, name: true } } } } } },
+        moLine: { select: { style: { select: { id: true, code: true, name: true } } } },
+      },
+    }),
+    prisma.processTransfer.findMany({ where: { vendorId: { not: null } }, distinct: ['vendorId'], select: { vendor: { select: { id: true, name: true } } } }),
+  ])
+  const unique = <T extends { id: string }>(xs: T[]) => [...new Map(xs.map((x) => [x.id, x])).values()]
+  const open = (s: string) => !['CLOSED', 'COMPLETED', 'CANCELLED'].includes(s)
+  res.json({
+    success: true,
+    data: {
+      stages: ops
+        .sort((a, b) => Number(b.kind === 'CUTTING') - Number(a.kind === 'CUTTING') || a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+        .map((o) => ({ id: o.id, name: o.name })),
+      customers: unique(cards.flatMap((c) => (c.mo.so ? [c.mo.so.customer] : []))).sort((a, b) => a.name.localeCompare(b.name)),
+      styles: unique(cards.map((c) => c.moLine.style)).sort((a, b) => a.code.localeCompare(b.code)),
+      orders: unique(cards.map((c) => ({ id: c.mo.id, moNumber: c.mo.moNumber, open: open(c.mo.status), customer: c.mo.so?.customer.name ?? null })))
+        .sort((a, b) => Number(b.open) - Number(a.open) || b.moNumber.localeCompare(a.moNumber)),
+      units: units.flatMap((u) => (u.vendor ? [u.vendor] : [])).sort((a, b) => a.name.localeCompare(b.name)),
+    },
+  })
+})
+
+/** GET /transfers — filters: moId, status, open=1, vendor=1|0, q, fromOp, toOp, unit, customerId, from, to, page, limit. */
 router.get('/transfers', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
-  const and: Prisma.ProcessTransferWhereInput[] = []
+  const and: Prisma.ProcessTransferWhereInput[] = transferFilters(req.query)
   const moId = text(req.query.moId)
   if (moId) and.push({ moId })
   const jobCardId = text(req.query.jobCardId)
@@ -277,13 +380,13 @@ router.get('/transfers', requirePermission(MODULE, 'view'), async (req, res) => 
     prisma.processTransfer.findMany({ where, include: transferInclude, orderBy: { createdAt: 'desc' }, skip: (page - 1) * limit, take: limit }),
     prisma.processTransfer.count({ where }),
   ])
-  res.json({ success: true, data: rows, pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 } })
+  res.json({ success: true, data: await withPassed(rows), pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 } })
 })
 
 router.get('/transfers/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const t = await prisma.processTransfer.findUnique({ where: { id: req.params.id }, include: transferInclude })
   if (!t) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
-  res.json({ success: true, data: t })
+  res.json({ success: true, data: (await withPassed([t]))[0] })
 })
 
 /**
@@ -311,9 +414,9 @@ router.get('/transfers/:id/print', requirePermission(MODULE, 'view'), async (req
 })
 
 /**
- * Where pieces at a step may go next: every step on the order's route, with
- * how many pieces of each bundle may go there and, for the last step, what
- * each bundle still has to go through first.
+ * Where pieces at a step go next: the next step of the order's route (none
+ * from the last one), with how many pieces of each bundle may go there and,
+ * for the last step, what each bundle still has to go through first.
  */
 router.get('/orders/:id/destinations', requirePermission(MODULE, 'view'), async (req, res) => {
   const fromStepId = typeof req.query.fromStepId === 'string' ? req.query.fromStepId : ''
@@ -327,24 +430,6 @@ router.get('/orders/:id/destinations', requirePermission(MODULE, 'view'), async 
   res.json({
     success: true,
     data: list.map((c) => ({ stepId: c.step.id, name: c.step.name, last: c.last, next: c.next, caps: c.caps, missing: c.missing })),
-  })
-})
-
-/** Where a transfer could go instead, or why it cannot any more. */
-router.get('/transfers/:id/redirect-options', requirePermission(MODULE, 'view'), async (req, res) => {
-  res.json({ success: true, data: await redirectOptions(prisma, req.params.id) })
-})
-
-/** A transfer sent to another step instead — taking back its count-in, if nobody there has worked on the pieces yet. */
-router.post('/transfers/:id/redirect', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const data = redirectSchema.parse(req.body)
-  const out = await prisma.$transaction((tx) => redirectTransfer(tx, req.params.id, data, req.user!.id), T)
-  const t = await prisma.processTransfer.findUniqueOrThrow({ where: { id: out.transfer.id }, include: transferInclude })
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ProcessTransfer', entityId: out.old.id, after: { redirectedTo: t.transferNumber, toStep: t.toStep.name, reason: data.reason } })
-  res.json({
-    success: true,
-    message: `${out.old.transferNumber} cancelled; the same pieces now go to ${t.toStep.name} on ${t.transferNumber}. Print the new card for them.`,
-    data: t,
   })
 })
 
@@ -397,7 +482,7 @@ router.post('/transfers/:id/cancel', requirePermission(MODULE, 'edit'), async (r
   const { reason } = reasonSchema.parse(req.body)
   const t = await prisma.$transaction((tx) => cancelTransfer(tx, req.params.id, reason, req.user!.id), T)
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ProcessTransfer', entityId: t.id, after: t })
-  res.json({ success: true, message: `${t.transferNumber} cancelled: the pieces are back where they were sent from.`, data: t })
+  res.json({ success: true, message: `${t.transferNumber} taken back: the pieces are back where they were sent from.`, data: t })
 })
 
 // ─── Work at a step ───────────────────────────────────────────
@@ -606,6 +691,23 @@ router.get('/stage-report', requirePermission(MODULE, 'view'), async (req, res) 
   const from = s('from') ? new Date(`${s('from')}T00:00:00+05:30`) : undefined
   const to = s('to') ? new Date(`${s('to')}T23:59:59.999+05:30`) : undefined
   res.json({ success: true, data: await stageReport(prisma, { operationId, from, to, moId: s('moId') }) })
+})
+
+/** GET /board?q=&show=open|all — every open job card, its route, and where its pieces are stage by stage. */
+router.get('/board', requirePermission(MODULE, 'view'), async (req, res) => {
+  const p = page(req)
+  const out = await boardCards(prisma, {
+    q: text(req.query.q),
+    show: text(req.query.show),
+    stage: text(req.query.stage),
+    needs: text(req.query.needs),
+    customerId: text(req.query.customerId),
+    styleId: text(req.query.styleId),
+    moId: text(req.query.moId),
+    due: text(req.query.due),
+    ...p,
+  })
+  res.json({ success: true, data: out.data, pagination: { ...p, total: out.total, pages: Math.ceil(out.total / p.limit) || 1 } })
 })
 
 router.get('/stage-tabs', requirePermission(MODULE, 'view'), async (_req, res) => {

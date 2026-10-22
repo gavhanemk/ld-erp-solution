@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { figuresFrom, type FigureStep, type Flows } from './floor.service'
 import { flowSummary } from './floorView.service'
-import { isCheck, nextStepAfter } from './route.service'
+import { isCheck, nextStepAfter, passedBy } from './route.service'
 
 /**
  * Job cards: one per line of a manufacturing order — a style in one colour or
@@ -410,6 +410,167 @@ export async function stageSheets(db: Db, q: { stage?: Stage; q?: string; show?:
   else if (q.show !== 'all') rows = rows.filter((r) => r.active)
   // Work to count in first, then the rest by order.
   rows.sort((a, b) => b.toCountIn - a.toCountIn || a.card.mo.moNumber.localeCompare(b.card.mo.moNumber) || a.card.jobCardNumber.localeCompare(b.card.jobCardNumber))
+  const total = rows.length
+  return { data: rows.slice((q.page - 1) * q.limit, q.page * q.limit), total }
+}
+
+/** What a job card on the board needs done — what the "needs" filter picks by. */
+export const BOARD_NEEDS = ['count', 'send', 'check', 'outside', 'decide', 'short', 'cutting', 'goods', 'putRight', 'none'] as const
+export type BoardNeed = (typeof BOARD_NEEDS)[number]
+
+export interface BoardFilters {
+  q?: string
+  show?: string
+  /** A process: job cards with pieces at that stage now — there, coming, out at a unit, or to sort out. */
+  stage?: string
+  needs?: string
+  customerId?: string
+  styleId?: string
+  moId?: string
+  /** late | week | month */
+  due?: string
+  page: number
+  limit: number
+}
+
+/**
+ * GET /board — every open job card with its route and, stage by stage, where
+ * its pieces are: what the process transfers screen opens on. Each card also
+ * carries the transfers waiting to be counted in, those short, and any sent
+ * past a stage before the route's order was kept, so the screen can say what
+ * to do next and offer the button for it. Cards with a transfer to deal with
+ * come first, then the order due soonest. Filters: stage, what it needs,
+ * customer, style, order and when it is due.
+ */
+export async function boardCards(db: Db, q: BoardFilters) {
+  const where: Prisma.JobCardWhereInput = {
+    AND: [
+      searchOf(q.q),
+      { mo: { status: { notIn: ['DRAFT', 'CLOSED'] }, steps: { some: {} } } },
+      q.customerId ? { mo: { so: { customerId: q.customerId } } } : {},
+      q.styleId ? { moLine: { styleId: q.styleId } } : {},
+      q.moId ? { moId: q.moId } : {},
+    ],
+  }
+  const cards = (await loadCards(db, where)).filter((c) => q.show === 'all' || c.state !== 'DONE')
+  const transfers = cards.length
+    ? await db.processTransfer.findMany({
+        where: { jobCardId: { in: cards.map((c) => c.id) }, isRework: false, status: { not: 'CANCELLED' } },
+        orderBy: { createdAt: 'asc' },
+        select: {
+          id: true,
+          transferNumber: true,
+          jobCardId: true,
+          fromStepId: true,
+          toStepId: true,
+          status: true,
+          vendorId: true,
+          dispatchDate: true,
+          issuedBy: true,
+          lines: { select: { dispatchedQty: true, receivedQty: true, shortQty: true, settledQty: true } },
+        },
+      })
+    : []
+  const sum = (t: (typeof transfers)[number], f: (l: (typeof t.lines)[number]) => number) => t.lines.reduce((s, l) => s + f(l), 0)
+
+  const rows = cards.map((c) => {
+    const stepName = (id: string) => c.steps.find((s) => s.id === id)?.name ?? ''
+    const mine = transfers.filter((t) => t.jobCardId === c.id)
+    const toCountIn = mine
+      .filter((t) => !t.vendorId && (t.status === 'DISPATCHED' || t.status === 'PARTLY_RECEIVED'))
+      .map((t) => ({ id: t.id, transferNumber: t.transferNumber, from: stepName(t.fromStepId), toStepId: t.toStepId, pcs: sum(t, (l) => l.dispatchedQty - l.receivedQty), dispatchDate: t.dispatchDate, issuedBy: t.issuedBy }))
+    const short = mine
+      .filter((t) => t.status === 'DISCREPANCY')
+      .map((t) => ({ id: t.id, transferNumber: t.transferNumber, toStepId: t.toStepId, pcs: sum(t, (l) => l.shortQty - l.settledQty) }))
+    const passed = mine
+      .map((t) => ({ t, by: passedBy(c.steps, t.fromStepId, t.toStepId) }))
+      .filter((x) => x.by.length)
+      .map(({ t, by }) => ({ id: t.id, transferNumber: t.transferNumber, from: stepName(t.fromStepId), to: stepName(t.toStepId), toStepId: t.toStepId, passed: by.map((s) => s.name), pcs: sum(t, (l) => l.dispatchedQty) }))
+    return {
+      id: c.id,
+      jobCardNumber: c.jobCardNumber,
+      designNo: c.designNo,
+      line: c.moLine,
+      mo: { id: c.mo.id, moNumber: c.mo.moNumber, held: !!c.mo.heldAt, due: c.mo.plannedEndDate, so: c.mo.so },
+      state: c.state,
+      withCutters: c.withCutters,
+      cut: c.cut,
+      packed: c.packed,
+      steps: c.steps.map((s) => {
+        const next = nextStepAfter(c.steps, s.id)
+        return {
+          id: s.id,
+          name: s.name,
+          kind: s.kind,
+          operationId: s.operationId,
+          isQcStep: s.isQcStep,
+          execution: s.execution,
+          department: s.department,
+          unit: s.workstation?.supplier ?? null,
+          skipped: !!s.skippedAt,
+          last: !next && !s.skippedAt,
+          next: next ? { id: next.id, name: next.name, execution: next.execution } : null,
+          figures: s.figures,
+        }
+      }),
+      toCountIn,
+      short,
+      passed,
+    }
+  })
+  // What each card needs done, stage by stage — the same reading the screen's "next to do" makes.
+  const needsOf = (r: (typeof rows)[number]) => {
+    const out = new Set<BoardNeed>()
+    if (r.toCountIn.length) out.add('count')
+    if (r.short.length) out.add('short')
+    if (r.passed.length) out.add('putRight')
+    const wrong = new Set(r.passed.map((p) => p.toStepId))
+    for (const s of r.steps) {
+      if (s.skipped) continue
+      const f = s.figures
+      const sendable = (n: number) => n > 0 && !wrong.has(s.id) && out.add(s.last ? 'goods' : 'send')
+      if (s.kind === 'CUTTING') {
+        if (r.withCutters || (Math.max(0, r.line.totalQty - r.cut - r.withCutters) && f.state !== 'DONE')) out.add('cutting')
+        sendable(f.waiting)
+      } else if (s.execution === 'OUTSOURCED') {
+        if (f.atVendor) out.add('outside')
+        sendable(f.waiting)
+      } else if (isCheck(s)) {
+        if (f.inHand) out.add('check')
+        sendable(f.waiting)
+      } else sendable(f.inHand + f.waiting)
+      if (f.damagedNow + f.rejectedNow + f.inRework) out.add('decide')
+    }
+    if (!out.size) out.add('none')
+    return out
+  }
+  const atStage = (r: (typeof rows)[number], operationId: string) =>
+    r.steps.some((s) => {
+      if (s.operationId !== operationId || s.skipped) return false
+      const f = s.figures
+      return f.inTransit + f.inHand + f.waiting + f.atVendor + f.inRework + f.damagedNow + f.rejectedNow + f.short > 0 || (s.kind === 'CUTTING' && r.withCutters > 0)
+    })
+  const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
+  today.setHours(0, 0, 0, 0)
+  const days = (n: number) => today.getTime() + n * 86_400_000
+  const dueIn = (r: (typeof rows)[number]) => {
+    if (!q.due) return true
+    if (!r.mo.due) return false
+    const t = new Date(r.mo.due).getTime()
+    if (q.due === 'late') return t < today.getTime() && r.state !== 'DONE'
+    if (q.due === 'week') return t >= today.getTime() && t < days(8)
+    if (q.due === 'month') return t >= today.getTime() && t < days(31)
+    return true
+  }
+  const shown = rows.filter(
+    (r) => (!q.stage || atStage(r, q.stage)) && (!q.needs || needsOf(r).has(q.needs as BoardNeed)) && dueIn(r),
+  )
+  rows.length = 0
+  rows.push(...shown)
+
+  const urgent = (r: (typeof rows)[number]) => r.toCountIn.length + r.short.length + r.passed.length
+  const due = (r: (typeof rows)[number]) => (r.mo.due ? new Date(r.mo.due).getTime() : Number.MAX_SAFE_INTEGER)
+  rows.sort((a, b) => Number(urgent(b) > 0) - Number(urgent(a) > 0) || due(a) - due(b) || a.jobCardNumber.localeCompare(b.jobCardNumber))
   const total = rows.length
   return { data: rows.slice((q.page - 1) * q.limit, q.page * q.limit), total }
 }

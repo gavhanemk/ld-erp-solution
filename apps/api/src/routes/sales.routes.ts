@@ -24,6 +24,7 @@ import {
   checkCredit,
   confirmMessage,
   confirmOrHold,
+  creditForAmendment,
   creditPosition,
   type ConfirmOutcome,
 } from '../services/salesOrder.service'
@@ -791,8 +792,9 @@ export async function prepareOrder(
       igst += tax
     }
   })
-  // Charges: each from the charge master, taxed at its own rate.
-  const charges = await priceSalesCharges(tx, data.charges, isIntraState)
+  // Charges: each from the charge master, taxed at the goods' rate.
+  const goods = data.lines.map((_l, i) => ({ taxable: lineTotals[i] * discountFactor, gstRate: gstRates[i] }))
+  const charges = await priceSalesCharges(tx, data.charges, isIntraState, goods)
   const chargeTotal = round2(charges.reduce((s, c) => s + c.amount, 0))
   cgst = round2(cgst + charges.reduce((s, c) => s + c.cgst, 0))
   sgst = round2(sgst + charges.reduce((s, c) => s + c.sgst, 0))
@@ -1218,6 +1220,15 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
 
     const { header, lines, charges } = await prepareOrder(tx, data)
 
+    // A change that raises the order's value meets the credit limit, as confirming it did.
+    const release = await creditForAmendment(
+      tx,
+      before,
+      Number(header.totalAmount),
+      req.user!.id,
+      confirmOptions(req, data.creditReleaseReason),
+    )
+
     // The order as it stood, whole, before this change. Plain JSON, so it
     // reads back the same however the tables change later.
     await tx.salesOrderRevision.create({
@@ -1262,6 +1273,7 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       where: { id: before.id },
       data: {
         ...header,
+        ...release,
         orderDate: data.orderDate ?? before.orderDate,
         version: before.version + 1,
         charges: { create: charges },

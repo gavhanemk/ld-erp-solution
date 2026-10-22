@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balancesOf, flowsOf, keyOf, lockMo, postEvent, reverseEvent, type BalanceRow, type Move } from './wip.service'
-import { destinationsFrom, isCheck, isLastStep, nextStepAfter, type RouteStep } from './route.service'
+import { destinationsFrom, isCheck, isLastStep, nextStepAfter, passedBy, type RouteStep } from './route.service'
 import { nextChallanNo } from './challanNo'
 
 /**
@@ -103,7 +103,7 @@ function byBundle<T extends { bundleId: string }>(lines: T[], add: (a: T, b: T) 
 
 export const dispatchSchema = z.object({
   fromStepId: z.string().min(1, 'Say which step it leaves'),
-  /** Any step on the route these bundles have not been through yet; the next one in order when not said. */
+  /** The next step of the route; refused when it names any other. Taken as the next one when not said. */
   toStepId: z.string().optional().nullable(),
   /** The outside unit, when the next step is done outside. */
   vendorId: z.string().optional().nullable(),
@@ -121,143 +121,41 @@ export const dispatchSchema = z.object({
 /** A working step on our own floor sends pieces on straight from in hand; a check, cutting or a unit only what it has done. */
 export const sendsFromHand = (s: { kind: ProcessKind; isQcStep: boolean; execution: StepExecution }) => s.kind !== 'CUTTING' && !isCheck(s) && s.execution === 'IN_HOUSE'
 
-/**
- * A transfer not yet counted in, sent somewhere else instead: what goes there
- * is the same bundles and pieces, and every check a new transfer has applies.
- * Done as the old one cancelled — the pieces back where they were sent from —
- * and a new one made, in one go, so the paper trail says what happened.
- */
-export const redirectSchema = z.object({
-  toStepId: z.string().min(1, 'Pick where they go instead'),
-  reason: z.string().trim().min(3, 'Say why they go somewhere else').max(500),
-})
-
-export async function redirectTransfer(tx: Tx, transferId: string, d: z.infer<typeof redirectSchema>, userId: string) {
-  const t = await tx.processTransfer.findUnique({ where: { id: transferId }, include: { lines: true, toStep: { select: { name: true } } } })
-  if (!t) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
-  if (t.vendorId) throw new AppError(`${t.transferNumber} went to an outside unit on a job-work challan: cancel it, then send the pieces again.`, 409, 'AT_A_UNIT')
-  if (t.toStepId === d.toStepId) throw new AppError('They are already going there.', 400, 'SAME_STEP')
-  const stuck = cannotRedirect(t)
-  if (stuck) throw new AppError(stuck, 409, 'CANNOT_REDIRECT')
-  // Counted in, but nobody there has touched the pieces yet: the count-in is taken back first.
-  if (t.lines.some((l) => l.receivedQty > 0)) await takeBackCount(tx, t, d.reason, userId)
-  await cancelTransfer(tx, t.id, `Sent somewhere else instead: ${d.reason}`, userId)
-  const out = await dispatch(
-    tx,
-    t.moId,
-    {
-      fromStepId: t.fromStepId,
-      toStepId: d.toStepId,
-      lines: t.lines.map((l) => ({ bundleId: l.bundleId, qty: l.dispatchedQty })),
-      issuedBy: t.issuedBy,
-      vehicleNo: t.vehicleNo,
-      notes: [t.notes, `In place of ${t.transferNumber}: ${d.reason}`].filter(Boolean).join(' · '),
-      dispatchDate: t.dispatchDate,
-      clientKey: null,
-    },
-    userId,
-  )
-  return { old: t, transfer: out.transfer }
-}
-
-type RedirectFacts = {
+type TakeBackFacts = {
+  id: string
   transferNumber: string
-  status: string
   vendorId: string | null
   toStep: { name: string }
   lines: Array<{ receivedQty: number; shortQty: number; excessQty: number }>
 }
-const workedOn = (t: Pick<RedirectFacts, 'transferNumber' | 'toStep'>) =>
-  `${t.toStep.name} has already worked on some of these pieces, so ${t.transferNumber} can no longer be sent somewhere else. Send the pieces on from ${t.toStep.name} instead.`
-
-/** Why a transfer must stand as it is, or null while it can still go somewhere else. */
-function cannotRedirect(t: RedirectFacts): string | null {
-  if (t.status === 'CANCELLED') return `${t.transferNumber} was cancelled.`
-  if (t.vendorId) return `${t.transferNumber} went to an outside unit on a job-work challan: cancel it, then send the pieces again.`
-  if (t.lines.some((l) => l.shortQty > 0 || l.excessQty > 0)) {
-    return `${t.transferNumber} was counted in with a difference, so it stands. Send the pieces on from ${t.toStep.name} instead.`
-  }
-  return null
-}
 
 /**
- * A count-in taken back, so the transfer can go somewhere else — only while
- * the pieces still sit at the step as they were counted in. Once that step
- * has worked on any of them, undoing the count fails, and the transfer stands.
+ * A count-in taken back, so a transfer that went wrong can be cancelled —
+ * only when it was counted in as sent, and only while the pieces still sit at
+ * the step as they were counted in. Once that step has worked on any of them,
+ * undoing the count fails, and the transfer stands.
  */
-async function takeBackCount(tx: Tx, t: { id: string } & RedirectFacts, reason: string, userId: string) {
+async function takeBackCount(tx: Tx, t: TakeBackFacts, reason: string, userId: string) {
+  if (t.lines.some((l) => l.shortQty > 0 || l.excessQty > 0)) {
+    throw new AppError(`${t.transferNumber} was counted in with a difference, so it stands. Send the pieces on from ${t.toStep.name} instead.`, 409, 'ALREADY_RECEIVED')
+  }
   const counts = await tx.wipEvent.findMany({ where: { transferId: t.id, type: 'RECEIVE', reversedAt: null }, select: { id: true }, orderBy: { createdAt: 'desc' } })
   for (const ev of counts) {
     try {
-      await reverseEvent(tx, ev.id, `Count-in taken back, to send ${t.transferNumber} somewhere else: ${reason}`, userId)
+      await reverseEvent(tx, ev.id, `Count-in taken back, to cancel ${t.transferNumber}: ${reason}`, userId)
     } catch (err) {
-      if (err instanceof AppError && err.code === 'NOT_ENOUGH_PIECES') throw new AppError(workedOn(t), 409, 'WORKED_ON')
+      if (err instanceof AppError && err.code === 'NOT_ENOUGH_PIECES') {
+        throw new AppError(
+          `${t.toStep.name} has already worked on some of these pieces, so ${t.transferNumber} can no longer be taken back. Send the pieces on from ${t.toStep.name} instead.`,
+          409,
+          'WORKED_ON',
+        )
+      }
       throw err
     }
   }
   await tx.processTransferLine.updateMany({ where: { transferId: t.id }, data: { receivedQty: 0 } })
   await tx.processTransfer.update({ where: { id: t.id }, data: { status: 'DISPATCHED', receivedBy: null, receivedAt: null } })
-}
-
-/**
- * Where a transfer could go instead: the same rule, as if it had not been
- * sent — and, when it cannot go anywhere else any more, why not.
- */
-export async function redirectOptions(db: Tx | PrismaClient, transferId: string) {
-  const t = await db.processTransfer.findUnique({
-    where: { id: transferId },
-    include: { lines: { include: { bundle: { select: { code: true } } } }, toStep: { select: { name: true } } },
-  })
-  if (!t) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
-  let blocked = cannotRedirect(t)
-  if (!blocked && t.lines.some((l) => l.receivedQty > 0)) {
-    // Counted in: still possible only while every counted piece sits there untouched.
-    const held = await balancesOf(db, t.moId)
-    const counted = new Map<string, number>()
-    for (const l of t.lines) counted.set(l.bundleId, (counted.get(l.bundleId) ?? 0) + l.receivedQty)
-    const untouched = (bundleId: string) =>
-      held.filter((r) => r.stepId === t.toStepId && r.bundleId === bundleId && r.bucket === 'WIP' && !r.vendorId && !r.reworkStepId).reduce((s, r) => s + r.qty, 0)
-    if ([...counted].some(([bundleId, n]) => untouched(bundleId) < n)) blocked = workedOn(t)
-  }
-  const mo = await db.manufacturingOrder.findUniqueOrThrow({
-    where: { id: t.moId },
-    select: { id: true, steps: { orderBy: { sequence: 'asc' }, select: { id: true, sequence: true, name: true, kind: true, isQcStep: true, execution: true, skippedAt: true } } },
-  })
-  const [bundles, sent] = await Promise.all([
-    db.productionBundle.findMany({ where: { moId: mo.id }, select: { id: true, qty: true, parentId: true } }),
-    db.processTransferLine.findMany({
-      where: { transfer: { moId: mo.id, isRework: false, status: { not: 'CANCELLED' }, id: { not: t.id } } },
-      select: { bundleId: true, dispatchedQty: true, transfer: { select: { toStepId: true } } },
-    }),
-  ])
-  const choices = destinationsFrom(
-    mo.steps,
-    t.fromStepId,
-    bundles,
-    sent.map((l) => ({ bundleId: l.bundleId, toStepId: l.transfer.toStepId, qty: l.dispatchedQty })),
-  )
-  const options = choices
-    .filter((c) => c.step.id !== t.toStepId)
-    .map((c) => {
-      const blocked = t.lines.find((l) => l.dispatchedQty > (c.caps[l.bundleId] ?? 0))
-      const missing = blocked ? c.missing[blocked.bundleId] : undefined
-      const outside = c.step.execution === 'OUTSOURCED'
-      return {
-        stepId: c.step.id,
-        name: c.step.name,
-        outside,
-        // An outside unit needs its unit and rate: that is a fresh transfer from the sheet.
-        ok: !blocked && !outside,
-        why: blocked
-          ? c.last && missing?.length
-            ? `${blocked.bundle.code} has still to go through ${missing.join(', ')}`
-            : `${blocked.bundle.code} has already been there`
-          : outside
-            ? 'Done at an outside unit: cancel this card, then send them out from the sheet'
-            : null,
-      }
-    })
-  return { blocked, counted: t.lines.some((l) => l.receivedQty > 0), options }
 }
 
 /**
@@ -281,9 +179,9 @@ export async function destinationsOf<T extends RouteStep>(db: Tx | PrismaClient,
 }
 
 /**
- * Sends bundles on from a step to the step the floor picks: any step on the
- * order's route these bundles have not been through yet, the last one only
- * once they have been through all the others.
+ * Sends bundles on from a step to the next step of the order's route — in
+ * the route's order, so none is passed by — and to the last one only once
+ * they have been through all the others.
  *
  * Between two steps of the same department — cutting and its own check, the
  * final check and packing — nothing changes hands: the department does both.
@@ -303,58 +201,38 @@ export async function dispatch(tx: Tx, moId: string, d: z.infer<typeof dispatchS
   )
   if (!lines.length) throw new AppError('Enter how many pieces of each bundle are going.', 400, 'NOTHING_SENT')
 
-  // Where they may go: the route's steps, as far as these bundles go.
-  const choices = await destinationsOf(tx, mo, from.id)
-  const fits = (c: (typeof choices)[number]) => lines.every((l) => l.qty <= (c.caps[l.bundleId] ?? 0))
-  let choice
-  if (d.toStepId) {
+  // Where they go: the next step of the route, in its order — never past one.
+  const [choice] = await destinationsOf(tx, mo, from.id)
+  if (!choice) throw new AppError(`${from.name} is the last step: its pieces go to Finished Goods In, not to another step.`, 409, 'LAST_STEP')
+  if (d.toStepId && d.toStepId !== choice.step.id) {
     const asked = stepOf(mo, d.toStepId)
-    choice = choices.find((c) => c.step.id === asked.id)
-    if (!choice) {
-      throw new AppError(
-        asked.id === from.id
-          ? `The pieces are already at ${from.name}: pick where they go next.`
-          : asked.skippedAt
-            ? `${asked.name} is left out of this order's route.`
-            : `Pieces cannot go back to ${asked.name}.`,
-        409,
-        'NOT_A_DESTINATION',
-      )
-    }
-  } else {
-    // Not said: the next one in the route's order, or the first one they can all go to.
-    choice = choices.find((c) => c.next && fits(c)) ?? choices.find(fits)
-    if (!choice) throw new AppError('Pick which step these bundles go to.', 400, 'NO_DESTINATION')
-  }
-  const to = choice.step
-  const codes = new Map(
-    (await tx.productionBundle.findMany({ where: { id: { in: lines.map((l) => l.bundleId) } }, select: { id: true, code: true } })).map((b) => [b.id, b.code]),
-  )
-  for (const l of lines) {
-    const cap = choice.caps[l.bundleId] ?? 0
-    if (l.qty <= cap) continue
-    const code = codes.get(l.bundleId) ?? 'A bundle'
-    const missing = choice.missing[l.bundleId]
+    const passed = passedBy(mo.steps, from.id, asked.id).map((s) => s.name)
     throw new AppError(
-      choice.last && missing?.length
-        ? `${code} has not been through ${missing.join(', ')} yet, so it cannot go to ${to.name}: everything else on the route comes first.`
-        : cap > 0
-          ? `${code}: only ${cap} more of its pieces can go to ${to.name}; the rest have already been sent there.`
-          : `${code} has already been sent to ${to.name}. Pick a step it has not been through.`,
+      asked.id === from.id
+        ? `The pieces are already at ${from.name}. From here they go to ${choice.step.name}.`
+        : asked.skippedAt
+          ? `${asked.name} is left out of this order's route. From ${from.name} the pieces go to ${choice.step.name}.`
+          : passed.length
+            ? `From ${from.name} the pieces go to ${choice.step.name} next: the stages run in the route's order, so ${passed.join(', ')} cannot be passed by. To leave a stage out or change their order, change the style's routing in Masters → Routings, then take its new stages on the order.`
+            : `Pieces do not go back to ${asked.name}. From ${from.name} they go to ${choice.step.name}.`,
       409,
-      'NOT_ALLOWED_THERE',
+      'NOT_NEXT_STEP',
     )
   }
-
-  const vendorId = d.vendorId || null
-  if (to.execution === 'OUTSOURCED' && !vendorId) throw new AppError(`${to.name} is done outside: say which unit the pieces go to.`, 400, 'NO_VENDOR')
-  let jobWorkOrderId: string | null = null
-  if (vendorId) {
-    const vendor = await tx.supplier.findUnique({ where: { id: vendorId }, select: { name: true, isActive: true } })
-    if (!vendor?.isActive) throw new AppError('That unit is not an active supplier.', 400, 'BAD_VENDOR')
-    jobWorkOrderId = (await jobWorkOrderFor(tx, mo, to, vendorId, d.rate ?? null, d.expectedBy ?? null, userId)).id
+  const to = choice.step
+  // Pieces that reached this step past others go no further until their card is taken back.
+  const cameIn = await tx.processTransfer.findMany({
+    where: { moId, toStepId: from.id, isRework: false, status: { not: 'CANCELLED' }, lines: { some: { bundleId: { in: lines.map((l) => l.bundleId) } } } },
+    select: { transferNumber: true, fromStepId: true },
+  })
+  const cameWrong = cameIn.map((t) => ({ t, by: passedBy(mo.steps, t.fromStepId, from.id) })).find((x) => x.by.length)
+  if (cameWrong) {
+    throw new AppError(
+      `${cameWrong.t.transferNumber} brought these pieces to ${from.name} past ${cameWrong.by.map((s) => s.name).join(', ')}. Take that card back first, then send the pieces on in the route's order.`,
+      409,
+      'TAKE_BACK_FIRST',
+    )
   }
-
   const bundles = await tx.productionBundle.findMany({ where: { id: { in: lines.map((l) => l.bundleId) }, moId }, select: { id: true, code: true, sizeId: true, moLineId: true } })
   if (bundles.length !== lines.length) throw new AppError('One of those bundles is not on this order.', 400, 'BAD_BUNDLE')
   const sizeOf = new Map(bundles.map((b) => [b.id, b.sizeId]))
@@ -375,6 +253,32 @@ export async function dispatch(tx: Tx, moId: string, d: z.infer<typeof dispatchS
     }
     return { ...l, done, hand }
   })
+
+  // No more of a bundle than the next step still takes.
+  for (const l of lines) {
+    const cap = choice.caps[l.bundleId] ?? 0
+    if (l.qty <= cap) continue
+    const code = codeOf.get(l.bundleId) ?? 'A bundle'
+    const missing = choice.missing[l.bundleId]
+    throw new AppError(
+      choice.last && missing?.length
+        ? `${code} has not been through ${missing.join(', ')} yet, so it cannot go to ${to.name}: everything else on the route comes first.`
+        : cap > 0
+          ? `${code}: only ${cap} more of its pieces can go to ${to.name}; the rest have already been sent there.`
+          : `${code} has already been sent to ${to.name}.`,
+      409,
+      'NOT_ALLOWED_THERE',
+    )
+  }
+
+  const vendorId = d.vendorId || null
+  if (to.execution === 'OUTSOURCED' && !vendorId) throw new AppError(`${to.name} is done outside: say which unit the pieces go to.`, 400, 'NO_VENDOR')
+  let jobWorkOrderId: string | null = null
+  if (vendorId) {
+    const vendor = await tx.supplier.findUnique({ where: { id: vendorId }, select: { name: true, isActive: true } })
+    if (!vendor?.isActive) throw new AppError('That unit is not an active supplier.', 400, 'BAD_VENDOR')
+    jobWorkOrderId = (await jobWorkOrderFor(tx, mo, to, vendorId, d.rate ?? null, d.expectedBy ?? null, userId)).id
+  }
 
   const when = d.dispatchDate ?? new Date()
   // Pieces leaving a working step straight from in hand were worked on there.
@@ -635,13 +539,21 @@ export async function settleShort(tx: Tx, transferId: string, d: z.infer<typeof 
   return { transfer, duplicate: false }
 }
 
-/** Takes back a transfer nobody has counted in yet: the pieces return to the sender. */
+/**
+ * Takes a transfer back: the pieces return to the step that sent them. One
+ * still on its way, or one counted in on our floor that nobody there has
+ * worked on yet; after that it stands.
+ */
 export async function cancelTransfer(tx: Tx, transferId: string, reason: string, userId: string) {
   const head = await tx.processTransfer.findUnique({ where: { id: transferId }, select: { moId: true } })
   if (!head) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
   await openMo(tx, head.moId)
+  const t0 = await tx.processTransfer.findUniqueOrThrow({ where: { id: transferId }, include: { lines: true, toStep: { select: { name: true } } } })
+  if (t0.status === 'CANCELLED') throw new AppError(`${t0.transferNumber} is already cancelled.`, 409, 'ALREADY_CANCELLED')
+  // Counted in on our floor, and nobody there has touched the pieces yet: the
+  // count-in is taken back first, then it is cancelled like one on its way.
+  if (!t0.vendorId && t0.lines.some((l) => l.receivedQty > 0)) await takeBackCount(tx, t0, reason, userId)
   const t = await tx.processTransfer.findUniqueOrThrow({ where: { id: transferId }, include: { lines: true } })
-  if (t.status === 'CANCELLED') throw new AppError(`${t.transferNumber} is already cancelled.`, 409, 'ALREADY_CANCELLED')
   if (t.status !== 'DISPATCHED' || t.lines.some((l) => l.receivedQty > 0 || l.shortQty > 0)) {
     throw new AppError(
       t.vendorId

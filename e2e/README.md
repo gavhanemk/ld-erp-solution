@@ -2,7 +2,7 @@
 
 Two kinds of tests, both run against a running ERP:
 
-- **API suites** (`api/`): six scenario scripts that go through a whole flow over the API (job-work orders, job work out and back, customer goods receipts, cutting, sheet import, ITC-04 reports). Each one prints a PASS or FAIL line for every check, then `N passed, M failed`.
+- **API suites** (`api/`): seven scenario scripts that go through a whole flow over the API (job-work orders, job work out and back, customer goods receipts, cutting, sheet import, ITC-04 reports, and sales from quotation to cash). Each one prints a PASS or FAIL line for every check, then `N passed, M failed`.
 - **Browser walk** (`browser/`): one LD Cotton Mills order (Kingsley Twill Chino, Khaki) made from start to finish in the real web app, driven by Playwright in Google Chrome.
 
 ## Safety rule
@@ -71,7 +71,7 @@ Set the sign-in for this shell only:
 $env:E2E_EMAIL = "<an admin user's email>"
 $env:E2E_PASSWORD = "<that user's password>"
 cd e2e
-npm run test:api            # all six suites in order, then a summary table; exits non-zero if any check failed
+npm run test:api            # all seven suites in order, then a summary table; exits non-zero if any check failed
 npm run test:api -- cgrn    # only the suites whose file name contains "cgrn"
 npm run test:walk           # the browser walk, headless
 $env:SLOW = "1"; npm run test:walk -- --headed   # the walk in a Chrome window, at a pace you can watch

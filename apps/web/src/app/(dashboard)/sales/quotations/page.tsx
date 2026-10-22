@@ -147,7 +147,20 @@ export default function QuotationsPage() {
     const open = q.status === 'DRAFT' || q.status === 'SENT'
     if (open && can('sales', 'edit')) items.push({ key: 'edit', label: 'Edit', icon: <Pencil size={15} />, onClick: () => setForm({ open: true, id: q.id }) })
     if (q.status === 'DRAFT' && can('sales', 'edit')) items.push({ key: 'sent', label: 'Mark sent', icon: <Send size={15} />, onClick: () => void markSent(q) })
-    if (open && can('sales', 'create')) items.push({ key: 'convert', label: 'Convert to order', icon: <ShoppingBag size={15} />, href: `/sales/orders?fromQuote=${q.id}` })
+    if (open && can('sales', 'create')) {
+      // An expired price is agreed again first: Edit moves its valid-until date.
+      items.push(
+        isExpired(q)
+          ? {
+              key: 'convert',
+              label: 'Convert to order',
+              icon: <ShoppingBag size={15} />,
+              onClick: () =>
+                setError(`${q.quoteNumber} expired on ${formatDate(q.validUntil!)}. If the price still stands, edit it and move its valid-until date, then convert it.`),
+            }
+          : { key: 'convert', label: 'Convert to order', icon: <ShoppingBag size={15} />, href: `/sales/orders?fromQuote=${q.id}` }
+      )
+    }
     if (open && can('sales', 'edit')) items.push({ key: 'lost', label: 'Mark lost', icon: <ThumbsDown size={15} />, danger: true, onClick: () => setLosing(q) })
     return items
   }

@@ -8,7 +8,7 @@ import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
-import { priceSalesCharges } from '../services/salesCharges'
+import { foldChargesIntoHsn, priceSalesCharges } from '../services/salesCharges'
 import { orderReconciliation } from '../services/reconciliation.service'
 
 /**
@@ -36,6 +36,44 @@ const MODULE = 'sales'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+
+const IST = 330 * 60_000
+/** A moment's calendar day in India, as YYYY-MM-DD: what the person billing calls "the date". */
+const istDay = (d: Date) => new Date(d.getTime() + IST).toISOString().slice(0, 10)
+const shortDay = (iso: string) =>
+  new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
+
+/** The first and the last-plus-one moments, in India, of the financial year a date falls in. */
+function yearAround(d: Date, startMonth: number) {
+  const ist = new Date(d.getTime() + IST)
+  const startYear = ist.getUTCMonth() + 1 >= startMonth ? ist.getUTCFullYear() : ist.getUTCFullYear() - 1
+  return {
+    gte: new Date(Date.UTC(startYear, startMonth - 1, 1) - IST),
+    lt: new Date(Date.UTC(startYear + 1, startMonth - 1, 1) - IST),
+  }
+}
+
+/**
+ * The latest invoice in the financial year of a date, cancelled ones aside.
+ * Invoice numbers run in date order through the year, so a new invoice is
+ * never dated before it (GST expects one consecutive series).
+ */
+async function lastInvoiceOfYear(db: Prisma.TransactionClient | typeof prisma, date: Date) {
+  const company = await db.company.findFirst({ select: { fyStartMonth: true } })
+  const year = yearAround(date, company?.fyStartMonth ?? 4)
+  const last = await db.salesInvoice.findFirst({
+    where: { status: { not: 'CANCELLED' }, invoiceDate: year },
+    orderBy: [{ invoiceDate: 'desc' }, { createdAt: 'desc' }],
+    select: { invoiceNumber: true, invoiceDate: true },
+  })
+  return { yearStart: istDay(year.gte), last: last && { invoiceNumber: last.invoiceNumber, day: istDay(last.invoiceDate) } }
+}
+
+/** For the form: today in India, the year's first day, and its last invoice. */
+async function dateRangeFor(today: Date) {
+  const { yearStart, last } = await lastInvoiceOfYear(prisma, today)
+  return { today: istDay(today), yearStart, lastInvoice: last }
+}
 
 /** Sales and Accounts both read invoices. */
 function mustSee(req: AuthRequest) {
@@ -201,9 +239,17 @@ async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: In
     orderSubtotal > 0 ? round2(Math.min(subtotal, (Number(order.discountAmount) * subtotal) / orderSubtotal)) : 0
   const taxableAmount = round2(subtotal - discountAmount)
   const factor = subtotal > 0 ? taxableAmount / subtotal : 1
+  // Each line's share, rounded. Whatever paisa the rounding leaves goes on the
+  // biggest line, so the lines add up to the invoice's taxable total exactly.
+  const values = bills.map((b) => round2(b.gross * factor))
+  const drift = round2(taxableAmount - values.reduce((s, v) => s + v, 0))
+  if (drift !== 0) {
+    const biggest = values.indexOf(Math.max(...values))
+    values[biggest] = round2(values[biggest] + drift)
+  }
 
   const lines = bills.map((b, i) => {
-    const taxableValue = round2(b.gross * factor)
+    const taxableValue = values[i]
     const tax = (taxableValue * b.gstRate) / 100
     const cgst = isIntraState ? round2(tax / 2) : 0
     const sgst = isIntraState ? round2(tax / 2) : 0
@@ -232,7 +278,9 @@ async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: In
   if (data.charges?.some((c) => c.ownMaterial && c.amount > 0) && !(order.isJobWork && order.ownMaterialBilling === 'BILLED')) {
     throw new AppError(`${order.soNumber} does not bill our own material separately, so the invoice carries no charge for it. Change the order if that was agreed with the customer.`, 400, 'OWN_MATERIAL_NOT_BILLED')
   }
-  const charges = await priceSalesCharges(tx, data.charges, isIntraState)
+  // Each charge at the goods' rate: one row per rate the goods carry.
+  const goods = lines.map((l) => ({ taxable: l.taxableValue, gstRate: l.gstRate }))
+  const charges = await priceSalesCharges(tx, data.charges, isIntraState, goods, { split: true })
   const chargeTotal = round2(charges.reduce((s, c) => s + c.amount, 0))
   const sum = (k: 'cgst' | 'sgst' | 'igst') =>
     round2(lines.reduce((s, l) => s + l[k], 0) + charges.reduce((s, c) => s + c[k], 0))
@@ -365,6 +413,8 @@ router.get('/prepare', requirePermission(MODULE, 'create'), async (req, res) => 
       charges: still.charges,
       otherCharges: still.otherCharges,
       defaults: { invoiceDate: today, dueDate: addDays(today, c.creditDays ?? 0) },
+      /** The dates the invoice may take, in India: from the year's last invoice (or the order) up to today. */
+      dateRange: await dateRangeFor(today),
     },
   })
 })
@@ -568,27 +618,26 @@ router.get('/:id/print', async (req: AuthRequest, res) => {
   const header = await getPrintHeader('INV')
   const taxMode = Number(invoice.igst) > 0 ? 'IGST' : Number(invoice.cgst) > 0 ? 'CGST_SGST' : 'NONE'
 
-  // One row per HSN code and rate, goods first, then each charge.
-  const summary = new Map<string, { hsn: string; rate: number; taxable: number; cgst: number; sgst: number; igst: number }>()
-  for (const l of invoice.lines) {
-    const key = `${l.hsnCode ?? '—'}|${Number(l.gstRate)}`
-    const row = summary.get(key) ?? { hsn: l.hsnCode ?? '—', rate: Number(l.gstRate), taxable: 0, cgst: 0, sgst: 0, igst: 0 }
-    row.taxable += Number(l.taxableValue)
-    row.cgst += Number(l.cgst)
-    row.sgst += Number(l.sgst)
-    row.igst += Number(l.igst)
-    summary.set(key, row)
-  }
-  for (const c of invoice.charges) {
-    summary.set(`charge|${c.id}`, {
-      hsn: c.chargeType.name,
-      rate: Number(c.gstRate),
-      taxable: Number(c.amount),
+  // One row per HSN code and rate. Charges are taxed at the goods' rate, so
+  // they fold into those goods' rows; one at a rate of its own keeps its name.
+  const summary = foldChargesIntoHsn(
+    invoice.lines.map((l) => ({
+      hsnCode: l.hsnCode,
+      gstRate: Number(l.gstRate),
+      taxable: Number(l.taxableValue),
+      cgst: Number(l.cgst),
+      sgst: Number(l.sgst),
+      igst: Number(l.igst),
+    })),
+    invoice.charges.map((c) => ({
+      name: c.chargeType.name,
+      gstRate: Number(c.gstRate),
+      amount: Number(c.amount),
       cgst: Number(c.cgst),
       sgst: Number(c.sgst),
       igst: Number(c.igst),
-    })
-  }
+    })),
+  )
 
   res.json({
     success: true,
@@ -599,7 +648,7 @@ router.get('/:id/print', async (req: AuthRequest, res) => {
       placeOfSupplyState: stateName(invoice.placeOfSupplyCode),
       totalInWords: amountInWords(Number(invoice.totalAmount)),
       taxInWords: amountInWords(round2(Number(invoice.cgst) + Number(invoice.sgst) + Number(invoice.igst))),
-      hsnSummary: [...summary.values()].map((r) => ({
+      hsnSummary: summary.map(({ charge: _charge, ...r }) => ({
         ...r,
         taxable: round2(r.taxable),
         cgst: round2(r.cgst),
@@ -624,6 +673,18 @@ export async function createInvoice(tx: Prisma.TransactionClient, data: InvoiceI
   const invoiceDate = data.invoiceDate ?? new Date()
   if (invoiceDate < new Date(order.orderDate.toDateString())) {
     throw new AppError(`The invoice cannot be dated before the order, ${order.soNumber}`, 400, 'BEFORE_ORDER')
+  }
+  const onDay = istDay(invoiceDate)
+  if (onDay > istDay(new Date())) {
+    throw new AppError('An invoice cannot be dated in the future. Date it today or earlier.', 400, 'FUTURE_DATE')
+  }
+  const { last } = await lastInvoiceOfYear(tx, invoiceDate)
+  if (last && onDay < last.day) {
+    throw new AppError(
+      `${last.invoiceNumber} is dated ${shortDay(last.day)}, and invoice numbers have to run in date order. Date this one ${shortDay(last.day)} or later.`,
+      400,
+      'BEFORE_LAST_INVOICE',
+    )
   }
   const invoiceNumber = await nextDocumentNumber(tx, 'INV', invoiceDate)
   const created = await tx.salesInvoice.create({
@@ -712,6 +773,18 @@ export async function cancelInvoice(tx: Prisma.TransactionClient, id: string, us
   }
   if (before._count.creditNotes > 0) {
     throw new AppError(`${before.invoiceNumber} has a credit note against it and cannot be cancelled`, 409, 'HAS_CREDIT_NOTES')
+  }
+  // Credit held on another note, set against this invoice, settles it as cash would.
+  const creditApplied = await tx.creditNoteAllocation.findFirst({
+    where: { invoiceId: before.id, note: { status: 'ISSUED' } },
+    select: { note: { select: { noteNumber: true } } },
+  })
+  if (creditApplied) {
+    throw new AppError(
+      `${before.invoiceNumber} has credit from ${creditApplied.note.noteNumber} set against it. Cancel that credit note first, or raise a credit note.`,
+      409,
+      'HAS_PAYMENTS',
+    )
   }
   const after = await tx.salesInvoice.update({
     where: { id: before.id },

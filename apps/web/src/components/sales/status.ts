@@ -83,12 +83,30 @@ export const PAYMENT_MODES: Array<{ value: string; label: string }> = [
 ]
 export const modeLabel = (mode: string) => PAYMENT_MODES.find((m) => m.value === mode)?.label ?? mode
 
+/** Today in India, as YYYY-MM-DD. */
+export const todayInIndia = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10)
+/** "2026-11-03" or an ISO moment, as its day in India. */
+const indiaDay = (v: string) => (v.length === 10 ? v : new Date(new Date(v).getTime() + 330 * 60_000).toISOString().slice(0, 10))
+
+/**
+ * A cheque dated after today is held: kept in hand, it settles nothing and is
+ * applied from its date (the business's answer of 19 Oct 2026). The server
+ * holds the same rule.
+ */
+export function chequeHeld(r: { mode: string; chequeDate?: string | null; isChequeCleared?: boolean }): boolean {
+  return (r.mode === 'CHEQUE' || r.mode === 'PDC') && !r.isChequeCleared && !!r.chequeDate && indiaDay(r.chequeDate) > todayInIndia()
+}
+
 /**
  * A receipt's status. A cheque not yet credited by the bank reads as such;
  * a reversed receipt (a bounced cheque, a mistake) settles nothing.
  */
-export function receiptStatus(r: { status: string; mode: string; isChequeCleared: boolean }): StatusLook {
+export function receiptStatus(r: { status: string; mode: string; isChequeCleared: boolean; chequeDate?: string | null }): StatusLook {
   if (r.status === 'REVERSED') return { label: 'Reversed', cls: 'badge-danger' }
+  if (chequeHeld(r)) {
+    const on = new Date(`${indiaDay(r.chequeDate!)}T00:00:00Z`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' })
+    return { label: `Held to ${on}`, cls: 'badge-info' }
+  }
   if ((r.mode === 'CHEQUE' || r.mode === 'PDC') && !r.isChequeCleared) return { label: 'Cheque to clear', cls: 'badge-warning' }
   return { label: 'Received', cls: 'badge-success' }
 }

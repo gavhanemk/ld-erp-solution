@@ -678,6 +678,33 @@ Two were "not sure", so a default was chosen that is easy to change:
   on each invoice and cut by credit notes. To confirm with the accountant
   before the brokerage report is built.
 
+### Decisions made before going live (19 Oct 2026)
+
+From a go-live check of Sales, answered by the business:
+
+1. **Trousers (HSN 6203) take the garment price slab**, as shirts (6205)
+   do: 5% up to ₹2,500 a piece, 18% above. Set in the HSN master on live.
+2. **A post-dated cheque is held until its date.** It is recorded as a
+   cheque in hand: the invoices stay owed, and the credit limit does not
+   count it. From the date on the cheque it is applied to the invoices like
+   an advance, then marked cleared when the bank credits it.
+3. **Transport, packing and other charges billed with the goods take the
+   goods' GST rate**, not a rate of their own: they are part of what the
+   goods are sold for. When the goods carry two rates, the charge is shared
+   between them by value. Our own trims billed on a job-work invoice are
+   goods of their own and keep their own rate.
+4. **Credit a credit note leaves with the customer** (the invoice was already
+   paid) is set against their later invoices with Apply credit.
+
+Rules added in the same check:
+
+- Invoice numbers run in date order: an invoice is never dated in the
+  future, nor before the year's last invoice.
+- Changing a confirmed order so it goes over the customer's credit limit
+  needs the same release, with a reason, as confirming it would.
+- A quotation becomes one order. One past its valid-until date has its
+  price agreed again (the date moved) before it becomes an order.
+
 ---
 
 ## 7. HR & people

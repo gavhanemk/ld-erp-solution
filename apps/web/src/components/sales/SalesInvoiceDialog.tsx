@@ -24,6 +24,7 @@ import { api, ApiError } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
+import { priceCharge } from './chargeShare'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
@@ -82,6 +83,8 @@ interface Prepared {
   charges: Array<{ chargeTypeId: string; name: string; amount: number; gstRate: number }>
   otherCharges: number
   defaults: { invoiceDate: string; dueDate: string }
+  /** India dates: today, and the year's last invoice, which a new one may not be dated before. */
+  dateRange?: { today: string; yearStart: string; lastInvoice: { invoiceNumber: string; day: string } | null }
   /** A job-work order that bills our own trims separately: their cost, what is billed, what is left to bill. */
   ownMaterial?: { cost: number; billed: number; toBill: number; lines: Array<{ item: { name: string; uom: string | null }; qty: number; value: number }> } | null
 }
@@ -229,7 +232,7 @@ export function SalesInvoiceDialog({
         const d = p.data
         setPrep(d)
         setChargeTypes(ct.rows.filter((x) => x.isActive && x.applyOnSale).sort((a, b) => a.name.localeCompare(b.name)))
-        setInvoiceDate(day(d.defaults.invoiceDate))
+        setInvoiceDate(d.dateRange?.today ?? day(d.defaults.invoiceDate))
         setDueDate(day(d.defaults.dueDate))
         setBillingAddress(d.order.billingAddress || d.customer.billingAddress)
         setShippingAddress(d.challan.deliveryAddress || d.order.deliveryAddress || '')
@@ -284,17 +287,27 @@ export function SalesInvoiceDialog({
       prep.order.subtotal > 0 ? round2(Math.min(subtotal, (prep.order.discountAmount * subtotal) / prep.order.subtotal)) : 0
     const taxable = round2(subtotal - discount)
     const factor = subtotal > 0 ? taxable / subtotal : 1
+    // The rounding's leftover paisa goes on the biggest line, as the server does.
+    const values = gross.map((g) => round2(g * factor))
+    const drift = round2(taxable - values.reduce((s, v) => s + v, 0))
+    if (drift !== 0) {
+      const biggest = values.indexOf(Math.max(...values))
+      values[biggest] = round2(values[biggest] + drift)
+    }
     const lines = prep.lines.map((l, i) => {
-      const value = round2(gross[i] * factor)
+      const value = values[i]
       const t = split((value * l.gstRate) / 100)
       return { ...l, gross: gross[i], value, tax: t.cgst + t.sgst + t.igst, ...t }
     })
+    // Each charge at the goods' rate, a share per rate the goods carry, as the server stores it.
+    const goods = lines.map((l) => ({ taxable: l.value, gstRate: l.gstRate }))
     const chargeRows = charges.map((c) => {
       const type = chargeTypeById.get(c.chargeTypeId)
       const amount = Number(c.amount) || 0
-      const rate = c.gstRate !== '' ? Number(c.gstRate) || 0 : Number(type?.defaultGstRate ?? 0)
-      const t = split((amount * rate) / 100)
-      return { ...c, type, value: amount, rate, ...t }
+      // Our own trims are goods of their own, at their own rate; any other charge takes the goods' rate.
+      const own = c.ownMaterial ? (c.gstRate !== '' ? Number(c.gstRate) || 0 : Number(type?.defaultGstRate ?? 0)) : null
+      const p = priceCharge(amount, own != null ? [] : goods, own ?? Number(type?.defaultGstRate ?? 0), !!intra)
+      return { ...c, type, value: amount, rateText: p.rateText, cgst: p.cgst, sgst: p.sgst, igst: p.igst }
     })
     const live = chargeRows.filter((c) => c.type && c.value > 0)
     const chargeTotal = round2(live.reduce((s, c) => s + c.value, 0))
@@ -324,17 +337,29 @@ export function SalesInvoiceDialog({
   }, [prep, charges, chargeTypeById, otherCharges])
 
   const chargeNoType = totals?.chargeRows.find((c) => !c.type && c.value > 0)
+  // The server checks the same; an earlier year's date is left to it, as that year has its own series.
+  const range = prep?.dateRange
+  const todayIn = range?.today
+  const last = range?.lastInvoice
+  const beforeLast =
+    range && last && invoiceDate && invoiceDate >= range.yearStart && invoiceDate < last.day
+      ? `${last.invoiceNumber} is dated ${formatDate(last.day)}, and invoice numbers run in date order. Date this one ${formatDate(last.day)} or later.`
+      : null
   const blocker = !prep
     ? null
     : prep.placeOfSupplyProblem
       ? prep.placeOfSupplyProblem
       : !invoiceDate
         ? 'Give the invoice a date.'
-        : dueDate && dueDate < invoiceDate
-          ? 'The due date cannot be before the invoice date.'
-          : chargeNoType
-            ? 'Pick which charge the amount in the totals is for.'
-            : null
+        : todayIn && invoiceDate > todayIn
+          ? 'An invoice cannot be dated in the future.'
+          : beforeLast
+            ? beforeLast
+            : dueDate && dueDate < invoiceDate
+              ? 'The due date cannot be before the invoice date.'
+              : chargeNoType
+                ? 'Pick which charge the amount in the totals is for.'
+                : null
 
   const save = async () => {
     if (!prep || !totals || blocker) return
@@ -354,7 +379,12 @@ export function SalesInvoiceDialog({
         eWayBillDate: eWayBillDate || null,
         charges: totals.chargeRows
           .filter((c) => c.type && c.value > 0)
-          .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.value, gstRate: c.gstRate !== '' ? c.rate : null, ownMaterial: !!c.ownMaterial })),
+          .map((c) => ({
+            chargeTypeId: c.chargeTypeId,
+            amount: c.value,
+            gstRate: c.ownMaterial && c.gstRate !== '' ? Number(c.gstRate) || 0 : null,
+            ownMaterial: !!c.ownMaterial,
+          })),
         otherCharges: totals.other,
         notes: notes.trim() || null,
         terms: terms.trim() || null,
@@ -419,7 +449,7 @@ export function SalesInvoiceDialog({
                     <div className="form-input text-muted-foreground pl-9 font-mono">Given when saved</div>
                   </Field>
                   <Field label="Invoice date" htmlFor="inv-date">
-                    <input id="inv-date" type="date" className="form-input" value={invoiceDate} min={day(o.orderDate)} onChange={(e) => pickInvoiceDate(e.target.value)} />
+                    <input id="inv-date" type="date" className="form-input" value={invoiceDate} min={day(o.orderDate)} max={prep.dateRange?.today} onChange={(e) => pickInvoiceDate(e.target.value)} />
                   </Field>
                   <Field label={`Due date (${prep.customer.creditDays} days' credit)`} htmlFor="inv-due">
                     <input id="inv-due" type="date" className="form-input" value={dueDate} min={invoiceDate || undefined} onChange={(e) => setDueDate(e.target.value)} />
@@ -618,7 +648,7 @@ export function SalesInvoiceDialog({
                                   .filter((ct) => !taken.has(ct.id))
                                   .map((ct) => (
                                     <option key={ct.id} value={ct.id}>
-                                      {ct.name} @ {Number(ct.defaultGstRate)}%
+                                      {ct.name}
                                     </option>
                                   ))}
                               </SmartSelect>
@@ -630,16 +660,25 @@ export function SalesInvoiceDialog({
                                 onValueChange={(v) => setCharge(c.key, { amount: v })}
                                 aria-label={`Charge ${i + 1} amount`}
                               />
-                              <StepInput
-                                decimals
-                                max={100}
-                                className="form-input h-8 w-14 shrink-0 text-right text-xs tabular-nums"
-                                placeholder={c.type ? String(Number(c.type.defaultGstRate)) : 'GST%'}
-                                value={c.gstRate}
-                                onValueChange={(v) => setCharge(c.key, { gstRate: v })}
-                                aria-label={`Charge ${i + 1} GST rate`}
-                                title="GST % on this charge"
-                              />
+                              {c.ownMaterial ? (
+                                <StepInput
+                                  decimals
+                                  max={100}
+                                  className="form-input h-8 w-14 shrink-0 text-right text-xs tabular-nums"
+                                  placeholder={c.type ? String(Number(c.type.defaultGstRate)) : 'GST%'}
+                                  value={c.gstRate}
+                                  onValueChange={(v) => setCharge(c.key, { gstRate: v })}
+                                  aria-label={`Charge ${i + 1} GST rate`}
+                                  title="GST % on our own trims"
+                                />
+                              ) : (
+                                <span
+                                  className="text-muted-foreground w-20 shrink-0 text-right text-[11px] tabular-nums"
+                                  title="A charge billed with the goods takes the goods' GST rate"
+                                >
+                                  {c.type && c.value > 0 ? `GST ${c.rateText}` : ''}
+                                </span>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => setCharges((cs) => cs.filter((x) => x.key !== c.key))}

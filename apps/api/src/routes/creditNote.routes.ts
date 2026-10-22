@@ -10,7 +10,7 @@ import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
 import { assertStockUnused, recordMovement } from '../services/stock.service'
 import { lockRow } from '../lib/lockRow'
-import { syncInvoiceFromReceipts } from '../services/salesReceipt.service'
+import { planAllocations, syncInvoiceFromReceipts } from '../services/salesReceipt.service'
 import { fgRates } from './finishedGoods.routes'
 
 /**
@@ -25,8 +25,9 @@ import { fgRates } from './finishedGoods.routes'
  *
  * A credit note reduces what the invoice still owes, as far as that goes; any
  * more — the invoice was already paid — stays with the customer as credit,
- * counted like an advance. Final when issued. Cancelled with a reason, which
- * takes returned goods back out of the store and restores the invoice.
+ * counted like an advance, and is set against their later invoices with Apply
+ * credit. Final when issued. Cancelled with a reason, which takes returned
+ * goods back out of the store and restores every invoice it reduced.
  *
  * Mounted at /api/sales/credit-notes, ahead of /api/sales. Sales returns are
  * handled here, not through LD Silk Mills' Head Office (9 Oct 2026).
@@ -312,6 +313,7 @@ const noteInclude = {
   warehouse: { select: { id: true, name: true } },
   createdBy: { select: { id: true, name: true } },
   cancelledBy: { select: { id: true, name: true } },
+  allocations: { orderBy: { createdAt: 'asc' }, include: { invoice: { select: { id: true, invoiceNumber: true, invoiceDate: true } } } },
   lines: {
     orderBy: { sortOrder: 'asc' },
     include: {
@@ -396,13 +398,76 @@ export async function cancelCreditNote(tx: Prisma.TransactionClient, id: string,
     data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId, cancelReason: reason, onAccount: 0 },
     include: noteInclude,
   })
+  // Credit it set against later invoices comes off them again.
+  const moved = round2(before.allocations.reduce((s, a) => s + Number(a.amount), 0))
+  for (const a of before.allocations) {
+    await tx.salesInvoice.update({ where: { id: a.invoiceId }, data: { creditedAmount: { decrement: Number(a.amount) } } })
+    await syncInvoiceFromReceipts(tx, a.invoiceId)
+  }
   if (before.invoiceId) {
-    const applied = round2(Number(before.totalAmount) - Number(before.onAccount))
+    const applied = round2(Number(before.totalAmount) - Number(before.onAccount) - moved)
     await tx.salesInvoice.update({ where: { id: before.invoiceId }, data: { creditedAmount: { decrement: applied } } })
     await syncInvoiceFromReceipts(tx, before.invoiceId)
   }
   return { before, after }
 }
+
+/**
+ * Sets credit a note left with the customer against their invoices still
+ * owed, inside the caller's transaction: each invoice owes that much less, as
+ * if paid, and the note holds that much less. The same checks as applying an
+ * advance: the customer's own invoices, open, and no more than each owes.
+ */
+export async function applyCreditNote(
+  tx: Prisma.TransactionClient,
+  id: string,
+  allocations: Array<{ invoiceId: string; amount: number }>,
+  userId: string,
+) {
+  // Two clicks at once would both see the same credit and spend it twice.
+  await lockRow(tx, 'creditNote', id)
+  const note = await tx.creditNote.findUnique({ where: { id }, select: { id: true, noteNumber: true, customerId: true, status: true, onAccount: true } })
+  if (!note) throw new AppError('Credit note not found', 404, 'NOT_FOUND')
+  if (note.status !== 'ISSUED') throw new AppError(`${note.noteNumber} is cancelled`, 409, 'NOT_ISSUED')
+  const held = Number(note.onAccount)
+  const wanted = round2(allocations.reduce((s, a) => s + a.amount, 0))
+  if (held <= 0) throw new AppError(`${note.noteNumber} holds no credit to apply`, 409, 'NO_CREDIT')
+  if (wanted > held) {
+    throw new AppError(`${note.noteNumber} holds ₹${held.toFixed(2)}; ₹${wanted.toFixed(2)} was applied`, 400, 'MORE_THAN_HELD')
+  }
+  const planned = await planAllocations(tx, note.customerId, allocations)
+  if (!planned.length) throw new AppError('Put an amount against at least one invoice', 400, 'NOTHING_APPLIED')
+  for (const a of planned) {
+    await tx.creditNoteAllocation.create({ data: { noteId: note.id, invoiceId: a.invoiceId, amount: a.amount, createdById: userId } })
+    await tx.salesInvoice.update({ where: { id: a.invoiceId }, data: { creditedAmount: { increment: a.amount } } })
+    await syncInvoiceFromReceipts(tx, a.invoiceId)
+  }
+  const applied = round2(planned.reduce((s, a) => s + a.amount, 0))
+  return tx.creditNote.update({ where: { id: note.id }, data: { onAccount: round2(held - applied) }, include: noteInclude })
+}
+
+const applySchema = z.object({
+  allocations: z
+    .array(z.object({ invoiceId: z.string().min(1, 'Pick the invoice'), amount: z.number().min(0, 'An amount cannot be less than zero') }))
+    .max(200)
+    .superRefine((list, ctx) => {
+      const ids = list.map((a) => a.invoiceId)
+      if (new Set(ids).size !== ids.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'The same invoice appears twice' })
+    }),
+})
+
+/** POST /api/sales/credit-notes/:id/apply — credit held, set against invoices raised since. */
+router.post('/:id/apply', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { allocations } = applySchema.parse(req.body)
+  const after = await prisma.$transaction((tx) => applyCreditNote(tx, req.params.id, allocations, req.user!.id), { timeout: 30_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'CreditNote', entityId: after.id, after })
+  const left = Number(after.onAccount)
+  res.json({
+    success: true,
+    message: `Credit from ${after.noteNumber} applied.${left > 0 ? ` ₹${left.toLocaleString('en-IN')} still held.` : ''}`,
+    data: after,
+  })
+})
 
 router.post('/:id/cancel', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
   const { reason } = z.object({ reason: z.string().trim().min(5, 'Say why, in a few words').max(500) }).parse(req.body ?? {})
