@@ -372,7 +372,18 @@ function SendLauncher({ jobCardId, stepId, onClose, onSaved }: { jobCardId: stri
   )
 }
 
-export function BoardView({ search, refreshKey, onSaved }: { search: string; refreshKey: number; onSaved: (message: string) => void }) {
+export function BoardView({
+  search,
+  filters,
+  refreshKey,
+  onSaved,
+}: {
+  search: string
+  /** The dropdowns: stage, needs, customerId, styleId, moId, due — only those set. */
+  filters: Record<string, string>
+  refreshKey: number
+  onSaved: (message: string) => void
+}) {
   const { rowsPerPage } = useAppSettings()
   const [rows, setRows] = useState<BoardCard[] | null>(null)
   const [total, setTotal] = useState(0)
@@ -401,13 +412,15 @@ export function BoardView({ search, refreshKey, onSaved }: { search: string; ref
   const [busy, setBusy] = useState(false)
   const latest = useRef(0)
 
-  useEffect(() => setPage(1), [search, showDone])
+  const filterQuery = new URLSearchParams(filters).toString()
+  const filtered = filterQuery !== ''
+  useEffect(() => setPage(1), [search, showDone, filterQuery])
 
   const load = useCallback(async () => {
     const ticket = ++latest.current
     setLoading(true)
     try {
-      const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage), show: showDone ? 'all' : 'open' })
+      const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage), show: showDone ? 'all' : 'open', ...Object.fromEntries(new URLSearchParams(filterQuery)) })
       if (search) qs.set('q', search)
       const res = await api.get<Paginated<BoardCard>>(`/production/board?${qs}`)
       if (ticket !== latest.current) return
@@ -419,7 +432,7 @@ export function BoardView({ search, refreshKey, onSaved }: { search: string; ref
     } finally {
       if (ticket === latest.current) setLoading(false)
     }
-  }, [page, rowsPerPage, search, showDone])
+  }, [page, rowsPerPage, search, showDone, filterQuery])
 
   useEffect(() => {
     void load()
@@ -507,7 +520,9 @@ export function BoardView({ search, refreshKey, onSaved }: { search: string; ref
         </div>
       ) : !rows?.length ? (
         <p className="text-muted-foreground px-4 py-10 text-center text-sm">
-          {search ? 'No job card matches that search.' : 'No job card is in production. Once an order’s stages are loaded, its job cards show here with their route.'}
+          {search || filtered
+            ? 'No job card matches that search and these filters.'
+            : 'No job card is in production. Once an order’s stages are loaded, its job cards show here with their route.'}
         </p>
       ) : layout === 'rows' ? (
         <>

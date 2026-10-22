@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertCircle, ArrowRight, ClipboardCheck, ExternalLink, Plus, Printer, RefreshCw, Scale, Search, Undo2 } from 'lucide-react'
 import { api, ApiError, can, type Paginated } from '@/lib/api'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 import { formatDate } from '@/lib/utils'
 import { useAppSettings } from '@/lib/appSettings'
 import { Pagination } from '@/components/tables/Pagination'
@@ -36,6 +37,54 @@ const VIEWS: Array<{ key: View; label: string; empty: string }> = [
   { key: 'all', label: 'All', empty: 'No transfers yet. One is made each time a department sends a job card’s bundles on.' },
 ]
 
+/** The choices for the dropdowns, as GET /production/transfers/filters gives them. */
+interface FilterChoices {
+  stages: Array<{ id: string; name: string }>
+  customers: Array<{ id: string; name: string }>
+  styles: Array<{ id: string; code: string; name: string }>
+  orders: Array<{ id: string; moNumber: string; open: boolean; customer: string | null }>
+  units: Array<{ id: string; name: string }>
+}
+
+/** Every dropdown on the screen. Customer and order apply to both the job cards and the transfer cards. */
+interface Filters {
+  customerId: string
+  moId: string
+  // The job cards.
+  stage: string
+  needs: string
+  styleId: string
+  due: string
+  // The transfer cards.
+  fromOp: string
+  toOp: string
+  unit: string
+  from: string
+  to: string
+}
+const NO_FILTERS: Filters = { customerId: '', moId: '', stage: '', needs: '', styleId: '', due: '', fromOp: '', toOp: '', unit: '', from: '', to: '' }
+const BOARD_KEYS = ['customerId', 'moId', 'stage', 'needs', 'styleId', 'due'] as const
+const CARD_KEYS = ['customerId', 'moId', 'fromOp', 'toOp', 'unit', 'from', 'to'] as const
+const NEEDS: Array<[string, string]> = [
+  ['count', 'To count in'],
+  ['send', 'Ready to send on'],
+  ['check', 'To check'],
+  ['outside', 'At an outside unit'],
+  ['decide', 'Damaged or in rework'],
+  ['short', 'Short, to settle'],
+  ['cutting', 'Cutting to issue or receive'],
+  ['goods', 'Ready for finished goods'],
+  ['putRight', 'Sent past a stage'],
+  ['none', 'Nothing waiting'],
+]
+const DUE: Array<[string, string]> = [
+  ['late', 'Late'],
+  ['week', 'Due in 7 days'],
+  ['month', 'Due in 30 days'],
+]
+const pick = (f: Filters, keys: readonly (keyof Filters)[]) => Object.fromEntries(keys.filter((k) => f[k]).map((k) => [k, f[k]]))
+const selectCls = 'form-input h-8 min-w-0 px-1.5 py-0 text-[11px] sm:w-40 sm:px-3 sm:text-xs'
+
 export default function TransfersPage() {
   const { rowsPerPage } = useAppSettings()
   const [rows, setRows] = useState<TransferRow[]>([])
@@ -57,21 +106,41 @@ export default function TransfersPage() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [busy, setBusy] = useState(false)
   const latest = useRef(0)
+  const [filters, setFilters] = useState<Filters>(NO_FILTERS)
+  const [choices, setChoices] = useState<FilterChoices | null>(null)
+  const setFilter = (k: keyof Filters, v: string) => setFilters((f) => ({ ...f, [k]: v }))
+  // Each view's filters, as the query its list is read with.
+  const boardFilters = pick(filters, BOARD_KEYS)
+  const cardQuery = new URLSearchParams(pick(filters, CARD_KEYS)).toString()
+  const anyFilter = (view === 'board' ? BOARD_KEYS : CARD_KEYS).some((k) => !!filters[k])
+
+  useEffect(() => {
+    let alive = true
+    api
+      .get<{ data: FilterChoices }>('/production/transfers/filters')
+      .then((r) => alive && setChoices(r.data))
+      .catch(() => {
+        // The dropdowns stay empty; the lists still work.
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
     return () => clearTimeout(t)
   }, [search])
-  useEffect(() => setPage(1), [debounced, view])
+  useEffect(() => setPage(1), [debounced, view, cardQuery])
 
   const loadCounts = useCallback(async () => {
     try {
-      const res = await api.get<{ data: Record<View, number> }>('/production/transfers/counts')
+      const res = await api.get<{ data: Record<View, number> }>(`/production/transfers/counts${cardQuery ? `?${cardQuery}` : ''}`)
       setCounts(res.data)
     } catch {
       // The tabs still work without their numbers.
     }
-  }, [])
+  }, [cardQuery])
 
   const load = useCallback(async () => {
     if (!view || view === 'board') return
@@ -79,7 +148,7 @@ export default function TransfersPage() {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
+      const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage), ...pick(filters, CARD_KEYS) })
       if (view !== 'all') qs.set('view', view)
       if (debounced) qs.set('q', debounced)
       const res = await api.get<Paginated<TransferRow>>(`/production/transfers?${qs}`)
@@ -91,12 +160,17 @@ export default function TransfersPage() {
     } finally {
       if (ticket === latest.current) setLoading(false)
     }
-  }, [page, rowsPerPage, view, debounced])
+    // The card filters come in through cardQuery.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, rowsPerPage, view, debounced, cardQuery])
 
   useEffect(() => {
     // Opens on the board; a link can open a tab of cards instead.
     const asked = new URLSearchParams(window.location.search).get('view') as View | null
     setView(asked && VIEWS.some((v) => v.key === asked) ? asked : 'board')
+  }, [])
+  // The tabs' numbers, read again whenever the card filters change.
+  useEffect(() => {
     void loadCounts()
   }, [loadCounts])
   useEffect(() => {
@@ -242,9 +316,130 @@ export default function TransfersPage() {
           )}
         </div>
 
+        {/* Dropdown filters: the job cards' own, or the transfer cards' own; customer and order go with both. */}
+        <div className="border-border grid grid-cols-2 gap-2 border-b px-4 py-2.5 sm:flex sm:flex-wrap sm:items-center">
+          {view === 'board' ? (
+            <>
+              <SmartSelect className={selectCls} value={filters.stage} onChange={(e) => setFilter('stage', e.target.value)} aria-label="Filter by stage">
+                <option value="">All stages</option>
+                {choices?.stages.map((s) => (
+                  <option key={s.id} value={s.id} data-sub="Pieces there now">
+                    {s.name}
+                  </option>
+                ))}
+              </SmartSelect>
+              <SmartSelect className={selectCls} value={filters.needs} onChange={(e) => setFilter('needs', e.target.value)} aria-label="Filter by what needs doing">
+                <option value="">Anything to do</option>
+                {NEEDS.map(([v, label]) => (
+                  <option key={v} value={v}>
+                    {label}
+                  </option>
+                ))}
+              </SmartSelect>
+            </>
+          ) : (
+            <>
+              <SmartSelect className={selectCls} value={filters.fromOp} onChange={(e) => setFilter('fromOp', e.target.value)} aria-label="Filter by the stage it left">
+                <option value="">From any stage</option>
+                {choices?.stages.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    From {s.name}
+                  </option>
+                ))}
+              </SmartSelect>
+              <SmartSelect className={selectCls} value={filters.toOp} onChange={(e) => setFilter('toOp', e.target.value)} aria-label="Filter by the stage it went to">
+                <option value="">To any stage</option>
+                {choices?.stages.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    To {s.name}
+                  </option>
+                ))}
+              </SmartSelect>
+              <SmartSelect className={selectCls} value={filters.unit} onChange={(e) => setFilter('unit', e.target.value)} aria-label="Filter by outside unit">
+                <option value="">Our floor and outside</option>
+                <option value="none">Our floor only</option>
+                <option value="any">Any outside unit</option>
+                {choices?.units.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name}
+                  </option>
+                ))}
+              </SmartSelect>
+            </>
+          )}
+          <SmartSelect className={selectCls} value={filters.customerId} onChange={(e) => setFilter('customerId', e.target.value)} aria-label="Filter by customer">
+            <option value="">All customers</option>
+            {choices?.customers.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </SmartSelect>
+          <SmartSelect className={selectCls} value={filters.moId} onChange={(e) => setFilter('moId', e.target.value)} aria-label="Filter by order">
+            <option value="">All orders</option>
+            {choices?.orders
+              .filter((o) => (view === 'board' ? o.open : true) && (!filters.customerId || o.customer === choices.customers.find((c) => c.id === filters.customerId)?.name))
+              .map((o) => (
+                <option key={o.id} value={o.id} data-sub={[o.customer, o.open ? null : 'closed'].filter(Boolean).join(' · ') || undefined}>
+                  {o.moNumber}
+                </option>
+              ))}
+          </SmartSelect>
+          {view === 'board' ? (
+            <>
+              <SmartSelect className={selectCls} value={filters.styleId} onChange={(e) => setFilter('styleId', e.target.value)} aria-label="Filter by style">
+                <option value="">All styles</option>
+                {choices?.styles.map((s) => (
+                  <option key={s.id} value={s.id} data-sub={s.name}>
+                    {s.code}
+                  </option>
+                ))}
+              </SmartSelect>
+              <SmartSelect className={selectCls} value={filters.due} onChange={(e) => setFilter('due', e.target.value)} aria-label="Filter by due date">
+                <option value="">Any due date</option>
+                {DUE.map(([v, label]) => (
+                  <option key={v} value={v}>
+                    {label}
+                  </option>
+                ))}
+              </SmartSelect>
+            </>
+          ) : (
+            <div className="col-span-2 flex items-center gap-1 sm:col-span-1">
+              <input
+                type="date"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[11px] sm:w-[8rem] sm:flex-none sm:px-3 sm:text-xs"
+                value={filters.from}
+                max={filters.to || undefined}
+                onChange={(e) => setFilter('from', e.target.value)}
+                aria-label="Sent from"
+              />
+              <span className="text-muted-foreground text-xs">to</span>
+              <input
+                type="date"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[11px] sm:w-[8rem] sm:flex-none sm:px-3 sm:text-xs"
+                value={filters.to}
+                min={filters.from || undefined}
+                onChange={(e) => setFilter('to', e.target.value)}
+                aria-label="Sent to"
+              />
+            </div>
+          )}
+          {anyFilter && (
+            <button
+              type="button"
+              className="btn-ghost h-8 px-2 text-xs"
+              onClick={() => setFilters((f) => ({ ...f, ...Object.fromEntries((view === 'board' ? BOARD_KEYS : CARD_KEYS).map((k) => [k, ''])) }))}
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+
         {view === 'board' ? (
           <BoardView
             search={debounced}
+            filters={boardFilters}
             refreshKey={refreshKey}
             onSaved={(m) => {
               setMessage(m)
@@ -258,7 +453,7 @@ export default function TransfersPage() {
             ))}
           </div>
         ) : !rows.length ? (
-          <p className="text-muted-foreground px-4 py-10 text-center text-sm">{debounced ? 'Nothing matches that search.' : current.empty}</p>
+          <p className="text-muted-foreground px-4 py-10 text-center text-sm">{debounced || anyFilter ? 'No transfer matches that search and these filters.' : current.empty}</p>
         ) : (
           <>
             {/* Wide screens: a table. */}

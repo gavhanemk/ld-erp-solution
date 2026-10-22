@@ -272,23 +272,81 @@ const VIEWS: Record<string, Prisma.ProcessTransferWhereInput> = {
   cancelled: { status: 'CANCELLED' },
 }
 
-/** GET /transfers/counts — how many transfers each tab of the list holds. */
-router.get('/transfers/counts', requirePermission(MODULE, 'view'), async (_req, res) => {
-  const [count, short, units, received, all] = await Promise.all([
-    prisma.processTransfer.count({ where: VIEWS.count }),
-    prisma.processTransfer.count({ where: VIEWS.short }),
-    prisma.processTransfer.count({ where: VIEWS.units }),
-    prisma.processTransfer.count({ where: VIEWS.received }),
-    prisma.processTransfer.count(),
-  ])
+/**
+ * The list's dropdown filters, the same for the list and its tab counts:
+ * from and to which stage (a process of the master), which outside unit (or
+ * our own floor only), whose order, which order, and sent between two dates.
+ */
+function transferFilters(query: Record<string, unknown>): Prisma.ProcessTransferWhereInput[] {
+  const and: Prisma.ProcessTransferWhereInput[] = []
+  const fromOp = text(query.fromOp)
+  if (fromOp) and.push({ fromStep: { operationId: fromOp } })
+  const toOp = text(query.toOp)
+  if (toOp) and.push({ toStep: { operationId: toOp } })
+  const unit = text(query.unit)
+  if (unit === 'none') and.push({ vendorId: null })
+  else if (unit === 'any') and.push({ vendorId: { not: null } })
+  else if (unit) and.push({ vendorId: unit })
+  const customerId = text(query.customerId)
+  if (customerId) and.push({ mo: { so: { customerId } } })
+  const from = text(query.from)
+  if (from) and.push({ dispatchDate: { gte: new Date(`${from}T00:00:00+05:30`) } })
+  const to = text(query.to)
+  if (to) and.push({ dispatchDate: { lte: new Date(`${to}T23:59:59.999+05:30`) } })
+  return and
+}
+
+/** GET /transfers/counts — how many transfers each tab of the list holds, under the same filters. */
+router.get('/transfers/counts', requirePermission(MODULE, 'view'), async (req, res) => {
+  const base = transferFilters(req.query)
+  const moId = text(req.query.moId)
+  if (moId) base.push({ moId })
+  const of = (w?: Prisma.ProcessTransferWhereInput) => prisma.processTransfer.count({ where: { AND: [...base, ...(w ? [w] : [])] } })
+  const [count, short, units, received, all] = await Promise.all([of(VIEWS.count), of(VIEWS.short), of(VIEWS.units), of(VIEWS.received), of()])
   res.json({ success: true, data: { count, short, units, received, all } })
 })
 
-/** GET /transfers — filters: moId, status, open=1, vendor=1|0, q, page, limit. */
+/**
+ * GET /transfers/filters — the choices for the screen's dropdowns: the stages
+ * (processes, cutting first, in the process master's order), the customers,
+ * styles and orders that have job cards (open orders first), and the outside
+ * units transfers have gone to.
+ */
+router.get('/transfers/filters', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const [ops, cards, units] = await Promise.all([
+    prisma.operation.findMany({ where: { moSteps: { some: { mo: { jobCards: { some: {} } } } } }, select: { id: true, name: true, kind: true, sortOrder: true } }),
+    prisma.jobCard.findMany({
+      take: 3000,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        mo: { select: { id: true, moNumber: true, status: true, so: { select: { customer: { select: { id: true, name: true } } } } } },
+        moLine: { select: { style: { select: { id: true, code: true, name: true } } } },
+      },
+    }),
+    prisma.processTransfer.findMany({ where: { vendorId: { not: null } }, distinct: ['vendorId'], select: { vendor: { select: { id: true, name: true } } } }),
+  ])
+  const unique = <T extends { id: string }>(xs: T[]) => [...new Map(xs.map((x) => [x.id, x])).values()]
+  const open = (s: string) => !['CLOSED', 'COMPLETED', 'CANCELLED'].includes(s)
+  res.json({
+    success: true,
+    data: {
+      stages: ops
+        .sort((a, b) => Number(b.kind === 'CUTTING') - Number(a.kind === 'CUTTING') || a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+        .map((o) => ({ id: o.id, name: o.name })),
+      customers: unique(cards.flatMap((c) => (c.mo.so ? [c.mo.so.customer] : []))).sort((a, b) => a.name.localeCompare(b.name)),
+      styles: unique(cards.map((c) => c.moLine.style)).sort((a, b) => a.code.localeCompare(b.code)),
+      orders: unique(cards.map((c) => ({ id: c.mo.id, moNumber: c.mo.moNumber, open: open(c.mo.status), customer: c.mo.so?.customer.name ?? null })))
+        .sort((a, b) => Number(b.open) - Number(a.open) || b.moNumber.localeCompare(a.moNumber)),
+      units: units.flatMap((u) => (u.vendor ? [u.vendor] : [])).sort((a, b) => a.name.localeCompare(b.name)),
+    },
+  })
+})
+
+/** GET /transfers — filters: moId, status, open=1, vendor=1|0, q, fromOp, toOp, unit, customerId, from, to, page, limit. */
 router.get('/transfers', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
-  const and: Prisma.ProcessTransferWhereInput[] = []
+  const and: Prisma.ProcessTransferWhereInput[] = transferFilters(req.query)
   const moId = text(req.query.moId)
   if (moId) and.push({ moId })
   const jobCardId = text(req.query.jobCardId)
@@ -638,7 +696,17 @@ router.get('/stage-report', requirePermission(MODULE, 'view'), async (req, res) 
 /** GET /board?q=&show=open|all — every open job card, its route, and where its pieces are stage by stage. */
 router.get('/board', requirePermission(MODULE, 'view'), async (req, res) => {
   const p = page(req)
-  const out = await boardCards(prisma, { q: text(req.query.q), show: text(req.query.show), ...p })
+  const out = await boardCards(prisma, {
+    q: text(req.query.q),
+    show: text(req.query.show),
+    stage: text(req.query.stage),
+    needs: text(req.query.needs),
+    customerId: text(req.query.customerId),
+    styleId: text(req.query.styleId),
+    moId: text(req.query.moId),
+    due: text(req.query.due),
+    ...p,
+  })
   res.json({ success: true, data: out.data, pagination: { ...p, total: out.total, pages: Math.ceil(out.total / p.limit) || 1 } })
 })
 
