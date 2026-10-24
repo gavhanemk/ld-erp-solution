@@ -25,6 +25,28 @@ export async function findBom(db: Db, styleId: string, color: string | null) {
 }
 
 /**
+ * Lines planned before their style had an approved BOM take the one approved
+ * since. A line keeps the BOM it was given; only a line with none looks
+ * again, so an order made a minute before its BOM was approved still gets
+ * its materials worked out. One order, or every open one when no id is given.
+ * Returns how many lines were linked.
+ */
+export async function attachLateBoms(db: Db, moId?: string) {
+  const lines = await db.mOLine.findMany({
+    where: { bomId: null, mo: { ...(moId ? { id: moId } : {}), status: { notIn: ['COMPLETED', 'CLOSED'] } } },
+    select: { id: true, styleId: true, color: true },
+  })
+  let linked = 0
+  for (const l of lines) {
+    const bom = await findBom(db, l.styleId, l.color || null)
+    if (!bom) continue
+    await db.mOLine.update({ where: { id: l.id }, data: { bomId: bom.id } })
+    linked++
+  }
+  return linked
+}
+
+/**
  * A sales order as production plans it: each line's style (the item's own,
  * else the style number typed on the line, when it is a style in the master),
  * its colour, the approved BOM, and per size what was ordered, what is
