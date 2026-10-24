@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { AlertCircle, CheckCircle2, ListPlus, Loader2, X } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
-import type { FormField } from '@/components/masters/MasterFormDialog'
+import { hsnFormFields, pct } from '@/components/masters/hsnFormFields'
 
 /**
  * HSN / SAC codes and the GST each carries.
@@ -34,9 +34,6 @@ interface FillResult {
   created: Array<{ code: string; gstRate: number; description: string }>
   skipped: Array<{ code: string; reason: string; items: number }>
 }
-
-/** 5 → "5%", 2.5 → "2.5%". */
-const pct = (n: number) => `${Number(n.toFixed(2))}%`
 
 const rupees = (n: number) =>
   `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
@@ -102,77 +99,6 @@ const columns: Column<HsnCode>[] = [
       ),
   },
   { key: 'isActive', header: 'Status', render: (h) => <ActiveBadge isActive={h.isActive} /> },
-]
-
-/*
- * Two rows on a wide screen:
- *
- *   Code | Type | Description ..........
- *   GST % | Price per piece above | GST above that | Effective from
- *   Notes ...............................
- */
-const formFields: FormField[] = [
-  {
-    name: 'code',
-    label: 'HSN / SAC Code',
-    required: true,
-    placeholder: '5208',
-    help: '4 to 8 digits. Service (SAC) codes start with 99.',
-  },
-  {
-    name: 'kind',
-    label: 'Type',
-    type: 'select',
-    help: 'Left empty, it is saved as Goods.',
-    options: [
-      { value: 'GOODS', label: 'Goods (HSN)' },
-      { value: 'SERVICES', label: 'Service (SAC)' },
-    ],
-  },
-  {
-    name: 'description',
-    label: 'Description',
-    required: true,
-    placeholder: 'Woven cotton fabric',
-    span: 2,
-  },
-  {
-    name: 'gstRate',
-    label: 'GST %',
-    type: 'number',
-    max: 40,
-    required: true,
-    placeholder: '5',
-    help: 'The total rate. It is split for you on every document.',
-    liveHelp: (v) => {
-      const n = Number(v)
-      if (v === '' || v == null || !Number.isFinite(n)) return null
-      return `Within state CGST ${pct(n / 2)} + SGST ${pct(n / 2)} · other state IGST ${pct(n)}`
-    },
-  },
-  {
-    name: 'priceLimit',
-    label: 'Price per piece above (₹)',
-    type: 'number',
-    placeholder: '2500',
-    help: 'Only for a rate that depends on the price, like garments. Leave empty otherwise.',
-  },
-  {
-    name: 'rateAbove',
-    label: 'GST % above that price',
-    type: 'number',
-    max: 40,
-    placeholder: '18',
-  },
-  {
-    name: 'effectiveFrom',
-    label: 'Effective from',
-    type: 'date',
-    // The server sends a full timestamp; a date box only takes the day.
-    initial: (r) => (r.effectiveFrom ? String(r.effectiveFrom).slice(0, 10) : ''),
-  },
-  { name: 'notes', label: 'Notes', placeholder: 'Notification or circular it comes from', span: 3 },
-  { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Used for GST on items' },
 ]
 
 const filterDefs: FilterDef[] = [
@@ -277,7 +203,7 @@ export default function HsnCodesPage() {
         entityName="HSN / SAC Code"
         resource="hsn-codes"
         columns={columns}
-        formFields={formFields}
+        formFields={hsnFormFields}
         formColumns={4}
         filterDefs={filterDefs}
         refreshKey={refreshKey}

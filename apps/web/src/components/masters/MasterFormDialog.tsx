@@ -131,7 +131,8 @@ export interface FormField {
    * Offers "Add new …" in an optionsFrom select, for a choice that is not in
    * the list yet: a unit nobody has needed before. It opens that master's own
    * form over this one, saves it to the master, and picks it here, so it is
-   * in the list from then on.
+   * in the list from then on. A suggestFrom box offers it the same way: an
+   * item's HSN code added to the HSN master from the item form.
    */
   createFrom?: {
     /** The master's form, the same one its own page uses. */
@@ -140,8 +141,11 @@ export interface FormField {
     title: string
     /** What a new one is called in the list: "unit". */
     noun: string
-    /** Which field of the new form takes what was typed in the search. Defaults to 'name'. */
-    typedInto?: string
+    /**
+     * Which field of the new form takes what was typed in the search, or how
+     * to choose it from what was typed. Defaults to 'name'.
+     */
+    typedInto?: string | ((typed: string) => string)
   }
   /**
    * Populates a select from a property on whatever record another field on
@@ -711,7 +715,9 @@ export function MasterFormDialog<T extends { id: string }>({
   // A unit added from the item form joins the list here and is picked, as
   // though it had always been there.
   const added = (f: FormField, row: Record<string, unknown>) => {
-    const { valueKey = 'id', labelKey = 'name' } = f.optionsFrom ?? {}
+    // A suggestion box's list is its codes, so it is kept in their order.
+    const valueKey = f.optionsFrom?.valueKey ?? f.suggestFrom?.valueKey ?? 'id'
+    const labelKey = f.optionsFrom ? (f.optionsFrom.labelKey ?? 'name') : valueKey
     setRemoteRows((prev) => ({
       ...prev,
       [f.name]: [...(prev[f.name] ?? []).filter((r) => r[valueKey] !== row[valueKey]), row].sort((a, b) =>
@@ -823,7 +829,7 @@ export function MasterFormDialog<T extends { id: string }>({
                     starred={Boolean(f.required) || insists(f)}
                     onChange={(v) => set(f.name, v)}
                     onCreate={
-                      f.createFrom && f.optionsFrom && can('masters', 'create')
+                      f.createFrom && (f.optionsFrom || f.suggestFrom) && can('masters', 'create')
                         ? (typed) => setAdding({ field: f, typed })
                         : undefined
                     }
@@ -862,9 +868,11 @@ export function MasterFormDialog<T extends { id: string }>({
     document.body,
   )
 
-  if (!adding?.field.createFrom || !adding.field.optionsFrom) return portal
+  const addingFrom = adding?.field.optionsFrom ?? adding?.field.suggestFrom
+  if (!adding?.field.createFrom || !addingFrom) return portal
   const { field: addingTo, typed } = adding
   const { fields: newFields, title: newTitle, typedInto = 'name' } = addingTo.createFrom!
+  const typedField = typeof typedInto === 'function' ? typedInto(typed) : typedInto
 
   // Beside this form's portal, not inside its <form>: a submit inside a
   // portal still bubbles up the React tree, and would save this form too.
@@ -876,9 +884,9 @@ export function MasterFormDialog<T extends { id: string }>({
         onClose={() => setAdding(null)}
         onSaved={() => {}}
         onCreated={(row) => added(addingTo, row)}
-        resource={addingTo.optionsFrom!.resource}
+        resource={addingFrom.resource}
         fields={newFields}
-        initialValues={typed ? { [typedInto]: typed } : undefined}
+        initialValues={typed ? { [typedField]: typed } : undefined}
         title={newTitle}
         stacked
       />
@@ -1047,6 +1055,8 @@ function Field({
           value={String(value ?? '')}
           onValueChange={(v) => onChange(v)}
           suggestions={(options ?? []).map((o) => ({ value: o.value, label: o.label }))}
+          onCreate={onCreate}
+          createNoun={field.createFrom?.noun}
         />
       ) : type === 'number' && !field.allowNegative ? (
         // The wheel and the arrow keys step it, and it never goes below its floor.
@@ -1081,7 +1091,17 @@ function Field({
       {problem ? (
         <p className="form-help !text-red-400">{problem}</p>
       ) : notListed ? (
-        <p className="form-help warn-text">{notListed}</p>
+        <p className="form-help warn-text">
+          {notListed}
+          {onCreate && (
+            <>
+              {' '}
+              <button type="button" onClick={() => onCreate(typed)} className="text-primary font-medium hover:underline">
+                Add it now
+              </button>
+            </>
+          )}
+        </p>
       ) : (field.liveHelp?.(value) ?? field.help) ? (
         <p className="form-help">{field.liveHelp?.(value) ?? field.help}</p>
       ) : null}

@@ -7,6 +7,7 @@ import { api } from '@/lib/api'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 import { createUomFrom } from '@/components/masters/uomFormFields'
+import { createHsnFrom } from '@/components/masters/hsnFormFields'
 
 /**
  * A rate in full, in Indian grouping: ₹1,290 and ₹0.35, never "₹1.3K". A rate
@@ -196,7 +197,7 @@ const isMain = (row: Record<string, unknown>) => !row.parentId
  * Four to a row, in two panels, so the whole item fits on one screen:
  *
  *   Item name ........... | Item type   | Unit
- *   Category | Sub category | Department | HSN
+ *   Category | Sub category | HSN
  *   Style | Colour                        (a finished good only)
  *   Description ...........................
  *   Standard rate | Reorder level | Minimum | Maximum
@@ -204,6 +205,9 @@ const isMain = (row: Record<string, unknown>) => !row.parentId
  * Category and Sub Category are two boxes over the one `categoryId` the item
  * is filed under: the sub-category when there is one, the main category when
  * there is not.
+ *
+ * There is no Department box: the server takes the department from the
+ * category (the sub-category's own, or else its main category's).
  */
 const formFields: FormField[] = [
   { name: 'code', label: 'Item Code', generated: true, section: 'Identity' },
@@ -241,7 +245,6 @@ const formFields: FormField[] = [
     section: 'Identity',
     sendAs: 'categoryId',
     resets: ['subCategoryId'],
-    fills: { field: 'departmentId', from: (row) => row.departmentId },
     optionsFrom: { resource: 'item-categories', filter: isMain },
     initial: (r) => {
       const c = r.category as { parentId?: string | null } | null
@@ -256,7 +259,6 @@ const formFields: FormField[] = [
     sendAs: 'categoryId',
     emptyLabel: 'None under this category',
     mustFill: 'ifOptions',
-    fills: { field: 'departmentId', from: (row) => row.departmentId },
     optionsFrom: {
       resource: 'item-categories',
       filter: (row, values) => Boolean(values.mainCategoryId) && row.parentId === values.mainCategoryId,
@@ -265,16 +267,6 @@ const formFields: FormField[] = [
       const c = r.category as { parentId?: string | null } | null
       return c?.parentId ? r.categoryId : ''
     },
-  },
-  {
-    name: 'departmentId',
-    label: 'Department',
-    type: 'select',
-    section: 'Identity',
-    // Optional: not every item belongs to one department. Picking a
-    // sub-category still fills it in from that sub-category.
-    optionsFrom: { resource: 'departments' },
-    help: 'Optional',
   },
   {
     name: 'hsnCode',
@@ -287,8 +279,11 @@ const formFields: FormField[] = [
       resource: 'hsn-codes',
       valueKey: 'code',
       label: (r) => `${String(r.description ?? '')} · GST ${Number(r.gstRate)}%`,
-      notListed: (code) => `${code} is not in Masters → HSN / SAC Codes yet, so it carries no GST rate. Add it there first.`,
+      notListed: (code) => `${code} is not in Masters → HSN / SAC Codes yet, so it carries no GST rate.`,
     },
+    // A code not listed yet is added to Masters → HSN / SAC Codes from here,
+    // over this form, and put in the box.
+    createFrom: createHsnFrom,
     help: 'GST comes from this code in Masters → HSN / SAC Codes',
   },
   {

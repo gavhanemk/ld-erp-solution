@@ -623,6 +623,22 @@ const itemInclude = {
 }
 
 /*
+ * An item's department is its category's: the sub-category's own, or else its
+ * main category's. The item form does not ask for it. Worked out when an item
+ * is added, and again when its category changes; a department sent on purpose
+ * is kept, and so is one an item already has while its category stays.
+ */
+async function departmentFromCategory(data: Record<string, unknown>, before?: Record<string, unknown>) {
+  if (data.departmentId !== undefined || typeof data.categoryId !== 'string') return data
+  if (before && before.categoryId === data.categoryId && before.departmentId) return data
+  const category = await prisma.itemCategory.findUnique({
+    where: { id: data.categoryId },
+    select: { departmentId: true, parent: { select: { departmentId: true } } },
+  })
+  return { ...data, departmentId: category?.departmentId ?? category?.parent?.departmentId ?? null }
+}
+
+/*
  * The TDS sections, for the "usual TDS section" box on a supplier or an
  * expense head. Read-only here — they are set up in Settings — and shaped like
  * any other master list so the master forms can pick from it.
@@ -756,6 +772,7 @@ router.use(
     // which a schema cannot do. On an edit the saved type, style and colour
     // stand in for whatever the edit leaves out.
     beforeSave: async (data, before) => {
+      data = await departmentFromCategory(data, before)
       const checked = await assertItemStyleColorValid(
         String(data.type ?? before?.type ?? ''),
         (data.styleId !== undefined ? data.styleId : before?.styleId) as string | null | undefined,

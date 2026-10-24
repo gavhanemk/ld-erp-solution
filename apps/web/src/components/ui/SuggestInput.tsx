@@ -2,6 +2,7 @@
 
 import { useMemo, useRef, useState, type InputHTMLAttributes, type KeyboardEvent } from 'react'
 import * as Popover from '@radix-ui/react-popover'
+import { Plus } from 'lucide-react'
 
 /**
  * A text box that suggests as you type, styled like SmartSelect's list.
@@ -23,11 +24,30 @@ type Props = Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 
   value: string
   onValueChange: (value: string) => void
   suggestions: Suggestion[]
+  /**
+   * Offers "Add new …" at the top of the list, for a value that is not in it
+   * yet: an HSN code added to the HSN master without leaving the item form.
+   * Not offered once the box holds a value that is already listed.
+   */
+  onCreate?: (typed: string) => void
+  /** What a new one is called in that row: "HSN code". */
+  createNoun?: string
 }
 
 const fold = (s: string) => s.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
 
-export function SuggestInput({ value, onValueChange, suggestions, className, onKeyDown, onFocus, onBlur, ...rest }: Props) {
+export function SuggestInput({
+  value,
+  onValueChange,
+  suggestions,
+  onCreate,
+  createNoun = 'one',
+  className,
+  onKeyDown,
+  onFocus,
+  onBlur,
+  ...rest
+}: Props) {
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(-1)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -45,7 +65,15 @@ export function SuggestInput({ value, onValueChange, suggestions, className, onK
     return list.slice(0, 60)
   }, [value, suggestions])
 
-  const show = open && matches.length > 0
+  const typed = value.trim()
+  const canCreate = Boolean(onCreate) && !suggestions.some((s) => s.value.toLowerCase() === typed.toLowerCase())
+  const show = open && (matches.length > 0 || canCreate)
+
+  const create = () => {
+    setOpen(false)
+    setActive(-1)
+    onCreate?.(typed)
+  }
 
   const pick = (s: Suggestion) => {
     onValueChange(s.value)
@@ -118,6 +146,19 @@ export function SuggestInput({ value, onValueChange, suggestions, className, onK
           }}
           className="border-border bg-card text-foreground z-[1000] max-h-[min(18rem,var(--radix-popover-content-available-height))] w-max max-w-[min(30rem,92vw)] min-w-[var(--radix-popover-trigger-width)] overflow-y-auto rounded-xl border py-1 shadow-xl"
         >
+          {canCreate && (
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={create}
+              className={`text-primary hover:bg-primary/10 flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium ${
+                matches.length ? 'border-border border-b' : ''
+              }`}
+            >
+              <Plus size={14} className="shrink-0" aria-hidden />
+              <span className="min-w-0 truncate">{typed ? `Add “${typed}” as a new ${createNoun}` : `Add new ${createNoun}`}</span>
+            </button>
+          )}
           <div role="listbox">
             {matches.map((s, i) => (
               <div
