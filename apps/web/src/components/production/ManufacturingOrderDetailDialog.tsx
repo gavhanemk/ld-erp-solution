@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, Info, Layers, Loader2, PackageCheck, Pencil, Send, X, Scissors } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
@@ -181,6 +181,9 @@ export function ManufacturingOrderDetailDialog({
 
   // Rows turned to the other owner by the person: "this fabric is ours after all".
   const [swap, setSwap] = useState<Set<string>>(new Set())
+  // The materials table, to find its Ask now boxes by row, and the button after them, for Enter.
+  const tableRef = useRef<HTMLTableElement>(null)
+  const raiseRef = useRef<HTMLButtonElement>(null)
 
   const loadPlan = useCallback(async (id: string, flipped: Set<string> = new Set()) => {
     setLoadingPlan(true)
@@ -296,6 +299,8 @@ export function ManufacturingOrderDetailDialog({
     }
   }
 
+  const planRows = plan?.rows ?? []
+  const firstTicked = planRows.find((r) => ask[r.key]?.on)
   const chosen = useMemo(
     () =>
       (plan?.rows ?? [])
@@ -312,7 +317,11 @@ export function ManufacturingOrderDetailDialog({
       : !live
         ? null
         : chosen.length === 0
-          ? 'Tick the materials to ask for.'
+          ? planRows.length > 0 && planRows.every((r) => r.toRequest <= 0)
+            ? 'Everything this order needs has already been asked for: see Requisitions below. More than planned is asked for in Inventory → Requisitions.'
+            : firstTicked
+              ? `Type how much to ask for under Ask now for ${firstTicked.item.code}.`
+              : 'Tick the materials to ask for, or tick the box at the top for all of them.'
           : chosen.find((x) => !x.a.processId)
             ? `Say which process ${chosen.find((x) => !x.a.processId)!.r.item.code} is for.`
             : chosen.find((x) => !x.a.warehouseId)
@@ -348,6 +357,33 @@ export function ManufacturingOrderDetailDialog({
   const s = mo ? moStatus(mo.status) : null
   const share = mo && mo.totalPlannedQty > 0 ? Math.min(100, Math.round((mo.totalPackedQty / mo.totalPlannedQty) * 100)) : 0
   const setRow = (key: string, patch: Partial<Ask[string]>) => setAsk((a) => ({ ...a, [key]: { ...a[key], ...patch } }))
+  /*
+   * Ticking a row asks for what is still left to ask for (needed less what
+   * is already asked), so nobody types the same figure twice; unticking
+   * empties it. A row already asked for in full has nothing to tick: the
+   * server takes no more than is left.
+   */
+  const tickPatch = (r: PlanRow, on: boolean, current?: Ask[string]): Partial<Ask[string]> =>
+    on ? { on, qty: Number(current?.qty) > 0 ? current!.qty : String(r.toRequest) } : { on, qty: '' }
+  const tick = (r: PlanRow, on: boolean) => setRow(r.key, tickPatch(r, on, ask[r.key]))
+  const askable = planRows.filter((r) => r.toRequest > 0)
+  const tickedCount = askable.filter((r) => ask[r.key]?.on).length
+  const tickAll = (on: boolean) =>
+    setAsk((a) => ({ ...a, ...Object.fromEntries(askable.map((r) => [r.key, { ...a[r.key], ...tickPatch(r, on, a[r.key]) }])) }))
+  /**
+   * Enter in an Ask now box goes down to the next one (past rows all asked
+   * for, which have none), and from the last one to Raise requisitions.
+   */
+  const askEnter = (i: number) => (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    const boxes = [...(tableRef.current?.querySelectorAll<HTMLInputElement>('[data-ask-row]') ?? [])]
+    const next = boxes.find((b) => Number(b.dataset.askRow) > i)
+    if (next) {
+      next.focus()
+      next.select()
+    } else raiseRef.current?.focus()
+  }
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
@@ -487,7 +523,7 @@ export function ManufacturingOrderDetailDialog({
                         Needed by
                         <input type="date" className="form-input h-7 w-36 py-0 text-xs" value={requiredDate} onChange={(e) => setRequiredDate(e.target.value)} />
                       </label>
-                      <button type="button" className="btn-primary h-8 px-3 text-xs" onClick={() => void raise()} disabled={busy !== null || !!raiseBlocker}>
+                      <button ref={raiseRef} type="button" className="btn-primary h-8 px-3 text-xs" onClick={() => void raise()} disabled={busy !== null || !!raiseBlocker}>
                         {busy === 'raise' ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />} Raise requisitions
                       </button>
                     </div>
@@ -509,15 +545,32 @@ export function ManufacturingOrderDetailDialog({
                       <p className="text-muted-foreground text-sm">Nothing to work out.</p>
                     ) : (
                       <div className="border-border overflow-x-auto rounded-lg border">
-                        <table className="data-table w-full min-w-[1080px]">
+                        <table ref={tableRef} className="data-table w-full min-w-[1080px]">
                           <thead>
                             <tr className="bg-secondary">
-                              {live && mayRaise && <th style={{ width: 32 }} />}
+                              {live && mayRaise && (
+                                <th style={{ width: 32 }}>
+                                  <input
+                                    type="checkbox"
+                                    className="accent-primary"
+                                    checked={askable.length > 0 && tickedCount === askable.length}
+                                    ref={(el) => {
+                                      if (el) el.indeterminate = tickedCount > 0 && tickedCount < askable.length
+                                    }}
+                                    disabled={askable.length === 0}
+                                    onChange={(e) => tickAll(e.target.checked)}
+                                    aria-label="Ask for all the materials"
+                                    title={askable.length === 0 ? 'All asked for already' : tickedCount === askable.length ? 'Untick all' : 'Tick all'}
+                                  />
+                                </th>
+                              )}
                               <th>Material</th>
                               <th>For process</th>
                               <th style={{ textAlign: 'right' }}>Needed</th>
                               <th style={{ textAlign: 'right' }}>In stock</th>
-                              <th style={{ textAlign: 'right' }}>Asked for</th>
+                              <th style={{ textAlign: 'right' }} title="Already in requisitions raised for this order">
+                                Already asked
+                              </th>
                               <th style={{ textAlign: 'right' }}>Issued</th>
                               <th style={{ textAlign: 'right' }}>Short</th>
                               {live && mayRaise && (
@@ -529,7 +582,7 @@ export function ManufacturingOrderDetailDialog({
                             </tr>
                           </thead>
                           <tbody>
-                            {plan.rows.map((r) => {
+                            {plan.rows.map((r, i) => {
                               const a = ask[r.key]
                               return (
                                 <tr key={r.key}>
@@ -539,8 +592,10 @@ export function ManufacturingOrderDetailDialog({
                                         type="checkbox"
                                         className="accent-primary"
                                         checked={!!a?.on}
-                                        onChange={(e) => setRow(r.key, { on: e.target.checked })}
+                                        disabled={r.toRequest <= 0}
+                                        onChange={(e) => tick(r, e.target.checked)}
                                         aria-label={`Ask for ${r.item.code}`}
+                                        title={r.toRequest <= 0 ? 'Already asked for in full' : undefined}
                                       />
                                     </td>
                                   )}
@@ -597,14 +652,23 @@ export function ManufacturingOrderDetailDialog({
                                   {live && mayRaise && (
                                     <>
                                       <td className="w-32 text-right">
-                                        <StepInput
-                                          decimals
-                                          className="form-input h-8 w-28 px-2 text-right text-xs tabular-nums"
-                                          value={a?.qty ?? ''}
-                                          placeholder="0"
-                                          onValueChange={(v) => setRow(r.key, { qty: v, on: Number(v) > 0 })}
-                                          aria-label={`Ask for ${r.item.code}, quantity`}
-                                        />
+                                        {r.toRequest > 0 ? (
+                                          <StepInput
+                                            data-ask-row={i}
+                                            decimals
+                                            className="form-input h-8 w-28 px-2 text-right text-xs tabular-nums"
+                                            value={a?.qty ?? ''}
+                                            placeholder="0"
+                                            max={r.toRequest}
+                                            title={`${qty(r.toRequest)} still to ask for`}
+                                            onValueChange={(v) => setRow(r.key, { qty: v, on: Number(v) > 0 })}
+                                            onKeyDown={askEnter(i)}
+                                            aria-label={`Ask for ${r.item.code}, quantity`}
+                                          />
+                                        ) : (
+                                          // Nothing left to ask for: said, rather than an empty box that looks like one to fill.
+                                          <span className="text-primary text-xs font-medium">All asked</span>
+                                        )}
                                       </td>
                                       <td>
                                         <SmartSelect className="form-input h-8 w-44 py-0 text-xs" value={a?.warehouseId ?? ''} onChange={(e) => setRow(r.key, { warehouseId: e.target.value })}>
