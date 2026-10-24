@@ -9,7 +9,7 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
 import { ensureJobCards } from '../services/jobCard.service'
-import { materialPlan, orderForPlanning, PLANNABLE_ORDER_STATUSES } from '../services/manufacturing.service'
+import { attachLateBoms, materialPlan, orderForPlanning, PLANNABLE_ORDER_STATUSES } from '../services/manufacturing.service'
 import { cancelCutting, createCutting, cuttingPrep, cuttingSchema } from '../services/cutting.service'
 import { applyRouting, routingProblem, stylesOfMo } from '../services/route.service'
 import floorRoutes from './productionFloor.routes'
@@ -234,6 +234,8 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
     })
   }
   const where: Prisma.ManufacturingOrderWhereInput = and.length ? { AND: and } : {}
+  // Lines planned before their BOM was approved pick it up, so "without a BOM" is true.
+  await attachLateBoms(prisma)
 
   const [orders, total] = await Promise.all([
     prisma.manufacturingOrder.findMany({
@@ -330,6 +332,8 @@ router.get('/plannable', requirePermission(MODULE, 'view'), async (_req, res) =>
 
 // GET /api/production/orders/:id
 router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  // A BOM approved after the order was made is picked up now.
+  await attachLateBoms(prisma, req.params.id)
   const order = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, include: moInclude })
   if (!order) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   res.json({ success: true, data: order })
@@ -572,6 +576,7 @@ router.post('/orders/:id/close', requirePermission(MODULE, 'edit'), async (req: 
 router.get('/orders/:id/materials', requirePermission(MODULE, 'view'), async (req, res) => {
   // ?swap=item|department,… turns those rows to the other owner.
   const swap = new Set(String(req.query.swap ?? '').split(',').filter(Boolean))
+  await attachLateBoms(prisma, req.params.id)
   const plan = await materialPlan(prisma, req.params.id, { swap })
   const [departments, processes] = await Promise.all([
     prisma.department.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
@@ -685,6 +690,7 @@ export async function raiseRequisitions(tx: Prisma.TransactionClient, moId: stri
       throw new AppError("A customer's material can only be asked for on their own order", 400, 'WRONG_OWNER')
     }
   }
+  await attachLateBoms(tx, mo.id)
   const first = await materialPlan(tx, mo.id)
   const swap = new Set<string>()
   for (const l of data.lines) {
