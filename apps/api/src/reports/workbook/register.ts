@@ -320,9 +320,13 @@ export async function buildRegisterWorkbook(opts: {
   // Summary first, so the workbook opens on it as the report screen does.
   buildSummarySheet(wb, lines, analysis, grids)
 
+  // Data starts on the first row: the headings in row 1, the first line in
+  // row 2, nothing above them. The accounts team sorts, filters and pastes
+  // this sheet, and lines of letterhead over it only got in the way. What the
+  // sheet is and which period it covers stay on the Summary sheet, and in the
+  // printed page's header.
   const ws = wb.addWorksheet('Data')
   ws.columns = cols.map((c) => ({ key: c.key, width: c.width ?? Math.max(10, c.label.length + 2) }))
-  writeHead(ws, lines)
 
   // ── The header row ──────────────────────────────────────────────────────
   const header = ws.addRow(cols.map((c) => c.label))
@@ -454,8 +458,13 @@ export async function buildRegisterWorkbook(opts: {
     margins: { left: 0.3, right: 0.3, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 },
     printTitlesRow: `${headerRow}:${headerRow}`,
   }
+  // The page header carries what the rows above the data used to say, on
+  // paper only, so the sheet itself still starts at row 1. An "&" is doubled:
+  // a single one starts a header code.
+  const amp = (t: string) => t.replace(/&/g, '&&')
   ws.headerFooter = {
-    oddFooter: `&L&8${def.title} · ${periodLabel}&C&8Generated ${RUN_AT.format(runAt)}&R&8Page &P of &N`,
+    oddHeader: `&L&9&B${amp(head.name)}&C&9&B${amp(def.title)}&R&9${amp(periodLabel)}`,
+    oddFooter: `&L&8${amp(def.title)} · ${amp(periodLabel)}&C&8Generated ${RUN_AT.format(runAt)}&R&8Page &P of &N`,
   }
 
   return Buffer.from(await wb.xlsx.writeBuffer())
