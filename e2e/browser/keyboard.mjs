@@ -383,6 +383,27 @@ await check('Alt+PgDn in an open sales order opens the next order in the list', 
   return shown && shown !== firstNo ? true : `first ${firstNo}, now showing ${shown}`
 })
 
+// ─── A dashboard chart, by keyboard ──────────────────────────────────────────
+await open('/purchase/dashboard')
+await check('Tab reaches a chart; → picks a bar with its name; Enter does what a click does', async () => {
+  await wait(1500)
+  let found = false
+  for (let i = 0; i < 120 && !found; i++) {
+    await key('Tab')
+    found = await page.evaluate(() => /Arrow keys choose/.test(document.activeElement?.getAttribute('aria-label') ?? ''))
+  }
+  if (!found) return 'no chart reached with Tab'
+  await key('ArrowRight')
+  await wait(200)
+  const label = await page.locator('[role="group"]:focus [aria-live="polite"]').innerText().catch(() => '')
+  const before = await page.evaluate(() => location.href + '|' + document.querySelectorAll('[role="dialog"]').length + '|' + (document.querySelector('main')?.innerText.length ?? 0))
+  await key('Enter')
+  await wait(1500)
+  const after = await page.evaluate(() => location.href + '|' + document.querySelectorAll('[role="dialog"]').length + '|' + (document.querySelector('main')?.innerText.length ?? 0))
+  if (await page.locator('[role="dialog"][aria-modal="true"]').count()) await key('Escape')
+  return /2 of \d+/.test(label) && before !== after ? true : `label "${label.replace(/\s+/g, ' ')}", screen changed: ${before !== after}`
+})
+
 // ─── 10. Nothing went wrong in the page ──────────────────────────────────────
 await check('no errors in the page during the run', async () => (errors.length ? errors.slice(0, 3).join(' | ') : true))
 

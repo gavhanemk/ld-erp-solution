@@ -6,6 +6,7 @@ import {
   XAxis, YAxis,
 } from 'recharts'
 import { ChartTip, EmptyChart, IN_COLOUR, OUT_COLOUR, PALETTE } from '@/components/dashboard/DashKit'
+import { ChartKeys } from '@/components/ui/ChartKeys'
 
 /**
  * The stock ledger dashboard's charts, one kind for each question: bars and a
@@ -106,43 +107,52 @@ export function FlowChart({
   }
   return (
     <div className="text-muted-foreground">
-      <ResponsiveContainer width="100%" height={240}>
-        <ComposedChart
-          data={rows}
-          margin={{ top: 20, right: 4, left: 4, bottom: 0 }}
-          stackOffset="sign"
-          onClick={(e: any) => {
-            const b = e?.activePayload?.[0]?.payload
-            if (b) onPick(b.from, b.to)
-          }}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.1} vertical={false} />
-          {/* Every bar gets its date and count while they fit (weeks, months, a
-              short run of days); past that the axis thins and the counts are
-              in the tooltip. */}
-          <XAxis
-            dataKey="label"
-            tick={<DateTick />}
-            tickLine={false}
-            axisLine={false}
-            interval={rows.length <= 16 ? 0 : 'preserveStartEnd'}
-            minTickGap={rows.length <= 16 ? 0 : 16}
-            height={labelled ? 38 : 24}
-          />
-          <YAxis yAxisId="v" tick={axis} tickLine={false} axisLine={false} tickFormatter={shortRupees} width={76} />
-          <YAxis yAxisId="n" orientation="right" tick={axis} tickLine={false} axisLine={false} allowDecimals={false} width={28} />
-          <ReferenceLine yAxisId="v" y={0} stroke="currentColor" strokeOpacity={0.4} />
-          <Tooltip content={<Tip />} cursor={{ fill: 'currentColor', fillOpacity: 0.06 }} />
-          <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
-          <Bar yAxisId="v" dataKey="inValue" name="Value in" stackId="f" fill={IN_COLOUR} radius={[3, 3, 0, 0]} maxBarSize={28} cursor="pointer">
-            {labelled && <LabelList dataKey="inValue" content={barLabel(IN_COLOUR, shortRupees, floor)} />}
-          </Bar>
-          <Bar yAxisId="v" dataKey="out" name="Value out" stackId="f" fill={OUT_COLOUR} radius={[0, 0, 3, 3]} maxBarSize={28} cursor="pointer">
-            {labelled && <LabelList dataKey="out" content={barLabel(OUT_COLOUR, shortRupees, floor, true)} />}
-          </Bar>
-          <Line yAxisId="n" type="monotone" dataKey="moves" name="Movements" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2.5, fill: '#f59e0b' }} />
-        </ComposedChart>
-      </ResponsiveContainer>
+      <ChartKeys
+        label="Value in and out over time"
+        items={rows.map((b) => ({
+          name: b.label,
+          value: `in ${shortRupees(b.inValue)} · out ${shortRupees(b.outValue)} · ${b.moves.toLocaleString('en-IN')} mv`,
+          pick: () => onPick(b.from, b.to),
+        }))}
+      >
+        <ResponsiveContainer width="100%" height={240}>
+          <ComposedChart
+            data={rows}
+            margin={{ top: 20, right: 4, left: 4, bottom: 0 }}
+            stackOffset="sign"
+            onClick={(e: any) => {
+              const b = e?.activePayload?.[0]?.payload
+              if (b) onPick(b.from, b.to)
+            }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.1} vertical={false} />
+            {/* Every bar gets its date and count while they fit (weeks, months, a
+                short run of days); past that the axis thins and the counts are
+                in the tooltip. */}
+            <XAxis
+              dataKey="label"
+              tick={<DateTick />}
+              tickLine={false}
+              axisLine={false}
+              interval={rows.length <= 16 ? 0 : 'preserveStartEnd'}
+              minTickGap={rows.length <= 16 ? 0 : 16}
+              height={labelled ? 38 : 24}
+            />
+            <YAxis yAxisId="v" tick={axis} tickLine={false} axisLine={false} tickFormatter={shortRupees} width={76} />
+            <YAxis yAxisId="n" orientation="right" tick={axis} tickLine={false} axisLine={false} allowDecimals={false} width={28} />
+            <ReferenceLine yAxisId="v" y={0} stroke="currentColor" strokeOpacity={0.4} />
+            <Tooltip content={<Tip />} cursor={{ fill: 'currentColor', fillOpacity: 0.06 }} />
+            <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
+            <Bar yAxisId="v" dataKey="inValue" name="Value in" stackId="f" fill={IN_COLOUR} radius={[3, 3, 0, 0]} maxBarSize={28} cursor="pointer">
+              {labelled && <LabelList dataKey="inValue" content={barLabel(IN_COLOUR, shortRupees, floor)} />}
+            </Bar>
+            <Bar yAxisId="v" dataKey="out" name="Value out" stackId="f" fill={OUT_COLOUR} radius={[0, 0, 3, 3]} maxBarSize={28} cursor="pointer">
+              {labelled && <LabelList dataKey="out" content={barLabel(OUT_COLOUR, shortRupees, floor, true)} />}
+            </Bar>
+            <Line yAxisId="n" type="monotone" dataKey="moves" name="Movements" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2.5, fill: '#f59e0b' }} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </ChartKeys>
     </div>
   )
 }
@@ -161,42 +171,49 @@ export function MovementDonut({
   const total = data.reduce((s, d) => s + d.count, 0)
   return (
     <div className="relative">
-      <ResponsiveContainer width="100%" height={240}>
-        <PieChart>
-          <Pie
-            data={data}
-            dataKey="count"
-            nameKey="label"
-            innerRadius="58%"
-            outerRadius="85%"
-            paddingAngle={2}
-            onClick={(d: any) => onPick(d.value)}
-            cursor="pointer"
-            stroke="none"
-            labelLine={false}
-            isAnimationActive={false}
-            label={(p: any) => {
-              if (p.percent < 0.04) return null
-              const r = p.innerRadius + (p.outerRadius - p.innerRadius) / 2
-              const a = (-p.midAngle * Math.PI) / 180
-              return (
-                <text x={p.cx + r * Math.cos(a)} y={p.cy + r * Math.sin(a)} fill="#fff" fontSize={11} fontWeight={700} textAnchor="middle" dominantBaseline="central">
-                  {p.count}
-                </text>
-              )
-            }}
-          >
-            {data.map((d, n) => (
-              <Cell
-                key={d.value}
-                fill={PALETTE[n % PALETTE.length]}
-                fillOpacity={picked.length && !picked.includes(d.value) ? 0.3 : 1}
-              />
-            ))}
-          </Pie>
-          <Tooltip content={<Tip money={false} />} />
-        </PieChart>
-      </ResponsiveContainer>
+      <ChartKeys
+        label="Movements by kind"
+        items={data
+          .filter((d) => d.count > 0)
+          .map((d) => ({ name: d.label, value: `${d.count} · ${total ? Math.round((d.count / total) * 100) : 0}%`, pick: () => onPick(d.value) }))}
+      >
+        <ResponsiveContainer width="100%" height={240}>
+          <PieChart>
+            <Pie
+              data={data}
+              dataKey="count"
+              nameKey="label"
+              innerRadius="58%"
+              outerRadius="85%"
+              paddingAngle={2}
+              onClick={(d: any) => onPick(d.value)}
+              cursor="pointer"
+              stroke="none"
+              labelLine={false}
+              isAnimationActive={false}
+              label={(p: any) => {
+                if (p.percent < 0.04) return null
+                const r = p.innerRadius + (p.outerRadius - p.innerRadius) / 2
+                const a = (-p.midAngle * Math.PI) / 180
+                return (
+                  <text x={p.cx + r * Math.cos(a)} y={p.cy + r * Math.sin(a)} fill="#fff" fontSize={11} fontWeight={700} textAnchor="middle" dominantBaseline="central">
+                    {p.count}
+                  </text>
+                )
+              }}
+            >
+              {data.map((d, n) => (
+                <Cell
+                  key={d.value}
+                  fill={PALETTE[n % PALETTE.length]}
+                  fillOpacity={picked.length && !picked.includes(d.value) ? 0.3 : 1}
+                />
+              ))}
+            </Pie>
+            <Tooltip content={<Tip money={false} />} />
+          </PieChart>
+        </ResponsiveContainer>
+      </ChartKeys>
       <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
         <span className="text-2xl font-bold tabular-nums text-foreground">{total}</span>
         <span className="text-[11px] text-muted-foreground">movements</span>
@@ -226,28 +243,33 @@ export function StoreColumns({ data, onPick }: { data: LedgerGroup[]; onPick: (v
   if (!data.length) return <Empty h={260} />
   return (
     <div className="text-muted-foreground">
-      <ResponsiveContainer width="100%" height={260}>
-        <BarChart
-          data={data}
-          margin={{ top: 20, right: 4, left: 4, bottom: 0 }}
-          onClick={(e: any) => {
-            const g = e?.activePayload?.[0]?.payload
-            if (g) onPick(g.value)
-          }}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.15} vertical={false} />
-          <XAxis dataKey="label" tick={axis} tickLine={false} axisLine={false} interval={0} tickFormatter={(v: string) => (v.length > 16 ? `${v.slice(0, 15)}…` : v)} />
-          <YAxis tick={axis} tickLine={false} axisLine={false} tickFormatter={shortRupees} width={64} />
-          <Tooltip content={<Tip />} cursor={{ fill: 'currentColor', fillOpacity: 0.06 }} />
-          <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
-          <Bar dataKey="inValue" name="Value in" fill={IN_COLOUR} radius={[4, 4, 0, 0]} maxBarSize={36} cursor="pointer">
-            <LabelList dataKey="inValue" content={barLabel(IN_COLOUR, shortRupees)} />
-          </Bar>
-          <Bar dataKey="outValue" name="Value out" fill={OUT_COLOUR} radius={[4, 4, 0, 0]} maxBarSize={36} cursor="pointer">
-            <LabelList dataKey="outValue" content={barLabel(OUT_COLOUR, shortRupees)} />
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
+      <ChartKeys
+        label="Value in and out by store"
+        items={data.map((g) => ({ name: g.label, value: `in ${shortRupees(g.inValue)} · out ${shortRupees(g.outValue)}`, pick: () => onPick(g.value) }))}
+      >
+        <ResponsiveContainer width="100%" height={260}>
+          <BarChart
+            data={data}
+            margin={{ top: 20, right: 4, left: 4, bottom: 0 }}
+            onClick={(e: any) => {
+              const g = e?.activePayload?.[0]?.payload
+              if (g) onPick(g.value)
+            }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.15} vertical={false} />
+            <XAxis dataKey="label" tick={axis} tickLine={false} axisLine={false} interval={0} tickFormatter={(v: string) => (v.length > 16 ? `${v.slice(0, 15)}…` : v)} />
+            <YAxis tick={axis} tickLine={false} axisLine={false} tickFormatter={shortRupees} width={64} />
+            <Tooltip content={<Tip />} cursor={{ fill: 'currentColor', fillOpacity: 0.06 }} />
+            <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
+            <Bar dataKey="inValue" name="Value in" fill={IN_COLOUR} radius={[4, 4, 0, 0]} maxBarSize={36} cursor="pointer">
+              <LabelList dataKey="inValue" content={barLabel(IN_COLOUR, shortRupees)} />
+            </Bar>
+            <Bar dataKey="outValue" name="Value out" fill={OUT_COLOUR} radius={[4, 4, 0, 0]} maxBarSize={36} cursor="pointer">
+              <LabelList dataKey="outValue" content={barLabel(OUT_COLOUR, shortRupees)} />
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </ChartKeys>
     </div>
   )
 }
@@ -280,22 +302,27 @@ export function CategoryTreemap({ data, onPick }: { data: LedgerGroup[]; onPick:
     )
   }
   return (
-    <ResponsiveContainer width="100%" height={260}>
-      <Treemap data={rows} dataKey="size" nameKey="name" isAnimationActive={false} content={<Box />}>
-        <Tooltip
-          content={({ active, payload }: any) =>
-            active && payload?.length ? (
-              <div className="glass-card px-3 py-2 text-xs shadow-lg">
-                <p className="font-semibold text-foreground">{payload[0].payload.name}</p>
-                <p className="text-emerald-500">in {shortRupees(payload[0].payload.inValue)}</p>
-                <p className="text-red-400">out {shortRupees(payload[0].payload.outValue)}</p>
-                <p className="text-muted-foreground">{payload[0].payload.moves} movements</p>
-              </div>
-            ) : null
-          }
-        />
-      </Treemap>
-    </ResponsiveContainer>
+    <ChartKeys
+      label="Value moved by category"
+      items={rows.filter((g) => g.name).map((g) => ({ name: g.name, value: `${shortRupees(g.size)} · ${Math.round((g.size / whole) * 100)}%`, pick: () => onPick(g.gid) }))}
+    >
+      <ResponsiveContainer width="100%" height={260}>
+        <Treemap data={rows} dataKey="size" nameKey="name" isAnimationActive={false} content={<Box />}>
+          <Tooltip
+            content={({ active, payload }: any) =>
+              active && payload?.length ? (
+                <div className="glass-card px-3 py-2 text-xs shadow-lg">
+                  <p className="font-semibold text-foreground">{payload[0].payload.name}</p>
+                  <p className="text-emerald-500">in {shortRupees(payload[0].payload.inValue)}</p>
+                  <p className="text-red-400">out {shortRupees(payload[0].payload.outValue)}</p>
+                  <p className="text-muted-foreground">{payload[0].payload.moves} movements</p>
+                </div>
+              ) : null
+            }
+          />
+        </Treemap>
+      </ResponsiveContainer>
+    </ChartKeys>
   )
 }
 
@@ -347,28 +374,33 @@ export function DocumentBars({ data, onPick }: { data: LedgerGroup[]; onPick: (v
   const rows = [...data].sort((a, b) => b.moves - a.moves).slice(0, 10)
   return (
     <div className="text-muted-foreground">
-      <ResponsiveContainer width="100%" height={Math.max(180, rows.length * 28 + 30)}>
-        <BarChart
-          data={rows}
-          layout="vertical"
-          margin={{ top: 0, right: 40, left: 0, bottom: 0 }}
-          onClick={(e: any) => {
-            const g = e?.activePayload?.[0]?.payload
-            if (g) onPick(g.value)
-          }}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.15} horizontal={false} />
-          <XAxis type="number" tick={axis} tickLine={false} axisLine={false} allowDecimals={false} />
-          <YAxis type="category" dataKey="label" tick={axis} tickLine={false} axisLine={false} width={150} tickFormatter={(v: string) => (v.length > 22 ? `${v.slice(0, 21)}…` : v)} />
-          <Tooltip content={<Tip money={false} />} cursor={{ fill: 'currentColor', fillOpacity: 0.06 }} />
-          <Bar dataKey="moves" name="Movements" radius={[0, 4, 4, 0]} cursor="pointer" barSize={16}>
-            {rows.map((r, n) => (
-              <Cell key={r.value} fill={PALETTE[n % PALETTE.length]} />
-            ))}
-            <LabelList dataKey="moves" position="right" formatter={count0} style={{ ...labelStyle, fill: 'currentColor' }} />
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
+      <ChartKeys
+        label="Movements by document"
+        items={rows.map((r) => ({ name: r.label, value: `${r.moves.toLocaleString('en-IN')} movements`, pick: () => onPick(r.value) }))}
+      >
+        <ResponsiveContainer width="100%" height={Math.max(180, rows.length * 28 + 30)}>
+          <BarChart
+            data={rows}
+            layout="vertical"
+            margin={{ top: 0, right: 40, left: 0, bottom: 0 }}
+            onClick={(e: any) => {
+              const g = e?.activePayload?.[0]?.payload
+              if (g) onPick(g.value)
+            }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.15} horizontal={false} />
+            <XAxis type="number" tick={axis} tickLine={false} axisLine={false} allowDecimals={false} />
+            <YAxis type="category" dataKey="label" tick={axis} tickLine={false} axisLine={false} width={150} tickFormatter={(v: string) => (v.length > 22 ? `${v.slice(0, 21)}…` : v)} />
+            <Tooltip content={<Tip money={false} />} cursor={{ fill: 'currentColor', fillOpacity: 0.06 }} />
+            <Bar dataKey="moves" name="Movements" radius={[0, 4, 4, 0]} cursor="pointer" barSize={16}>
+              {rows.map((r, n) => (
+                <Cell key={r.value} fill={PALETTE[n % PALETTE.length]} />
+              ))}
+              <LabelList dataKey="moves" position="right" formatter={count0} style={{ ...labelStyle, fill: 'currentColor' }} />
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </ChartKeys>
     </div>
   )
 }
