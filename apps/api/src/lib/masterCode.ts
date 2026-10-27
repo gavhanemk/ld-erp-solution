@@ -11,9 +11,9 @@ import { prisma } from '@ld-erp/database'
  *
  * So the forms no longer ask. This fills it in.
  *
- * The exceptions are the masters where the code IS the information: a size's
- * code is "40", and a style's code says which brand, garment and season it
- * belongs to. Those are still typed, and this is never called for them.
+ * The exception is a size, whose code IS the information ("40"): that is
+ * still typed. A style's code says which brand, garment and season it belongs
+ * to, so it is made from those (see nextStyleCode) rather than numbered.
  */
 
 /** Which prefix each register uses. Matches what is already in the data. */
@@ -102,12 +102,86 @@ async function nextDepartmentCode(name: unknown, attempt: number): Promise<strin
   return code
 }
 
+/** The brand part of a style code, as the mill's styles already read: LD-, VH-. */
+const STYLE_BRAND: Record<string, string> = { LD_COTTON_MILLS: 'LD', VHAGAR: 'VH', CUSTOM: 'CU' }
+
+/**
+ * The garment part: SH for a shirt, TR for a trouser, as in LD-SH-2604 and
+ * LD-TR-2602. The garment type is typed freely, so "Shirts", "shirt" and
+ * "SHIRT" all read the same; a type not listed takes its first letter and
+ * the next consonant (Kurta → KR), and no type at all is GN.
+ */
+const GARMENT: Record<string, string> = {
+  shirt: 'SH',
+  trouser: 'TR',
+  pant: 'TR',
+  chino: 'TR',
+  tshirt: 'TS',
+  tee: 'TS',
+  polo: 'PL',
+  jean: 'JN',
+  denim: 'JN',
+  short: 'SO',
+  kurta: 'KR',
+  jacket: 'JK',
+  blazer: 'BZ',
+  waistcoat: 'WC',
+  trackpant: 'TP',
+  jogger: 'JG',
+  pyjama: 'PJ',
+  pajama: 'PJ',
+  boxer: 'BX',
+  vest: 'VS',
+}
+export function garmentCode(type: unknown): string {
+  let word = String(type ?? '').toLowerCase().replace(/[^a-z]/g, '')
+  if (!word) return 'GN'
+  if (word.endsWith('s') && word.length > 3) word = word.slice(0, -1)
+  if (GARMENT[word]) return GARMENT[word]
+  const first = word[0].toUpperCase()
+  const next = word.slice(1).match(/[bcdfghjklmnpqrstvwxyz]/)?.[0] ?? word[1] ?? 'X'
+  return first + next.toUpperCase()
+}
+
+/**
+ * The year part: the season's year — SS-26 and AW-26 are 26 — or, with no
+ * season typed, this year (in India).
+ */
+export function seasonYear(season: unknown, now = new Date()): string {
+  const digits = String(season ?? '').match(/(\d{4}|\d{2})(?!.*\d)/)?.[1]
+  if (digits) return digits.slice(-2)
+  return new Date(now.getTime() + 5.5 * 3600 * 1000).getUTCFullYear().toString().slice(-2)
+}
+
+/**
+ * A style's code: brand, garment, year, then the next number for those three
+ * — LD-SH-2601 to LD-SH-2605 are taken, so the next LD Cotton Mills shirt for
+ * a 26 season is LD-SH-2606. Read from the codes already there, like every
+ * other code here, so an imported style counts too. The database keeps codes
+ * unique; `attempt` steps past one somebody else has just taken.
+ */
+export async function nextStyleCode(data: Record<string, unknown>, attempt = 0): Promise<string> {
+  const stem = `${STYLE_BRAND[String(data.brandType)] ?? 'LD'}-${garmentCode(data.category)}-${seasonYear(data.season)}`
+  const rows = await prisma.style.findMany({ where: { code: { startsWith: stem } }, select: { code: true } })
+  const highest = rows.reduce((max, r) => {
+    const tail = r.code.slice(stem.length)
+    if (!/^\d+$/.test(tail)) return max
+    const n = Number.parseInt(tail, 10)
+    return n > max ? n : max
+  }, 0)
+  // A retry reads the codes again, so the one just taken is already counted:
+  // no number is skipped. Only a third try steps further, in case the other
+  // save is not yet visible.
+  return `${stem}${String(highest + 1 + Math.max(0, attempt - 1)).padStart(2, '0')}`
+}
+
 export async function nextMasterCode(
   model: string,
   data: Record<string, unknown> = {},
   attempt = 0,
 ): Promise<string> {
   if (model === 'department') return nextDepartmentCode(data.name, attempt)
+  if (model === 'style') return nextStyleCode(data, attempt)
 
   const prefix = model === 'item' ? await itemPrefix(data.categoryId) : PREFIX[model]
   if (!prefix) {
@@ -136,7 +210,7 @@ export async function nextMasterCode(
 
 /** Whether this register has its codes made up for it. */
 export const isGeneratedCode = (model: string): boolean =>
-  model in PREFIX || model === 'department'
+  model in PREFIX || model === 'department' || model === 'style'
 
 /**
  * Saves a record with a generated code, stepping past a number somebody else

@@ -375,7 +375,9 @@ export const WASH_CARE = [
 ] as const
 
 export const createStyleSchema = z.object({
-  code,
+  // Made by the server from brand, garment type and season (LD-SH-2606);
+  // still accepted when given, as an import of existing styles does.
+  code: code.optional(),
   name,
   season: z.string().max(50).optional().nullable(),
   brandType: BrandTypeEnum,

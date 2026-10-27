@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
+import { nextStyleCode } from '../lib/masterCode'
 import { createRouting, deleteRouting, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
 import { styleOrderStages } from '../services/styleOrders.service'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
@@ -894,6 +895,16 @@ router.patch('/styles/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     }
   }
   next()
+})
+
+/**
+ * The code a new style would get, shown on the form while it is filled in:
+ * brand, garment type and season decide it. The code given on save is worked
+ * out again then, so two people adding a shirt at once still get two codes.
+ */
+router.get('/styles/next-code', requirePermission(MODULE, 'create'), async (req, res) => {
+  const q = (k: string) => (typeof req.query[k] === 'string' ? (req.query[k] as string) : '')
+  res.json({ success: true, data: { code: await nextStyleCode({ brandType: q('brandType'), category: q('category'), season: q('season') }) } })
 })
 
 router.use(

@@ -1,5 +1,7 @@
+import { createElement } from 'react'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 import { WASH_CARE } from '@/components/packages/WashCare'
+import { NextStyleCode } from '@/components/masters/NextStyleCode'
 
 /*
  * The style form, shared by Masters → Styles and by "Add new style" on a
@@ -18,7 +20,23 @@ export const BRAND_LABEL: Record<'LD_COTTON_MILLS' | 'VHAGAR' | 'CUSTOM', string
  * colours on the last.
  */
 export const styleFormFields: FormField[] = [
-  { name: 'code', label: 'Style Code', required: true, placeholder: 'LD-SH-2701', section: 'Style' },
+  /*
+   * The code is made by the system, never typed: brand, garment type and
+   * season year, then the next number — LD-SH-2606 — so no two styles share
+   * one and every code reads the same way. While adding, the box shows the
+   * code the style will get; once saved it sits in the title bar, locked,
+   * because it is on documents by then.
+   */
+  { name: 'code', label: 'Style Code', generated: true, section: 'Style' },
+  {
+    name: 'codePreview',
+    label: 'Style Code',
+    type: 'readout',
+    section: 'Style',
+    showIf: (v) => !v.code,
+    readout: (v) => createElement(NextStyleCode, { brandType: v.brandType, category: v.category, season: v.season }),
+    help: 'Given on save, from brand, garment type and season',
+  },
   {
     name: 'name',
     label: 'Style Name',
@@ -35,7 +53,8 @@ export const styleFormFields: FormField[] = [
     section: 'Style',
     options: Object.entries(BRAND_LABEL).map(([value, label]) => ({ value, label })),
   },
-  { name: 'category', label: 'Garment Type', section: 'Style', placeholder: 'Shirt' },
+  // Required: it is the SH or TR in the style code, which cannot change once saved.
+  { name: 'category', label: 'Garment Type', mustFill: true, section: 'Style', placeholder: 'Shirt' },
   { name: 'season', label: 'Season', section: 'Style', placeholder: 'SS-26' },
   { name: 'fabricType', label: 'Fabric', section: 'Style', placeholder: 'Cotton Poplin' },
   { name: 'gsm', label: 'GSM', type: 'number', section: 'Style', placeholder: '120' },
