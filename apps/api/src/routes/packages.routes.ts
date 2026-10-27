@@ -326,6 +326,72 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
   })
 })
 
+const pickSchema = z.object({
+  itemId: z.string().min(1),
+  warehouseId: z.string().min(1),
+  ownership: z.enum(['OWNED', 'CUSTOMER_OWNED']).optional(),
+  ownerCustomerId: z.string().optional().nullable(),
+})
+
+/**
+ * The pick list for one item in one store, ours or one customer's: its
+ * packages in the order first-in-first-out takes them, where each sits, and
+ * how much of the stock has no sticker. What the requisition window shows
+ * under each line, so the store knows which packet to take before scanning.
+ *
+ * Packages off the same receipt are the same age, so all of the oldest
+ * receipt's are "take first"; an opened one among them is listed first, to be
+ * used up before a full one is broken into. Held packages (rejected at
+ * receipt) are counted apart: they cannot be issued.
+ */
+router.get('/pick', requirePermission(MODULE, 'view'), async (req, res) => {
+  const q = pickSchema.parse(req.query)
+  const spot = { itemId: q.itemId, warehouseId: q.warehouseId, ownership: q.ownership ?? 'OWNED', ownerCustomerId: q.ownerCustomerId || null }
+  const [rows, pos] = await Promise.all([
+    prisma.stockPackage.findMany({
+      where: { ...spot, status: 'IN_STOCK' },
+      orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
+      take: 500,
+      select: { id: true, code: true, qty: true, initialQty: true, rack: true, lotNo: true, sourceRef: true, sourceId: true, sourceType: true, createdAt: true, grade: true, notes: true, packType: true },
+    }),
+    positionOf(prisma, spot),
+  ])
+  const usable = rows.filter((r) => r.grade !== 'R')
+  const held = rows.filter((r) => r.grade === 'R')
+  // Receipts in the order they came in; within one, an opened package first.
+  const order = new Map<string, number>()
+  for (const r of usable) if (!order.has(r.sourceId ?? r.id)) order.set(r.sourceId ?? r.id, order.size)
+  const opened = (r: (typeof usable)[number]) => Number(r.qty) < Number(r.initialQty) - 0.0005
+  usable.sort((a, b) => order.get(a.sourceId ?? a.id)! - order.get(b.sourceId ?? b.id)! || Number(opened(b)) - Number(opened(a)) || a.code.localeCompare(b.code))
+  const first = usable[0] ? (usable[0].sourceId ?? usable[0].id) : null
+  const now = Date.now()
+  res.json({
+    success: true,
+    data: {
+      packages: usable.map((r) => ({
+        id: r.id,
+        code: r.code,
+        qty: round3(Number(r.qty)),
+        initialQty: round3(Number(r.initialQty)),
+        packType: r.packType,
+        rack: r.rack,
+        lotNo: r.lotNo,
+        sourceRef: r.sourceRef,
+        receivedOn: r.createdAt,
+        days: Math.max(0, Math.floor((now - r.createdAt.getTime()) / 86_400_000)),
+        // The receipt's own note on it ("torn bag"); not the system's notes on a split.
+        note: r.sourceType === 'GRN' ? r.notes : null,
+        opened: opened(r),
+        takeFirst: (r.sourceId ?? r.id) === first,
+      })),
+      inPackages: round3(usable.reduce((t, r) => t + Number(r.qty), 0)),
+      held: { packages: held.length, qty: round3(held.reduce((t, r) => t + Number(r.qty), 0)) },
+      loose: round3(Math.max(0, pos.loose)),
+      inStore: pos.inStore,
+    },
+  })
+})
+
 /**
  * One line per item in a store: how many packages, how much is in them, which
  * lots. Fifty boxes of one button read as one line, opened to see the boxes.

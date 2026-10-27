@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { CheckCircle2, Loader2, Printer, ScanLine } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { newRequestId } from '@/lib/utils'
@@ -40,12 +40,15 @@ export function ScanIssue({
   mrNumber,
   itemIds,
   onIssued,
+  pick,
 }: {
   mrId: string
   mrNumber: string
   /** The items on the requisition, to say why a sticker cannot be issued against it. */
   itemIds: string[]
   onIssued: (message: string) => void
+  /** A packet chosen from the pick list: read as if its sticker had been scanned. */
+  pick?: { code: string; n: number } | null
 }) {
   const [pkg, setPkg] = useState<PackageDetail | null>(null)
   const [line, setLine] = useState<Waiting | null>(null)
@@ -101,6 +104,16 @@ export function ScanIssue({
     }
   }
 
+  // A packet chosen from the pick list below: the same as scanning it.
+  const panel = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!pick) return
+    void read(pick.code)
+    panel.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    // Only when another packet is chosen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pick?.n])
+
   const n = Number(qty) || 0
   const problem = !pkg || !line ? null : !(n > 0) ? 'Enter how much goes.' : n > pkg.qty + 1e-9 ? `${pkg.code} has only ${qtyText(pkg.qty)} ${pkg.unit} on it.` : n > line.owed + 1e-9 ? `${mrNumber} needs only ${qtyText(line.owed)} ${pkg.unit} more.` : null
 
@@ -149,7 +162,7 @@ export function ScanIssue({
   }
 
   return (
-    <div className="relative z-20 space-y-3">
+    <div ref={panel} className="relative z-20 space-y-3">
       <p className="flex flex-wrap items-center gap-x-2 text-sm">
         <ScanLine size={16} className="text-primary" />
         <span className="font-semibold text-foreground">Scan items to issue</span>
