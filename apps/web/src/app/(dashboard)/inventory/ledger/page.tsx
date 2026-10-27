@@ -607,6 +607,7 @@ function LedgerScreen() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search the ledger"
+            data-hotkey="search"
           />
           {search && (
             <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
@@ -993,7 +994,7 @@ function LedgerScreen() {
                 </tr>
               </thead>
               <tbody>
-                {rows.flatMap((r) => {
+                {rows.flatMap((r, i) => {
                   const m = MOVEMENT[r.transactionType] ?? { label: r.transactionType, cls: 'badge-neutral' }
                   const inQty = Number(r.inQty)
                   const outQty = Number(r.outQty)
@@ -1020,7 +1021,7 @@ function LedgerScreen() {
                     )
                   }
                   out.push(
-                    <tr key={r.id}>
+                    <tr key={r.id} data-row tabIndex={i === 0 ? 0 : -1}>
                       <td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">{timeOf(r.transactionDate)}</td>
                       <td className="whitespace-nowrap">
                         <span className={m.cls}>{m.label}</span>
@@ -1060,6 +1061,7 @@ function LedgerScreen() {
                       <td className="whitespace-nowrap font-mono text-xs text-teal-500">{r.item.code}</td>
                       <td className="min-w-[170px]">
                         <Link
+                          data-row-open
                           href={`/inventory/stock/${r.item.id}`}
                           className="text-sm font-medium text-foreground hover:text-teal-400"
                         >

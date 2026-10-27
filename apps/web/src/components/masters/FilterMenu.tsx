@@ -63,7 +63,10 @@ export function FilterMenu({
       setAlignRight(Boolean(box && box.left + PANEL_WIDTH > window.innerWidth - 8))
       // After the panel is in the page, so the focus lands. `preventScroll`,
       // or the browser scrolls the page to bring the box into view.
-      requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }))
+      // A short list has no search box: its first choice has focus instead.
+      requestAnimationFrame(() =>
+        (inputRef.current ?? rootRef.current?.querySelector<HTMLElement>('[role="option"]'))?.focus({ preventScroll: true }),
+      )
     }
   }, [open])
 
@@ -88,8 +91,27 @@ export function FilterMenu({
 
   const searchable = (choices?.length ?? 0) > 6
 
+  // ↑ ↓ between the search box and the choices; Space or Enter ticks one.
+  const onPanelKey = (e: React.KeyboardEvent) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+    const stops = [...(rootRef.current?.querySelectorAll<HTMLElement>('input, [role="option"]') ?? [])]
+    const at = stops.indexOf(document.activeElement as HTMLElement)
+    const next = stops[at + (e.key === 'ArrowDown' ? 1 : -1)]
+    if (next) {
+      e.preventDefault()
+      next.focus()
+    }
+  }
+
   return (
-    <div ref={rootRef} className="relative">
+    <div
+      ref={rootRef}
+      className="relative"
+      // Tabbing out of the open menu shuts it, as a press outside does.
+      onBlur={(e) => {
+        if (open && !rootRef.current?.contains(e.relatedTarget as Node | null)) setOpen(false)
+      }}
+    >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -109,6 +131,7 @@ export function FilterMenu({
 
       {open && (
         <div
+          onKeyDown={onPanelKey}
           className={`bg-card border-border absolute top-full z-40 mt-1.5 w-72 max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border shadow-xl ${
             alignRight ? 'right-0' : 'left-0'
           }`}
@@ -151,7 +174,7 @@ export function FilterMenu({
                     role="option"
                     aria-selected={on}
                     onClick={() => toggle(c.value)}
-                    className={`hover:bg-secondary flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm ${
+                    className={`hover:bg-secondary focus:bg-secondary flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm focus:outline-none ${
                       c.count === 0 && !on ? 'text-muted-foreground/60' : 'text-foreground'
                     }`}
                   >

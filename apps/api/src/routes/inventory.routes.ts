@@ -20,7 +20,8 @@ import { MOVEMENT_DOC_JOIN, movementDocs } from '../services/movementDocs.servic
 import { decidePending } from '../services/requisition.service'
 import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
 import { qcByGrnLine } from '../services/grnQc.service'
-import { packageRule } from '../services/package.service'
+import { packageRule, positionOf } from '../services/package.service'
+import { getPreference } from '../lib/preferences'
 import { createPurchaseNoteIn } from './purchase-notes.routes'
 import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
@@ -2129,6 +2130,11 @@ export async function issueRequisition(
     })).map((w) => [w.id, w.name]),
   )
   const handedOver: string[] = []
+  // Settings → Preferences: stickered stock is handed over by scanning its
+  // packages. A typed issue (this, unless the caller scanned) may then take
+  // only what is not in a package.
+  const typed = (opts.stickers ?? 'window') !== 'caller'
+  const scanOnly = typed && (await getPreference<boolean>('issueByScanOnly', false)) === true
 
   for (const line of mr.lines) {
     const parts = plan.get(line.id)
@@ -2154,6 +2160,18 @@ export async function issueRequisition(
     }
 
     for (const a of parts) {
+      if (scanOnly) {
+        const pos = await positionOf(tx, { itemId: line.itemId, warehouseId: a.warehouseId, ownership: line.ownership, ownerCustomerId: line.ownerCustomerId ?? null })
+        const loose = Math.max(0, pos.loose)
+        if (pos.inPackages > 0 && a.qty > loose + 1e-9) {
+          throw new AppError(
+            `${line.item.name}: ${qtyText(pos.inPackages)} ${unit} of it in ${storeNames.get(a.warehouseId) ?? 'that store'} is in stickered packages, and stickered stock is issued by scan. ` +
+              (loose > 0 ? `Scan the packages to issue them; only ${qtyText(loose)} ${unit} without a sticker can be typed.` : 'Scan the packages to issue them.'),
+            400,
+            'SCAN_TO_ISSUE',
+          )
+        }
+      }
       // Stock held for other requisitions is not ours to give here.
       if (line.ownership !== 'CUSTOMER_OWNED') {
         await refuseIfHeldForOthers(tx, {

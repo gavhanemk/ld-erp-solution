@@ -18,9 +18,11 @@ import {
   MapPin,
   Percent,
   Tag,
+  Copy,
 } from 'lucide-react'
 import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 // The same panel the order and receipt forms are built from, so all three
 // read as one module rather than three people's ideas of a form.
 import { Section } from '@/components/purchase/PurchaseOrderDialog'
@@ -875,6 +877,9 @@ export function PurchaseBillDialog({
 
   // Escape closes this window only — not the ones behind it.
   useEscape(onClose, open)
+  // Tab goes round inside the form, and focus goes back to the button that opened it.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef, open)
   useEffect(() => {
     if (!open) return
     const previous = document.body.style.overflow
@@ -1438,6 +1443,30 @@ export function PurchaseBillDialog({
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
 
   /**
+   * A copy of one hand-added line straight under it. Like a line whose item
+   * was picked by hand, it is matched to no receipt and no order, so nothing
+   * upstream is billed twice.
+   */
+  const copyLine = (index: number) =>
+    setLines((prev) => {
+      const src = prev[index]
+      if (!src) return prev
+      const copy: BillLine = {
+        ...src,
+        grnLineId: null,
+        poLineId: null,
+        poNumber: undefined,
+        acceptedQty: undefined,
+        pendingQty: undefined,
+        rejectedQty: undefined,
+        orderedRate: undefined,
+        rateAction: null,
+        grnNumber: undefined,
+      }
+      return [...prev.slice(0, index + 1), copy, ...prev.slice(index + 1)]
+    })
+
+  /**
    * Clears a rate decision the moment the rate it was made about changes.
    *
    * Somebody who picks "book at the order's rate" and then retypes the rate
@@ -1744,6 +1773,7 @@ export function PurchaseBillDialog({
         top of this one. Filling the height makes the margin the padding and
         nothing else. */}
       <div
+        ref={dialogRef}
         // An expense bill has a handful of fields and one short table, so on a
         // wide screen it is held to a readable width and centred rather than
         // stretched edge to edge. A goods bill keeps the full width for its
@@ -2509,6 +2539,9 @@ export function PurchaseBillDialog({
                   type="button"
                   onClick={() => setLines((p) => [...p, freshLine()])}
                   className="btn-secondary text-xs"
+                  data-grid-add
+                  aria-keyshortcuts="Alt+A"
+                  title="Add line (Alt+A)"
                 >
                   <Plus size={14} /> Add line
                 </button>
@@ -2552,12 +2585,13 @@ export function PurchaseBillDialog({
                       ))}
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody data-grid>
                     {lines.map((line, i) => {
                       const item = itemById.get(line.itemId)
                       return (
                         <tr
                           key={i}
+                          data-grid-row
                           className="border-border/50 border-b last:border-0 [&>td]:align-top"
                         >
                           <td className="min-w-[200px] px-3 py-1.5">
@@ -2626,15 +2660,13 @@ export function PurchaseBillDialog({
                           <td className="w-28 px-3 py-1.5">
                             {/* The wheel and the arrow keys move this by whole units.
                            Not 0.001, which moved it by a thousandth of a piece; and not 1,
-                           which would refuse 1500.5 metres of fabric outright. "any" steps
+                           which would refuse 1500.5 metres of fabric outright. It steps
                            by one while still accepting a decimal that is typed. */}
-                            <input
-                              type="number"
-                              step="any"
-                              min={0}
+                            <StepInput
+                              decimals
                               className="form-input h-8 text-right"
                               value={String(line.qty)}
-                              onChange={(e) => setLine(i, { qty: e.target.value })}
+                              onValueChange={(v) => setLine(i, { qty: v })}
                               aria-label={`Line ${i + 1} quantity`}
                             />
                             {item?.uom?.symbol && (
@@ -2644,13 +2676,11 @@ export function PurchaseBillDialog({
                             )}
                           </td>
                           <td className="w-28 px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min={0}
+                            <StepInput
+                              decimals
                               className="form-input h-8 text-right"
                               value={String(line.unitPrice)}
-                              onChange={(e) => setLineRate(i, e.target.value)}
+                              onValueChange={(v) => setLineRate(i, v)}
                               aria-label={`Line ${i + 1} rate`}
                             />
                             {line.orderedRate != null && (
@@ -2660,27 +2690,23 @@ export function PurchaseBillDialog({
                             )}
                           </td>
                           <td className="w-20 px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min={0}
+                            <StepInput
+                              decimals
                               max={100}
                               className="form-input h-8 text-right"
                               value={String(line.discount)}
-                              onChange={(e) => setLine(i, { discount: e.target.value })}
+                              onValueChange={(v) => setLine(i, { discount: v })}
                               aria-label={`Line ${i + 1} discount`}
                             />
                           </td>
                           <td className="w-20 px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min={0}
+                            <StepInput
+                              decimals
                               max={100}
                               className="form-input h-8 text-right"
                               disabled={taxMode === 'NONE'}
                               value={taxMode === 'NONE' ? '' : String(line.gstRate)}
-                              onChange={(e) => setLine(i, { gstRate: e.target.value })}
+                              onValueChange={(v) => setLine(i, { gstRate: v })}
                               aria-label={`Line ${i + 1} GST rate`}
                             />
                           </td>
@@ -2688,17 +2714,36 @@ export function PurchaseBillDialog({
                             {inr(totals.lineGross[i] ?? 0)}
                           </td>
                           <td className="w-12 px-3 py-1.5">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setLines((p) => (p.length === 1 ? p : p.filter((_, x) => x !== i)))
-                              }
-                              disabled={lines.length === 1}
-                              className="btn-ghost text-muted-foreground p-1 hover:text-red-400 disabled:opacity-25"
-                              aria-label={`Remove line ${i + 1}`}
-                            >
-                              <Trash2 size={13} />
-                            </button>
+                            <div className="flex items-center">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setLines((p) => (p.length === 1 ? p : p.filter((_, x) => x !== i)))
+                                }
+                                disabled={lines.length === 1}
+                                className="btn-ghost text-muted-foreground p-1 hover:text-red-400 disabled:opacity-25"
+                                aria-label={`Remove line ${i + 1}`}
+                                aria-keyshortcuts="Alt+Delete"
+                                data-grid-remove
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                              {/* Hand-added lines only: one off a receipt or a
+                                service order bills that line, once. */}
+                              {!line.grnLineId && !line.grnNumber && !line.poLineId && (
+                                <button
+                                  type="button"
+                                  className="btn-ghost text-muted-foreground hover:text-primary p-1"
+                                  onClick={() => copyLine(i)}
+                                  aria-label={`Copy row ${i + 1}`}
+                                  title="Copy this line (Alt+C)"
+                                  aria-keyshortcuts="Alt+C"
+                                  data-grid-copy
+                                >
+                                  <Copy size={13} />
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       )
@@ -2791,13 +2836,11 @@ export function PurchaseBillDialog({
                       <div className="mt-2 grid grid-cols-2 gap-2">
                         <div className="space-y-1">
                           <label className={fieldLabel}>Qty</label>
-                          <input
-                            type="number"
-                            step="any"
-                            min={0}
+                          <StepInput
+                            decimals
                             className="form-input h-9 w-full text-right"
                             value={String(line.qty)}
-                            onChange={(e) => setLine(i, { qty: e.target.value })}
+                            onValueChange={(v) => setLine(i, { qty: v })}
                             aria-label={`Line ${i + 1} quantity`}
                           />
                           {item?.uom?.symbol && (
@@ -2808,13 +2851,11 @@ export function PurchaseBillDialog({
                         </div>
                         <div className="space-y-1">
                           <label className={fieldLabel}>Rate</label>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
+                          <StepInput
+                            decimals
                             className="form-input h-9 w-full text-right"
                             value={String(line.unitPrice)}
-                            onChange={(e) => setLineRate(i, e.target.value)}
+                            onValueChange={(v) => setLineRate(i, v)}
                             aria-label={`Line ${i + 1} rate`}
                           />
                           {line.orderedRate != null && (
@@ -2828,28 +2869,24 @@ export function PurchaseBillDialog({
                       <div className="mt-2 grid grid-cols-2 gap-2">
                         <div className="space-y-1">
                           <label className={fieldLabel}>Disc %</label>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
+                          <StepInput
+                            decimals
                             max={100}
                             className="form-input h-9 w-full text-right"
                             value={String(line.discount)}
-                            onChange={(e) => setLine(i, { discount: e.target.value })}
+                            onValueChange={(v) => setLine(i, { discount: v })}
                             aria-label={`Line ${i + 1} discount`}
                           />
                         </div>
                         <div className="space-y-1">
                           <label className={fieldLabel}>GST %</label>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
+                          <StepInput
+                            decimals
                             max={100}
                             className="form-input h-9 w-full text-right"
                             disabled={taxMode === 'NONE'}
                             value={taxMode === 'NONE' ? '' : String(line.gstRate)}
-                            onChange={(e) => setLine(i, { gstRate: e.target.value })}
+                            onValueChange={(v) => setLine(i, { gstRate: v })}
                             aria-label={`Line ${i + 1} GST rate`}
                           />
                         </div>
@@ -3109,7 +3146,7 @@ export function PurchaseBillDialog({
             <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
               Cancel
             </button>
-            <button type="submit" className="btn-primary" disabled={saving}>
+            <button type="submit" className="btn-primary" disabled={saving} data-hotkey="save" aria-keyshortcuts="Control+S Meta+S">
               {saving && <Loader2 size={15} className="animate-spin" />}
               {isEdit ? 'Save changes' : payNow && expenseMode ? 'Book & pay' : 'Book bill'}
             </button>

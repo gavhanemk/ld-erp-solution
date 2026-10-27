@@ -55,7 +55,7 @@ interface NavItem {
   children?: NavChild[]
 }
 
-const navItems: NavItem[] = [
+export const navItems: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { label: 'Reports', href: '/reports', icon: BarChart3 },
   {

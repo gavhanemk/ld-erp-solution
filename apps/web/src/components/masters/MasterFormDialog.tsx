@@ -37,6 +37,7 @@ import {
 } from 'lucide-react'
 import { ApiError, can, masterResource, type Paginated, type Single } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
@@ -467,6 +468,9 @@ export function MasterFormDialog<T extends { id: string }>({
     if ((document.activeElement as HTMLElement | null)?.closest?.('[data-radix-popper-content-wrapper]')) return
     onClose()
   }, open)
+  // Tab goes round inside the form, and focus goes back to the button that opened it.
+  const formRef = useRef<HTMLFormElement>(null)
+  useDialogFocus(formRef, open)
   // The page behind must not scroll while the dialog is up.
   useEffect(() => {
     if (!open) return
@@ -728,7 +732,7 @@ export function MasterFormDialog<T extends { id: string }>({
   }
 
   const saveButton = (
-    <button type="submit" form={formId} className="btn-primary" disabled={saving}>
+    <button type="submit" form={formId} className="btn-primary" disabled={saving} data-hotkey="save" aria-keyshortcuts="Control+S Meta+S">
       {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
       {isEdit ? 'Save changes' : `Save ${sentenceCase(title)}`}
     </button>
@@ -752,6 +756,7 @@ export function MasterFormDialog<T extends { id: string }>({
       {/* Capped and centred. A master has a dozen fields, not an item table;
         stretched across a wide screen each box ran half the monitor long. */}
       <form
+        ref={formRef}
         id={formId}
         onSubmit={submit}
         noValidate

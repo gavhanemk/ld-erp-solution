@@ -31,16 +31,19 @@ import {
   ClipboardList,
   ChevronUp,
   ChevronDown,
+  Copy,
 } from 'lucide-react'
 import { Section } from '@/components/purchase/Section'
 import type { EnquiryQuote, EnquiryRecord as EnquiryLite } from '@/components/purchase/enquiryTypes'
 import { api, apiErrorMessage, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } from '@/components/purchase/IndentItemsDialog'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { StepInput } from '@/components/ui/StepInput'
 
 /**
  * Raising a purchase order.
@@ -381,7 +384,8 @@ const ADD_NEW = '__new__'
 
 const COL = {
   num: 'w-8',
-  remove: 'w-8',
+  // Remove and copy, side by side.
+  remove: 'w-16',
   item: 'w-64',
   category: 'w-40',
   style: 'w-24',
@@ -1068,6 +1072,9 @@ export function PurchaseOrderDialog({
 
   // Escape closes this window only — not the ones behind it.
   useEscape(onClose, open)
+  // Tab goes round inside the form, and focus goes back to the button that opened it.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef, open)
   useEffect(() => {
     if (!open) return
     // The page behind must not scroll while this is open, or closing the form
@@ -1625,6 +1632,39 @@ export function PurchaseOrderDialog({
       return left.length ? left : [blankLine()]
     })
 
+  /**
+   * Puts a copy of one row directly under it — everything typed on it, but
+   * none of what ties it to a saved line, an indent or an enquiry, so the copy
+   * is never counted against the request the original fulfils.
+   */
+  const copyLine = (index: number) =>
+    setLines((prev) => {
+      const src = prev[index]
+      if (!src) return prev
+      // Everything but the item: the form refuses the same item on two rows,
+      // and a copy must not slip past that. Category, quantity, rate, discount
+      // and tax come across; the item is picked again.
+      const copy: PoLine = {
+        ...src,
+        itemId: '',
+        codeText: '',
+        item: undefined,
+        id: undefined,
+        amount: undefined,
+        mrLineId: null,
+        mrNumber: null,
+        mrLine: null,
+        enquiryLineId: null,
+        receivedQty: undefined,
+        pendingQty: undefined,
+        shortClosed: undefined,
+        shortCloseReason: undefined,
+        shortClosedAt: undefined,
+        shortClosedBy: undefined,
+      }
+      return [...prev.slice(0, index + 1), copy, ...prev.slice(index + 1)]
+    })
+
   // poDate and deliveryDate are deliberately absent. The form no longer asks
   // for either, and omitting them rather than sending a value means a new
   // order takes today's date from the API, while editing an existing draft
@@ -2010,6 +2050,9 @@ export function PurchaseOrderDialog({
         onClick={() => void save('draft')}
         className="btn-secondary"
         disabled={busy || incomplete}
+        data-hotkey="save"
+        aria-keyshortcuts="Control+S Meta+S"
+        title="Save as draft (Ctrl+S)"
       >
         {saving === 'draft' ? (
           <Loader2 size={15} className="animate-spin" />
@@ -2060,6 +2103,7 @@ export function PurchaseOrderDialog({
           8px on a phone, 12px on a desktop. The body scrolls inside, which it
           did already. */}
         <div
+          ref={dialogRef}
           className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
           role="dialog"
           aria-modal="true"
@@ -2543,7 +2587,7 @@ export function PurchaseOrderDialog({
                       ))}
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody data-grid>
                     {lines.map((line, i) => {
                       const item = itemById.get(line.itemId)
 
@@ -2580,6 +2624,7 @@ export function PurchaseOrderDialog({
                       return (
                         <tr
                           key={i}
+                          data-grid-row
                           className={`${
                             i % 2 === 1 ? 'zebra-row' : 'bg-card'
                           } border-border/50 border-b last:border-0 [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top`}
@@ -2601,8 +2646,21 @@ export function PurchaseOrderDialog({
                                 onClick={() => removeRow(i)}
                                 className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
                                 aria-label={`Remove row ${i + 1}`}
+                                aria-keyshortcuts="Alt+Delete"
+                                data-grid-remove
                               >
                                 <Trash2 size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-ghost text-muted-foreground hover:text-primary p-1"
+                                onClick={() => copyLine(i)}
+                                aria-label={`Copy row ${i + 1}`}
+                                title="Copy this line (Alt+C)"
+                                aria-keyshortcuts="Alt+C"
+                                data-grid-copy
+                              >
+                                <Copy size={13} />
                               </button>
                             </div>
                           </td>
@@ -2777,16 +2835,14 @@ export function PurchaseOrderDialog({
                           <td className={COL.qty}>
                             {/* The wheel and the arrow keys move this by whole units.
                              Not 0.001, which moved it by a thousandth of a piece; and not 1,
-                             which would refuse 1500.5 metres of fabric outright. "any" steps
+                             which would refuse 1500.5 metres of fabric outright. It steps
                              by one while still accepting a decimal that is typed. */}
-                            <input
-                              type="number"
-                              step="any"
-                              min={0}
+                            <StepInput
+                              decimals
                               className={`${cell} text-right ${needsQty ? 'border-amber-500/70' : ''}`}
                               placeholder="0"
                               value={String(line.qty)}
-                              onChange={(e) => setLine(i, { qty: e.target.value })}
+                              onValueChange={(v) => setLine(i, { qty: v })}
                               aria-label={`Row ${i + 1} quantity`}
                             />
                             {item?.uom?.symbol && (
@@ -2797,14 +2853,12 @@ export function PurchaseOrderDialog({
                           </td>
 
                           <td className={COL.rate}>
-                            <input
-                              type="number"
-                              step="any"
-                              min={0}
+                            <StepInput
+                              decimals
                               className={`${cell} text-right ${needsRate ? 'border-amber-500/70' : ''}`}
                               placeholder="0.00"
                               value={String(line.unitRate)}
-                              onChange={(e) => setLine(i, { unitRate: e.target.value })}
+                              onValueChange={(v) => setLine(i, { unitRate: v })}
                               aria-label={`Row ${i + 1} rate`}
                             />
                             {/* The last rate this item was bought at, shown but
@@ -2837,16 +2891,14 @@ export function PurchaseOrderDialog({
                               allowed. Both sit in the cell, so which one this
                               figure is can never be in doubt. */}
                             <div className="flex items-stretch gap-1">
-                              <input
-                                type="number"
-                                step="any"
-                                min={0}
+                              <StepInput
+                                decimals
                                 max={(line.discountUnit ?? '%') === '%' ? 100 : undefined}
                                 className={`${cell} min-w-0 flex-1 text-right`}
                                 placeholder="0"
                                 disabled={poType !== 'ITEM_LEVEL'}
                                 value={poType === 'ITEM_LEVEL' ? String(line.discount) : ''}
-                                onChange={(e) => setLine(i, { discount: e.target.value })}
+                                onValueChange={(v) => setLine(i, { discount: v })}
                                 aria-label={`Row ${i + 1} discount`}
                               />
                               <SmartSelect
@@ -2865,16 +2917,14 @@ export function PurchaseOrderDialog({
                           </td>
 
                           <td className={COL.tax}>
-                            <input
-                              type="number"
-                              step="any"
-                              min={0}
+                            <StepInput
+                              decimals
                               max={100}
                               className={`${cell} text-right`}
                               placeholder="0"
                               disabled={taxMode === 'NONE'}
                               value={taxMode === 'NONE' ? '' : String(line.gstRate)}
-                              onChange={(e) => setLine(i, { gstRate: e.target.value })}
+                              onValueChange={(v) => setLine(i, { gstRate: v })}
                               aria-label={`Row ${i + 1} tax percent`}
                             />
                             {/* The old form's "Is tax exempt". It is the same
@@ -3098,14 +3148,12 @@ export function PurchaseOrderDialog({
                       <div className="mt-2 grid grid-cols-2 gap-2">
                         <div className="space-y-1">
                           <label className={fieldLabel}>Qty</label>
-                          <input
-                            type="number"
-                            step="any"
-                            min={0}
+                          <StepInput
+                            decimals
                             className={`${cell} ${needsQty ? 'border-amber-500/70' : ''}`}
                             placeholder="0"
                             value={String(line.qty)}
-                            onChange={(e) => setLine(i, { qty: e.target.value })}
+                            onValueChange={(v) => setLine(i, { qty: v })}
                             aria-label={`Row ${i + 1} quantity`}
                           />
                           {item?.uom?.symbol && (
@@ -3114,14 +3162,12 @@ export function PurchaseOrderDialog({
                         </div>
                         <div className="space-y-1">
                           <label className={fieldLabel}>Rate</label>
-                          <input
-                            type="number"
-                            step="any"
-                            min={0}
+                          <StepInput
+                            decimals
                             className={`${cell} ${needsRate ? 'border-amber-500/70' : ''}`}
                             placeholder="0.00"
                             value={String(line.unitRate)}
-                            onChange={(e) => setLine(i, { unitRate: e.target.value })}
+                            onValueChange={(v) => setLine(i, { unitRate: v })}
                             aria-label={`Row ${i + 1} rate`}
                           />
                           {lastRate && (
@@ -3149,16 +3195,14 @@ export function PurchaseOrderDialog({
                             stretching to match the number box and pushing
                             the row past the card's right edge. */}
                           <div className="flex items-stretch gap-1">
-                            <input
-                              type="number"
-                              step="any"
-                              min={0}
+                            <StepInput
+                              decimals
                               max={(line.discountUnit ?? '%') === '%' ? 100 : undefined}
                               className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
                               placeholder="0"
                               disabled={poType !== 'ITEM_LEVEL'}
                               value={poType === 'ITEM_LEVEL' ? String(line.discount) : ''}
-                              onChange={(e) => setLine(i, { discount: e.target.value })}
+                              onValueChange={(v) => setLine(i, { discount: v })}
                               aria-label={`Row ${i + 1} discount`}
                             />
                             <SmartSelect
@@ -3177,16 +3221,14 @@ export function PurchaseOrderDialog({
                         </div>
                         <div className="space-y-1">
                           <label className={fieldLabel}>Tax %</label>
-                          <input
-                            type="number"
-                            step="any"
-                            min={0}
+                          <StepInput
+                            decimals
                             max={100}
                             className={cell}
                             placeholder="0"
                             disabled={taxMode === 'NONE'}
                             value={taxMode === 'NONE' ? '' : String(line.gstRate)}
-                            onChange={(e) => setLine(i, { gstRate: e.target.value })}
+                            onValueChange={(v) => setLine(i, { gstRate: v })}
                             aria-label={`Row ${i + 1} tax percent`}
                           />
                           {line.itemId && (
@@ -3234,6 +3276,9 @@ export function PurchaseOrderDialog({
                 <button
                   type="button"
                   onClick={addRow}
+                  data-grid-add
+                  aria-keyshortcuts="Alt+A"
+                  title="Add item row (Alt+A)"
                   className="text-primary border-primary/40 hover:bg-primary/10 focus:ring-ring inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors duration-200 focus:outline-none focus:ring-2"
                 >
                   <Plus size={14} /> Add item row

@@ -416,6 +416,7 @@ export default function DeliveryChallanPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search"
+              data-hotkey="search"
             />
           </div>
           {tab === 'challans' && (
@@ -560,12 +561,12 @@ export default function DeliveryChallanPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {waiting.map((o) => {
+                    {waiting.map((o, i) => {
                       const note = dueNote(o.deliveryDate)
                       const draft = o.deliveryChallans[0]
                       const s = salesOrderStatus(o)
                       return (
-                        <tr key={o.id}>
+                        <tr key={o.id} data-row tabIndex={i === 0 ? 0 : -1}>
                           <td className="whitespace-nowrap">
                             <span className="text-foreground font-mono text-xs font-semibold">{o.soNumber}</span>
                             <div className="text-muted-foreground flex items-center gap-1 text-[11px]">
@@ -692,16 +693,17 @@ export default function DeliveryChallanPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((c) => {
+                  {rows.map((c, i) => {
                     const s = challanStatus(c.status)
                     const actions = rowActions(c)
                     return (
-                      <tr key={c.id}>
+                      <tr key={c.id} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td className="whitespace-nowrap">
                           <a
                             href={`/print/delivery-challan/${c.id}`}
                             target="_blank"
                             rel="noreferrer"
+                            data-row-open
                             className="text-primary font-mono text-xs font-semibold hover:underline"
                             title={`Print ${c.dcNumber}`}
                           >

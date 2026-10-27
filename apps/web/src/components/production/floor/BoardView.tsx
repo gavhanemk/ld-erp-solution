@@ -269,7 +269,7 @@ function RowsTable({ rows, handlers }: { rows: BoardCard[]; handlers: (c: BoardC
           </tr>
         </thead>
         <tbody>
-          {rows.map((c) => {
+          {rows.map((c, ri) => {
             const h = handlers(c)
             const todos = todosOf(c, h)
             const first = todos[0]
@@ -279,7 +279,7 @@ function RowsTable({ rows, handlers }: { rows: BoardCard[]; handlers: (c: BoardC
               .map((s) => ({ s, note: stripNote(s, s.kind === 'CUTTING' ? c.withCutters : 0) }))
               .filter((x) => x.note.tone === 'here' || x.note.tone === 'coming' || x.note.tone === 'warn')
             return (
-              <tr key={c.id} className="cursor-pointer align-top" onClick={() => h.sheet(null)}>
+              <tr key={c.id} className="cursor-pointer align-top" onClick={() => h.sheet(null)} data-row tabIndex={ri === 0 ? 0 : -1}>
                 <td>
                   <span className="text-foreground block font-mono text-xs font-semibold">{c.jobCardNumber}</span>
                   <span className="text-muted-foreground block text-[11px]">

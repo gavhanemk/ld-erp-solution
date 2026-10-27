@@ -1,10 +1,11 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Bell, Search, Sun, Moon, Zap, ChevronDown, BellOff, Menu } from 'lucide-react'
+import { Bell, Search, Sun, Moon, Zap, ChevronDown, BellOff, Menu, Keyboard } from 'lucide-react'
 import Link from 'next/link'
 import { api, currentUser } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { keyLabel } from '@/lib/keys'
 
 interface TopBarProps {
   sidebarCollapsed: boolean
@@ -40,6 +41,9 @@ export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
   // worked out there rarely matches the one worked out here, and React throws
   // away the page to redraw it (minified error #418).
   const [now, setNow] = useState<Date | null>(null)
+  // Ctrl K, or ⌘K on a Mac — known only in the browser, so set after mount.
+  const [paletteKey, setPaletteKey] = useState('Ctrl K')
+  useEffect(() => setPaletteKey(keyLabel('mod+k')), [])
 
   // localStorage is only readable in the browser, so this waits for mount.
   useEffect(() => {
@@ -135,13 +139,31 @@ export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
         </p>
       </div>
 
-      <div className="hidden md:flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border w-72 cursor-pointer hover:border-teal-500/30 transition-colors group">
+      {/* Opens the palette, as Ctrl+K (⌘K on a Mac) does from anywhere. */}
+      <button
+        type="button"
+        onClick={() => window.dispatchEvent(new Event('ld:palette'))}
+        className="hidden md:flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border w-72 cursor-pointer hover:border-teal-500/30 transition-colors group text-left"
+        aria-label="Search screens, records and actions"
+        aria-keyshortcuts="Control+K Meta+K"
+      >
         <Search size={14} className="text-muted-foreground group-hover:text-teal-400 transition-colors" />
         <span className="text-sm text-muted-foreground flex-1">Search anything...</span>
         <kbd className="text-[10px] text-muted-foreground bg-background px-1.5 py-0.5 rounded border border-border">
-          ⌘K
+          {paletteKey}
         </kbd>
-      </div>
+      </button>
+      {/* Every shortcut, in one list — as Alt+/ or ? shows from anywhere. */}
+      <button
+        type="button"
+        onClick={() => window.dispatchEvent(new Event('ld:shortcuts'))}
+        className="hidden md:flex p-2 rounded-lg hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
+        aria-label="Keyboard shortcuts"
+        title="Keyboard shortcuts (Alt+/)"
+        aria-keyshortcuts="Alt+/"
+      >
+        <Keyboard size={17} />
+      </button>
 
       <Link
         href="/ai"

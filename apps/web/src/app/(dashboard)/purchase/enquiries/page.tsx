@@ -373,6 +373,8 @@ export default function PurchaseEnquiriesPage() {
               className="btn-primary"
               onClick={() => setForm({ open: true, record: null })}
               aria-label="New enquiry"
+              data-hotkey="new"
+              aria-keyshortcuts="Alt+N"
             >
               <Plus size={15} /> <span className="hidden sm:inline">New Enquiry</span>
             </button>
@@ -444,6 +446,8 @@ export default function PurchaseEnquiriesPage() {
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Enquiry no, PI no, reference, supplier, item"
               className="form-input pl-8"
+              aria-label="Search enquiries"
+              data-hotkey="search"
             />
           </div>
           <SmartSelect
@@ -652,13 +656,13 @@ export default function PurchaseEnquiriesPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((e) => {
+                  {rows.map((e, ri) => {
                     const s = ENQUIRY_STATUS[e.status]
                     const expanded = open === e.id
                     const waiting = e.quotes.find((q) => q.sentAt && !q.answered)
                     return (
                       <Fragment key={e.id}>
-                        <tr className={expanded ? 'bg-secondary/30' : undefined}>
+                        <tr className={expanded ? 'bg-secondary/30' : undefined} data-row tabIndex={ri === 0 ? 0 : -1}>
                           {/* The toggle gets a cell of its own rather than
                             hiding on the number. A row that opens only when you
                             happen to press the right four characters is a row
@@ -672,6 +676,7 @@ export default function PurchaseEnquiriesPage() {
                               title={expanded ? 'Hide items' : 'Show items'}
                               aria-label={`${expanded ? 'Hide' : 'Show'} items on ${e.enquiryNumber}`}
                               aria-expanded={expanded}
+                              data-row-open
                             >
                               {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                             </button>

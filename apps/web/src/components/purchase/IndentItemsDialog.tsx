@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import { X, Loader2, AlertCircle, Search } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
 import { formatDate } from '@/lib/utils'
 import { StepInput } from '@/components/ui/StepInput'
 
@@ -160,6 +161,9 @@ export function IndentItemsDialog({
       cancelled = true
     }
   }, [])
+
+  // Escape closes this picker only — not the form it was opened from.
+  useEscape(onClose)
 
   // Everything typed into the box at once — customer, order, indent, item.
   // A buyer looking for "Rajmandir's thread" should not have to know which

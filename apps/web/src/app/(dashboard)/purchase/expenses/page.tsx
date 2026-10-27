@@ -312,6 +312,8 @@ function ExpensesTable() {
             className="btn-primary"
             onClick={() => setDialog({ open: true, record: null })}
             aria-label="New expense"
+            data-hotkey="new"
+            aria-keyshortcuts="Alt+N"
           >
             <Plus size={15} /> <span className="hidden sm:inline">New Expense</span>
           </button>
@@ -342,6 +344,7 @@ function ExpensesTable() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 aria-label="Search expenses"
+                data-hotkey="search"
               />
             </div>
             <div className="flex shrink-0 items-center gap-1">
@@ -535,13 +538,13 @@ function ExpensesTable() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((bill) => {
+                  {rows.map((bill, i) => {
                     const s = STATUS[bill.status] ?? { label: bill.status, cls: 'badge-neutral' }
                     const open = expanded === bill.id
                     const lines = bill.lines ?? []
                     return (
                       <Fragment key={bill.id}>
-                        <tr>
+                        <tr data-row tabIndex={i === 0 ? 0 : -1}>
                           <td>
                             <button
                               className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
@@ -549,6 +552,7 @@ function ExpensesTable() {
                               title={open ? 'Hide lines' : 'Show lines'}
                               aria-label={`${open ? 'Hide' : 'Show'} lines on ${bill.billNumber}`}
                               aria-expanded={open}
+                              data-row-open
                             >
                               {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                             </button>

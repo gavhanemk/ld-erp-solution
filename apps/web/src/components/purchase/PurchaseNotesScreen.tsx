@@ -633,6 +633,8 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                 setEditing(null)
                 setDialogOpen(true)
               }}
+              data-hotkey="new"
+              aria-keyshortcuts="Alt+N"
             >
               <Plus size={15} />
               <span className="hidden sm:inline">{words.newLabel}</span>
@@ -721,6 +723,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 aria-label={`Search ${words.one}s`}
+                data-hotkey="search"
               />
             </div>
 
@@ -1065,19 +1068,20 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                     </td>
                   </tr>
                 ) : (
-                  rows.map((n) => {
+                  rows.map((n, i) => {
                     const open = expanded === n.id
                     const tax = Number(n.cgst) + Number(n.sgst) + Number(n.igst)
                     const s = NOTE_STATUS[n.status]
                     return (
                       <Fragment key={n.id}>
-                        <tr className="border-border/60 hover:bg-secondary/40 border-b transition-colors">
+                        <tr className="border-border/60 hover:bg-secondary/40 border-b transition-colors" data-row tabIndex={i === 0 ? 0 : -1}>
                           <td className="px-3 py-2">
                             <button
                               onClick={() => setExpanded(open ? null : n.id)}
                               className="text-muted-foreground hover:text-foreground"
                               aria-label={open ? 'Hide detail' : 'Show detail'}
                               aria-expanded={open}
+                              data-row-open
                             >
                               {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                             </button>

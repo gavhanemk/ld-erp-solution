@@ -16,6 +16,8 @@ export interface AppSettings {
   rowsPerPage: number
   dateFormat: 'DD-MMM-YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD'
   qcInDailyProduction: boolean
+  /** Stickered stock is issued by scanning its packages; only stock without a sticker can be typed. */
+  issueByScanOnly: boolean
 }
 
 /** Matches the defaults in the API's preference catalogue. */
@@ -23,6 +25,7 @@ const FALLBACK: AppSettings = {
   rowsPerPage: 25,
   dateFormat: 'DD-MMM-YYYY',
   qcInDailyProduction: true,
+  issueByScanOnly: false,
 }
 
 const STORAGE_KEY = 'app_settings'
@@ -59,6 +62,7 @@ function normalise(raw: Record<string, unknown> | null | undefined): AppSettings
       typeof raw.qcInDailyProduction === 'boolean'
         ? raw.qcInDailyProduction
         : FALLBACK.qcInDailyProduction,
+    issueByScanOnly: raw.issueByScanOnly === true,
   }
 }
 

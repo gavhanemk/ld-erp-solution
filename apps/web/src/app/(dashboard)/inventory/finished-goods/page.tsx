@@ -184,7 +184,7 @@ export default function FinishedGoodsPage() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           {can('inventory', 'create') && (
-            <button className="btn-primary" onClick={() => setAdding(true)} aria-label="New finished goods receipt">
+            <button className="btn-primary" onClick={() => setAdding(true)} aria-label="New finished goods receipt" data-hotkey="new" aria-keyshortcuts="Alt+N">
               <Plus size={15} /> <span className="hidden sm:inline">Put packed goods in</span>
             </button>
           )}
@@ -213,6 +213,7 @@ export default function FinishedGoodsPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search finished goods receipts"
+              data-hotkey="search"
             />
           </div>
           <div className="flex items-center gap-1">
@@ -335,15 +336,16 @@ export default function FinishedGoodsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((r) => {
+                    {rows.map((r, ri) => {
                       const actions = rowActions(r)
                       const items = byItem(r)
                       const expanded = open === r.id
                       return (
                         <Fragment key={r.id}>
-                          <tr>
+                          <tr data-row tabIndex={ri === 0 ? 0 : -1}>
                             <td>
                               <button
+                                data-row-open
                                 className="btn-ghost p-1"
                                 onClick={() => setOpen(expanded ? null : r.id)}
                                 aria-label={`${expanded ? 'Hide' : 'Show'} the sizes on ${r.fgrNumber}`}

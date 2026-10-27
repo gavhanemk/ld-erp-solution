@@ -10,6 +10,7 @@ import { PackageCard } from '@/components/packages/PackageCard'
 import { RackInput, useRacks } from '@/components/packages/RackInput'
 import { qtyText, type PackageDetail } from '@/components/packages/packageTypes'
 import { GarmentCard, looksLikeGarment, type GarmentDetail } from '@/components/packages/GarmentCard'
+import { StickerStock } from '@/components/packages/StickerStock'
 
 /** A sticker just scanned onto a rack. */
 interface PutAway {
@@ -218,14 +219,22 @@ function ScanScreen() {
       ) : pkg ? (
         <PackageCard key={pkg.id} pkg={pkg} onChange={setPkg} onDone={setMessage} />
       ) : (
-        !busy &&
-        !error && (
-          <div className="glass-card flex flex-col items-center gap-3 p-10 text-center">
-            <Package size={36} className="text-muted-foreground" />
-            <p className="max-w-md text-muted-foreground">
-              Scan the QR on a box, roll or carton. With a scanner gun, just scan — the box above is ready. On a phone, press{' '}
-              <span className="font-semibold text-foreground">Use camera</span>.
+        !busy && (
+          // Nothing scanned yet: what is on the racks, to browse and open without a scanner.
+          <div className="space-y-2">
+            <p className="flex items-center gap-2 px-1 text-sm text-muted-foreground">
+              <Package size={16} className="shrink-0" />
+              <span>
+                Scan the QR on a box, roll or carton — with a scanner gun just scan, on a phone press{' '}
+                <span className="font-semibold text-foreground">Use camera</span>. Or pick a packet from the stock below.
+              </span>
             </p>
+            <StickerStock
+              onOpen={(code) => {
+                void find(code)
+                document.getElementById('scan-result')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }}
+            />
           </div>
         )
       )}

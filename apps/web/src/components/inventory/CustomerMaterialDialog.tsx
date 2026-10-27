@@ -1,9 +1,11 @@
 'use client'
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Loader2, AlertCircle, Plus, Trash2, PackageOpen, FileText, Truck, Boxes, Save, Send } from 'lucide-react'
+import { X, Loader2, AlertCircle, Plus, Trash2, Copy, PackageOpen, FileText, Truck, Boxes, Save, Send } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
+import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { StepInput } from '@/components/ui/StepInput'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -137,6 +139,22 @@ export function CustomerMaterialDialog({
   const [saving, setSaving] = useState<null | 'DRAFT' | 'SUBMIT'>(null)
   const [error, setError] = useState<string | null>(null)
 
+  // Escape closes this window only (not one behind it, nor while saving); the
+  // page behind does not scroll; Tab goes round inside, and focus goes back
+  // to the button that opened it.
+  useEscape(() => {
+    if (!saving) onClose()
+  })
+  useEffect(() => {
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [])
+  const dialogRef = useRef<HTMLFormElement>(null)
+  useDialogFocus(dialogRef)
+
   useEffect(() => {
     let cancelled = false
     void (async () => {
@@ -217,6 +235,9 @@ export function CustomerMaterialDialog({
 
   const setLine = (index: number, patch: Partial<Line>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
+  /** A copy of a line, put just under it. */
+  const copyLine = (index: number) =>
+    setLines((prev) => (prev[index] ? [...prev.slice(0, index + 1), { ...prev[index] }, ...prev.slice(index + 1)] : prev))
 
   const theirOrders = orders.filter((o) => o.customerId === customerId)
   const filled = lines.filter((l) => l.itemId && num(l.receivedQty) > 0)
@@ -314,7 +335,15 @@ export function CustomerMaterialDialog({
     </button>
   )
   const draftButton = (
-    <button type="button" className="btn-secondary" onClick={() => void save('DRAFT')} disabled={!!saving}>
+    <button
+      type="button"
+      className="btn-secondary"
+      onClick={() => void save('DRAFT')}
+      disabled={!!saving}
+      data-hotkey="save"
+      aria-keyshortcuts="Control+S Meta+S"
+      title="Save draft (Ctrl+S)"
+    >
       {spin('DRAFT', <Save size={15} />)} Save draft
     </button>
   )
@@ -322,6 +351,7 @@ export function CustomerMaterialDialog({
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       <form
+        ref={dialogRef}
         id="customer-material-form"
         onSubmit={(e) => {
           e.preventDefault()
@@ -521,6 +551,9 @@ export function CustomerMaterialDialog({
                 type="button"
                 className="btn-secondary h-8 text-xs"
                 onClick={() => setLines((prev) => [...prev, emptyLine()])}
+                data-grid-add
+                aria-keyshortcuts="Alt+A"
+                title="Add item (Alt+A)"
               >
                 <Plus size={14} /> Add item
               </button>
@@ -536,10 +569,10 @@ export function CustomerMaterialDialog({
                     <th style={{ textAlign: 'right' }}>Received qty</th>
                     <th style={{ textAlign: 'right' }}>Short / excess</th>
                     <th>Markings / remarks</th>
-                    <th style={{ width: 40 }} />
+                    <th style={{ width: 80 }} />
                   </tr>
                 </thead>
-                <tbody>
+                <tbody data-grid>
                   {lines.map((line, i) => {
                     const diff = num(line.receivedQty) - num(line.challanQty)
                     const item = items.find((x) => x.id === line.itemId)
@@ -563,7 +596,7 @@ export function CustomerMaterialDialog({
                       </div>
                     )
                     return (
-                      <tr key={i} className="align-top">
+                      <tr key={i} data-grid-row className="align-top">
                         <td className="text-muted-foreground pt-4 text-xs tabular-nums">{i + 1}</td>
                         {/* Category and sub-category narrow the item list, as on the old form. */}
                         <td className="min-w-[300px]">
@@ -655,18 +688,33 @@ export function CustomerMaterialDialog({
                           />
                         </td>
                         <td className="text-right">
-                          <button
-                            type="button"
-                            className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
-                            onClick={() =>
-                              setLines((prev) =>
-                                prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i)
-                              )
-                            }
-                            aria-label={`Remove line ${i + 1}`}
-                          >
-                            <Trash2 size={15} />
-                          </button>
+                          <div className="flex items-center justify-end">
+                            <button
+                              type="button"
+                              className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
+                              onClick={() =>
+                                setLines((prev) =>
+                                  prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i)
+                                )
+                              }
+                              aria-label={`Remove line ${i + 1}`}
+                              aria-keyshortcuts="Alt+Delete"
+                              data-grid-remove
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-ghost text-muted-foreground p-1.5 hover:text-primary"
+                              onClick={() => copyLine(i)}
+                              aria-label={`Copy row ${i + 1}`}
+                              title="Copy this line (Alt+C)"
+                              aria-keyshortcuts="Alt+C"
+                              data-grid-copy
+                            >
+                              <Copy size={15} />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )

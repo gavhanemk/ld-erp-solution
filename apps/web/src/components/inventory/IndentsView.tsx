@@ -210,6 +210,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search indents"
+              data-hotkey="search"
             />
             {search && (
               <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
@@ -282,11 +283,11 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
                   </tr>
                 </thead>
                 <tbody>
-                  {pageRows.map((r) => {
+                  {pageRows.map((r, i) => {
                     const st = STATE[stateOf(r)]
                     const late = r.requiredDate && dayKey(r.requiredDate) < dayKey(new Date()) && stateOf(r) !== 'arrived' && stateOf(r) !== 'inStock'
                     return (
-                      <tr key={r.lineId}>
+                      <tr key={r.lineId} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td className="whitespace-nowrap">
                           <div className="font-mono text-xs font-semibold text-primary">{r.mrNumber}</div>
                           <div className={`text-[11px] ${late ? 'font-semibold text-red-500' : 'text-muted-foreground'}`}>
@@ -329,7 +330,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
                         </td>
                         <td className="whitespace-nowrap text-right">
                           {r.mrStatus === 'APPROVED' ? (
-                            <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => onProcess(r.mrId)} title="Open the requisition to issue, reserve or buy">
+                            <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => onProcess(r.mrId)} title="Open the requisition to issue, reserve or buy" data-row-open>
                               <PackageCheck size={13} /> Process
                             </button>
                           ) : (

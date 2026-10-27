@@ -43,6 +43,10 @@ export interface RowAction {
  * its overflow and the last row's menu would be cut in half by it. It closes
  * on a press outside, on Escape, and on a scroll — a menu that floats away
  * from the row it belongs to is worse than one that shuts.
+ *
+ * From the keyboard: Enter, Space or ↓ on the button opens it on the first
+ * line; ↑ ↓ Home End move; a letter jumps to the line starting with it;
+ * Enter chooses; Escape or Tab shut it, and focus is back on the button.
  */
 export function ActionMenu({
   label,
@@ -56,6 +60,48 @@ export function ActionMenu({
 }) {
   const [open, setOpen] = useState(false)
   const btnRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  // Shut, with focus back on the button, so the next Tab carries on from the row.
+  const shut = (refocus = true) => {
+    setOpen(false)
+    if (refocus) btnRef.current?.focus()
+  }
+
+  // Open: the first line that can be chosen has focus.
+  useEffect(() => {
+    if (!open) return
+    const t = setTimeout(() => menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')?.focus(), 0)
+    return () => clearTimeout(t)
+  }, [open])
+
+  const onMenuKey = (e: React.KeyboardEvent) => {
+    const lines = [...(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ?? [])]
+    const at = lines.indexOf(document.activeElement as HTMLElement)
+    const to = (i: number) => {
+      e.preventDefault()
+      lines[(i + lines.length) % lines.length]?.focus()
+    }
+    if (e.key === 'ArrowDown') to(at + 1)
+    else if (e.key === 'ArrowUp') to(at - 1)
+    else if (e.key === 'Home') to(0)
+    else if (e.key === 'End') to(lines.length - 1)
+    else if (e.key === 'Tab') {
+      e.preventDefault()
+      shut()
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const ch = e.key.toLowerCase()
+      const from = at + 1
+      for (let n = 0; n < lines.length; n++) {
+        const l = lines[(from + n) % lines.length]
+        if ((l.textContent ?? '').trim().toLowerCase().startsWith(ch)) {
+          e.preventDefault()
+          l.focus()
+          break
+        }
+      }
+    }
+  }
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
 
   /**
@@ -82,7 +128,7 @@ export function ActionMenu({
 
   // A menu anchored to a row must not float away from it. Anything that moves
   // the row under it — a scroll, a resize — shuts it, and so does Escape.
-  useEscape(() => setOpen(false), open)
+  useEscape(() => shut(), open)
   useEffect(() => {
     if (!open) return
     const shut = () => setOpen(false)
@@ -110,6 +156,13 @@ export function ActionMenu({
           place()
           setOpen(true)
         }}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown' && !open) {
+            e.preventDefault()
+            place()
+            setOpen(true)
+          }
+        }}
         className={`border-border text-muted-foreground hover:bg-secondary hover:text-foreground inline-flex h-8 items-center gap-1.5 rounded-lg border text-xs font-medium transition-colors ${compact ? 'w-8 justify-center' : 'px-2.5'}`}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -133,8 +186,10 @@ export function ActionMenu({
           <>
             <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
             <div
+              ref={menuRef}
               role="menu"
               aria-label={label}
+              onKeyDown={onMenuKey}
               className="border-border bg-card fixed z-50 min-w-[14rem] overflow-hidden rounded-xl border py-1 shadow-xl"
               style={{ top: pos.top, right: pos.right }}
             >
@@ -145,7 +200,7 @@ export function ActionMenu({
                     href={it.href}
                     target={it.newTab ? '_blank' : undefined}
                     role="menuitem"
-                    className={`${ITEM} text-foreground`}
+                    className={`${ITEM} text-foreground focus:bg-secondary focus:outline-none`}
                     onClick={() => setOpen(false)}
                   >
                     {it.icon}
@@ -167,7 +222,7 @@ export function ActionMenu({
                     role="menuitem"
                     disabled={it.disabled}
                     title={it.hint}
-                    className={`${ITEM} ${
+                    className={`${ITEM} focus:bg-secondary focus:outline-none ${
                       it.disabled
                         ? 'text-muted-foreground cursor-not-allowed opacity-60'
                         : it.danger
@@ -176,7 +231,9 @@ export function ActionMenu({
                     }`}
                     onClick={() => {
                       if (it.disabled) return
-                      setOpen(false)
+                      // Focus back on the button first: a window the action opens
+                      // returns focus there when it closes.
+                      shut()
                       it.onClick?.()
                     }}
                   >

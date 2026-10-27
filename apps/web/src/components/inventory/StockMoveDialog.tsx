@@ -5,6 +5,7 @@ import {
   Loader2,
   Plus,
   Trash2,
+  Copy,
   Package,
   PackagePlus,
   ClipboardCheck,
@@ -15,6 +16,7 @@ import { api, apiErrorMessage, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { StepInput } from '@/components/ui/StepInput'
 
 /**
  * The three ways stock moves without a purchase or a sale behind it.
@@ -224,6 +226,9 @@ export function StockMoveDialog({
   const addLine = () => setLines((prev) => [...prev, emptyLine()])
   const removeLine = (index: number) =>
     setLines((prev) => (prev.length === 1 ? [emptyLine()] : prev.filter((_, i) => i !== index)))
+  /** A copy of a line, put just under it. */
+  const copyLine = (index: number) =>
+    setLines((prev) => (prev[index] ? [...prev.slice(0, index + 1), { ...prev[index] }, ...prev.slice(index + 1)] : prev))
 
   const filled = lines.filter((l) => l.itemId && l.qty !== '')
 
@@ -443,7 +448,14 @@ export function StockMoveDialog({
         icon={Package}
         title="Items"
         actions={
-          <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={addLine}>
+          <button
+            type="button"
+            className="btn-secondary h-8 px-3 text-xs"
+            onClick={addLine}
+            data-grid-add
+            aria-keyshortcuts="Alt+A"
+            title="Add another item (Alt+A)"
+          >
             <Plus size={14} /> Add another item
           </button>
         }
@@ -457,17 +469,17 @@ export function StockMoveDialog({
                 {mode !== 'opening' && mode !== 'stockin' && <th style={{ width: '26%' }}>Stock</th>}
                 <th style={{ textAlign: 'right' }}>{copy.qtyLabel}</th>
                 {mode !== 'transfer' && <th style={{ textAlign: 'right' }}>Rate ₹</th>}
-                <th style={{ width: 40 }} />
+                <th style={{ width: 80 }} />
               </tr>
             </thead>
-            <tbody>
+            <tbody data-grid>
               {lines.map((line, i) => {
                 const item = itemsById.get(line.itemId)
                 const choices = held.filter((h) => h.itemId === line.itemId)
                 const ours = choices.find((h) => heldKey(h) === OURS)
                 const customers = parseWhose(line.whose).ownership === 'CUSTOMER_OWNED'
                 return (
-                  <tr key={i}>
+                  <tr key={i} data-grid-row>
                     <td className="text-muted-foreground px-3 py-2 text-xs">{i + 1}</td>
                     <td className="px-3 py-2">
                       <SmartSelect
@@ -526,13 +538,11 @@ export function StockMoveDialog({
                     )}
                     <td className="px-3 py-2 text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <input
-                          type="number"
-                          step="0.001"
-                          min="0"
+                        <StepInput
+                          decimals
                           className="form-input h-9 w-28 text-right tabular-nums"
                           value={line.qty}
-                          onChange={(e) => setLine(i, { qty: e.target.value })}
+                          onValueChange={(v) => setLine(i, { qty: v })}
                           aria-label={`${copy.qtyLabel} on line ${i + 1}`}
                         />
                         <span className="text-muted-foreground w-8 text-left text-xs">
@@ -542,13 +552,11 @@ export function StockMoveDialog({
                     </td>
                     {mode !== 'transfer' && (
                       <td className="px-3 py-2 text-right">
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
+                        <StepInput
+                          decimals
                           className="form-input h-9 w-28 text-right tabular-nums placeholder:text-muted-foreground/60"
                           value={line.rate}
-                          onChange={(e) => setLine(i, { rate: e.target.value })}
+                          onValueChange={(v) => setLine(i, { rate: v })}
                           placeholder={customers ? 'customer’s' : mode === 'count' ? 'only if new' : ''}
                           disabled={customers}
                           title={customers ? "A customer's cloth carries no value of ours" : undefined}
@@ -557,14 +565,29 @@ export function StockMoveDialog({
                       </td>
                     )}
                     <td className="px-3 py-2 text-right">
-                      <button
-                        type="button"
-                        className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
-                        onClick={() => removeLine(i)}
-                        aria-label={`Remove line ${i + 1}`}
-                      >
-                        <Trash2 size={15} />
-                      </button>
+                      <div className="flex items-center justify-end">
+                        <button
+                          type="button"
+                          className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
+                          onClick={() => removeLine(i)}
+                          aria-label={`Remove line ${i + 1}`}
+                          aria-keyshortcuts="Alt+Delete"
+                          data-grid-remove
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-ghost text-muted-foreground p-1.5 hover:text-primary"
+                          onClick={() => copyLine(i)}
+                          aria-label={`Copy row ${i + 1}`}
+                          title="Copy this line (Alt+C)"
+                          aria-keyshortcuts="Alt+C"
+                          data-grid-copy
+                        >
+                          <Copy size={15} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )

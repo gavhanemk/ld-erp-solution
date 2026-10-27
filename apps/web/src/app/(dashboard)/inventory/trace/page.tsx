@@ -291,6 +291,7 @@ function TraceScreen() {
           busy={false}
           autoFocus={!target}
           clearOnCode={false}
+          searchBox
           placeholder={filtering ? 'Type to narrow the list: a tag, lot, challan, order or colour' : 'Scan a tag, or type a code, order, PO, challan, customer or style'}
           onType={(t) => {
             setTyped(t)

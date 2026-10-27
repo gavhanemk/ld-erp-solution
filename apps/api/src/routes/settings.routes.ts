@@ -1006,7 +1006,7 @@ router.delete('/tds-sections/:id', requirePermission(SETTINGS, 'delete'), async 
  * see dates in the company's format and the right number of rows per page, so
  * this one is open to anyone with a valid token and carries nothing sensitive.
  */
-const DISPLAY_PREFERENCE_KEYS = ['rowsPerPage', 'dateFormat', 'qcInDailyProduction'] as const
+const DISPLAY_PREFERENCE_KEYS = ['rowsPerPage', 'dateFormat', 'qcInDailyProduction', 'issueByScanOnly'] as const
 
 router.get('/app', async (_req, res) => {
   const values = await getPreferences()

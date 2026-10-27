@@ -615,6 +615,8 @@ export default function SalesOrdersPage() {
               className="btn-primary"
               onClick={() => setDialog({ open: true, orderId: null, amend: false })}
               aria-label="New sales order"
+              data-hotkey="new"
+              aria-keyshortcuts="Alt+N"
             >
               <Plus size={15} /> <span className="hidden sm:inline">New order</span>
             </button>
@@ -681,6 +683,7 @@ export default function SalesOrdersPage() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 aria-label="Search sales orders"
+                data-hotkey="search"
               />
             </div>
             <div className="flex shrink-0 items-center gap-1">
@@ -900,14 +903,14 @@ export default function SalesOrdersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((o) => {
+                  {rows.map((o, i) => {
                     const s = salesOrderStatus(o)
                     const note = deliveryNote(o)
                     const expanded = open === o.id
                     const actions = rowActions(o)
                     return (
                       <Fragment key={o.id}>
-                        <tr>
+                        <tr data-row tabIndex={i === 0 ? 0 : -1}>
                           <td>
                             <button
                               className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
@@ -925,6 +928,7 @@ export default function SalesOrdersPage() {
                               className="text-primary font-mono text-xs font-semibold hover:underline"
                               onClick={() => setViewId(o.id)}
                               title={`Open ${o.soNumber}`}
+                              data-row-open
                             >
                               {o.soNumber}
                             </button>

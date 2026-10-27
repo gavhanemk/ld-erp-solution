@@ -139,11 +139,30 @@ issued or sent to a job worker for an open job-work order of that same
 customer, and cutting takes the panels' owner from the fabric actually issued,
 refusing fabric that is partly ours and partly a customer's.
 
-**Stickers on part rolls.** Whenever part of a roll goes — issued, moved,
-returned, released — its sticker is retired and both parts get new stickers:
-the part that went, and the rest, which waits on "Ready to print". A sticker
-therefore always says what its roll holds, and a retired one scanned again
-names its replacement and issues nothing.
+**One sticker for the life of a packet.** Each roll, box or packet gets one
+sticker when it comes in — a packet of 50 buttons is one sticker, by the
+item's "qty per sticker" (typed on the receipt as "10 packets of 50", and
+remembered on the item). When part of it is issued, returned or written off,
+it keeps the same sticker and only its balance goes down: 50, then 40, then
+35, each step on its history with the document it went on. Scanning it shows
+the live balance; "Print label" prints the same code with that balance. Only
+a part moved to another store gets a sticker of its own, because one sticker
+cannot be on two racks; the rest keeps its code. Part of a held roll released
+for use also gets its own, since the released part is usable and the rest
+still held.
+
+**First in, first out.** A package goes out only after the older ones of the
+same item, store and owner (ours or the customer's): received earlier, and
+packages off the same receipt count as the same age. Scanning a newer one
+while an older one still has stock is stopped, naming the older one and its
+rack. Only the store manager can let the newer one go first, with a reason
+(damaged, matching lot or shade, the customer's choice, cannot be reached);
+each time is on the FIFO Exceptions report. Held packages never count. Stock
+that goes out without a scan comes off the oldest packages by itself.
+
+**Issued by scan only.** Settings → Preferences, "Stickered stock is issued
+by scan only". When it is on, stock in stickered packages is issued by
+scanning them; only stock without a sticker can be typed on an issue.
 
 **Closing a job-work order.** The order's reconciliation counts only its own
 receipts and requisitions, and compares cutting with the BOM. Every metre of

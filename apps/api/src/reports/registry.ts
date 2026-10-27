@@ -22,6 +22,8 @@ import { itc04Sent } from './definitions/itc04-sent'
 import { itc04Received } from './definitions/itc04-received'
 import { customerMaterialStock } from './definitions/customer-material-stock'
 import { stockCountVariance } from './definitions/stock-count-variance'
+import { packetBalances } from './definitions/packet-balances'
+import { fifoExceptions } from './definitions/fifo-exceptions'
 
 /**
  * Every report the ERP knows about.
@@ -59,6 +61,8 @@ export const REPORTS: ReportDefinition[] = [
   itc04Received,
   customerMaterialStock,
   stockCountVariance,
+  packetBalances,
+  fifoExceptions,
   ...SALES_REPORTS,
 ]
 

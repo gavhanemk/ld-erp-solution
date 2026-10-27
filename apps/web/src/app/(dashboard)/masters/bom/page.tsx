@@ -180,6 +180,8 @@ export default function BomPage() {
               setEditing(null)
               setDialogOpen(true)
             }}
+            data-hotkey="new"
+            aria-keyshortcuts="Alt+N"
           >
             <Plus size={16} />
             New BOM
@@ -195,6 +197,8 @@ export default function BomPage() {
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by style name, code or version..."
             className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground flex-1 focus:outline-none"
+            aria-label="Search BOMs"
+            data-hotkey="search"
           />
         </div>
         <SmartSelect
@@ -253,10 +257,11 @@ export default function BomPage() {
       )}
 
       <div className="space-y-3">
-        {(boms ?? []).map((bom) => (
+        {(boms ?? []).map((bom, i) => (
           <BomRow
             key={bom.id}
             bom={bom}
+            first={i === 0}
             open={expanded === bom.id}
             busy={busy}
             onToggle={() => setExpanded(expanded === bom.id ? null : bom.id)}
@@ -328,9 +333,11 @@ interface RowProps {
   onApprove: () => void
   onCopy: () => void
   onRetire: () => void
+  /** The first line in the list: the one Tab lands on. */
+  first?: boolean
 }
 
-function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire }: RowProps) {
+function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire, first }: RowProps) {
   const status = STATUS[bom.status] ?? STATUS.DRAFT
   // Labour, overhead, cost and price reach only those who may approve masters;
   // the API leaves them out for everyone else, who see material alone.
@@ -396,12 +403,13 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
   }, [bom.lines])
 
   return (
-    <div className="glass-card overflow-hidden">
+    <div className="glass-card overflow-hidden" data-row tabIndex={first ? 0 : -1}>
       <div className="flex flex-wrap items-center gap-3 p-4">
         <button
           onClick={onToggle}
           className="btn-ghost p-1"
           aria-label={open ? 'Collapse' : 'Expand'}
+          data-row-open
         >
           {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
         </button>

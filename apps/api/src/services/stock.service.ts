@@ -1,7 +1,7 @@
 import type { Prisma, StockOwnership, TransactionType } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 // package.service imports this file too; each only calls the other from inside a function.
-import { splitOff } from './package.service'
+import { takeFromPackage } from './package.service'
 
 /**
  * The only place in the system that is allowed to write a stock movement.
@@ -399,7 +399,7 @@ export async function recordMovement(
  * stickers saying they are still full. Straight after it, the stickers of that
  * item in that store are taken down to what is left, the oldest first, as a
  * store issues: a whole roll's sticker is emptied, and a roll only partly gone
- * has its sticker retired and the rest put on a new one, to print.
+ * keeps its sticker with what is left in it.
  * Rejected stock held in the same store still has its rolls, so it counts.
  */
 async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
@@ -425,20 +425,13 @@ async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
   for (const p of packages) {
     if (over <= 0.0005) break
     const take = round3(Math.min(Number(p.qty), over))
-    const went = `stock went out without a scan${m.notes ? ` (${m.notes})` : ''}`
-    const { part } = await splitOff(tx, p, take, { notes: went, userId: null, referenceType: m.referenceType, referenceId: m.referenceId })
-    await tx.stockPackage.update({ where: { id: part.id }, data: { qty: 0, status: 'EMPTY' } })
-    await tx.stockPackageMove.create({
-      data: {
-        packageId: part.id,
-        type: 'ISSUED',
-        qty: -take,
-        balanceAfter: 0,
-        warehouseId: m.warehouseId,
-        referenceType: m.referenceType,
-        referenceId: m.referenceId,
-        notes: `${went[0].toUpperCase()}${went.slice(1)}: the sticker is taken down with it.`,
-      },
+    const went = `Stock went out without a scan${m.notes ? ` (${m.notes})` : ''}`
+    const whole = take >= Number(p.qty) - 0.0005
+    const left = round3(Number(p.qty) - take)
+    await takeFromPackage(tx, p, take, {
+      referenceType: m.referenceType,
+      referenceId: m.referenceId,
+      notes: whole ? `${went}: the sticker is taken down with it.` : `${went}: ${left} left on this sticker.`,
     })
     over = round3(over - take)
   }

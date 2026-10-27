@@ -82,7 +82,7 @@ export function PieceList({ pieces, code, onCode }: { pieces: SheetPiece[]; code
       <div className="flex flex-wrap items-center gap-2">
         <div className="border-field-edge bg-field flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:max-w-xs">
           <Search size={14} className="text-muted-foreground shrink-0" />
-          <input className="text-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none" placeholder="Tag, size or bundle…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Find a piece" />
+          <input className="text-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none" placeholder="Tag, size or bundle…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Find a piece" data-hotkey="search" />
         </div>
         <span className="text-muted-foreground text-xs">
           {rows.length} of {pieces.length} pieces · pick one to see its history
@@ -102,10 +102,10 @@ export function PieceList({ pieces, code, onCode }: { pieces: SheetPiece[]; code
             </tr>
           </thead>
           <tbody>
-            {rows.map((p) => {
+            {rows.map((p, i) => {
               const st = badge(GARMENT_STATUS, p.status)
               return (
-                <tr key={p.id} className="cursor-pointer" onClick={() => onCode(p.code)}>
+                <tr key={p.id} className="cursor-pointer" onClick={() => onCode(p.code)} data-row tabIndex={i === 0 ? 0 : -1}>
                   <td className="text-primary font-mono text-xs font-semibold">{p.code}</td>
                   <td className="font-mono text-xs">{p.bundle?.code ?? '—'}</td>
                   <td className="font-semibold">{p.size?.code ?? '—'}</td>

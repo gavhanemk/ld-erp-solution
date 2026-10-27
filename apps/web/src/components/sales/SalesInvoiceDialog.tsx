@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
@@ -24,6 +24,7 @@ import { api, ApiError } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { priceCharge } from './chargeShare'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -213,6 +214,9 @@ export function SalesInvoiceDialog({
       document.body.style.overflow = previous
     }
   }, [open])
+  // Tab goes round inside the form, and focus goes back to the button that opened it.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef, open)
 
   useEffect(() => {
     if (!dcId) return
@@ -407,7 +411,7 @@ export function SalesInvoiceDialog({
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
-      <div className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="inv-title">
+      <div ref={dialogRef} className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="inv-title">
         <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
           <div className="flex min-w-0 items-center gap-3">
             <div className="bg-primary/10 border-primary/20 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
@@ -546,9 +550,9 @@ export function SalesInvoiceDialog({
                         <th style={{ textAlign: 'right' }}>Amount</th>
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody data-grid>
                       {totals.lines.map((l) => (
-                        <tr key={`${l.soLineId}|${l.grade ?? 'A'}`}>
+                        <tr key={`${l.soLineId}|${l.grade ?? 'A'}`} data-grid-row>
                           <td>
                             <div className="text-foreground text-sm font-medium">
                               {l.grade === 'B' && <span className="badge-warning mr-1.5">B-grade</span>}
@@ -749,7 +753,14 @@ export function SalesInvoiceDialog({
           <button type="button" onClick={onClose} className="btn-secondary hidden sm:inline-flex" disabled={saving}>
             Cancel
           </button>
-          <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving || loading || !!blocker || !prep}>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => void save()}
+            disabled={saving || loading || !!blocker || !prep}
+            data-hotkey="save"
+            aria-keyshortcuts="Control+S Meta+S"
+          >
             {saving ? <Loader2 size={15} className="animate-spin" /> : <ReceiptText size={15} />} Save invoice
           </button>
         </div>

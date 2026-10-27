@@ -128,6 +128,8 @@ export default function PeopleSettingsPage() {
             className="btn-primary text-xs"
             onClick={() => setUserDialog({ open: true, user: null })}
             disabled={roles.length === 0}
+            data-hotkey="new"
+            aria-keyshortcuts="Alt+N"
           >
             <Plus size={14} /> Add person
           </button>
@@ -145,6 +147,7 @@ export default function PeopleSettingsPage() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 aria-label="Search people"
+                data-hotkey="search"
               />
             </div>
 
@@ -165,12 +168,12 @@ export default function PeopleSettingsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {visible.map((u) => {
+                    {visible.map((u, i) => {
                       const status = STATUS_STYLE[u.status]
                       const isSelf = u.id === selfId
 
                       return (
-                        <tr key={u.id}>
+                        <tr key={u.id} data-row tabIndex={i === 0 ? 0 : -1}>
                           <td>
                             <div className="font-medium text-foreground">
                               {u.name}
@@ -195,6 +198,7 @@ export default function PeopleSettingsPage() {
                               <button
                                 className="btn-ghost p-1.5"
                                 onClick={() => setUserDialog({ open: true, user: u })}
+                                data-row-open
                                 title="Edit"
                                 aria-label={`Edit ${u.name}`}
                               >

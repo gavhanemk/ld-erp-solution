@@ -1,9 +1,10 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useId, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, X, type LucideIcon } from 'lucide-react'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 
 /**
  * The frame every data-entry form sits in, the one the purchase order drew.
@@ -17,6 +18,10 @@ import { useEscape } from '@/lib/useEscape'
  * A title bar with the form's icon and its main button, a body that is the
  * only thing to scroll, and a footer that stays in reach however long the
  * form. The card is as tall as what it holds, up to the screen.
+ *
+ * From the keyboard: the first box has focus when it opens, Tab goes round
+ * inside it and not out to the page behind, Ctrl+S (⌘S) presses the main
+ * button in the footer, and focus goes back where it was when it closes.
  */
 export function FormFrame({
   icon: Icon,
@@ -54,6 +59,10 @@ export function FormFrame({
   useEscape(() => {
     if (!busy) onClose()
   })
+  const cardRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(cardRef)
+  // Its own id: a form opened from another form has a title of its own.
+  const titleId = useId()
   // The page behind must not scroll while the form is up.
   useEffect(() => {
     const previous = document.body.style.overflow
@@ -66,10 +75,11 @@ export function FormFrame({
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       <div
+        ref={cardRef}
         className={`glass-card po-form flex max-h-full w-full ${width} flex-col self-center overflow-hidden`}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="form-frame-title"
+        aria-labelledby={titleId}
       >
         <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
           <div className="flex min-w-0 items-center gap-3">
@@ -78,7 +88,7 @@ export function FormFrame({
             </div>
             <div className="min-w-0">
               <h2
-                id="form-frame-title"
+                id={titleId}
                 className="text-foreground truncate text-xl font-semibold tracking-tight"
               >
                 {title}
@@ -117,7 +127,10 @@ export function FormFrame({
             <p className="text-muted-foreground mr-auto min-w-0 text-xs">{footerNote}</p>
           )}
           {footer}
-          {primary}
+          {/* What Ctrl+S presses: this button, not a copy of it. */}
+          <span data-hotkey="save" className="contents">
+            {primary}
+          </span>
         </div>
       </div>
     </div>,

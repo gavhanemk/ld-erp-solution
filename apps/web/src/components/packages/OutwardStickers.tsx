@@ -5,6 +5,7 @@ import { ArrowRight, Loader2, Printer, Tags } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { StepInput } from '@/components/ui/StepInput'
+import { FifoOverride, isFifoStop } from './FifoOverride'
 import { openPrintTab, packCount, printOutward, qtyText, type OutwardRef } from './packageTypes'
 
 interface Spot {
@@ -34,8 +35,10 @@ const r3 = (n: number) => Math.round(n * 1000) / 1000
  * Each item that left gets one label to stick on it — the document number as
  * its QR, where it is going, how much. Under it, the rolls or boxes it came
  * off when it went out without a scan: the oldest first, worked out here. A
- * whole one used up needs nothing; a part-used one gets a fresh sticker for
- * what is left. "Not these? Change" is only for when that guess is wrong.
+ * whole one used up needs nothing; a part-used one keeps its sticker with
+ * what is left on it. Stock that only moved takes its part along on a new
+ * sticker. "Not these? Change" is only for when that guess is wrong, and
+ * picking a newer one over an older one (FIFO) needs the store manager.
  */
 export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRef; onClose: () => void; onDone: (message: string) => void }) {
   const [plan, setPlan] = useState<Plan | null>(null)
@@ -43,6 +46,10 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
   const [open, setOpen] = useState<Record<string, boolean>>({})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // The oldest-first guess, to go back to after FIFO stops a change to it.
+  const [proposed, setProposed] = useState<Record<string, string>>({})
+  // FIFO stopped the save: the server's words, and the same save again with the store manager's reason.
+  const [fifo, setFifo] = useState<{ message: string; retry: (reason: string) => void } | null>(null)
 
   useEffect(() => {
     let live = true
@@ -52,7 +59,9 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
         if (!live) return
         if (!res.data.lines.length) return onClose()
         setPlan(res.data)
-        setTakes(Object.fromEntries(res.data.spots.flatMap((s) => s.packages.map((p) => [p.id, p.take > 0 ? String(p.take) : '']))))
+        const guess = Object.fromEntries(res.data.spots.flatMap((s) => s.packages.map((p) => [p.id, p.take > 0 ? String(p.take) : ''])))
+        setTakes(guess)
+        setProposed(guess)
       })
       // The document is saved either way; no labels is not worth an error over it.
       .catch(() => live && onClose())
@@ -75,9 +84,9 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
       return null
     })
     .find(Boolean)
-  // A part-used package gets a fresh sticker for what is left in it; when the
-  // stock only moved, the part that went is a new package with its own too.
-  const fresh = chosen.reduce((n, { p, qty }) => n + (qty < p.qty - 1e-9 ? (plan?.moves ? 2 : 1) : 0), 0)
+  // A part-used package keeps its sticker; when the stock only moved, the
+  // part that went is a new package with a sticker of its own.
+  const fresh = chosen.reduce((n, { p, qty }) => n + (qty < p.qty - 1e-9 && plan?.moves ? 1 : 0), 0)
   const count = (plan?.lines.length ?? 0) + fresh
 
   /*
@@ -85,24 +94,34 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
    * already gone, so their stickers come down with it now, not on some later
    * issue. Closing the window any way does the same.
    */
-  const skip = async () => {
+  const skip = async (fifoReason?: string) => {
     if (!plan || saving) return
     if (!chosen.length || problem) return onClose()
     setSaving(true)
+    setError(null)
+    setFifo(null)
     try {
-      await api.post('/packages/outward/apply', { type: source.type, id: source.id, q: source.q ?? null, takes: chosen.map(({ p, qty }) => ({ packageId: p.id, qty })) })
+      await api.post('/packages/outward/apply', {
+        type: source.type,
+        id: source.id,
+        q: source.q ?? null,
+        takes: chosen.map(({ p, qty }) => ({ packageId: p.id, qty })),
+        ...(fifoReason ? { fifoReason } : {}),
+      })
       onDone(`No labels printed. The stickers on ${plan.spots.map((s) => s.item).join(', ')} now match the stock.`)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not update the stickers.')
+      if (err instanceof ApiError && isFifoStop(err.code)) setFifo({ message: err.message, retry: (r) => void skip(r) })
+      else setError(err instanceof ApiError ? err.message : 'Could not update the stickers.')
     } finally {
       setSaving(false)
     }
   }
 
-  const print = async () => {
+  const print = async (fifoReason?: string) => {
     if (!plan) return
     setSaving(true)
     setError(null)
+    setFifo(null)
     // Opened on the click itself: a tab opened after the save is blocked as a pop-up.
     const tab = openPrintTab()
     try {
@@ -113,6 +132,7 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
           id: source.id,
           q: source.q ?? null,
           takes: chosen.map(({ p, qty }) => ({ packageId: p.id, qty })),
+          ...(fifoReason ? { fifoReason } : {}),
         })
         reprint = res.data.reprint
       }
@@ -120,7 +140,8 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
       onDone(`Stickers for ${plan.number} have opened in a new tab: press Print there.`)
     } catch (err) {
       tab?.close()
-      setError(err instanceof ApiError ? err.message : 'Could not print. Is the API running?')
+      if (err instanceof ApiError && isFifoStop(err.code)) setFifo({ message: err.message, retry: (r) => void print(r) })
+      else setError(err instanceof ApiError ? err.message : 'Could not print. Is the API running?')
     } finally {
       setSaving(false)
     }
@@ -150,9 +171,9 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
     }
     return {
       text: plan.moves
-        ? `${qtyText(take)} ${s.unit} of the ${what} goes on a new sticker; ${qtyText(left)} ${s.unit} stays.`
-        : `${qtyText(take)} ${s.unit} taken off the ${what}; ${qtyText(left)} ${s.unit} left on it.`,
-      fresh: true,
+        ? `${qtyText(take)} ${s.unit} of the ${what} goes on a new sticker; ${qtyText(left)} ${s.unit} stays on this one.`
+        : `${qtyText(take)} ${s.unit} taken off the ${what}; ${qtyText(left)} ${s.unit} left on the same sticker.`,
+      fresh: plan.moves,
       code: p.code,
     }
   }
@@ -190,7 +211,7 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
               fates.map((f) => (
                 <li key={f.code} className="flex flex-wrap items-baseline gap-x-2">
                   <span className="text-foreground">{f.text}</span>
-                  {f.fresh && <span className="badge-info">+1 fresh sticker</span>}
+                  {f.fresh && <span className="badge-info">+1 new sticker</span>}
                   <span className="text-muted-foreground font-mono text-[11px]">{f.code}</span>
                 </li>
               ))
@@ -238,7 +259,7 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
       error={error}
       width="max-w-2xl"
       primary={
-        <button type="button" className="btn-primary" onClick={() => void print()} disabled={saving || Boolean(problem)}>
+        <button type="button" className="btn-primary" onClick={() => void print()} disabled={saving || Boolean(problem) || Boolean(fifo)}>
           {saving ? <Loader2 size={15} className="animate-spin" /> : <Printer size={15} />}
           Print {count} {count === 1 ? 'label' : 'labels'}
         </button>
@@ -252,11 +273,26 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
         problem ? (
           <span className="warn-text">{problem}</span>
         ) : (
-          `${count} to print: one for each item that went${fresh ? `, and ${fresh} fresh for what is left on part-used ${fresh === 1 ? 'roll or box' : 'rolls or boxes'}` : ''}.`
+          `${count} to print: one for each item that went${fresh ? `, and ${fresh} new for the ${fresh === 1 ? 'part' : 'parts'} of a roll or box that moved` : ''}.`
         )
       }
     >
       <div className="space-y-2.5">
+        {fifo && (
+          <div className="space-y-2">
+            <FifoOverride message={fifo.message} busy={saving} onAllow={fifo.retry} />
+            <button
+              type="button"
+              className="text-primary text-xs font-medium hover:underline"
+              onClick={() => {
+                setTakes(proposed)
+                setFifo(null)
+              }}
+            >
+              Use the oldest first instead
+            </button>
+          </div>
+        )}
         {cards.map(({ l, spot }) => (
           <div key={l.key} className="border-border bg-card rounded-xl border p-3">
             <div className="flex flex-wrap items-baseline justify-between gap-x-3">

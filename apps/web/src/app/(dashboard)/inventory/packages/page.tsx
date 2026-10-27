@@ -229,6 +229,7 @@ function PackagesScreen() {
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
                   aria-label="Search packages"
+                  data-hotkey="search"
                 />
               </div>
               <SmartSelect className="form-input h-9 w-40" value={status} onChange={(e) => setStatus(e.target.value)}>
@@ -278,6 +279,7 @@ function PackagesScreen() {
                   value={lq}
                   onChange={(e) => setLq(e.target.value)}
                   aria-label="Search stock to label"
+                  data-hotkey="search"
                 />
                 {lq && (
                   <button onClick={() => setLq('')} aria-label="Clear the search" className="text-muted-foreground hover:text-foreground">
@@ -574,8 +576,8 @@ function ToLabelView({
                 </tr>
               </thead>
               <tbody>
-                {grnRows.map((l) => (
-                  <tr key={l.grnLineId}>
+                {grnRows.map((l, i) => (
+                  <tr key={l.grnLineId} data-row tabIndex={i === 0 ? 0 : -1}>
                     <td className="whitespace-nowrap">
                       <div className="font-mono text-sm font-semibold text-foreground">{l.grnNumber}</div>
                       <div className="text-xs text-muted-foreground">
@@ -597,6 +599,7 @@ function ToLabelView({
                     <td className="text-right">
                       {creator && (
                         <button
+                          data-row-open
                           className="btn-primary h-9"
                           onClick={() =>
                             onLabel({
@@ -652,8 +655,8 @@ function ToLabelView({
               </tr>
             </thead>
             <tbody>
-              {rackRows.map((l) => (
-                <tr key={`${l.itemId}-${l.warehouseId}-${l.ownerCustomerId ?? ''}`}>
+              {rackRows.map((l, i) => (
+                <tr key={`${l.itemId}-${l.warehouseId}-${l.ownerCustomerId ?? ''}`} data-row tabIndex={i === 0 ? 0 : -1}>
                   <td>
                     <div className="font-medium text-foreground">{l.item}</div>
                     <div className="font-mono text-xs text-muted-foreground">{l.itemCode}</div>
@@ -667,6 +670,7 @@ function ToLabelView({
                   <td className="text-right">
                     {creator && (
                       <button
+                        data-row-open
                         className="btn-secondary h-9"
                         onClick={() =>
                           onLabel({

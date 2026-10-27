@@ -279,6 +279,7 @@ export function ReservationsView() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search reservations"
+              data-hotkey="search"
             />
             {search && (
               <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
@@ -377,10 +378,10 @@ export function ReservationsView() {
                   </tr>
                 </thead>
                 <tbody>
-                  {pageRows.map((r) => {
+                  {pageRows.map((r, i) => {
                     const late = r.status === 'ACTIVE' && r.neededBy && dayKey(r.neededBy) < today
                     return (
-                      <tr key={r.id} className={r.status === 'ACTIVE' ? undefined : 'opacity-70'}>
+                      <tr key={r.id} className={r.status === 'ACTIVE' ? undefined : 'opacity-70'} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td className="min-w-[200px]">
                           <div className="text-sm font-medium text-foreground">{r.itemName}</div>
                           <div className="font-mono text-[11px] text-muted-foreground">{r.itemCode}</div>

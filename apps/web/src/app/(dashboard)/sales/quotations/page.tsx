@@ -184,7 +184,7 @@ export default function QuotationsPage() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           {can('sales', 'create') && (
-            <button className="btn-primary" onClick={() => setForm({ open: true, id: null })}>
+            <button className="btn-primary" onClick={() => setForm({ open: true, id: null })} data-hotkey="new" aria-keyshortcuts="Alt+N">
               <Plus size={15} /> <span className="hidden sm:inline">New quotation</span>
             </button>
           )}
@@ -217,7 +217,7 @@ export default function QuotationsPage() {
         <div className="border-border flex flex-wrap items-center gap-2 border-b px-3 py-2">
           <div className="border-field-edge bg-field flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:max-w-[260px]">
             <Search size={14} className="text-muted-foreground shrink-0" />
-            <input className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none" placeholder="Quotation, customer, style..." value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search quotations" />
+            <input className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none" placeholder="Quotation, customer, style..." value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search quotations" data-hotkey="search" />
           </div>
           <SmartSelect className="form-input h-8 w-36 py-0 text-xs" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by status">
             <option value="">All quotations</option>
@@ -258,12 +258,12 @@ export default function QuotationsPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((q) => {
+                {rows.map((q, i) => {
                   const s = look(q)
                   return (
-                    <tr key={q.id}>
+                    <tr key={q.id} data-row tabIndex={i === 0 ? 0 : -1}>
                       <td className="whitespace-nowrap">
-                        <a href={`/print/quotation/${q.id}`} target="_blank" rel="noreferrer" className="text-primary font-mono text-xs font-semibold hover:underline">
+                        <a href={`/print/quotation/${q.id}`} target="_blank" rel="noreferrer" data-row-open className="text-primary font-mono text-xs font-semibold hover:underline">
                           {q.quoteNumber}
                         </a>
                         <div className="text-muted-foreground flex items-center gap-1 text-[11px]">

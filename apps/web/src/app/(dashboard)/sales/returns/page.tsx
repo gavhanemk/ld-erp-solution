@@ -129,7 +129,7 @@ export default function ReturnsPage() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           {can('sales', 'create') && (
-            <button className="btn-primary" onClick={() => setForm({ open: true, invoiceId: null })}>
+            <button className="btn-primary" onClick={() => setForm({ open: true, invoiceId: null })} data-hotkey="new" aria-keyshortcuts="Alt+N">
               <Plus size={15} /> <span className="hidden sm:inline">New credit note</span>
             </button>
           )}
@@ -157,7 +157,7 @@ export default function ReturnsPage() {
         <div className="border-border flex flex-wrap items-center gap-2 border-b px-3 py-2">
           <div className="border-field-edge bg-field flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:max-w-[260px]">
             <Search size={14} className="text-muted-foreground shrink-0" />
-            <input className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none" placeholder="Credit note, customer, invoice..." value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search" />
+            <input className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none" placeholder="Credit note, customer, invoice..." value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search" data-hotkey="search" />
           </div>
           <SmartSelect className="form-input h-8 w-40 py-0 text-xs" value={type} onChange={(e) => setType(e.target.value)} aria-label="Filter by kind">
             <option value="">Returns and amounts</option>
@@ -197,10 +197,10 @@ export default function ReturnsPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((n) => (
-                  <tr key={n.id} className={n.status === 'CANCELLED' ? 'opacity-70' : undefined}>
+                {rows.map((n, i) => (
+                  <tr key={n.id} className={n.status === 'CANCELLED' ? 'opacity-70' : undefined} data-row tabIndex={i === 0 ? 0 : -1}>
                     <td className="whitespace-nowrap">
-                      <a href={`/print/credit-note/${n.id}`} target="_blank" rel="noreferrer" className="text-primary font-mono text-xs font-semibold hover:underline">
+                      <a href={`/print/credit-note/${n.id}`} target="_blank" rel="noreferrer" data-row-open className="text-primary font-mono text-xs font-semibold hover:underline">
                         {n.noteNumber}
                       </a>
                       <div className="text-muted-foreground flex items-center gap-1 text-[11px]">

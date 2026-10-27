@@ -34,8 +34,11 @@ import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase
 import { IconField, Readout } from '@/components/purchase/FormBits'
 import { shortCloseNoun } from '@/components/purchase/shortClose'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { StepInput } from '@/components/ui/StepInput'
 import { parseSizes, splitEvenly } from '@/components/packages/packageTypes'
+import { PackageSizesDialog } from '@/components/purchase/PackageSizesDialog'
 import type { InwardRef } from '@/components/packages/InwardStickers'
 
 /**
@@ -112,6 +115,8 @@ interface Alloc {
   packType?: string
   exact?: boolean
   sizes?: string
+  /** A note on each of those packages, in the same order: "short width". */
+  notes?: string[]
 }
 
 /** What one package is, as the receipt asks it. */
@@ -167,6 +172,8 @@ function PackedAs({
   disabled: boolean
   onChange: (patch: Partial<Alloc>) => void
 }) {
+  // The Package sizes window, open over the receipt.
+  const [sizing, setSizing] = useState(false)
   const pack = line.pack
   if (pack && !pack.tracked) {
     return <span className="text-muted-foreground text-xs">No stickers</span>
@@ -178,15 +185,17 @@ function PackedAs({
   const type = alloc.packType || pack?.packType || 'BUNDLE'
   const mismatch = alloc.exact && qtys.length > 0 && Math.abs(total - received) > 0.0005
   const count = <b className="text-foreground font-semibold">{packWord(type, qtys.length)}</b>
+  const noted = alloc.exact ? (alloc.notes ?? []).filter((n) => n.trim()).length : 0
 
   let hint: React.ReactNode = null
   if (alloc.exact) {
     hint = qtys.length ? (
       <>
         {count}, {qtyFmt(total)} of {qtyFmt(received)} {unit}
+        {noted ? ` · ${noted} with a note` : ''}
       </>
     ) : (
-      'Type each one, e.g. 100, 98.5, 101'
+      'Enter the size of each package'
     )
   } else if (qtys.length) {
     const last = qtys[qtys.length - 1]
@@ -204,14 +213,17 @@ function PackedAs({
       {/* Sizes typed one by one get the whole width, the kind of package under them. */}
       <div className={alloc.exact ? 'flex flex-col gap-1' : 'flex gap-1'}>
         {alloc.exact ? (
-          <input
-            className="form-input h-9 w-full min-w-0 text-sm"
-            value={alloc.sizes ?? ''}
-            onChange={(e) => onChange({ sizes: e.target.value })}
+          // The sizes, as entered in the Package sizes window: click to change them.
+          <button
+            type="button"
+            className="form-input h-9 w-full min-w-0 truncate text-left text-sm"
+            onClick={() => setSizing(true)}
             disabled={disabled}
-            placeholder="100, 98.5, 101"
+            title="Change the size of each package"
             aria-label={`Size of each package of ${line.item.name}`}
-          />
+          >
+            {qtys.length ? `${qtys.slice(0, 4).map(qtyFmt).join(', ')}${qtys.length > 4 ? ` +${qtys.length - 4} more` : ''}` : 'Enter sizes…'}
+          </button>
         ) : (
           <StepInput
             className="form-input h-9 w-14 shrink-0 text-right"
@@ -239,19 +251,44 @@ function PackedAs({
       <div className={`mt-1 text-[11px] ${mismatch ? 'text-red-400' : 'text-muted-foreground'}`}>
         {hint}
         {!disabled && (received > 0 || alloc.exact) && (
-          <button
-            type="button"
-            className="text-primary ml-1.5 hover:underline"
-            onClick={() =>
-              alloc.exact
-                ? onChange({ exact: false, packs: qtys.length ? String(qtys.length) : '' })
-                : onChange({ exact: true, sizes: qtys.join(', ') })
-            }
-          >
-            {alloc.exact ? 'All the same' : 'Sizes differ?'}
-          </button>
+          <>
+            <button type="button" className="text-primary ml-1.5 hover:underline" onClick={() => setSizing(true)}>
+              {alloc.exact ? 'Edit sizes' : 'Enter sizes'}
+            </button>
+            {alloc.exact && (
+              <button
+                type="button"
+                className="text-primary ml-1.5 hover:underline"
+                onClick={() => onChange({ exact: false, packs: qtys.length ? String(qtys.length) : '', notes: [] })}
+              >
+                All the same
+              </button>
+            )}
+          </>
         )}
       </div>
+      {sizing && (
+        <PackageSizesDialog
+          item={line.item.name}
+          unit={unit}
+          received={received}
+          packType={type}
+          packNouns={PACK_NOUNS}
+          perPack={pack?.perPack ?? null}
+          initial={qtys.map((q, i) => ({ qty: String(q), note: alloc.exact ? (alloc.notes?.[i] ?? '') : '' }))}
+          onClose={() => setSizing(false)}
+          onSave={(r) => {
+            onChange({
+              exact: true,
+              sizes: r.rows.map((x) => x.qty).join(', '),
+              notes: r.rows.map((x) => x.note),
+              packType: r.packType,
+              ...(r.received != null ? { received: String(r.received) } : {}),
+            })
+            setSizing(false)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -337,6 +374,7 @@ interface EditingGrn {
     batchNumber?: string | null
     packType?: string | null
     packQtys?: Array<string | number>
+    packNotes?: string[]
   }>
   po: {
     id: string
@@ -452,7 +490,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
         const first = i === 0
 
         return (
-          <tr key={alloc.key} className="divide-border/60 divide-x [&>td]:align-top">
+          <tr key={alloc.key} data-grid-row className="divide-border/60 divide-x [&>td]:align-top">
             {first && (
               <>
                 <td rowSpan={allocs.length} className="align-top">
@@ -512,11 +550,11 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
             )}
 
             <td>
-              <input
+              <StepInput
+                decimals
                 className="form-input h-9 text-right"
-                inputMode="decimal"
                 value={alloc.received}
-                onChange={(e) => setAlloc(line.id, alloc.key, { received: e.target.value })}
+                onValueChange={(v) => setAlloc(line.id, alloc.key, { received: v })}
                 disabled={done}
                 placeholder="Qty"
                 aria-label={`Quantity of ${line.item.name} received on this receipt${
@@ -560,8 +598,10 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                     className="border-border text-muted-foreground hover:text-foreground hover:bg-secondary inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40"
                     onClick={() => addAlloc(line.id)}
                     disabled={done}
-                    title={`Send some of ${line.item.name} to another store`}
+                    title={`Send some of ${line.item.name} to another store (Alt+A)`}
                     aria-label={`Add another store for ${line.item.name}`}
+                    aria-keyshortcuts="Alt+A"
+                    data-grid-add="row"
                   >
                     <Plus size={14} />
                   </button>
@@ -570,8 +610,10 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                     type="button"
                     className="border-border text-muted-foreground inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors hover:text-red-400"
                     onClick={() => removeAlloc(line.id, alloc.key)}
-                    title="Remove this store"
+                    title="Remove this store (Alt+Delete)"
                     aria-label={`Remove store row ${i + 1} for ${line.item.name}`}
+                    aria-keyshortcuts="Alt+Delete"
+                    data-grid-remove
                   >
                     <Minus size={14} />
                   </button>
@@ -717,11 +759,11 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1">
                 <label className={fieldLabel}>Received qty</label>
-                <input
+                <StepInput
+                  decimals
                   className="form-input h-9 w-full text-right"
-                  inputMode="decimal"
                   value={alloc.received}
-                  onChange={(e) => setAlloc(line.id, alloc.key, { received: e.target.value })}
+                  onValueChange={(v) => setAlloc(line.id, alloc.key, { received: v })}
                   disabled={done}
                   placeholder="Qty"
                   aria-label={`Quantity of ${line.item.name} received on this receipt${
@@ -834,6 +876,22 @@ export function ReceiveGoodsDialog({
   const [attachmentCount, setAttachmentCount] = useState(0)
 
   const [saving, setSaving] = useState(false)
+
+  // Escape closes this window only (not one behind it, nor while saving); the
+  // page behind does not scroll; Tab goes round inside, and focus goes back
+  // to the button that opened it.
+  useEscape(() => {
+    if (!saving) onClose()
+  })
+  useEffect(() => {
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [])
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef)
   const [error, setError] = useState<string | null>(null)
 
   /*
@@ -1048,7 +1106,9 @@ export function ReceiveGoodsDialog({
           const packQtys = (l.packQtys ?? []).map((q) => round3(Number(q)))
           // Split evenly, it reads back as a count; otherwise as the sizes typed.
           const even = packQtysOf({ key: '', warehouseId: '', received, packs: String(packQtys.length) })
-          const exact = packQtys.length > 0 && even.join(',') !== packQtys.join(',')
+          const packNotes = (l.packNotes ?? []).slice(0, packQtys.length)
+          // Notes on the packages keep it as sizes, so they are seen and kept.
+          const exact = packQtys.length > 0 && (even.join(',') !== packQtys.join(',') || packNotes.some((n) => n.trim()))
           arr.push({
             key: makeKey(),
             warehouseId: l.warehouseId,
@@ -1058,6 +1118,7 @@ export function ReceiveGoodsDialog({
             packs: packQtys.length && !exact ? String(packQtys.length) : '',
             exact,
             sizes: exact ? packQtys.join(', ') : '',
+            notes: exact ? packNotes : [],
           })
         }
         // A line this receipt never touched still gets a row — empty, same
@@ -1314,7 +1375,7 @@ export function ReceiveGoodsDialog({
       return setError(
         qtys.length
           ? `${offPacks.line.item.name}: the packages add up to ${qtyFmt(qtys.reduce((sum, q) => sum + q, 0))}, but ${qtyFmt(num(offPacks.alloc.received))} arrived. Make them match.`
-          : `${offPacks.line.item.name}: type the size of each package, or choose "All the same".`
+          : `${offPacks.line.item.name}: enter the size of each package (Enter sizes), or choose "All the same".`
       )
     }
 
@@ -1352,12 +1413,16 @@ export function ReceiveGoodsDialog({
       lines: rows.map(({ line, alloc }) => {
         // How it came packed: a sticker for each package, made on saving.
         const packQtys = line.pack?.tracked === false ? [] : packQtysOf(alloc)
+        // A note on each package, lined up with its size.
+        const packNotes = alloc.exact ? packQtys.map((_, i) => (alloc.notes?.[i] ?? '').trim()) : []
         return {
           poLineId: line.id,
           warehouseId: alloc.warehouseId,
           receivedQty: num(alloc.received),
           batchNumber: text(alloc.lot ?? ''),
-          ...(packQtys.length ? { packType: alloc.packType || line.pack?.packType || 'BUNDLE', packQtys } : {}),
+          ...(packQtys.length
+            ? { packType: alloc.packType || line.pack?.packType || 'BUNDLE', packQtys, ...(packNotes.some(Boolean) ? { packNotes } : {}) }
+            : {}),
         }
       }),
     }
@@ -1481,6 +1546,7 @@ export function ReceiveGoodsDialog({
         page that kept showing over the top. Filling the height makes the
         margin the padding and nothing else. */}
       <div
+        ref={dialogRef}
         className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
@@ -1932,7 +1998,7 @@ export function ReceiveGoodsDialog({
                       </th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody data-grid>
                     {order.lines.map((line) => (
                       <ReceiptLineRows
                         key={line.id}
@@ -2021,6 +2087,8 @@ export function ReceiveGoodsDialog({
             className="btn-primary"
             onClick={() => void save()}
             disabled={saving || !order || loadingOrder}
+            data-hotkey="save"
+            aria-keyshortcuts="Control+S Meta+S"
           >
             {saving ? (
               <Loader2 size={15} className="animate-spin" />

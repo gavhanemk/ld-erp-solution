@@ -376,7 +376,7 @@ function StockScreen() {
             <PackagePlus size={15} /> Opening stock
           </button>
           {/* Stock that came in later without a purchase order, approved by a store manager. */}
-          <button className="btn-primary" onClick={() => setDialog('stockin')}>
+          <button className="btn-primary" onClick={() => setDialog('stockin')} data-hotkey="new" aria-keyshortcuts="Alt+N">
             <PackagePlus size={15} /> Stock in
           </button>
         </div>
@@ -462,6 +462,7 @@ function StockScreen() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 aria-label="Search stock"
+                data-hotkey="search"
               />
               {search && (
                 <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
@@ -535,11 +536,12 @@ function StockScreen() {
                 </tr>
               </thead>
               <tbody>
-                {shown.map((r) => (
-                  <tr key={`${r.itemId}-${r.warehouseId}-${r.ownerName ?? ''}`}>
+                {shown.map((r, i) => (
+                  <tr key={`${r.itemId}-${r.warehouseId}-${r.ownerName ?? ''}`} data-row tabIndex={i === 0 ? 0 : -1}>
                     <td className="whitespace-nowrap font-mono text-xs font-semibold text-teal-400">{r.itemCode}</td>
                     <td>
                       <Link
+                        data-row-open
                         href={`/inventory/stock/${r.itemId}`}
                         className="font-medium text-foreground hover:text-teal-400"
                       >

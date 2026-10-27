@@ -449,6 +449,7 @@ export default function SalesInvoicesPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search"
+              data-hotkey="search"
             />
           </div>
           {tab === 'invoices' && (
@@ -580,13 +581,14 @@ export default function SalesInvoicesPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {waiting.map((c) => (
-                      <tr key={c.id}>
+                    {waiting.map((c, i) => (
+                      <tr key={c.id} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td className="whitespace-nowrap">
                           <a
                             href={`/print/delivery-challan/${c.id}`}
                             target="_blank"
                             rel="noreferrer"
+                            data-row-open
                             className="text-primary font-mono text-xs font-semibold hover:underline"
                           >
                             {c.dcNumber}
@@ -684,16 +686,17 @@ export default function SalesInvoicesPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((inv) => {
+                  {rows.map((inv, i) => {
                     const s = invoiceStatus(inv.status)
                     const note = dueNote(inv)
                     return (
-                      <tr key={inv.id}>
+                      <tr key={inv.id} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td className="whitespace-nowrap">
                           <a
                             href={`/print/sales-invoice/${inv.id}`}
                             target="_blank"
                             rel="noreferrer"
+                            data-row-open
                             className="text-primary font-mono text-xs font-semibold hover:underline"
                             title={`Print ${inv.invoiceNumber}`}
                           >

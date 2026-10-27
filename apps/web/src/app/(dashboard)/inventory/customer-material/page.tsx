@@ -953,6 +953,7 @@ function CustomerMaterialScreen() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search customer material"
+            data-hotkey="search"
           />
           {search && (
             <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
@@ -1092,7 +1093,7 @@ function CustomerMaterialScreen() {
           >
             <Undo2 size={15} /> Return material
           </button>
-          <button className="btn-primary" onClick={() => setDialog(true)}>
+          <button className="btn-primary" onClick={() => setDialog(true)} data-hotkey="new" aria-keyshortcuts="Alt+N">
             <Plus size={15} /> Receive material
           </button>
         </div>
@@ -1213,10 +1214,10 @@ function CustomerMaterialScreen() {
                     </tr>
                   </thead>
                   <tbody>
-                    {pageRows.map((r) => {
+                    {pageRows.map((r, i) => {
                       const diff = r.receivedQty - r.challanQty
                       return (
-                        <tr key={r.id} className={r.cancelledAt ? 'opacity-60' : undefined}>
+                        <tr key={r.id} className={r.cancelledAt ? 'opacity-60' : undefined} data-row tabIndex={i === 0 ? 0 : -1}>
                           <td className="whitespace-nowrap">
                             <div className="font-mono text-xs font-semibold text-teal-400">{r.grnNumber}</div>
                             <div className="text-[10px] text-muted-foreground" title={r.receivedByName ? `Received by ${r.receivedByName}` : undefined}>
@@ -1401,10 +1402,11 @@ function CustomerMaterialScreen() {
                     </tr>
                   </thead>
                   <tbody>
-                    {returnPageRows.map((r) => (
-                      <tr key={r.id} className={r.cancelledAt ? 'opacity-60' : undefined}>
+                    {returnPageRows.map((r, i) => (
+                      <tr key={r.id} className={r.cancelledAt ? 'opacity-60' : undefined} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td className="whitespace-nowrap">
                           <a
+                            data-row-open
                             href={`/print/customer-return/${r.returnId}`}
                             target="_blank"
                             rel="noreferrer"
