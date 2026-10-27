@@ -239,8 +239,8 @@ const SIZES: Record<Layout, { label: string; page: string }> = {
  * remembered on this computer, since each desk has the printer it has.
  *
  * With `out=TYPE:id` it also prints the labels for stock going out on that
- * document — an issue, a challan, a return — ahead of the fresh stickers for
- * what was left in the rolls and boxes it came from.
+ * document — an issue, a challan, a return — ahead of the new stickers for
+ * parts of rolls and boxes that moved to another store.
  */
 function Stickers() {
   const params = useSearchParams()
@@ -317,7 +317,7 @@ function Stickers() {
   if (!data) return <p style={{ padding: 48, color: '#ddd' }}>Opening the stickers…</p>
   if (!data.packages.length && !outward.length) return <p style={{ padding: 48, color: '#fff' }}>No packages to print.</p>
 
-  // Labels for what went out first, then the fresh stickers for what is left.
+  // Labels for what went out first, then the new stickers for parts that moved.
   const all = [
     ...outward.flatMap((o) => Array.from({ length: copies }, (_, i) => ({ o, p: null, key: `out-${o.key}-${i}` }))),
     ...data.packages.flatMap((p) => Array.from({ length: copies }, (_, i) => ({ o: null, p, key: `${p.id}-${i}` }))),

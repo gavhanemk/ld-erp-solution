@@ -5669,6 +5669,10 @@ model StockPackageMove {
   referenceNumber  String?
   /// The other package of a split: the new one, or the one it was cut from.
   relatedPackageId String?
+  /// FIFO: an older package of the same item, store and owner that still had
+  /// stock when this one went first, and why the store manager allowed it.
+  fifoSkippedId    String?
+  fifoReason       String?
   notes            String?
   createdById      String?
   createdBy        User?           @relation("PackageMovesBy", fields: [createdById], references: [id])

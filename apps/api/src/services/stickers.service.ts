@@ -145,6 +145,20 @@ export async function labelGroup(
   return created
 }
 
+/**
+ * Keeps how an item came packed — 10 packets of 50, give or take a smaller
+ * last one — as its own qty per sticker and pack type, where it has none
+ * yet. What the item already has is never changed: that is set on purpose.
+ */
+export async function learnPackSize(tx: Prisma.TransactionClient, itemId: string, qtys: number[], packType: PackType) {
+  if (qtys.length < 2) return
+  const first = qtys[0]
+  const same = qtys.slice(0, -1).every((q) => q === first) && qtys[qtys.length - 1] <= first
+  if (!same || !(first > 0)) return
+  await tx.item.updateMany({ where: { id: itemId, packQty: null }, data: { packQty: first } })
+  await tx.item.updateMany({ where: { id: itemId, packType: null }, data: { packType } })
+}
+
 /** The number printed on a sticker for the document its stock came in on. */
 export async function sourceRefOf(type: InwardSource, id: string): Promise<string | null> {
   switch (type) {
@@ -308,6 +322,8 @@ export async function planStickers(data: InwardQuery) {
       packType: (packs && c.packType) || d.packType,
       perPack: d.perPack,
       remembered: item.packType != null || item.packQty != null,
+      /** Packed as typed on the receipt, for an item with no qty per sticker yet: kept on the item after (see autoStickers). */
+      learnPack: Boolean(packs) && !(item.packQty != null && Number(item.packQty) > 0),
       /** What the document brought in, before any stickers: rechecked under the lock. */
       came: c.qty,
       // What one unit holds, for the sentence: "1 box on each (144 pcs)".
@@ -366,6 +382,10 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
               userId,
             )),
           )
+          // "10 packets of 50" typed on the receipt, for an item with no qty
+          // per sticker yet: the item keeps it, so the next receipt of it is
+          // stickered a packet each by itself.
+          if (t.learnPack) await learnPackSize(tx, t.itemId, t.qtys, t.packType)
         }
         return all
       },
@@ -609,6 +629,8 @@ export async function restickStickers(
     const others = await tx.stockPackage.count({ where: { grnLineId: first.grnLineId, status: { not: 'VOID' }, id: { notIn: created.map((c) => c.id) } } })
     if (line && !others && Math.abs(Number(line.acceptedQty) - sum) <= 0.0005) {
       await tx.gRNLine.update({ where: { id: first.grnLineId }, data: { packQtys: wanted, packType: packType ?? first.packType } })
+      // And the item keeps it, where it has no qty per sticker yet.
+      await learnPackSize(tx, first.itemId, wanted, packType ?? first.packType)
     }
   }
   return { created, before: list.map((p) => p.code), unit }

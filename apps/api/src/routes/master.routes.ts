@@ -699,6 +699,7 @@ router.post('/items/import', requirePermission(MODULE, 'create'), async (req: Au
     existingItems: new Set(plans.filter((p) => p.plan.item === 'existing' && !p.plan.skipped).map((p) => p.itemKey)).size,
     skipped: plans.filter((p) => p.plan.skipped).length,
     stockLines: plans.filter((p) => p.stock).length,
+    packsSet: plans.filter((p) => p.packUpdate).length,
     problems: plans.filter((p) => p.plan.problems.length > 0).length,
   }
 
@@ -712,14 +713,14 @@ router.post('/items/import', requirePermission(MODULE, 'create'), async (req: Au
     action: 'CREATE',
     entityType: 'ItemImport',
     entityId: done.reference,
-    after: { fileName, created: done.created, stockLines: done.stockLines },
+    after: { fileName, created: done.created, stockLines: done.stockLines, packsSet: done.packsSet },
   })
   res.status(201).json({
     success: true,
     message: `Imported ${done.created.length} new ${done.created.length === 1 ? 'item' : 'items'}${
       done.stockLines ? ` and ${done.stockLines} ${done.stockLines === 1 ? 'line' : 'lines'} of opening stock` : ''
-    }.`,
-    data: { summary, created: done.created, stockLines: done.stockLines },
+    }${done.packsSet ? `. How ${done.packsSet} ${done.packsSet === 1 ? 'item comes' : 'items come'} packed is set` : ''}.`,
+    data: { summary, created: done.created, stockLines: done.stockLines, packsSet: done.packsSet },
   })
 })
 

@@ -6,6 +6,7 @@ import { api, ApiError } from '@/lib/api'
 import { newRequestId } from '@/lib/utils'
 import { StepInput } from '@/components/ui/StepInput'
 import { StickerScanner } from './StickerSearch'
+import { FifoOverride, isFifoStop } from './FifoOverride'
 import { STATUS, packCount, printLabels, qtyText, type PackageDetail } from './packageTypes'
 
 type Waiting = PackageDetail['requisitions'][number]
@@ -15,8 +16,9 @@ interface Issued {
   code: string
   item: string
   qty: number
+  /** What is left on the same sticker: nought when the whole of it went. */
   left: number
-  /** Part of the roll went: the new sticker for what is left on it, the scanned one now retired. */
+  /** Only for an issue made before part of a roll kept its sticker: the new sticker for what was left. */
   newSticker: { id: string; code: string } | null
   unit: string
   /** "roll", "box": what it was. */
@@ -28,8 +30,10 @@ interface Issued {
 /**
  * Issuing an approved requisition by scanning its stickers: scan one, say how
  * much of it goes, press Issue — the store's stock comes down there and then.
- * Scan the next one straight after. A roll only partly issued has its sticker
- * retired, and what is left of it gets a new one, printed from here.
+ * Scan the next one straight after. A packet only partly issued keeps its
+ * sticker, and what is left stays on it: 50, then 40, then 35. An older
+ * packet of the same item still on the rack goes first (FIFO), unless the
+ * store manager lets this one go, with a reason.
  */
 export function ScanIssue({
   mrId,
@@ -49,6 +53,8 @@ export function ScanIssue({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [issued, setIssued] = useState<Issued[]>([])
+  // FIFO stopped this one: the server's words, naming the older package.
+  const [fifo, setFifo] = useState<string | null>(null)
   // Bumped after each issue, so the scan box is fresh and focused for the next sticker.
   const [round, setRound] = useState(0)
   // Set the moment Issue is pressed, before any state settles: a second Enter
@@ -59,6 +65,7 @@ export function ScanIssue({
 
   const read = async (code: string) => {
     setError(null)
+    setFifo(null)
     setBusy(true)
     try {
       const res = await api.get<{ data: PackageDetail }>(`/packages/scan/${encodeURIComponent(code)}`)
@@ -67,7 +74,7 @@ export function ScanIssue({
       if (p.status === 'SPLIT') {
         setError(
           p.replacedBy?.length
-            ? `${p.code} is retired: part of its roll already went. What is left of it is now ${p.replacedBy.map((r) => `${r.code} (${qtyText(r.qty)} ${p.unit})`).join(', ')} — scan that sticker instead.`
+            ? `${p.code} is retired. What is left of its roll is now ${p.replacedBy.map((r) => `${r.code} (${qtyText(r.qty)} ${p.unit})`).join(', ')} — scan that sticker instead.`
             : `${p.code} is retired, and nothing of its roll is left in stock.`,
         )
       } else if (p.status !== 'IN_STOCK') {
@@ -97,7 +104,7 @@ export function ScanIssue({
   const n = Number(qty) || 0
   const problem = !pkg || !line ? null : !(n > 0) ? 'Enter how much goes.' : n > pkg.qty + 1e-9 ? `${pkg.code} has only ${qtyText(pkg.qty)} ${pkg.unit} on it.` : n > line.owed + 1e-9 ? `${mrNumber} needs only ${qtyText(line.owed)} ${pkg.unit} more.` : null
 
-  const issue = async () => {
+  const issue = async (fifoReason?: string) => {
     if (!pkg || !line || problem || sending.current) return
     sending.current = true
     setBusy(true)
@@ -108,7 +115,9 @@ export function ScanIssue({
         lineId: line.lineId,
         qty: n,
         requestId: requestId.current,
+        ...(fifoReason ? { fifoReason } : {}),
       })
+      setFifo(null)
       const fresh = res.data.newSticker
       setIssued((list) => [
         {
@@ -116,7 +125,7 @@ export function ScanIssue({
           code: pkg.code,
           item: pkg.item.name,
           qty: n,
-          left: fresh?.qty ?? 0,
+          left: fresh?.qty ?? (res.data.status === 'IN_STOCK' ? res.data.qty : 0),
           newSticker: fresh ? { id: fresh.id, code: fresh.code } : null,
           unit: pkg.unit,
           kind: packCount(1, pkg.packType).replace(/^1 /, ''),
@@ -131,7 +140,8 @@ export function ScanIssue({
       setRound((r) => r + 1)
       onIssued(res.message)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not issue it.')
+      if (err instanceof ApiError && isFifoStop(err.code)) setFifo(err.message)
+      else setError(err instanceof ApiError ? err.message : 'Could not issue it.')
     } finally {
       sending.current = false
       setBusy(false)
@@ -176,13 +186,13 @@ export function ScanIssue({
                 onValueChange={setQty}
                 decimals
                 autoFocus
-                onKeyDown={(e) => e.key === 'Enter' && void issue()}
+                onKeyDown={(e) => e.key === 'Enter' && !fifo && void issue()}
                 aria-label={`How much of ${pkg.code} to issue`}
               />
               <span className="text-sm text-foreground">{pkg.unit}</span>
             </div>
           </label>
-          <button type="button" className="btn-primary h-10" onClick={() => void issue()} disabled={busy || !!problem}>
+          <button type="button" className="btn-primary h-10" onClick={() => void issue()} disabled={busy || !!problem || !!fifo}>
             {busy ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
             Issue {n > 0 ? `${qtyText(n)} ${pkg.unit}` : ''}
           </button>
@@ -192,6 +202,7 @@ export function ScanIssue({
             onClick={() => {
               setPkg(null)
               setLine(null)
+              setFifo(null)
               setRound((r) => r + 1)
             }}
             disabled={busy}
@@ -199,6 +210,11 @@ export function ScanIssue({
             Cancel
           </button>
           {problem && n > 0 && <p className="w-full text-sm text-red-400">{problem}</p>}
+          {fifo && (
+            <div className="w-full">
+              <FifoOverride message={fifo} busy={busy} onAllow={(reason) => void issue(reason)} />
+            </div>
+          )}
         </div>
       )}
 
@@ -214,11 +230,13 @@ export function ScanIssue({
                 <span className="text-muted-foreground">
                   {d.newSticker
                     ? `issued from a ${d.kind}${d.lot ? ` (lot ${d.lot})` : ''} — the ${qtyText(d.left)} ${d.unit} left in ${d.store} is now ${d.newSticker.code}; ${d.code} is retired`
-                    : `issued — the whole ${d.kind}${d.lot ? ` (lot ${d.lot})` : ''}, now out of ${d.store}`}
+                    : d.left > 0
+                      ? `issued from a ${d.kind}${d.lot ? ` (lot ${d.lot})` : ''} — ${qtyText(d.left)} ${d.unit} left on the same sticker in ${d.store}`
+                      : `issued — the whole ${d.kind}${d.lot ? ` (lot ${d.lot})` : ''}, now out of ${d.store}`}
                 </span>{' '}
                 <span className="font-mono text-[11px] text-muted-foreground">{d.code}</span>
               </span>
-              {d.newSticker && (
+              {d.newSticker ? (
                 <button
                   type="button"
                   className="btn-secondary h-8 px-2.5 text-xs"
@@ -227,6 +245,18 @@ export function ScanIssue({
                 >
                   <Printer size={13} /> Print {d.newSticker.code}
                 </button>
+              ) : (
+                d.left > 0 && (
+                  // Not needed: the sticker on it still scans to what is left. Only for a packet opened often.
+                  <button
+                    type="button"
+                    className="btn-ghost h-8 px-2.5 text-xs text-muted-foreground"
+                    onClick={() => printLabels([d.id])}
+                    title={`The same code, printed with the ${qtyText(d.left)} ${d.unit} left`}
+                  >
+                    <Printer size={13} /> Reprint with balance
+                  </button>
+                )
               )}
             </li>
           ))}

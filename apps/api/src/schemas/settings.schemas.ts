@@ -230,6 +230,15 @@ export const PREFERENCES: PreferenceDefinition[] = [
     affects: 'Dashboard low-stock alerts',
   },
   {
+    key: 'issueByScanOnly',
+    label: 'Stickered stock is issued by scan only',
+    help: 'Turn this on once the store scans every issue. Packages with a sticker must then be scanned to issue them; only stock without a sticker can be typed.',
+    group: 'Stock',
+    type: 'boolean',
+    default: false,
+    affects: 'Requisition issue',
+  },
+  {
     key: 'qcInDailyProduction',
     label: 'Quality check on daily production',
     help: 'Turn this off if the line records output without a per-day QC entry.',

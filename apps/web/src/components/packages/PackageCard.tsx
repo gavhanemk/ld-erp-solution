@@ -21,6 +21,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { QrCode } from './QrCode'
 import { RackInput } from './RackInput'
+import { FifoOverride, isFifoStop } from './FifoOverride'
 import { STATUS, openPrintTab, packLabel, printLabels, printOutward, qtyText, type OutwardRef, type PackageDetail } from './packageTypes'
 
 /** What an action prints: a label for stock that went out, and the stickers that changed. */
@@ -67,14 +68,17 @@ export function PackageCard({
   const [error, setError] = useState<string | null>(null)
   // The rack box, open while the rack is being changed.
   const [rack, setRack] = useState<string | null>(null)
+  // FIFO stopped the action: the server's words, and the same action again with the store manager's reason.
+  const [fifo, setFifo] = useState<{ message: string; retry: (reason: string) => void } | null>(null)
 
   const st = STATUS[pkg.status] ?? { label: pkg.status, cls: 'badge-neutral' }
   const editable = can('inventory', 'edit')
 
   /** Saves an action. `prints` names what it prints, in a tab opened on the click. True once saved. */
-  const run = async (path: string, body: unknown, prints?: Prints) => {
+  const run = async (path: string, body: unknown, prints?: Prints): Promise<boolean> => {
     setBusy(true)
     setError(null)
+    setFifo(null)
     const tab = prints ? openPrintTab() : null
     try {
       const res = await api.post<{ message: string; data: PackageDetail }>(`/packages/${pkg.id}/${path}`, body)
@@ -87,7 +91,9 @@ export function PackageCard({
       return true
     } catch (err) {
       tab?.close()
-      setError(err instanceof ApiError ? err.message : 'Could not save. Is the API running?')
+      if (err instanceof ApiError && isFifoStop(err.code)) {
+        setFifo({ message: err.message, retry: (reason) => void run(path, { ...(body as object), fifoReason: reason }, prints) })
+      } else setError(err instanceof ApiError ? err.message : 'Could not save. Is the API running?')
       return false
     } finally {
       setBusy(false)
@@ -199,6 +205,7 @@ export function PackageCard({
               onClick={() => {
                 setAction(t.key)
                 setError(null)
+                setFifo(null)
               }}
               className={`flex shrink-0 items-center gap-2 rounded-t-lg px-4 py-2.5 text-sm font-semibold transition-colors ${
                 action === t.key ? 'bg-card text-primary shadow-sm' : 'text-muted-foreground hover:text-foreground'
@@ -215,9 +222,14 @@ export function PackageCard({
             <AlertTriangle size={16} className="mt-0.5 shrink-0" /> {error}
           </p>
         )}
+        {fifo && (
+          <div className="mb-3">
+            <FifoOverride message={fifo.message} busy={busy} onAllow={fifo.retry} />
+          </div>
+        )}
         {!live && action !== 'history' && action !== 'more' && pkg.status === 'SPLIT' && (
           <p className="text-sm text-muted-foreground">
-            This sticker is retired: its roll was split when part of it went.{' '}
+            This sticker is retired: its roll was split.{' '}
             {pkg.replacedBy?.length ? (
               <>
                 What is left of it now carries{' '}
@@ -244,11 +256,12 @@ export function PackageCard({
           <IssuePanel
             pkg={pkg}
             busy={busy}
-            // A label for what goes to the floor, and a fresh sticker for what stays in the package.
+            // A label for what goes to the floor. What stays keeps its sticker:
+            // "Print label" above prints it again with the balance, if wanted.
             onIssue={(b) =>
-              run('issue', b, (d) => ({
+              run('issue', b, () => ({
                 out: { type: 'MR', id: b.mrId, q: `${b.lineId}:${b.qty}:${pkg.warehouse.id}` },
-                ids: d.status === 'IN_STOCK' && d.qty > 0 ? [d.id] : [],
+                ids: [],
               }))
             }
           />
@@ -257,8 +270,8 @@ export function PackageCard({
           <MovePanel
             pkg={pkg}
             busy={busy}
-            // Part of it: the new package that went, and a fresh sticker for what stayed.
-            onMove={(b) => run('transfer', b, b.qty < pkg.qty - 1e-9 ? (d) => ({ ids: d.newPackage ? [d.newPackage.id, d.id] : [] }) : undefined)}
+            // Part of it: a sticker for the new package that went. What stayed keeps this one.
+            onMove={(b) => run('transfer', b, b.qty < pkg.qty - 1e-9 ? (d) => ({ ids: d.newPackage ? [d.newPackage.id] : [] }) : undefined)}
           />
         )}
         {live && action === 'split' && (
@@ -322,7 +335,7 @@ function QtyBox({
           ? `Only ${qtyText(max)} ${unit} in this package.`
           : n > 0
             ? left > 0
-              ? `${qtyText(left)} ${unit} will be left: it goes on a new sticker, and this one is retired.`
+              ? `${qtyText(left)} ${unit} will be left on this sticker.`
               : 'The package will be empty.'
             : `${qtyText(max)} ${unit} in the package.`}
       </p>
@@ -430,7 +443,7 @@ function MovePanel({ pkg, busy, onMove }: { pkg: PackageDetail; busy: boolean; o
       <QtyBox value={qty} onChange={setQty} max={pkg.qty} unit={pkg.unit} label="How much moves" />
       {n > 0 && !whole && n < pkg.qty && (
         <p className="text-sm text-muted-foreground">
-          The part that moves and the part that stays each get a new sticker, which open for printing. This sticker is retired.
+          The part that moves gets a sticker of its own, which opens for printing. What stays here keeps this sticker.
         </p>
       )}
       <button

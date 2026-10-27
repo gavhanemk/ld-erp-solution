@@ -1,5 +1,6 @@
 // Customer GRN controls — scenario tests against the DEMO API (E2E_API, default 5101) and DEMO database (lderp_demo) only.
-// Round 2 (16 Oct 2026): receiving → QC → stock approval; part rolls split onto new stickers.
+// Round 2 (16 Oct 2026): receiving → QC → stock approval.
+// Round 3 (27 Oct 2026): part of a roll keeps its sticker (10 → 6 on the same code); FIFO on what goes out.
 import { randomUUID } from 'node:crypto'
 import { API, demoDb, adminLogin, staffLogins, exit } from '../lib/demo.mjs'
 const db = await demoDb()
@@ -16,6 +17,9 @@ const call = async (m, p, b, tok = ADMIN) => {
 let pass = 0, fail = 0
 const check = (id, name, ok, extra = '') => { ok ? pass++ : fail++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${id.padEnd(5)} ${name}${extra && !ok ? `  — ${extra}` : ''}`) }
 const err = (r) => `${r.status} ${r.body?.code ?? ''} ${(r.body?.message ?? '').slice(0, 200)}`
+// FIFO: rolls of the same customer's fabric left from earlier runs are older than this run's, so a
+// scan or move of this run's rolls needs the store manager's reason. The admin gives it.
+const FIFO_OK = { fifoReason: 'E2E: older rolls are from earlier test runs' }
 
 // Guard: demo only.
 const guard = await q(`SELECT current_database() d`)
@@ -185,46 +189,42 @@ const M2 = MR, L2 = LINE
 const [P1, P2, P3] = pkA
 const ledgerOut = async () => Number((await q(`SELECT COALESCE(SUM("outQty"),0)::float8 n FROM stock_ledger WHERE "referenceId"=$1`, [M2.id]))[0].n)
 
-const s1 = await call('POST', `/packages/${P1.id}/issue`, { mrId: M2.id, lineId: L2, qty: 10, requestId: randomUUID() })
+const s1 = await call('POST', `/packages/${P1.id}/issue`, { mrId: M2.id, lineId: L2, qty: 10, requestId: randomUUID(), ...FIFO_OK })
 check('T10', `first scan of ${P1.code} issues the whole roll once`, s1.status === 200 && (await ledgerOut()) === 10 && !s1.body?.data?.newSticker, err(s1))
-const s1b = await call('POST', `/packages/${P1.id}/issue`, { mrId: M2.id, lineId: L2, qty: 10, requestId: randomUUID() })
+const s1b = await call('POST', `/packages/${P1.id}/issue`, { mrId: M2.id, lineId: L2, qty: 10, requestId: randomUUID(), ...FIFO_OK })
 check('T11', 'a second scan of the same roll is refused with where it went', s1b.status === 409 && s1b.body?.code === 'ALREADY_ISSUED' && /already issued/.test(s1b.body?.message ?? '') && (await ledgerOut()) === 10, err(s1b))
 const rid = randomUUID()
-const s2 = await call('POST', `/packages/${P2.id}/issue`, { mrId: M2.id, lineId: L2, qty: 4, requestId: rid })
-const s2b = await call('POST', `/packages/${P2.id}/issue`, { mrId: M2.id, lineId: L2, qty: 4, requestId: rid })
+const s2 = await call('POST', `/packages/${P2.id}/issue`, { mrId: M2.id, lineId: L2, qty: 4, requestId: rid, ...FIFO_OK })
+const s2b = await call('POST', `/packages/${P2.id}/issue`, { mrId: M2.id, lineId: L2, qty: 4, requestId: rid, ...FIFO_OK })
 check('T12', 'the same request sent again issues nothing more', s2.status === 200 && s2b.status === 200 && s2b.body?.repeat === true && (await ledgerOut()) === 14, `${err(s2b)} out=${await ledgerOut()}`)
 
-// Part of a roll: the old sticker retires, the part issued and the rest get new ones.
+// Part of a roll: it keeps its sticker, and only what it holds goes down.
 const p2 = await pkg(P2.id), p2kids = await kids(P2.id)
-const part = p2kids.find((k) => k.i === 4), rest = p2kids.find((k) => k.i === 6)
-check('S1', `${P2.code} part-issued: its sticker is retired (nothing left on it)`, p2.status === 'SPLIT' && p2.q === 0, JSON.stringify(p2))
-check('S1', 'the 4 issued is a sticker of its own, used up', part?.status === 'EMPTY' && part?.q === 0, JSON.stringify(p2kids))
-check('S1', 'the 6 left is a new sticker on the same rack, waiting to be printed', rest?.status === 'IN_STOCK' && rest?.q === 6 && rest?.printCount === 0 && rest?.rack === p2.rack, JSON.stringify(rest))
-check('S1', 'the issue says which sticker to print', s2.body?.data?.newSticker?.code === rest?.code && s2.body?.message?.includes(rest?.code), s2.body?.message)
-const issuedMove = await q(`SELECT "referenceNumber" FROM stock_package_moves WHERE "packageId"=$1 AND type='ISSUED'`, [part.id])
-check('S1', 'the issued part records the requisition it went to', issuedMove[0]?.referenceNumber === M2.mrNumber)
-const ready = await call('GET', `/packages/ready`)
-check('S1', 'the new sticker is on Ready to print', ready.body?.data?.groups?.some((g) => g.ids.includes(rest.id)), err(ready))
+check('S1', `${P2.code} part-issued: same sticker, 6 left on it`, p2.status === 'IN_STOCK' && p2.q === 6 && p2.i === 10, JSON.stringify(p2))
+check('S1', 'no new sticker is made for the part issued or the rest', p2kids.length === 0, JSON.stringify(p2kids))
+check('S1', 'the issue says what is left on the same sticker, and asks for no print', !s2.body?.data?.newSticker && /6 .*left on the same sticker/.test(s2.body?.message ?? ''), s2.body?.message)
+const issuedMove = await q(`SELECT "referenceNumber", qty::float8 q, "balanceAfter"::float8 b FROM stock_package_moves WHERE "packageId"=$1 AND type='ISSUED'`, [P2.id])
+check('S1', 'its history records the requisition it went to: 4 out, 6 after', issuedMove[0]?.referenceNumber === M2.mrNumber && issuedMove[0]?.q === -4 && issuedMove[0]?.b === 6, JSON.stringify(issuedMove))
 const look2 = await call('GET', `/packages/scan/${P2.code}`)
-check('S2', 'scanning the retired sticker names its replacement', look2.body?.data?.status === 'SPLIT' && look2.body?.data?.replacedBy?.[0]?.code === rest.code, JSON.stringify(look2.body?.data?.replacedBy))
-const old = await call('POST', `/packages/${P2.id}/issue`, { mrId: M2.id, lineId: L2, qty: 1, requestId: randomUUID() })
-check('S2', 'the retired sticker cannot be issued from again, and says what to scan', old.status === 409 && old.body?.code === 'STICKER_RETIRED' && old.body?.message?.includes(rest.code) && (await ledgerOut()) === 14, err(old))
+check('S2', 'scanning it again shows the 6 left on it', look2.body?.data?.status === 'IN_STOCK' && look2.body?.data?.qty === 6, err(look2))
+const old = await call('POST', `/packages/${P2.id}/issue`, { mrId: M2.id, lineId: L2, qty: 7, requestId: randomUUID(), ...FIFO_OK })
+check('S2', 'more than is left on it cannot be issued', old.status === 400 && old.body?.code === 'OVER_PACKAGE' && (await ledgerOut()) === 14, err(old))
 
 const [c1, c2] = await Promise.all([
-  call('POST', `/packages/${P3.id}/issue`, { mrId: M2.id, lineId: L2, qty: 10, requestId: randomUUID() }),
-  call('POST', `/packages/${P3.id}/issue`, { mrId: M2.id, lineId: L2, qty: 10, requestId: randomUUID() }),
+  call('POST', `/packages/${P3.id}/issue`, { mrId: M2.id, lineId: L2, qty: 10, requestId: randomUUID(), ...FIFO_OK }),
+  call('POST', `/packages/${P3.id}/issue`, { mrId: M2.id, lineId: L2, qty: 10, requestId: randomUUID(), ...FIFO_OK }),
 ])
 check('T13', 'two scans of one roll at the same moment: one issue', [c1, c2].filter((r) => r.status === 200).length === 1 && (await ledgerOut()) === 24, `${c1.status}/${c2.status} out=${await ledgerOut()}`)
-const same = await call('POST', `/packages/${P2.id}/issue`, { mrId: M2.id, lineId: L2, qty: 4, requestId: rid })
+const same = await call('POST', `/packages/${P2.id}/issue`, { mrId: M2.id, lineId: L2, qty: 4, requestId: rid, ...FIFO_OK })
 check('T12', 'a retried request id cannot be used for a different roll', same.body?.repeat === true && (await ledgerOut()) === 24)
 const before14 = await ledgerOut()
 const look = await call('GET', `/packages/scan/${P1.code}`)
 check('T14', 'looking up a used sticker shows its history and moves nothing', look.status === 200 && look.body?.data?.status === 'EMPTY' && (await ledgerOut()) === before14, err(look))
-const s3 = await call('POST', `/packages/${rest.id}/issue`, { mrId: M2.id, lineId: L2, qty: 6, requestId: randomUUID() })
-const s3b = await call('POST', `/packages/${rest.id}/issue`, { mrId: M2.id, lineId: L2, qty: 1, requestId: randomUUID() })
-check('T16', `part rolls: ${P2.code} gave 4, its new sticker ${rest.code} the other 6, then nothing`, s3.status === 200 && s3b.status === 409 && (await ledgerOut()) === 30, `${s3.status}/${s3b.status} out=${await ledgerOut()}`)
-const fam = [await pkg(P2.id), ...(await kids(P2.id))]
-check('T15', 'never more out of a roll than it held: 4 + 6 = 10, nothing left on any of its stickers', fam.every((p) => p.q === 0) && (await kids(P2.id)).reduce((t, k) => t + k.i, 0) === 10)
+const s3 = await call('POST', `/packages/${P2.id}/issue`, { mrId: M2.id, lineId: L2, qty: 6, requestId: randomUUID(), ...FIFO_OK })
+const s3b = await call('POST', `/packages/${P2.id}/issue`, { mrId: M2.id, lineId: L2, qty: 1, requestId: randomUUID(), ...FIFO_OK })
+check('T16', `part rolls: ${P2.code} gave 4, then the other 6 off the same sticker, then nothing`, s3.status === 200 && s3b.status === 409 && (await ledgerOut()) === 30, `${s3.status}/${s3b.status} out=${await ledgerOut()}`)
+const p2out = await q(`SELECT COALESCE(SUM(-qty),0)::float8 n FROM stock_package_moves WHERE "packageId"=$1 AND type='ISSUED'`, [P2.id])
+check('T15', 'never more out of a roll than it held: 4 + 6 = 10, nothing left on its sticker', (await pkg(P2.id)).q === 0 && (await pkg(P2.id)).status === 'EMPTY' && p2out[0].n === 10, JSON.stringify(p2out))
 const corr = await call('POST', `/packages/${P1.id}/correct`, { qty: 10, reason: 'Found it again' })
 check('T17', 'a used sticker cannot be brought back to life', corr.status === 409 && corr.body?.code === 'STICKER_USED', err(corr))
 const P4 = pkA[3]
@@ -247,23 +247,23 @@ const gk = await receiveQcApprove({ customerId: B, soId: SO_B.id, warehouseId: W
 const K = await q(`SELECT id, code FROM stock_packages WHERE "sourceId"=$1 ORDER BY "createdAt", code`, [gk.body?.data?.id ?? ''])
 check('SET', "Kanha's 40 in stock on 4 stickers", gk.status === 200 && K.length === 4, err(gk))
 
-// A typed issue: the labels window takes part of a roll, onto new stickers.
+// A typed issue: the labels window takes part of a roll off its own sticker.
 const P5 = K[0]
 const mr3 = await call('POST', '/inventory/requisitions', { departmentId: DEPT, warehouseId: WH, soId: SO_B.id, lines: [{ itemId: FAB, requestedQty: 3, ownership: 'CUSTOMER_OWNED', ownerCustomerId: B }] })
 await call('PATCH', `/inventory/requisitions/${mr3.body.data.id}/approve`, {})
 const typed = await call('POST', `/inventory/requisitions/${mr3.body.data.id}/issue`, { lines: [{ lineId: mr3.body.data.lines[0].id, issueQty: 3, warehouseId: WH }] })
-const outw = await call('POST', '/packages/outward/apply', { type: 'MR', id: mr3.body.data.id, takes: [{ packageId: P5.id, qty: 3 }] })
+const outw = await call('POST', '/packages/outward/apply', { type: 'MR', id: mr3.body.data.id, takes: [{ packageId: P5.id, qty: 3 }], ...FIFO_OK })
 const p5 = await pkg(P5.id), p5kids = await kids(P5.id)
-check('S3', 'typed issue of 3, then the labels window: the roll\'s sticker retires', typed.status === 200 && outw.status === 200 && p5.status === 'SPLIT', `${err(typed)} ${err(outw)}`)
-check('S3', '3 on a used-up sticker, 7 on a new one to print', p5kids.some((k) => k.i === 3 && k.status === 'EMPTY') && p5kids.some((k) => k.i === 7 && k.status === 'IN_STOCK' && outw.body?.data?.reprint?.includes(k.id)), JSON.stringify(p5kids))
+check('S3', 'typed issue of 3, then the labels window: the roll keeps its sticker with 7 on it', typed.status === 200 && outw.status === 200 && p5.status === 'IN_STOCK' && p5.q === 7, `${err(typed)} ${err(outw)} ${JSON.stringify(p5)}`)
+check('S3', 'no new sticker to print', p5kids.length === 0 && (outw.body?.data?.reprint ?? []).length === 0, JSON.stringify(p5kids))
 
 // Moving part of a roll to another store.
 const P6 = pkA[5]
-const mv = await call('POST', `/packages/${P6.id}/transfer`, { toWarehouseId: JWG, qty: 4 })
+const mv = await call('POST', `/packages/${P6.id}/transfer`, { toWarehouseId: JWG, qty: 4, ...FIFO_OK })
 const p6 = await pkg(P6.id), p6kids = await kids(P6.id)
-const there = p6kids.find((k) => k.i === 4), here = p6kids.find((k) => k.i === 6)
-check('S4', 'part of a roll moved: old sticker retired, 4 on a new sticker in the other store, 6 on a new one here', mv.status === 200 && p6.status === 'SPLIT' && there?.warehouseId === JWG && there?.status === 'IN_STOCK' && here?.warehouseId === WH && here?.status === 'IN_STOCK', `${err(mv)} ${JSON.stringify(p6kids)}`)
-await call('POST', `/packages/${there.id}/transfer`, { toWarehouseId: WH, qty: 4 })
+const there = p6kids.find((k) => k.i === 4)
+check('S4', 'part of a roll moved: 4 on a new sticker in the other store, 6 stay here on the same sticker', mv.status === 200 && p6.status === 'IN_STOCK' && p6.q === 6 && p6.warehouseId === WH && there?.warehouseId === JWG && there?.status === 'IN_STOCK' && p6kids.length === 1, `${err(mv)} ${JSON.stringify(p6)} ${JSON.stringify(p6kids)}`)
+await call('POST', `/packages/${there.id}/transfer`, { toWarehouseId: WH, qty: 4, ...FIFO_OK })
 
 // Splitting by hand: whatever is not cut off gets a sticker too.
 const P7 = pkA[6]
@@ -292,12 +292,12 @@ check('T18', 'nothing more can go back as rejected than was held', cmr2.status =
 const cc = await call('PATCH', `/inventory/customer-return/${cmr.body.data.id}/cancel`, { reason: 'Lorry did not leave' })
 check('T18', 'cancelling that return puts the 4 back on hold, not into usable stock', cc.status === 200 && Math.abs((await bal('R')) - h1) < 1e-6, err(cc))
 
-// A leftover return: its labels window takes part of a roll, onto new stickers.
+// A leftover return: its labels window takes part of a roll off its own sticker.
 const P8 = K[1]
 const lo = await call('POST', '/inventory/customer-return', { customerId: B, warehouseId: WH, soId: SO_B.id, reason: 'LEFTOVER', lines: [{ itemId: FAB, qty: 2.5 }] })
-const loOut = await call('POST', '/packages/outward/apply', { type: 'CUSTOMER_RETURN', id: lo.body?.data?.id, takes: [{ packageId: P8.id, qty: 2.5 }] })
-const p8kids = await kids(P8.id)
-check('S6', 'a leftover return of 2.5 from a roll of 10: 2.5 on a used-up sticker, 7.5 on a new one', lo.status === 201 && loOut.status === 200 && (await pkg(P8.id)).status === 'SPLIT' && p8kids.some((k) => k.i === 2.5 && k.status === 'EMPTY') && p8kids.some((k) => k.i === 7.5 && k.status === 'IN_STOCK'), `${err(lo)} ${err(loOut)} ${JSON.stringify(p8kids)}`)
+const loOut = await call('POST', '/packages/outward/apply', { type: 'CUSTOMER_RETURN', id: lo.body?.data?.id, takes: [{ packageId: P8.id, qty: 2.5 }], ...FIFO_OK })
+const p8 = await pkg(P8.id), p8kids = await kids(P8.id)
+check('S6', 'a leftover return of 2.5 from a roll of 10: 7.5 left on the same sticker, no new one', lo.status === 201 && loOut.status === 200 && p8.status === 'IN_STOCK' && p8.q === 7.5 && p8kids.length === 0, `${err(lo)} ${err(loOut)} ${JSON.stringify(p8)}`)
 
 // Stock out with no window at all (a count found less): the stickers come down by themselves.
 const spot = async () => {
@@ -311,7 +311,7 @@ const adjOk = await call('POST', `/inventory/adjustments/${adj.body?.data?.id}/a
 const adjMoves = await q(`SELECT m.type, m.qty::float8 q, p.code, p.status, p."parentId" FROM stock_package_moves m JOIN stock_packages p ON p.id=m."packageId" WHERE m."referenceId"=$1`, [adj.body?.data?.id ?? ''])
 const adjDown = -adjMoves.filter((m) => m.type === 'ISSUED').reduce((t, m) => t + m.q, 0)
 check('S7', `a count 1.5 short (book ${sp0.book}, nothing loose) takes 1.5 off the stickers by itself`, adj.status === 201 && adjOk.status === 200 && sp0.loose === 0 && Math.abs(adjDown - 1.5) < 1e-6, `${err(adj)} ${err(adjOk)} ${JSON.stringify(adjMoves)}`)
-check('S7', '…by retiring a roll\'s sticker: 1.5 used up, the rest on a new one', adjMoves.some((m) => m.type === 'SPLIT') && adjMoves.some((m) => m.type === 'ISSUED' && m.status === 'EMPTY' && m.parentId))
+check('S7', '…off the oldest roll\'s own sticker: no sticker retired, no new one made', !adjMoves.some((m) => m.type === 'SPLIT') && adjMoves.every((m) => m.type === 'ISSUED'), JSON.stringify(adjMoves))
 const sp1 = await spot()
 check('S7', "Kanha's stickers add up to the book again", Math.abs(sp1.loose) < 1e-6, JSON.stringify(sp1))
 
@@ -323,9 +323,18 @@ const g2after = (await q(`SELECT status FROM customer_grn WHERE id=$1`, [G2.id])
 const g2net = Number((await q(`SELECT COALESCE(SUM("inQty"-"outQty"),0)::float8 n FROM stock_ledger WHERE "referenceId"=$1`, [G2.id]))[0].n)
 check('D4', 'cancel & correct: the old one off the books, a linked draft in its place', corrG.status === 201 && g2after.status === 'CANCELLED' && g2net === 0 && corrG.body?.data?.status === 'DRAFT' && corrG.body?.data?.correctionOfId === G2.id, err(corrG))
 
-// The one rule all of it keeps: a sticker on stock holds exactly what it was made with.
-const shrunk = await q(`SELECT p.code, p.qty::float8 q, p."initialQty"::float8 i FROM stock_packages p WHERE p.status='IN_STOCK' AND p.qty <> p."initialQty" AND (p."createdAt" >= $1 OR p.id IN (SELECT "packageId" FROM stock_package_moves WHERE "createdAt" >= $1 AND type IN ('ISSUED','SPLIT','TRANSFERRED')))`, [runStart])
-check('I1', 'no sticker on stock touched in this run holds less than it says', shrunk.length === 0, JSON.stringify(shrunk))
+// The one rule all of it keeps: the stickers of an item in a store never claim more than the store holds.
+const spots = await q(`
+  WITH touched AS (
+    SELECT DISTINCT p."itemId", p."warehouseId", p.ownership, p."ownerCustomerId" FROM stock_packages p
+    WHERE p."createdAt" >= $1 OR p.id IN (SELECT "packageId" FROM stock_package_moves WHERE "createdAt" >= $1)
+  )
+  SELECT t."itemId", t."warehouseId",
+    (SELECT COALESCE(SUM(qty),0) FROM stock_packages s WHERE s."itemId"=t."itemId" AND s."warehouseId"=t."warehouseId" AND s.ownership=t.ownership AND s."ownerCustomerId" IS NOT DISTINCT FROM t."ownerCustomerId" AND s.status='IN_STOCK')::float8 packed,
+    (SELECT COALESCE(SUM("inQty"-"outQty"),0) FROM stock_ledger l WHERE l."itemId"=t."itemId" AND l."warehouseId"=t."warehouseId" AND l.ownership=t.ownership AND l."ownerCustomerId" IS NOT DISTINCT FROM t."ownerCustomerId" AND l."sizeId" IS NULL AND l.grade IN ('A','R'))::float8 book
+  FROM touched t`, [runStart])
+const claimsMore = spots.filter((r) => r.packed > r.book + 1e-6)
+check('I1', 'no item touched in this run has stickers claiming more than its store holds', claimsMore.length === 0, JSON.stringify(claimsMore))
 
 // ── Print, history, reconciliation ──
 const pr = await call('GET', `/inventory/customer-grn/${G1.id}/print`)

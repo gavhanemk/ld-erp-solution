@@ -6,7 +6,9 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { createTransfer, issueRequisition } from './inventory.routes'
 import {
+  checkFifo,
   createPackages,
+  cutOffForMove,
   lockPackage,
   normaliseCode,
   codeCandidates,
@@ -20,9 +22,9 @@ import {
   racksIn,
   replacementsOf,
   setRack,
-  splitOff,
   stickerDefaultsFrom,
   suggestQtys,
+  takeFromPackage,
   trackedCategoryIds,
   type PackageSource,
 } from '../services/package.service'
@@ -96,8 +98,11 @@ const outwardSchema = z.object({
   id: z.string().min(1),
   q: z.string().max(4000).optional().nullable(),
 })
+/** Why a newer package goes before an older one: the store manager's reason, asked only when FIFO is broken. */
+const fifoReason = z.string().trim().max(200).optional().nullable()
 const outwardApplySchema = outwardSchema.extend({
   takes: z.array(z.object({ packageId: z.string().min(1), qty })).max(200),
+  fifoReason,
 })
 const issueSchema = z.object({
   mrId: z.string().min(1, 'Choose the requisition'),
@@ -105,8 +110,9 @@ const issueSchema = z.object({
   qty,
   /** The screen's id for this one press of Issue: a repeat of it issues nothing more. */
   requestId: z.string().min(8).max(100).optional(),
+  fifoReason,
 })
-const transferSchema = z.object({ toWarehouseId: z.string().min(1, 'Choose the store it goes to'), qty })
+const transferSchema = z.object({ toWarehouseId: z.string().min(1, 'Choose the store it goes to'), qty, fifoReason })
 const splitSchema = z.object({ qtys: z.array(qty).min(1, 'Enter at least one new package').max(200) })
 const correctSchema = z.object({
   qty: z.number().min(0, 'Quantity cannot be negative'),
@@ -683,8 +689,8 @@ router.post('/outward/plan', requirePermission(MODULE, 'view'), async (req, res)
  * Takes what went out off the packages it came from, so their stickers say
  * what is really in them. Stock that left us empties or shrinks its package;
  * stock that only moved takes its package along — a whole roll moves, part of
- * one becomes a new roll in the other store. Returns the packages whose
- * stickers have changed, to print fresh.
+ * one becomes a new roll in the other store. A package keeps its code for
+ * what stays in it. Returns the new packages, to print.
  */
 router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = outwardApplySchema.parse(req.body)
@@ -697,6 +703,13 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
     async (tx) => {
       const reprint: string[] = []
       const taken = new Map<string, number>()
+      // Packages going out in full on this document: FIFO does not ask them
+      // to wait for each other, only for older ones left on the rack.
+      const whole: string[] = []
+      for (const t of data.takes) {
+        const p = await tx.stockPackage.findUnique({ where: { id: t.packageId }, select: { qty: true } })
+        if (p && t.qty >= Number(p.qty) - 0.0005) whole.push(t.packageId)
+      }
       for (const t of data.takes) {
         const pkg = await lockPackage(tx, t.packageId)
         const key = [pkg.itemId, pkg.warehouseId, pkg.ownership, pkg.ownerCustomerId ?? ''].join('|')
@@ -720,18 +733,20 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
           throw new AppError(`Only ${room} ${unit} of ${pkg.item.name} went out without a scan, so ${t.qty} cannot come off ${pkg.code}.`, 400, 'OVER_OUTWARD')
         }
         taken.set(key, round3(room - t.qty))
+        // FIFO: a newer package taken while an older one stays on the rack
+        // needs the store manager's reason.
+        const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit, whole)
 
         const ref = { referenceType: OUTWARD[data.type].ledger, referenceId: doc.id, referenceNumber: doc.number, userId: req.user?.id ?? null }
-        // Part of a roll: the part that went and the rest each get a sticker
-        // of their own, and this one is retired. The rest's sticker is printed
-        // for the rack; one that moved, for the store it went to.
-        const { part, rest } = await splitOff(tx, pkg, t.qty, { notes: `to ${doc.to} on ${doc.number}`, unit, ...ref })
-        if (rest) reprint.push(rest.id)
         if (!moves) {
-          await tx.stockPackage.update({ where: { id: part.id }, data: { qty: 0, status: 'EMPTY' } })
-          await recordPackageMove(tx, { packageId: part.id, type: 'ISSUED', qty: -t.qty, balanceAfter: 0, warehouseId: pkg.warehouseId, notes: `To ${doc.to}`, ...ref })
+          // Part of a packet: it keeps its code and sticker, and only what it holds goes down.
+          await takeFromPackage(tx, pkg, t.qty, { notes: `To ${doc.to}`, ...ref, ...fifo })
         } else {
           // What went keeps a sticker, now in the other store, off its old rack.
+          // Part of a packet goes as a new one, printed for the store it went
+          // to; this one keeps its code for what stays.
+          const cut = await cutOffForMove(tx, pkg, t.qty, { notes: `to ${doc.to} on ${doc.number}`, unit, toWarehouseId: doc.toWarehouseId!, ...ref, ...fifo })
+          const part = cut ?? { id: pkg.id, code: pkg.code, qty: round3(Number(pkg.qty)) }
           await tx.stockPackage.update({ where: { id: part.id }, data: { warehouseId: doc.toWarehouseId!, rack: null } })
           await recordPackageMove(tx, {
             packageId: part.id,
@@ -742,15 +757,22 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
             toWarehouseId: doc.toWarehouseId,
             notes: `To ${doc.to}`,
             ...ref,
+            ...(cut ? {} : fifo),
           })
-          if (rest) reprint.push(part.id)
+          if (cut) reprint.push(cut.id)
         }
       }
       return reprint
     },
     { timeout: 60_000, maxWait: 20_000 },
   )
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: data.takes[0]?.packageId ?? doc.id, after: { outward: doc.number, takes: data.takes } })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'StockPackage',
+    entityId: data.takes[0]?.packageId ?? doc.id,
+    after: { outward: doc.number, takes: data.takes, ...(data.fifoReason ? { fifoReason: data.fifoReason } : {}) },
+  })
   // The rolls now say which order they went to: its job cards can take their lot.
   if (data.type === 'MR' && data.takes.length) {
     const mr = await prisma.materialRequisition.findUnique({ where: { id: data.id }, select: { moId: true } })
@@ -1023,39 +1045,39 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
         throw new AppError("That requisition wants a different owner's stock than this package holds.", 400, 'WRONG_OWNER')
       }
 
+      // FIFO: an older package of the same item in this store goes first,
+      // unless the store manager lets this one go, with a reason.
+      const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit)
+
       // The issue itself, with every rule the Issue screen has.
       // The scanned package comes down below, by itself: no other sticker is touched.
       const issued = await issueRequisition(tx, data.mrId, { lines: [{ lineId: data.lineId, issueQty: data.qty, warehouseId: pkg.warehouseId }] }, req.user, { stickers: 'caller' })
 
-      // Part of a roll: the part issued and the rest each get a sticker of
-      // their own and this one is retired, so no sticker ever says more than
-      // its roll holds and the old one cannot be issued from again.
+      // Part of a packet: it keeps its code and its sticker, and only what it
+      // holds goes down — 50, then 40, then 35. All of it: the packet is empty.
       const ref = { referenceType: 'MATERIAL_REQUISITION', referenceId: data.mrId, referenceNumber: issued.after.mrNumber }
-      const { part, rest } = await splitOff(tx, pkg, data.qty, { notes: `issued to ${issued.after.mrNumber}`, userId: req.user?.id ?? null, unit, ...ref })
-      await tx.stockPackage.update({ where: { id: part.id }, data: { qty: 0, status: 'EMPTY' } })
-      await recordPackageMove(tx, {
-        packageId: part.id,
-        type: 'ISSUED',
-        qty: -data.qty,
-        balanceAfter: 0,
-        warehouseId: pkg.warehouseId,
+      const { left } = await takeFromPackage(tx, pkg, data.qty, {
         ...ref,
+        ...fifo,
         notes: `To ${issued.after.department?.name ?? 'production'}`,
         userId: req.user?.id ?? null,
       })
       audit = { mr: issued.after, handedOver: issued.handedOver }
       return {
-        pkgId: rest?.id ?? pkg.id,
+        pkgId: pkg.id,
         scannedId: pkg.id,
         code: pkg.code,
         mrId: issued.after.id,
         mrNumber: issued.after.mrNumber,
-        left: rest?.qty ?? 0,
-        issuedAs: part.code,
-        newSticker: rest,
-        message: rest
-          ? `${data.qty} ${unit} issued from ${pkg.code} against ${issued.after.mrNumber}, as ${part.code}. ${pkg.code} is retired: the ${rest.qty} ${unit} left is now ${rest.code}. Print its sticker and put it on the roll.`
-          : `${data.qty} ${unit} issued from ${pkg.code} against ${issued.after.mrNumber}. The package is now empty.`,
+        left,
+        issuedAs: pkg.code,
+        // A part issued no longer makes a new sticker; kept for a repeat of an issue from before.
+        newSticker: null as { id: string; code: string; qty: number } | null,
+        fifoReason: fifo.fifoReason,
+        message:
+          left > 0
+            ? `${data.qty} ${unit} issued from ${pkg.code} against ${issued.after.mrNumber}. ${left} ${unit} left on the same sticker.`
+            : `${data.qty} ${unit} issued from ${pkg.code} against ${issued.after.mrNumber}. The package is now empty.`,
       }
     }),
     { timeout: 60_000, maxWait: 20_000 },
@@ -1068,7 +1090,7 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
       action: 'UPDATE',
       entityType: 'StockPackage',
       entityId: done.scannedId ?? done.pkgId,
-      after: { issued: data.qty, against: done.mrNumber, issuedAs: done.issuedAs, left: done.left, newSticker: done.newSticker?.code ?? null },
+      after: { issued: data.qty, against: done.mrNumber, issuedAs: done.issuedAs, left: done.left, newSticker: done.newSticker?.code ?? null, fifoReason: done.fifoReason ?? null },
     })
     // The requisition's own history shows the issue too, as a typed one would.
     await writeAuditLog(req, {
@@ -1089,7 +1111,8 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
 
 /**
  * Moving a package to another store. The whole of it moves with its label;
- * part of it moves as a new package with its own label, which needs printing.
+ * part of it moves as a new package with its own label, which needs printing,
+ * and this one keeps its code for what stays on its rack.
  */
 router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = transferSchema.parse(req.body)
@@ -1101,6 +1124,9 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
       if (pkg.grade === 'R') throw new AppError(`${pkg.code} is on hold (rejected at receipt), so it stays where it is until it is released or sent back.`, 409, 'HELD')
       if (data.toWarehouseId === pkg.warehouseId) throw new AppError(`${pkg.code} is already in ${pkg.warehouse.name}.`, 400, 'SAME_STORE')
       if (data.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
+      // FIFO: an older package of the same item in this store goes first,
+      // unless the store manager lets this one go, with a reason.
+      const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit)
 
       const note = await createTransfer(
         tx,
@@ -1114,10 +1140,18 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
         // The scanned package moves itself below.
         { stickers: 'caller' },
       )
-      // Part of it: the part that goes and the rest that stays each get a
-      // sticker of their own, and this one is retired.
+      // Part of it: the part that goes gets a sticker of its own in the other
+      // store, and this one keeps its code for what stays here.
       const ref = { referenceType: 'STOCK_TRANSFER', referenceId: note.id, referenceNumber: note.transferNumber }
-      const { part, rest } = await splitOff(tx, pkg, data.qty, { notes: `moved to ${note.toWarehouse.name} on ${note.transferNumber}`, userId: req.user?.id ?? null, unit, ...ref })
+      const cut = await cutOffForMove(tx, pkg, data.qty, {
+        notes: `moved to ${note.toWarehouse.name} on ${note.transferNumber}`,
+        userId: req.user?.id ?? null,
+        unit,
+        toWarehouseId: data.toWarehouseId,
+        ...ref,
+        ...fifo,
+      })
+      const part = cut ?? { id: pkg.id, code: pkg.code, qty: round3(Number(pkg.qty)) }
       // A rack belongs to the store it is in: put away again on arrival.
       await tx.stockPackage.update({ where: { id: part.id }, data: { warehouseId: data.toWarehouseId, rack: null } })
       await recordPackageMove(tx, {
@@ -1128,20 +1162,28 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
         warehouseId: pkg.warehouseId,
         toWarehouseId: data.toWarehouseId,
         ...ref,
+        // A whole package moving carries its own FIFO reason; a part's is on the package it came from.
+        ...(cut ? {} : fifo),
         userId: req.user?.id ?? null,
       })
-      return { pkg, note, part, rest, unit, to: note.toWarehouse.name }
+      return { pkg, note, part, cut, left: cut ? round3(Number(pkg.qty) - data.qty) : 0, unit, to: note.toWarehouse.name, fifo }
     },
     { timeout: 60_000, maxWait: 20_000 },
   )
-  const { pkg, part, rest } = result
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: pkg.id, after: { moved: data.qty, to: result.to, note: result.note.transferNumber, movedAs: part.code, restAs: rest?.code ?? null } })
+  const { pkg, part, cut } = result
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'StockPackage',
+    entityId: pkg.id,
+    after: { moved: data.qty, to: result.to, note: result.note.transferNumber, movedAs: part.code, left: result.left, fifoReason: result.fifo.fifoReason },
+  })
   res.json({
     success: true,
-    message: rest
-      ? `${data.qty} ${result.unit} moved to ${result.to} as ${part.code}; the ${rest.qty} ${result.unit} left here is now ${rest.code}. ${pkg.code} is retired: print both new stickers and stick them on.`
+    message: cut
+      ? `${data.qty} ${result.unit} moved to ${result.to} as ${cut.code}; ${result.left} ${result.unit} stays here on ${pkg.code}. Print the sticker for ${cut.code} and stick it on.`
       : `${pkg.code} moved to ${result.to} on ${result.note.transferNumber}.`,
-    data: { ...(await detail(rest?.id ?? pkg.id)), newPackage: rest ? { id: part.id, code: part.code } : null, newPackages: rest ? [part, rest] : [] },
+    data: { ...(await detail(pkg.id)), newPackage: cut ? { id: cut.id, code: cut.code } : null, newPackages: cut ? [cut] : [] },
   })
 })
 

@@ -1,5 +1,6 @@
 import type { Prisma, PackType, PackageMoveType, StockOwnership } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { userCan, type AuthRequest } from '../middleware/auth'
 import { balanceOf, lockedBalanceOf } from './stock.service'
 
 /*
@@ -332,6 +333,9 @@ export async function recordPackageMove(
     relatedPackageId?: string | null
     notes?: string | null
     userId?: string | null
+    /** FIFO: the older package this one went before, and the store manager's reason. */
+    fifoSkippedId?: string | null
+    fifoReason?: string | null
   },
 ) {
   return tx.stockPackageMove.create({
@@ -346,6 +350,8 @@ export async function recordPackageMove(
       referenceId: m.referenceId ?? null,
       referenceNumber: m.referenceNumber ?? null,
       relatedPackageId: m.relatedPackageId ?? null,
+      fifoSkippedId: m.fifoSkippedId ?? null,
+      fifoReason: m.fifoReason ?? null,
       notes: m.notes ?? null,
       createdById: m.userId ?? null,
     },
@@ -464,11 +470,15 @@ type Splittable = {
 }
 
 /**
- * Part of a roll going and the rest staying. A sticker says what its roll
- * held, so it is never left on a roll that now holds less: the part taken and
- * the rest each get a sticker of their own, and the old one is retired (SPLIT,
- * nothing in it) — scanned again, it names what replaced it. Taking all of it
- * splits nothing: the package itself is the part.
+ * Part of a roll cut off as a package of its own, and the rest put on a new
+ * sticker too: the old one is retired (SPLIT, nothing in it) — scanned again,
+ * it names what replaced it. Taking all of it splits nothing: the package
+ * itself is the part.
+ *
+ * Only where the part and the rest can no longer share a sticker: part of a
+ * held roll released for use, while the rest stays held. Stock going out uses
+ * `takeFromPackage` and stock moving uses `cutOffForMove`; both keep the
+ * package's own code for what stays in it.
  *
  * Returns the part, for the caller to issue, move, release or send back, and
  * the rest, which stays on the same rack waiting on "Ready to print".
@@ -517,6 +527,175 @@ export async function splitOff(
     userId: why.userId,
   })
   return { part: { id: part.id, code: part.code, qty: t }, rest: { id: rest.id, code: rest.code, qty: left } }
+}
+
+/**
+ * Part of a package leaving stock — issued, sent back, written off — and the
+ * rest staying in it. The package keeps its code and its sticker; only what
+ * it holds goes down, and its history says where the part went: 50 in, 10
+ * issued, 40 on the same sticker. Taking all of it empties it.
+ *
+ * The caller has checked the package is in stock and holds at least `take`.
+ */
+export async function takeFromPackage(
+  tx: Prisma.TransactionClient,
+  pkg: { id: string; qty: Prisma.Decimal | number; warehouseId: string },
+  take: number,
+  move: {
+    notes?: string | null
+    userId?: string | null
+    referenceType?: string | null
+    referenceId?: string | null
+    referenceNumber?: string | null
+    fifoSkippedId?: string | null
+    fifoReason?: string | null
+  },
+): Promise<{ left: number; empty: boolean }> {
+  const t = round3(take)
+  const left = round3(Math.max(0, Number(pkg.qty) - t))
+  const empty = left <= 0.0005
+  await tx.stockPackage.update({ where: { id: pkg.id }, data: empty ? { qty: 0, status: 'EMPTY' } : { qty: left } })
+  await recordPackageMove(tx, { packageId: pkg.id, type: 'ISSUED', qty: -t, balanceAfter: empty ? 0 : left, warehouseId: pkg.warehouseId, ...move })
+  return { left: empty ? 0 : left, empty }
+}
+
+/**
+ * Part of a package moving to another store, where it stays in stock. The
+ * package keeps its code for what is left on its rack; the part that moves
+ * becomes a package of its own with its own sticker, because one sticker
+ * cannot be on two racks. Moving all of it moves the package itself, which
+ * the caller does: this then returns null.
+ *
+ * The part is made in this store; the caller moves it, as with a whole one.
+ */
+export async function cutOffForMove(
+  tx: Prisma.TransactionClient,
+  pkg: Splittable,
+  take: number,
+  why: {
+    notes: string
+    userId: string | null
+    unit?: string
+    toWarehouseId: string
+    referenceType?: string | null
+    referenceId?: string | null
+    referenceNumber?: string | null
+    fifoSkippedId?: string | null
+    fifoReason?: string | null
+  },
+): Promise<{ id: string; code: string; qty: number } | null> {
+  const has = round3(Number(pkg.qty))
+  const t = round3(take)
+  if (t >= has - 0.0005) return null
+  const left = round3(has - t)
+  const unit = why.unit ? ` ${why.unit}` : ''
+  const [part] = await createPackages(tx, {
+    spot: { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId },
+    packType: pkg.packType,
+    qtys: [t],
+    lotNo: pkg.lotNo,
+    rack: pkg.rack,
+    notes: `${t}${unit} of ${pkg.code}: ${why.notes}`,
+    sourceType: 'SPLIT',
+    sourceId: pkg.sourceId,
+    sourceRef: pkg.sourceRef,
+    grnLineId: pkg.grnLineId,
+    parentId: pkg.id,
+    userId: why.userId,
+    fromPackage: true,
+    unit: why.unit ?? '',
+    itemName: '',
+    grade: pkg.grade,
+  })
+  await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left } })
+  await recordPackageMove(tx, {
+    packageId: pkg.id,
+    type: 'TRANSFERRED',
+    qty: -t,
+    balanceAfter: left,
+    warehouseId: pkg.warehouseId,
+    toWarehouseId: why.toWarehouseId,
+    referenceType: why.referenceType ?? null,
+    referenceId: why.referenceId ?? null,
+    referenceNumber: why.referenceNumber ?? null,
+    relatedPackageId: part.id,
+    fifoSkippedId: why.fifoSkippedId ?? null,
+    fifoReason: why.fifoReason ?? null,
+    notes: `${t}${unit} moved as ${part.code} (${why.notes}); ${left}${unit} left on this sticker`,
+    userId: why.userId,
+  })
+  return { id: part.id, code: part.code, qty: t }
+}
+
+/**
+ * FIFO: the oldest package of the same item, store and owner that came in
+ * before this one and still has stock, if there is one. Packages from the
+ * same inward document are the same age, so ten packets off one GRN go in any
+ * order. Held packages (rejected at receipt) never count: they cannot go out.
+ * `exclude` leaves out packages going out in full alongside this one.
+ */
+export async function olderPackage(
+  tx: Prisma.TransactionClient,
+  pkg: {
+    id: string
+    itemId: string
+    warehouseId: string
+    ownership: StockOwnership
+    ownerCustomerId: string | null
+    createdAt: Date
+    sourceId: string | null
+  },
+  exclude: string[] = [],
+) {
+  return tx.stockPackage.findFirst({
+    where: {
+      itemId: pkg.itemId,
+      warehouseId: pkg.warehouseId,
+      ownership: pkg.ownership,
+      ownerCustomerId: pkg.ownerCustomerId,
+      status: 'IN_STOCK',
+      grade: { not: 'R' },
+      qty: { gt: 0 },
+      createdAt: { lt: pkg.createdAt },
+      id: { notIn: [pkg.id, ...exclude] },
+      ...(pkg.sourceId ? { NOT: { sourceId: pkg.sourceId } } : {}),
+    },
+    orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
+    select: { id: true, code: true, qty: true, rack: true, sourceRef: true, createdAt: true },
+  })
+}
+
+/** The reasons a store manager can give for letting a newer package go first. */
+export const FIFO_REASONS = ['Older package damaged', 'Matching lot or shade', 'Customer asked for this lot', 'Older package cannot be reached'] as const
+
+/**
+ * FIFO on a package going out: refused while an older one of the same item,
+ * store and owner still has stock, naming that one and where it sits. Only
+ * the store manager (inventory approve) may let it go first, with a reason;
+ * what is returned is kept on the package's move for the exceptions report.
+ */
+export async function checkFifo(
+  tx: Prisma.TransactionClient,
+  pkg: Parameters<typeof olderPackage>[1] & { code: string },
+  user: AuthRequest['user'],
+  reason: string | null | undefined,
+  unit: string,
+  exclude: string[] = [],
+): Promise<{ fifoSkippedId: string | null; fifoReason: string | null }> {
+  const older = await olderPackage(tx, pkg, exclude)
+  if (!older) return { fifoSkippedId: null, fifoReason: null }
+  const when = older.createdAt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })
+  const where =
+    `${older.code} came in on ${when}${older.sourceRef ? ` (${older.sourceRef})` : ''}, has ${round3(Number(older.qty))}${unit ? ` ${unit}` : ''}` +
+    (older.rack ? ` and is on rack ${older.rack}` : '')
+  const said = (reason ?? '').trim()
+  if (!said) {
+    throw new AppError(`${pkg.code} is newer. Take ${older.code} first: ${where}.`, 409, 'FIFO_OLDER')
+  }
+  if (!userCan(user, 'inventory', 'approve')) {
+    throw new AppError(`Only the store manager can let ${pkg.code} go before the older ${older.code}. ${where}.`, 403, 'FIFO_NEEDS_MANAGER')
+  }
+  return { fifoSkippedId: older.id, fifoReason: said.slice(0, 200) }
 }
 
 /**
