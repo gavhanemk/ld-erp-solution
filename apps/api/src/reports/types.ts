@@ -32,6 +32,14 @@ export interface ReportColumn {
    * every other type.
    */
   unit?: string
+  /**
+   * For a `qty` whose unit changes from row to row — metres on one line,
+   * pieces on the next: the column holding each row's unit.
+   *
+   * A register's totals add such a quantity up unit by unit, never into one
+   * figure. Ignored for every other type.
+   */
+  unitKey?: string
   /** For `badge`: the word to print for each stored value. */
   badges?: Record<string, string>
   /**
@@ -300,7 +308,11 @@ export type ReportParams = Record<string, string | undefined>
 export interface ReportResult {
   /** One object per row, keyed by column key. */
   rows: Array<Record<string, unknown>>
-  analysis: ReportAnalysis
+  /**
+   * The dashboard's figures. A register has none: it is read as a ledger,
+   * and its only figures are the totals at the foot of its columns.
+   */
+  analysis?: ReportAnalysis
   /**
    * Rows the query found before the cap was applied.
    *
@@ -343,6 +355,73 @@ export interface SummaryTable {
   limit?: number
 }
 
+/**
+ * One printed column of a register: a figure, with a second one set small
+ * under it where the two are read together — the date under a bill number,
+ * the GSTIN under a supplier.
+ *
+ * Stacking is what lets a register with a dozen money columns fit across one
+ * landscape page without shrinking every figure to nothing.
+ */
+export interface RegisterColumn {
+  key: string
+  /** Printed under it, one small line each; an empty one is skipped. */
+  sub?: string[]
+  /**
+   * A second figure of equal weight printed under this one, at full size —
+   * SGST under CGST, which are always the same amount on the same bill. A
+   * total adds each up on its own line.
+   */
+  under?: string
+  underLabel?: string
+  /** The heading. Defaults to the column's own label. */
+  label?: string
+  subLabel?: string
+  /**
+   * A name that may run onto a second line. Everything else — figures,
+   * dates, numbers, codes — stays on one: "PB-2627-" over "0002" is two
+   * halves of a number nobody can search for.
+   */
+  wrap?: boolean
+}
+
+/**
+ * A report laid out as a register — the accounts team's printed ledger —
+ * rather than as a dashboard.
+ *
+ * A register's rows are the lines of documents. What belongs to the line (the
+ * item, its quantity and rate) prints on every line; what belongs to the
+ * document (its number, supplier and totals) prints once, on its first line,
+ * so a bill of four items is counted once and not four times.
+ *
+ * A report with a register gets no Dashboard, Pivot or Notes sheet: its
+ * export is the register alone, on one sheet, and its PDF is the same sheet
+ * printed.
+ */
+export interface RegisterSpec {
+  /** The column all of one document's lines share. */
+  documentKey: string
+  /** What one document is called on the totals line: "1 bill", "47 bills". */
+  noun: { one: string; many: string }
+  /**
+   * The columns that belong to the line. Every other column belongs to the
+   * document and prints on its first line only.
+   */
+  lineKeys: string[]
+  /** What prints, left to right, on screen and on paper. */
+  print: RegisterColumn[]
+  /** A text column printed as a note under a document's lines, when it has one. */
+  noteKey?: string
+  /**
+   * The badge value marking a void document — cancelled, say. It is listed,
+   * so the numbering has no gaps, and carries no figures, so no total can
+   * count it.
+   */
+  void?: { key: string; value: string; word: string }
+  /** The date column whose months the register subtotals by. */
+  monthKey: string
+}
+
 export interface ReportDefinition {
   id: string
   module: ReportModule
@@ -354,6 +433,8 @@ export interface ReportDefinition {
   filters: ReportFilter[]
   /** The Pivot sheet, where the rows repeat a key worth grouping by. */
   pivot?: PivotSpec
+  /** Lays the report out as a register instead of a dashboard. */
+  register?: RegisterSpec
   run: (ctx: ReportContext) => Promise<ReportResult>
 }
 

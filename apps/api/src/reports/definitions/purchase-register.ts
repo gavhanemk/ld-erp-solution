@@ -1,16 +1,6 @@
 import type { Prisma } from '@prisma/client'
-import type { Panel, ReportDefinition, Tone } from '../types'
-import {
-  byMonth,
-  dateRangeFilters,
-  dayRange,
-  mean,
-  round2,
-  supplierFilter,
-  searchFilter,
-  itemFilter,
-  topWithRest,
-} from './shared'
+import type { ReportDefinition, Tone } from '../types'
+import { dateRangeFilters, dayRange, round2, supplierFilter, searchFilter, itemFilter } from './shared'
 
 /** Settled is green, part paid is the ordinary case, unpaid is waiting. */
 const STATUS_TONE: Record<string, Tone> = {
@@ -27,26 +17,41 @@ const STATUS_WORDS: Record<string, string> = {
   CANCELLED: 'Cancelled',
 }
 
+const money = (n: number) =>
+  n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+/** "+500.00" or "−1,200.00": an add or a less, signed the way a register prints it. */
+const signed = (n: number) => `${n < 0 ? '−' : '+'}${money(Math.abs(n))}`
+
 /**
- * Every supplier bill booked in a period, and what it was taxed at.
+ * Every supplier bill booked in a period, line by line — the mill's Purchase
+ * Detail Register.
  *
- * The report the accounts team reconciles GSTR-2B against, so the tax split is
- * on the row rather than rolled into one figure: input credit is claimed
- * CGST/SGST or IGST, never "GST".
+ * Laid out as the old ERP printed it. A bill's lines each carry their item,
+ * quantity, rate and gross; the bill's own figures — what was added or taken
+ * off, the taxable value, the tax split, the total, what has been paid and
+ * what is still owed — print once, on its first line. So a bill of four
+ * qualities is counted once in every total, and the gross of its lines plus
+ * its add/less comes to its taxable value.
+ *
+ * The tax split is kept on the bill rather than rolled into one figure: input
+ * credit is claimed CGST/SGST or IGST, never "GST", and this is the report the
+ * accounts team reconciles GSTR-2B against.
  */
 export const purchaseRegister: ReportDefinition = {
   id: 'purchase-register',
   module: 'purchase',
   title: 'Purchase Register',
   description:
-    'Every supplier bill booked in the period, with its tax split, what has been paid against it and what is still owed.',
+    'Every supplier bill booked in the period, line by line, with its tax split, what has been paid and what is still owed.',
   filters: [
     ...dateRangeFilters,
     supplierFilter,
     itemFilter,
     {
       key: 'status',
-      label: 'Status',
+      label: 'Payment status',
+      emptyLabel: 'All statuses',
       type: 'select',
       options: Object.entries(STATUS_WORDS).map(([value, label]) => ({ value, label })),
     },
@@ -58,51 +63,111 @@ export const purchaseRegister: ReportDefinition = {
     },
     searchFilter,
   ],
+  /*
+   * The workbook's columns, in order: every field the register has, one to a
+   * column, so the sheet can be sorted and filtered and added up.
+   *
+   * A bill's number, dates and supplier repeat on each of its lines, so
+   * filtering to one supplier keeps all of their lines. Its money does not:
+   * that is on the first line only, so a column's sum is the register's total
+   * and never a bill counted once per line.
+   */
   columns: [
-    { key: 'billDate', label: 'Booked On', type: 'date', width: 14 },
-    { key: 'billNumber', label: 'Our Ref', type: 'text', width: 16 },
-    { key: 'supplierInvoiceNo', label: 'Their Bill No.', type: 'text', width: 18 },
-    { key: 'supplierInvoiceDate', label: 'Their Bill Date', type: 'date', width: 14 },
+    { key: 'sr', label: 'Sr. No.', type: 'integer', width: 7 },
+    { key: 'billNumber', label: 'Entry No.', type: 'text', width: 15 },
+    { key: 'billDate', label: 'Entry Date', type: 'date', width: 11 },
+    { key: 'supplierInvoiceNo', label: 'Supplier Bill No.', type: 'text', width: 17 },
+    { key: 'supplierInvoiceDate', label: 'Supplier Bill Date', type: 'date', width: 11 },
     { key: 'supplier', label: 'Supplier', type: 'text', width: 30 },
-    { key: 'gstin', label: 'GSTIN', type: 'text', width: 18 },
-    { key: 'poNumber', label: 'Order No.', type: 'text', width: 14 },
-    { key: 'taxable', label: 'Taxable', type: 'money', total: 'sum' },
-    { key: 'cgst', label: 'CGST', type: 'money', total: 'sum' },
-    { key: 'sgst', label: 'SGST', type: 'money', total: 'sum' },
-    { key: 'igst', label: 'IGST', type: 'money', total: 'sum' },
-    { key: 'total', label: 'Bill Total', type: 'money', total: 'sum' },
-    { key: 'tds', label: 'TDS', type: 'money', total: 'sum' },
-    { key: 'paid', label: 'Paid', type: 'money', total: 'sum' },
-    { key: 'balance', label: 'Outstanding', type: 'money', total: 'sum' },
+    { key: 'gstin', label: 'GSTIN', type: 'text', width: 17 },
+    { key: 'poNumber', label: 'PO No.', type: 'text', width: 15 },
+    { key: 'grnNumber', label: 'GRN No.', type: 'text', width: 15 },
+    { key: 'itemCode', label: 'Item Code', type: 'text', width: 13 },
+    { key: 'item', label: 'Item / Quality', type: 'text', width: 28 },
+    { key: 'description', label: 'Description', type: 'text', width: 24 },
+    { key: 'hsn', label: 'HSN', type: 'text', width: 9 },
+    { key: 'gstRate', label: 'GST %', type: 'percent', width: 7 },
+    { key: 'qty', label: 'Qty', type: 'qty', unitKey: 'unit', total: 'sum', width: 11 },
+    { key: 'unit', label: 'Unit', type: 'text', width: 6 },
+    { key: 'rate', label: 'Rate', type: 'money', total: 'none', width: 10 },
+    { key: 'gross', label: 'Gross Amount', type: 'money', total: 'sum', width: 14 },
+    { key: 'addLess', label: 'Add / Less', type: 'money', total: 'sum', width: 12 },
+    { key: 'taxable', label: 'Taxable Amount', type: 'money', total: 'sum', width: 14 },
+    { key: 'cgst', label: 'CGST', type: 'money', total: 'sum', width: 12 },
+    { key: 'sgst', label: 'SGST', type: 'money', total: 'sum', width: 12 },
+    { key: 'igst', label: 'IGST', type: 'money', total: 'sum', width: 12 },
+    { key: 'gst', label: 'Total GST', type: 'money', total: 'sum', width: 12 },
+    { key: 'roundOff', label: 'Round Off', type: 'money', total: 'sum', width: 9 },
+    { key: 'total', label: 'Bill Total', type: 'money', total: 'sum', width: 14 },
+    { key: 'tds', label: 'TDS', type: 'money', total: 'sum', width: 11 },
+    { key: 'adjusted', label: 'Adjusted by Notes', type: 'money', total: 'sum', width: 12 },
+    { key: 'paid', label: 'Paid', type: 'money', total: 'sum', width: 14 },
+    { key: 'balance', label: 'Outstanding', type: 'money', total: 'sum', width: 14 },
     {
       key: 'status',
-      label: 'Status',
+      label: 'Payment Status',
       type: 'badge',
       badges: STATUS_WORDS,
       badgeTones: STATUS_TONE,
       width: 12,
     },
-    { key: 'dueDate', label: 'Due', type: 'date', width: 14 },
+    { key: 'dueDate', label: 'Due Date', type: 'date', width: 11 },
+    { key: 'reverseCharge', label: 'Reverse Charge', type: 'text', width: 9 },
+    { key: 'addLessDetails', label: 'Add / Less Details', type: 'text', width: 28 },
+    { key: 'narration', label: 'Narration', type: 'text', width: 36 },
   ],
 
-  summary: {
-    title: 'Biggest bills in this period',
-    columns: ['billDate', 'supplierInvoiceNo', 'supplier', 'taxable', 'total', 'balance', 'status'],
-    by: 'total',
-    limit: 12,
-  },
-
-  /**
-   * By supplier: billed, settled, and what is left of it.
-   *
-   * Taxable rather than the bill total leads, because that is the figure the
-   * purchase ledger and the GST return both work from.
-   */
-  pivot: {
-    rows: 'supplier',
-    values: ['taxable', 'total', 'paid', 'balance'],
-    slicers: ['status'],
-    note: 'What each supplier billed, what has gone out to them, and what is still to go.',
+  register: {
+    documentKey: 'billNumber',
+    noun: { one: 'bill', many: 'bills' },
+    lineKeys: [
+      'grnNumber',
+      'itemCode',
+      'item',
+      'description',
+      'hsn',
+      'gstRate',
+      'qty',
+      'unit',
+      'rate',
+      'gross',
+    ],
+    /*
+     * Eighteen columns across a landscape A4, which is only possible because
+     * the figures that are read together share a column: the date under the
+     * entry number, the GSTIN under the supplier, SGST under CGST, the due
+     * date under the status. What still does not fit — the add/less broken
+     * down, round off, TDS, reverse charge, the narration — prints as a note
+     * under the bill. The workbook keeps every one in its own column.
+     */
+    print: [
+      { key: 'sr', label: 'Sr.' },
+      { key: 'billNumber', sub: ['billDate', 'poNumber'], label: 'Entry No.', subLabel: 'Date' },
+      {
+        key: 'supplierInvoiceNo',
+        sub: ['supplierInvoiceDate'],
+        label: 'Bill No.',
+        subLabel: 'Bill Date',
+      },
+      { key: 'supplier', sub: ['gstin'], subLabel: 'GSTIN', wrap: true },
+      { key: 'item', sub: ['itemCode', 'description'], subLabel: 'Code', wrap: true },
+      { key: 'hsn', sub: ['gstRate'], subLabel: 'GST %' },
+      { key: 'qty' },
+      { key: 'rate' },
+      { key: 'gross', label: 'Gross' },
+      { key: 'addLess' },
+      { key: 'taxable', label: 'Taxable' },
+      { key: 'cgst', under: 'sgst', underLabel: 'SGST' },
+      { key: 'igst' },
+      { key: 'gst' },
+      { key: 'total' },
+      { key: 'paid' },
+      { key: 'balance' },
+      { key: 'status', sub: ['dueDate'], label: 'Status', subLabel: 'Due' },
+    ],
+    noteKey: 'note',
+    void: { key: 'status', value: 'CANCELLED', word: 'cancelled' },
+    monthKey: 'billDate',
   },
 
   async run({ tx, params, rowCap }) {
@@ -116,7 +181,9 @@ export const purchaseRegister: ReportDefinition = {
         return range ? { billDate: range } : {}
       })(),
       // The same clauses the Purchase Bills list runs, so the Export button on
-      // that screen reports on exactly the rows it is showing.
+      // that screen reports on exactly the rows it is showing. A bill with a
+      // line for the item is listed whole: its totals are the bill's, and
+      // printing only the one line beside them would not add up.
       ...(params.itemId ? { lines: { some: { itemId: params.itemId } } } : {}),
       // An AND rather than two more top-level keys: `status` is already set
       // above when the picker chose one, and a second `status` in the same
@@ -142,9 +209,21 @@ export const purchaseRegister: ReportDefinition = {
         : {}),
     }
 
-    // Counted before the rows are fetched, so the cap can be reported against
-    // what was really there rather than against what came back.
-    const totalRows = await tx.purchaseInvoice.count({ where })
+    /*
+     * Rows are lines, so the cap is counted in lines. Measured before anything
+     * is fetched, so a cut can be reported against what was really there: a
+     * live bill prints a row per line (one, if it somehow has none) and a
+     * cancelled bill prints one row however many lines it had.
+     */
+    const live: Prisma.PurchaseInvoiceWhereInput = {
+      AND: [where, { status: { not: 'CANCELLED' } }],
+    }
+    const [lineRows, emptyBills, cancelledBills] = await Promise.all([
+      tx.purchaseInvoiceLine.count({ where: { bill: live } }),
+      tx.purchaseInvoice.count({ where: { AND: [live, { lines: { none: {} } }] } }),
+      tx.purchaseInvoice.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
+    ])
+    const totalRows = lineRows + emptyBills + cancelledBills
 
     const bills = await tx.purchaseInvoice.findMany({
       where,
@@ -160,298 +239,147 @@ export const purchaseRegister: ReportDefinition = {
         cgst: true,
         sgst: true,
         igst: true,
+        roundOff: true,
         totalAmount: true,
+        tdsSection: true,
         tdsAmount: true,
+        noteAdjustment: true,
         paidAmount: true,
         balanceAmount: true,
         status: true,
         isReverseCharge: true,
+        notes: true,
         supplier: { select: { name: true, gstin: true } },
         po: { select: { poNumber: true } },
+        charges: {
+          select: { amount: true, chargeType: { select: { name: true } } },
+        },
+        lines: {
+          orderBy: { sortOrder: 'asc' },
+          select: {
+            description: true,
+            hsnCode: true,
+            qty: true,
+            unitPrice: true,
+            gstRate: true,
+            item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+            grnLine: { select: { grn: { select: { grnNumber: true } } } },
+          },
+        },
       },
     })
 
-    const rows = bills.map((b) => ({
-      billDate: b.billDate,
-      billNumber: b.billNumber,
-      supplierInvoiceNo: b.supplierInvoiceNo,
-      supplierInvoiceDate: b.supplierInvoiceDate,
-      supplier: b.supplier?.name ?? '',
-      gstin: b.supplier?.gstin ?? '',
-      poNumber: b.po?.poNumber ?? '',
-      taxable: Number(b.taxableAmount),
-      cgst: Number(b.cgst),
-      sgst: Number(b.sgst),
-      igst: Number(b.igst),
-      total: Number(b.totalAmount),
-      tds: Number(b.tdsAmount),
-      paid: Number(b.paidAmount),
-      balance: Number(b.balanceAmount),
-      status: b.status,
-      dueDate: b.dueDate,
-    }))
+    const rows: Array<Record<string, unknown>> = []
 
-    // Cancelled bills are listed but never counted. A cancelled bill is part
-    // of what happened; it is not part of what was bought.
-    const live = rows.filter((r) => r.status !== 'CANCELLED')
-    const cancelled = rows.length - live.length
+    for (const [n, b] of bills.entries()) {
+      const cancelled = b.status === 'CANCELLED'
+      const lines = cancelled ? [] : b.lines
+      // A whole bill or none of it: half a bill under the cap would print
+      // totals that its own lines do not add up to.
+      if (rows.length + Math.max(1, lines.length) > rowCap) break
 
-    const taxable = round2(live.reduce((s, r) => s + r.taxable, 0))
-    const gst = round2(live.reduce((s, r) => s + r.cgst + r.sgst + r.igst, 0))
-    const billed = round2(live.reduce((s, r) => s + r.total, 0))
-    const outstanding = round2(live.reduce((s, r) => s + r.balance, 0))
+      const document = {
+        sr: n + 1,
+        billNumber: b.billNumber,
+        billDate: b.billDate,
+        supplierInvoiceNo: b.supplierInvoiceNo,
+        supplierInvoiceDate: b.supplierInvoiceDate,
+        supplier: b.supplier?.name ?? '',
+        gstin: b.supplier?.gstin ?? '',
+        poNumber: b.po?.poNumber ?? '',
+        status: b.status,
+        dueDate: b.dueDate,
+      }
 
-    const withinState = round2(live.filter((r) => r.cgst > 0).reduce((s, r) => s + r.taxable, 0))
-    const otherState = round2(live.filter((r) => r.igst > 0).reduce((s, r) => s + r.taxable, 0))
-    const noGst = round2(taxable - withinState - otherState)
+      // Cancelled: listed, so the numbering has no gap, and carrying no
+      // figures, so nothing can count it. Why it went is in its narration.
+      if (cancelled) {
+        rows.push({ ...document, narration: b.notes ?? '', note: b.notes ?? '' })
+        continue
+      }
 
-    // Past the due date and not settled. Counted here rather than in the
-    // panels because it is the one figure on this report somebody has to do
-    // something about today.
-    const pastDue = live.filter(
-      (r) => r.balance > 0 && r.dueDate != null && r.dueDate < new Date()
-    )
-    const pastDueAmount = round2(pastDue.reduce((s, r) => s + r.balance, 0))
+      const gross = lines.map((l) => round2(Number(l.qty) * Number(l.unitPrice)))
+      const grossTotal = round2(gross.reduce((s, g) => s + g, 0))
+      const taxable = Number(b.taxableAmount)
+      const cgst = Number(b.cgst)
+      const sgst = Number(b.sgst)
+      const igst = Number(b.igst)
+      const roundOff = Number(b.roundOff)
+      const tds = Number(b.tdsAmount)
+      const adjusted = Number(b.noteAdjustment)
 
-    const bySupplier = new Map<string, number>()
-    for (const r of live) bySupplier.set(r.supplier, (bySupplier.get(r.supplier) ?? 0) + r.total)
+      /*
+       * Add/less is whatever takes the lines' gross to the bill's taxable
+       * value: charges on, discounts off. Worked from the two stored figures
+       * rather than re-priced, so it is exactly the gap between them and the
+       * row adds up to the paisa.
+       */
+      const addLess = round2(taxable - grossTotal)
+      const chargeTotal = round2(b.charges.reduce((s, c) => s + Number(c.amount), 0))
+      const discount = round2(grossTotal + chargeTotal - taxable)
+      const addLessParts = [
+        ...b.charges.map((c) => `${c.chargeType.name} ${signed(Number(c.amount))}`),
+        ...(Math.abs(discount) >= 0.01 ? [`Discount ${signed(-discount)}`] : []),
+      ]
 
-    const byStatus = Object.keys(STATUS_WORDS)
-      .filter((s) => s !== 'CANCELLED')
-      .map((s) => ({
-        label: STATUS_WORDS[s],
-        value: live.filter((r) => r.status === s).length,
-        tone: STATUS_TONE[s],
-      }))
-      .filter((p) => p.value > 0)
+      const narration = b.notes?.trim() ?? ''
+      // What the printed columns cannot show but a reader checking the row
+      // needs: why it does not simply add across.
+      const note = [
+        ...addLessParts,
+        Math.abs(roundOff) >= 0.01 ? `Round off ${signed(roundOff)}` : '',
+        tds > 0 ? `TDS${b.tdsSection ? ` ${b.tdsSection}` : ''} ${money(tds)}` : '',
+        Math.abs(adjusted) >= 0.01 ? `Adjusted by notes ${money(adjusted)}` : '',
+        b.isReverseCharge ? 'Reverse charge: the GST is ours to pay and is not in the bill total' : '',
+        narration,
+      ]
+        .filter(Boolean)
+        .join(' · ')
 
-    /*
-     * The biggest suppliers, and what each of them is made of.
-     *
-     * Eight, because a stacked bar with three segments needs the bar to be
-     * tall enough to divide — past about eight the segments are hairlines and
-     * the chart says less than the ranking beside it already did.
-     */
-    const topSuppliers = [...bySupplier.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8)
-      .map(([name]) => name)
+      const totals = {
+        addLess,
+        taxable,
+        cgst,
+        sgst,
+        igst,
+        gst: round2(cgst + sgst + igst),
+        roundOff,
+        total: Number(b.totalAmount),
+        tds,
+        adjusted,
+        paid: Number(b.paidAmount),
+        balance: Number(b.balanceAmount),
+        reverseCharge: b.isReverseCharge ? 'Yes' : '',
+        addLessDetails: addLessParts.join(', '),
+        narration,
+        note,
+      }
 
-    const sumBy = (supplier: string, pick: (r: (typeof live)[number]) => number) =>
-      round2(live.filter((r) => r.supplier === supplier).reduce((s, r) => s + pick(r), 0))
+      if (lines.length === 0) {
+        rows.push({ ...document, ...totals })
+        continue
+      }
 
-    const panels: Panel[] = [
-      {
-        title: 'Biggest suppliers by value billed',
-        question: 'ranking',
-        format: 'money',
-        points: topWithRest(
-          [...bySupplier].map(([label, value]) => ({ label, value: round2(value) })),
-          8
-        ),
-        note: 'Bill totals including tax. Cancelled bills are not counted.',
-      },
-      {
-        /*
-         * Concentration, which a ranking cannot show.
-         *
-         * A ranking says who is biggest. This says how much of the mill's
-         * buying rests on how few names — the question behind whether a
-         * supplier going quiet is an inconvenience or a stoppage.
-         */
-        title: 'How few suppliers make up the spend',
-        question: 'pareto',
-        format: 'money',
-        points: topWithRest(
-          [...bySupplier].map(([label, value]) => ({ label, value: round2(value) })),
-          9
-        ),
-        note: 'The line is the share reached by that supplier and every bigger one, so it ends at 100%.',
-      },
-      {
-        title: 'Settled against still owed, by supplier',
-        question: 'split',
-        format: 'money',
-        points: topSuppliers.map((s) => ({ label: s, value: round2(bySupplier.get(s) ?? 0) })),
-        series: [
-          { name: 'Paid', values: topSuppliers.map((s) => sumBy(s, (r) => r.paid)), tone: 'good' },
-          {
-            name: 'Still owed',
-            values: topSuppliers.map((s) => sumBy(s, (r) => r.balance)),
-            tone: 'warn',
-          },
-        ],
-        note: 'The eight biggest suppliers by value billed.',
-      },
-      {
-        /*
-         * The same three-way tax split as the doughnut, but per supplier.
-         *
-         * The doughnut says how much of the period carries IGST. This says
-         * which suppliers it comes from, which is the one a person can act
-         * on — an interstate supplier's credit is claimed on a different line
-         * of the return.
-         */
-        title: 'How each supplier was taxed',
-        question: 'split',
-        format: 'money',
-        points: topSuppliers.map((s) => ({ label: s, value: sumBy(s, (r) => r.taxable) })),
-        series: [
-          {
-            name: 'Within the state',
-            values: topSuppliers.map((s) =>
-              round2(
-                live
-                  .filter((r) => r.supplier === s && r.cgst > 0)
-                  .reduce((n, r) => n + r.taxable, 0)
-              )
-            ),
-          },
-          {
-            name: 'Other state (IGST)',
-            values: topSuppliers.map((s) =>
-              round2(
-                live
-                  .filter((r) => r.supplier === s && r.igst > 0)
-                  .reduce((n, r) => n + r.taxable, 0)
-              )
-            ),
-          },
-          {
-            name: 'No GST',
-            values: topSuppliers.map((s) =>
-              round2(
-                live
-                  .filter((r) => r.supplier === s && r.cgst === 0 && r.igst === 0)
-                  .reduce((n, r) => n + r.taxable, 0)
-              )
-            ),
-          },
-        ],
-        note: 'Taxable value, so each bar matches that supplier’s share of the taxable total.',
-      },
-      {
-        title: 'Where the goods were taxed',
-        question: 'composition',
-        format: 'money',
-        points: [
-          { label: 'Within the state (CGST+SGST)', value: withinState },
-          { label: 'Other state (IGST)', value: otherState },
-          { label: 'No GST charged', value: noGst },
-        ].filter((p) => p.value > 0),
-        note: 'Taxable value, so the three add up to the taxable total above.',
-      },
-      {
-        title: 'Bills by settlement',
-        question: 'comparison',
-        format: 'integer',
-        points: byStatus,
-      },
-    ]
-
-    const trendPoints = byMonth(
-      live,
-      (r) => r.billDate,
-      (r) => r.taxable
-    )
-
-    const biggest = [...bySupplier.entries()].sort((a, b) => b[1] - a[1])[0]
-    const insights: string[] = []
-    if (biggest && billed > 0) {
-      insights.push(
-        `${biggest[0]} accounts for ₹${round2(biggest[1]).toLocaleString('en-IN')} of the ₹${billed.toLocaleString('en-IN')} billed — ${Math.round((biggest[1] / billed) * 100)}% of the period.`
-      )
-    }
-    if (otherState > 0 && withinState > 0) {
-      insights.push(
-        `₹${otherState.toLocaleString('en-IN')} of taxable value came from outside the state and carries IGST, which is claimed separately from the CGST/SGST on the rest.`
-      )
-    }
-    if (outstanding > 0) {
-      insights.push(
-        `₹${outstanding.toLocaleString('en-IN')} of the ₹${billed.toLocaleString('en-IN')} billed is still owed across ${live.filter((r) => r.balance > 0).length} bills.`
-      )
-    }
-    if (noGst > 0) {
-      insights.push(
-        `₹${noGst.toLocaleString('en-IN')} of taxable value carries no GST — unregistered suppliers, or bills under reverse charge where the tax is ours to pay.`
-      )
+      lines.forEach((l, i) => {
+        const description = l.description?.trim() ?? ''
+        rows.push({
+          ...document,
+          grnNumber: l.grnLine?.grn.grnNumber ?? '',
+          itemCode: l.item.code,
+          item: l.item.name,
+          // Only when it says something the item's own name does not.
+          description: description && description !== l.item.name ? description : '',
+          hsn: l.hsnCode ?? '',
+          gstRate: Number(l.gstRate) / 100,
+          qty: Number(l.qty),
+          unit: l.item.uom?.symbol ?? '',
+          rate: Number(l.unitPrice),
+          gross: gross[i],
+          ...(i === 0 ? totals : {}),
+        })
+      })
     }
 
-    const caveats = [
-      'Booked on the bill date, not the date goods arrived. A delivery at the end of one month billed in the next falls in the later month here.',
-      cancelled > 0
-        ? `${cancelled} cancelled ${cancelled === 1 ? 'bill is' : 'bills are'} listed on the Data sheet but counted nowhere on this Dashboard.`
-        : 'No cancelled bills fell in this period.',
-      'Input credit shown is what the supplier charged. It is not a claim — reconcile against GSTR-2B before filing.',
-    ]
-
-    return {
-      rows,
-      totalRows,
-      analysis: {
-        exceptions: [
-          {
-            label: 'Past the due date',
-            value: pastDueAmount || null,
-            format: 'money',
-            basis: `across ${pastDue.length} ${pastDue.length === 1 ? 'bill' : 'bills'} already due`,
-            tone: 'bad',
-          },
-          {
-            label: 'Still owed',
-            value: outstanding || null,
-            format: 'money',
-            basis: `of ₹${billed.toLocaleString('en-IN')} billed in this period`,
-            tone: 'warn',
-          },
-        ],
-        headline:
-          live.length === 0
-            ? 'No bills were booked in this period.'
-            : `₹${billed.toLocaleString('en-IN')} billed across ${live.length} bills from ${bySupplier.size} suppliers.`,
-        kpis: [
-          {
-            label: 'Taxable value',
-            value: live.length ? taxable : null,
-            format: 'money',
-            basis: `across ${live.length} bills`,
-          },
-          {
-            label: 'GST charged',
-            value: live.length ? gst : null,
-            format: 'money',
-            basis: `on ${live.filter((r) => r.cgst + r.sgst + r.igst > 0).length} bills carrying tax`,
-          },
-          {
-            label: 'Average bill',
-            value: mean(billed, live.length),
-            format: 'money',
-            basis: live.length
-              ? `${billed.toLocaleString('en-IN')} over ${live.length} bills`
-              : 'no bills in this period',
-          },
-          {
-            label: 'Still outstanding',
-            value: live.length ? outstanding : null,
-            format: 'money',
-            basis: `of ₹${billed.toLocaleString('en-IN')} billed`,
-            tone: outstanding > 0 ? 'warn' : 'good',
-          },
-        ],
-        trend:
-          trendPoints.length > 1
-            ? {
-                title: 'Taxable value booked, by month',
-                valueLabel: 'Taxable value',
-                format: 'money',
-                points: trendPoints,
-              }
-            : undefined,
-        panels: panels.filter((p) => p.points.length > 0),
-        insights,
-        caveats,
-      },
-    }
+    return { rows, totalRows }
   },
 }

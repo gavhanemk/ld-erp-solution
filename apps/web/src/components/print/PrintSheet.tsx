@@ -103,6 +103,24 @@ export function DocumentTable({
   )
 }
 
+/**
+ * Opens the print box with the saved PDF named `fileName`.
+ *
+ * Every browser takes the PDF's filename from `document.title`, so it is set
+ * for the moment of the print and put back after.
+ */
+export function printAs(fileName?: string) {
+  const was = document.title
+  if (fileName) document.title = fileName
+  window.print()
+  // Restored on the next tick: the dialog is modal and synchronous in some
+  // browsers and deferred in others, and the title has to still be the
+  // document's own by the time anybody looks at the tab again.
+  window.setTimeout(() => {
+    document.title = was
+  }, 1000)
+}
+
 export function PrintToolbar({
   backHref,
   backLabel,
@@ -132,17 +150,7 @@ export function PrintToolbar({
    * adds is that the outcome most people want is named on a control rather
    * than described in a sentence they have to read first.
    */
-  const print = () => {
-    const was = document.title
-    if (fileName) document.title = fileName
-    window.print()
-    // Restored on the next tick: the dialog is modal and synchronous in some
-    // browsers and deferred in others, and the title has to still be the
-    // document's own by the time anybody looks at the tab again.
-    window.setTimeout(() => {
-      document.title = was
-    }, 1000)
-  }
+  const print = () => printAs(fileName)
 
   return (
     <div className="no-print print-toolbar">

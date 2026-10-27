@@ -25,7 +25,7 @@ import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/Pur
 import { BillItems, BillDetailDialog, BillFilesDialog } from '@/components/purchase/BillDetail'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
-import { describeReport, downloadReport } from '@/lib/reportDownload'
+import { describeReport, downloadReport, openRegisterPrint } from '@/lib/reportDownload'
 import {
   asDate,
   asNumber,
@@ -256,18 +256,22 @@ function PurchaseBillsTable() {
    * exactly this. A report answering a different question from the one on
    * screen, and saying nothing about it, would be worse than no button.
    */
+  const reportParams = () => {
+    const params: Record<string, string> = {}
+    if (debounced) params.q = debounced
+    if (status) params.status = status
+    if (supplierId) params.supplierId = supplierId
+    if (itemId) params.itemId = itemId
+    if (fromDate) params.from = fromDate
+    if (toDate) params.to = toDate
+    if (overdueOnly) params.overdue = 'true'
+    return params
+  }
+
   const exportReport = async () => {
     setError(null)
     try {
-      const params: Record<string, string> = {}
-      if (debounced) params.q = debounced
-      if (status) params.status = status
-      if (supplierId) params.supplierId = supplierId
-      if (itemId) params.itemId = itemId
-      if (fromDate) params.from = fromDate
-      if (toDate) params.to = toDate
-      if (overdueOnly) params.overdue = 'true'
-      setMessage(describeReport(await downloadReport('purchase-register', 'xlsx', params)))
+      setMessage(describeReport(await downloadReport('purchase-register', 'xlsx', reportParams())))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The report could not be built.')
     }
@@ -465,7 +469,14 @@ function PurchaseBillsTable() {
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
+          <ExportButton
+            onExport={exportList}
+            onReport={exportReport}
+            reportLabel="Purchase Register (.xlsx)"
+            reportHint="Every bill line with its tax split, on one sheet"
+            onPdf={() => openRegisterPrint('purchase-register', reportParams())}
+            disabled={loading}
+          />
           {/* Expense and service bills — electricity, rent, a contractor — now
             live on their own screen with TDS. The way there stays here for
             anyone who still looks for it beside Book Bill. */}

@@ -175,7 +175,7 @@ function cellValue(c: ReportColumn, v: unknown): ExcelJS.CellValue {
   return plainCell(c, v)
 }
 
-function colLetter(n: number): string {
+export function colLetter(n: number): string {
   let s = ''
   while (n > 0) {
     const r = (n - 1) % 26

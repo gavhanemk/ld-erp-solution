@@ -8,6 +8,8 @@ import { periodLabel } from '../reports/definitions/shared'
 import { buildCsv, buildWorkbook } from '../reports/workbook'
 import { describeFilters, type AppliedFilter } from '../reports/filters'
 import { countsInWords } from '../reports/wording'
+import { COMPANY_SELECT, letterhead, registerTotals, type RegisterCompany } from '../reports/register'
+import { buildRegisterWorkbook } from '../reports/workbook/register'
 
 const router = Router()
 
@@ -48,7 +50,7 @@ router.get('/', async (req: AuthRequest, res) => {
 async function runReport(
   id: string,
   params: ReportParams
-): Promise<{ result: ReportResult; applied: AppliedFilter[] }> {
+): Promise<{ result: ReportResult; applied: AppliedFilter[]; company: RegisterCompany | null }> {
   const def = findReport(id)
   if (!def) throw new AppError('No such report', 404, 'NOT_FOUND')
 
@@ -64,6 +66,8 @@ async function runReport(
     async (tx) => ({
       result: await def.run({ prisma, tx, params, rowCap: ROW_CAP }),
       applied: await describeFilters(def, params, tx),
+      // A register prints under the letterhead, as the old ERP's did.
+      company: def.register ? await tx.company.findFirst({ select: COMPANY_SELECT }) : null,
     }),
     { timeout: 120_000, maxWait: 15_000 }
   )
@@ -85,7 +89,7 @@ function guard(id: string, req: AuthRequest) {
 router.get('/:id/run', async (req: AuthRequest, res) => {
   const def = guard(req.params.id, req)
   const params = req.query as ReportParams
-  const { result, applied } = await runReport(def.id, params)
+  const { result, applied, company } = await runReport(def.id, params)
 
   res.json({
     success: true,
@@ -98,8 +102,21 @@ router.get('/:id/run', async (req: AuthRequest, res) => {
       totalRows: result.totalRows ?? result.rows.length,
       truncated: Boolean(result.totalRows && result.totalRows > result.rows.length),
       columns: def.columns,
-      /** The first 100, for the plain table underneath. */
-      preview: result.rows.slice(0, 100),
+      /**
+       * How a register prints, and its totals — worked out here, once, so
+       * the screen, the PDF and the workbook all print the same figures.
+       */
+      register: def.register
+        ? {
+            spec: def.register,
+            totals: registerTotals(def, result.rows),
+            letterhead: letterhead(company),
+            generatedAt: new Date().toISOString(),
+            generatedBy: req.user?.name ?? null,
+          }
+        : undefined,
+      /** The first 100, for the plain table underneath. A register prints every row. */
+      preview: def.register ? [] : result.rows.slice(0, 100),
       /**
        * Every row the query returned, capped the same way the export is.
        *
@@ -117,7 +134,7 @@ router.get('/:id/export', async (req: AuthRequest, res) => {
   const def = guard(req.params.id, req)
   const format = req.query.format === 'csv' ? 'csv' : 'xlsx'
   const params = req.query as ReportParams
-  const { result, applied } = await runReport(def.id, params)
+  const { result, applied, company } = await runReport(def.id, params)
 
   const stamp = new Date().toISOString().slice(0, 10)
   const partial = Boolean(result.totalRows && result.totalRows > result.rows.length)
@@ -127,6 +144,28 @@ router.get('/:id/export', async (req: AuthRequest, res) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8')
     res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
     res.send(buildCsv(def, result.rows))
+    return
+  }
+
+  // A register is one sheet: the register, nothing behind it.
+  if (def.register) {
+    const buffer = await buildRegisterWorkbook({
+      def,
+      rows: result.rows,
+      totals: registerTotals(def, result.rows),
+      company,
+      periodLabel: periodLabel(params),
+      appliedFilters: applied,
+      runBy: req.user?.name ?? 'Unknown',
+      truncatedFrom: partial ? result.totalRows : undefined,
+    })
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+    res.setHeader('Content-Length', String(buffer.length))
+    res.setHeader('X-Report-Charts', '0')
+    res.setHeader('X-Report-Pivots', '0')
+    res.setHeader('X-Report-Rows', String(result.rows.length))
+    res.send(buffer)
     return
   }
 

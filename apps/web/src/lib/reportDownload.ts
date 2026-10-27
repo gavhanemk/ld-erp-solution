@@ -61,6 +61,19 @@ export async function downloadReport(
 }
 
 /**
+ * Opens a register's printed page in a new tab, with the same filters, and
+ * has it bring up the print box — where the browser prints it or saves it as
+ * the PDF.
+ *
+ * A new tab so the register being read stays where it was. Opened inside the
+ * click, so no pop-up blocker takes it for an advert.
+ */
+export function openRegisterPrint(reportId: string, params: Record<string, string>) {
+  const qs = new URLSearchParams({ ...params, print: '1' })
+  window.open(`/print/report/${reportId}?${qs}`, '_blank', 'noopener')
+}
+
+/**
  * What the file turned out to hold, as a sentence.
  *
  * Shared by the report screen and the four purchase lists so they describe

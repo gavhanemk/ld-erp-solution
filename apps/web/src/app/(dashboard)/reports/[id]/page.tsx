@@ -2,14 +2,16 @@
 
 import { use, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { AlertCircle, ArrowLeft, RefreshCw } from 'lucide-react'
+import { useSearchParams } from 'next/navigation'
+import { AlertCircle, ArrowLeft, Printer, RefreshCw } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ReportDashboard, TONE, type Analysis, type Tone } from '@/components/reports/Dashboard'
 import { PivotTable } from '@/components/reports/PivotTable'
 import { MODULE_WORDS, moduleReportsHref } from '@/components/reports/modules'
 import { FilterBar, type Filter } from '@/components/reports/FilterBar'
-import { describeReport, downloadReport } from '@/lib/reportDownload'
+import { RegisterSheet, type RegisterData } from '@/components/reports/RegisterSheet'
+import { describeReport, downloadReport, openRegisterPrint } from '@/lib/reportDownload'
 import { formatDate } from '@/lib/utils'
 
 interface Column {
@@ -25,7 +27,9 @@ interface Column {
 interface RunResult {
   report: { id: string; title: string; description: string }
   periodLabel: string
-  analysis: Analysis
+  appliedFilters: RegisterData['appliedFilters']
+  /** Absent on a register, which has no dashboard. */
+  analysis?: Analysis
   rowCount: number
   totalRows: number
   truncated: boolean
@@ -33,6 +37,8 @@ interface RunResult {
   preview: Array<Record<string, unknown>>
   /** Every row the query returned, for the pivot table to regroup over. */
   rows: Array<Record<string, unknown>>
+  /** Present when the report is laid out as a register rather than a dashboard. */
+  register?: RegisterData['register']
 }
 
 const money = (v: number) =>
@@ -78,9 +84,17 @@ function cellText(c: Column, v: unknown): string {
 
 export default function ReportPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
+  const search = useSearchParams()
 
   const [filters, setFilters] = useState<Filter[]>([])
-  const [values, setValues] = useState<Record<string, string>>({})
+  /*
+   * Seeded from the address, so a link to a filtered report — the way back
+   * from its printed page, or a refresh — opens on the same question rather
+   * than on everything on record.
+   */
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries([...search.entries()].filter(([k, v]) => v && k !== 'print'))
+  )
   /** What the result on screen was actually built from, so the bar can say
       when the two have drifted apart. */
   const [ranWith, setRanWith] = useState<Record<string, string>>({})
@@ -154,6 +168,9 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
       // answered means a failed run leaves the screen showing the previous
       // period's figures under the new period's filters.
       setRanWith(asked)
+      // And into the address, so a refresh asks the same question again.
+      const qs = new URLSearchParams(asked).toString()
+      window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`)
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?'
@@ -183,6 +200,11 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
     }
   }
 
+  // The printed register is the one on screen, so it prints what was last
+  // run — not filters typed since and not yet run.
+  const isRegister = Boolean(result?.register)
+  const printRegister = () => openRegisterPrint(id, ranWith)
+
   return (
     <div className="space-y-5">
       <div className="page-header flex-wrap gap-3">
@@ -200,7 +222,22 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
           <button className="btn-ghost" onClick={() => void run()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <ExportButton onExport={exportFile} disabled={loading || !result} />
+          {isRegister && (
+            <button
+              className="btn-ghost"
+              onClick={printRegister}
+              disabled={loading}
+              title="Print, or save as PDF"
+            >
+              <Printer size={15} />
+              <span className="hidden sm:inline">Print</span>
+            </button>
+          )}
+          <ExportButton
+            onExport={exportFile}
+            onPdf={isRegister ? printRegister : undefined}
+            disabled={loading || !result}
+          />
         </div>
       </div>
 
@@ -230,6 +267,9 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
 
       {loading && !result ? (
         <p className="text-muted-foreground text-sm">Running...</p>
+      ) : result?.register ? (
+        // A register is read as a ledger: the sheet, and nothing drawn over it.
+        <RegisterSheet data={result as RegisterData} mode="screen" />
       ) : result ? (
         <>
           <p className="text-muted-foreground text-xs">
@@ -242,7 +282,9 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
             )}
           </p>
 
-          <ReportDashboard analysis={result.analysis} rowCount={result.rowCount} />
+          {result.analysis && (
+            <ReportDashboard analysis={result.analysis} rowCount={result.rowCount} />
+          )}
 
           {result.rows.length > 0 && (
             <PivotTable

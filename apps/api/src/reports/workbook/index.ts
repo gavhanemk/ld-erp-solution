@@ -26,6 +26,8 @@ export async function buildWorkbook(opts: {
   appliedFilters?: AppliedFilter[]
 }): Promise<{ buffer: Buffer; chartCount: number; pivotCount: number; partial: boolean }> {
   const { def, result, params, runBy, periodLabel, appliedFilters = [] } = opts
+  // Only a register has no analysis, and a register never comes here.
+  const analysis = result.analysis ?? { kpis: [], panels: [], insights: [], caveats: [] }
   const meta = {
     runBy,
     runAt: new Date(),
@@ -42,10 +44,10 @@ export async function buildWorkbook(opts: {
 
   // 1 — ordinary workbook building. Dashboard first, so it opens on it, then
   //     the Pivot to work in, then the rows it all comes from, then Notes.
-  const specs = buildDashboard(wb, def, result.analysis, params, meta, result.rows)
+  const specs = buildDashboard(wb, def, analysis, params, meta, result.rows)
   const pivot = buildPivot(wb, def, result.rows)
   buildData(wb, def, result.rows)
-  buildNotes(wb, def, result.analysis, params, meta)
+  buildNotes(wb, def, analysis, params, meta)
 
   // 2 — a real .xlsx buffer
   const serialised = Buffer.from(await wb.xlsx.writeBuffer())
