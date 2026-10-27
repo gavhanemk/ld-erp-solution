@@ -2,15 +2,16 @@
 
 import { use, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { AlertCircle, ArrowLeft, RefreshCw } from 'lucide-react'
+import { useSearchParams } from 'next/navigation'
+import { AlertCircle, ArrowLeft, FileText, LayoutDashboard, Printer, RefreshCw } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
-import { ReportDashboard, TONE, type Analysis, type Tone } from '@/components/reports/Dashboard'
-import { PivotTable } from '@/components/reports/PivotTable'
+import { ReportDashboard, type Analysis, type Tone } from '@/components/reports/Dashboard'
+import { SummaryTable } from '@/components/reports/SummaryTable'
 import { MODULE_WORDS, moduleReportsHref } from '@/components/reports/modules'
 import { FilterBar, type Filter } from '@/components/reports/FilterBar'
-import { describeReport, downloadReport } from '@/lib/reportDownload'
-import { formatDate } from '@/lib/utils'
+import { RegisterSheet, type RegisterData } from '@/components/reports/RegisterSheet'
+import { describeReport, downloadReport, openRegisterPrint } from '@/lib/reportDownload'
 
 interface Column {
   key: string
@@ -25,62 +26,33 @@ interface Column {
 interface RunResult {
   report: { id: string; title: string; description: string }
   periodLabel: string
-  analysis: Analysis
+  appliedFilters: RegisterData['appliedFilters']
+  /** The KPI Summary tab. Absent on a report that has none. */
+  analysis?: Analysis
   rowCount: number
   totalRows: number
   truncated: boolean
   columns: Column[]
-  preview: Array<Record<string, unknown>>
-  /** Every row the query returned, for the pivot table to regroup over. */
+  /** Every row the query returned: the register, and the KPI tab's totals by group. */
   rows: Array<Record<string, unknown>>
-}
-
-const money = (v: number) =>
-  v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-
-/**
- * A status as a badge, the same as the export prints it.
- *
- * Without this the preview showed the raw enum — COMPLETED, SENT — beside an
- * exported sheet that showed "Completed" and "Sent" on a tinted cell, and the
- * two looked like different reports. The word and the colour both come from
- * the column definition rather than from the value's spelling.
- */
-function Badge({ column, value }: { column: Column; value: unknown }) {
-  const raw = String(value)
-  const word = column.badges?.[raw] ?? raw
-  const tone = column.badgeTones?.[raw]
-  if (!tone) return <>{word}</>
-  return (
-    <span
-      className="inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium"
-      style={{
-        background: `color-mix(in srgb, ${TONE[tone]} 16%, transparent)`,
-        color: TONE[tone],
-      }}
-    >
-      {word}
-    </span>
-  )
-}
-
-function cellText(c: Column, v: unknown): string {
-  if (v == null || v === '') return '—'
-  if (c.type === 'date') return formatDate(String(v))
-  if (c.type === 'money') return `₹${money(Number(v))}`
-  if (c.type === 'percent') return `${(Number(v) * 100).toFixed(1)}%`
-  if (c.type === 'qty') {
-    return `${Number(v).toLocaleString('en-IN', { maximumFractionDigits: 3 })}${c.unit ? ` ${c.unit}` : ''}`
-  }
-  if (c.type === 'integer') return Number(v).toLocaleString('en-IN')
-  return String(v)
+  register: RegisterData['register']
 }
 
 export default function ReportPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
+  const search = useSearchParams()
 
   const [filters, setFilters] = useState<Filter[]>([])
-  const [values, setValues] = useState<Record<string, string>>({})
+  /*
+   * Seeded from the address, so a link to a filtered report — the way back
+   * from its printed page, or a refresh — opens on the same question rather
+   * than on everything on record.
+   */
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      [...search.entries()].filter(([k, v]) => v && k !== 'print' && k !== 'tab')
+    )
+  )
   /** What the result on screen was actually built from, so the bar can say
       when the two have drifted apart. */
   const [ranWith, setRanWith] = useState<Record<string, string>>({})
@@ -89,10 +61,25 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
-  /** What the report's own Pivot sheet defaults to, so the on-screen one opens the same way. */
-  const [pivotDefaults, setPivotDefaults] = useState<{ rows?: string; values?: string }>({})
   /** The report's module, for the way back to that module's reports. */
   const [module, setModule] = useState<string | null>(null)
+  /*
+   * Which tab is showing. A report opens on its summary — the KPIs, what
+   * needs attention and the totals — with the detailed report, the one the
+   * PDF prints, on the tab beside it. `tab=report` in the address opens on
+   * the detailed one, which is where the way back from the printed page goes.
+   */
+  const [view, setView] = useState<'summary' | 'report'>(() =>
+    search.get('tab') === 'report' ? 'report' : 'summary'
+  )
+
+  /** The address for these filters and this tab, so a refresh lands where it was. */
+  const keepAddress = (asked: Record<string, string>, tab: 'summary' | 'report') => {
+    const q = new URLSearchParams(asked)
+    if (tab === 'report') q.set('tab', 'report')
+    const qs = q.toString()
+    window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`)
+  }
 
   // The definition, for the filter bar. Fetched from the same registry the
   // server runs from, so a filter added there appears here with no change.
@@ -104,17 +91,11 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
             id: string
             module: string
             filters: Filter[]
-            pivot?: { rows: string | string[]; values: string[] }
           }>
         }>('/reports')
         const mine = res.data.find((r) => r.id === id)
         setModule(mine?.module ?? null)
         setFilters(mine?.filters ?? [])
-        const rowsSpec = mine?.pivot?.rows
-        setPivotDefaults({
-          rows: Array.isArray(rowsSpec) ? rowsSpec[0] : rowsSpec,
-          values: mine?.pivot?.values?.[0],
-        })
 
         const needed = [...new Set((mine?.filters ?? []).map((f) => f.optionsFrom).filter(Boolean))]
         const loaded: Record<string, Array<{ id: string; name: string }>> = {}
@@ -154,6 +135,8 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
       // answered means a failed run leaves the screen showing the previous
       // period's figures under the new period's filters.
       setRanWith(asked)
+      // And into the address, so a refresh asks the same question again.
+      keepAddress(asked, view)
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?'
@@ -161,7 +144,13 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
     } finally {
       setLoading(false)
     }
-  }, [id, values])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keepAddress is redrawn each render
+  }, [id, values, view])
+
+  const showTab = (tab: 'summary' | 'report') => {
+    setView(tab)
+    keepAddress(ranWith, tab)
+  }
 
   // Runs once on arrival with no filters, so the screen is never empty.
   useEffect(() => {
@@ -183,6 +172,11 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
     }
   }
 
+  // The printed report is the one on screen, so it prints what was last run
+  // — not filters typed since and not yet run.
+  const printRegister = () => openRegisterPrint(id, ranWith)
+  const hasSummary = Boolean(result?.analysis)
+
   return (
     <div className="space-y-5">
       <div className="page-header flex-wrap gap-3">
@@ -200,7 +194,20 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
           <button className="btn-ghost" onClick={() => void run()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <ExportButton onExport={exportFile} disabled={loading || !result} />
+          <button
+            className="btn-ghost"
+            onClick={printRegister}
+            disabled={loading || !result}
+            title="Print, or save as PDF"
+          >
+            <Printer size={15} />
+            <span className="hidden sm:inline">Print</span>
+          </button>
+          <ExportButton
+            onExport={exportFile}
+            onPdf={printRegister}
+            disabled={loading || !result}
+          />
         </div>
       </div>
 
@@ -232,79 +239,54 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         <p className="text-muted-foreground text-sm">Running...</p>
       ) : result ? (
         <>
-          <p className="text-muted-foreground text-xs">
-            {result.periodLabel} · {result.rowCount.toLocaleString('en-IN')} {result.rowCount === 1 ? 'row' : 'rows'}
-            {result.truncated && (
-              <span className="text-amber-400">
-                {' '}
-                of {result.totalRows.toLocaleString('en-IN')} — the export will be marked PARTIAL
-              </span>
-            )}
-          </p>
-
-          <ReportDashboard analysis={result.analysis} rowCount={result.rowCount} />
-
-          {result.rows.length > 0 && (
-            <PivotTable
-              columns={result.columns}
-              rows={result.rows}
-              defaultRowKey={pivotDefaults.rows}
-              defaultValueKey={pivotDefaults.values}
-            />
+          {hasSummary && (
+            <div className="border-border bg-secondary inline-flex rounded-lg border p-1" role="tablist">
+              {(
+                [
+                  { key: 'summary', label: 'Summary', icon: LayoutDashboard },
+                  { key: 'report', label: 'Detailed Report', icon: FileText },
+                ] as const
+              ).map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={view === t.key}
+                  onClick={() => showTab(t.key)}
+                  className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                    view === t.key
+                      ? 'bg-card text-foreground font-medium shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  <t.icon size={15} /> {t.label}
+                </button>
+              ))}
+            </div>
           )}
 
-          {result.preview.length > 0 && (
-            <div className="glass-card overflow-hidden p-0">
-              <div className="border-border flex items-center justify-between border-b px-4 py-2.5">
-                <h3 className="text-foreground text-sm font-semibold">The rows</h3>
-                <span className="text-muted-foreground text-xs">
-                  first {result.preview.length} of {result.rowCount.toLocaleString('en-IN')} — every
-                  row is in the export
-                </span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="subtable w-full">
-                  <thead>
-                    <tr>
-                      {result.columns.map((c) => (
-                        <th
-                          key={c.key}
-                          className={
-                            ['money', 'qty', 'integer', 'percent'].includes(c.type)
-                              ? 'text-right'
-                              : undefined
-                          }
-                        >
-                          {c.label}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.preview.map((r, i) => (
-                      <tr key={i}>
-                        {result.columns.map((c) => (
-                          <td
-                            key={c.key}
-                            className={
-                              ['money', 'qty', 'integer', 'percent'].includes(c.type)
-                                ? 'whitespace-nowrap text-right tabular-nums'
-                                : 'whitespace-nowrap'
-                            }
-                          >
-                            {c.type === 'badge' && r[c.key] != null && r[c.key] !== '' ? (
-                              <Badge column={c} value={r[c.key]} />
-                            ) : (
-                              cellText(c, r[c.key])
-                            )}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+          {view === 'summary' && result.analysis ? (
+            <>
+              <p className="text-muted-foreground text-xs">
+                {result.periodLabel} · {result.rowCount.toLocaleString('en-IN')}{' '}
+                {result.rowCount === 1 ? 'row' : 'rows'}
+                {result.truncated && (
+                  <span className="text-amber-400">
+                    {' '}
+                    of {result.totalRows.toLocaleString('en-IN')} — the export will be marked PARTIAL
+                  </span>
+                )}
+              </p>
+
+              {/* Figures only: the KPI cards, one table of totals under them,
+                then what needs attention. No charts. */}
+              <ReportDashboard analysis={result.analysis}>
+                <SummaryTable grids={result.register.summary} />
+              </ReportDashboard>
+            </>
+          ) : (
+            // The detailed report: the sheet the PDF prints and the workbook holds.
+            <RegisterSheet data={result as RegisterData} mode="screen" />
           )}
         </>
       ) : null}

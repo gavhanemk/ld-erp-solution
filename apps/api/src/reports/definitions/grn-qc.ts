@@ -266,6 +266,15 @@ export const grnQcRegister: ReportDefinition = {
     note: 'Open a supplier to see which items were rejected. Pick a UOM before reading a quantity total.',
   },
 
+  // Printed as a register, its lines grouped under each receipt: the GRN number
+  // and date, order and supplier print once, on the first line, as the old ERP's
+  // registers did.
+  register: {
+    documentKey: 'grnNumber',
+    noun: { one: 'GRN', many: 'GRNs' },
+    documentColumns: ['grnNumber', 'grnDate', 'poNumber', 'supplier'],
+  },
+
   async run(ctx) {
     const { rows: all, totalRows } = await qcRows(ctx)
     const rows =

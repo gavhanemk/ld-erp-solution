@@ -103,6 +103,15 @@ export const indentAgainstPo: ReportDefinition = {
     note: 'Quantities in different units share these columns. Pick a UOM before reading a total.',
   },
 
+  // Printed as a register, its lines grouped under each requisition: the date,
+  // requisition number, department and MO print once, on the first line, as the
+  // old ERP's registers did.
+  register: {
+    documentKey: 'mrNumber',
+    noun: { one: 'requisition', many: 'requisitions' },
+    documentColumns: ['requestDate', 'mrNumber', 'department', 'moNumber'],
+  },
+
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)
     // Orders the report counts: not cancelled, not in the recycle bin.

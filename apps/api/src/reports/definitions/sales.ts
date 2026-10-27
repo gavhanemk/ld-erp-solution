@@ -52,6 +52,15 @@ export const salesRegister: ReportDefinition = {
   summary: { title: 'Biggest invoice lines', columns: ['invoiceDate', 'invoiceNumber', 'customer', 'item', 'qty', 'taxable'], by: 'taxable', limit: 12 },
   pivot: { rows: ['customer', 'item'], values: ['qty', 'taxable', 'amount'], slicers: ['brand', 'style'], note: 'Open a customer to see what they bought.' },
 
+  // Printed as a register, its lines grouped under each invoice: the date,
+  // invoice number, customer, GSTIN and place of supply print once, on the first
+  // line, as the old ERP's registers did.
+  register: {
+    documentKey: 'invoiceNumber',
+    noun: { one: 'invoice', many: 'invoices' },
+    documentColumns: ['invoiceDate', 'invoiceNumber', 'customer', 'gstin', 'placeOfSupply'],
+  },
+
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)
     const invoice: Prisma.SalesInvoiceWhereInput = {
@@ -168,6 +177,15 @@ export const orderBook: ReportDefinition = {
   summary: { title: 'Latest orders', columns: ['soNumber', 'customer', 'item', 'pending', 'daysLate'], by: 'daysLate', limit: 12 },
   pivot: { rows: ['customer', 'soNumber'], values: ['pending', 'pendingValue'], slicers: ['status'] },
 
+  // Printed as a register, its lines grouped under each order: the order number,
+  // its dates, customer, buyer's PO and status print once, on the first line, as
+  // the old ERP's registers did.
+  register: {
+    documentKey: 'soNumber',
+    noun: { one: 'order', many: 'orders' },
+    documentColumns: ['soNumber', 'orderDate', 'deliveryDate', 'daysLate', 'customer', 'buyerPo', 'status'],
+  },
+
   async run({ tx, params, rowCap }) {
     const today = new Date()
     today.setHours(0, 0, 0, 0)
@@ -275,6 +293,15 @@ export const dispatchRegister: ReportDefinition = {
   ],
   pivot: { rows: ['customer', 'item'], values: ['qty'], slicers: ['status', 'store'] },
 
+  // Printed as a register, its lines grouped under each challan: the date,
+  // challan number, customer, order, transport and invoice print once, on the
+  // first line, as the old ERP's registers did.
+  register: {
+    documentKey: 'dcNumber',
+    noun: { one: 'challan', many: 'challans' },
+    documentColumns: ['dcDate', 'dcNumber', 'customer', 'soNumber', 'transporter', 'lrNumber', 'eWayBill', 'invoice', 'status'],
+  },
+
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)
     const where: Prisma.DeliveryChallanLineWhereInput = {
@@ -366,6 +393,9 @@ export const customerOutstanding: ReportDefinition = {
   ],
   pivot: { rows: ['customer', 'bucket'], values: ['balance'] },
 
+  // Printed as a register, one row to a line; its totals count invoices.
+  register: { noun: { one: 'invoice', many: 'invoices' } },
+
   async run({ tx, params, rowCap }) {
     const today = new Date()
     today.setHours(0, 0, 0, 0)
@@ -442,6 +472,9 @@ export const brokerageReport: ReportDefinition = {
   ],
   pivot: { rows: ['broker', 'customer'], values: ['taxable', 'brokerage'] },
 
+  // Printed as a register, one row to a line; its totals count invoices.
+  register: { noun: { one: 'invoice', many: 'invoices' } },
+
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)
     const where: Prisma.SalesInvoiceWhereInput = {
@@ -509,6 +542,15 @@ export const salesReturnsRegister: ReportDefinition = {
     { key: 'reason', label: 'Reason', type: 'text', width: 30 },
   ],
   pivot: { rows: ['customer', 'item'], values: ['qty', 'taxable'], slicers: ['kind'] },
+
+  // Printed as a register, its lines grouped under each note: the date, note
+  // number, kind, customer and invoice print once, on the first line, as the old
+  // ERP's registers did.
+  register: {
+    documentKey: 'noteNumber',
+    noun: { one: 'note', many: 'notes' },
+    documentColumns: ['noteDate', 'noteNumber', 'kind', 'customer', 'invoice'],
+  },
 
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)

@@ -5,9 +5,19 @@ import { userCan, type AuthRequest } from '../middleware/auth'
 import { REPORTS, findReport } from '../reports/registry'
 import { ROW_CAP, type ReportParams, type ReportResult } from '../reports/types'
 import { periodLabel } from '../reports/definitions/shared'
-import { buildCsv, buildWorkbook } from '../reports/workbook'
+import { buildCsv } from '../reports/workbook'
 import { describeFilters, type AppliedFilter } from '../reports/filters'
 import { countsInWords } from '../reports/wording'
+import {
+  COMPANY_SELECT,
+  letterhead,
+  registerTotals,
+  resolveColumns,
+  resolveRegister,
+  type RegisterCompany,
+} from '../reports/register'
+import { buildRegisterWorkbook } from '../reports/workbook/register'
+import { summaryGrids } from '../reports/summary'
 
 const router = Router()
 
@@ -48,7 +58,7 @@ router.get('/', async (req: AuthRequest, res) => {
 async function runReport(
   id: string,
   params: ReportParams
-): Promise<{ result: ReportResult; applied: AppliedFilter[] }> {
+): Promise<{ result: ReportResult; applied: AppliedFilter[]; company: RegisterCompany | null }> {
   const def = findReport(id)
   if (!def) throw new AppError('No such report', 404, 'NOT_FOUND')
 
@@ -64,6 +74,8 @@ async function runReport(
     async (tx) => ({
       result: await def.run({ prisma, tx, params, rowCap: ROW_CAP }),
       applied: await describeFilters(def, params, tx),
+      // Every report prints under the letterhead, as the old ERP's registers did.
+      company: await tx.company.findFirst({ select: COMPANY_SELECT }),
     }),
     { timeout: 120_000, maxWait: 15_000 }
   )
@@ -85,7 +97,10 @@ function guard(id: string, req: AuthRequest) {
 router.get('/:id/run', async (req: AuthRequest, res) => {
   const def = guard(req.params.id, req)
   const params = req.query as ReportParams
-  const { result, applied } = await runReport(def.id, params)
+  const { result, applied, company } = await runReport(def.id, params)
+  const columns = resolveColumns(def)
+  const spec = resolveRegister(def, columns)
+  const totals = registerTotals(def, result.rows, columns, spec)
 
   res.json({
     success: true,
@@ -93,31 +108,51 @@ router.get('/:id/run', async (req: AuthRequest, res) => {
       report: { id: def.id, title: def.title, description: def.description },
       periodLabel: periodLabel(params),
       appliedFilters: applied,
+      /** The Summary tab: KPIs, charts and the rest of the dashboard. */
       analysis: result.analysis,
       rowCount: result.rows.length,
       totalRows: result.totalRows ?? result.rows.length,
       truncated: Boolean(result.totalRows && result.totalRows > result.rows.length),
-      columns: def.columns,
-      /** The first 100, for the plain table underneath. */
-      preview: result.rows.slice(0, 100),
+      columns,
+      /**
+       * The Report tab: how the register prints, and its totals — worked out
+       * here, once, so the screen, the PDF and the workbook all print the
+       * same figures.
+       */
+      register: {
+        spec,
+        totals,
+        /** The Summary tab's tables — the same ones the workbook's Summary sheet holds. */
+        summary: summaryGrids(def, result.rows, columns, spec, totals.grand),
+        letterhead: letterhead(company),
+        generatedAt: new Date().toISOString(),
+        generatedBy: req.user?.name ?? null,
+      },
       /**
        * Every row the query returned, capped the same way the export is.
        *
-       * The on-screen pivot table regroups over this rather than the preview
-       * — a cross-tab built from the first 100 rows of a register sorted by
-       * date would silently answer for a fortnight while claiming to answer
-       * for the quarter that was actually asked for.
+       * The register prints all of them, and the Summary tab's totals by
+       * group regroup over the same rows — a cross-tab built from the first
+       * hundred of a register sorted by date would silently answer for a
+       * fortnight while claiming to answer for the quarter that was asked for.
        */
       rows: result.rows,
     },
   })
 })
 
+/**
+ * The files.
+ *
+ * `xlsx` is the workbook of two sheets — Summary, the report screen's
+ * Summary tab in figures, and Data, the detailed report — and nothing else.
+ * `csv` is the rows for another system.
+ */
 router.get('/:id/export', async (req: AuthRequest, res) => {
   const def = guard(req.params.id, req)
   const format = req.query.format === 'csv' ? 'csv' : 'xlsx'
   const params = req.query as ReportParams
-  const { result, applied } = await runReport(def.id, params)
+  const { result, applied, company } = await runReport(def.id, params)
 
   const stamp = new Date().toISOString().slice(0, 10)
   const partial = Boolean(result.totalRows && result.totalRows > result.rows.length)
@@ -130,21 +165,29 @@ router.get('/:id/export', async (req: AuthRequest, res) => {
     return
   }
 
-  const { buffer, chartCount, pivotCount } = await buildWorkbook({
+  const columns = resolveColumns(def)
+  const spec = resolveRegister(def, columns)
+  const totals = registerTotals(def, result.rows, columns, spec)
+  const buffer = await buildRegisterWorkbook({
     def,
-    result,
-    params,
-    runBy: req.user?.name ?? 'Unknown',
+    columns,
+    spec,
+    rows: result.rows,
+    totals,
+    analysis: result.analysis,
+    grids: summaryGrids(def, result.rows, columns, spec, totals.grand),
+    company,
     periodLabel: periodLabel(params),
     appliedFilters: applied,
+    runBy: req.user?.name ?? 'Unknown',
+    truncatedFrom: partial ? result.totalRows : undefined,
   })
-
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
   // Measured off the finished file, not predicted from the row count.
   res.setHeader('Content-Length', String(buffer.length))
-  res.setHeader('X-Report-Charts', String(chartCount))
-  res.setHeader('X-Report-Pivots', String(pivotCount))
+  res.setHeader('X-Report-Charts', '0')
+  res.setHeader('X-Report-Pivots', '0')
   res.setHeader('X-Report-Rows', String(result.rows.length))
   res.send(buffer)
 })

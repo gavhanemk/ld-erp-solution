@@ -57,7 +57,6 @@ interface NavItem {
 
 export const navItems: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { label: 'Reports', href: '/reports', icon: BarChart3 },
   {
     label: 'Masters', icon: Layers,
     children: [
@@ -183,6 +182,9 @@ export const navItems: NavItem[] = [
     ],
   },
   { label: 'Maintenance', href: '/maintenance', icon: Wrench, planned: true },
+  // After the modules, not second: every report belongs to one of the
+  // modules above, and the list reads module by module before it.
+  { label: 'Reports', href: '/reports', icon: BarChart3 },
   { label: 'AI Assistant', href: '/ai', icon: Bot, badge: 'AI', badgeColor: 'teal' },
   { label: 'Settings', href: '/settings', icon: Settings },
 ]

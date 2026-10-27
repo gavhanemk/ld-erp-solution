@@ -13,6 +13,7 @@ import { tokens } from '@/lib/api'
  */
 export async function downloadReport(
   reportId: string,
+  /** `xlsx` the workbook of Summary and Data, `csv` the rows. */
   format: 'xlsx' | 'csv',
   params: Record<string, string>
 ): Promise<{ fileName: string; bytes: number; charts: number | null; pivots: number | null }> {
@@ -58,6 +59,19 @@ export async function downloadReport(
     charts: charts == null ? null : Number(charts),
     pivots: pivots == null ? null : Number(pivots),
   }
+}
+
+/**
+ * Opens a register's printed page in a new tab, with the same filters, and
+ * has it bring up the print box — where the browser prints it or saves it as
+ * the PDF.
+ *
+ * A new tab so the register being read stays where it was. Opened inside the
+ * click, so no pop-up blocker takes it for an advert.
+ */
+export function openRegisterPrint(reportId: string, params: Record<string, string>) {
+  const qs = new URLSearchParams({ ...params, print: '1' })
+  window.open(`/print/report/${reportId}?${qs}`, '_blank', 'noopener')
 }
 
 /**

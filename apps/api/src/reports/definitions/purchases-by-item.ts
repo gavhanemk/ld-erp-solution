@@ -83,6 +83,15 @@ export const purchasesByItem: ReportDefinition = {
     note: 'Open an item to see which suppliers it was bought from. Pick a UOM before reading a quantity total.',
   },
 
+  // Printed as a register, its lines grouped under each bill: the bill date, our
+  // number, their number and supplier print once, on the first line, as the old
+  // ERP's registers did.
+  register: {
+    documentKey: 'billNumber',
+    noun: { one: 'bill', many: 'bills' },
+    documentColumns: ['billDate', 'billNumber', 'supplierInvoiceNo', 'supplier'],
+  },
+
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)
     const contains = (v: string) => ({ contains: v, mode: 'insensitive' as const })

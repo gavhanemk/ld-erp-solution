@@ -66,6 +66,15 @@ export const requisitionFulfilment: ReportDefinition = {
     note: 'Open a department to see how its lines were served.',
   },
 
+  // Printed as a register, its lines grouped under each requisition: the
+  // requisition number, dates and department print once, on the first line, as
+  // the old ERP's registers did.
+  register: {
+    documentKey: 'mrNumber',
+    noun: { one: 'requisition', many: 'requisitions' },
+    documentColumns: ['mrNumber', 'requestDate', 'neededBy', 'department'],
+  },
+
   async run({ tx, params, rowCap }) {
     const from = params.from ? new Date(`${params.from}T00:00:00`) : undefined
     const to = params.to ? new Date(`${params.to}T23:59:59.999`) : undefined

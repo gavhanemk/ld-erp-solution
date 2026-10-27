@@ -131,6 +131,15 @@ export const purchaseOrderStatus: ReportDefinition = {
     note: 'Open a supplier to see its orders. Pick a UOM before reading a quantity total.',
   },
 
+  // Printed as a register, its lines grouped under each order: the date, order
+  // number, supplier and reference print once, on the first line, as the old
+  // ERP's registers did.
+  register: {
+    documentKey: 'poNumber',
+    noun: { one: 'order', many: 'orders' },
+    documentColumns: ['poDate', 'poNumber', 'supplier', 'reference'],
+  },
+
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)
     const contains = (v: string) => ({ contains: v, mode: 'insensitive' as const })

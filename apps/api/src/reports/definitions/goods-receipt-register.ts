@@ -147,6 +147,15 @@ export const goodsReceiptRegister: ReportDefinition = {
     note: 'Quantities in different units share these columns. Pick a UOM before reading a total.',
   },
 
+  // Printed as a register, its lines grouped under each receipt: the date, GRN
+  // number, order, supplier and challan print once, on the first line, as the
+  // old ERP's registers did.
+  register: {
+    documentKey: 'grnNumber',
+    noun: { one: 'GRN', many: 'GRNs' },
+    documentColumns: ['grnDate', 'grnNumber', 'poNumber', 'supplier', 'challanNo'],
+  },
+
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)
     const where: Prisma.GRNWhereInput = {
