@@ -21,6 +21,8 @@ interface Label {
   category: string
   store: string
   lotNo: string | null
+  /** The receipt's note on this package: "torn bag". */
+  note?: string | null
   owner: string | null
   grnNumber: string | null
   supplier: string | null
@@ -145,7 +147,13 @@ function Sticker({ p, company, layout, codes }: { p: Label; company: string; lay
             </div>
           ) : (
             <>
-              {lotLine && <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>{lotLine}</div>}
+              {/* The receipt's note on this package rides on the lot line, so no other line is pushed off. */}
+              {(lotLine || p.note) && (
+                <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>
+                  {lotLine}
+                  {p.note && <i>{lotLine ? ' · ' : ''}{p.note}</i>}
+                </div>
+              )}
               <div style={{ fontSize: d.line, ...clip }}>{docLine}</div>
             </>
           )}

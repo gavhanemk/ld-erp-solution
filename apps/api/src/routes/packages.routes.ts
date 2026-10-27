@@ -566,6 +566,8 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           category: r.item.category?.name ?? '',
           store: r.warehouse.name,
           lotNo: r.lotNo,
+          // The receipt's note on this package: "torn bag".
+          note: fromGrn(r) ? (r.notes ?? null) : null,
           owner: r.ownerCustomer?.name ?? null,
           // The document it came in on: a GRN, or a stock-in, a customer's receipt…
           grnNumber: g?.grnNumber ?? r.sourceRef ?? null,

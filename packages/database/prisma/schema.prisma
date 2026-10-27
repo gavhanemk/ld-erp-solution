@@ -2425,6 +2425,9 @@ model GRNLine {
   /// Empty: the item's own sticker rule.
   packType     PackType?
   packQtys     Decimal[]          @default([]) @db.Decimal(10, 3)
+  /// A note on each of those packages, in the same order, "" for none:
+  /// "short width", "torn bag". Kept on each package's sticker record.
+  packNotes    String[]           @default([])
 
   billLines PurchaseInvoiceLine[]
   noteLines PurchaseNoteLine[]

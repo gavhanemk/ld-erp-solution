@@ -371,6 +371,8 @@ export async function createPackages(
     spot: StockSpot
     packType: PackType
     qtys: number[]
+    /** A note for each package, in the order of `qtys`; `notes` where it has none. */
+    notesEach?: Array<string | null>
     lotNo?: string | null
     /** The rack it sits on: a split keeps the rack of the package it was cut from. */
     rack?: string | null
@@ -413,7 +415,8 @@ export async function createPackages(
   }
 
   const created = []
-  for (const q of qtys) {
+  for (const [i, q] of qtys.entries()) {
+    const note = input.notesEach?.[i]?.trim() || input.notes || null
     const code = await nextPackageCode(tx)
     const pkg = await tx.stockPackage.create({
       data: {
@@ -427,7 +430,7 @@ export async function createPackages(
         qty: q,
         lotNo: input.lotNo || null,
         rack: input.rack || null,
-        notes: input.notes || null,
+        notes: note,
         sourceType: input.sourceType,
         sourceId: input.sourceId ?? null,
         sourceRef: input.sourceRef ?? null,
@@ -444,7 +447,7 @@ export async function createPackages(
       balanceAfter: q,
       warehouseId: pkg.warehouseId,
       relatedPackageId: input.parentId ?? null,
-      notes: input.notes ?? null,
+      notes: note,
       userId: input.userId,
     })
     created.push(pkg)

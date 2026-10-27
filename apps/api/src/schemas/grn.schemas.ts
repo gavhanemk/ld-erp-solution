@@ -39,6 +39,8 @@ const lineSchema = z.object({
     .array(z.number().positive('A package cannot be empty').max(9_999_999))
     .max(1000, 'That is more than 1,000 packages on one line')
     .optional(),
+  // A note on each of those packages, in the same order: "short width".
+  packNotes: z.array(z.string().trim().max(120, 'A package note is 120 characters at most')).max(1000).optional(),
 })
 
 /**

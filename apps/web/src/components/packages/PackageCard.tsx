@@ -149,6 +149,7 @@ export function PackageCard({
             <Fact label="Labelled with">
               {qtyText(pkg.initialQty)} {pkg.unit}
             </Fact>
+            {pkg.notes && pkg.sourceType === 'GRN' && <Fact label="Note on receipt">{pkg.notes}</Fact>}
             {pkg.grn && (
               <Fact label="Received on">
                 {pkg.grn.grnNumber} · {day(pkg.grn.grnDate)}

@@ -2586,6 +2586,7 @@ interface GrnLineInput {
   batchNumber?: string | null
   packType?: PackType | null
   packQtys?: number[]
+  packNotes?: string[]
 }
 
 /**
@@ -2683,6 +2684,8 @@ function prepareGrnLines(
     const ordered = Number(poLine.qty)
 
     const packQtys = (line.packQtys ?? []).map(round3)
+    // A note for each package, lined up with its size; none without sizes.
+    const notes = packQtys.map((_, i) => (line.packNotes?.[i] ?? '').trim())
     return {
       poLine,
       warehouseId: line.warehouseId,
@@ -2690,6 +2693,7 @@ function prepareGrnLines(
       // "5 bundles of 100": a sticker each when it is saved.
       packType: packQtys.length ? (line.packType ?? null) : null,
       packQtys,
+      packNotes: notes.some(Boolean) ? notes : [],
       orderedQty: ordered,
       received,
       rejected,
@@ -3238,6 +3242,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
             batchNumber: p.batchNumber,
             packType: p.packType,
             packQtys: p.packQtys,
+            packNotes: p.packNotes,
             unitRate: p.unitRate,
             amount: round2(p.accepted * p.unitRate),
           })),
@@ -3539,12 +3544,19 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
           batchNumber: p.batchNumber,
           packType: p.packType,
           packQtys: p.packQtys,
+          packNotes: p.packNotes,
           unitRate: p.unitRate,
           amount: round2(p.accepted * p.unitRate),
         },
       })
       const oldPacks = old.packQtys.map((q) => round3(Number(q))).join(',')
       if (p.packQtys.length && (oldPacks !== p.packQtys.join(',') || old.packType !== p.packType)) repacked.push(old.id)
+      // Only a package's note changed, its sizes the same: its sticker record
+      // takes the new note, in the same order, and no sticker is made again.
+      else if (p.packQtys.length && (old.packNotes ?? []).join('\u0001') !== p.packNotes.join('\u0001')) {
+        const made = await tx.stockPackage.findMany({ where: { grnLineId: old.id, sourceType: 'GRN', status: { not: 'VOID' } }, orderBy: { code: 'asc' }, select: { id: true } })
+        for (const [i, pk] of made.entries()) await tx.stockPackage.update({ where: { id: pk.id }, data: { notes: p.packNotes[i] || null } })
+      }
       // A lot corrected is corrected on the line's stickers too.
       if ((old.batchNumber ?? null) !== p.batchNumber) {
         await tx.stockPackage.updateMany({ where: { grnLineId: old.id, status: { not: 'VOID' } }, data: { lotNo: p.batchNumber } })
@@ -3589,6 +3601,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
               batchNumber: p.batchNumber,
               packType: p.packType,
               packQtys: p.packQtys,
+              packNotes: p.packNotes,
               unitRate: p.unitRate,
               amount: round2(p.accepted * p.unitRate),
             })),
