@@ -512,6 +512,7 @@ model Brand {
   salesOrders         SalesOrder[]
   manufacturingOrders ManufacturingOrder[]
   quotations          SalesQuotation[] @relation("QuoteBrand")
+  styles              Style[]
 
   @@map("brands")
 }
@@ -804,6 +805,10 @@ model Style {
   name        String
   season      String?
   brandType   BrandType
+  /// The brand from the Brands master it is made under; brandType follows
+  /// from that brand's kind.
+  brandId     String?
+  brand       Brand?     @relation(fields: [brandId], references: [id])
   category    String?
   collarType  String?
   sleeveType  String?
@@ -836,6 +841,7 @@ model Style {
   stepRuns StyleStepRun[]
 
   @@index([code])
+  @@index([brandId])
   mrLines MaterialRequisitionLine[] @relation("MRLineStyle")
   @@map("styles")
 }

@@ -904,7 +904,10 @@ router.patch('/styles/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
  */
 router.get('/styles/next-code', requirePermission(MODULE, 'create'), async (req, res) => {
   const q = (k: string) => (typeof req.query[k] === 'string' ? (req.query[k] as string) : '')
-  res.json({ success: true, data: { code: await nextStyleCode({ brandType: q('brandType'), category: q('category'), season: q('season') }) } })
+  res.json({
+    success: true,
+    data: { code: await nextStyleCode({ brandId: q('brandId'), brandType: q('brandType'), category: q('category'), season: q('season') }) },
+  })
 })
 
 router.use(
@@ -918,7 +921,18 @@ router.use(
     searchFields: ['name', 'code', 'season', 'category', 'fabricType'],
     sortableFields: ['name', 'code', 'createdAt', 'season'],
     defaultSort: { field: 'code', order: 'asc' },
-    include: { sizeGroup: { select: { id: true, name: true } } },
+    include: { sizeGroup: { select: { id: true, name: true } }, brand: { select: { id: true, name: true } } },
+    // The brand picked decides the kind (LD Cotton Mills, VHAGAR, Custom),
+    // which labels, prices and reports go by. A style must have one or the other.
+    beforeSave: async (data, before) => {
+      if (typeof data.brandId === 'string' && data.brandId) {
+        const brand = await prisma.brand.findUnique({ where: { id: data.brandId }, select: { type: true, isActive: true } })
+        if (!brand) throw new AppError('That brand is not in the Brands master.', 400, 'BRAND_NOT_FOUND')
+        return { data: { ...data, brandType: brand.type } }
+      }
+      if (!before && !data.brandType) throw new AppError('Pick the brand the style is made under.', 400, 'BRAND_REQUIRED')
+      return { data }
+    },
     filters: {
       brandType: { where: (v) => ({ brandType: { in: v } }), facets: ['brandType'] },
       category: textFilter('category'),

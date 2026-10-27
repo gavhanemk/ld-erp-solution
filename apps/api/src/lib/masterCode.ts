@@ -102,8 +102,24 @@ async function nextDepartmentCode(name: unknown, attempt: number): Promise<strin
   return code
 }
 
-/** The brand part of a style code, as the mill's styles already read: LD-, VH-. */
+/** The brand part of a style code by kind, for a style with no brand picked: LD-, VH-. */
 const STYLE_BRAND: Record<string, string> = { LD_COTTON_MILLS: 'LD', VHAGAR: 'VH', CUSTOM: 'CU' }
+
+/**
+ * The brand part of a style code, from the brand's own name, so the codes
+ * the mill already has keep reading the same: "LD Cotton Mills" → LD (a short
+ * first word is kept whole), "VHAGAR" → VH, "DCot" → DC (otherwise the first
+ * two letters).
+ */
+export function brandCode(name: unknown, type?: unknown): string {
+  const words = String(name ?? '')
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter(Boolean)
+  if (!words.length) return STYLE_BRAND[String(type)] ?? 'LD'
+  if (words.length > 1 && words[0].length <= 3) return words[0]
+  return words[0].slice(0, 2)
+}
 
 /**
  * The garment part: SH for a shirt, TR for a trouser, as in LD-SH-2604 and
@@ -161,7 +177,12 @@ export function seasonYear(season: unknown, now = new Date()): string {
  * unique; `attempt` steps past one somebody else has just taken.
  */
 export async function nextStyleCode(data: Record<string, unknown>, attempt = 0): Promise<string> {
-  const stem = `${STYLE_BRAND[String(data.brandType)] ?? 'LD'}-${garmentCode(data.category)}-${seasonYear(data.season)}`
+  const brand =
+    typeof data.brandId === 'string' && data.brandId
+      ? await prisma.brand.findUnique({ where: { id: data.brandId }, select: { name: true, type: true } })
+      : null
+  const prefix = brand ? brandCode(brand.name, brand.type) : (STYLE_BRAND[String(data.brandType)] ?? 'LD')
+  const stem = `${prefix}-${garmentCode(data.category)}-${seasonYear(data.season)}`
   const rows = await prisma.style.findMany({ where: { code: { startsWith: stem } }, select: { code: true } })
   const highest = rows.reduce((max, r) => {
     const tail = r.code.slice(stem.length)

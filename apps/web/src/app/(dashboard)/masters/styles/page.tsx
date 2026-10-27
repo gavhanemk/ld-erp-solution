@@ -13,6 +13,7 @@ interface Style {
   name: string
   season: string | null
   brandType: 'LD_COTTON_MILLS' | 'VHAGAR' | 'CUSTOM'
+  brand?: { id: string; name: string } | null
   category: string | null
   collarType: string | null
   sleeveType: string | null
@@ -37,7 +38,7 @@ const baseColumns: Column<Style>[] = [
           s.brandType === 'VHAGAR' ? 'vhagar-accent font-bold text-xs' : 'text-muted-foreground text-xs'
         }
       >
-        {BRAND_LABEL[s.brandType] ?? s.brandType}
+        {s.brand?.name ?? BRAND_LABEL[s.brandType] ?? s.brandType}
       </span>
     ),
   },

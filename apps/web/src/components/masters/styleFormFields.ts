@@ -34,7 +34,7 @@ export const styleFormFields: FormField[] = [
     type: 'readout',
     section: 'Style',
     showIf: (v) => !v.code,
-    readout: (v) => createElement(NextStyleCode, { brandType: v.brandType, category: v.category, season: v.season }),
+    readout: (v) => createElement(NextStyleCode, { brandId: v.brandId, category: v.category, season: v.season }),
     help: 'Given on save, from brand, garment type and season',
   },
   {
@@ -45,13 +45,16 @@ export const styleFormFields: FormField[] = [
     section: 'Style',
     span: 2,
   },
+  // From the Brands master, so a brand added there (DCot) is offered here.
+  // Its kind (LD Cotton Mills, VHAGAR, Custom) goes with it on save.
   {
-    name: 'brandType',
+    name: 'brandId',
     label: 'Brand',
     type: 'select',
     required: true,
+    mustFill: true,
     section: 'Style',
-    options: Object.entries(BRAND_LABEL).map(([value, label]) => ({ value, label })),
+    optionsFrom: { resource: 'brands' },
   },
   // Required: it is the SH or TR in the style code, which cannot change once saved.
   { name: 'category', label: 'Garment Type', mustFill: true, section: 'Style', placeholder: 'Shirt' },

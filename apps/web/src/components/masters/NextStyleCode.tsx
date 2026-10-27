@@ -6,15 +6,15 @@ import { api } from '@/lib/api'
 
 /**
  * The code a new style will get, shown while the form is filled in. Brand,
- * garment type and season decide it — LD-SH-2606 is the sixth LD Cotton Mills
- * shirt for a 26 season. The server works it out again when the style is
- * saved, so it is always the next free one even if somebody saved a shirt in
- * between.
+ * garment type and season decide it: LD-SH-2606 is the sixth LD Cotton Mills
+ * shirt for a 26 season, DC-SH-2601 the first DCot one. The server works it
+ * out again when the style is saved, so it is always the next free one even
+ * if somebody saved a shirt in between.
  */
-export function NextStyleCode({ brandType, category, season }: { brandType?: unknown; category?: unknown; season?: unknown }) {
+export function NextStyleCode({ brandId, category, season }: { brandId?: unknown; category?: unknown; season?: unknown }) {
   const [code, setCode] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const brand = typeof brandType === 'string' ? brandType : ''
+  const brand = typeof brandId === 'string' ? brandId : ''
   const type = typeof category === 'string' ? category.trim() : ''
   const year = typeof season === 'string' ? season.trim() : ''
 
@@ -27,7 +27,7 @@ export function NextStyleCode({ brandType, category, season }: { brandType?: unk
     setBusy(true)
     // Typing settles for a moment before asking.
     const t = setTimeout(() => {
-      const qs = new URLSearchParams({ brandType: brand, category: type, season: year })
+      const qs = new URLSearchParams({ brandId: brand, category: type, season: year })
       api
         .get<{ data: { code: string } }>(`/masters/styles/next-code?${qs}`)
         .then((r) => live && setCode(r.data.code))

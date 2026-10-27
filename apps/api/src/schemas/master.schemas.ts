@@ -380,7 +380,10 @@ export const createStyleSchema = z.object({
   code: code.optional(),
   name,
   season: z.string().max(50).optional().nullable(),
-  brandType: BrandTypeEnum,
+  // The brand from the Brands master; its kind sets brandType on save. A
+  // brandType alone is still taken, from an import or an older screen.
+  brandId: z.string().min(1).optional().nullable(),
+  brandType: BrandTypeEnum.optional(),
   category: z.string().max(100).optional().nullable(),
   collarType: z.string().max(100).optional().nullable(),
   sleeveType: z.string().max(100).optional().nullable(),
