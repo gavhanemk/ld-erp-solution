@@ -50,6 +50,14 @@ const GROUPS: Array<{ title: string; keys: Array<[string[], string]> }> = [
     ],
   },
   {
+    title: 'On a chart (dashboards)',
+    keys: [
+      [['Tab'], 'To the chart'],
+      [['←', '→'], 'Choose a bar or slice: its name and figure show'],
+      [['Enter'], 'Open it, as a click would'],
+    ],
+  },
+  {
     title: 'In a dropdown',
     keys: [
       [['Enter', '↓'], 'Open it'],

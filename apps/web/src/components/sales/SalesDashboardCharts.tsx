@@ -11,6 +11,7 @@ import { ArrowDown, ArrowUp, ArrowUpRight } from 'lucide-react'
 import { formatDate } from '@/lib/utils'
 import { ChartTip, EmptyChart, PALETTE, TONE, inr, markLabel } from '@/components/dashboard/DashKit'
 import { TONE_OF } from '@/components/purchase/PurchaseDashboardCharts'
+import { ChartKeys } from '@/components/ui/ChartKeys'
 
 /**
  * The sales dashboard's charts and lists, each a different kind for a
@@ -167,23 +168,37 @@ export function SalesTrendChart({ data }: { data: SalesDashboard['analysis']['tr
 /** What customers owe by how late it is, green to red; the count of invoices sits inside each bar. */
 export function AgeingBars({ data, onPick }: { data: SalesDashboard['now']['receivables']['ageing']; onPick?: (key: string) => void }) {
   if (!data.some((d) => d.value)) return <EmptyChart h={240} text="Nothing is owed. Every invoice is paid." />
+  const chart = (
+    <ResponsiveContainer width="100%" height={240}>
+      <BarChart data={data} margin={{ top: 22, right: 4, left: 0, bottom: 0 }}>
+        <CartesianGrid {...GRID} vertical={false} />
+        <XAxis dataKey="label" tick={{ ...axis, fontSize: 10 }} tickLine={false} axisLine={false} interval={0} />
+        <YAxis tick={axis} tickLine={false} axisLine={false} tickFormatter={inrAxis} width={62} />
+        <Tooltip content={<ChartTip labelOf={(p: any) => `${p.label} · ${p.invoices} ${p.invoices === 1 ? 'invoice' : 'invoices'}`} />} cursor={{ fill: 'currentColor', fillOpacity: 0.04 }} />
+        <Bar isAnimationActive={false} dataKey="value" name="Owed" radius={[6, 6, 0, 0]} maxBarSize={44} cursor={onPick ? 'pointer' : undefined} onClick={(d: any) => d?.key && onPick?.(d.key)}>
+          {data.map((d, i) => (
+            <Cell key={d.key} fill={TONE_OF[d.tone] ?? PALETTE[0]} fillOpacity={i === data.length - 1 ? 1 : 0.85} />
+          ))}
+          <LabelList dataKey="value" content={markLabel('currentColor', inr)} />
+          <LabelList dataKey="invoices" content={markLabel('#fff', (v) => `${v}`, { inside: true })} />
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  )
   return (
     <div className="text-muted-foreground">
-      <ResponsiveContainer width="100%" height={240}>
-        <BarChart data={data} margin={{ top: 22, right: 4, left: 0, bottom: 0 }}>
-          <CartesianGrid {...GRID} vertical={false} />
-          <XAxis dataKey="label" tick={{ ...axis, fontSize: 10 }} tickLine={false} axisLine={false} interval={0} />
-          <YAxis tick={axis} tickLine={false} axisLine={false} tickFormatter={inrAxis} width={62} />
-          <Tooltip content={<ChartTip labelOf={(p: any) => `${p.label} · ${p.invoices} ${p.invoices === 1 ? 'invoice' : 'invoices'}`} />} cursor={{ fill: 'currentColor', fillOpacity: 0.04 }} />
-          <Bar isAnimationActive={false} dataKey="value" name="Owed" radius={[6, 6, 0, 0]} maxBarSize={44} cursor={onPick ? 'pointer' : undefined} onClick={(d: any) => d?.key && onPick?.(d.key)}>
-            {data.map((d, i) => (
-              <Cell key={d.key} fill={TONE_OF[d.tone] ?? PALETTE[0]} fillOpacity={i === data.length - 1 ? 1 : 0.85} />
-            ))}
-            <LabelList dataKey="value" content={markLabel('currentColor', inr)} />
-            <LabelList dataKey="invoices" content={markLabel('#fff', (v) => `${v}`, { inside: true })} />
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
+      {onPick ? (
+        <ChartKeys
+          label="Owed by how late it is"
+          items={data
+            .filter((d) => d.key)
+            .map((d) => ({ name: d.label, value: `${inr(d.value)} · ${d.invoices} ${d.invoices === 1 ? 'invoice' : 'invoices'}`, pick: () => onPick(d.key) }))}
+        >
+          {chart}
+        </ChartKeys>
+      ) : (
+        chart
+      )}
     </div>
   )
 }

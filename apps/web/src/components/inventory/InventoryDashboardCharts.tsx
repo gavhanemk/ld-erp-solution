@@ -10,6 +10,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import {
   ChartTip, EmptyChart, IN_COLOUR, OUT_COLOUR, PALETTE, inr, markLabel, qtyFmt,
 } from '@/components/dashboard/DashKit'
+import { ChartKeys } from '@/components/ui/ChartKeys'
 
 /**
  * The inventory dashboard's charts, each a different kind for a different
@@ -98,38 +99,43 @@ export function StoreDonut({
   return (
     <div>
       <div className="relative">
-        <ResponsiveContainer width="100%" height={196}>
-          <PieChart>
-            <Pie
-              data={data}
-              dataKey="value"
-              nameKey="name"
-              innerRadius="64%"
-              outerRadius="94%"
-              paddingAngle={2}
-              stroke="none"
-              isAnimationActive={false}
-              cursor="pointer"
-              onClick={(d: any) => onPick(d.id)}
-              labelLine={false}
-              label={(p: any) => {
-                if (p.percent < 0.07) return null
-                const r = p.innerRadius + (p.outerRadius - p.innerRadius) / 2
-                const a = (-p.midAngle * Math.PI) / 180
-                return (
-                  <text x={p.cx + r * Math.cos(a)} y={p.cy + r * Math.sin(a)} fill="#fff" fontSize={10} fontWeight={600} textAnchor="middle" dominantBaseline="central">
-                    {Math.round(p.percent * 100)}%
-                  </text>
-                )
-              }}
-            >
-              {data.map((d, n) => (
-                <Cell key={d.id} fill={PALETTE[n % PALETTE.length]} fillOpacity={active && active !== d.id ? 0.25 : 1} />
-              ))}
-            </Pie>
-            <Tooltip content={<ChartTip />} />
-          </PieChart>
-        </ResponsiveContainer>
+        <ChartKeys
+          label="Stock value by store"
+          items={data.filter((d) => d.value > 0).map((d) => ({ name: d.name, value: inr(d.value), pick: () => onPick(d.id) }))}
+        >
+          <ResponsiveContainer width="100%" height={196}>
+            <PieChart>
+              <Pie
+                data={data}
+                dataKey="value"
+                nameKey="name"
+                innerRadius="64%"
+                outerRadius="94%"
+                paddingAngle={2}
+                stroke="none"
+                isAnimationActive={false}
+                cursor="pointer"
+                onClick={(d: any) => onPick(d.id)}
+                labelLine={false}
+                label={(p: any) => {
+                  if (p.percent < 0.07) return null
+                  const r = p.innerRadius + (p.outerRadius - p.innerRadius) / 2
+                  const a = (-p.midAngle * Math.PI) / 180
+                  return (
+                    <text x={p.cx + r * Math.cos(a)} y={p.cy + r * Math.sin(a)} fill="#fff" fontSize={10} fontWeight={600} textAnchor="middle" dominantBaseline="central">
+                      {Math.round(p.percent * 100)}%
+                    </text>
+                  )
+                }}
+              >
+                {data.map((d, n) => (
+                  <Cell key={d.id} fill={PALETTE[n % PALETTE.length]} fillOpacity={active && active !== d.id ? 0.25 : 1} />
+                ))}
+              </Pie>
+              <Tooltip content={<ChartTip />} />
+            </PieChart>
+          </ResponsiveContainer>
+        </ChartKeys>
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
           <span className="text-lg font-semibold tabular-nums text-foreground">{inr(total)}</span>
           <span className="text-[11px] text-muted-foreground">
