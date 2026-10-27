@@ -5,6 +5,7 @@ import {
   Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { ChartTip, EmptyChart, IN_COLOUR, PALETTE, inr, markLabel } from '@/components/dashboard/DashKit'
+import { ChartKeys } from '@/components/ui/ChartKeys'
 
 /**
  * The job work dashboard's charts, from the shared dashboard kit so they match
@@ -38,31 +39,36 @@ export function SentBackTrend({
     set.has(data[props.index]?.key) ? markLabel(colour, inr)(props) : null
   return (
     <div className="text-muted-foreground">
-      <ResponsiveContainer width="100%" height={270}>
-        <ComposedChart
-          data={data}
-          margin={{ top: 24, right: 4, left: 0, bottom: 0 }}
-          onClick={(e: any) => {
-            const b = e?.activePayload?.[0]?.payload
-            if (b) onPick(b.from, b.to)
-          }}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.1} vertical={false} />
-          <XAxis dataKey="label" tick={axis} tickLine={false} axisLine={false} minTickGap={16} />
-          <YAxis tick={axis} tickLine={false} axisLine={false} tickFormatter={inrAxis} width={66} />
-          <Tooltip
-            content={<ChartTip labelOf={(p: any) => `${p.label} · ${p.challans} ${p.challans === 1 ? 'challan' : 'challans'}`} />}
-            cursor={{ fill: 'currentColor', fillOpacity: 0.04 }}
-          />
-          <Legend wrapperStyle={{ fontSize: 11, paddingTop: 6 }} iconSize={8} />
-          <Bar dataKey="sent" name="Value sent" fill={SENT} radius={[4, 4, 0, 0]} maxBarSize={26} cursor="pointer">
-            <LabelList dataKey="sent" content={only(topSent, '#1d4ed8')} />
-          </Bar>
-          <Bar dataKey="back" name="Value settled back" fill={IN_COLOUR} radius={[4, 4, 0, 0]} maxBarSize={26} cursor="pointer">
-            <LabelList dataKey="back" content={only(topBack, '#047857')} />
-          </Bar>
-        </ComposedChart>
-      </ResponsiveContainer>
+      <ChartKeys
+        label="Value sent and settled back"
+        items={data.map((b) => ({ name: b.label, value: `sent ${inr(b.sent)} · back ${inr(b.back)}`, pick: () => onPick(b.from, b.to) }))}
+      >
+        <ResponsiveContainer width="100%" height={270}>
+          <ComposedChart
+            data={data}
+            margin={{ top: 24, right: 4, left: 0, bottom: 0 }}
+            onClick={(e: any) => {
+              const b = e?.activePayload?.[0]?.payload
+              if (b) onPick(b.from, b.to)
+            }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.1} vertical={false} />
+            <XAxis dataKey="label" tick={axis} tickLine={false} axisLine={false} minTickGap={16} />
+            <YAxis tick={axis} tickLine={false} axisLine={false} tickFormatter={inrAxis} width={66} />
+            <Tooltip
+              content={<ChartTip labelOf={(p: any) => `${p.label} · ${p.challans} ${p.challans === 1 ? 'challan' : 'challans'}`} />}
+              cursor={{ fill: 'currentColor', fillOpacity: 0.04 }}
+            />
+            <Legend wrapperStyle={{ fontSize: 11, paddingTop: 6 }} iconSize={8} />
+            <Bar dataKey="sent" name="Value sent" fill={SENT} radius={[4, 4, 0, 0]} maxBarSize={26} cursor="pointer">
+              <LabelList dataKey="sent" content={only(topSent, '#1d4ed8')} />
+            </Bar>
+            <Bar dataKey="back" name="Value settled back" fill={IN_COLOUR} radius={[4, 4, 0, 0]} maxBarSize={26} cursor="pointer">
+              <LabelList dataKey="back" content={only(topBack, '#047857')} />
+            </Bar>
+          </ComposedChart>
+        </ResponsiveContainer>
+      </ChartKeys>
     </div>
   )
 }
@@ -91,38 +97,45 @@ export function DueDonut({
   return (
     <div>
       <div className="relative">
-        <ResponsiveContainer width="100%" height={196}>
-          <PieChart>
-            <Pie
-              data={rows}
-              dataKey={total ? 'value' : 'lines'}
-              nameKey="label"
-              innerRadius="64%"
-              outerRadius="94%"
-              paddingAngle={2}
-              stroke="none"
-              isAnimationActive={false}
-              cursor="pointer"
-              onClick={(d: any) => onPick(d.key)}
-              labelLine={false}
-              label={(p: any) => {
-                if (p.percent < 0.07) return null
-                const r = p.innerRadius + (p.outerRadius - p.innerRadius) / 2
-                const a = (-p.midAngle * Math.PI) / 180
-                return (
-                  <text x={p.cx + r * Math.cos(a)} y={p.cy + r * Math.sin(a)} fill="#fff" fontSize={10} fontWeight={600} textAnchor="middle" dominantBaseline="central">
-                    {Math.round(p.percent * 100)}%
-                  </text>
-                )
-              }}
-            >
-              {rows.map((d) => (
-                <Cell key={d.key} fill={DUE_COLOUR[d.key]} fillOpacity={picked.length && !picked.includes(d.key) ? 0.25 : 1} />
-              ))}
-            </Pie>
-            <Tooltip content={<ChartTip />} />
-          </PieChart>
-        </ResponsiveContainer>
+        <ChartKeys
+          label="What is still out, by due-back date"
+          items={rows
+            .filter((d) => (total ? d.value : d.lines) > 0)
+            .map((d) => ({ name: d.label, value: `${inr(d.value)} · ${d.lines} lines`, pick: () => onPick(d.key) }))}
+        >
+          <ResponsiveContainer width="100%" height={196}>
+            <PieChart>
+              <Pie
+                data={rows}
+                dataKey={total ? 'value' : 'lines'}
+                nameKey="label"
+                innerRadius="64%"
+                outerRadius="94%"
+                paddingAngle={2}
+                stroke="none"
+                isAnimationActive={false}
+                cursor="pointer"
+                onClick={(d: any) => onPick(d.key)}
+                labelLine={false}
+                label={(p: any) => {
+                  if (p.percent < 0.07) return null
+                  const r = p.innerRadius + (p.outerRadius - p.innerRadius) / 2
+                  const a = (-p.midAngle * Math.PI) / 180
+                  return (
+                    <text x={p.cx + r * Math.cos(a)} y={p.cy + r * Math.sin(a)} fill="#fff" fontSize={10} fontWeight={600} textAnchor="middle" dominantBaseline="central">
+                      {Math.round(p.percent * 100)}%
+                    </text>
+                  )
+                }}
+              >
+                {rows.map((d) => (
+                  <Cell key={d.key} fill={DUE_COLOUR[d.key]} fillOpacity={picked.length && !picked.includes(d.key) ? 0.25 : 1} />
+                ))}
+              </Pie>
+              <Tooltip content={<ChartTip />} />
+            </PieChart>
+          </ResponsiveContainer>
+        </ChartKeys>
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
           <span className="text-lg font-semibold tabular-nums text-foreground">{inr(total)}</span>
           <span className="text-[11px] text-muted-foreground">still out</span>
@@ -172,41 +185,43 @@ export function WorkerBars({
   const rows = data.slice(0, 8).map((d) => ({ ...d, tag: `${inr(d.onTime + d.late)} · ${d.lines} ln` }))
   return (
     <div className="text-muted-foreground">
-      <ResponsiveContainer width="100%" height={Math.max(180, rows.length * 38 + 40)}>
-        <BarChart
-          data={rows}
-          layout="vertical"
-          margin={{ top: 0, right: 92, left: 0, bottom: 0 }}
-          onClick={(e: any) => {
-            const g = e?.activePayload?.[0]?.payload
-            if (g) onPick(g.id)
-          }}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.1} horizontal={false} />
-          <XAxis type="number" tick={axis} tickLine={false} axisLine={false} tickFormatter={inrAxis} />
-          <YAxis type="category" dataKey="name" tick={<OneLineTick />} tickLine={false} axisLine={false} width={124} />
-          <Tooltip content={<ChartTip />} cursor={{ fill: 'currentColor', fillOpacity: 0.04 }} />
-          <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
-          <Bar dataKey="onTime" name="Not yet due" stackId="w" fill="#0d9488" barSize={18} cursor="pointer">
-            {rows.map((r) => (
-              <Cell key={r.id} fillOpacity={picked.length && !picked.includes(r.id) ? 0.3 : 1} />
-            ))}
-          </Bar>
-          <Bar dataKey="late" name="Overdue" stackId="w" fill="#f43f5e" radius={[0, 4, 4, 0]} barSize={18} cursor="pointer">
-            {rows.map((r) => (
-              <Cell key={r.id} fillOpacity={picked.length && !picked.includes(r.id) ? 0.3 : 1} />
-            ))}
-            <LabelList
-              dataKey="tag"
-              content={(p: any) => (
-                <text x={Number(p.x) + Number(p.width) + 6} y={Number(p.y) + Number(p.height) / 2} dominantBaseline="central" fontSize={10} fontWeight={600} fill="currentColor">
-                  {p.value}
-                </text>
-              )}
-            />
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
+      <ChartKeys label="What each job worker holds" items={rows.map((r) => ({ name: r.name, value: r.tag, pick: () => onPick(r.id) }))}>
+        <ResponsiveContainer width="100%" height={Math.max(180, rows.length * 38 + 40)}>
+          <BarChart
+            data={rows}
+            layout="vertical"
+            margin={{ top: 0, right: 92, left: 0, bottom: 0 }}
+            onClick={(e: any) => {
+              const g = e?.activePayload?.[0]?.payload
+              if (g) onPick(g.id)
+            }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.1} horizontal={false} />
+            <XAxis type="number" tick={axis} tickLine={false} axisLine={false} tickFormatter={inrAxis} />
+            <YAxis type="category" dataKey="name" tick={<OneLineTick />} tickLine={false} axisLine={false} width={124} />
+            <Tooltip content={<ChartTip />} cursor={{ fill: 'currentColor', fillOpacity: 0.04 }} />
+            <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
+            <Bar dataKey="onTime" name="Not yet due" stackId="w" fill="#0d9488" barSize={18} cursor="pointer">
+              {rows.map((r) => (
+                <Cell key={r.id} fillOpacity={picked.length && !picked.includes(r.id) ? 0.3 : 1} />
+              ))}
+            </Bar>
+            <Bar dataKey="late" name="Overdue" stackId="w" fill="#f43f5e" radius={[0, 4, 4, 0]} barSize={18} cursor="pointer">
+              {rows.map((r) => (
+                <Cell key={r.id} fillOpacity={picked.length && !picked.includes(r.id) ? 0.3 : 1} />
+              ))}
+              <LabelList
+                dataKey="tag"
+                content={(p: any) => (
+                  <text x={Number(p.x) + Number(p.width) + 6} y={Number(p.y) + Number(p.height) / 2} dominantBaseline="central" fontSize={10} fontWeight={600} fill="currentColor">
+                    {p.value}
+                  </text>
+                )}
+              />
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </ChartKeys>
     </div>
   )
 }
@@ -252,37 +267,44 @@ export function ProcessPie({
   const key = total ? 'amount' : 'challans'
   return (
     <div>
-      <ResponsiveContainer width="100%" height={190}>
-        <PieChart>
-          <Pie
-            data={data}
-            dataKey={key}
-            nameKey="label"
-            outerRadius="92%"
-            stroke="hsl(var(--card))"
-            strokeWidth={2}
-            isAnimationActive={false}
-            cursor="pointer"
-            onClick={(d: any) => onPick(d.value)}
-            labelLine={false}
-            label={(p: any) => {
-              if (p.percent < 0.08) return null
-              const r = p.outerRadius * 0.62
-              const a = (-p.midAngle * Math.PI) / 180
-              return (
-                <text x={p.cx + r * Math.cos(a)} y={p.cy + r * Math.sin(a)} fill="#fff" fontSize={10} fontWeight={600} textAnchor="middle" dominantBaseline="central">
-                  {Math.round(p.percent * 100)}%
-                </text>
-              )
-            }}
-          >
-            {data.map((d, n) => (
-              <Cell key={d.value} fill={PALETTE[n % PALETTE.length]} fillOpacity={picked.length && !picked.includes(d.value) ? 0.3 : 1} />
-            ))}
-          </Pie>
-          <Tooltip content={<ChartTip />} />
-        </PieChart>
-      </ResponsiveContainer>
+      <ChartKeys
+        label="Value sent by kind of work"
+        items={data
+          .filter((d) => d[key] > 0)
+          .map((d) => ({ name: d.label, value: `${inr(d.amount)} · ${d.challans} ch.`, pick: () => onPick(d.value) }))}
+      >
+        <ResponsiveContainer width="100%" height={190}>
+          <PieChart>
+            <Pie
+              data={data}
+              dataKey={key}
+              nameKey="label"
+              outerRadius="92%"
+              stroke="hsl(var(--card))"
+              strokeWidth={2}
+              isAnimationActive={false}
+              cursor="pointer"
+              onClick={(d: any) => onPick(d.value)}
+              labelLine={false}
+              label={(p: any) => {
+                if (p.percent < 0.08) return null
+                const r = p.outerRadius * 0.62
+                const a = (-p.midAngle * Math.PI) / 180
+                return (
+                  <text x={p.cx + r * Math.cos(a)} y={p.cy + r * Math.sin(a)} fill="#fff" fontSize={10} fontWeight={600} textAnchor="middle" dominantBaseline="central">
+                    {Math.round(p.percent * 100)}%
+                  </text>
+                )
+              }}
+            >
+              {data.map((d, n) => (
+                <Cell key={d.value} fill={PALETTE[n % PALETTE.length]} fillOpacity={picked.length && !picked.includes(d.value) ? 0.3 : 1} />
+              ))}
+            </Pie>
+            <Tooltip content={<ChartTip />} />
+          </PieChart>
+        </ResponsiveContainer>
+      </ChartKeys>
       <div className="mt-3 divide-y divide-border/60">
         {data.slice(0, 6).map((d, n) => (
           <button

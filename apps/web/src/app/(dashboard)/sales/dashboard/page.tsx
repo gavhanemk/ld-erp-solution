@@ -456,7 +456,7 @@ export default function SalesDashboardPage() {
           {/* ── What sells: styles and sizes ── */}
           <div className="grid gap-5 xl:grid-cols-3">
             <DashCard className="xl:col-span-2" icon={LayoutGrid} title="Bookings by style" hint="Each box sized by its value, coloured by garment type">
-              <CategoryTreemap data={a.styleTree} onPick={() => {}} />
+              <CategoryTreemap data={a.styleTree} />
             </DashCard>
             <DashCard icon={Ruler} title="Size mix" hint="Pieces booked in each size — the shape of the size curve">
               <SizeMix data={a.sizes} />
