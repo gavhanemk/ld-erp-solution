@@ -49,7 +49,9 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
    * than on everything on record.
    */
   const [values, setValues] = useState<Record<string, string>>(() =>
-    Object.fromEntries([...search.entries()].filter(([k, v]) => v && k !== 'print'))
+    Object.fromEntries(
+      [...search.entries()].filter(([k, v]) => v && k !== 'print' && k !== 'tab')
+    )
   )
   /** What the result on screen was actually built from, so the bar can say
       when the two have drifted apart. */
@@ -64,10 +66,22 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   /** The report's module, for the way back to that module's reports. */
   const [module, setModule] = useState<string | null>(null)
   /*
-   * Which tab is showing. The report first, always: it is what the accounts
-   * team asked to open on. The KPIs are a tab away for whoever wants them.
+   * Which tab is showing. A report opens on its summary — the KPIs, what
+   * needs attention and the totals — with the detailed report, the one the
+   * PDF prints, on the tab beside it. `tab=report` in the address opens on
+   * the detailed one, which is where the way back from the printed page goes.
    */
-  const [view, setView] = useState<'report' | 'summary'>('report')
+  const [view, setView] = useState<'summary' | 'report'>(() =>
+    search.get('tab') === 'report' ? 'report' : 'summary'
+  )
+
+  /** The address for these filters and this tab, so a refresh lands where it was. */
+  const keepAddress = (asked: Record<string, string>, tab: 'summary' | 'report') => {
+    const q = new URLSearchParams(asked)
+    if (tab === 'report') q.set('tab', 'report')
+    const qs = q.toString()
+    window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`)
+  }
 
   // The definition, for the filter bar. Fetched from the same registry the
   // server runs from, so a filter added there appears here with no change.
@@ -130,8 +144,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
       // period's figures under the new period's filters.
       setRanWith(asked)
       // And into the address, so a refresh asks the same question again.
-      const qs = new URLSearchParams(asked).toString()
-      window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`)
+      keepAddress(asked, view)
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?'
@@ -139,7 +152,13 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
     } finally {
       setLoading(false)
     }
-  }, [id, values])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keepAddress is redrawn each render
+  }, [id, values, view])
+
+  const showTab = (tab: 'summary' | 'report') => {
+    setView(tab)
+    keepAddress(ranWith, tab)
+  }
 
   // Runs once on arrival with no filters, so the screen is never empty.
   useEffect(() => {
@@ -236,8 +255,8 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
             <div className="border-border bg-secondary inline-flex rounded-lg border p-1" role="tablist">
               {(
                 [
-                  { key: 'report', label: 'Report', icon: FileText },
-                  { key: 'summary', label: 'KPI Summary', icon: LayoutDashboard },
+                  { key: 'summary', label: 'Summary', icon: LayoutDashboard },
+                  { key: 'report', label: 'Detailed Report', icon: FileText },
                 ] as const
               ).map((t) => (
                 <button
@@ -245,7 +264,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
                   type="button"
                   role="tab"
                   aria-selected={view === t.key}
-                  onClick={() => setView(t.key)}
+                  onClick={() => showTab(t.key)}
                   className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
                     view === t.key
                       ? 'bg-card text-foreground font-medium shadow-sm'
@@ -283,7 +302,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
               )}
             </>
           ) : (
-            // The report itself: the sheet the PDF prints and the workbook holds.
+            // The detailed report: the sheet the PDF prints and the workbook holds.
             <RegisterSheet data={result as RegisterData} mode="screen" />
           )}
         </>

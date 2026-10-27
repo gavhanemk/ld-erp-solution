@@ -147,8 +147,8 @@ function RegisterPrint() {
     <>
       <style>{pageCss}</style>
       <PrintToolbar
-        backHref={`/reports/${id}${filters ? `?${filters}` : ''}`}
-        backLabel="Back to the register"
+        backHref={`/reports/${id}?${filters ? `${filters}&` : ''}tab=report`}
+        backLabel="Back to the report"
         copies={1}
         fileName={fileName}
       />

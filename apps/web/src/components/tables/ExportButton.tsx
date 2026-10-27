@@ -187,7 +187,7 @@ export function ExportButton({
                   <span className="min-w-0">
                     <span className="block">PDF / Print</span>
                     <span className="text-muted-foreground block text-xs leading-snug">
-                      Ready for A4; choose &ldquo;Save as PDF&rdquo; or a printer
+                      The detailed report on A4; &ldquo;Save as PDF&rdquo; or print
                     </span>
                   </span>
                 </button>
