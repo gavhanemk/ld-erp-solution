@@ -93,17 +93,24 @@ export function StickerStock({ onOpen }: { onOpen: (code: string) => void }) {
     <div className="glass-card overflow-hidden p-0">
       {/* What is on stickers, at a glance. */}
       <div className="border-border flex flex-wrap items-center gap-2 border-b px-4 py-3">
-        <h3 className="text-foreground mr-auto flex items-center gap-2 text-sm font-semibold">
-          <Layers size={16} className="text-primary" /> Stock on stickers
-        </h3>
+        <div className="mr-auto min-w-0">
+          <h3 className="text-foreground flex items-center gap-2 text-sm font-semibold">
+            <Layers size={16} className="text-primary" /> What is in the stores
+          </h3>
+          <p className="text-muted-foreground mt-0.5 text-xs">Every packet with a sticker. Click an item to see its packets and which to use first.</p>
+        </div>
         {summary && (
           <>
             <span className="badge-neutral">
               <b>{summary.packages}</b>&nbsp;packets · {summary.items} items · {summary.stores} stores
             </span>
             {summary.mismatches > 0 && (
-              <Link href="/inventory/packages" className="badge-warning inline-flex items-center gap-1" title="Packets whose stickers say more than the store holds">
-                <AlertTriangle size={12} /> {summary.mismatches} don&apos;t match the stock
+              <Link
+                href="/inventory/packages"
+                className="badge-warning inline-flex items-center gap-1"
+                title="For these items the stickers add up to more than the store holds: some was given out without scanning. Open Stickers to fix them."
+              >
+                <AlertTriangle size={12} /> {summary.mismatches} {summary.mismatches === 1 ? 'item needs' : 'items need'} checking
               </Link>
             )}
           </>
@@ -117,7 +124,7 @@ export function StickerStock({ onOpen }: { onOpen: (code: string) => void }) {
           <input
             id="sticker-stock-search"
             className="form-input h-9 w-full pl-8 text-sm"
-            placeholder="Item, code, lot or rack"
+            placeholder="Search item, packet no. or rack"
             value={typed}
             onChange={(e) => setTyped(e.target.value)}
             aria-label="Find stock on stickers"
@@ -150,10 +157,13 @@ export function StickerStock({ onOpen }: { onOpen: (code: string) => void }) {
         <p className="text-muted-foreground px-4 py-6 text-center text-sm">{filtered ? 'Nothing on stickers matches that.' : 'Nothing is on stickers yet.'}</p>
       ) : (
         <>
-          <p className="text-muted-foreground px-4 pt-2 text-[11px]">
-            {totals.packets} packets of {totals.items} {totals.items === 1 ? 'item' : 'items'}
-            {filtered ? ' match' : ''} · open a line to see its packets, oldest first
-          </p>
+          {/* Column headings, so each figure on a line says what it is. */}
+          <div className="text-muted-foreground border-border hidden items-center gap-x-3 border-b px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide sm:flex">
+            <span className="w-4" />
+            <span className="flex-1">Item{filtered ? ` · ${totals.items} found` : ''}</span>
+            <span className="w-44">Where</span>
+            <span className="w-40 text-right">In stock</span>
+          </div>
           <ul className="divide-border divide-y">
             {groups.map((g) => {
               const isOpen = open === g.key
@@ -167,25 +177,30 @@ export function StickerStock({ onOpen }: { onOpen: (code: string) => void }) {
                   >
                     {isOpen ? <ChevronDown size={15} className="text-primary shrink-0" /> : <ChevronRight size={15} className="text-muted-foreground shrink-0" />}
                     <span className="min-w-0 flex-1">
-                      <span className="text-foreground block truncate text-sm font-semibold">{g.item}</span>
+                      <span className="text-foreground block truncate text-sm font-semibold">
+                        {g.item}
+                        {g.owner && <span className="badge-purple ml-2 align-middle text-[10px]">{g.owner}&apos;s material</span>}
+                      </span>
                       <span className="text-muted-foreground block text-[11px]">
                         <span className="font-mono">{g.itemCode}</span>
                         {g.category ? ` · ${g.category}` : ''}
-                        {g.lots.length ? ` · lot ${g.lots.slice(0, 3).join(', ')}${g.lots.length > 3 ? ' …' : ''}` : ''}
                       </span>
                     </span>
-                    <span className="text-muted-foreground flex items-center gap-1 text-xs">
-                      <Warehouse size={12} /> {g.store}
-                    </span>
-                    {g.owner && <span className="badge-purple text-[10px]">{g.owner}&apos;s</span>}
-                    <span className="text-muted-foreground flex w-28 items-center gap-1 text-xs">
-                      <MapPin size={12} />
-                      {g.racks.length ? `${g.racks.slice(0, 3).join(', ')}${g.racks.length > 3 ? ' …' : ''}` : 'no rack'}
+                    <span className="w-44 text-xs">
+                      <span className="text-foreground flex items-center gap-1">
+                        <Warehouse size={12} className="text-muted-foreground" /> {g.store}
+                      </span>
+                      <span className={`flex items-center gap-1 ${g.racks.length ? 'text-muted-foreground' : 'warn-text'}`}>
+                        <MapPin size={12} />
+                        {g.racks.length ? `Rack ${g.racks.slice(0, 3).join(', ')}${g.racks.length > 3 ? ' …' : ''}` : 'No rack yet'}
+                      </span>
                     </span>
                     <span className="text-foreground w-40 text-right text-xs tabular-nums">
-                      <b className="text-sm">{qtyText(g.qty)}</b> {g.unit}
+                      <b className="text-sm">
+                        {qtyText(g.qty)} {g.unit}
+                      </b>
                       <span className="text-muted-foreground block text-[11px]">
-                        {packCount(g.packages, g.packTypes[0] ?? 'OTHER')} · last in {day(g.lastAt)}
+                        in {packCount(g.packages, g.packTypes[0] ?? 'OTHER')} · last came {day(g.lastAt)}
                       </span>
                     </span>
                   </button>
@@ -202,7 +217,7 @@ export function StickerStock({ onOpen }: { onOpen: (code: string) => void }) {
                         owner={g.owner}
                         unit={g.unit}
                         refreshKey={0}
-                        action="Open"
+                        action="View"
                         onPick={onOpen}
                       />
                     </div>
@@ -214,7 +229,7 @@ export function StickerStock({ onOpen }: { onOpen: (code: string) => void }) {
         </>
       )}
       <p className="text-muted-foreground border-border flex items-center gap-1.5 border-t px-4 py-2 text-[11px]">
-        <Package size={12} /> Every packet is listed with its rack. A newer one is never issued while an older one of the same item is on the rack, unless the store manager allows it.
+        <Package size={12} /> The packet that came in first is always used first. A later one cannot be given out while an earlier one is still on the rack, unless the store manager allows it.
       </p>
     </div>
   )
