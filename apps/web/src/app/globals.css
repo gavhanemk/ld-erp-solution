@@ -848,3 +848,36 @@
     }
   }
 }
+
+/* Where the keyboard is. Only when it got there by keyboard
+   (:focus-visible), so a click leaves no ring behind. Boxes keep the ring
+   they draw on focus already; this covers buttons, links, list lines and
+   anything else that takes focus without one. */
+:where(button, a, [role='tab'], [role='option'], [role='menuitem'], [tabindex]):focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+:where(.form-input, input, select, textarea):focus-visible {
+  outline: none;
+}
+/* A line in a list: drawn inside the line, which sits flush in its table. */
+[data-row]:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: -2px;
+  background: hsl(var(--primary) / 0.08);
+}
+/* A key, as shown in the shortcut list and the palette. */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.4rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.3rem;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--background));
+  color: hsl(var(--muted-foreground));
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.3;
+}

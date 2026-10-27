@@ -16,6 +16,7 @@ import {
 } from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import { Check, ChevronDown, Plus, Search } from 'lucide-react'
+import { focusNext } from '@/lib/keys'
 
 /**
  * A dropdown you can type into.
@@ -30,7 +31,12 @@ import { Check, ChevronDown, Plus, Search } from 'lucide-react'
  *     "SUP-JW-003 — Crystal Washing & Finishing");
  *   - arrow keys, Enter to pick, Escape to close (the dropdown only, never
  *     the form it sits in);
- *   - typing on a closed dropdown opens it with that letter already searched.
+ *   - typing on a closed dropdown opens it with that letter already searched;
+ *     in a short list without a search box, typing jumps to the choice that
+ *     starts with those letters;
+ *   - a choice made with Enter or Tab moves on to the next box (Shift+Tab to
+ *     the one before), so a form fills without reaching for the mouse. A
+ *     click leaves focus on the dropdown, as before.
  *
  * The list opens in a layer above everything, so a dropdown inside a table
  * that scrolls sideways, or at the bottom of a dialog, is never cut off.
@@ -139,6 +145,12 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
   const [active, setActive] = useState(0)
   const searchRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  // Where focus goes once the list shuts: on to the next box (1), back (-1), or stay (0).
+  const advance = useRef<0 | 1 | -1>(0)
+  // Letters typed in a short list, to jump to the choice they start.
+  const typed = useRef({ text: '', at: 0 })
+  const jumpOnOpen = useRef<string | null>(null)
 
   const selected = options.find((o) => o.value === current)
   // The empty choice ("Select...", "All suppliers") reads as a hint, not a value.
@@ -156,9 +168,25 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
     })
   }, [options, query])
 
-  // On opening, start at what is chosen now so Enter keeps it.
+  // On opening, start at what is chosen now so Enter keeps it — or, opened by
+  // typing a letter, at the first choice that starts with it.
   useEffect(() => {
     if (!open) return
+    const letter = jumpOnOpen.current
+    jumpOnOpen.current = null
+    const jumped = letter ? visible.findIndex((o) => !o.disabled && fold(o.label).startsWith(letter)) : -1
+    if (jumped >= 0) return setActive(jumped)
+    // Searching: the first choice that starts with what was typed, then one
+    // with a word that does ("k" is Kaj Button before Job Work), else the first.
+    const typedWords = fold(query).split(/\s+/).filter(Boolean)
+    if (typedWords.length) {
+      const usable = (o: Opt) => !o.disabled && o.value !== ''
+      const head = fold(query.trim())
+      const starts = visible.findIndex((o) => usable(o) && fold(o.label).startsWith(head))
+      const word = visible.findIndex((o) => usable(o) && fold(o.label).split(/[\s\-—·/(]+/).some((w) => w.startsWith(typedWords[0])))
+      const any = visible.findIndex(usable)
+      return setActive(starts >= 0 ? starts : word >= 0 ? word : Math.max(0, any))
+    }
     const at = visible.findIndex((o) => o.value === current)
     setActive(at >= 0 ? at : Math.max(0, visible.findIndex((o) => !o.disabled)))
     // Only on open and when the list narrows, not on every render.
@@ -194,6 +222,20 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
     },
     [current, value, onChange, name, id]
   )
+
+  /** Typing in a list with no search box: to the next choice starting with what was typed. */
+  const jump = (ch: string) => {
+    const now = Date.now()
+    const t = typed.current
+    t.text = now - t.at < 800 ? t.text + fold(ch) : fold(ch)
+    t.at = now
+    // A second press of the same letter goes on to the next choice with it.
+    const from = t.text.length === 1 ? active + 1 : active
+    for (let n = 0; n < visible.length; n++) {
+      const i = (from + n) % visible.length
+      if (!visible[i].disabled && fold(visible[i].label).startsWith(t.text)) return setActive(i)
+    }
+  }
 
   const move = (step: number) => {
     if (!visible.length) return
@@ -231,11 +273,26 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
       e.preventDefault()
       // Nothing matches what was typed: Enter adds it, if adding is offered.
       if (!visible.length && onCreate && query.trim()) create()
-      else choose(visible[active])
+      else if (visible[active] && !visible[active].disabled) {
+        advance.current = 1
+        choose(visible[active])
+      }
     } else if (e.key === 'Escape') {
       stopEscape(e)
     } else if (e.key === 'Tab') {
-      setOpen(false)
+      // Tab keeps the highlighted choice — what is chosen now, unless the
+      // arrows or typing moved it — and goes on, as it would from a <select>.
+      e.preventDefault()
+      advance.current = e.shiftKey ? -1 : 1
+      const opt = visible[active]
+      if (opt && !opt.disabled) choose(opt)
+      else {
+        setOpen(false)
+        setQuery('')
+      }
+    } else if (!showSearch && e.key.length === 1 && e.key !== ' ' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault()
+      jump(e.key)
     }
   }
 
@@ -246,9 +303,14 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
       setOpen(true)
-    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && showSearch) {
+    } else if (e.key.length === 1 && e.key !== ' ' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault()
-      setQuery(e.key)
+      if (showSearch) setQuery(e.key)
+      else {
+        // A short list: open it at the first choice with that letter.
+        jumpOnOpen.current = fold(e.key)
+        typed.current = { text: fold(e.key), at: Date.now() }
+      }
       setOpen(true)
     }
   }
@@ -272,7 +334,11 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
     >
       <Popover.Trigger asChild disabled={disabled}>
         <button
-          ref={ref}
+          ref={(el) => {
+            triggerRef.current = el
+            if (typeof ref === 'function') ref(el)
+            else if (ref) ref.current = el
+          }}
           type="button"
           id={id}
           name={name}
@@ -307,6 +373,20 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
             else listRef.current?.focus()
           }}
           onEscapeKeyDown={(e) => e.preventDefault()}
+          onCloseAutoFocus={(e) => {
+            const dir = advance.current
+            advance.current = 0
+            const trigger = triggerRef.current
+            if (!dir || !trigger) return
+            // Chosen from the keyboard: back to the box, then on once the
+            // screen has caught up with the choice (a box it enables, a box
+            // it fills).
+            e.preventDefault()
+            trigger.focus()
+            setTimeout(() => {
+              if (document.activeElement === trigger) focusNext(trigger, dir)
+            }, 30)
+          }}
           className="border-border bg-card text-foreground z-[1000] flex max-h-[min(22rem,var(--radix-popover-content-available-height))] w-max max-w-[min(30rem,92vw)] min-w-[var(--radix-popover-trigger-width)] flex-col overflow-hidden rounded-xl border shadow-xl"
         >
           {showSearch && (
