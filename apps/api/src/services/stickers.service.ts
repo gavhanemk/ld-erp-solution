@@ -547,6 +547,8 @@ export async function restickStickers(
   qtys: number[],
   packType: PackType | null,
   userId: string | null,
+  /** A note on each new sticker, in the order of `qtys`. */
+  notes?: string[],
 ) {
   const list = await tx.stockPackage.findMany({
     where: { id: { in: ids } },
@@ -621,6 +623,7 @@ export async function restickStickers(
     spot,
     packType: packType ?? first.packType,
     qtys: wanted,
+    notesEach: notes,
     lotNo: first.lotNo,
     // Still on the rack the old stickers were on, when they were all on one.
     rack: list.every((p) => p.rack === first.rack) ? first.rack : null,
@@ -641,7 +644,7 @@ export async function restickStickers(
     const line = await tx.gRNLine.findUnique({ where: { id: first.grnLineId }, select: { acceptedQty: true } })
     const others = await tx.stockPackage.count({ where: { grnLineId: first.grnLineId, status: { not: 'VOID' }, id: { notIn: created.map((c) => c.id) } } })
     if (line && !others && Math.abs(Number(line.acceptedQty) - sum) <= 0.0005) {
-      await tx.gRNLine.update({ where: { id: first.grnLineId }, data: { packQtys: wanted, packType: packType ?? first.packType, packNotes: [] } })
+      await tx.gRNLine.update({ where: { id: first.grnLineId }, data: { packQtys: wanted, packType: packType ?? first.packType, packNotes: notes?.some((n) => n.trim()) ? wanted.map((_, n) => notes[n]?.trim() ?? '') : [] } })
       // And the item keeps it, where it has no qty per sticker yet.
       await learnPackSize(tx, first.itemId, wanted, packType ?? first.packType)
     }

@@ -59,6 +59,8 @@ const groupSchema = z.object({
   qtys: z.array(qty).min(1, 'Enter at least one package').max(500, 'Up to 500 packages at a time'),
   lotNo: z.string().max(50).optional().nullable(),
   notes: z.string().max(500).optional().nullable(),
+  /** A note on each package, in the order of `qtys`: "short width". */
+  notesEach: z.array(z.string().trim().max(120)).max(500).optional(),
   grnLineId: z.string().optional().nullable(),
   /** Keep this pack type and quantity as the item's own, for next time. */
   remember: z.boolean().optional().default(false),
@@ -128,6 +130,8 @@ const restickSchema = z.object({
   ids: z.array(z.string().min(1)).min(1).max(500),
   qtys: z.array(qty).min(1, 'Make at least one sticker').max(500, 'That is more than 500 stickers'),
   packType: z.enum(PACK_TYPES).optional().nullable(),
+  /** A note on each new sticker, in the order of `qtys`: "short width". */
+  notes: z.array(z.string().trim().max(120, 'A package note is 120 characters at most')).max(500).optional(),
 })
 
 const pkgInclude = {
@@ -997,7 +1001,7 @@ router.post('/auto', requirePermission(MODULE, 'create'), async (req: AuthReques
  */
 router.post('/restick', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = restickSchema.parse(req.body)
-  const result = await prisma.$transaction((tx) => restickStickers(tx, data.ids, data.qtys, data.packType ?? null, req.user?.id ?? null), {
+  const result = await prisma.$transaction((tx) => restickStickers(tx, data.ids, data.qtys, data.packType ?? null, req.user?.id ?? null, data.notes), {
     timeout: 60_000,
     maxWait: 20_000,
   })

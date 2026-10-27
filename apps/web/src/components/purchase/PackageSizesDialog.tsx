@@ -1,16 +1,14 @@
 'use client'
 
-import { useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { CheckCircle2, ClipboardPaste, Package, Plus, Trash2, Wand2 } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { CheckCircle2, ClipboardPaste, Package, Wand2 } from 'lucide-react'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { parseSizes, splitEvenly } from '@/components/packages/packageTypes'
+import { PackageRows, type SizeRow } from '@/components/packages/PackageRows'
 
-export interface PackageRow {
-  qty: string
-  note: string
-}
+export type PackageRow = SizeRow
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000
 const fmt = (n: number) => round3(n).toLocaleString('en-IN', { maximumFractionDigits: 3 })
@@ -62,8 +60,6 @@ export function PackageSizesDialog({
   const [fillSize, setFillSize] = useState(() => (perPack ? String(perPack) : ''))
   const [pasting, setPasting] = useState(false)
   const [pasted, setPasted] = useState('')
-  const tableRef = useRef<HTMLTableElement>(null)
-  const sizeBox = (i: number) => tableRef.current?.querySelector<HTMLInputElement>(`[data-pack-row="${i}"]`) ?? null
   const noun = packNouns.find((n) => n.value === type)?.label.toLowerCase() ?? 'packages'
 
   const sizes = rows.map((r) => num(r.qty))
@@ -87,21 +83,6 @@ export function PackageSizesDialog({
     setRows(qtys.map((q) => ({ qty: String(q), note: '' })))
     setPasting(false)
     setPasted('')
-  }
-  const setRow = (i: number, patch: Partial<PackageRow>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)))
-  const addRow = (focus = true) => {
-    setRows((rs) => [...rs, { qty: '', note: '' }])
-    if (focus) setTimeout(() => sizeBox(rows.length)?.focus(), 0)
-  }
-  /** Enter in a size goes down to the next one, and adds a row at the end. */
-  const onSizeKey = (i: number) => (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key !== 'Enter') return
-    e.preventDefault()
-    const next = sizeBox(i + 1)
-    if (next) {
-      next.focus()
-      next.select()
-    } else addRow()
   }
 
   const save = (alsoReceived?: number) =>
@@ -201,61 +182,7 @@ export function PackageSizesDialog({
         </div>
 
         {/* One row a package: its size, and a note when one is worth keeping. */}
-        <div className="border-border overflow-hidden rounded-xl border">
-          <table ref={tableRef} className="data-table w-full">
-            <thead>
-              <tr className="bg-secondary">
-                <th style={{ width: 48 }}>#</th>
-                <th style={{ width: 170, textAlign: 'right' }}>Size ({unit})</th>
-                <th>Note (optional)</th>
-                <th style={{ width: 44 }} />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={i}>
-                  <td className="text-muted-foreground text-xs tabular-nums">{i + 1}</td>
-                  <td>
-                    <StepInput
-                      id={`pack-size-${i}`}
-                      decimals
-                      className="form-input h-9 w-full text-right tabular-nums"
-                      value={r.qty}
-                      onValueChange={(v) => setRow(i, { qty: v })}
-                      onKeyDown={onSizeKey(i)}
-                      data-pack-row={i}
-                      aria-label={`Size of package ${i + 1}`}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      id={`pack-note-${i}`}
-                      className="form-input h-9 w-full text-sm"
-                      value={r.note}
-                      maxLength={120}
-                      placeholder="e.g. short width, torn bag"
-                      onChange={(e) => setRow(i, { note: e.target.value })}
-                      aria-label={`Note on package ${i + 1}`}
-                    />
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      className="btn-ghost text-muted-foreground hover:text-destructive p-1.5"
-                      onClick={() => setRows((rs) => (rs.length > 1 ? rs.filter((_, j) => j !== i) : [{ qty: '', note: '' }]))}
-                      aria-label={`Remove package ${i + 1}`}
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <button type="button" className="btn-ghost border-border h-9 w-full justify-center border border-dashed text-sm" onClick={() => addRow()}>
-          <Plus size={14} /> Add a package
-        </button>
+        <PackageRows rows={rows} onChange={setRows} unit={unit} max={1000} />
       </div>
     </FormFrame>
   )
