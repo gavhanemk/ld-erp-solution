@@ -299,7 +299,8 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
   // On the closed box: arrows and Enter open it, and a letter opens it
   // already searching for that letter.
   const onTriggerKey = (e: KeyboardEvent<HTMLButtonElement>) => {
-    if (open) return
+    // Alt, Ctrl or ⌘ with a key is a shortcut (Alt+↓ to the next line, Ctrl+S): not for the list.
+    if (open || e.altKey || e.ctrlKey || e.metaKey) return
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
       setOpen(true)

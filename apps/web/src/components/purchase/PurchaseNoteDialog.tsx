@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { api, apiErrorMessage, ApiError, can, masterResource } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { Section } from '@/components/purchase/Section'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import {
@@ -960,6 +961,18 @@ export function PurchaseNoteDialog({
 
   // Escape closes this window only — not the ones behind it.
   useEscape(onClose, open)
+  // The page behind does not scroll; Tab goes round inside, and focus goes
+  // back to the button that opened it.
+  useEffect(() => {
+    if (!open) return
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [open])
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef, open)
 
   if (!open || typeof document === 'undefined') return null
 
@@ -980,6 +993,7 @@ export function PurchaseNoteDialog({
     <>
       <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
         <div
+          ref={dialogRef}
           className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
           role="dialog"
           aria-modal="true"
@@ -1412,7 +1426,14 @@ export function PurchaseNoteDialog({
                 title="Item Details"
                 actions={
                   noBill ? (
-                    <button type="button" onClick={addManualLine} className="btn-secondary text-xs">
+                    <button
+                      type="button"
+                      onClick={addManualLine}
+                      className="btn-secondary text-xs"
+                      data-grid-add
+                      aria-keyshortcuts="Alt+A"
+                      title="Add line (Alt+A)"
+                    >
                       <Plus size={14} /> Add line
                     </button>
                   ) : picked.length > 0 ? (
@@ -1457,14 +1478,14 @@ export function PurchaseNoteDialog({
                               <th className="w-8 px-2 py-2"></th>
                             </tr>
                           </thead>
-                          <tbody>
+                          <tbody data-grid>
                             {formLines.map((l, i) => {
                               const g = l.grnMeta
                               const problem = problems[i]
                               const value = round2(num(l.qty) * num(l.unitPrice))
                               const item = itemById.get(l.itemId)
                               return (
-                                <tr key={i} className="border-border/60 border-b last:border-0">
+                                <tr key={i} data-grid-row className="border-border/60 border-b last:border-0">
                                   <td className="px-2 py-2 align-top">
                                     {g ? (
                                       <>
@@ -1566,6 +1587,8 @@ export function PurchaseNoteDialog({
                                       onClick={() => removeManualLine(i)}
                                       className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
                                       aria-label={`Remove line ${i + 1}`}
+                                      aria-keyshortcuts="Alt+Delete"
+                                      data-grid-remove
                                     >
                                       <Trash2 size={13} />
                                     </button>
@@ -1731,7 +1754,7 @@ export function PurchaseNoteDialog({
                             </th>
                           </tr>
                         </thead>
-                        <tbody>
+                        <tbody data-grid>
                           {formLines.map((l, i) => {
                             const m = l.meta!
                             const problem = problems[i]
@@ -1739,6 +1762,7 @@ export function PurchaseNoteDialog({
                             return (
                               <tr
                                 key={l.billLineId ?? i}
+                                data-grid-row
                                 className={`border-border/60 border-b last:border-0 ${
                                   l.picked ? 'bg-primary/[0.04]' : ''
                                 }`}
@@ -2239,6 +2263,9 @@ export function PurchaseNoteDialog({
                   type="submit"
                   className={mayPost ? 'btn-secondary' : 'btn-primary'}
                   disabled={saving}
+                  data-hotkey="save"
+                  aria-keyshortcuts="Control+S Meta+S"
+                  title={isEdit ? 'Save changes (Ctrl+S)' : 'Save as draft (Ctrl+S)'}
                 >
                   {saving ? <Loader2 size={15} className="animate-spin" /> : <Icon size={15} />}
                   {isEdit ? 'Save changes' : 'Save as draft'}

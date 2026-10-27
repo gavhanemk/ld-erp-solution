@@ -474,7 +474,7 @@ export default function PaymentsReceivedPage() {
           </button>
           <ExportButton onExport={tab === 'receipts' ? exportList : exportOwed} disabled={loading || owedLoading} />
           {mayRecord && (
-            <button className="btn-primary" onClick={() => setForm({ open: true, customerId: null, invoiceId: null, apply: null })}>
+            <button className="btn-primary" onClick={() => setForm({ open: true, customerId: null, invoiceId: null, apply: null })} data-hotkey="new" aria-keyshortcuts="Alt+N">
               <Plus size={15} /> <span className="hidden sm:inline">Record receipt</span>
             </button>
           )}
@@ -524,6 +524,7 @@ export default function PaymentsReceivedPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search"
+              data-hotkey="search"
             />
           </div>
           {tab === 'outstanding' ? (
@@ -621,16 +622,17 @@ export default function PaymentsReceivedPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {owed.map((r) => {
+                  {owed.map((r, i) => {
                     const expanded = openRow === r.customer.id
                     return (
                       <Fragment key={r.customer.id}>
-                        <tr>
+                        <tr data-row tabIndex={i === 0 ? 0 : -1}>
                           <td>
                             {r.invoices.length > 0 && (
                               <button
                                 className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
                                 onClick={() => setOpenRow(expanded ? null : r.customer.id)}
+                                data-row-open
                                 aria-expanded={expanded}
                                 aria-label={`${expanded ? 'Hide' : 'Show'} invoices of ${r.customer.name}`}
                               >
@@ -797,15 +799,16 @@ export default function PaymentsReceivedPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r) => {
+                  {rows.map((r, i) => {
                     const s = receiptStatus(r)
                     return (
-                      <tr key={r.id} className={r.status === 'REVERSED' ? 'opacity-70' : undefined}>
+                      <tr key={r.id} className={r.status === 'REVERSED' ? 'opacity-70' : undefined} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td className="whitespace-nowrap">
                           <a
                             href={`/print/payment-receipt/${r.id}`}
                             target="_blank"
                             rel="noreferrer"
+                            data-row-open
                             className="text-primary font-mono text-xs font-semibold hover:underline"
                           >
                             {r.receiptNumber}

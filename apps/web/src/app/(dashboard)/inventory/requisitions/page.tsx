@@ -849,7 +849,7 @@ function RequisitionsScreen() {
           >
             {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
           </button>
-          <button className="btn-primary" onClick={() => setDialog(true)}>
+          <button className="btn-primary" onClick={() => setDialog(true)} data-hotkey="new" aria-keyshortcuts="Alt+N">
             <Plus size={15} /> New requisition
           </button>
         </div>
@@ -964,6 +964,7 @@ function RequisitionsScreen() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search requisitions"
+              data-hotkey="search"
             />
             {search && (
               <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
@@ -1136,7 +1137,7 @@ function RequisitionsScreen() {
                     </tr>
                   </thead>
                   <tbody>
-                    {pageRows.map((mr) => {
+                    {pageRows.map((mr, i) => {
                       const r = rowFacts(mr)
                       const expanded = open === mr.id
                       const live = OPEN_STAGES.includes(r.stage)
@@ -1146,9 +1147,10 @@ function RequisitionsScreen() {
                       const short = openLines.filter((l) => (l.available ?? 0) + 1e-9 < Number(l.requestedQty) - Number(l.issuedQty))
                       return (
                         <Fragment key={mr.id}>
-                          <tr>
+                          <tr data-row tabIndex={i === 0 ? 0 : -1}>
                             <td>
                               <button
+                                data-row-open
                                 className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
                                 onClick={() => setOpen(expanded ? null : mr.id)}
                                 title={expanded ? 'Hide items' : 'Show items'}

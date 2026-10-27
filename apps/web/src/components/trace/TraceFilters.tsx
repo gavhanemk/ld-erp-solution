@@ -254,10 +254,10 @@ export function PieceResults({ f, typed, set, open, storyAbove = false }: { f: F
               </tr>
             </thead>
             <tbody>
-              {data?.rows.map((r) => {
+              {data?.rows.map((r, i) => {
                 const st = badge(GARMENT_STATUS, r.status)
                 return (
-                  <tr key={r.code} className="cursor-pointer" onClick={() => open({ kind: 'g', id: r.code })} title={`${r.code}: see its whole history`}>
+                  <tr key={r.code} className="cursor-pointer" onClick={() => open({ kind: 'g', id: r.code })} title={`${r.code}: see its whole history`} data-row tabIndex={i === 0 ? 0 : -1}>
                     <td className="text-primary whitespace-nowrap font-mono text-xs font-semibold">{r.code}</td>
                     <td className="whitespace-nowrap text-sm">
                       {r.style} <span className="text-muted-foreground">· {r.color}</span>

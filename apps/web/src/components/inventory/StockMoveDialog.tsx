@@ -443,7 +443,14 @@ export function StockMoveDialog({
         icon={Package}
         title="Items"
         actions={
-          <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={addLine}>
+          <button
+            type="button"
+            className="btn-secondary h-8 px-3 text-xs"
+            onClick={addLine}
+            data-grid-add
+            aria-keyshortcuts="Alt+A"
+            title="Add another item (Alt+A)"
+          >
             <Plus size={14} /> Add another item
           </button>
         }
@@ -460,14 +467,14 @@ export function StockMoveDialog({
                 <th style={{ width: 40 }} />
               </tr>
             </thead>
-            <tbody>
+            <tbody data-grid>
               {lines.map((line, i) => {
                 const item = itemsById.get(line.itemId)
                 const choices = held.filter((h) => h.itemId === line.itemId)
                 const ours = choices.find((h) => heldKey(h) === OURS)
                 const customers = parseWhose(line.whose).ownership === 'CUSTOMER_OWNED'
                 return (
-                  <tr key={i}>
+                  <tr key={i} data-grid-row>
                     <td className="text-muted-foreground px-3 py-2 text-xs">{i + 1}</td>
                     <td className="px-3 py-2">
                       <SmartSelect
@@ -562,6 +569,8 @@ export function StockMoveDialog({
                         className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
                         onClick={() => removeLine(i)}
                         aria-label={`Remove line ${i + 1}`}
+                        aria-keyshortcuts="Alt+Delete"
+                        data-grid-remove
                       >
                         <Trash2 size={15} />
                       </button>

@@ -1247,7 +1247,7 @@ export default function GoodsReceiptPage() {
             />
           )}
           <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
-          <button className="btn-primary" onClick={() => setDialog('')} aria-label="Receive goods">
+          <button className="btn-primary" onClick={() => setDialog('')} aria-label="Receive goods" data-hotkey="new" aria-keyshortcuts="Alt+N">
             <Plus size={15} /> <span className="hidden sm:inline">Receive goods</span>
           </button>
         </div>
@@ -1351,6 +1351,7 @@ export default function GoodsReceiptPage() {
                   tab === 'waiting' ? setWaitSearch(e.target.value) : setSearch(e.target.value)
                 }
                 aria-label="Search"
+                data-hotkey="search"
               />
             </div>
 
@@ -1737,7 +1738,7 @@ export default function GoodsReceiptPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {waitingShown.map((po) => {
+                        {waitingShown.map((po, i) => {
                           const part = po.status === 'PARTIALLY_RECEIVED'
                           const lines = po.lines ?? []
                           const groups = qtyByUnit(lines)
@@ -1745,7 +1746,7 @@ export default function GoodsReceiptPage() {
                           const expanded = openOrder === po.id
                           return (
                             <Fragment key={po.id}>
-                              <tr>
+                              <tr data-row tabIndex={i === 0 ? 0 : -1}>
                                 <td>
                                   <button
                                     className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
@@ -1758,6 +1759,7 @@ export default function GoodsReceiptPage() {
                                     title={expanded ? 'Hide items' : 'Show items'}
                                     aria-label={`${expanded ? 'Hide' : 'Show'} items on ${po.poNumber}`}
                                     aria-expanded={expanded}
+                                    data-row-open
                                   >
                                     {expanded ? (
                                       <ChevronDown size={14} />
@@ -2280,19 +2282,20 @@ export default function GoodsReceiptPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {rows.map((grn) => {
+                        {rows.map((grn, i) => {
                           const s = stage(grn.status)
                           const expanded = open === grn.id
                           const t = receiptTotals(grn)
 
                           return (
                             <Fragment key={grn.id}>
-                              <tr>
+                              <tr data-row tabIndex={i === 0 ? 0 : -1}>
                                 <td>
                                   <button
                                     className="btn-ghost p-1"
                                     onClick={() => setOpen(expanded ? null : grn.id)}
                                     aria-label={expanded ? 'Hide items' : 'Show items'}
+                                    data-row-open
                                   >
                                     {expanded ? (
                                       <ChevronDown size={14} />

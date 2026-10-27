@@ -668,6 +668,7 @@ export default function SupplierPaymentsPage() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 aria-label="Search"
+                data-hotkey="search"
               />
             </div>
 
@@ -910,13 +911,13 @@ export default function SupplierPaymentsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleBills.map((b) => {
+                    {visibleBills.map((b, i) => {
                       const grns = grnsOn(b)
                       const bOpen = expanded === b.id
                       const canExpand = grns.length > 0 || Boolean(b.po?.attachments?.length)
                       return (
                         <Fragment key={b.id}>
-                          <tr>
+                          <tr data-row tabIndex={i === 0 ? 0 : -1}>
                             <td>
                               <button
                                 className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
@@ -943,6 +944,7 @@ export default function SupplierPaymentsPage() {
                                 href={`/print/purchase-bill/${b.id}`}
                                 target="_blank"
                                 rel="noreferrer"
+                                data-row-open
                                 className="font-mono text-xs text-teal-400 hover:underline"
                                 title="Open this bill to print or save"
                               >
@@ -1198,13 +1200,13 @@ export default function SupplierPaymentsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visiblePayments.map((p) => {
+                  {visiblePayments.map((p, i) => {
                     const grns = p.invoice ? grnsOn(p.invoice) : []
                     const canExpand = grns.length > 0 || Boolean(p.invoice?.po?.attachments?.length)
                     const pOpen = expanded === p.id
                     return (
                       <Fragment key={p.id}>
-                        <tr>
+                        <tr data-row tabIndex={i === 0 ? 0 : -1}>
                           <td>
                             <button
                               className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
@@ -1217,6 +1219,7 @@ export default function SupplierPaymentsPage() {
                               title={pOpen ? 'Hide receipts' : 'Show receipts and files'}
                               aria-label={`${pOpen ? 'Hide' : 'Show'} receipts on ${p.paymentNumber}`}
                               aria-expanded={pOpen}
+                              data-row-open
                             >
                               {pOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                             </button>

@@ -136,60 +136,120 @@ export function focusNext(from: HTMLElement, dir: 1 | -1 = 1) {
   }
 }
 
+/*
+ * Where focus has been, newest last: so a window can hand focus back to the
+ * button that opened it, even when something inside took focus before the
+ * window's own code ran.
+ */
+const trail: HTMLElement[] = []
+let tracking = false
+export function trackFocus() {
+  if (tracking || typeof document === 'undefined') return
+  tracking = true
+  document.addEventListener(
+    'focusin',
+    (e) => {
+      if (!(e.target instanceof HTMLElement)) return
+      trail.push(e.target)
+      if (trail.length > 20) trail.shift()
+    },
+    true,
+  )
+}
+
+/** The last thing focused outside this window, still on the page: what opened it. */
+export function focusBefore(root: HTMLElement): HTMLElement | null {
+  const now = document.activeElement
+  if (now instanceof HTMLElement && now !== document.body && !root.contains(now)) return now
+  for (let i = trail.length - 1; i >= 0; i--) {
+    const el = trail[i]
+    if (el.isConnected && el !== document.body && !root.contains(el) && !el.closest('[data-radix-popper-content-wrapper]')) return el
+  }
+  return null
+}
+
+const FIELDS = 'input:not([type="hidden"]), textarea, select, [role="combobox"]'
+
 /**
- * Focus for a dialog: into it when it opens (the first field, unless
- * something inside already has focus), round inside it with Tab and
- * Shift+Tab, and back to whatever had it before when it closes. A list
- * opened from inside it (drawn elsewhere on the page) is left alone.
+ * Puts focus in a window that has just opened, unless something inside has
+ * it already: the first box to fill — waited for while it is greyed out and
+ * its list loads — or, in a window with nothing to fill, the window itself,
+ * so Tab starts inside it. Never a button: Enter on Cancel would close the
+ * form. Returns a function that stops the waiting.
+ */
+export function placeFocus(root: HTMLElement): () => void {
+  let tries = 0
+  let t: ReturnType<typeof setTimeout>
+  const place = () => {
+    if (!root.isConnected || root.contains(document.activeElement)) return
+    const boxes = [...root.querySelectorAll<HTMLElement>(FIELDS)].filter(
+      (el) => el.getClientRects().length > 0 && !el.closest('[inert], [aria-hidden="true"]') && el.tabIndex >= 0,
+    )
+    const usable = boxes.filter((el) => !(el as HTMLInputElement).disabled)
+    tries++
+    // The first box, once it can be used; after a second and a half, the first that can.
+    if (boxes[0] && usable[0] === boxes[0]) return boxes[0].focus()
+    if (boxes.length && tries < 15) return void (t = setTimeout(place, 100))
+    if (usable[0]) return usable[0].focus()
+    if (boxes.length && tries < 40) return void (t = setTimeout(place, 100))
+    if (!root.hasAttribute('tabindex')) root.setAttribute('tabindex', '-1')
+    root.focus({ preventScroll: true })
+  }
+  t = setTimeout(place, 60)
+  return () => clearTimeout(t)
+}
+
+/**
+ * Tab and Shift+Tab go round inside the window on top, never out to the page
+ * behind it. A list opened from inside the window (drawn elsewhere on the
+ * page, like a dropdown's) is left to itself.
+ */
+export function keepTabInside(e: KeyboardEvent) {
+  if (e.key !== 'Tab' || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return
+  const root = topDialog()
+  if (!root) return
+  const at = document.activeElement as HTMLElement | null
+  if (at?.closest('[data-radix-popper-content-wrapper]')) return
+  const fields = tabbables(root)
+  if (!fields.length) return
+  const first = fields[0]
+  const last = fields[fields.length - 1]
+  if (!at || !root.contains(at)) {
+    e.preventDefault()
+    ;(e.shiftKey ? last : first).focus()
+  } else if (e.shiftKey && (at === first || at === root)) {
+    e.preventDefault()
+    last.focus()
+  } else if (!e.shiftKey && at === last) {
+    e.preventDefault()
+    first.focus()
+  }
+}
+
+/**
+ * Focus for a dialog: into it when it opens, and back to whatever opened it
+ * when it closes. (Tab is kept inside by the keyboard layer, for every
+ * window on the page.)
  */
 export function useDialogFocus(ref: React.RefObject<HTMLElement | null>, active = true) {
   useEffect(() => {
     if (!active) return
-    const before = document.activeElement as HTMLElement | null
-    // The first box to fill. One still greyed out while its list loads is
-    // waited for, up to a second and a half, rather than skipped for the
-    // box after it.
-    let tries = 0
-    let t: ReturnType<typeof setTimeout>
-    const place = () => {
-      const root = ref.current
-      if (!root || root.contains(document.activeElement)) return
-      const box = [...root.querySelectorAll<HTMLElement>('input:not([type="hidden"]), textarea, select, [role="combobox"]')].find(
-        (el) => el.getClientRects().length > 0 && !el.closest('[inert], [aria-hidden="true"]') && el.tabIndex >= 0,
-      )
-      if (box && (box as HTMLInputElement).disabled && tries++ < 15) {
-        t = setTimeout(place, 100)
-        return
-      }
-      const fields = tabbables(root)
-      const first = (box && fields.includes(box) ? box : null) ?? fields.find((el) => el.matches('input, textarea, select, [role="combobox"]')) ?? fields.find((el) => !el.matches('[aria-label="Close"]')) ?? fields[0]
-      first?.focus()
-    }
-    t = setTimeout(place, 60)
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab' || e.defaultPrevented) return
-      const root = ref.current
-      if (!root || topDialog() !== root) return
-      // In a list drawn outside the dialog: the list decides.
-      if (!root.contains(document.activeElement)) return
-      const fields = tabbables(root)
-      if (!fields.length) return
-      const first = fields[0]
-      const last = fields[fields.length - 1]
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault()
-        last.focus()
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', onKey)
+    trackFocus()
+    const root = ref.current
+    const before = root ? focusBefore(root) : (document.activeElement as HTMLElement | null)
+    const stop = root ? placeFocus(root) : () => {}
     return () => {
-      clearTimeout(t)
-      document.removeEventListener('keydown', onKey)
-      // Back where the person was, if it is still on the page.
-      if (before && before.isConnected && before !== document.body) setTimeout(() => before.focus?.(), 0)
+      stop()
+      // Back where the person was, once the window has really gone (not when
+      // this only runs again with it still open), and only if focus went
+      // with it rather than somewhere on purpose.
+      setTimeout(() => {
+        if (!before || !before.isConnected || before === document.body) return
+        const gone = !root || !root.isConnected || root.getClientRects().length === 0
+        if (!gone) return
+        const at = document.activeElement
+        if (!at || at === document.body || !at.isConnected || root?.contains(at)) before.focus()
+      }, 0)
     }
   }, [ref, active])
 }

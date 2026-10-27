@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 // The same panel the order and receipt forms are built from, so all three
 // read as one module rather than three people's ideas of a form.
 import { Section } from '@/components/purchase/PurchaseOrderDialog'
@@ -875,6 +876,9 @@ export function PurchaseBillDialog({
 
   // Escape closes this window only — not the ones behind it.
   useEscape(onClose, open)
+  // Tab goes round inside the form, and focus goes back to the button that opened it.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef, open)
   useEffect(() => {
     if (!open) return
     const previous = document.body.style.overflow
@@ -1744,6 +1748,7 @@ export function PurchaseBillDialog({
         top of this one. Filling the height makes the margin the padding and
         nothing else. */}
       <div
+        ref={dialogRef}
         // An expense bill has a handful of fields and one short table, so on a
         // wide screen it is held to a readable width and centred rather than
         // stretched edge to edge. A goods bill keeps the full width for its
@@ -2509,6 +2514,9 @@ export function PurchaseBillDialog({
                   type="button"
                   onClick={() => setLines((p) => [...p, freshLine()])}
                   className="btn-secondary text-xs"
+                  data-grid-add
+                  aria-keyshortcuts="Alt+A"
+                  title="Add line (Alt+A)"
                 >
                   <Plus size={14} /> Add line
                 </button>
@@ -2552,12 +2560,13 @@ export function PurchaseBillDialog({
                       ))}
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody data-grid>
                     {lines.map((line, i) => {
                       const item = itemById.get(line.itemId)
                       return (
                         <tr
                           key={i}
+                          data-grid-row
                           className="border-border/50 border-b last:border-0 [&>td]:align-top"
                         >
                           <td className="min-w-[200px] px-3 py-1.5">
@@ -2696,6 +2705,8 @@ export function PurchaseBillDialog({
                               disabled={lines.length === 1}
                               className="btn-ghost text-muted-foreground p-1 hover:text-red-400 disabled:opacity-25"
                               aria-label={`Remove line ${i + 1}`}
+                              aria-keyshortcuts="Alt+Delete"
+                              data-grid-remove
                             >
                               <Trash2 size={13} />
                             </button>
@@ -3109,7 +3120,7 @@ export function PurchaseBillDialog({
             <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
               Cancel
             </button>
-            <button type="submit" className="btn-primary" disabled={saving}>
+            <button type="submit" className="btn-primary" disabled={saving} data-hotkey="save" aria-keyshortcuts="Control+S Meta+S">
               {saving && <Loader2 size={15} className="animate-spin" />}
               {isEdit ? 'Save changes' : payNow && expenseMode ? 'Book & pay' : 'Book bill'}
             </button>

@@ -74,6 +74,7 @@ cd e2e
 npm run test:api            # all seven suites in order, then a summary table; exits non-zero if any check failed
 npm run test:api -- cgrn    # only the suites whose file name contains "cgrn"
 npm run test:walk           # the browser walk, headless
+npm run test:keys           # keyboard-only checks (palette, lists, forms, item lines), headless
 $env:SLOW = "1"; npm run test:walk -- --headed   # the walk in a Chrome window, at a pace you can watch
 ```
 
@@ -82,6 +83,8 @@ Some suites also sign in as three test users (`zztest.keeper`, `zztest.qc`, `zzt
 Optional settings: `E2E_API` (default `http://localhost:5101/api`), `E2E_WEB` (default `http://localhost:3301`) and `E2E_DB` (default `postgresql://postgres:demo@localhost:5433/lderp_demo`).
 
 ### Things to know
+
+- **The keyboard checks** (`browser/keyboard.mjs`) press keys only, never click: Ctrl+K to a screen, "/" and the arrows through a list, Enter to open a line, Shift+F10 for its menu, a record found by its number, a brand made and renamed with Alt+N and Ctrl+S, a requisition's dropdowns and its "missing department" message, Tab kept inside a form, Esc back to the button that opened it, and a two-line purchase order saved as a draft. They write one `ZZKEY Brand …` and one draft purchase order to the demo each run.
 
 - **The API suites can run again and again.** Each run makes its own orders, receipts and challans, with numbers that are new each time. Run them in the order `test:api` uses: on a fresh demo database, later suites use records that earlier ones made.
 - **The browser walk runs once per fresh demo database.** It makes a new item, BOM and routing for its style (`browser/configs.mjs`). It checks first and stops if that style already has a BOM or a routing. Run `npm run db:reset` before you run it again. The walk stops at the first step that fails, says which one, and saves a screenshot in `browser/shots/`.

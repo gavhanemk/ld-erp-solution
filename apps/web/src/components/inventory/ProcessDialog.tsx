@@ -1088,10 +1088,10 @@ export function ProcessDialog({
                     ))}
                   </tr>
                 </thead>
-                <tbody>
+                <tbody data-grid>
                   {rows.map((r) => (
                     <Fragment key={r.l.id}>
-                      <tr className="border-t border-border transition-colors hover:bg-secondary/20">
+                      <tr data-grid-row className="border-t border-border transition-colors hover:bg-secondary/20">
                         <td className="px-3 py-2.5 align-top">{itemCell(r)}</td>
                         <td className={td}>{neededCell(r)}</td>
                         <td className={td}>{storeCell(r)}</td>

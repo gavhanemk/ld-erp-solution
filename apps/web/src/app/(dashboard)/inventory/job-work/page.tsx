@@ -758,6 +758,7 @@ function JobWorkScreen() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search job work"
+            data-hotkey="search"
           />
           {search && (
             <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
@@ -896,7 +897,7 @@ function JobWorkScreen() {
           >
             <FileText size={15} /> Statement
           </Link>
-          <button className="btn-primary" onClick={() => setSending(true)}>
+          <button className="btn-primary" onClick={() => setSending(true)} data-hotkey="new" aria-keyshortcuts="Alt+N">
             <Plus size={15} /> Send out
           </button>
         </div>
@@ -1002,7 +1003,7 @@ function JobWorkScreen() {
                     </tr>
                   </thead>
                   <tbody>
-                    {pageRows.map((r) => {
+                    {pageRows.map((r, i) => {
                       const f = fact(r)
                       const out = r.stillOutQty > 0
                       const open = r.status === 'SENT' || r.status === 'PARTLY_BACK'
@@ -1036,9 +1037,10 @@ function JobWorkScreen() {
                           disabled: busy === r.challanId,
                         })
                       return (
-                        <tr key={r.id} className={r.status === 'CANCELLED' ? 'opacity-60' : undefined}>
+                        <tr key={r.id} className={r.status === 'CANCELLED' ? 'opacity-60' : undefined} data-row tabIndex={i === 0 ? 0 : -1}>
                           <td className="whitespace-nowrap">
                             <a
+                              data-row-open
                               href={`/print/job-work/${r.challanId}`}
                               target="_blank"
                               rel="noreferrer"

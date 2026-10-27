@@ -642,6 +642,8 @@ The supplier already has this order. If it was real and fell through, cancel it 
             className="btn-primary"
             onClick={() => setDialog({ open: true, record: null })}
             aria-label="New Purchase Order"
+            data-hotkey="new"
+            aria-keyshortcuts="Alt+N"
           >
             <Plus size={15} /> <span className="hidden sm:inline">New Purchase Order</span>
           </button>
@@ -695,6 +697,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
                 onChange={(e) => setSearch(e.target.value)}
                 aria-label="Search purchase orders"
                 title="Reaches the supplier as well as the order number"
+                data-hotkey="search"
               />
             </div>
 
@@ -1052,13 +1055,13 @@ The supplier already has this order. If it was real and fell through, cancel it 
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((po) => {
+                  {rows.map((po, ri) => {
                     const s = STATUS[po.status] ?? { label: po.status, cls: 'badge-neutral' }
                     const lines = po.lines ?? []
                     const expanded = open === po.id
                     return (
                       <Fragment key={po.id}>
-                        <tr>
+                        <tr data-row tabIndex={ri === 0 ? 0 : -1}>
                           <td>
                             {/* Item code, category and quantity belong to a line, not
                             to the order — a four-item order has four of each — so
@@ -1075,6 +1078,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
                               title={expanded ? 'Hide items' : 'Show items'}
                               aria-label={`${expanded ? 'Hide' : 'Show'} items on ${po.poNumber}`}
                               aria-expanded={expanded}
+                              data-row-open
                             >
                               {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                             </button>

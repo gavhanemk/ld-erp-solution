@@ -199,7 +199,11 @@ export function ScanIssue({
                 onValueChange={setQty}
                 decimals
                 autoFocus
-                onKeyDown={(e) => e.key === 'Enter' && !fifo && void issue()}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return
+                  e.preventDefault()
+                  if (!fifo) void issue()
+                }}
                 aria-label={`How much of ${pkg.code} to issue`}
               />
               <span className="text-sm text-foreground">{pkg.unit}</span>

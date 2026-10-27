@@ -13,7 +13,7 @@ const GROUPS: Array<{ title: string; keys: Array<[string[], string]> }> = [
       [['mod+k'], 'Find a screen, a record or an action'],
       [['alt+n'], 'New — the New button of the list you are on'],
       [['/'], 'Go to the search box of the list'],
-      [['mod+s'], 'Save — the main button of the open form'],
+      [['mod+s'], 'Save — the open form’s save button (as a draft where it has one)'],
       [['Esc'], 'Close the list, then the window on top'],
       [['alt+/', '?'], 'This list of shortcuts'],
     ],
@@ -25,6 +25,8 @@ const GROUPS: Array<{ title: string; keys: Array<[string[], string]> }> = [
       [['↑', '↓'], 'Move up and down the lines'],
       [['Home', 'End'], 'First line, last line'],
       [['Enter'], 'Open the line'],
+      [['shift+F10'], 'The line’s Actions menu'],
+      [['←', '→'], 'On a row of tabs: the tab beside'],
     ],
   },
   {

@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
-import { isTyping, matches, tabbables, topDialog, useHotkeys } from '@/lib/keys'
-import { CommandPalette, rememberVisit } from './CommandPalette'
+import { focusBefore, isTyping, keepTabInside, keyLabel, matches, placeFocus, tabbables, topDialog, trackFocus, useHotkeys } from '@/lib/keys'
+import { CommandPalette, earlyKeys, rememberVisit } from './CommandPalette'
 import { ShortcutHelp } from './ShortcutHelp'
 
 /*
@@ -22,8 +22,12 @@ import { ShortcutHelp } from './ShortcutHelp'
  *   data-row              a line in a list: ↑ ↓ move, Enter opens
  *   data-row-open         inside a line: what Enter presses (else the line)
  *   data-grid             line items of a form: Enter goes to the next box
- *   data-grid-row         one line of them
- *   data-grid-add         the "Add line" button (Alt+A)
+ *   data-grid-row         one line of them; a second row belonging to the line
+ *                         above (its sizes) is data-grid-row="sizes"
+ *   data-grid-add         the "Add line" button (Alt+A); inside the grid, or
+ *                         anywhere in the same dialog when it sits below the table.
+ *                         data-grid-add="row" is a line's own add (another store
+ *                         for this line): Alt+A on that line presses it instead
  *   data-grid-remove      the line's own remove button (Alt+Delete)
  */
 
@@ -39,6 +43,15 @@ function markedButton(root: ParentNode, mark: string): { button: HTMLButtonEleme
   const marks = [...root.querySelectorAll<HTMLElement>(`[data-hotkey="${mark}"]`)]
   const buttons = marks.flatMap((m) => (m instanceof HTMLButtonElement ? [m] : [...m.querySelectorAll<HTMLButtonElement>('button')])).filter(shown)
   return { button: buttons.find((b) => !b.disabled) ?? null, found: buttons.length > 0 }
+}
+
+/**
+ * Presses a button the way a person would: focus on it first, so a window it
+ * opens hands focus back to it when that window closes.
+ */
+export function press(button: HTMLElement) {
+  button.focus()
+  button.click()
 }
 
 /** Sets a text box's value so the screen's own onChange sees it, as if typed. */
@@ -61,10 +74,43 @@ export function queueAfterMove(a: AfterMove) {
   window.dispatchEvent(new Event('ld:after-move'))
 }
 
+/** What Enter on a line presses: its marked button, or the line itself. */
+const openTarget = (row: HTMLElement) => [...row.querySelectorAll<HTMLElement>('[data-row-open]')].find(shown) ?? row
+
 /** Opens a line in a list: its marked button, or the line itself. */
 export function openRow(row: HTMLElement) {
-  const target = [...row.querySelectorAll<HTMLElement>('[data-row-open]')].find(shown)
-  ;(target ?? row).click()
+  // Focus stays on the line, so ↑ ↓ carry on from it and a window it opens
+  // hands focus back to it when it closes.
+  openTarget(row).click()
+}
+
+/**
+ * Enter in a box of a form, or of a window, goes on to the next box — it
+ * never sends the form. A form is saved on purpose: its button, or Ctrl+S.
+ *
+ * Left alone: a box that does something with Enter itself (a scan box, a
+ * reason box — they mark the key handled), a list's search box, a box with a
+ * suggestion list open, a text area, and a form of one box (a barcode
+ * scanner ends each code with Enter, and that Enter is the submit).
+ */
+function enterToNext(e: KeyboardEvent, el: HTMLElement) {
+  if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return
+  if (!(el instanceof HTMLInputElement) || !isTyping(el)) return
+  if (el.matches('[data-hotkey="search"], [data-enter-own]') || el.getAttribute('aria-expanded') === 'true') return
+  const form = el.form
+  const dialog = el.closest<HTMLElement>('[role="dialog"]')
+  if (!form && !dialog) return
+  const scope = (form ?? dialog) as HTMLElement
+  const boxes = tabbables(scope).filter((c) => c.matches('input, select, textarea, [role="combobox"]') && !c.matches('[type="checkbox"], [type="radio"]'))
+  if (form && !dialog && boxes.filter((b) => b instanceof HTMLInputElement && isTyping(b)).length < 2) return
+  e.preventDefault()
+  const next = boxes[boxes.indexOf(el) + 1]
+  if (next) {
+    next.focus()
+    if (next instanceof HTMLInputElement && isTyping(next)) next.select()
+  } else if (form) {
+    window.dispatchEvent(new CustomEvent('ld:note', { detail: `Last box. Press ${keyLabel('mod+s')}, or the save button, to save.` }))
+  }
 }
 
 export function KeyboardLayer() {
@@ -85,11 +131,50 @@ export function KeyboardLayer() {
   useEffect(() => {
     const openPalette = () => setPalette(true)
     const openHelp = () => setHelp(true)
+    const note = (e: Event) => flash(String((e as CustomEvent).detail ?? ''))
     window.addEventListener('ld:palette', openPalette)
     window.addEventListener('ld:shortcuts', openHelp)
+    window.addEventListener('ld:note', note)
     return () => {
       window.removeEventListener('ld:palette', openPalette)
       window.removeEventListener('ld:shortcuts', openHelp)
+      window.removeEventListener('ld:note', note)
+    }
+  }, [flash])
+
+  /*
+   * Every window, whoever drew it: focus goes into it when it opens, Tab stays
+   * inside it, and focus goes back to what opened it when it closes. Done here
+   * once, for all of them, so a window added later gets it without asking.
+   */
+  useEffect(() => {
+    trackFocus()
+    const open = new Map<HTMLElement, { before: HTMLElement | null; stop: () => void }>()
+    let frame = 0
+    const scan = () => {
+      frame = 0
+      const now = [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]')].filter((d) => d.getClientRects().length > 0)
+      for (const d of now) if (!open.has(d)) open.set(d, { before: focusBefore(d), stop: placeFocus(d) })
+      for (const [d, { before, stop }] of open) {
+        if (d.isConnected && now.includes(d)) continue
+        open.delete(d)
+        stop()
+        setTimeout(() => {
+          const at = document.activeElement
+          if ((!at || at === document.body || !at.isConnected) && before?.isConnected) before.focus()
+        }, 40)
+      }
+    }
+    const watch = new MutationObserver(() => {
+      if (!frame) frame = requestAnimationFrame(scan)
+    })
+    watch.observe(document.body, { childList: true, subtree: true })
+    document.addEventListener('keydown', keepTabInside)
+    scan()
+    return () => {
+      watch.disconnect()
+      cancelAnimationFrame(frame)
+      document.removeEventListener('keydown', keepTabInside)
     }
   }, [])
 
@@ -127,7 +212,7 @@ export function KeyboardLayer() {
         const { button, found } = markedButton(document, 'new')
         if (button) {
           clearInterval(t)
-          button.click()
+          press(button)
         } else if (tries > 40) {
           clearInterval(t)
           flash(found ? 'New is not open to you on this screen.' : 'This screen has no New button.')
@@ -148,7 +233,12 @@ export function KeyboardLayer() {
       if (row) {
         clearInterval(t)
         row.focus()
-        openRow(row)
+        row.scrollIntoView({ block: 'nearest' })
+        // Opened for the person — unless that means a new tab (a printed copy),
+        // which the browser would block as a pop-up: then the line waits, with
+        // focus, for their own Enter.
+        const target = openTarget(row)
+        if (!(target instanceof HTMLAnchorElement && target.target === '_blank')) openRow(row)
       } else if (tries > 60) {
         clearInterval(t)
         box?.focus()
@@ -184,6 +274,7 @@ export function KeyboardLayer() {
     'mod+k': (e) => {
       e.preventDefault()
       setHelp(false)
+      if (!palette) earlyKeys.text = ''
       setPalette((p) => !p)
     },
     'mod+s': (e) => {
@@ -196,7 +287,7 @@ export function KeyboardLayer() {
       if (palette || help || topDialog()) return
       const { button, found } = markedButton(document.querySelector('main') ?? document, 'new')
       e.preventDefault()
-      if (button) button.click()
+      if (button) press(button)
       else flash(found ? 'New is not open to you on this screen.' : 'This screen has no New button.')
     },
     '/': (e) => {
@@ -217,6 +308,19 @@ export function KeyboardLayer() {
       setHelp(true)
     },
   })
+
+  // Letters typed before the palette's box is there are kept for it.
+  useEffect(() => {
+    const hold = (e: KeyboardEvent) => {
+      if (earlyKeys.text === null || document.activeElement?.id === 'palette-input') return
+      if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return
+      e.preventDefault()
+      e.stopPropagation()
+      earlyKeys.text += e.key
+    }
+    window.addEventListener('keydown', hold, true)
+    return () => window.removeEventListener('keydown', hold, true)
+  }, [])
 
   // Lists and line items: keys that only mean something where focus is.
   useEffect(() => {
@@ -250,6 +354,29 @@ export function KeyboardLayer() {
         else if (e.key === 'Enter' && !e.altKey && !e.ctrlKey && !e.metaKey && e.target === el) {
           e.preventDefault()
           openRow(el)
+        } else if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+          // The line's own Actions menu, as a right-click would have offered.
+          const menu = [...el.querySelectorAll<HTMLButtonElement>('[aria-haspopup="menu"]')].find((b) => shown(b) && !b.disabled)
+          if (menu) {
+            e.preventDefault()
+            menu.focus()
+            menu.click()
+          }
+        }
+        return
+      }
+
+      // A row of tabs: ← → Home End go to the tab beside and show it.
+      if (el.getAttribute('role') === 'tab' && !e.altKey && !e.ctrlKey && !e.metaKey && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) {
+        const list = el.closest('[role="tablist"]')
+        const tabs = list ? [...list.querySelectorAll<HTMLElement>('[role="tab"]')].filter((t) => shown(t) && !(t as HTMLButtonElement).disabled) : []
+        const i = tabs.indexOf(el)
+        const to = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : i + (e.key === 'ArrowRight' ? 1 : -1)
+        const tab = tabs[(to + tabs.length) % tabs.length]
+        if (tab && tab !== el) {
+          e.preventDefault()
+          tab.focus()
+          tab.click()
         }
         return
       }
@@ -267,39 +394,61 @@ export function KeyboardLayer() {
 
       // Line items of a form.
       const grid = el.closest<HTMLElement>('[data-grid]')
-      if (!grid) return
+      if (!grid) {
+        enterToNext(e, el)
+        return
+      }
       const row = el.closest<HTMLElement>('[data-grid-row]')
       const rows = [...grid.querySelectorAll<HTMLElement>('[data-grid-row]')].filter(shown)
-      const cells = (r: HTMLElement) => tabbables(r).filter((c) => !c.hasAttribute('data-grid-remove') && !c.closest('[data-grid-skip]'))
-
-      // Alt+A: a new line, and its first box ready to type in.
-      if (matches(e, 'alt+a')) {
-        const add = [...grid.querySelectorAll<HTMLButtonElement>('[data-grid-add]')].find((b) => shown(b) && !b.disabled)
-        if (!add) return
-        e.preventDefault()
-        const before = rows.length
+      // A line's own row, not the sizes row under it.
+      // (React writes a bare data-grid-row as "true".)
+      const kindOf = (r: HTMLElement) => {
+        const k = r.getAttribute('data-grid-row') ?? ''
+        return k === 'true' ? '' : k
+      }
+      const cells = (r: HTMLElement) => tabbables(r).filter((c) => !c.matches('[data-grid-remove], [data-grid-add]') && !c.closest('[data-grid-skip]'))
+      // The Add button for new lines: in the grid, else the one in the same dialog.
+      const usable = (b: HTMLButtonElement) => shown(b) && !b.disabled
+      const addButton = () =>
+        [...grid.querySelectorAll<HTMLButtonElement>('[data-grid-add]:not([data-grid-add="row"])')].find(usable) ??
+        [...(grid.closest('[role="dialog"]') ?? document).querySelectorAll<HTMLButtonElement>('[data-grid-add]:not([data-grid-add="row"])')].find(usable)
+      // Press an add, then put focus in the first box of the row it made.
+      const addAndGo = (add: HTMLButtonElement) => {
+        const before = new Set(rows)
         add.click()
         let n = 0
         const t = setInterval(() => {
           const now = [...grid.querySelectorAll<HTMLElement>('[data-grid-row]')].filter(shown)
-          if (now.length > before || ++n > 20) {
+          const fresh = now.find((r) => !before.has(r))
+          if (fresh || ++n > 20) {
             clearInterval(t)
-            const fresh = now[now.length - 1]
             if (fresh) cells(fresh)[0]?.focus()
           }
         }, 50)
+      }
+
+      // Alt+A: a new line (or this line's own add), its first box ready to type in.
+      if (matches(e, 'alt+a')) {
+        const own = row ? [...row.querySelectorAll<HTMLButtonElement>('[data-grid-add="row"]')].find(usable) : undefined
+        const add = own ?? addButton()
+        if (!add) return
+        e.preventDefault()
+        addAndGo(add)
         return
       }
       if (!row) return
       // Alt+Delete: this line's own remove button, with whatever check it has.
       if (matches(e, 'alt+delete')) {
-        const remove = [...row.querySelectorAll<HTMLButtonElement>('[data-grid-remove]')].find((b) => shown(b) && !b.disabled)
-        if (!remove) return
+        // From a sizes row, the line above it is the one removed.
+        let line: HTMLElement | null = row
+        while (line && kindOf(line) !== '') line = rows[rows.indexOf(line) - 1] ?? null
+        const remove = line ? [...line.querySelectorAll<HTMLButtonElement>('[data-grid-remove]')].find((b) => shown(b) && !b.disabled) : undefined
+        if (!line || !remove) return
         e.preventDefault()
-        const at = rows.indexOf(row)
+        const at = rows.filter((r) => kindOf(r) === '').indexOf(line)
         remove.click()
         setTimeout(() => {
-          const now = [...grid.querySelectorAll<HTMLElement>('[data-grid-row]')].filter(shown)
+          const now = [...grid.querySelectorAll<HTMLElement>('[data-grid-row]')].filter(shown).filter((r) => kindOf(r) === '')
           const next = now[Math.min(at, now.length - 1)]
           if (next) cells(next)[0]?.focus()
         }, 80)
@@ -307,8 +456,9 @@ export function KeyboardLayer() {
       }
       // Alt+↑ / Alt+↓: the same box on the line above or below (↑ ↓ alone still step a number).
       if (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-        const at = rows.indexOf(row)
-        const other = rows[at + (e.key === 'ArrowDown' ? 1 : -1)]
+        const peers = rows.filter((r) => kindOf(r) === kindOf(row))
+        const at = peers.indexOf(row)
+        const other = peers[at + (e.key === 'ArrowDown' ? 1 : -1)]
         if (!other) return
         e.preventDefault()
         const col = cells(row).indexOf(el)
@@ -331,20 +481,8 @@ export function KeyboardLayer() {
           if (next instanceof HTMLInputElement && isTyping(next)) next.select()
           return
         }
-        const add = [...grid.querySelectorAll<HTMLButtonElement>('[data-grid-add]')].find((b) => shown(b) && !b.disabled)
-        if (add) {
-          const before = rows.length
-          add.click()
-          let n = 0
-          const t = setInterval(() => {
-            const now = [...grid.querySelectorAll<HTMLElement>('[data-grid-row]')].filter(shown)
-            if (now.length > before || ++n > 20) {
-              clearInterval(t)
-              const fresh = now[now.length - 1]
-              if (fresh && now.length > before) cells(fresh)[0]?.focus()
-            }
-          }, 50)
-        }
+        const add = addButton()
+        if (add) addAndGo(add)
       }
     }
     // After the screen's own handlers, so a box that uses a key itself (a

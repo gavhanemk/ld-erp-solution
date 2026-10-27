@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, Calculator, FileText, Hash, Loader2, Lock, Package, Pencil, Plus, Save, Send, StickyNote, Trash2, User, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { Section } from '@/components/purchase/Section'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { BomFormDialog, type Bom } from '@/components/masters/BomFormDialog'
@@ -206,6 +207,9 @@ export function QuotationDialog({
       document.body.style.overflow = previous
     }
   }, [open])
+  // Tab goes round inside the form, and focus goes back to the button that opened it.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef, open)
 
   useEffect(() => {
     if (!open) return
@@ -441,7 +445,7 @@ export function QuotationDialog({
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
-      <div className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="qt-title">
+      <div ref={dialogRef} className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="qt-title">
         <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
           <div className="flex min-w-0 items-center gap-3">
             <div className="bg-primary/10 border-primary/20 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
@@ -538,15 +542,15 @@ export function QuotationDialog({
                         ))}
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody data-grid>
                       {totals.lines.map((p, i) => {
                         const st = p.style
                         const bomPrice = p.bom?.price ?? null
                         const offBom = bomPrice != null && Math.abs(p.rate - bomPrice) >= 0.005
                         return (
-                          <tr key={p.l.key} className={`${i % 2 ? 'zebra-row' : 'bg-card'} [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top`}>
+                          <tr key={p.l.key} data-grid-row className={`${i % 2 ? 'zebra-row' : 'bg-card'} [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top`}>
                             <td>
-                              <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" onClick={() => setLines((ls) => (ls.length > 1 ? ls.filter((x) => x.key !== p.l.key) : [blank()]))} aria-label={`Remove row ${i + 1}`}>
+                              <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" onClick={() => setLines((ls) => (ls.length > 1 ? ls.filter((x) => x.key !== p.l.key) : [blank()]))} aria-label={`Remove row ${i + 1}`} aria-keyshortcuts="Alt+Delete" data-grid-remove>
                                 <Trash2 size={13} />
                               </button>
                             </td>
@@ -673,7 +677,7 @@ export function QuotationDialog({
                     </tbody>
                   </table>
                 </div>
-                <button type="button" className="btn-secondary mt-3 h-8 px-3 text-xs" onClick={() => setLines((ls) => [...ls, blank()])}>
+                <button type="button" className="btn-secondary mt-3 h-8 px-3 text-xs" onClick={() => setLines((ls) => [...ls, blank()])} data-grid-add aria-keyshortcuts="Alt+A" title="Add item row (Alt+A)">
                   <Plus size={14} /> Add item row
                 </button>
                 {/* The full style form, the same as Masters → Styles, over
@@ -775,7 +779,7 @@ export function QuotationDialog({
           <button type="button" onClick={onClose} className="btn-secondary hidden sm:inline-flex" disabled={saving !== null}>
             Cancel
           </button>
-          <button type="button" className={saved && saved.status !== 'DRAFT' ? 'btn-primary' : 'btn-secondary'} onClick={() => void save(false)} disabled={busy || !!blocker}>
+          <button type="button" className={saved && saved.status !== 'DRAFT' ? 'btn-primary' : 'btn-secondary'} onClick={() => void save(false)} disabled={busy || !!blocker} data-hotkey="save" aria-keyshortcuts="Control+S Meta+S" title={saved && saved.status !== 'DRAFT' ? 'Save (Ctrl+S)' : 'Save as draft (Ctrl+S)'}>
             {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} {saved && saved.status !== 'DRAFT' ? 'Save' : 'Save as draft'}
           </button>
           {(!saved || saved.status === 'DRAFT') && (

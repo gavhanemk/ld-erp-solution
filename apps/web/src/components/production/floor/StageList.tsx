@@ -152,6 +152,7 @@ export function StageList({ operationId, stage, onOpen, refreshKey }: { operatio
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search"
+            data-hotkey="search"
           />
         </div>
         <SmartSelect className="form-input h-8 w-48 py-0 text-xs" value={show} onChange={(e) => setShow(e.target.value)} aria-label="Show">
@@ -208,8 +209,8 @@ export function StageList({ operationId, stage, onOpen, refreshKey }: { operatio
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
-                  <tr key={`${r.card.id}|${r.step.id}`} className="cursor-pointer" onClick={() => onOpen(r)} title={`Open ${r.card.jobCardNumber} at ${r.step.name}`}>
+                {rows.map((r, i) => (
+                  <tr key={`${r.card.id}|${r.step.id}`} className="cursor-pointer" onClick={() => onOpen(r)} title={`Open ${r.card.jobCardNumber} at ${r.step.name}`} data-row tabIndex={i === 0 ? 0 : -1}>
                     <td className="whitespace-nowrap">
                       <span className="text-primary font-mono text-xs font-semibold">{r.card.jobCardNumber}</span>
                       {r.card.designNo && <span className="text-muted-foreground block text-[11px]">design {r.card.designNo}</span>}

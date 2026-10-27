@@ -79,7 +79,9 @@ export function ReasonDialog({
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !tooShort && !busy) onConfirm(reason.trim())
+                if (e.key !== 'Enter') return
+                e.preventDefault()
+                if (!tooShort && !busy) onConfirm(reason.trim())
               }}
               placeholder={placeholder}
               autoFocus

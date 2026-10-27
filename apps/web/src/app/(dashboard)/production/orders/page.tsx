@@ -167,7 +167,7 @@ export default function ManufacturingOrdersPage() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           {mayCreate && (
-            <button className="btn-primary" onClick={() => setForm({ open: true, soId: null, moId: null })}>
+            <button className="btn-primary" onClick={() => setForm({ open: true, soId: null, moId: null })} data-hotkey="new" aria-keyshortcuts="Alt+N">
               <Plus size={15} /> <span className="hidden sm:inline">New MO</span>
             </button>
           )}
@@ -196,6 +196,7 @@ export default function ManufacturingOrdersPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search manufacturing orders"
+              data-hotkey="search"
             />
           </div>
           <SmartSelect className="form-input h-8 min-w-0 px-1.5 py-0 text-[11px] sm:w-36 sm:px-3 sm:text-xs" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by status">
@@ -278,14 +279,14 @@ export default function ManufacturingOrdersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((mo) => {
+                  {rows.map((mo, i) => {
                     const s = moStatus(mo.status)
                     const share = mo.totalPlannedQty > 0 ? Math.min(100, Math.round((mo.totalPackedQty / mo.totalPlannedQty) * 100)) : 0
                     const late = mo.plannedEndDate && new Date(mo.plannedEndDate) < new Date(new Date().toDateString()) && !['COMPLETED', 'CLOSED'].includes(mo.status)
                     return (
-                      <tr key={mo.id}>
+                      <tr key={mo.id} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td className="whitespace-nowrap">
-                          <button type="button" className="text-primary font-mono text-xs font-semibold hover:underline" onClick={() => setViewId(mo.id)}>
+                          <button type="button" className="text-primary font-mono text-xs font-semibold hover:underline" onClick={() => setViewId(mo.id)} data-row-open>
                             {mo.moNumber}
                           </button>
                           {mo.plannedStartDate && (

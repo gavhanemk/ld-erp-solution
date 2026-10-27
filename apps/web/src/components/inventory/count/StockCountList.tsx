@@ -67,7 +67,7 @@ export function StockCountList({ onOpen }: { onOpen: (id: string) => void }) {
           <p className="page-subtitle">Count a store by scanning every sticker on its racks. What does not match goes to a store manager as an adjustment.</p>
         </div>
         {can('inventory', 'create') && (
-          <button type="button" className="btn-primary" onClick={() => setStarting(true)}>
+          <button type="button" className="btn-primary" onClick={() => setStarting(true)} data-hotkey="new" aria-keyshortcuts="Alt+N">
             <Plus size={15} /> Start a count
           </button>
         )}
@@ -84,7 +84,7 @@ export function StockCountList({ onOpen }: { onOpen: (id: string) => void }) {
         <div className="border-border flex flex-wrap items-center gap-2 border-b px-4 py-3">
           <div className="bg-field border-field-edge flex min-w-[180px] max-w-xs flex-1 items-center gap-2 rounded-lg border px-3 py-1.5">
             <Search size={14} className="text-muted-foreground" />
-            <input className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none" placeholder="Count number or store…" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search counts" />
+            <input className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none" placeholder="Count number or store…" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search counts" data-hotkey="search" />
           </div>
           {FILTERS.map((f) => (
             <button
@@ -129,11 +129,11 @@ export function StockCountList({ onOpen }: { onOpen: (id: string) => void }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r) => {
+                  {rows.map((r, i) => {
                     const st = COUNT_STATUS[r.status]
                     const adj = r.adjustment ? ADJ_STATUS[r.adjustment.status] : null
                     return (
-                      <tr key={r.id} className="cursor-pointer" onClick={() => onOpen(r.id)}>
+                      <tr key={r.id} className="cursor-pointer" onClick={() => onOpen(r.id)} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td className="text-primary whitespace-nowrap font-mono text-xs font-semibold">{r.countNumber}</td>
                         <td className="text-foreground font-medium">{r.store}</td>
                         <td className="whitespace-nowrap text-xs">

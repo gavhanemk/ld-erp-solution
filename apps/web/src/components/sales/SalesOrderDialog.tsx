@@ -30,6 +30,7 @@ import { api, ApiError, can, currentUser } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { Section } from '@/components/purchase/Section'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -422,6 +423,10 @@ export function SalesOrderDialog({
   useEscape(() => {
     if (!saving && !releaseAsk) onClose()
   }, open)
+  // The first box has focus on open, Tab goes round inside, and focus goes
+  // back to the button that opened it.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef, open)
   useEffect(() => {
     if (!open) return
     const previous = document.body.style.overflow
@@ -1365,7 +1370,7 @@ export function SalesOrderDialog({
   }
 
   const primary = amend ? (
-    <button type="button" className="btn-primary" onClick={() => void save(false)} disabled={busy || !!blocker}>
+    <button type="button" className="btn-primary" onClick={() => void save(false)} disabled={busy || !!blocker} data-hotkey="save" aria-keyshortcuts="Control+S Meta+S">
       {saving === 'amend' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
       Save amendment
     </button>
@@ -1390,6 +1395,7 @@ export function SalesOrderDialog({
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       <div
+        ref={dialogRef}
         className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
@@ -1681,13 +1687,13 @@ export function SalesOrderDialog({
                         ))}
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody data-grid>
                       {totals.lines.map((p, i) => {
                         const f = boxes(p, i, true)
                         const zebra = i % 2 === 1 ? 'zebra-row' : 'bg-card'
                         return (
                           <Fragment key={p.line.key}>
-                            <tr className={`${zebra} [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top`}>
+                            <tr data-grid-row className={`${zebra} [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top`}>
                               <td className={`${COL.num} sticky left-0 z-10 bg-inherit`}>
                                 <div className="text-muted-foreground flex h-8 items-center justify-center text-xs tabular-nums">
                                   {i + 1}
@@ -1700,6 +1706,8 @@ export function SalesOrderDialog({
                                     onClick={() => removeLine(p.line.key)}
                                     className="btn-ghost text-muted-foreground hover:text-destructive p-1"
                                     aria-label={`Remove row ${i + 1}`}
+                                    aria-keyshortcuts="Alt+Delete"
+                                    data-grid-remove
                                   >
                                     <Trash2 size={13} />
                                   </button>
@@ -1753,7 +1761,7 @@ export function SalesOrderDialog({
                             {/* The rest of the line, under it: sizes first, then
                               what the old system's columns held. */}
                             {p.line.itemId && (
-                              <tr className={zebra}>
+                              <tr data-grid-row="sizes" className={zebra}>
                                 <td className="sticky left-0 z-10 bg-inherit" />
                                 <td className="sticky left-8 z-10 bg-inherit" />
                                 <td colSpan={10} className="px-2 pb-2.5 pt-0">
@@ -1905,6 +1913,9 @@ export function SalesOrderDialog({
                   type="button"
                   className="btn-secondary mt-3 h-8 px-3 text-xs"
                   onClick={() => setLines((ls) => [...ls, blankLine()])}
+                  data-grid-add
+                  aria-keyshortcuts="Alt+A"
+                  title="Add item row (Alt+A)"
                 >
                   <Plus size={14} /> Add item row
                 </button>
@@ -2137,7 +2148,15 @@ export function SalesOrderDialog({
             Cancel
           </button>
           {!amend && (
-            <button type="button" className="btn-secondary" onClick={() => void save(false)} disabled={busy || !!blocker}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => void save(false)}
+              disabled={busy || !!blocker}
+              data-hotkey="save"
+              aria-keyshortcuts="Control+S Meta+S"
+              title="Save as draft (Ctrl+S)"
+            >
               {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
               <span className="sm:hidden">Draft</span>
               <span className="hidden sm:inline">Save as draft</span>

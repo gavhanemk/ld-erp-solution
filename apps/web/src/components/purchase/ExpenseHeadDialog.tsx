@@ -281,7 +281,9 @@ export function ExpenseHeadDialog({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') void save()
+                    if (e.key !== 'Enter') return
+                    e.preventDefault()
+                    void save()
                   }}
                   placeholder="Electricity"
                   className="form-input"

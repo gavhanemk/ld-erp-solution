@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { Section } from '@/components/purchase/Section'
@@ -524,6 +525,17 @@ export function PurchaseEnquiryDialog({
   useEscape(() => {
     if (!saving) onClose()
   })
+  // The page behind does not scroll; Tab goes round inside, and focus goes
+  // back to the button that opened it.
+  useEffect(() => {
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [])
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef)
 
   return createPortal(
     /* The module's own shell: offset past the sidebar so the menu stays
@@ -531,6 +543,7 @@ export function PurchaseEnquiryDialog({
       order, bill and receipt forms rather than inventing a third look. */
     <div className="fixed inset-0 z-40 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       <div
+        ref={dialogRef}
         className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
@@ -705,7 +718,14 @@ export function PurchaseEnquiryDialog({
                   <ClipboardList size={14} />
                   Select Items From Indent Items
                 </button>
-                <button type="button" onClick={addLine} className="btn-ghost text-xs">
+                <button
+                  type="button"
+                  onClick={addLine}
+                  className="btn-ghost text-xs"
+                  data-grid-add
+                  aria-keyshortcuts="Alt+A"
+                  title="Add line (Alt+A)"
+                >
                   <Plus size={14} />
                   Add line
                 </button>
@@ -906,9 +926,9 @@ export function PurchaseEnquiryDialog({
                         ))}
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody data-grid>
                       {lines.map((l, i) => (
-                        <tr key={l.key} className="border-border/60 border-b last:border-0">
+                        <tr key={l.key} data-grid-row className="border-border/60 border-b last:border-0">
                           <td className="text-muted-foreground px-2 py-1.5 align-top text-[11px]">
                             {i + 1}
                           </td>
@@ -1041,6 +1061,8 @@ export function PurchaseEnquiryDialog({
                               onClick={() => removeLine(l.key)}
                               className="btn-ghost p-1 text-red-400"
                               aria-label={`Remove row ${i + 1}`}
+                              aria-keyshortcuts="Alt+Delete"
+                              data-grid-remove
                             >
                               <Trash2 size={13} />
                             </button>
@@ -1237,6 +1259,8 @@ export function PurchaseEnquiryDialog({
               onClick={save}
               disabled={saving || problems.length > 0}
               className="btn-primary"
+              data-hotkey="save"
+              aria-keyshortcuts="Control+S Meta+S"
             >
               {saving && <Loader2 size={15} className="animate-spin" />}
               {editing ? 'Save changes' : 'Raise enquiry'}

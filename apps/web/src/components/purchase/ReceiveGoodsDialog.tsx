@@ -34,6 +34,8 @@ import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase
 import { IconField, Readout } from '@/components/purchase/FormBits'
 import { shortCloseNoun } from '@/components/purchase/shortClose'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { StepInput } from '@/components/ui/StepInput'
 import { parseSizes, splitEvenly } from '@/components/packages/packageTypes'
 import { PackageSizesDialog } from '@/components/purchase/PackageSizesDialog'
@@ -488,7 +490,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
         const first = i === 0
 
         return (
-          <tr key={alloc.key} className="divide-border/60 divide-x [&>td]:align-top">
+          <tr key={alloc.key} data-grid-row className="divide-border/60 divide-x [&>td]:align-top">
             {first && (
               <>
                 <td rowSpan={allocs.length} className="align-top">
@@ -596,8 +598,10 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                     className="border-border text-muted-foreground hover:text-foreground hover:bg-secondary inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40"
                     onClick={() => addAlloc(line.id)}
                     disabled={done}
-                    title={`Send some of ${line.item.name} to another store`}
+                    title={`Send some of ${line.item.name} to another store (Alt+A)`}
                     aria-label={`Add another store for ${line.item.name}`}
+                    aria-keyshortcuts="Alt+A"
+                    data-grid-add="row"
                   >
                     <Plus size={14} />
                   </button>
@@ -606,8 +610,10 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                     type="button"
                     className="border-border text-muted-foreground inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors hover:text-red-400"
                     onClick={() => removeAlloc(line.id, alloc.key)}
-                    title="Remove this store"
+                    title="Remove this store (Alt+Delete)"
                     aria-label={`Remove store row ${i + 1} for ${line.item.name}`}
+                    aria-keyshortcuts="Alt+Delete"
+                    data-grid-remove
                   >
                     <Minus size={14} />
                   </button>
@@ -870,6 +876,22 @@ export function ReceiveGoodsDialog({
   const [attachmentCount, setAttachmentCount] = useState(0)
 
   const [saving, setSaving] = useState(false)
+
+  // Escape closes this window only (not one behind it, nor while saving); the
+  // page behind does not scroll; Tab goes round inside, and focus goes back
+  // to the button that opened it.
+  useEscape(() => {
+    if (!saving) onClose()
+  })
+  useEffect(() => {
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [])
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef)
   const [error, setError] = useState<string | null>(null)
 
   /*
@@ -1524,6 +1546,7 @@ export function ReceiveGoodsDialog({
         page that kept showing over the top. Filling the height makes the
         margin the padding and nothing else. */}
       <div
+        ref={dialogRef}
         className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
@@ -1975,7 +1998,7 @@ export function ReceiveGoodsDialog({
                       </th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody data-grid>
                     {order.lines.map((line) => (
                       <ReceiptLineRows
                         key={line.id}
@@ -2064,6 +2087,8 @@ export function ReceiveGoodsDialog({
             className="btn-primary"
             onClick={() => void save()}
             disabled={saving || !order || loadingOrder}
+            data-hotkey="save"
+            aria-keyshortcuts="Control+S Meta+S"
           >
             {saving ? (
               <Loader2 size={15} className="animate-spin" />

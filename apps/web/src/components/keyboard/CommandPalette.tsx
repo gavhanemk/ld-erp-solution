@@ -8,7 +8,7 @@ import { keyLabel, topDialog, useDialogFocus } from '@/lib/keys'
 import { useEscape } from '@/lib/useEscape'
 import { navItems } from '@/components/layout/Sidebar'
 import { INVENTORY_SECTIONS } from '@/components/layout/inventorySections'
-import { queueAfterMove } from './KeyboardLayer'
+import { press, queueAfterMove } from './KeyboardLayer'
 
 /*
  * Ctrl+K: open any screen, start any document, find any record, or press a
@@ -199,6 +199,13 @@ function screenButtons(): Array<{ label: string; button: HTMLButtonElement }> {
   return out.slice(0, 40)
 }
 
+/**
+ * Letters typed in the instant between Ctrl+K and the palette's box being on
+ * the screen: held by the keyboard layer and handed over here, so a quick
+ * "Ctrl+K MR-0141" does not lose its "MR-".
+ */
+export const earlyKeys: { text: string | null } = { text: null }
+
 const ICON = { page: ArrowRight, new: Plus, record: FileText, button: MousePointerClick, help: Keyboard, recent: Clock }
 
 export function CommandPalette({ onClose, onHelp }: { onClose: () => void; onHelp: () => void }) {
@@ -216,6 +223,11 @@ export function CommandPalette({ onClose, onHelp }: { onClose: () => void; onHel
 
   useDialogFocus(boxRef)
   useEscape(onClose)
+  useEffect(() => {
+    const held = earlyKeys.text
+    earlyKeys.text = null
+    if (held) setQ((q) => held + q)
+  }, [])
 
   const go = (path: string) => {
     onClose()
@@ -274,7 +286,7 @@ export function CommandPalette({ onClose, onHelp }: { onClose: () => void; onHel
       icon: 'button',
       run: () => {
         onClose()
-        setTimeout(() => b.button.isConnected && !b.button.disabled && b.button.click(), 30)
+        setTimeout(() => b.button.isConnected && !b.button.disabled && press(b.button), 30)
       },
     }))
     const help: Entry = { id: 'help', group: 'Help', label: 'Keyboard shortcuts', hint: keyLabel('alt+/'), words: 'help keys hotkeys', icon: 'help', run: onHelp }
@@ -347,6 +359,7 @@ export function CommandPalette({ onClose, onHelp }: { onClose: () => void; onHel
         <div className="border-border flex items-center gap-2 border-b px-3">
           <Search size={16} className="text-muted-foreground shrink-0" aria-hidden />
           <input
+            id="palette-input"
             autoFocus
             value={q}
             onChange={(e) => setQ(e.target.value)}

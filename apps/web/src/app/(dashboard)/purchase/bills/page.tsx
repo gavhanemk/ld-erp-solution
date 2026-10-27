@@ -481,6 +481,8 @@ function PurchaseBillsTable() {
             className="btn-primary"
             onClick={() => setDialog({ open: true, record: null })}
             aria-label="Book Bill"
+            data-hotkey="new"
+            aria-keyshortcuts="Alt+N"
           >
             <Plus size={15} /> <span className="hidden sm:inline">Book Bill</span>
           </button>
@@ -521,6 +523,7 @@ function PurchaseBillsTable() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 aria-label="Search purchase bills"
+                data-hotkey="search"
               />
             </div>
 
@@ -839,14 +842,14 @@ function PurchaseBillsTable() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((bill) => {
+                  {rows.map((bill, i) => {
                     const s = STATUS[bill.status] ?? { label: bill.status, cls: 'badge-neutral' }
                     const overdue = isOverdue(bill)
                     const open = expanded === bill.id
                     const lines = bill.lines ?? []
                     return (
                       <Fragment key={bill.id}>
-                        <tr>
+                        <tr data-row tabIndex={i === 0 ? 0 : -1}>
                           <td>
                             <button
                               className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
@@ -859,6 +862,7 @@ function PurchaseBillsTable() {
                               title={open ? 'Hide items' : 'Show items'}
                               aria-label={`${open ? 'Hide' : 'Show'} items on ${bill.billNumber}`}
                               aria-expanded={open}
+                              data-row-open
                             >
                               {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                             </button>

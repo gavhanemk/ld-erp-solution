@@ -474,12 +474,19 @@ export function RequisitionDialog({
         icon={Package}
         title="Items"
         actions={
-          <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setLines((prev) => [...prev, emptyLine()])}>
+          <button
+            type="button"
+            className="btn-secondary h-8 px-3 text-xs"
+            onClick={() => setLines((prev) => [...prev, emptyLine()])}
+            data-grid-add
+            aria-keyshortcuts="Alt+A"
+            title="Add another item (Alt+A)"
+          >
             <Plus size={14} /> Add another item
           </button>
         }
       >
-        <div className="space-y-3">
+        <div className="space-y-3" data-grid>
           {lines.map((line, i) => {
             const it = itemsById.get(line.itemId)
             const unit = it?.uom?.symbol ?? ''
@@ -489,7 +496,7 @@ export function RequisitionDialog({
             const holdingIds = new Set(holding.map((h) => h.id))
             const owners = line.itemId && line.warehouseId ? ownersAt(line.itemId, line.warehouseId) : { ours: 0, theirs: [] }
             return (
-              <div key={i} className="rounded-lg border border-border bg-secondary/30 p-3">
+              <div key={i} data-grid-row className="rounded-lg border border-border bg-secondary/30 p-3">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-xs font-semibold text-muted-foreground">Item {i + 1}</span>
                   <button
@@ -497,6 +504,8 @@ export function RequisitionDialog({
                     className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
                     onClick={() => setLines((prev) => (prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i)))}
                     aria-label={`Remove line ${i + 1}`}
+                    aria-keyshortcuts="Alt+Delete"
+                    data-grid-remove
                   >
                     <Trash2 size={15} />
                   </button>

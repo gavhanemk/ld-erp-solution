@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { api, apiErrorMessage, can, masterResource } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
@@ -254,6 +255,9 @@ export function ReturnChallanDialog({
       document.body.style.overflow = previous
     }
   }, [])
+  // Tab goes round inside the form, and focus goes back to the button that opened it.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef)
 
   const lineById = useMemo(() => new Map((data?.lines ?? []).map((l) => [l.billLineId, l])), [data])
   const reasonByKey = useMemo(
@@ -383,6 +387,7 @@ export function ReturnChallanDialog({
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       <div
+        ref={dialogRef}
         className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
@@ -765,7 +770,7 @@ export function ReturnChallanDialog({
                         ))}
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody data-grid>
                       {rows.map((r, i) => {
                         const l = lineById.get(r.billLineId)
                         if (!l) return null
@@ -784,6 +789,7 @@ export function ReturnChallanDialog({
                         return (
                           <tr
                             key={r.key}
+                            data-grid-row
                             className={`border-border/50 border-b last:border-0 [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top ${
                               i % 2 ? 'zebra-row' : ''
                             }`}
@@ -902,8 +908,10 @@ export function ReturnChallanDialog({
                                   type="button"
                                   className="btn-ghost text-muted-foreground p-1"
                                   onClick={() => splitRow(r.key)}
-                                  title="Split into another row — for another reason, or from another godown"
+                                  title="Split into another row — for another reason, or from another godown (Alt+A)"
                                   aria-label={`${l.itemName}: split into another row`}
+                                  aria-keyshortcuts="Alt+A"
+                                  data-grid-add="row"
                                 >
                                   <Plus size={13} />
                                 </button>
@@ -913,6 +921,8 @@ export function ReturnChallanDialog({
                                     className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
                                     onClick={() => dropRow(r.key)}
                                     aria-label="Remove this row"
+                                    aria-keyshortcuts="Alt+Delete"
+                                    data-grid-remove
                                   >
                                     <Trash2 size={13} />
                                   </button>
@@ -977,6 +987,8 @@ export function ReturnChallanDialog({
               className="btn-primary"
               onClick={() => void save()}
               disabled={saving || loading || problems.length > 0}
+              data-hotkey="save"
+              aria-keyshortcuts="Control+S Meta+S"
             >
               {saving ? <Loader2 size={15} className="animate-spin" /> : <Truck size={15} />}
               Save &amp; dispatch

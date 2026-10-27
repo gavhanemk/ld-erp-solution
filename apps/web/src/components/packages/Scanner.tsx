@@ -25,6 +25,7 @@ export function Scanner({
   clearOnCode = true,
   focusKey,
   onKeyDown,
+  searchBox = false,
 }: {
   onCode: (code: string) => void
   busy?: boolean
@@ -40,6 +41,8 @@ export function Scanner({
   focusKey?: number
   /** Keys for the suggestions under the box — arrows, Escape. True when it was used. */
   onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => boolean
+  /** The screen's search: "/" goes to it and ↓ goes from it into the list. */
+  searchBox?: boolean
 }) {
   const [typed, setTyped] = useState('')
   const [camera, setCamera] = useState(false)
@@ -138,6 +141,7 @@ export function Scanner({
             autoCapitalize="characters"
             spellCheck={false}
             aria-label="Package code"
+            data-hotkey={searchBox ? 'search' : undefined}
           />
           {typed && (
             <button type="button" className="btn-primary h-10" onClick={submit} disabled={busy}>

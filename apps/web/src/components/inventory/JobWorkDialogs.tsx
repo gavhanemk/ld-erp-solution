@@ -381,7 +381,14 @@ export function SendJobWorkDialog({
         icon={Boxes}
         title="Items"
         actions={
-          <button type="button" className="btn-secondary h-8 text-xs" onClick={() => setLines((prev) => [...prev, emptyOut()])}>
+          <button
+            type="button"
+            className="btn-secondary h-8 text-xs"
+            onClick={() => setLines((prev) => [...prev, emptyOut()])}
+            data-grid-add
+            aria-keyshortcuts="Alt+A"
+            title="Add item (Alt+A)"
+          >
             <Plus size={14} /> Add item
           </button>
         }
@@ -398,7 +405,7 @@ export function SendJobWorkDialog({
                 <th style={{ width: 40 }} />
               </tr>
             </thead>
-            <tbody>
+            <tbody data-grid>
               {lines.map((line, i) => {
                 const item = items.find((x) => x.id === line.itemId)
                 const uom = item?.uom?.symbol ?? ''
@@ -408,7 +415,7 @@ export function SendJobWorkDialog({
                 const owners = held.filter((h) => h.itemId === line.itemId)
                 const over = have !== null && num(line.qty) > have + 1e-9
                 return (
-                  <tr key={i} className="align-top">
+                  <tr key={i} data-grid-row className="align-top">
                     <td className="text-muted-foreground pt-4 text-xs tabular-nums">{i + 1}</td>
                     {/* Category and sub-category narrow the item list, as on the other forms. */}
                     <td className="min-w-[320px]">
@@ -523,6 +530,8 @@ export function SendJobWorkDialog({
                         className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
                         onClick={() => setLines((prev) => (prev.length === 1 ? [emptyOut()] : prev.filter((_, x) => x !== i)))}
                         aria-label={`Remove line ${i + 1}`}
+                        aria-keyshortcuts="Alt+Delete"
+                        data-grid-remove
                       >
                         <Trash2 size={15} />
                       </button>
@@ -748,14 +757,14 @@ export function ReceiveJobWorkDialog({
                 <th>Into store</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody data-grid>
               {challan.lines.map((l, i) => {
                 const e = entries[l.id]
                 const done = l.outstanding <= 0
                 const sentUom = l.item.uom?.symbol ?? ''
                 const backUom = items.find((x) => x.id === e?.itemId)?.uom?.symbol ?? sentUom
                 return (
-                  <tr key={l.id} className={done ? 'opacity-60' : undefined}>
+                  <tr key={l.id} data-grid-row className={done ? 'opacity-60' : undefined}>
                     <td className="text-muted-foreground text-xs tabular-nums">{i + 1}</td>
                     <td className="min-w-[180px]">
                       <div className="text-sm font-medium text-foreground">{l.item.name}</div>

@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Bell, Search, Sun, Moon, Zap, ChevronDown, BellOff, Menu } from 'lucide-react'
+import { Bell, Search, Sun, Moon, Zap, ChevronDown, BellOff, Menu, Keyboard } from 'lucide-react'
 import Link from 'next/link'
 import { api, currentUser } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
@@ -152,6 +152,17 @@ export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
         <kbd className="text-[10px] text-muted-foreground bg-background px-1.5 py-0.5 rounded border border-border">
           {paletteKey}
         </kbd>
+      </button>
+      {/* Every shortcut, in one list — as Alt+/ or ? shows from anywhere. */}
+      <button
+        type="button"
+        onClick={() => window.dispatchEvent(new Event('ld:shortcuts'))}
+        className="hidden md:flex p-2 rounded-lg hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
+        aria-label="Keyboard shortcuts"
+        title="Keyboard shortcuts (Alt+/)"
+        aria-keyshortcuts="Alt+/"
+      >
+        <Keyboard size={17} />
       </button>
 
       <Link

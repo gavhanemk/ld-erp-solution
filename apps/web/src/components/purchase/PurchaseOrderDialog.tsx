@@ -36,6 +36,7 @@ import { Section } from '@/components/purchase/Section'
 import type { EnquiryQuote, EnquiryRecord as EnquiryLite } from '@/components/purchase/enquiryTypes'
 import { api, apiErrorMessage, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } from '@/components/purchase/IndentItemsDialog'
@@ -1068,6 +1069,9 @@ export function PurchaseOrderDialog({
 
   // Escape closes this window only — not the ones behind it.
   useEscape(onClose, open)
+  // Tab goes round inside the form, and focus goes back to the button that opened it.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef, open)
   useEffect(() => {
     if (!open) return
     // The page behind must not scroll while this is open, or closing the form
@@ -2010,6 +2014,9 @@ export function PurchaseOrderDialog({
         onClick={() => void save('draft')}
         className="btn-secondary"
         disabled={busy || incomplete}
+        data-hotkey="save"
+        aria-keyshortcuts="Control+S Meta+S"
+        title="Save as draft (Ctrl+S)"
       >
         {saving === 'draft' ? (
           <Loader2 size={15} className="animate-spin" />
@@ -2060,6 +2067,7 @@ export function PurchaseOrderDialog({
           8px on a phone, 12px on a desktop. The body scrolls inside, which it
           did already. */}
         <div
+          ref={dialogRef}
           className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
           role="dialog"
           aria-modal="true"
@@ -2543,7 +2551,7 @@ export function PurchaseOrderDialog({
                       ))}
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody data-grid>
                     {lines.map((line, i) => {
                       const item = itemById.get(line.itemId)
 
@@ -2580,6 +2588,7 @@ export function PurchaseOrderDialog({
                       return (
                         <tr
                           key={i}
+                          data-grid-row
                           className={`${
                             i % 2 === 1 ? 'zebra-row' : 'bg-card'
                           } border-border/50 border-b last:border-0 [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top`}
@@ -2601,6 +2610,8 @@ export function PurchaseOrderDialog({
                                 onClick={() => removeRow(i)}
                                 className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
                                 aria-label={`Remove row ${i + 1}`}
+                                aria-keyshortcuts="Alt+Delete"
+                                data-grid-remove
                               >
                                 <Trash2 size={13} />
                               </button>
@@ -3234,6 +3245,9 @@ export function PurchaseOrderDialog({
                 <button
                   type="button"
                   onClick={addRow}
+                  data-grid-add
+                  aria-keyshortcuts="Alt+A"
+                  title="Add item row (Alt+A)"
                   className="text-primary border-primary/40 hover:bg-primary/10 focus:ring-ring inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors duration-200 focus:outline-none focus:ring-2"
                 >
                   <Plus size={14} /> Add item row

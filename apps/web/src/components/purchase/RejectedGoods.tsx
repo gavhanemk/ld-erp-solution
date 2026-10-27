@@ -174,6 +174,7 @@ export function RejectedGoods() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search rejected goods"
+              data-hotkey="search"
             />
           </div>
           {summary && summary.heldLines > 0 && (
@@ -214,8 +215,8 @@ export function RejectedGoods() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r) => (
-                    <tr key={`${r.qcId}-${r.grnLineId}`}>
+                  {rows.map((r, i) => (
+                    <tr key={`${r.qcId}-${r.grnLineId}`} data-row tabIndex={i === 0 ? 0 : -1}>
                       <td className="whitespace-nowrap text-xs">
                         {day(r.checkedOn)}
                         {r.checkedBy && <span className="text-muted-foreground block">{r.checkedBy}</span>}
