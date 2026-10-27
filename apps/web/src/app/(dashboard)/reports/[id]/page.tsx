@@ -61,11 +61,6 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
-  /** What the report groups its totals by, and which figures it totals — its own Pivot sheet's. */
-  const [grouping, setGrouping] = useState<{ rows: string[]; values: string[] }>({
-    rows: [],
-    values: [],
-  })
   /** The report's module, for the way back to that module's reports. */
   const [module, setModule] = useState<string | null>(null)
   /*
@@ -96,17 +91,11 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
             id: string
             module: string
             filters: Filter[]
-            pivot?: { rows: string | string[]; values: string[] }
           }>
         }>('/reports')
         const mine = res.data.find((r) => r.id === id)
         setModule(mine?.module ?? null)
         setFilters(mine?.filters ?? [])
-        const rowsSpec = mine?.pivot?.rows
-        setGrouping({
-          rows: rowsSpec == null ? [] : Array.isArray(rowsSpec) ? rowsSpec : [rowsSpec],
-          values: mine?.pivot?.values ?? [],
-        })
 
         const needed = [...new Set((mine?.filters ?? []).map((f) => f.optionsFrom).filter(Boolean))]
         const loaded: Record<string, Array<{ id: string; name: string }>> = {}
@@ -174,7 +163,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
     [values]
   )
 
-  const exportFile = async (format: 'xlsx' | 'csv' | 'summary') => {
+  const exportFile = async (format: 'xlsx' | 'csv') => {
     setError(null)
     try {
       setMessage(describeReport(await downloadReport(id, format, applied)))
@@ -292,14 +281,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
               {/* Figures only: the KPI cards, one table of totals under them,
                 then what needs attention. No charts. */}
               <ReportDashboard analysis={result.analysis}>
-                <SummaryTable
-                  columns={(result as RegisterData).columns}
-                  rows={result.rows}
-                  spec={result.register.spec}
-                  grand={result.register.totals.grand}
-                  groupKeys={grouping.rows}
-                  valueKeys={grouping.values}
-                />
+                <SummaryTable grids={result.register.summary} />
               </ReportDashboard>
             </>
           ) : (

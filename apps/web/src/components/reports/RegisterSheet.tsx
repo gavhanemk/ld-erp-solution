@@ -1,6 +1,7 @@
 'use client'
 
 import { Fragment } from 'react'
+import type { SummaryGrid } from './SummaryTable'
 
 /**
  * A report printed as a register — the accounts team's ledger page.
@@ -73,6 +74,8 @@ export interface RegisterData {
   register: {
     spec: RegisterSpec
     totals: { months: RegisterTotal[]; grand: RegisterTotal }
+    /** The Summary tab's tables, worked out on the server. */
+    summary: SummaryGrid[]
     letterhead: { name: string; lines: string[] }
     generatedAt: string
     generatedBy: string | null

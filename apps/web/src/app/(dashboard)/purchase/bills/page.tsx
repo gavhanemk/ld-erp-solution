@@ -473,7 +473,7 @@ function PurchaseBillsTable() {
             onExport={exportList}
             onReport={exportReport}
             reportLabel="Purchase Register (.xlsx)"
-            reportHint="Every bill line with its tax split, on one sheet"
+            reportHint="Summary, and every bill line with its tax split"
             onPdf={() => openRegisterPrint('purchase-register', reportParams())}
             disabled={loading}
           />

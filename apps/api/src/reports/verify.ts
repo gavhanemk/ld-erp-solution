@@ -41,6 +41,7 @@ import { periodLabel } from './definitions/shared'
 import { buildWorkbook } from './workbook'
 import { buildRegisterWorkbook } from './workbook/register'
 import { registerTotals, resolveColumns, resolveRegister } from './register'
+import { summaryGrids } from './summary'
 
 const SYNTHETIC: { def: ReportDefinition; result: ReportResult } = {
   def: {
@@ -312,43 +313,26 @@ async function main() {
       async (tx) => def.run({ prisma, tx, params, rowCap: ROW_CAP }),
       { timeout: 120_000, maxWait: 15_000 }
     )
-    // Every report is two files: the register on one sheet, and the summary
-    // workbook behind its Summary tab.
+    // What every Export → Excel gives: Summary and Data, two sheets.
     const columns = resolveColumns(def)
     const spec = resolveRegister(def, columns)
-    const register = await buildRegisterWorkbook({
+    const totals = registerTotals(def, result.rows, columns, spec)
+    const buffer = await buildRegisterWorkbook({
       def,
       columns,
       spec,
       rows: result.rows,
-      totals: registerTotals(def, result.rows, columns, spec),
+      totals,
+      analysis: result.analysis,
+      grids: summaryGrids(def, result.rows, columns, spec, totals.grand),
       company: await prisma.company.findFirst(),
       periodLabel: periodLabel(params),
       appliedFilters: [],
       runBy: 'Verification',
     })
-    writeFileSync(`${out}/${def.id}.xlsx`, register)
-    if (!result.analysis) {
-      console.log(`${def.id.padEnd(26)} rows=${String(result.rows.length).padEnd(6)}register only`)
-      continue
-    }
-    const { buffer, chartCount, pivotCount, partial } = await buildWorkbook({
-      def,
-      result,
-      params,
-      runBy: 'Verification',
-      periodLabel: periodLabel(params),
-    })
-    writeFileSync(`${out}/${def.id}-summary.xlsx`, buffer)
-    // The same rule the builder uses. Left at "two or more points" this
-    // printed "charts=6 panels=6 (0 chartable)" on one line, which reads as a
-    // failure report about a workbook that was fine.
-    const panels = result.analysis?.panels ?? []
-    const chartable = panels.filter((p) => p.points.length > 0).length
+    writeFileSync(`${out}/${def.id}.xlsx`, buffer)
     console.log(
-      `${def.id.padEnd(26)} rows=${String(result.rows.length).padEnd(6)}` +
-        `charts=${chartCount} pivots=${pivotCount}  panels=${panels.length} (${chartable} chartable)  ` +
-        `partial=${partial}  summary ${(buffer.length / 1024).toFixed(0)}KB, register ${(register.length / 1024).toFixed(0)}KB`
+      `${def.id.padEnd(26)} rows=${String(result.rows.length).padEnd(6)}${(buffer.length / 1024).toFixed(0)}KB`
     )
   }
 

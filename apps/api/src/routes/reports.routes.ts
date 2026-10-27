@@ -5,7 +5,7 @@ import { userCan, type AuthRequest } from '../middleware/auth'
 import { REPORTS, findReport } from '../reports/registry'
 import { ROW_CAP, type ReportParams, type ReportResult } from '../reports/types'
 import { periodLabel } from '../reports/definitions/shared'
-import { buildCsv, buildWorkbook } from '../reports/workbook'
+import { buildCsv } from '../reports/workbook'
 import { describeFilters, type AppliedFilter } from '../reports/filters'
 import { countsInWords } from '../reports/wording'
 import {
@@ -17,6 +17,7 @@ import {
   type RegisterCompany,
 } from '../reports/register'
 import { buildRegisterWorkbook } from '../reports/workbook/register'
+import { summaryGrids } from '../reports/summary'
 
 const router = Router()
 
@@ -99,6 +100,7 @@ router.get('/:id/run', async (req: AuthRequest, res) => {
   const { result, applied, company } = await runReport(def.id, params)
   const columns = resolveColumns(def)
   const spec = resolveRegister(def, columns)
+  const totals = registerTotals(def, result.rows, columns, spec)
 
   res.json({
     success: true,
@@ -119,7 +121,9 @@ router.get('/:id/run', async (req: AuthRequest, res) => {
        */
       register: {
         spec,
-        totals: registerTotals(def, result.rows, columns, spec),
+        totals,
+        /** The Summary tab's tables — the same ones the workbook's Summary sheet holds. */
+        summary: summaryGrids(def, result.rows, columns, spec, totals.grand),
         letterhead: letterhead(company),
         generatedAt: new Date().toISOString(),
         generatedBy: req.user?.name ?? null,
@@ -140,21 +144,19 @@ router.get('/:id/run', async (req: AuthRequest, res) => {
 /**
  * The files.
  *
- * `xlsx` is the register on one sheet — what every Export → Excel gives.
- * `summary` is the dashboard workbook behind the Summary tab: KPIs, charts,
- * a pivot table and the rows on their own sheet, for whoever asks for it.
+ * `xlsx` is the workbook of two sheets — Summary, the report screen's
+ * Summary tab in figures, and Data, the detailed report — and nothing else.
  * `csv` is the rows for another system.
  */
 router.get('/:id/export', async (req: AuthRequest, res) => {
   const def = guard(req.params.id, req)
-  const format =
-    req.query.format === 'csv' ? 'csv' : req.query.format === 'summary' ? 'summary' : 'xlsx'
+  const format = req.query.format === 'csv' ? 'csv' : 'xlsx'
   const params = req.query as ReportParams
   const { result, applied, company } = await runReport(def.id, params)
 
   const stamp = new Date().toISOString().slice(0, 10)
   const partial = Boolean(result.totalRows && result.totalRows > result.rows.length)
-  const name = `${def.id}${format === 'summary' ? '-summary' : ''}${partial ? '_PARTIAL' : ''}-${stamp}.${format === 'csv' ? 'csv' : 'xlsx'}`
+  const name = `${def.id}${partial ? '_PARTIAL' : ''}-${stamp}.${format}`
 
   if (format === 'csv') {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8')
@@ -163,47 +165,29 @@ router.get('/:id/export', async (req: AuthRequest, res) => {
     return
   }
 
-  // The register is one sheet: the register, nothing behind it.
-  if (format === 'xlsx' || !result.analysis) {
-    const columns = resolveColumns(def)
-    const spec = resolveRegister(def, columns)
-    const buffer = await buildRegisterWorkbook({
-      def,
-      columns,
-      spec,
-      rows: result.rows,
-      totals: registerTotals(def, result.rows, columns, spec),
-      company,
-      periodLabel: periodLabel(params),
-      appliedFilters: applied,
-      runBy: req.user?.name ?? 'Unknown',
-      truncatedFrom: partial ? result.totalRows : undefined,
-    })
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
-    res.setHeader('Content-Length', String(buffer.length))
-    res.setHeader('X-Report-Charts', '0')
-    res.setHeader('X-Report-Pivots', '0')
-    res.setHeader('X-Report-Rows', String(result.rows.length))
-    res.send(buffer)
-    return
-  }
-
-  const { buffer, chartCount, pivotCount } = await buildWorkbook({
+  const columns = resolveColumns(def)
+  const spec = resolveRegister(def, columns)
+  const totals = registerTotals(def, result.rows, columns, spec)
+  const buffer = await buildRegisterWorkbook({
     def,
-    result,
-    params,
-    runBy: req.user?.name ?? 'Unknown',
+    columns,
+    spec,
+    rows: result.rows,
+    totals,
+    analysis: result.analysis,
+    grids: summaryGrids(def, result.rows, columns, spec, totals.grand),
+    company,
     periodLabel: periodLabel(params),
     appliedFilters: applied,
+    runBy: req.user?.name ?? 'Unknown',
+    truncatedFrom: partial ? result.totalRows : undefined,
   })
-
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
   // Measured off the finished file, not predicted from the row count.
   res.setHeader('Content-Length', String(buffer.length))
-  res.setHeader('X-Report-Charts', String(chartCount))
-  res.setHeader('X-Report-Pivots', String(pivotCount))
+  res.setHeader('X-Report-Charts', '0')
+  res.setHeader('X-Report-Pivots', '0')
   res.setHeader('X-Report-Rows', String(result.rows.length))
   res.send(buffer)
 })

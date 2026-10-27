@@ -24,9 +24,9 @@ import { useEscape } from '@/lib/useEscape'
  * screen, for somebody who wants to work on it. CSV is what another system
  * reads. None of the three is a fallback for the others.
  *
- * The report is the detailed report itself now — one sheet of every row with
- * its totals, the same as the report screen's Detailed Report tab — and the
- * PDF is that sheet printed.
+ * The report is a workbook of two sheets now — Summary, the figures of the
+ * report screen's Summary tab, and Data, the detailed report — and the PDF
+ * is the detailed report printed.
  *
  * The work itself belongs to the page: only the page knows which filters are
  * set, and an export that quietly ignored them would be the wrong list.
@@ -37,7 +37,7 @@ export function ExportButton({
   onExport,
   onReport,
   reportLabel = 'Report (.xlsx)',
-  reportHint = 'The full report on one sheet, with its totals',
+  reportHint = 'Two sheets: the summary, and every row with its totals',
   onPdf,
   disabled,
   label = 'Export',

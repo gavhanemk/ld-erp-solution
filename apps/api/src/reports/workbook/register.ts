@@ -1,5 +1,5 @@
 import ExcelJS from 'exceljs'
-import type { RegisterSpec, ReportColumn, ReportDefinition } from '../types'
+import type { Kpi, RegisterSpec, ReportAnalysis, ReportColumn, ReportDefinition } from '../types'
 import type { AppliedFilter } from '../filters'
 import { filterLine } from '../filters'
 import {
@@ -10,17 +10,21 @@ import {
   type RegisterTotal,
   type RegisterTotals,
 } from '../register'
+import type { SummaryGrid, SummaryValue } from '../summary'
 import { BADGE_INK, BADGE_PAPER, colLetter } from './data'
 import { FMT, INK, PAPER } from './theme'
 
 /**
- * A register as one worksheet, named for the register.
+ * A report as a workbook of two sheets, and only two.
  *
- * No Dashboard, Pivot or Notes behind it: the accounts team asked for the
- * register and nothing else. The letterhead and period sit above one header
- * row; every line follows as plain numbers and dates, so the sheet sorts,
- * filters and adds up like any other; the totals sit below, outside the
- * filter, where sorting cannot carry them off into the data.
+ * **Summary** is the report screen's Summary tab in numbers: the headline,
+ * the KPI figures, the totals tables and what needs attention. No charts,
+ * no pivot — the accounts team asked for figures they can read straight off.
+ *
+ * **Data** is the detailed report. The letterhead and period sit above one
+ * header row; every line follows as plain numbers and dates, so the sheet
+ * sorts, filters and adds up like any other; the totals sit below, outside
+ * the filter, where sorting cannot carry them off into the data.
  */
 
 const FONT = 'Calibri'
@@ -87,6 +91,173 @@ function qtyTotal(t: RegisterTotal, c: ReportColumn): number | string | null {
     .join(' · ')
 }
 
+type Line = { text: string; size: number; bold?: boolean; color?: string }
+
+/** The letterhead, the title and the period, the same at the top of both sheets. */
+function writeHead(ws: ExcelJS.Worksheet, lines: Line[]) {
+  for (const l of lines) {
+    const r = ws.addRow([l.text])
+    r.getCell(1).font = { name: FONT, size: l.size, bold: l.bold, color: { argb: l.color ?? INK.heading } }
+  }
+  ws.addRow([])
+}
+
+/** A KPI's figure as a number Excel can still add, in the format it reads in. */
+function kpiCell(k: { value: number | null; format: Kpi['format']; unit?: string }): {
+  value: ExcelJS.CellValue
+  numFmt?: string
+} {
+  if (k.value == null) return { value: '—' }
+  switch (k.format) {
+    case 'money':
+      return { value: k.value, numFmt: FMT.moneySigned }
+    case 'percent':
+      return { value: k.value, numFmt: '0.0%' }
+    case 'days':
+      return { value: Math.round(k.value), numFmt: '0" days"' }
+    case 'qty':
+      return { value: k.value, numFmt: k.unit ? `#,##0.###" ${k.unit.replace(/"/g, '')}"` : '#,##0.###' }
+    default:
+      return { value: k.value, numFmt: '#,##0' }
+  }
+}
+
+/** A quantity's unit rides in the number format, so the cell is still a number. */
+function summaryCell(type: string, v: SummaryValue): { value: ExcelJS.CellValue; numFmt?: string } {
+  if (v == null) return { value: null }
+  if (Array.isArray(v)) {
+    if (v.length === 0) return { value: null }
+    if (v.length === 1) {
+      return { value: v[0].value, numFmt: `${FORMAT.qty.split(';').pop()}" ${v[0].unit.replace(/"/g, '')}"` }
+    }
+    // Metres and pieces in one cell cannot be one number; they are words.
+    return {
+      value: v
+        .map((u) => `${u.value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 3 })} ${u.unit}`)
+        .join(' · '),
+    }
+  }
+  if (type === 'money') return { value: v, numFmt: FORMAT.money }
+  if (type === 'qty') return { value: v, numFmt: FORMAT.qty }
+  return { value: v, numFmt: '#,##0' }
+}
+
+function buildSummarySheet(
+  wb: ExcelJS.Workbook,
+  head: Line[],
+  analysis: ReportAnalysis | undefined,
+  grids: SummaryGrid[]
+) {
+  const ws = wb.addWorksheet('Summary')
+  const width = Math.max(3, ...grids.map((g) => g.figures.length + 3))
+  ws.columns = Array.from({ length: width }, (_, i) => ({ width: i === 0 ? 34 : i === 2 && !grids.length ? 44 : 17 }))
+  writeHead(ws, head)
+
+  const section = (title: string) => {
+    const r = ws.addRow([title])
+    r.getCell(1).font = { name: FONT, size: 11, bold: true, color: { argb: INK.heading } }
+    for (let i = 1; i <= width; i++) {
+      r.getCell(i).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.brandSoft } }
+    }
+  }
+  const header = (labels: string[], numericFrom: number) => {
+    const r = ws.addRow(labels)
+    r.eachCell((c, i) => {
+      c.font = { name: FONT, size: 10, bold: true, color: { argb: INK.onBrand } }
+      c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.header } }
+      c.alignment = { vertical: 'middle', wrapText: true, horizontal: i > numericFrom ? 'right' : 'left' }
+    })
+    r.height = 22
+  }
+  const body = { name: FONT, size: 10, color: { argb: INK.body } }
+
+  if (analysis?.headline) {
+    const r = ws.addRow([analysis.headline])
+    r.getCell(1).font = { name: FONT, size: 12, bold: true, color: { argb: INK.heading } }
+    ws.addRow([])
+  }
+
+  // ── The period at a glance ──────────────────────────────────────────────
+  if (analysis?.kpis.length) {
+    section('The period at a glance')
+    header(['Figure', 'Value', 'Based on'], 1)
+    for (const k of analysis.kpis) {
+      const v = kpiCell(k)
+      const r = ws.addRow([k.label, v.value, k.basis])
+      r.font = body
+      if (v.numFmt) r.getCell(2).numFmt = v.numFmt
+      r.getCell(2).alignment = { horizontal: 'right' }
+      r.getCell(2).font = { ...body, bold: true }
+      r.getCell(3).font = { name: FONT, size: 9, color: { argb: INK.muted } }
+    }
+    ws.addRow([])
+  }
+
+  // ── The totals ──────────────────────────────────────────────────────────
+  for (const g of grids) {
+    // "Job Worker" reads "job worker" mid-sentence; "HSN" stays "HSN".
+    const inSentence = g.label
+      .split(' ')
+      .map((w) => (/^[A-Z]{2}/.test(w) ? w : w.charAt(0).toLowerCase() + w.slice(1)))
+      .join(' ')
+    section(`Totals by ${inSentence}`)
+    header([g.label, g.counted, ...g.figures.map((f) => f.label), ...(g.shared ? ['Share'] : [])], 1)
+    const write = (name: string, documents: number, values: SummaryValue[], share: number | null, total: boolean) => {
+      const r = ws.addRow([name, documents])
+      r.font = total ? { ...body, bold: true, color: { argb: INK.heading } } : body
+      r.getCell(2).numFmt = '#,##0'
+      g.figures.forEach((f, i) => {
+        const c = summaryCell(f.type, values[i])
+        const x = r.getCell(3 + i)
+        x.value = c.value
+        if (c.numFmt) x.numFmt = c.numFmt
+        x.alignment = { horizontal: 'right' }
+      })
+      if (g.shared) {
+        const x = r.getCell(3 + g.figures.length)
+        x.value = share
+        x.numFmt = '0.0%'
+        x.alignment = { horizontal: 'right' }
+      }
+      if (total) {
+        for (let i = 1; i <= 2 + g.figures.length + (g.shared ? 1 : 0); i++) {
+          const x = r.getCell(i)
+          x.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.brandSoft } }
+          x.border = { top: { style: 'thin', color: { argb: INK.heading } }, bottom: { style: 'double', color: { argb: INK.heading } } }
+        }
+      }
+    }
+    for (const row of g.rows) write(row.name, row.documents, row.values, row.share, false)
+    write('Total', g.total.documents, g.total.values, g.shared ? 1 : null, true)
+    ws.addRow([])
+  }
+
+  // ── Needs attention ─────────────────────────────────────────────────────
+  const live = (analysis?.exceptions ?? []).filter((e) => e.value != null && e.value !== 0)
+  if (live.length) {
+    section('Needs attention')
+    header(['', 'Value', 'Note'], 1)
+    for (const e of live) {
+      const v = kpiCell(e)
+      const r = ws.addRow([e.label, v.value, e.basis])
+      r.font = body
+      if (v.numFmt) r.getCell(2).numFmt = v.numFmt
+      r.getCell(2).alignment = { horizontal: 'right' }
+      r.getCell(2).font = { ...body, bold: true, color: { argb: e.tone === 'bad' ? 'FF991B1B' : 'FF92400E' } }
+      r.getCell(3).font = { name: FONT, size: 9, color: { argb: INK.muted } }
+    }
+  }
+
+  ws.pageSetup = {
+    paperSize: 9,
+    orientation: 'portrait',
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 },
+  }
+}
+
 const RUN_AT = new Intl.DateTimeFormat('en-IN', {
   day: 'numeric',
   month: 'short',
@@ -103,6 +274,9 @@ export async function buildRegisterWorkbook(opts: {
   spec: RegisterSpec
   rows: Array<Record<string, unknown>>
   totals: RegisterTotals
+  /** The Summary sheet: the KPIs and what needs attention, and the totals tables. */
+  analysis?: ReportAnalysis
+  grids: SummaryGrid[]
   company: RegisterCompany | null
   periodLabel: string
   appliedFilters: AppliedFilter[]
@@ -110,7 +284,7 @@ export async function buildRegisterWorkbook(opts: {
   /** Rows the query found, when more than were returned. */
   truncatedFrom?: number
 }): Promise<Buffer> {
-  const { def, columns: cols, spec, rows, totals, company, periodLabel, appliedFilters, runBy, truncatedFrom } =
+  const { def, columns: cols, spec, rows, totals, analysis, grids, company, periodLabel, appliedFilters, runBy, truncatedFrom } =
     opts
   const runAt = new Date()
 
@@ -118,14 +292,9 @@ export async function buildRegisterWorkbook(opts: {
   wb.creator = 'LD Cotton Mills ERP'
   wb.created = runAt
 
-  // Excel refuses a sheet name with : \ / ? * [ ] in it, or longer than 31.
-  const sheetName = def.title.replace(/:/g, ' -').replace(/[\\/?*[\]]/g, '').slice(0, 31).trim()
-  const ws = wb.addWorksheet(sheetName)
-  ws.columns = cols.map((c) => ({ key: c.key, width: c.width ?? Math.max(10, c.label.length + 2) }))
-
-  // ── Letterhead and period ───────────────────────────────────────────────
+  // ── Letterhead and period, at the top of both sheets ───────────────────
   const head = letterhead(company)
-  const lines: Array<{ text: string; size: number; bold?: boolean; color?: string }> = [
+  const lines: Line[] = [
     ...(head.name ? [{ text: head.name, size: 14, bold: true }] : []),
     ...head.lines.map((text) => ({ text, size: 9, color: INK.muted })),
     { text: def.title, size: 13, bold: true },
@@ -147,11 +316,13 @@ export async function buildRegisterWorkbook(opts: {
         ]
       : []),
   ]
-  for (const l of lines) {
-    const r = ws.addRow([l.text])
-    r.getCell(1).font = { name: FONT, size: l.size, bold: l.bold, color: { argb: l.color ?? INK.heading } }
-  }
-  ws.addRow([])
+
+  // Summary first, so the workbook opens on it as the report screen does.
+  buildSummarySheet(wb, lines, analysis, grids)
+
+  const ws = wb.addWorksheet('Data')
+  ws.columns = cols.map((c) => ({ key: c.key, width: c.width ?? Math.max(10, c.label.length + 2) }))
+  writeHead(ws, lines)
 
   // ── The header row ──────────────────────────────────────────────────────
   const header = ws.addRow(cols.map((c) => c.label))
