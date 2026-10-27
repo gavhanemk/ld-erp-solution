@@ -7,7 +7,7 @@ import { AlertCircle, ArrowLeft, FileText, LayoutDashboard, Printer, RefreshCw }
 import { api, ApiError, masterResource } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ReportDashboard, type Analysis, type Tone } from '@/components/reports/Dashboard'
-import { PivotTable } from '@/components/reports/PivotTable'
+import { SummaryTable } from '@/components/reports/SummaryTable'
 import { MODULE_WORDS, moduleReportsHref } from '@/components/reports/modules'
 import { FilterBar, type Filter } from '@/components/reports/FilterBar'
 import { RegisterSheet, type RegisterData } from '@/components/reports/RegisterSheet'
@@ -61,8 +61,11 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
-  /** What the report's own Pivot sheet defaults to, so the on-screen one opens the same way. */
-  const [pivotDefaults, setPivotDefaults] = useState<{ rows?: string; values?: string }>({})
+  /** What the report groups its totals by, and which figures it totals — its own Pivot sheet's. */
+  const [grouping, setGrouping] = useState<{ rows: string[]; values: string[] }>({
+    rows: [],
+    values: [],
+  })
   /** The report's module, for the way back to that module's reports. */
   const [module, setModule] = useState<string | null>(null)
   /*
@@ -100,9 +103,9 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         setModule(mine?.module ?? null)
         setFilters(mine?.filters ?? [])
         const rowsSpec = mine?.pivot?.rows
-        setPivotDefaults({
-          rows: Array.isArray(rowsSpec) ? rowsSpec[0] : rowsSpec,
-          values: mine?.pivot?.values?.[0],
+        setGrouping({
+          rows: rowsSpec == null ? [] : Array.isArray(rowsSpec) ? rowsSpec : [rowsSpec],
+          values: mine?.pivot?.values ?? [],
         })
 
         const needed = [...new Set((mine?.filters ?? []).map((f) => f.optionsFrom).filter(Boolean))]
@@ -214,10 +217,6 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
           <ExportButton
             onExport={exportFile}
             onPdf={printRegister}
-            onReport={hasSummary ? () => exportFile('summary') : undefined}
-            reportLabel="KPI summary with charts (.xlsx)"
-            reportHint="KPIs, charts and a pivot table, with the rows behind them"
-            reportLast
             disabled={loading || !result}
           />
         </div>
@@ -290,16 +289,18 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
                 )}
               </p>
 
-              <ReportDashboard analysis={result.analysis} rowCount={result.rowCount} />
-
-              {result.rows.length > 0 && (
-                <PivotTable
-                  columns={result.columns}
+              {/* Figures only: the KPI cards, one table of totals under them,
+                then what needs attention. No charts. */}
+              <ReportDashboard analysis={result.analysis}>
+                <SummaryTable
+                  columns={(result as RegisterData).columns}
                   rows={result.rows}
-                  defaultRowKey={pivotDefaults.rows}
-                  defaultValueKey={pivotDefaults.values}
+                  spec={result.register.spec}
+                  grand={result.register.totals.grand}
+                  groupKeys={grouping.rows}
+                  valueKeys={grouping.values}
                 />
-              )}
+              </ReportDashboard>
             </>
           ) : (
             // The detailed report: the sheet the PDF prints and the workbook holds.

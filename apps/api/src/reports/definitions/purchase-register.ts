@@ -141,7 +141,7 @@ export const purchaseRegister: ReportDefinition = {
    */
   pivot: {
     rows: 'supplier',
-    values: ['taxable', 'total', 'paid', 'balance'],
+    values: ['taxable', 'gst', 'total', 'paid', 'balance'],
     slicers: ['status'],
     note: 'What each supplier billed, what has gone out to them, and what is still to go.',
   },
