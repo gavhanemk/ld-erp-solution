@@ -469,6 +469,8 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                 setDialogOpen(true)
               }}
               className="btn-primary"
+              data-hotkey="new"
+              aria-keyshortcuts="Alt+N"
             >
               <Plus size={16} />
               New {singular}
@@ -487,6 +489,8 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
               onChange={(e) => setSearch(e.target.value)}
               placeholder={searchPlaceholder}
               className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+              data-hotkey="search"
+              aria-label={`Search ${title.toLowerCase()}`}
             />
             {search && (
               <button
@@ -602,6 +606,19 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                     style={col.align ? { textAlign: col.align } : undefined}
                     className={col.sortable ? 'cursor-pointer select-none hover:text-foreground' : undefined}
                     onClick={col.sortable ? () => toggleSort(col.key) : undefined}
+                    // A sortable heading sorts from the keyboard as well: Tab to it, Enter.
+                    tabIndex={col.sortable ? 0 : undefined}
+                    onKeyDown={
+                      col.sortable
+                        ? (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              toggleSort(col.key)
+                            }
+                          }
+                        : undefined
+                    }
+                    aria-sort={sort === col.key ? (order === 'asc' ? 'ascending' : 'descending') : undefined}
                   >
                     {col.header}
                     {sort === col.key && (order === 'asc' ? ' ↑' : ' ↓')}
@@ -637,8 +654,10 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                 </tr>
               )}
 
-              {rows.map((row) => (
-                <tr key={row.id} className={row.isActive === false ? 'opacity-50' : ''}>
+              {/* A line takes focus: ↑ ↓ move, Enter opens it to edit. The
+                first is reached with Tab, the rest with the arrows. */}
+              {rows.map((row, i) => (
+                <tr key={row.id} className={row.isActive === false ? 'opacity-50' : ''} data-row tabIndex={i === 0 ? 0 : -1}>
                   {columns.map((col) => (
                     <td
                       key={col.key}
@@ -663,6 +682,8 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                       <button
                         className="btn-ghost p-1.5"
                         title={`Edit ${singular.toLowerCase()}`}
+                        aria-label={`Edit ${singular.toLowerCase()}`}
+                        data-row-open
                         onClick={() => {
                           if (onEdit) return onEdit(row)
                           setEditing(row)
@@ -677,6 +698,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                         <button
                           className={`btn-ghost p-1.5 text-red-400 ${row.isActive === false ? 'invisible' : ''}`}
                           title={`Deactivate ${singular.toLowerCase()}`}
+                          aria-label={`Deactivate ${singular.toLowerCase()}`}
                           onClick={() => void deactivate(row)}
                         >
                           <Ban size={14} />
@@ -686,6 +708,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                         <button
                           className="btn-ghost p-1.5 text-red-500"
                           title={`Delete ${singular.toLowerCase()} permanently`}
+                          aria-label={`Delete ${singular.toLowerCase()} permanently`}
                           onClick={() => {
                             setActionError(null)
                             setNotice(null)

@@ -36,6 +36,7 @@ import packageRoutes from './routes/packages.routes'
 import retailRoutes from './routes/retail.routes'
 import garmentRoutes from './routes/garments.routes'
 import traceRoutes from './routes/trace.routes'
+import searchRoutes from './routes/search.routes'
 import stockCountRoutes from './routes/stockCount.routes'
 import finishedGoodsRoutes from './routes/finishedGoods.routes'
 import productionRoutes from './routes/production.routes'
@@ -307,6 +308,8 @@ app.use('/api/retail', authMiddleware, retailRoutes)
 // One QR tag per finished garment: tag an order's pieces, print, scan.
 app.use('/api/garments', authMiddleware, garmentRoutes)
 app.use('/api/trace', authMiddleware, traceRoutes)
+// The Ctrl+K palette's record search, across every module the user may see.
+app.use('/api/search', authMiddleware, searchRoutes)
 // Stock counts by scanning stickers: Inventory → Stock → Stock Count.
 app.use('/api/stock-counts', authMiddleware, stockCountRoutes)
 // Packed garments into the finished-goods store, by size. A store document,

@@ -195,7 +195,7 @@ export function PackageGroups({
             </tr>
           </thead>
           <tbody>
-            {groups.map((g) => {
+            {groups.map((g, i) => {
               const isOpen = open.has(g.key)
               const list = rows[g.key]
               const allPicked = Boolean(list?.length) && list!.every((p) => picked.has(p.id))
@@ -208,6 +208,8 @@ export function PackageGroups({
                     }}
                     className={`cursor-pointer ${isOpen ? 'bg-primary/5' : ''}`}
                     onClick={() => void toggle(g)}
+                    data-row
+                    tabIndex={i === 0 ? 0 : -1}
                   >
                     <td className="text-muted-foreground">{isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</td>
                     <td>

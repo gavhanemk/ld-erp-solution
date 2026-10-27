@@ -8,6 +8,8 @@ interface RowPlan {
   item: 'new' | 'existing' | 'none'
   code: string | null
   stock: { store: string; qty: number; rate: number } | null
+  /** How it comes packed, set by this row: "Packet of 50". */
+  pack?: string | null
   skipped: boolean
   problems: string[]
 }
@@ -18,6 +20,8 @@ interface Summary {
   existingItems: number
   skipped: number
   stockLines: number
+  /** Items already there whose Sticker Package or Qty per Sticker the sheet sets. */
+  packsSet?: number
   problems: number
 }
 
@@ -37,7 +41,7 @@ const config: SheetImportConfig<RowPlan, Summary> = {
     },
     current: {
       title: 'With your current items',
-      text: 'Every item already listed. Type the store, quantity and rate against the ones you have in stock; rows left empty are skipped. New items can be added at the bottom.',
+      text: 'Every item already listed. Type the store, quantity and rate against the ones you have in stock, or how each comes packed; rows left as they are are skipped. New items can be added at the bottom.',
     },
   },
   columns: [
@@ -65,20 +69,27 @@ const config: SheetImportConfig<RowPlan, Summary> = {
         </span>
       ),
     },
+    {
+      head: 'Packed as',
+      width: 130,
+      cell: (r) => <span className="text-xs">{r.pack || '—'}</span>,
+    },
   ],
   chips: (s) => (
     <>
       <span className="badge-success">{count(s.newItems, 'new item', 'new items')}</span>
       <span className="badge-info">{count(s.stockLines, 'stock line', 'stock lines')}</span>
       {s.existingItems > 0 && (
-        <span className="badge-neutral">{count(s.existingItems, 'item', 'items')} already there, stock only</span>
+        <span className="badge-neutral">{count(s.existingItems, 'item', 'items')} already there</span>
       )}
+      {(s.packsSet ?? 0) > 0 && <span className="badge-neutral">packing set on {count(s.packsSet ?? 0, 'item', 'items')}</span>}
     </>
   ),
   toDo: (s) =>
     [
       s.newItems ? count(s.newItems, 'new item', 'new items') : '',
       s.stockLines ? count(s.stockLines, 'stock line', 'stock lines') : '',
+      s.packsSet ? `packing on ${count(s.packsSet, 'item', 'items')}` : '',
     ].filter(Boolean),
   created: (data) => (data as { created: Array<{ code: string; name: string }> }).created,
 }

@@ -9,8 +9,10 @@ import { api, ApiError, currentUser } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { StepInput } from '@/components/ui/StepInput'
 import { formatDate, newRequestId } from '@/lib/utils'
+import { useAppSettings } from '@/lib/appSettings'
 import type { OutwardRef } from '@/components/packages/packageTypes'
 import { ScanIssue } from '@/components/packages/ScanIssue'
+import { PickList } from '@/components/packages/PickList'
 import { noBuyBox, planRows, r3, shortOf, spread, startingQty, coveredByPo, type FulfilData, type FulfilOrder, type ProcessLine } from './processPlan'
 
 /**
@@ -109,6 +111,12 @@ export function ProcessDialog({
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Settings → Preferences: stickered stock is handed over by scanning it.
+  const { issueByScanOnly } = useAppSettings()
+  // A packet chosen from a pick list, handed to the scan panel; and a count
+  // that makes the pick lists read their packets again after an issue.
+  const [picked, setPicked] = useState<{ code: string; n: number } | null>(null)
+  const [pickRefresh, setPickRefresh] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
   const [qty, setQty] = useState<Record<ProcessTab, Record<string, string>>>({ issue: {}, reserve: {}, buy: {} })
   const [open, setOpen] = useState<Record<string, boolean>>({})
@@ -1000,16 +1008,52 @@ export function ProcessDialog({
               <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-foreground">Everything on this requisition has been issued.</p>
             ) : summary.ready + summary.partly > 0 ? (
               // Approved, so it can be handed over by scanning: stock comes down with each sticker.
-              <ScanIssue
-                mrId={mr.id}
-                mrNumber={mr.mrNumber}
-                itemIds={mr.lines.map((l) => l.item.id)}
-                onIssued={(message) => {
-                  setNotice(message)
-                  onDone(message)
-                  void read()
-                }}
-              />
+              <>
+                <ScanIssue
+                  mrId={mr.id}
+                  mrNumber={mr.mrNumber}
+                  itemIds={mr.lines.map((l) => l.item.id)}
+                  pick={picked}
+                  onIssued={(message) => {
+                    setNotice(message)
+                    onDone(message)
+                    setPickRefresh((k) => k + 1)
+                    void read()
+                  }}
+                />
+                {issueByScanOnly && (
+                  <p className="text-xs text-muted-foreground">
+                    Stickered stock is issued by scan only. A quantity typed below can take only stock that has no sticker.
+                  </p>
+                )}
+                {/* Which packets to take: each item's packets in its store, oldest first. */}
+                {rows.some((r) => r.owed > 0 && r.stores.length > 0) && (
+                  <div className="space-y-2">
+                    <p className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                      <span className="font-semibold text-foreground">Which packets to take</span>
+                      <span className="text-xs text-muted-foreground">oldest first · press Issue this, or scan its sticker</span>
+                    </p>
+                    {rows
+                      .filter((r) => r.owed > 0 && r.stores.length > 0)
+                      .map((r) => (
+                        <PickList
+                          key={r.l.id}
+                          item={r.l.item.name}
+                          itemId={r.l.item.id}
+                          warehouseId={r.stores[0].id}
+                          store={r.stores[0].name}
+                          ownership={r.theirs ? 'CUSTOMER_OWNED' : 'OWNED'}
+                          ownerCustomerId={r.theirs ? (r.l.ownerCustomer?.id ?? null) : null}
+                          owner={r.l.ownerCustomer?.name ?? null}
+                          unit={r.unit}
+                          owed={r.owed}
+                          refreshKey={pickRefresh}
+                          onPick={(code) => setPicked({ code, n: Date.now() })}
+                        />
+                      ))}
+                  </div>
+                )}
+              </>
             ) : (
               <div className="rounded-lg border border-dashed border-border bg-secondary/40 px-4 py-3 text-sm">
                 <p className="font-medium text-foreground">Nothing on this requisition is in the store yet, so there is nothing to issue.</p>
@@ -1044,10 +1088,10 @@ export function ProcessDialog({
                     ))}
                   </tr>
                 </thead>
-                <tbody>
+                <tbody data-grid>
                   {rows.map((r) => (
                     <Fragment key={r.l.id}>
-                      <tr className="border-t border-border transition-colors hover:bg-secondary/20">
+                      <tr data-grid-row className="border-t border-border transition-colors hover:bg-secondary/20">
                         <td className="px-3 py-2.5 align-top">{itemCell(r)}</td>
                         <td className={td}>{neededCell(r)}</td>
                         <td className={td}>{storeCell(r)}</td>

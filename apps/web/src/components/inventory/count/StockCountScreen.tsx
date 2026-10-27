@@ -482,7 +482,11 @@ function Loose({ count, lines, editable, reload, onError }: { count: OpenCount; 
                   disabled={!editable || saving === l.key}
                   onValueChange={(v) => setDraft((d) => ({ ...d, [l.key]: v }))}
                   onBlur={() => void save(l, draft[l.key] ?? '')}
-                  onKeyDown={(e) => e.key === 'Enter' && void save(l, draft[l.key] ?? '')}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return
+                    e.preventDefault()
+                    void save(l, draft[l.key] ?? '')
+                  }}
                   aria-label={`${l.name} counted`}
                 />
                 {saving === l.key && <Loader2 size={13} className="text-muted-foreground animate-spin" />}

@@ -272,6 +272,8 @@ export default function ServiceOrdersPage() {
             className="btn-primary"
             onClick={() => setDialog({ open: true, record: null })}
             aria-label="New service order"
+            data-hotkey="new"
+            aria-keyshortcuts="Alt+N"
           >
             <Plus size={15} /> <span className="hidden sm:inline">New Service Order</span>
           </button>
@@ -302,6 +304,7 @@ export default function ServiceOrdersPage() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 aria-label="Search service orders"
+                data-hotkey="search"
               />
             </div>
             <div className="flex shrink-0 items-center gap-1">
@@ -440,19 +443,20 @@ export default function ServiceOrdersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((po) => {
+                  {rows.map((po, ri) => {
                     const s = STATUS[po.status] ?? { label: po.status, cls: 'badge-neutral' }
                     const open = expanded === po.id
                     const lines = po.lines ?? []
                     return (
                       <Fragment key={po.id}>
-                        <tr>
+                        <tr data-row tabIndex={ri === 0 ? 0 : -1}>
                           <td>
                             <button
                               className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg"
                               onClick={() => setExpanded(open ? null : po.id)}
                               aria-label={`${open ? 'Hide' : 'Show'} lines on ${po.poNumber}`}
                               aria-expanded={open}
+                              data-row-open
                             >
                               {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                             </button>

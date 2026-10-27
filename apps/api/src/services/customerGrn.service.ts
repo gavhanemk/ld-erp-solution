@@ -1,7 +1,7 @@
 import type { Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { recordMovement, lockedBalanceOf } from './stock.service'
-import { recordPackageMove, round3, splitOff, type StockSpot } from './package.service'
+import { recordPackageMove, round3, splitOff, takeFromPackage, type StockSpot } from './package.service'
 
 /*
  * A customer's receipt, from the count at the gate to the books.
@@ -185,6 +185,13 @@ async function heldPackagesFor(
   preferSourceId: string | null,
   userId: string | null,
   why: string,
+  /**
+   * Going back to the customer: part of a roll comes off its own sticker,
+   * which stays on the held rest, and is not returned here. Left out, part
+   * of a roll is cut off with a sticker of its own, as a release needs: the
+   * released part is usable and the rest is still held.
+   */
+  leaving?: { move: Parameters<typeof takeFromPackage>[3] },
 ) {
   await lockedBalanceOf(tx, { ...spot, grade: HELD })
   const held = await tx.stockPackage.findMany({
@@ -211,8 +218,14 @@ async function heldPackagesFor(
       left = round3(left - has)
       continue
     }
-    // Part of a roll: the part taken and the rest, still held, each get a
-    // sticker of their own, and the old one is retired.
+    if (leaving) {
+      // Part of a roll going back: the rest stays held on the same sticker.
+      await takeFromPackage(tx, p, left, leaving.move)
+      left = 0
+      continue
+    }
+    // Part of a roll released: the part taken and the rest, still held, each
+    // get a sticker of their own, and the old one is retired.
     const { part } = await splitOff(tx, p, left, { notes: why, userId, unit: p.item.uom?.symbol ?? '' })
     taken.push(part)
     left = 0
@@ -280,10 +293,11 @@ export async function takeHeldPackages(
   doc: { type: string; id: string; number: string; grnId: string | null },
   userId: string | null,
 ) {
-  const taken = await heldPackagesFor(tx, spot, qty, doc.grnId, userId, `going back on ${doc.number}`)
+  const move = { referenceType: doc.type, referenceId: doc.id, referenceNumber: doc.number, notes: 'Back to the customer as rejected', userId }
+  const taken = await heldPackagesFor(tx, spot, qty, doc.grnId, userId, `going back on ${doc.number}`, { move })
   for (const p of taken) {
     await tx.stockPackage.update({ where: { id: p.id }, data: { qty: 0, status: 'EMPTY' } })
-    await recordPackageMove(tx, { packageId: p.id, type: 'ISSUED', qty: -p.qty, balanceAfter: 0, warehouseId: spot.warehouseId, referenceType: doc.type, referenceId: doc.id, referenceNumber: doc.number, notes: 'Back to the customer as rejected', userId })
+    await recordPackageMove(tx, { packageId: p.id, type: 'ISSUED', qty: -p.qty, balanceAfter: 0, warehouseId: spot.warehouseId, ...move })
   }
   return taken
 }

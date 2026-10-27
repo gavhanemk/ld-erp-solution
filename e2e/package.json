@@ -8,7 +8,8 @@
     "db:reset": "node demo-db/reset.mjs",
     "db:copy-masters": "node demo-db/copy-masters.mjs",
     "test:api": "node api/run-all.mjs",
-    "test:walk": "node browser/walk.mjs"
+    "test:walk": "node browser/walk.mjs",
+    "test:keys": "node browser/keyboard.mjs"
   },
   "dependencies": {
     "embedded-postgres": "^17.10.0-beta.17",

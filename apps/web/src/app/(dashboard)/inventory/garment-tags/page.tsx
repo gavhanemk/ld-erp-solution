@@ -178,6 +178,7 @@ export default function GarmentTagsPage() {
               value={q}
               onChange={(e) => setQ(e.target.value)}
               aria-label="Search orders"
+              data-hotkey="search"
             />
           </div>
           <span className="text-xs text-muted-foreground">Orders with pieces received into finished goods, or switched on for tags</span>
@@ -204,12 +205,12 @@ export default function GarmentTagsPage() {
                 </tr>
               </thead>
               <tbody>
-                {orders.map((o) => {
+                {orders.map((o, i) => {
                   const isOpen = openId === o.id
                   const toTag = Math.max(0, o.received - o.tagged)
                   return (
                     <Fragment key={o.id}>
-                      <tr className={`cursor-pointer ${isOpen ? 'bg-primary/5' : ''}`} onClick={() => void toggleOpen(o)}>
+                      <tr className={`cursor-pointer ${isOpen ? 'bg-primary/5' : ''}`} onClick={() => void toggleOpen(o)} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td className="text-muted-foreground">{isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</td>
                         <td className="whitespace-nowrap font-mono text-sm font-semibold text-foreground">{o.moNumber}</td>
                         <td>

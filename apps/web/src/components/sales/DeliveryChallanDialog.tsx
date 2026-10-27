@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
 import {
@@ -21,6 +21,7 @@ import {
 import { api, ApiError } from '@/lib/api'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
@@ -196,6 +197,9 @@ export function DeliveryChallanDialog({
       document.body.style.overflow = previous
     }
   }, [open])
+  // Tab goes round inside the form, and focus goes back to the button that opened it.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef, open)
 
   /** The order's lines and stock for one store. */
   const loadPrep = useCallback(async (orderId: string, store: string | null) => {
@@ -410,7 +414,7 @@ export function DeliveryChallanDialog({
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
-      <div className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="dc-title">
+      <div ref={dialogRef} className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="dc-title">
         <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
           <div className="flex min-w-0 items-center gap-3">
             <div className="bg-primary/10 border-primary/20 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
@@ -511,9 +515,9 @@ export function DeliveryChallanDialog({
                   For each size: what the order still wants, what is packed in this store, and what goes now. &quot;Fill what
                   can go&quot; puts the smaller of the two in every box.
                 </p>
-                <div className="space-y-3">
+                <div className="space-y-3" data-grid>
                   {rows.map(({ l, d, sizes, now, nowB, showB, over, short: lineShort }) => (
-                    <div key={l.soLineId} className="border-border bg-card rounded-lg border p-3">
+                    <div key={l.soLineId} data-grid-row className="border-border bg-card rounded-lg border p-3">
                       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
                         <p className="text-foreground text-sm font-medium">
                           <span className="font-mono text-xs">{l.item.code}</span> — {l.item.name}
@@ -721,7 +725,15 @@ export function DeliveryChallanDialog({
           <button type="button" onClick={onClose} className="btn-secondary hidden sm:inline-flex" disabled={saving !== null}>
             Cancel
           </button>
-          <button type="button" className="btn-secondary" onClick={() => void save(false)} disabled={busy || !!blocker}>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => void save(false)}
+            disabled={busy || !!blocker}
+            data-hotkey="save"
+            aria-keyshortcuts="Control+S Meta+S"
+            title="Save as draft (Ctrl+S)"
+          >
             {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
             <span className="sm:hidden">Draft</span>
             <span className="hidden sm:inline">Save as draft</span>

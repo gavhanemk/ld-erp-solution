@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
+import type { PackType } from '@prisma/client'
 import { addDropdowns, addHowToSheet, addTemplateSheet, readSheetRows, type SheetColumn } from '../lib/sheet'
 import { createItemSchema } from '../schemas/master.schemas'
 import { itemPrefix } from '../lib/masterCode'
@@ -18,8 +19,9 @@ import { balanceOf, lockedBalanceOf, recordMovement } from './stock.service'
  *
  * A row names an item and, if it gives a store and a quantity, the stock of it
  * on hand today (opening stock). An item already in the system is matched by
- * its code or its name and is not changed; only its stock is added. The same
- * item on several rows is one item with stock in several stores.
+ * its code or its name and is not changed, but for how it comes packed when
+ * the row fills that in; its stock is added. The same item on several rows is
+ * one item with stock in several stores.
  */
 
 export const MAX_ROWS = 2000
@@ -38,6 +40,8 @@ const COLUMNS = [
   { key: 'reorderLevel', head: 'Reorder Level', width: 14 },
   { key: 'minStock', head: 'Minimum Stock', width: 14 },
   { key: 'maxStock', head: 'Maximum Stock', width: 14 },
+  { key: 'packType', head: 'Sticker Package', width: 16, list: 'packTypes', note: 'What one sticker goes on: Packet, Box, Roll and so on. Empty: as the category says.' },
+  { key: 'packQty', head: 'Qty per Sticker', width: 14, note: 'How much one package holds: 50 for a packet of 50 buttons. Empty: one sticker for the lot.' },
   { key: 'description', head: 'Description', width: 30 },
   { key: 'store', head: 'Store', width: 22, list: 'stores', note: 'For stock on hand today. Leave the three stock columns empty for an item with none.' },
   { key: 'qty', head: 'Stock Qty', width: 12 },
@@ -68,6 +72,22 @@ const TYPE_LABEL: Record<string, string> = {
 }
 const TYPE_LABELS = Object.values(TYPE_LABEL)
 
+/** What one sticker goes on, as the item form names them. */
+const PACK_LABEL: Record<PackType, string> = {
+  PACKET: 'Packet',
+  BOX: 'Box',
+  ROLL: 'Roll',
+  CARTON: 'Carton',
+  BAG: 'Bag',
+  BUNDLE: 'Bundle',
+  OTHER: 'Other',
+}
+const PACK_LABELS = Object.values(PACK_LABEL)
+const packOf = (s: string | undefined) => {
+  const t = low(s)
+  return (Object.keys(PACK_LABEL) as PackType[]).find((k) => low(k) === t || low(PACK_LABEL[k]) === t)
+}
+
 const low = (s: string | undefined | null) => (s ?? '').trim().toLowerCase()
 
 /** The masters a sheet is matched against, loaded once. */
@@ -88,6 +108,8 @@ async function loadMasters() {
         isActive: true,
         type: true,
         standardRate: true,
+        packType: true,
+        packQty: true,
         category: { select: { name: true, parent: { select: { name: true } } } },
         department: { select: { name: true } },
         uom: { select: { name: true } },
@@ -124,6 +146,8 @@ export async function buildTemplate(withItems: boolean): Promise<Buffer> {
         subCategory: parent ? it.category.name : '',
         department: it.department?.name ?? '',
         unit: it.uom.name,
+        packType: it.packType ? PACK_LABEL[it.packType] : '',
+        packQty: it.packQty != null && Number(it.packQty) > 0 ? Number(it.packQty) : '',
       })
     }
   }
@@ -142,6 +166,7 @@ export async function buildTemplate(withItems: boolean): Promise<Buffer> {
       departments: m.departments.map((d) => d.name).sort(),
       units: m.units.map((u) => u.name).sort(),
       stores: m.stores.map((s) => s.name).sort(),
+      packTypes: PACK_LABELS,
     },
     MAX_ROWS,
   )
@@ -151,7 +176,8 @@ export async function buildTemplate(withItems: boolean): Promise<Buffer> {
     'Pick Type, Category, Sub Category, Department, Unit and Store from the dropdowns, so they match what is in the system.',
     "Department can be left empty: the item then takes its sub-category's department.",
     'A new item gets its code when it is saved. Put a code in Item Code only to point at an item already in the system.',
-    'An item already in the system (same code, or same name) is not changed. Only its stock is added.',
+    'An item already in the system (same code, or same name) is not changed. Only its stock is added, and its Sticker Package and Qty per Sticker when the row fills them in.',
+    'Sticker Package and Qty per Sticker say how an item comes packed: a packet of 50 buttons is Packet and 50. When it comes in, it then gets one sticker a packet.',
     'Stock on hand today: fill Store, Stock Qty and Stock Rate. Empty Stock Rate takes the Standard Rate. Leave all three empty for no stock.',
     'The same item in two stores: two rows with the same name, one per store.',
     'Opening stock can only be entered once for an item in a store. After that, correct it with a stock count.',
@@ -187,6 +213,8 @@ export interface RowPlan {
   item: 'new' | 'existing' | 'none'
   code: string | null
   stock: { store: string; qty: number; rate: number } | null
+  /** How it comes packed, set on the item by this row: "Packet of 50". */
+  pack: string | null
   /**
    * An item already in the system with no stock on its row: left alone. The
    * sheet of current items lists every item, and most rows of it are only
@@ -202,6 +230,8 @@ interface Resolved {
   itemKey: string
   existingId?: string
   stock?: { warehouseId: string; qty: number; rate: number }
+  /** An item already in the system: how it comes packed, from this row. */
+  packUpdate?: { packType?: PackType; packQty?: number }
 }
 
 const num = (s: string | undefined) => {
@@ -229,8 +259,20 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
   for (const { row, raw } of rows) {
     const problems: string[] = []
     const name = (raw.name ?? '').trim()
-    const plan: RowPlan = { row, name, item: 'none', code: null, stock: null, skipped: false, problems }
+    const plan: RowPlan = { row, name, item: 'none', code: null, stock: null, pack: null, skipped: false, problems }
     const res: Resolved = { plan, itemKey: low(name) }
+
+    // How it comes packed, when the row says.
+    const packType = raw.packType ? packOf(raw.packType) : undefined
+    if (raw.packType && !packType) problems.push(`Sticker Package "${raw.packType}" is not one of: ${PACK_LABELS.join(', ')}.`)
+    const packQty = num(raw.packQty)
+    if (packQty !== undefined && (Number.isNaN(packQty) || !(packQty > 0))) problems.push(`Qty per Sticker "${raw.packQty}" has to be a number more than nought.`)
+    const pack = {
+      ...(packType ? { packType } : {}),
+      ...(packQty !== undefined && packQty > 0 ? { packQty } : {}),
+    }
+    const packBad = Boolean(raw.packType && !packType) || (packQty !== undefined && (Number.isNaN(packQty) || !(packQty > 0)))
+    const packText = (t?: PackType, q?: number) => [t ? PACK_LABEL[t] : 'Sticker', q ? `of ${q}` : null].filter(Boolean).join(' ')
 
     // Which item this row is about.
     let existing = raw.code ? byCode.get(low(raw.code)) : undefined
@@ -245,6 +287,15 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
       plan.code = existing.code
       plan.name = existing.name
       if (!existing.isActive) problems.push(`${existing.code} is deactivated. Reactivate it first to add stock.`)
+      // Only what differs from the item is set.
+      const change = {
+        ...(pack.packType && pack.packType !== existing.packType ? { packType: pack.packType } : {}),
+        ...(pack.packQty && pack.packQty !== Number(existing.packQty ?? 0) ? { packQty: pack.packQty } : {}),
+      }
+      if (Object.keys(change).length) {
+        res.packUpdate = change
+        plan.pack = packText(pack.packType ?? existing.packType ?? undefined, pack.packQty ?? (existing.packQty != null ? Number(existing.packQty) : undefined))
+      }
     } else if (name && seen.has(low(name))) {
       const first = seen.get(low(name))!
       res.itemKey = first.itemKey
@@ -303,8 +354,10 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
           uomId: u.id,
           hsnCode: raw.hsn ? raw.hsn.replace(/\s+/g, '') : undefined,
           description: raw.description || undefined,
+          ...pack,
           ...Object.fromEntries(Object.entries(numbers).filter(([, v]) => v !== undefined)),
         }
+        if (pack.packType || pack.packQty) plan.pack = packText(pack.packType, pack.packQty)
         const checked = createItemSchema.safeParse(candidate)
         if (!checked.success) problems.push(...checked.error.issues.map((i) => i.message))
         else res.create = { ...(checked.data as Record<string, unknown>), categoryId }
@@ -339,7 +392,7 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
       }
     }
 
-    if (plan.item === 'existing' && !plan.stock && !raw.store && !raw.qty && !raw.rate) {
+    if (plan.item === 'existing' && !plan.stock && !raw.store && !raw.qty && !raw.rate && !res.packUpdate && !packBad) {
       // Nothing asked of an item that is already there: not a problem, just
       // nothing to do, and any complaint about it being deactivated is moot.
       plan.skipped = true
@@ -397,6 +450,14 @@ export async function runImport(plans: Resolved[]) {
         created.push({ code: item.code, name: item.name })
       }
 
+      // How items already in the system come packed, where the sheet says.
+      let packsSet = 0
+      for (const p of plans) {
+        if (!p.packUpdate || !p.existingId) continue
+        await tx.item.update({ where: { id: p.existingId }, data: p.packUpdate })
+        packsSet += 1
+      }
+
       let stockLines = 0
       for (const p of plans) {
         if (!p.stock) continue
@@ -423,7 +484,7 @@ export async function runImport(plans: Resolved[]) {
         stockLines += 1
       }
 
-      return { reference, created, stockLines }
+      return { reference, created, stockLines, packsSet }
     },
     // A few hundred rows over a pooler an ocean away take a while.
     { timeout: 300_000, maxWait: 20_000 },

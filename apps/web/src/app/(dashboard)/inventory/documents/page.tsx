@@ -329,6 +329,7 @@ export default function StockDocumentsPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label={`Search ${noun}`}
+              data-hotkey="search"
             />
           </div>
           <span className="text-muted-foreground ml-auto text-xs">
@@ -363,7 +364,7 @@ export default function StockDocumentsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {transfers.map((t) => {
+                  {transfers.map((t, i) => {
                     const expanded = open === t.id
                     // The note that travels with the goods, and the way back if it was a mistake.
                     const actions: RowAction[] = [
@@ -373,9 +374,10 @@ export default function StockDocumentsPage() {
                       actions.push({ key: 'cancel', label: 'Cancel and move the goods back', icon: <Ban size={14} />, onClick: () => void cancel(t), danger: true })
                     return (
                       <Fragment key={t.id}>
-                        <tr>
+                        <tr data-row tabIndex={i === 0 ? 0 : -1}>
                           <td>
                             <button
+                              data-row-open
                               className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
                               onClick={() => setOpen(expanded ? null : t.id)}
                               title={expanded ? 'Hide items' : 'Show items'}
@@ -498,7 +500,7 @@ export default function StockDocumentsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {adjustments.map((a) => {
+                  {adjustments.map((a, i) => {
                     const expanded = open === a.id
                     const changed = a.lines.filter((l) => Number(l.difference) !== 0).length
                     const mine = !!a.madeBy && a.madeBy.id === me?.id
@@ -520,9 +522,10 @@ export default function StockDocumentsPage() {
 
                     return (
                       <Fragment key={a.id}>
-                        <tr>
+                        <tr data-row tabIndex={i === 0 ? 0 : -1}>
                           <td>
                             <button
+                              data-row-open
                               className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
                               onClick={() => setOpen(expanded ? null : a.id)}
                               title={expanded ? 'Hide items' : 'Show items'}

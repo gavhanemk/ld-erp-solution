@@ -425,10 +425,10 @@ export function StickerFinder({ onOpen }: { onOpen: (code: string) => void }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((p) => {
+                    {rows.map((p, n) => {
                       const st = statusOf(p)
                       return (
-                        <tr key={p.id} className="cursor-pointer" onClick={() => onOpen(p.code)}>
+                        <tr key={p.id} className="cursor-pointer" onClick={() => onOpen(p.code)} data-row tabIndex={n === 0 ? 0 : -1}>
                           <td className="text-primary whitespace-nowrap font-mono text-xs font-semibold">{p.code}</td>
                           <td>
                             <span className="text-foreground">{p.item.name}</span>

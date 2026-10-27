@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import {
   AlertCircle,
   ClipboardList,
+  Copy,
   FileText,
   Loader2,
   MapPin,
@@ -18,6 +19,7 @@ import {
 } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { Section } from '@/components/purchase/Section'
@@ -26,6 +28,7 @@ import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } f
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import type { EnquiryRecord } from '@/components/purchase/enquiryTypes'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { StepInput } from '@/components/ui/StepInput'
 
 /**
  * Raising or correcting a purchase enquiry.
@@ -114,7 +117,8 @@ const COL = {
   description: 'w-44',
   qty: 'w-24',
   rate: 'w-28',
-  remove: 'w-10',
+  // Remove and copy, side by side.
+  remove: 'w-16',
 } as const
 
 const num = (v: string) => {
@@ -269,6 +273,20 @@ export function PurchaseEnquiryDialog({
     setLines((prev) => {
       const left = prev.filter((l) => l.key !== key)
       return left.length ? left : [blank()]
+    })
+  }, [])
+
+  /**
+   * A copy of one row straight under it: what was typed, but not the saved
+   * line's id or the indent line it came off, so the copy is not counted
+   * against that request a second time.
+   */
+  const copyLine = useCallback((index: number) => {
+    setLines((prev) => {
+      const src = prev[index]
+      if (!src) return prev
+      const copy: Line = { ...src, key: nextKey(), id: null, mrLineId: null, mrNumber: null }
+      return [...prev.slice(0, index + 1), copy, ...prev.slice(index + 1)]
     })
   }, [])
 
@@ -524,6 +542,17 @@ export function PurchaseEnquiryDialog({
   useEscape(() => {
     if (!saving) onClose()
   })
+  // The page behind does not scroll; Tab goes round inside, and focus goes
+  // back to the button that opened it.
+  useEffect(() => {
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [])
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(dialogRef)
 
   return createPortal(
     /* The module's own shell: offset past the sidebar so the menu stays
@@ -531,6 +560,7 @@ export function PurchaseEnquiryDialog({
       order, bill and receipt forms rather than inventing a third look. */
     <div className="fixed inset-0 z-40 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       <div
+        ref={dialogRef}
         className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
@@ -705,7 +735,14 @@ export function PurchaseEnquiryDialog({
                   <ClipboardList size={14} />
                   Select Items From Indent Items
                 </button>
-                <button type="button" onClick={addLine} className="btn-ghost text-xs">
+                <button
+                  type="button"
+                  onClick={addLine}
+                  className="btn-ghost text-xs"
+                  data-grid-add
+                  aria-keyshortcuts="Alt+A"
+                  title="Add line (Alt+A)"
+                >
                   <Plus size={14} />
                   Add line
                 </button>
@@ -850,26 +887,20 @@ export function PurchaseEnquiryDialog({
                         <div className="mt-2 grid grid-cols-2 gap-2">
                           <div className="space-y-1">
                             <label className={fieldLabel}>Qty{l.uom ? ` (${l.uom})` : ''}</label>
-                            <input
-                              type="number"
-                              step="0.001"
-                              min="0"
-                              inputMode="decimal"
+                            <StepInput
+                              decimals
                               value={l.qty}
-                              onChange={(e) => setLine(l.key, { qty: e.target.value })}
+                              onValueChange={(v) => setLine(l.key, { qty: v })}
                               className="form-input h-9 w-full text-right"
                               aria-label={`Row ${i + 1} quantity`}
                             />
                           </div>
                           <div className="space-y-1">
                             <label className={fieldLabel}>Expected rate</label>
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              inputMode="decimal"
+                            <StepInput
+                              decimals
                               value={l.expectedRate}
-                              onChange={(e) => setLine(l.key, { expectedRate: e.target.value })}
+                              onValueChange={(v) => setLine(l.key, { expectedRate: v })}
                               placeholder="—"
                               className="form-input h-9 w-full text-right"
                               aria-label={`Row ${i + 1} expected rate`}
@@ -906,9 +937,9 @@ export function PurchaseEnquiryDialog({
                         ))}
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody data-grid>
                       {lines.map((l, i) => (
-                        <tr key={l.key} className="border-border/60 border-b last:border-0">
+                        <tr key={l.key} data-grid-row className="border-border/60 border-b last:border-0">
                           <td className="text-muted-foreground px-2 py-1.5 align-top text-[11px]">
                             {i + 1}
                           </td>
@@ -1006,12 +1037,10 @@ export function PurchaseEnquiryDialog({
                             />
                           </td>
                           <td className="px-2 py-1.5 align-top">
-                            <input
-                              type="number"
-                              step="0.001"
-                              min="0"
+                            <StepInput
+                              decimals
                               value={l.qty}
-                              onChange={(e) => setLine(l.key, { qty: e.target.value })}
+                              onValueChange={(v) => setLine(l.key, { qty: v })}
                               className="form-input text-right"
                               aria-label={`Row ${i + 1} quantity`}
                             />
@@ -1024,26 +1053,39 @@ export function PurchaseEnquiryDialog({
                           {/* Ours, not theirs. What a supplier quotes is recorded
                           against his PI number and never typed on this form. */}
                           <td className="px-2 py-1.5 align-top">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
+                            <StepInput
+                              decimals
                               value={l.expectedRate}
-                              onChange={(e) => setLine(l.key, { expectedRate: e.target.value })}
+                              onValueChange={(v) => setLine(l.key, { expectedRate: v })}
                               placeholder="—"
                               className="form-input text-right"
                               aria-label={`Row ${i + 1} expected rate`}
                             />
                           </td>
                           <td className="px-2 py-1.5 align-top">
-                            <button
-                              type="button"
-                              onClick={() => removeLine(l.key)}
-                              className="btn-ghost p-1 text-red-400"
-                              aria-label={`Remove row ${i + 1}`}
-                            >
-                              <Trash2 size={13} />
-                            </button>
+                            <div className="flex items-center">
+                              <button
+                                type="button"
+                                onClick={() => removeLine(l.key)}
+                                className="btn-ghost p-1 text-red-400"
+                                aria-label={`Remove row ${i + 1}`}
+                                aria-keyshortcuts="Alt+Delete"
+                                data-grid-remove
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-ghost text-muted-foreground hover:text-primary p-1"
+                                onClick={() => copyLine(i)}
+                                aria-label={`Copy row ${i + 1}`}
+                                title="Copy this line (Alt+C)"
+                                aria-keyshortcuts="Alt+C"
+                                data-grid-copy
+                              >
+                                <Copy size={13} />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1237,6 +1279,8 @@ export function PurchaseEnquiryDialog({
               onClick={save}
               disabled={saving || problems.length > 0}
               className="btn-primary"
+              data-hotkey="save"
+              aria-keyshortcuts="Control+S Meta+S"
             >
               {saving && <Loader2 size={15} className="animate-spin" />}
               {editing ? 'Save changes' : 'Raise enquiry'}

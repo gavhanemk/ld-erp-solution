@@ -301,6 +301,8 @@ export default function PurchaseReturnsPage() {
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Challan no, bill no, their bill, vehicle, debit note, supplier"
               className="form-input pl-8"
+              aria-label="Search purchase returns"
+              data-hotkey="search"
             />
           </div>
           <SmartSelect
@@ -542,12 +544,12 @@ export default function PurchaseReturnsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r) => {
+                  {rows.map((r, i) => {
                     const s = STATUS[r.status]
                     const expanded = open === r.id
                     return (
                       <Fragment key={r.id}>
-                        <tr className={expanded ? 'bg-secondary/30' : undefined}>
+                        <tr className={expanded ? 'bg-secondary/30' : undefined} data-row tabIndex={i === 0 ? 0 : -1}>
                           <td>
                             <button
                               type="button"
@@ -555,6 +557,7 @@ export default function PurchaseReturnsPage() {
                               className="btn-ghost p-1"
                               aria-expanded={expanded}
                               aria-label={`${expanded ? 'Hide' : 'Show'} items on ${r.returnNumber}`}
+                              data-row-open
                             >
                               {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                             </button>

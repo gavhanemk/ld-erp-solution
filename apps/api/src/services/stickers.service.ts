@@ -45,6 +45,8 @@ export interface StickerGroup {
   ownerCustomerId?: string | null
   packType: PackType
   qtys: number[]
+  /** A note for each package, in the order of `qtys`: "short width". */
+  notesEach?: Array<string | null>
   lotNo?: string | null
   notes?: string | null
   grnLineId?: string | null
@@ -124,6 +126,7 @@ export async function labelGroup(
     spot,
     packType: g.packType,
     qtys: g.qtys,
+    notesEach: g.notesEach,
     lotNo: g.lotNo,
     notes: g.notes,
     sourceType,
@@ -143,6 +146,20 @@ export async function labelGroup(
     await tx.item.update({ where: { id: g.itemId }, data: { packType: g.packType, packQty: same && g.qtys.length > 1 ? g.qtys[0] : null } })
   }
   return created
+}
+
+/**
+ * Keeps how an item came packed — 10 packets of 50, give or take a smaller
+ * last one — as its own qty per sticker and pack type, where it has none
+ * yet. What the item already has is never changed: that is set on purpose.
+ */
+export async function learnPackSize(tx: Prisma.TransactionClient, itemId: string, qtys: number[], packType: PackType) {
+  if (qtys.length < 2) return
+  const first = qtys[0]
+  const same = qtys.slice(0, -1).every((q) => q === first) && qtys[qtys.length - 1] <= first
+  if (!same || !(first > 0)) return
+  await tx.item.updateMany({ where: { id: itemId, packQty: null }, data: { packQty: first } })
+  await tx.item.updateMany({ where: { id: itemId, packType: null }, data: { packType } })
 }
 
 /** The number printed on a sticker for the document its stock came in on. */
@@ -174,6 +191,8 @@ type Came = {
   /** How a GRN line came packed — 5 bundles of 100 — when the receipt said. */
   packType?: PackType | null
   packQtys?: number[]
+  /** A note on each of those packages, in the same order. */
+  packNotes?: string[]
   /** 'R' for what came in held (rejected at a customer's receipt). */
   grade?: string
 }
@@ -183,7 +202,7 @@ async function whatCameIn(data: InwardQuery): Promise<Came[]> {
   if (data.sourceType === 'GRN') {
     const lines = await prisma.gRNLine.findMany({
       where: { grnId: data.sourceId, acceptedQty: { gt: 0 } },
-      select: { id: true, itemId: true, warehouseId: true, acceptedQty: true, batchNumber: true, packType: true, packQtys: true },
+      select: { id: true, itemId: true, warehouseId: true, acceptedQty: true, batchNumber: true, packType: true, packQtys: true, packNotes: true },
       orderBy: { id: 'asc' },
     })
     return lines.map((l) => ({
@@ -196,6 +215,7 @@ async function whatCameIn(data: InwardQuery): Promise<Came[]> {
       grnLineId: l.id,
       packType: l.packType,
       packQtys: l.packQtys.map(Number),
+      packNotes: l.packNotes,
     }))
   }
   if (data.lines?.length) {
@@ -308,11 +328,15 @@ export async function planStickers(data: InwardQuery) {
       packType: (packs && c.packType) || d.packType,
       perPack: d.perPack,
       remembered: item.packType != null || item.packQty != null,
+      /** Packed as typed on the receipt, for an item with no qty per sticker yet: kept on the item after (see autoStickers). */
+      learnPack: Boolean(packs) && !(item.packQty != null && Number(item.packQty) > 0),
       /** What the document brought in, before any stickers: rechecked under the lock. */
       came: c.qty,
       // What one unit holds, for the sentence: "1 box on each (144 pcs)".
       content: item.contentQty && Number(item.contentQty) > 0 ? { each: Number(item.contentQty), unit: item.contentUnit || 'pcs' } : null,
       qtys: packs ?? suggestQtys(max, d.perPack),
+      /** Each package's note, when the receipt gave its sizes. */
+      notesEach: packs ? (c.packNotes ?? []) : undefined,
     })
   }
   return { sourceType: data.sourceType, sourceId: data.sourceId, sourceRef, targets, untracked }
@@ -347,7 +371,11 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
           const remaining = round3(t.came - Number(done._sum.initialQty ?? 0))
           if (remaining <= 0.0005) continue
           const planned = round3(t.qtys.reduce((s, q) => s + q, 0))
-          if (remaining < planned - 1e-9) t.qtys = suggestQtys(remaining, t.perPack)
+          if (remaining < planned - 1e-9) {
+            t.qtys = suggestQtys(remaining, t.perPack)
+            // Sizes worked out again no longer line up with the receipt's notes.
+            t.notesEach = undefined
+          }
           all.push(
             ...(await labelGroup(
               tx,
@@ -358,6 +386,7 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
                 ownerCustomerId: t.ownerCustomerId,
                 packType: t.packType,
                 qtys: t.qtys,
+                notesEach: t.notesEach,
                 lotNo: t.lotNo,
                 grnLineId: t.grnLineId,
                 grade: t.grade,
@@ -366,6 +395,10 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
               userId,
             )),
           )
+          // "10 packets of 50" typed on the receipt, for an item with no qty
+          // per sticker yet: the item keeps it, so the next receipt of it is
+          // stickered a packet each by itself.
+          if (t.learnPack) await learnPackSize(tx, t.itemId, t.qtys, t.packType)
         }
         return all
       },
@@ -514,6 +547,8 @@ export async function restickStickers(
   qtys: number[],
   packType: PackType | null,
   userId: string | null,
+  /** A note on each new sticker, in the order of `qtys`. */
+  notes?: string[],
 ) {
   const list = await tx.stockPackage.findMany({
     where: { id: { in: ids } },
@@ -588,6 +623,7 @@ export async function restickStickers(
     spot,
     packType: packType ?? first.packType,
     qtys: wanted,
+    notesEach: notes,
     lotNo: first.lotNo,
     // Still on the rack the old stickers were on, when they were all on one.
     rack: list.every((p) => p.rack === first.rack) ? first.rack : null,
@@ -608,7 +644,9 @@ export async function restickStickers(
     const line = await tx.gRNLine.findUnique({ where: { id: first.grnLineId }, select: { acceptedQty: true } })
     const others = await tx.stockPackage.count({ where: { grnLineId: first.grnLineId, status: { not: 'VOID' }, id: { notIn: created.map((c) => c.id) } } })
     if (line && !others && Math.abs(Number(line.acceptedQty) - sum) <= 0.0005) {
-      await tx.gRNLine.update({ where: { id: first.grnLineId }, data: { packQtys: wanted, packType: packType ?? first.packType } })
+      await tx.gRNLine.update({ where: { id: first.grnLineId }, data: { packQtys: wanted, packType: packType ?? first.packType, packNotes: notes?.some((n) => n.trim()) ? wanted.map((_, n) => notes[n]?.trim() ?? '') : [] } })
+      // And the item keeps it, where it has no qty per sticker yet.
+      await learnPackSize(tx, first.itemId, wanted, packType ?? first.packType)
     }
   }
   return { created, before: list.map((p) => p.code), unit }

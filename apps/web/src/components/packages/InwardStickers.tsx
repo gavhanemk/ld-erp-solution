@@ -6,6 +6,7 @@ import { api, ApiError } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { StepInput } from '@/components/ui/StepInput'
 import { PACK_TYPES, openPrintTab, printLabels, qtyText } from './packageTypes'
+import { PackageRows, emptyRow, notesOf, rowsOf, sizesOf, type SizeRow } from './PackageRows'
 
 /** The inward documents the sticker window opens after. */
 export type InwardSource = 'GRN' | 'STOCK_IN' | 'OPENING' | 'CUSTOMER_GRN' | 'JOB_WORK_RETURN' | 'MR_RETURN'
@@ -58,12 +59,12 @@ interface Plan {
 interface Row {
   skip: boolean
   open: boolean
-  /** Different sizes: one quantity a line, for rolls of 48 m, 51 m… */
+  /** Different sizes: a box for each, for rolls of 48 m, 51 m… */
   sizes: boolean
   each: string
   /** Empty: as many as it takes to cover everything. */
   count: string
-  list: string
+  list: SizeRow[]
   lotNo: string
   changed: boolean
 }
@@ -83,15 +84,9 @@ function cover(max: number, each: number): number[] {
   return out
 }
 
-const parseList = (text: string) =>
-  text
-    .split(/[\s,;]+/)
-    .map((t) => Number(t.replace(/[^\d.]/g, '')))
-    .filter((n) => n > 0)
-
 function qtysOf(t: LabelTarget, r: Row): number[] {
   if (r.skip) return []
-  if (r.sizes) return parseList(r.list)
+  if (r.sizes) return sizesOf(r.list)
   const each = Number(r.each)
   const count = Math.floor(Number(r.count) || 0)
   return count > 0 ? (each > 0 ? Array.from({ length: Math.min(count, 500) }, () => r3(each)) : []) : cover(t.max, each)
@@ -109,7 +104,7 @@ function startRow(t: LabelTarget, suggested?: number[]): Row {
     sizes: !same,
     each: tooMany ? String(t.perPack) : same ? String(q[0]) : '',
     count: '',
-    list: same ? '' : q.join('\n'),
+    list: same ? [] : rowsOf(q),
     lotNo: t.lotNo ?? '',
     changed: false,
   }
@@ -229,6 +224,8 @@ export function InwardStickers({
         // Changed here, so next time starts the same way. Sizes that differ
         // roll to roll are nothing to remember.
         remember: r.changed && !r.sizes,
+        // A note on each package, when each was typed in its own box.
+        ...(r.sizes && notesOf(r.list).some(Boolean) ? { notesEach: notesOf(r.list) } : {}),
       }))
       const ids: string[] = []
       let message = ''
@@ -328,17 +325,15 @@ export function InwardStickers({
               {r.open && (
                 <div className="border-border mt-3 space-y-3 border-t pt-3">
                   {r.sizes ? (
-                    <label className="block">
-                      <span className="form-label">What is in each {one(t.packType)}, one a line</span>
-                      <textarea
-                        className="form-input font-mono text-sm"
-                        rows={Math.min(6, Math.max(3, r.list.split('\n').length))}
-                        value={r.list}
-                        onChange={(e) => edit(t.key, { list: e.target.value })}
-                        placeholder={'e.g.\n48.5\n51\n50.2'}
-                        aria-label={`What is in each ${one(t.packType)} of ${t.item}`}
+                    <div>
+                      <span className="form-label">What is in each {one(t.packType)}</span>
+                      <PackageRows
+                        rows={r.list.length ? r.list : [emptyRow()]}
+                        onChange={(list) => edit(t.key, { list })}
+                        unit={t.unit}
+                        idPrefix={`inward-${t.key}`}
                       />
-                    </label>
+                    </div>
                   ) : (
                     <div className="flex flex-wrap items-end gap-3">
                       <label className="block">
@@ -384,7 +379,7 @@ export function InwardStickers({
                         type="button"
                         className="text-primary font-medium hover:underline"
                         onClick={() =>
-                          edit(t.key, r.sizes ? { sizes: false, each: String(qtys[0] ?? t.perPack ?? ''), count: '' } : { sizes: true, list: qtys.join('\n') })
+                          edit(t.key, r.sizes ? { sizes: false, each: String(qtys[0] ?? t.perPack ?? ''), count: '' } : { sizes: true, list: rowsOf(qtys) })
                         }
                       >
                         {r.sizes ? 'All the same size' : `${many(t.packType).replace(/^./, (c) => c.toUpperCase())} of different sizes`}

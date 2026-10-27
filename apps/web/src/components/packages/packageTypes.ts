@@ -73,8 +73,8 @@ export interface OutwardRef {
 }
 
 /**
- * Opens the labels for what went out on a document, and the fresh stickers
- * for the packages it left part-used, in one tab.
+ * Opens the labels for what went out on a document, and the new stickers
+ * for parts of packages that moved to another store, in one tab.
  */
 export const printOutward = (out: OutwardRef | null, ids: string[], tab?: Window | null) => {
   if (!out) return printLabels(ids, tab)

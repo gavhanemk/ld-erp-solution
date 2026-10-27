@@ -250,7 +250,7 @@ export default function TransfersPage() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           {can('production', 'create') && (
-            <button className="btn-primary" onClick={() => setCreating(true)}>
+            <button className="btn-primary" onClick={() => setCreating(true)} data-hotkey="new" aria-keyshortcuts="Alt+N">
               <Plus size={15} /> New transfer
             </button>
           )}
@@ -307,6 +307,7 @@ export default function TransfersPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search"
+              data-hotkey="search"
             />
           </div>
           {view !== 'board' && (
@@ -470,13 +471,13 @@ export default function TransfersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((t) => {
+                  {rows.map((t, i) => {
                     const st = transferStatus(t)
                     const sent = t.lines.reduce((s, l) => s + l.dispatchedQty, 0)
                     const got = t.lines.reduce((s, l) => s + l.receivedQty, 0)
                     const short = t.lines.reduce((s, l) => s + l.shortQty - l.settledQty, 0)
                     return (
-                      <tr key={t.id} className={`cursor-pointer ${t.status === 'CANCELLED' ? 'opacity-60' : ''}`} onClick={() => setDetail(t)}>
+                      <tr key={t.id} className={`cursor-pointer ${t.status === 'CANCELLED' ? 'opacity-60' : ''}`} onClick={() => setDetail(t)} data-row tabIndex={i === 0 ? 0 : -1}>
                         <td>
                           <span className="text-foreground font-mono text-xs font-semibold">{t.transferNumber}</span>
                           <span className="text-muted-foreground block text-[11px]">
@@ -539,11 +540,11 @@ export default function TransfersPage() {
 
             {/* Phones: a card each. */}
             <div className="divide-border/60 divide-y md:hidden">
-              {rows.map((t) => {
+              {rows.map((t, i) => {
                 const st = transferStatus(t)
                 const sent = t.lines.reduce((s, l) => s + l.dispatchedQty, 0)
                 return (
-                  <div key={t.id} className={`space-y-1.5 px-4 py-3 ${t.status === 'CANCELLED' ? 'opacity-60' : ''}`} onClick={() => setDetail(t)}>
+                  <div key={t.id} className={`space-y-1.5 px-4 py-3 ${t.status === 'CANCELLED' ? 'opacity-60' : ''}`} onClick={() => setDetail(t)} data-row tabIndex={i === 0 ? 0 : -1}>
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-mono text-xs font-semibold">{t.transferNumber}</span>
                       <span className={st.cls}>{st.label}</span>

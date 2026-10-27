@@ -113,6 +113,7 @@ export default function JobCardsPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search"
+              data-hotkey="search"
             />
           </div>
           <SmartSelect className="form-input h-8 w-40 py-0 text-xs" value={show} onChange={(e) => setShow(e.target.value)} aria-label="Show">
@@ -147,10 +148,10 @@ export default function JobCardsPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => {
+                {rows.map((r, i) => {
                   const st = STATE[r.state]
                   return (
-                    <tr key={r.id} className="cursor-pointer" onClick={() => setOpened(r.id)}>
+                    <tr key={r.id} className="cursor-pointer" onClick={() => setOpened(r.id)} data-row tabIndex={i === 0 ? 0 : -1}>
                       <td className="text-primary font-mono text-xs">{r.jobCardNumber}</td>
                       <td className="font-mono text-[11px]">{refNo(r)}</td>
                       <td className="text-xs">
