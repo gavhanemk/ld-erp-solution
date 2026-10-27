@@ -1,12 +1,13 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, Plus, Trash2, ClipboardList, FileText, Package } from 'lucide-react'
+import { Loader2, Plus, Trash2, Copy, ClipboardList, FileText, Package } from 'lucide-react'
 import { api, ApiError, currentUser, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
+import { StepInput } from '@/components/ui/StepInput'
 
 /**
  * A department asking the store for material.
@@ -241,6 +242,9 @@ export function RequisitionDialog({
 
   const setLine = (index: number, patch: Partial<Line>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
+  /** A copy of a line, put just under it. */
+  const copyLine = (index: number) =>
+    setLines((prev) => (prev[index] ? [...prev.slice(0, index + 1), { ...prev[index] }, ...prev.slice(index + 1)] : prev))
 
   /** Picking an item fills in its category and sub-category, and the store that holds most of it. */
   const pickItem = (index: number, itemId: string) => {
@@ -499,16 +503,29 @@ export function RequisitionDialog({
               <div key={i} data-grid-row className="rounded-lg border border-border bg-secondary/30 p-3">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-xs font-semibold text-muted-foreground">Item {i + 1}</span>
-                  <button
-                    type="button"
-                    className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
-                    onClick={() => setLines((prev) => (prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i)))}
-                    aria-label={`Remove line ${i + 1}`}
-                    aria-keyshortcuts="Alt+Delete"
-                    data-grid-remove
-                  >
-                    <Trash2 size={15} />
-                  </button>
+                  <div className="flex items-center">
+                    <button
+                      type="button"
+                      className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
+                      onClick={() => setLines((prev) => (prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i)))}
+                      aria-label={`Remove line ${i + 1}`}
+                      aria-keyshortcuts="Alt+Delete"
+                      data-grid-remove
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost p-1.5 text-muted-foreground hover:text-primary"
+                      onClick={() => copyLine(i)}
+                      aria-label={`Copy row ${i + 1}`}
+                      title="Copy this line (Alt+C)"
+                      aria-keyshortcuts="Alt+C"
+                      data-grid-copy
+                    >
+                      <Copy size={15} />
+                    </button>
+                  </div>
                 </div>
 
                 {/* What: category, sub-category, item, style — each narrows the next. */}
@@ -648,13 +665,11 @@ export function RequisitionDialog({
                       Quantity<span className="ml-0.5 text-red-500">*</span>
                     </span>
                     <div className="relative">
-                      <input
-                        type="number"
-                        step="0.001"
-                        min="0"
+                      <StepInput
+                        decimals
                         className="form-input h-9 pr-10 text-right tabular-nums"
                         value={line.requestedQty}
-                        onChange={(e) => setLine(i, { requestedQty: e.target.value })}
+                        onValueChange={(v) => setLine(i, { requestedQty: v })}
                         disabled={!line.itemId}
                         aria-label={`Quantity on line ${i + 1}`}
                       />

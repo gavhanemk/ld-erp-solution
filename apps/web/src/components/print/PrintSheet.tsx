@@ -1,6 +1,7 @@
 'use client'
 
-import { Printer, ArrowLeft, Download } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Printer, ArrowLeft, Download, X } from 'lucide-react'
 import Link from 'next/link'
 
 /**
@@ -144,11 +145,22 @@ export function PrintToolbar({
     }, 1000)
   }
 
+  // Shown inside the ERP's own document window (opened from a list by Enter):
+  // "back" would load the list inside that window, so it closes it instead.
+  const [framed, setFramed] = useState(false)
+  useEffect(() => setFramed(window.self !== window.top), [])
+
   return (
     <div className="no-print print-toolbar">
-      <Link href={backHref} className="tb-btn">
-        <ArrowLeft size={15} /> {backLabel}
-      </Link>
+      {framed ? (
+        <button className="tb-btn" onClick={() => window.parent.postMessage('ld:close-doc', window.location.origin)}>
+          <X size={15} /> Close
+        </button>
+      ) : (
+        <Link href={backHref} className="tb-btn">
+          <ArrowLeft size={15} /> {backLabel}
+        </Link>
+      )}
       <span className="tb-hint">
         Both open the print box; choose your printer, or &ldquo;Save as PDF&rdquo;.
         {copies > 1 && ` ${copies} copies print, one per page.`}

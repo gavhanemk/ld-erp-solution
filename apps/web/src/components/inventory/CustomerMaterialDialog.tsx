@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Loader2, AlertCircle, Plus, Trash2, PackageOpen, FileText, Truck, Boxes, Save, Send } from 'lucide-react'
+import { X, Loader2, AlertCircle, Plus, Trash2, Copy, PackageOpen, FileText, Truck, Boxes, Save, Send } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
@@ -235,6 +235,9 @@ export function CustomerMaterialDialog({
 
   const setLine = (index: number, patch: Partial<Line>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
+  /** A copy of a line, put just under it. */
+  const copyLine = (index: number) =>
+    setLines((prev) => (prev[index] ? [...prev.slice(0, index + 1), { ...prev[index] }, ...prev.slice(index + 1)] : prev))
 
   const theirOrders = orders.filter((o) => o.customerId === customerId)
   const filled = lines.filter((l) => l.itemId && num(l.receivedQty) > 0)
@@ -566,7 +569,7 @@ export function CustomerMaterialDialog({
                     <th style={{ textAlign: 'right' }}>Received qty</th>
                     <th style={{ textAlign: 'right' }}>Short / excess</th>
                     <th>Markings / remarks</th>
-                    <th style={{ width: 40 }} />
+                    <th style={{ width: 80 }} />
                   </tr>
                 </thead>
                 <tbody data-grid>
@@ -685,20 +688,33 @@ export function CustomerMaterialDialog({
                           />
                         </td>
                         <td className="text-right">
-                          <button
-                            type="button"
-                            className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
-                            onClick={() =>
-                              setLines((prev) =>
-                                prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i)
-                              )
-                            }
-                            aria-label={`Remove line ${i + 1}`}
-                            aria-keyshortcuts="Alt+Delete"
-                            data-grid-remove
-                          >
-                            <Trash2 size={15} />
-                          </button>
+                          <div className="flex items-center justify-end">
+                            <button
+                              type="button"
+                              className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
+                              onClick={() =>
+                                setLines((prev) =>
+                                  prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i)
+                                )
+                              }
+                              aria-label={`Remove line ${i + 1}`}
+                              aria-keyshortcuts="Alt+Delete"
+                              data-grid-remove
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-ghost text-muted-foreground p-1.5 hover:text-primary"
+                              onClick={() => copyLine(i)}
+                              aria-label={`Copy row ${i + 1}`}
+                              title="Copy this line (Alt+C)"
+                              aria-keyshortcuts="Alt+C"
+                              data-grid-copy
+                            >
+                              <Copy size={15} />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )

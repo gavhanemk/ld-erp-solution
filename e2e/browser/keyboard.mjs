@@ -9,7 +9,8 @@
 // ends with "N passed, M failed" and exits non-zero on a failure.
 //
 // It WRITES a little to the demo, and only the demo: one brand named
-// "ZZKEY Brand …" (made, then renamed) and one draft purchase order. Same
+// "ZZKEY Brand …" (made, then renamed) and one draft purchase order (a second
+// order is filled in and closed unsaved, to check Copy line). Same
 // guards as every suite here: the database must be lderp_demo and the API
 // must be using it.
 import { chromium } from 'playwright'
@@ -256,8 +257,11 @@ await check('Tab stays inside the open form', async () => {
   return (await focus()).inDialog ? true : 'focus left the form'
 })
 await check('Esc closes the form and focus goes back to New requisition', async () => {
-  await key('Escape')
-  await wait(400)
+  // Esc shuts an open list first (a suggestion under a box), then the form.
+  for (let i = 0; i < 3 && (await page.locator('[role="dialog"][aria-modal="true"]').count()); i++) {
+    await key('Escape')
+    await wait(400)
+  }
   const f = await focus()
   return /new requisition/i.test(f.label) ? true : `focus is on ${f.what} "${f.label}"`
 })
@@ -301,8 +305,114 @@ await check('a purchase order with two item lines, made and saved as a draft by 
   return lines === 2 && after !== null && draftsBefore !== null && after === draftsBefore + 1 ? true : `lines ${lines}, drafts ${draftsBefore} → ${after}`
 })
 
+// ─── Copy a line ─────────────────────────────────────────────────────────────
+await open('/purchase/orders')
+await check('Alt+C copies a PO line under it: quantity carried, item left to pick (no item twice)', async () => {
+  await key('Alt+n')
+  await page.locator('[aria-labelledby="po-dialog-title"]').waitFor({ timeout: 8000 })
+  await wait(1500)
+  const row = page.locator('tbody[data-grid] > [data-grid-row]').first()
+  const itemBox = row.locator('button[role="combobox"]').nth(3)
+  await itemBox.focus()
+  await key('Enter')
+  await wait(200)
+  await type('button')
+  await wait(300)
+  await key('Enter')
+  await wait(800)
+  await row.getByLabel(/quantity/i).focus()
+  await type('7')
+  await key('Alt+c')
+  await wait(600)
+  const lines = page.locator('tbody[data-grid] > [data-grid-row]')
+  const count = await lines.count()
+  const item1 = (await itemBox.innerText()).trim()
+  const item2 = (await lines.nth(1).locator('button[role="combobox"]').nth(3).innerText()).trim()
+  const qty2 = await lines.nth(1).getByLabel(/quantity/i).inputValue()
+  const inLine2 = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('tbody[data-grid] > [data-grid-row]')]
+    return rows.indexOf(document.activeElement?.closest('[data-grid-row]')) === 1
+  })
+  await key('Escape')
+  await wait(400)
+  if (await page.locator('[aria-labelledby="po-dialog-title"]').count()) await key('Escape')
+  return count === 2 && item1 !== item2 && qty2 === '7' && inLine2 ? true : `lines ${count}, items "${item1}" / "${item2}", copied qty "${qty2}", focus on the copy ${inLine2}`
+})
+
+// ─── A printed copy opens inside the ERP; Alt+PgDn goes to the next ─────────
+await open('/sales/quotations')
+await check('Enter on a quotation opens its printed copy in a window, not a new tab', async () => {
+  const tabs = ctx.pages().length
+  await key('/')
+  await key('ArrowDown')
+  await key('Enter')
+  const win = page.locator('[role="dialog"]:has(iframe)')
+  await win.waitFor({ timeout: 5000 })
+  return ctx.pages().length === tabs ? true : 'a new tab opened'
+})
+await check('Alt+PgDn shows the next quotation, Esc closes and focus is on that line', async () => {
+  const win = page.locator('[role="dialog"]:has(iframe)')
+  const first = await win.getAttribute('aria-label')
+  await key('Alt+PageDown')
+  await wait(500)
+  const second = await win.getAttribute('aria-label')
+  await key('Escape')
+  await wait(400)
+  const f = await focus()
+  const gone = (await win.count()) === 0
+  return first !== second && gone && f.row && f.label.includes(second ?? '???') ? true : `"${first}" → "${second}", closed ${gone}, focus on "${f.label}"`
+})
+
+// ─── Next record from an open order ──────────────────────────────────────────
+await open('/sales/orders')
+await check('Alt+PgDn in an open sales order opens the next order in the list', async () => {
+  await key('/')
+  await key('ArrowDown')
+  const firstNo = await page.evaluate(() => document.activeElement?.textContent?.match(/SO-[\d-]+/)?.[0])
+  await key('Enter')
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')].some((d) => d.getClientRects().length), null, { timeout: 6000 })
+  await wait(600)
+  await key('Alt+PageDown')
+  await wait(1500)
+  const shown = await page.evaluate(() => {
+    const d = [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')].filter((x) => x.getClientRects().length).pop()
+    return d?.textContent?.match(/SO-[\d-]+/)?.[0] ?? null
+  })
+  await key('Escape')
+  await wait(300)
+  return shown && shown !== firstNo ? true : `first ${firstNo}, now showing ${shown}`
+})
+
 // ─── 10. Nothing went wrong in the page ──────────────────────────────────────
 await check('no errors in the page during the run', async () => (errors.length ? errors.slice(0, 3).join(' | ') : true))
+
+// ─── On a Mac: ⌘ for Ctrl, and Option+letter by the key pressed ─────────────
+const mac = await browser.newContext({ ...(headed ? { viewport: null } : { viewport: { width: 1440, height: 900 } }), storageState: await ctx.storageState() })
+await mac.addInitScript(() => Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'MacIntel' }))
+const mp = await mac.newPage()
+await mp.goto(`${WEB}/inventory/requisitions`)
+await mp.waitForLoadState('networkidle')
+await mp.waitForTimeout(900)
+await check('on a Mac: the top bar says ⌘K, and ⌘K (not Ctrl+K) opens the palette', async () => {
+  const label = (await mp.locator('[aria-keyshortcuts="Control+K Meta+K"] kbd').innerText()).trim()
+  await mp.keyboard.press('Control+k')
+  await mp.waitForTimeout(250)
+  const byCtrl = await mp.getByRole('dialog', { name: /Find a screen/ }).isVisible().catch(() => false)
+  await mp.keyboard.press('Meta+k')
+  await mp.waitForTimeout(250)
+  const byCmd = await mp.getByRole('dialog', { name: /Find a screen/ }).isVisible().catch(() => false)
+  await mp.keyboard.press('Escape')
+  return label === '⌘K' && !byCtrl && byCmd ? true : `label "${label}", Ctrl+K opened ${byCtrl}, ⌘K opened ${byCmd}`
+})
+await check('on a Mac: Option+N (which types "˜") still means New', async () => {
+  await mp.waitForTimeout(300)
+  await mp.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: '˜', code: 'KeyN', altKey: true, bubbles: true, cancelable: true })))
+  await mp.waitForTimeout(800)
+  const open = await mp.locator('[role="dialog"][aria-modal="true"]').count()
+  await mp.keyboard.press('Escape')
+  return open ? true : 'no New form opened'
+})
+await mac.close()
 
 await browser.close()
 await db.end()

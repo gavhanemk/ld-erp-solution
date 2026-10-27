@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation'
 import { focusBefore, isTyping, keepTabInside, keyLabel, matches, placeFocus, tabbables, topDialog, trackFocus, useHotkeys } from '@/lib/keys'
 import { CommandPalette, earlyKeys, rememberVisit } from './CommandPalette'
 import { ShortcutHelp } from './ShortcutHelp'
+import { DocWindow } from './DocWindow'
 
 /*
  * The shortcuts that mean the same thing on every screen, and the keys that
@@ -29,6 +30,7 @@ import { ShortcutHelp } from './ShortcutHelp'
  *                         data-grid-add="row" is a line's own add (another store
  *                         for this line): Alt+A on that line presses it instead
  *   data-grid-remove      the line's own remove button (Alt+Delete)
+ *   data-grid-copy        the line's own copy button (Alt+C)
  */
 
 /** On screen and not hidden behind a closed tab or a phone-only copy. */
@@ -77,12 +79,24 @@ export function queueAfterMove(a: AfterMove) {
 /** What Enter on a line presses: its marked button, or the line itself. */
 const openTarget = (row: HTMLElement) => [...row.querySelectorAll<HTMLElement>('[data-row-open]')].find(shown) ?? row
 
+/** A printed copy that opens in a new tab: from the keyboard, it opens in a window instead. */
+const printedCopy = (el: HTMLElement): el is HTMLAnchorElement =>
+  el instanceof HTMLAnchorElement && el.target === '_blank' && new URL(el.href, location.href).pathname.startsWith('/print/')
+
 /** Opens a line in a list: its marked button, or the line itself. */
 export function openRow(row: HTMLElement) {
   // Focus stays on the line, so ↑ ↓ carry on from it and a window it opens
   // hands focus back to it when it closes.
-  openTarget(row).click()
+  const target = openTarget(row)
+  if (printedCopy(target)) {
+    window.dispatchEvent(new CustomEvent('ld:doc', { detail: { href: target.getAttribute('href'), title: (target.textContent ?? '').trim() || 'Document', row } }))
+    return
+  }
+  target.click()
 }
+
+/** The other lines of the list a line is in, as the arrows see them. */
+const linesBeside = (row: HTMLElement) => (row.parentElement ? [...row.parentElement.querySelectorAll<HTMLElement>(':scope > [data-row]')].filter(shown) : [])
 
 /**
  * Enter in a box of a form, or of a window, goes on to the next box — it
@@ -118,6 +132,10 @@ export function KeyboardLayer() {
   const [palette, setPalette] = useState(false)
   const [help, setHelp] = useState(false)
   const [note, setNote] = useState<string | null>(null)
+  // A printed copy open in a window, and the list line it belongs to.
+  const [doc, setDoc] = useState<{ href: string; title: string; row: HTMLElement } | null>(null)
+  // Each open window, and what had focus before it opened (often a list line).
+  const openersRef = useRef(new Map<HTMLElement, { before: HTMLElement | null; stop: () => void }>())
   const lastSave = useRef(0)
   const noteTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
@@ -132,6 +150,8 @@ export function KeyboardLayer() {
     const openPalette = () => setPalette(true)
     const openHelp = () => setHelp(true)
     const note = (e: Event) => flash(String((e as CustomEvent).detail ?? ''))
+    const openDoc = (e: Event) => setDoc((e as CustomEvent).detail)
+    window.addEventListener('ld:doc', openDoc)
     window.addEventListener('ld:palette', openPalette)
     window.addEventListener('ld:shortcuts', openHelp)
     window.addEventListener('ld:note', note)
@@ -139,8 +159,70 @@ export function KeyboardLayer() {
       window.removeEventListener('ld:palette', openPalette)
       window.removeEventListener('ld:shortcuts', openHelp)
       window.removeEventListener('ld:note', note)
+      window.removeEventListener('ld:doc', openDoc)
     }
   }, [flash])
+
+  /*
+   * Alt+PgDn / Alt+PgUp in a window opened from a list line: that window shuts
+   * and the next (or previous) line's opens, as Esc, then the arrow and Enter
+   * would. Only a window that is read, not one being filled in: typing is
+   * never thrown away.
+   */
+  const step = useCallback(
+    (dir: 1 | -1) => {
+      const go = (row: HTMLElement) => {
+        const list = linesBeside(row)
+        const next = list[list.indexOf(row) + dir]
+        if (!next) {
+          flash(dir > 0 ? 'That was the last line of the list.' : 'That was the first line of the list.')
+          return null
+        }
+        return next
+      }
+      if (doc) {
+        const next = go(doc.row)
+        if (!next) return
+        next.focus()
+        next.scrollIntoView({ block: 'nearest' })
+        const target = openTarget(next)
+        if (printedCopy(target)) setDoc({ href: target.getAttribute('href') ?? target.href, title: (target.textContent ?? '').trim() || 'Document', row: next })
+        else {
+          setDoc(null)
+          setTimeout(() => openRow(next), 60)
+        }
+        return
+      }
+      const top = topDialog()
+      if (!top) return
+      const before = openersRef.current.get(top)?.before ?? null
+      const row = before?.closest<HTMLElement>('[data-row]') ?? null
+      if (!row || !row.isConnected) {
+        flash('This window was not opened from a list, so there is no next one.')
+        return
+      }
+      const filling =
+        !!top.querySelector('[data-hotkey="save"]') ||
+        [...top.querySelectorAll<HTMLInputElement>('input, textarea')].some((b) => shown(b) && isTyping(b) && !b.disabled && !b.readOnly)
+      if (filling) {
+        flash('This is a form: save it or close it (Esc) first.')
+        return
+      }
+      const next = go(row)
+      if (!next) return
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      let n = 0
+      const t = setInterval(() => {
+        if (top.isConnected && top.getClientRects().length > 0 && ++n < 40) return
+        clearInterval(t)
+        if (top.isConnected && top.getClientRects().length > 0) return
+        next.focus()
+        next.scrollIntoView({ block: 'nearest' })
+        openRow(next)
+      }, 50)
+    },
+    [doc, flash],
+  )
 
   /*
    * Every window, whoever drew it: focus goes into it when it opens, Tab stays
@@ -149,7 +231,7 @@ export function KeyboardLayer() {
    */
   useEffect(() => {
     trackFocus()
-    const open = new Map<HTMLElement, { before: HTMLElement | null; stop: () => void }>()
+    const open = openersRef.current
     let frame = 0
     const scan = () => {
       frame = 0
@@ -238,7 +320,8 @@ export function KeyboardLayer() {
         // which the browser would block as a pop-up: then the line waits, with
         // focus, for their own Enter.
         const target = openTarget(row)
-        if (!(target instanceof HTMLAnchorElement && target.target === '_blank')) openRow(row)
+        // A printed copy opens in a window here; any other new tab waits for the person's own Enter.
+        if (printedCopy(target) || !(target instanceof HTMLAnchorElement && target.target === '_blank')) openRow(row)
       } else if (tries > 60) {
         clearInterval(t)
         box?.focus()
@@ -297,6 +380,14 @@ export function KeyboardLayer() {
       e.preventDefault()
       box.focus()
       box.select?.()
+    },
+    'alt+pagedown': (e) => {
+      e.preventDefault()
+      step(1)
+    },
+    'alt+pageup': (e) => {
+      e.preventDefault()
+      step(-1)
     },
     'alt+/': (e) => {
       e.preventDefault()
@@ -406,7 +497,7 @@ export function KeyboardLayer() {
         const k = r.getAttribute('data-grid-row') ?? ''
         return k === 'true' ? '' : k
       }
-      const cells = (r: HTMLElement) => tabbables(r).filter((c) => !c.matches('[data-grid-remove], [data-grid-add]') && !c.closest('[data-grid-skip]'))
+      const cells = (r: HTMLElement) => tabbables(r).filter((c) => !c.matches('[data-grid-remove], [data-grid-add], [data-grid-copy]') && !c.closest('[data-grid-skip]'))
       // The Add button for new lines: in the grid, else the one in the same dialog.
       const usable = (b: HTMLButtonElement) => shown(b) && !b.disabled
       const addButton = () =>
@@ -425,6 +516,17 @@ export function KeyboardLayer() {
             if (fresh) cells(fresh)[0]?.focus()
           }
         }, 50)
+      }
+
+      // Alt+C: a copy of this line, under it, its first box ready to change.
+      if (matches(e, 'alt+c') && row) {
+        let line: HTMLElement | null = row
+        while (line && kindOf(line) !== '') line = rows[rows.indexOf(line) - 1] ?? null
+        const copy = line ? [...line.querySelectorAll<HTMLButtonElement>('[data-grid-copy]')].find(usable) : undefined
+        if (!copy) return
+        e.preventDefault()
+        addAndGo(copy)
+        return
       }
 
       // Alt+A: a new line (or this line's own add), its first box ready to type in.
@@ -496,6 +598,7 @@ export function KeyboardLayer() {
     <>
       {palette && <CommandPalette onClose={() => setPalette(false)} onHelp={() => (setPalette(false), setHelp(true))} />}
       {help && <ShortcutHelp onClose={() => setHelp(false)} />}
+      {doc && <DocWindow key={doc.href} href={doc.href} title={doc.title} onClose={() => setDoc(null)} onStep={step} />}
       {note && (
         <div role="status" aria-live="polite" className="bg-card border-border text-foreground fixed bottom-4 left-1/2 z-[1100] -translate-x-1/2 rounded-lg border px-4 py-2.5 text-sm shadow-xl">
           {note}

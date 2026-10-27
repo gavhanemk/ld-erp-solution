@@ -1,11 +1,12 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, Plus, Trash2, Send, Undo2, Factory, Truck, Boxes, FileText } from 'lucide-react'
+import { Loader2, Plus, Trash2, Copy, Send, Undo2, Factory, Truck, Boxes, FileText } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { StepInput } from '@/components/ui/StepInput'
 import type { InwardRef } from '@/components/packages/InwardStickers'
 import type { OutwardRef } from '@/components/packages/packageTypes'
 
@@ -189,6 +190,9 @@ export function SendJobWorkDialog({
 
   const setLine = (index: number, patch: Partial<OutLine>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
+  /** A copy of a line, put just under it. */
+  const copyLine = (index: number) =>
+    setLines((prev) => (prev[index] ? [...prev.slice(0, index + 1), { ...prev[index] }, ...prev.slice(index + 1)] : prev))
 
   const filled = lines.filter((l) => l.itemId && num(l.qty) > 0)
 
@@ -402,7 +406,7 @@ export function SendJobWorkDialog({
                 <th>Whose stock</th>
                 <th style={{ textAlign: 'right' }}>{fromName ? `In ${fromName}` : 'In the store'}</th>
                 <th style={{ textAlign: 'right' }}>Quantity to send</th>
-                <th style={{ width: 40 }} />
+                <th style={{ width: 80 }} />
               </tr>
             </thead>
             <tbody data-grid>
@@ -511,11 +515,11 @@ export function SendJobWorkDialog({
                     </td>
                     <td className="min-w-[130px]">
                       <div className="relative">
-                        <input
+                        <StepInput
+                          decimals
                           className={`form-input h-9 pr-10 text-right ${over ? 'border-red-500/60' : ''}`}
-                          inputMode="decimal"
                           value={line.qty}
-                          onChange={(e) => setLine(i, { qty: e.target.value })}
+                          onValueChange={(v) => setLine(i, { qty: v })}
                           aria-label={`Quantity on line ${i + 1}`}
                         />
                         {uom && (
@@ -525,16 +529,29 @@ export function SendJobWorkDialog({
                       {over && <p className="mt-1 text-right text-[11px] text-red-500">More than the store has</p>}
                     </td>
                     <td className="pt-1.5 text-right">
-                      <button
-                        type="button"
-                        className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
-                        onClick={() => setLines((prev) => (prev.length === 1 ? [emptyOut()] : prev.filter((_, x) => x !== i)))}
-                        aria-label={`Remove line ${i + 1}`}
-                        aria-keyshortcuts="Alt+Delete"
-                        data-grid-remove
-                      >
-                        <Trash2 size={15} />
-                      </button>
+                      <div className="flex items-center justify-end">
+                        <button
+                          type="button"
+                          className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
+                          onClick={() => setLines((prev) => (prev.length === 1 ? [emptyOut()] : prev.filter((_, x) => x !== i)))}
+                          aria-label={`Remove line ${i + 1}`}
+                          aria-keyshortcuts="Alt+Delete"
+                          data-grid-remove
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-ghost text-muted-foreground p-1.5 hover:text-primary"
+                          onClick={() => copyLine(i)}
+                          aria-label={`Copy row ${i + 1}`}
+                          title="Copy this line (Alt+C)"
+                          aria-keyshortcuts="Alt+C"
+                          data-grid-copy
+                        >
+                          <Copy size={15} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
@@ -687,11 +704,11 @@ export function ReceiveJobWorkDialog({
 
   const qtyInput = (value: string, onChange: (v: string) => void, label: string, uom: string, disabled: boolean, bad = false) => (
     <div className="relative">
-      <input
+      <StepInput
+        decimals
         className={`form-input h-9 pr-10 text-right ${bad ? 'border-red-500/60' : ''}`}
-        inputMode="decimal"
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onValueChange={onChange}
         disabled={disabled}
         placeholder="0"
         aria-label={label}

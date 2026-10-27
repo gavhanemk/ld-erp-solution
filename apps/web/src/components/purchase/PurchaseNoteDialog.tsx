@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import {
   AlertCircle,
   Calculator,
+  Copy,
   FileMinus,
   FilePlus2,
   Info,
@@ -40,6 +41,7 @@ const GST_CHOICES: NoteGst[] = [
   'NO_GST_IMPACT',
 ]
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { StepInput } from '@/components/ui/StepInput'
 
 /**
  * Raising a debit or credit note against a supplier.
@@ -221,6 +223,44 @@ const inr = (v: number) =>
 const qtyFmt = (v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 3 })
 
 const round2 = (n: number) => Math.round(n * 100) / 100
+
+/**
+ * The GST % box on a typed line. The line holds the rate as a number, so the
+ * text is kept here while it is typed — "2." would otherwise lose its point
+ * before the 5 of 2.5 arrived. A rate set from outside (picking an item)
+ * replaces it.
+ */
+function GstRateBox({
+  value,
+  onValue,
+  className,
+  'aria-label': ariaLabel,
+}: {
+  value: number
+  onValue: (rate: number) => void
+  className?: string
+  'aria-label'?: string
+}) {
+  const [text, setText] = useState(String(value))
+  const [seen, setSeen] = useState(value)
+  if (value !== seen) {
+    setSeen(value)
+    if (Number(text) !== value) setText(String(value))
+  }
+  return (
+    <StepInput
+      decimals
+      max={100}
+      className={className}
+      value={text}
+      onValueChange={(v) => {
+        setText(v)
+        onValue(Number(v) || 0)
+      }}
+      aria-label={ariaLabel}
+    />
+  )
+}
 
 export function PurchaseNoteDialog({
   open,
@@ -717,6 +757,15 @@ export function PurchaseNoteDialog({
 
   const removeManualLine = (index: number) =>
     setFormLines((prev) => prev.filter((_, i) => i !== index))
+
+  /** A copy of a hand-typed line straight under it, tied to no bill or receipt line. */
+  const copyLine = (index: number) =>
+    setFormLines((prev) => {
+      const src = prev[index]
+      if (!src) return prev
+      const copy: FormLine = { ...src, billLineId: null, grnLineId: null, meta: null, grnMeta: null }
+      return [...prev.slice(0, index + 1), copy, ...prev.slice(index + 1)]
+    })
 
   const pickManualItem = (index: number, itemId: string) => {
     const item = itemById.get(itemId)
@@ -1533,13 +1582,11 @@ export function PurchaseNoteDialog({
                                     />
                                   </td>
                                   <td className="px-2 py-2 align-top">
-                                    <input
-                                      type="number"
-                                      step="0.001"
-                                      min="0"
+                                    <StepInput
+                                      decimals
                                       className="form-input h-8 w-24 py-0 text-right text-[13px]"
                                       value={l.qty}
-                                      onChange={(e) => setLine(i, { qty: e.target.value })}
+                                      onValueChange={(v) => setLine(i, { qty: v })}
                                       aria-label={`Quantity for line ${i + 1}`}
                                     />
                                     {item?.uom?.symbol && (
@@ -1549,13 +1596,11 @@ export function PurchaseNoteDialog({
                                     )}
                                   </td>
                                   <td className="px-2 py-2 align-top">
-                                    <input
-                                      type="number"
-                                      step="0.01"
-                                      min="0"
+                                    <StepInput
+                                      decimals
                                       className="form-input h-8 w-24 py-0 text-right text-[13px]"
                                       value={l.unitPrice}
-                                      onChange={(e) => setLine(i, { unitPrice: e.target.value })}
+                                      onValueChange={(v) => setLine(i, { unitPrice: v })}
                                       aria-label={`Rate for line ${i + 1}`}
                                     />
                                     {g && (
@@ -1565,16 +1610,10 @@ export function PurchaseNoteDialog({
                                     )}
                                   </td>
                                   <td className="px-2 py-2 align-top">
-                                    <input
-                                      type="number"
-                                      step="0.01"
-                                      min="0"
-                                      max="100"
+                                    <GstRateBox
                                       className="form-input h-8 w-20 py-0 text-right text-[13px]"
                                       value={l.gstRate}
-                                      onChange={(e) =>
-                                        setLine(i, { gstRate: Number(e.target.value) || 0 })
-                                      }
+                                      onValue={(rate) => setLine(i, { gstRate: rate })}
                                       aria-label={`GST rate for line ${i + 1}`}
                                     />
                                   </td>
@@ -1582,16 +1621,32 @@ export function PurchaseNoteDialog({
                                     ₹{inr(value)}
                                   </td>
                                   <td className="px-2 py-2 align-top">
-                                    <button
-                                      type="button"
-                                      onClick={() => removeManualLine(i)}
-                                      className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
-                                      aria-label={`Remove line ${i + 1}`}
-                                      aria-keyshortcuts="Alt+Delete"
-                                      data-grid-remove
-                                    >
-                                      <Trash2 size={13} />
-                                    </button>
+                                    <div className="flex items-center">
+                                      <button
+                                        type="button"
+                                        onClick={() => removeManualLine(i)}
+                                        className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                                        aria-label={`Remove line ${i + 1}`}
+                                        aria-keyshortcuts="Alt+Delete"
+                                        data-grid-remove
+                                      >
+                                        <Trash2 size={13} />
+                                      </button>
+                                      {/* Typed lines only: one off a receipt claims that receipt line, once. */}
+                                      {!g && !l.grnLineId && (
+                                        <button
+                                          type="button"
+                                          className="btn-ghost text-muted-foreground hover:text-primary p-1"
+                                          onClick={() => copyLine(i)}
+                                          aria-label={`Copy row ${i + 1}`}
+                                          title="Copy this line (Alt+C)"
+                                          aria-keyshortcuts="Alt+C"
+                                          data-grid-copy
+                                        >
+                                          <Copy size={13} />
+                                        </button>
+                                      )}
+                                    </div>
                                   </td>
                                 </tr>
                               )
@@ -1654,38 +1709,28 @@ export function PurchaseNoteDialog({
                               <div className="mt-2 grid grid-cols-2 gap-2">
                                 <div>
                                   <label className="form-label text-[11px]">Quantity</label>
-                                  <input
-                                    type="number"
-                                    step="0.001"
-                                    min="0"
+                                  <StepInput
+                                    decimals
                                     className="form-input h-8 py-0 text-[13px]"
                                     value={l.qty}
-                                    onChange={(e) => setLine(i, { qty: e.target.value })}
+                                    onValueChange={(v) => setLine(i, { qty: v })}
                                   />
                                 </div>
                                 <div>
                                   <label className="form-label text-[11px]">Rate</label>
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    min="0"
+                                  <StepInput
+                                    decimals
                                     className="form-input h-8 py-0 text-[13px]"
                                     value={l.unitPrice}
-                                    onChange={(e) => setLine(i, { unitPrice: e.target.value })}
+                                    onValueChange={(v) => setLine(i, { unitPrice: v })}
                                   />
                                 </div>
                                 <div>
                                   <label className="form-label text-[11px]">GST %</label>
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    min="0"
-                                    max="100"
+                                  <GstRateBox
                                     className="form-input h-8 py-0 text-[13px]"
                                     value={l.gstRate}
-                                    onChange={(e) =>
-                                      setLine(i, { gstRate: Number(e.target.value) || 0 })
-                                    }
+                                    onValue={(rate) => setLine(i, { gstRate: rate })}
                                   />
                                 </div>
                                 <div>
@@ -1840,26 +1885,22 @@ export function PurchaseNoteDialog({
                                   </span>
                                 </td>
                                 <td className="px-2 py-1.5 align-top">
-                                  <input
-                                    type="number"
-                                    step="0.001"
-                                    min="0"
+                                  <StepInput
+                                    decimals
                                     className="form-input h-8 w-24 py-0 text-right text-[13px]"
                                     value={l.qty}
                                     disabled={!l.picked}
-                                    onChange={(e) => setLine(i, { qty: e.target.value })}
+                                    onValueChange={(v) => setLine(i, { qty: v })}
                                     aria-label={`Quantity coming off ${m.itemName}`}
                                   />
                                 </td>
                                 <td className="px-2 py-1.5 align-top">
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    min="0"
+                                  <StepInput
+                                    decimals
                                     className="form-input h-8 w-24 py-0 text-right text-[13px]"
                                     value={l.unitPrice}
                                     disabled={!l.picked}
-                                    onChange={(e) => setLine(i, { unitPrice: e.target.value })}
+                                    onValueChange={(v) => setLine(i, { unitPrice: v })}
                                     aria-label={`Rate for ${m.itemName}`}
                                   />
                                 </td>
@@ -1932,24 +1973,20 @@ export function PurchaseNoteDialog({
                               <div className="mt-2 grid grid-cols-2 gap-2">
                                 <div>
                                   <label className="form-label text-[11px]">Quantity</label>
-                                  <input
-                                    type="number"
-                                    step="0.001"
-                                    min="0"
+                                  <StepInput
+                                    decimals
                                     className="form-input h-8 py-0 text-[13px]"
                                     value={l.qty}
-                                    onChange={(e) => setLine(i, { qty: e.target.value })}
+                                    onValueChange={(v) => setLine(i, { qty: v })}
                                   />
                                 </div>
                                 <div>
                                   <label className="form-label text-[11px]">Rate</label>
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    min="0"
+                                  <StepInput
+                                    decimals
                                     className="form-input h-8 py-0 text-[13px]"
                                     value={l.unitPrice}
-                                    onChange={(e) => setLine(i, { unitPrice: e.target.value })}
+                                    onValueChange={(v) => setLine(i, { unitPrice: v })}
                                   />
                                 </div>
                                 {problem && (

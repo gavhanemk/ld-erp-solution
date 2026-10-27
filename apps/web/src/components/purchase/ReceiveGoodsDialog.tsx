@@ -550,11 +550,11 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
             )}
 
             <td>
-              <input
+              <StepInput
+                decimals
                 className="form-input h-9 text-right"
-                inputMode="decimal"
                 value={alloc.received}
-                onChange={(e) => setAlloc(line.id, alloc.key, { received: e.target.value })}
+                onValueChange={(v) => setAlloc(line.id, alloc.key, { received: v })}
                 disabled={done}
                 placeholder="Qty"
                 aria-label={`Quantity of ${line.item.name} received on this receipt${
@@ -759,11 +759,11 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1">
                 <label className={fieldLabel}>Received qty</label>
-                <input
+                <StepInput
+                  decimals
                   className="form-input h-9 w-full text-right"
-                  inputMode="decimal"
                   value={alloc.received}
-                  onChange={(e) => setAlloc(line.id, alloc.key, { received: e.target.value })}
+                  onValueChange={(v) => setAlloc(line.id, alloc.key, { received: v })}
                   disabled={done}
                   placeholder="Qty"
                   aria-label={`Quantity of ${line.item.name} received on this receipt${

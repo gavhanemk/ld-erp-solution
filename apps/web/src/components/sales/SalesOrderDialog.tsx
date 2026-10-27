@@ -6,6 +6,7 @@ import {
   AlertCircle,
   Calculator,
   CheckCircle2,
+  Copy,
   FileText,
   Handshake,
   Hash,
@@ -243,7 +244,7 @@ const num = (v: string | number | null | undefined) => (v == null || v === '' ? 
 /** Column widths of the line table, as on the purchase order form. */
 const COL = {
   num: 'w-8',
-  remove: 'w-8',
+  remove: 'w-16',
   category: 'w-40',
   item: 'w-64',
   style: 'w-32',
@@ -1071,6 +1072,17 @@ export function SalesOrderDialog({
   }
 
   const removeLine = (key: string) => setLines((ls) => (ls.length > 1 ? ls.filter((l) => l.key !== key) : [blankLine()]))
+  /**
+   * A copy of a line, put just under it. It is a new line: no saved line id,
+   * so none of the original's dispatches or production go with it.
+   */
+  const copyLine = (key: string) =>
+    setLines((ls) => {
+      const at = ls.findIndex((l) => l.key === key)
+      if (at < 0) return ls
+      const copy: LineDraft = { ...ls[at], key: blankLine().key, id: undefined, sizes: { ...ls[at].sizes } }
+      return [...ls.slice(0, at + 1), copy, ...ls.slice(at + 1)]
+    })
   const setCharge = (key: string, patch: Partial<ChargeDraft>) =>
     setCharges((cs) => cs.map((c) => (c.key === key ? { ...c, ...patch } : c)))
 
@@ -1711,6 +1723,17 @@ export function SalesOrderDialog({
                                   >
                                     <Trash2 size={13} />
                                   </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => copyLine(p.line.key)}
+                                    className="btn-ghost text-muted-foreground hover:text-primary p-1"
+                                    aria-label={`Copy row ${i + 1}`}
+                                    title="Copy this line (Alt+C)"
+                                    aria-keyshortcuts="Alt+C"
+                                    data-grid-copy
+                                  >
+                                    <Copy size={13} />
+                                  </button>
                                 </div>
                               </td>
                               <td className={COL.category}>
@@ -1836,14 +1859,25 @@ export function SalesOrderDialog({
                       <div key={p.line.key} className="border-border bg-card space-y-2.5 rounded-lg border p-3">
                         <div className="flex items-center justify-between">
                           <span className="text-muted-foreground text-xs font-semibold">Row {i + 1}</span>
-                          <button
-                            type="button"
-                            className="btn-ghost p-1.5"
-                            onClick={() => removeLine(p.line.key)}
-                            aria-label={`Remove row ${i + 1}`}
-                          >
-                            <Trash2 size={14} />
-                          </button>
+                          <div className="flex items-center">
+                            <button
+                              type="button"
+                              className="btn-ghost p-1.5"
+                              onClick={() => removeLine(p.line.key)}
+                              aria-label={`Remove row ${i + 1}`}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-ghost p-1.5"
+                              onClick={() => copyLine(p.line.key)}
+                              aria-label={`Copy row ${i + 1}`}
+                              title="Copy this line"
+                            >
+                              <Copy size={14} />
+                            </button>
+                          </div>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           {f.category}

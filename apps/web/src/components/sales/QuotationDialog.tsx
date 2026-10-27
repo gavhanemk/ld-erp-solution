@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Calculator, FileText, Hash, Loader2, Lock, Package, Pencil, Plus, Save, Send, StickyNote, Trash2, User, X } from 'lucide-react'
+import { AlertCircle, Calculator, Copy, FileText, Hash, Loader2, Lock, Package, Pencil, Plus, Save, Send, StickyNote, Trash2, User, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatRupees } from '@/lib/utils'
@@ -281,6 +281,12 @@ export function QuotationDialog({
   const styleByCode = useMemo(() => new Map(styles.map((st) => [st.code.toLowerCase(), st])), [styles])
 
   const setLine = (key: string, patch: Partial<LineDraft>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)))
+  /** A copy of a line, put just under it. */
+  const copyLine = (key: string) =>
+    setLines((ls) => {
+      const at = ls.findIndex((l) => l.key === key)
+      return at < 0 ? ls : [...ls.slice(0, at + 1), { ...ls[at], key: blank().key }, ...ls.slice(at + 1)]
+    })
 
   /**
    * A style or colour picked: the item to bill is the one linked to that
@@ -526,7 +532,7 @@ export function QuotationDialog({
                     <thead>
                       <tr className="bg-secondary">
                         {[
-                          ['', 'w-8'],
+                          ['', 'w-16'],
                           ['Style', 'w-72'],
                           ['Colour', 'w-32'],
                           ['Item billed as', 'w-56'],
@@ -550,9 +556,14 @@ export function QuotationDialog({
                         return (
                           <tr key={p.l.key} data-grid-row className={`${i % 2 ? 'zebra-row' : 'bg-card'} [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top`}>
                             <td>
-                              <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" onClick={() => setLines((ls) => (ls.length > 1 ? ls.filter((x) => x.key !== p.l.key) : [blank()]))} aria-label={`Remove row ${i + 1}`} aria-keyshortcuts="Alt+Delete" data-grid-remove>
-                                <Trash2 size={13} />
-                              </button>
+                              <div className="flex items-center">
+                                <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" onClick={() => setLines((ls) => (ls.length > 1 ? ls.filter((x) => x.key !== p.l.key) : [blank()]))} aria-label={`Remove row ${i + 1}`} aria-keyshortcuts="Alt+Delete" data-grid-remove>
+                                  <Trash2 size={13} />
+                                </button>
+                                <button type="button" className="btn-ghost text-muted-foreground hover:text-primary p-1" onClick={() => copyLine(p.l.key)} aria-label={`Copy row ${i + 1}`} title="Copy this line (Alt+C)" aria-keyshortcuts="Alt+C" data-grid-copy>
+                                  <Copy size={13} />
+                                </button>
+                              </div>
                             </td>
                             <td>
                               <SmartSelect
