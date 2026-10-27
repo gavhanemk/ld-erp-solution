@@ -1,8 +1,9 @@
 import ExcelJS from 'exceljs'
-import type { ReportColumn, ReportDefinition } from '../types'
+import type { RegisterSpec, ReportColumn, ReportDefinition } from '../types'
 import type { AppliedFilter } from '../filters'
 import { filterLine } from '../filters'
 import {
+  asDate,
   istDay,
   letterhead,
   type RegisterCompany,
@@ -59,8 +60,8 @@ const NUMERIC = new Set(['money', 'qty', 'integer', 'percent'])
  * day first — the day the screen and the PDF print.
  */
 function excelDate(v: unknown): Date | null {
-  const d = v instanceof Date ? v : v ? new Date(String(v)) : null
-  if (!d || Number.isNaN(d.getTime())) return null
+  const d = asDate(v)
+  if (!d) return null
   const [y, m, day] = istDay(d).split('-').map(Number)
   return new Date(Date.UTC(y, m - 1, day))
 }
@@ -97,6 +98,9 @@ const RUN_AT = new Intl.DateTimeFormat('en-IN', {
 
 export async function buildRegisterWorkbook(opts: {
   def: ReportDefinition
+  /** The report's columns and register, every default filled in. */
+  columns: ReportColumn[]
+  spec: RegisterSpec
   rows: Array<Record<string, unknown>>
   totals: RegisterTotals
   company: RegisterCompany | null
@@ -106,17 +110,17 @@ export async function buildRegisterWorkbook(opts: {
   /** Rows the query found, when more than were returned. */
   truncatedFrom?: number
 }): Promise<Buffer> {
-  const { def, rows, totals, company, periodLabel, appliedFilters, runBy, truncatedFrom } = opts
-  const spec = def.register
-  if (!spec) throw new Error(`${def.id} is not a register`)
-  const cols = def.columns
+  const { def, columns: cols, spec, rows, totals, company, periodLabel, appliedFilters, runBy, truncatedFrom } =
+    opts
   const runAt = new Date()
 
   const wb = new ExcelJS.Workbook()
   wb.creator = 'LD Cotton Mills ERP'
   wb.created = runAt
 
-  const ws = wb.addWorksheet(def.title.slice(0, 31))
+  // Excel refuses a sheet name with : \ / ? * [ ] in it, or longer than 31.
+  const sheetName = def.title.replace(/:/g, ' -').replace(/[\\/?*[\]]/g, '').slice(0, 31).trim()
+  const ws = wb.addWorksheet(sheetName)
   ws.columns = cols.map((c) => ({ key: c.key, width: c.width ?? Math.max(10, c.label.length + 2) }))
 
   // ── Letterhead and period ───────────────────────────────────────────────
@@ -135,7 +139,7 @@ export async function buildRegisterWorkbook(opts: {
     ...(truncatedFrom
       ? [
           {
-            text: `PARTIAL: the first ${rows.length.toLocaleString('en-IN')} of ${truncatedFrom.toLocaleString('en-IN')} lines. Narrow the period to see every line.`,
+            text: `PARTIAL: the first ${rows.length.toLocaleString('en-IN')} of ${truncatedFrom.toLocaleString('en-IN')} rows. Narrow the period to see every row.`,
             size: 10,
             bold: true,
             color: 'FF991B1B',
@@ -167,15 +171,17 @@ export async function buildRegisterWorkbook(opts: {
   const firstData = headerRow + 1
   let doc = -1
   let lastKey: unknown = Symbol('none')
-  for (const r of rows) {
-    if (r[spec.documentKey] !== lastKey) {
+  for (const [i, r] of rows.entries()) {
+    // Without a document key every row is its own document.
+    const key = spec.documentKey ? r[spec.documentKey] : i
+    if (key !== lastKey) {
       doc++
-      lastKey = r[spec.documentKey]
+      lastKey = key
     }
     const added = ws.addRow(cols.map((c) => cell(c, r[c.key])))
     const isVoid = spec.void != null && r[spec.void.key] === spec.void.value
-    // Banded by bill, not by row: a bill's lines read as one block, which is
-    // how the eye finds where one bill ends and the next begins.
+    // Banded by document, not by row: a bill's lines read as one block, which
+    // is how the eye finds where one bill ends and the next begins.
     const banded = doc % 2 === 1
     cols.forEach((c, i) => {
       const x = added.getCell(i + 1)
@@ -263,7 +269,7 @@ export async function buildRegisterWorkbook(opts: {
       }
     }
   } else {
-    const none = ws.addRow(['No bills match these filters.'])
+    const none = ws.addRow([`No ${spec.noun.many} match these filters.`])
     none.getCell(1).font = { name: FONT, size: 10, italic: true, color: { argb: INK.muted } }
   }
 

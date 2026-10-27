@@ -40,7 +40,7 @@ import { ROW_CAP, type ReportDefinition, type ReportResult } from './types'
 import { periodLabel } from './definitions/shared'
 import { buildWorkbook } from './workbook'
 import { buildRegisterWorkbook } from './workbook/register'
-import { registerTotals } from './register'
+import { registerTotals, resolveColumns, resolveRegister } from './register'
 
 const SYNTHETIC: { def: ReportDefinition; result: ReportResult } = {
   def: {
@@ -312,20 +312,24 @@ async function main() {
       async (tx) => def.run({ prisma, tx, params, rowCap: ROW_CAP }),
       { timeout: 120_000, maxWait: 15_000 }
     )
-    if (def.register) {
-      const buffer = await buildRegisterWorkbook({
-        def,
-        rows: result.rows,
-        totals: registerTotals(def, result.rows),
-        company: await prisma.company.findFirst(),
-        periodLabel: periodLabel(params),
-        appliedFilters: [],
-        runBy: 'Verification',
-      })
-      writeFileSync(`${out}/${def.id}.xlsx`, buffer)
-      console.log(
-        `${def.id.padEnd(26)} rows=${String(result.rows.length).padEnd(6)}register, one sheet  ${(buffer.length / 1024).toFixed(0)}KB`
-      )
+    // Every report is two files: the register on one sheet, and the summary
+    // workbook behind its Summary tab.
+    const columns = resolveColumns(def)
+    const spec = resolveRegister(def, columns)
+    const register = await buildRegisterWorkbook({
+      def,
+      columns,
+      spec,
+      rows: result.rows,
+      totals: registerTotals(def, result.rows, columns, spec),
+      company: await prisma.company.findFirst(),
+      periodLabel: periodLabel(params),
+      appliedFilters: [],
+      runBy: 'Verification',
+    })
+    writeFileSync(`${out}/${def.id}.xlsx`, register)
+    if (!result.analysis) {
+      console.log(`${def.id.padEnd(26)} rows=${String(result.rows.length).padEnd(6)}register only`)
       continue
     }
     const { buffer, chartCount, pivotCount, partial } = await buildWorkbook({
@@ -335,7 +339,7 @@ async function main() {
       runBy: 'Verification',
       periodLabel: periodLabel(params),
     })
-    writeFileSync(`${out}/${def.id}.xlsx`, buffer)
+    writeFileSync(`${out}/${def.id}-summary.xlsx`, buffer)
     // The same rule the builder uses. Left at "two or more points" this
     // printed "charts=6 panels=6 (0 chartable)" on one line, which reads as a
     // failure report about a workbook that was fine.
@@ -344,7 +348,7 @@ async function main() {
     console.log(
       `${def.id.padEnd(26)} rows=${String(result.rows.length).padEnd(6)}` +
         `charts=${chartCount} pivots=${pivotCount}  panels=${panels.length} (${chartable} chartable)  ` +
-        `partial=${partial}  ${(buffer.length / 1024).toFixed(0)}KB`
+        `partial=${partial}  summary ${(buffer.length / 1024).toFixed(0)}KB, register ${(register.length / 1024).toFixed(0)}KB`
     )
   }
 

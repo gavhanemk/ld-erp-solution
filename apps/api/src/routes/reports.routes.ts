@@ -8,7 +8,14 @@ import { periodLabel } from '../reports/definitions/shared'
 import { buildCsv, buildWorkbook } from '../reports/workbook'
 import { describeFilters, type AppliedFilter } from '../reports/filters'
 import { countsInWords } from '../reports/wording'
-import { COMPANY_SELECT, letterhead, registerTotals, type RegisterCompany } from '../reports/register'
+import {
+  COMPANY_SELECT,
+  letterhead,
+  registerTotals,
+  resolveColumns,
+  resolveRegister,
+  type RegisterCompany,
+} from '../reports/register'
 import { buildRegisterWorkbook } from '../reports/workbook/register'
 
 const router = Router()
@@ -66,8 +73,8 @@ async function runReport(
     async (tx) => ({
       result: await def.run({ prisma, tx, params, rowCap: ROW_CAP }),
       applied: await describeFilters(def, params, tx),
-      // A register prints under the letterhead, as the old ERP's did.
-      company: def.register ? await tx.company.findFirst({ select: COMPANY_SELECT }) : null,
+      // Every report prints under the letterhead, as the old ERP's registers did.
+      company: await tx.company.findFirst({ select: COMPANY_SELECT }),
     }),
     { timeout: 120_000, maxWait: 15_000 }
   )
@@ -90,6 +97,8 @@ router.get('/:id/run', async (req: AuthRequest, res) => {
   const def = guard(req.params.id, req)
   const params = req.query as ReportParams
   const { result, applied, company } = await runReport(def.id, params)
+  const columns = resolveColumns(def)
+  const spec = resolveRegister(def, columns)
 
   res.json({
     success: true,
@@ -97,48 +106,55 @@ router.get('/:id/run', async (req: AuthRequest, res) => {
       report: { id: def.id, title: def.title, description: def.description },
       periodLabel: periodLabel(params),
       appliedFilters: applied,
+      /** The Summary tab: KPIs, charts and the rest of the dashboard. */
       analysis: result.analysis,
       rowCount: result.rows.length,
       totalRows: result.totalRows ?? result.rows.length,
       truncated: Boolean(result.totalRows && result.totalRows > result.rows.length),
-      columns: def.columns,
+      columns,
       /**
-       * How a register prints, and its totals — worked out here, once, so
-       * the screen, the PDF and the workbook all print the same figures.
+       * The Report tab: how the register prints, and its totals — worked out
+       * here, once, so the screen, the PDF and the workbook all print the
+       * same figures.
        */
-      register: def.register
-        ? {
-            spec: def.register,
-            totals: registerTotals(def, result.rows),
-            letterhead: letterhead(company),
-            generatedAt: new Date().toISOString(),
-            generatedBy: req.user?.name ?? null,
-          }
-        : undefined,
-      /** The first 100, for the plain table underneath. A register prints every row. */
-      preview: def.register ? [] : result.rows.slice(0, 100),
+      register: {
+        spec,
+        totals: registerTotals(def, result.rows, columns, spec),
+        letterhead: letterhead(company),
+        generatedAt: new Date().toISOString(),
+        generatedBy: req.user?.name ?? null,
+      },
       /**
        * Every row the query returned, capped the same way the export is.
        *
-       * The on-screen pivot table regroups over this rather than the preview
-       * — a cross-tab built from the first 100 rows of a register sorted by
-       * date would silently answer for a fortnight while claiming to answer
-       * for the quarter that was actually asked for.
+       * The register prints all of them, and the Summary tab's totals by
+       * group regroup over the same rows — a cross-tab built from the first
+       * hundred of a register sorted by date would silently answer for a
+       * fortnight while claiming to answer for the quarter that was asked for.
        */
       rows: result.rows,
     },
   })
 })
 
+/**
+ * The files.
+ *
+ * `xlsx` is the register on one sheet — what every Export → Excel gives.
+ * `summary` is the dashboard workbook behind the Summary tab: KPIs, charts,
+ * a pivot table and the rows on their own sheet, for whoever asks for it.
+ * `csv` is the rows for another system.
+ */
 router.get('/:id/export', async (req: AuthRequest, res) => {
   const def = guard(req.params.id, req)
-  const format = req.query.format === 'csv' ? 'csv' : 'xlsx'
+  const format =
+    req.query.format === 'csv' ? 'csv' : req.query.format === 'summary' ? 'summary' : 'xlsx'
   const params = req.query as ReportParams
   const { result, applied, company } = await runReport(def.id, params)
 
   const stamp = new Date().toISOString().slice(0, 10)
   const partial = Boolean(result.totalRows && result.totalRows > result.rows.length)
-  const name = `${def.id}${partial ? '_PARTIAL' : ''}-${stamp}.${format}`
+  const name = `${def.id}${format === 'summary' ? '-summary' : ''}${partial ? '_PARTIAL' : ''}-${stamp}.${format === 'csv' ? 'csv' : 'xlsx'}`
 
   if (format === 'csv') {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8')
@@ -147,12 +163,16 @@ router.get('/:id/export', async (req: AuthRequest, res) => {
     return
   }
 
-  // A register is one sheet: the register, nothing behind it.
-  if (def.register) {
+  // The register is one sheet: the register, nothing behind it.
+  if (format === 'xlsx' || !result.analysis) {
+    const columns = resolveColumns(def)
+    const spec = resolveRegister(def, columns)
     const buffer = await buildRegisterWorkbook({
       def,
+      columns,
+      spec,
       rows: result.rows,
-      totals: registerTotals(def, result.rows),
+      totals: registerTotals(def, result.rows, columns, spec),
       company,
       periodLabel: periodLabel(params),
       appliedFilters: applied,

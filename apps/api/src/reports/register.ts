@@ -1,7 +1,8 @@
-import type { ReportColumn, ReportDefinition, RegisterSpec } from './types'
+import type { RegisterColumn, ReportColumn, ReportDefinition, RegisterSpec } from './types'
 
 /**
- * The totals of a register, worked out once.
+ * Every report as a register: its layout worked out, and its totals worked
+ * out once.
  *
  * The screen, the printed sheet and the workbook all print these figures
  * rather than adding the columns up themselves. Three sums of the same column
@@ -61,7 +62,13 @@ export const COMPANY_SELECT = {
   email: true,
 } as const
 
-/** "LD Cotton Mills", then its address and GSTIN, as the letterhead prints them. */
+/**
+ * "LD Cotton Mills", then its address and GSTIN, as the letterhead prints them.
+ *
+ * The mill's own name, as Settings holds it, rather than the legal name the
+ * documents it sends out carry: a register is the mill's working paper, and
+ * the accounts team asked for it to read "LD Cotton Mills" and nothing more.
+ */
 export function letterhead(c: RegisterCompany | null): { name: string; lines: string[] } {
   if (!c) return { name: '', lines: [] }
   const place = [c.address, c.city, [c.state, c.pincode].filter(Boolean).join(' - ')]
@@ -70,7 +77,7 @@ export function letterhead(c: RegisterCompany | null): { name: string; lines: st
   const reach = [c.gstin && `GSTIN: ${c.gstin}`, c.phone && `Phone: ${c.phone}`, c.email]
     .filter(Boolean)
     .join('   ')
-  return { name: c.legalName || c.name, lines: [place, reach].filter(Boolean) }
+  return { name: c.name || c.legalName || '', lines: [place, reach].filter(Boolean) }
 }
 
 export interface RegisterTotals {
@@ -78,6 +85,83 @@ export interface RegisterTotals {
   months: RegisterTotal[]
   grand: RegisterTotal
 }
+
+// ── The layout ──────────────────────────────────────────────────────────────
+
+/** The columns a report keeps its unit of measure in. */
+const UNIT_COLUMNS = new Set(['uom', 'unit', 'uqc'])
+
+/**
+ * The report's columns, with every quantity told where its unit is.
+ *
+ * Most reports keep the unit in a `uom` column beside the figures. Pointing
+ * each quantity at it is what lets a total add metres to metres and pieces to
+ * pieces, and never one to the other.
+ */
+export function resolveColumns(def: ReportDefinition): ReportColumn[] {
+  const unit = def.columns.find((c) => UNIT_COLUMNS.has(c.key) && c.type === 'text')?.key
+  return def.columns.map((c) =>
+    c.type === 'qty' && !c.unit && !c.unitKey && unit ? { ...c, unitKey: unit } : c
+  )
+}
+
+/**
+ * A single code or number, which never breaks across lines. A name or a list
+ * of numbers may.
+ */
+const CODE =
+  /(Number|No|Code|Challan|Po)$|^(gstin|jwGstin|pan|hsn|uom|unit|uqc|lossUqc|month|document|invoice|number|eWayBill|bucket|section|style)$/
+
+/** The columns that carry a party's or an item's name, given room before they wrap. */
+const NAMES = new Set(['item', 'supplier', 'customer', 'jobWorker', 'description'])
+
+/**
+ * What prints, when a report does not say: every column, in order, with an
+ * item's code set under its name, and the unit of one or two quantities
+ * printed in the figure ("2,316.00 mtr") instead of in a column of its own.
+ * Past two quantities a Unit column is the narrower of the two.
+ */
+function printFor(columns: ReportColumn[]): RegisterColumn[] {
+  const keys = new Set(columns.map((c) => c.key))
+  const withUnit = columns.filter((c) => c.type === 'qty' && c.unitKey)
+  const unitKey = withUnit[0]?.unitKey
+  const inline =
+    unitKey != null && withUnit.length <= 2 && withUnit.every((c) => c.unitKey === unitKey)
+
+  const out: RegisterColumn[] = []
+  for (const c of columns) {
+    if (inline && c.key === unitKey) continue
+    if (c.key === 'itemCode' && keys.has('item')) continue
+    if (c.key === 'item' && keys.has('itemCode')) {
+      out.push({ key: 'item', sub: ['itemCode'], subLabel: 'Code', wrap: true, wide: true })
+      continue
+    }
+    const words = c.type === 'text' && !CODE.test(c.key)
+    out.push({ key: c.key, ...(words ? { wrap: true, ...(NAMES.has(c.key) ? { wide: true } : {}) } : {}) })
+  }
+  return out
+}
+
+/** A report's register with every default filled in. */
+export function resolveRegister(def: ReportDefinition, columns = resolveColumns(def)): RegisterSpec {
+  const o = def.register ?? {}
+  const all = columns.map((c) => c.key)
+  const documentKey = o.documentKey ?? ''
+  const documentColumns = new Set(o.documentColumns ?? [documentKey])
+  const first = columns[0]
+  return {
+    documentKey,
+    noun: o.noun ?? { one: 'entry', many: 'entries' },
+    lineKeys: !documentKey ? all : (o.lineKeys ?? all.filter((k) => !documentColumns.has(k))),
+    print: o.print ?? printFor(columns),
+    noteKey: o.noteKey,
+    void: o.void,
+    monthKey:
+      o.monthKey === false ? '' : (o.monthKey ?? (first?.type === 'date' ? first.key : '')),
+  }
+}
+
+// ── The totals ──────────────────────────────────────────────────────────────
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 const round3 = (n: number) => Math.round(n * 1000) / 1000
@@ -93,6 +177,12 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000
  */
 export function istDay(d: Date): string {
   return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+}
+
+/** A date however a report holds it — a Date, or text a Date can read. */
+export function asDate(v: unknown): Date | null {
+  const d = v instanceof Date ? v : typeof v === 'string' && v ? new Date(v) : null
+  return d && !Number.isNaN(d.getTime()) ? d : null
 }
 
 const MONTH = new Intl.DateTimeFormat('en-IN', {
@@ -113,7 +203,7 @@ function isNumber(v: unknown): v is number {
 function totalOf(
   label: string,
   rows: Array<Record<string, unknown>>,
-  lastRow: number,
+  offset: number,
   columns: ReportColumn[],
   spec: RegisterSpec
 ): RegisterTotal {
@@ -139,43 +229,57 @@ function totalOf(
     }
   }
 
+  // Without a document key every row is its own document.
   const isVoid = (r: Record<string, unknown>) =>
     spec.void != null && r[spec.void.key] === spec.void.value
   const counted = new Set<unknown>()
   const voided = new Set<unknown>()
-  for (const r of rows) (isVoid(r) ? voided : counted).add(r[spec.documentKey])
+  rows.forEach((r, i) =>
+    (isVoid(r) ? voided : counted).add(spec.documentKey ? r[spec.documentKey] : offset + i)
+  )
 
   const counts = { documents: counted.size, voided: voided.size }
-  return { label, ...counts, count: countWords(counts, spec), sums, byUnit, lastRow }
+  return {
+    label,
+    ...counts,
+    count: countWords(counts, spec),
+    sums,
+    byUnit,
+    lastRow: offset + rows.length - 1,
+  }
 }
 
 export function registerTotals(
   def: ReportDefinition,
-  rows: Array<Record<string, unknown>>
+  rows: Array<Record<string, unknown>>,
+  columns = resolveColumns(def),
+  spec = resolveRegister(def, columns)
 ): RegisterTotals {
-  const spec = def.register
-  if (!spec) throw new Error(`${def.id} is not a register`)
-
   const months: RegisterTotal[] = []
-  let start = 0
-  const monthOf = (r: Record<string, unknown>) => {
-    const d = r[spec.monthKey]
-    return d instanceof Date ? istDay(d).slice(0, 7) : ''
-  }
-  for (let i = 1; i <= rows.length; i++) {
-    if (i === rows.length || monthOf(rows[i]) !== monthOf(rows[start])) {
-      const key = monthOf(rows[start])
-      months.push(
-        totalOf(key ? monthLabel(key) : 'Undated', rows.slice(start, i), i - 1, def.columns, spec)
-      )
-      start = i
+  if (spec.monthKey) {
+    const monthOf = (r: Record<string, unknown>) => {
+      const d = asDate(r[spec.monthKey])
+      return d ? istDay(d).slice(0, 7) : ''
+    }
+    let start = 0
+    for (let i = 1; i <= rows.length; i++) {
+      if (i === rows.length || monthOf(rows[i]) !== monthOf(rows[start])) {
+        const key = monthOf(rows[start])
+        months.push(
+          totalOf(key ? monthLabel(key) : 'Undated', rows.slice(start, i), start, columns, spec)
+        )
+        start = i
+      }
     }
   }
+  // A report not in date order would come back as April, May, April again: a
+  // month total is only printed when each month is one unbroken run.
+  const inOrder = new Set(months.map((m) => m.label)).size === months.length
 
   return {
     // A single month's subtotal would only repeat the grand total under it.
-    months: months.length > 1 ? months : [],
-    grand: totalOf('Grand total', rows, rows.length - 1, def.columns, spec),
+    months: months.length > 1 && inOrder ? months : [],
+    grand: totalOf('Grand total', rows, 0, columns, spec),
   }
 }
 

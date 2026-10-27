@@ -52,6 +52,15 @@ export const stockCountVariance: ReportDefinition = {
     note: 'Open a store to see which categories it lost or gained.',
   },
 
+  // Printed as a register, its lines grouped under each count: the date, count
+  // number, store and reason print once, on the first line, as the old ERP's
+  // registers did.
+  register: {
+    documentKey: 'number',
+    noun: { one: 'count', many: 'counts' },
+    documentColumns: ['date', 'number', 'store', 'reason'],
+  },
+
   async run({ tx, params, rowCap }) {
     const from = params.from ? new Date(`${params.from}T00:00:00`) : undefined
     const to = params.to ? new Date(`${params.to}T23:59:59.999`) : undefined

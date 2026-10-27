@@ -87,6 +87,9 @@ export const supplierOutstanding: ReportDefinition = {
     note: 'What is still owed, by supplier. Ageing narrows it to one band; MSME to the suppliers with a statutory payment clock.',
   },
 
+  // Printed as a register, one row to a line; its totals count bills.
+  register: { noun: { one: 'bill', many: 'bills' } },
+
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)
     const where: Prisma.PurchaseInvoiceWhereInput = {

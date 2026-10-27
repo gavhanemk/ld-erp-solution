@@ -4,12 +4,13 @@ import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar, printAs } from '@/components/print/PrintSheet'
-import { RegisterSheet, stampOf, type RegisterData } from '@/components/reports/RegisterSheet'
+import { RegisterSheet, paperFor, stampOf, type RegisterData } from '@/components/reports/RegisterSheet'
 
 /**
- * A register, printed — and saved as the PDF.
+ * A report, printed — and saved as the PDF.
  *
- * The same sheet the report screen shows, laid on a landscape A4. The browser
+ * The same sheet the report screen shows, laid on an A4: landscape for a
+ * report too wide for a portrait page, which is most of them. The browser
  * saves a PDF by printing to one, so the PDF is this page and nothing else:
  * there is no second, slightly different document to keep in step with it.
  *
@@ -58,7 +59,7 @@ function RegisterPrint() {
       )
       .then((r) => {
         if (!r.data.register) {
-          setError('This report is not a register, so it has no printed page. Use Export → Excel instead.')
+          setError('This report has no printed page yet. Use Export → Excel instead.')
           return
         }
         setData(r.data)
@@ -95,7 +96,9 @@ function RegisterPrint() {
     )
   }
 
-  const { letterhead, generatedAt, generatedBy } = data.register
+  const { letterhead, generatedAt, generatedBy, spec } = data.register
+  const paper = paperFor(spec.print.length)
+  const width = paper.landscape ? '297mm' : '210mm'
   const running = [letterhead.name, data.report.title, data.periodLabel].filter(Boolean).join('  ·  ')
   const footer = `Generated on ${stampOf(generatedAt)}${generatedBy ? ` by ${generatedBy}` : ''}`
 
@@ -108,7 +111,7 @@ function RegisterPrint() {
    */
   const pageCss = `
 @page {
-  size: A4 landscape;
+  size: A4 ${paper.landscape ? 'landscape' : 'portrait'};
   margin: 10mm 6mm 11mm;
   @top-left { content: ${cssText(running)}; font: 6.5pt Helvetica, Arial, sans-serif; color: #555; vertical-align: bottom; padding-bottom: 2mm; }
   @bottom-left { content: ${cssText(footer)}; font: 6.5pt Helvetica, Arial, sans-serif; color: #555; vertical-align: top; padding-top: 2mm; }
@@ -117,11 +120,11 @@ function RegisterPrint() {
 @page :first { @top-left { content: none; } }
 
 .register-page {
-  width: 297mm; margin: 0 auto 14px; padding: 10mm 6mm; box-sizing: border-box;
+  width: ${width}; margin: 0 auto 14px; padding: 10mm 6mm; box-sizing: border-box;
   background: #fff; box-shadow: 0 2px 18px rgba(0,0,0,.35);
 }
 .print-toolbar {
-  display: flex; align-items: center; gap: 14px; max-width: 297mm; margin: 0 auto 12px;
+  display: flex; align-items: center; gap: 14px; max-width: ${width}; margin: 0 auto 12px;
   padding: 8px 12px; background: #fff; border-radius: 6px;
   font: 13px Inter, system-ui, sans-serif; color: #1f2b3d;
 }

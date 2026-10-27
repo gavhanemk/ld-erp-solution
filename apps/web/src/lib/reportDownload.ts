@@ -13,7 +13,8 @@ import { tokens } from '@/lib/api'
  */
 export async function downloadReport(
   reportId: string,
-  format: 'xlsx' | 'csv',
+  /** `xlsx` the report on one sheet, `summary` the KPI workbook, `csv` the rows. */
+  format: 'xlsx' | 'csv' | 'summary',
   params: Record<string, string>
 ): Promise<{ fileName: string; bytes: number; charts: number | null; pivots: number | null }> {
   const base = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:5000/api'
@@ -34,7 +35,8 @@ export async function downloadReport(
   }
 
   const disposition = res.headers.get('Content-Disposition') ?? ''
-  const fileName = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `${reportId}.${format}`
+  const fileName =
+    /filename="([^"]+)"/.exec(disposition)?.[1] ?? `${reportId}.${format === 'csv' ? 'csv' : 'xlsx'}`
 
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)

@@ -82,6 +82,15 @@ export const jobWorkPending: ReportDefinition = {
     note: 'Open a job worker to see each process they do for us.',
   },
 
+  // Printed as a register, its lines grouped under each challan: the challan
+  // number and date and job worker print once, on the first line, as the old
+  // ERP's registers did.
+  register: {
+    documentKey: 'challanNumber',
+    noun: { one: 'challan', many: 'challans' },
+    documentColumns: ['challanNumber', 'challanDate', 'jobWorker'],
+  },
+
   async run({ tx, params, rowCap }) {
     const from = params.from ? new Date(`${params.from}T00:00:00`) : undefined
     const to = params.to ? new Date(`${params.to}T23:59:59.999`) : undefined

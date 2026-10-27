@@ -24,8 +24,10 @@ import { useEscape } from '@/lib/useEscape'
  * screen, for somebody who wants to work on it. CSV is what another system
  * reads. None of the three is a fallback for the others.
  *
- * A register is the exception: its report is the register itself, one sheet
- * of every line, and it alone adds a PDF — the register as printed.
+ * The report is the register itself now — one sheet of every row with its
+ * totals, the same as the report screen opens on — and the PDF is that sheet
+ * printed. On the report screen the dashboard workbook is still offered, last,
+ * for whoever wants the KPIs and charts.
  *
  * The work itself belongs to the page: only the page knows which filters are
  * set, and an export that quietly ignored them would be the wrong list.
@@ -35,8 +37,9 @@ type Choice = ExportFormat | 'report' | 'pdf'
 export function ExportButton({
   onExport,
   onReport,
-  reportLabel = 'Detailed report (.xlsx)',
-  reportHint = 'Dashboard, charts and a pivot table, with the rows behind them',
+  reportLabel = 'Report (.xlsx)',
+  reportHint = 'The full report on one sheet, with its totals',
+  reportLast = false,
   onPdf,
   disabled,
   label = 'Export',
@@ -52,6 +55,8 @@ export function ExportButton({
   /** What the report item is called, and the line under it saying what is in it. */
   reportLabel?: string
   reportHint?: string
+  /** Put the report item at the foot of the menu rather than the head. */
+  reportLast?: boolean
   /**
    * Opens the print-ready page, from which the browser prints or saves a PDF.
    * Only a register has one.
@@ -110,6 +115,27 @@ export function ExportButton({
   const ITEM =
     'text-foreground hover:bg-secondary flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors'
 
+  // The report item, with a rule between it and the plain formats on
+  // whichever side they are.
+  const reportItem = onReport ? (
+    <>
+      {reportLast && <div className="border-border my-1 border-t" role="separator" />}
+      <button
+        type="button"
+        role="menuitem"
+        className={`${ITEM} items-start`}
+        onClick={() => void run('report')}
+      >
+        <LayoutDashboard size={15} className="text-primary mt-0.5 shrink-0" />
+        <span className="min-w-0">
+          <span className="block">{reportLabel}</span>
+          <span className="text-muted-foreground block text-xs leading-snug">{reportHint}</span>
+        </span>
+      </button>
+      {!reportLast && <div className="border-border my-1 border-t" role="separator" />}
+    </>
+  ) : null
+
   return (
     <>
       <button
@@ -149,25 +175,7 @@ export function ExportButton({
               className="border-border bg-card fixed z-50 min-w-[17rem] overflow-hidden rounded-xl border py-1 shadow-xl"
               style={{ top: pos.top, right: pos.right }}
             >
-              {onReport && (
-                <>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className={`${ITEM} items-start`}
-                    onClick={() => void run('report')}
-                  >
-                    <LayoutDashboard size={15} className="text-primary mt-0.5 shrink-0" />
-                    <span className="min-w-0">
-                      <span className="block">{reportLabel}</span>
-                      <span className="text-muted-foreground block text-xs leading-snug">
-                        {reportHint}
-                      </span>
-                    </span>
-                  </button>
-                  <div className="border-border my-1 border-t" role="separator" />
-                </>
-              )}
+              {!reportLast && reportItem}
               {onPdf && (
                 <button
                   type="button"
@@ -179,7 +187,7 @@ export function ExportButton({
                   <span className="min-w-0">
                     <span className="block">PDF / Print</span>
                     <span className="text-muted-foreground block text-xs leading-snug">
-                      Landscape A4; choose &ldquo;Save as PDF&rdquo; or a printer
+                      Ready for A4; choose &ldquo;Save as PDF&rdquo; or a printer
                     </span>
                   </span>
                 </button>
@@ -202,6 +210,7 @@ export function ExportButton({
                 <FileText size={15} className="text-muted-foreground" />
                 CSV (.csv)
               </button>
+              {reportLast && reportItem}
             </div>
           </>,
           document.body

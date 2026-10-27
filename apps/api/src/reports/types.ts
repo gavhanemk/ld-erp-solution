@@ -383,33 +383,43 @@ export interface RegisterColumn {
    * halves of a number nobody can search for.
    */
   wrap?: boolean
+  /** A party's or an item's name: given room for a few words before it wraps. */
+  wide?: boolean
 }
 
 /**
- * A report laid out as a register — the accounts team's printed ledger —
- * rather than as a dashboard.
+ * How a report prints as a register — the accounts team's ledger page, and
+ * the first thing every report opens on.
  *
- * A register's rows are the lines of documents. What belongs to the line (the
- * item, its quantity and rate) prints on every line; what belongs to the
- * document (its number, supplier and totals) prints once, on its first line,
- * so a bill of four items is counted once and not four times.
+ * A register's rows are lines. Where several lines belong to one document —
+ * the items of one bill — what belongs to the line (the item, its quantity
+ * and rate) prints on every line, and what belongs to the document (its
+ * number, party and totals) prints once, on its first line, so a bill of four
+ * items reads as one bill.
  *
- * A report with a register gets no Dashboard, Pivot or Notes sheet: its
- * export is the register alone, on one sheet, and its PDF is the same sheet
- * printed.
+ * Every report has one. A report says only what differs from the plain
+ * default, in which each row stands alone, every column prints, an item's
+ * code sits under its name and a quantity carries its unit; `resolveRegister`
+ * fills in the rest. Its export is the register on one sheet and its PDF is
+ * the same sheet printed; the dashboard is a second tab, for whoever wants it.
  */
-export interface RegisterSpec {
-  /** The column all of one document's lines share. */
-  documentKey: string
+export interface RegisterOptions {
+  /** The column all of one document's lines share. Absent: every row stands alone. */
+  documentKey?: string
   /** What one document is called on the totals line: "1 bill", "47 bills". */
-  noun: { one: string; many: string }
+  noun?: { one: string; many: string }
   /**
-   * The columns that belong to the line. Every other column belongs to the
-   * document and prints on its first line only.
+   * The columns that belong to the document, printed on its first line only.
+   * Ignored without a `documentKey`.
    */
-  lineKeys: string[]
-  /** What prints, left to right, on screen and on paper. */
-  print: RegisterColumn[]
+  documentColumns?: string[]
+  /**
+   * Or the other way round: the columns that belong to the line, every other
+   * column belonging to the document. Takes precedence over `documentColumns`.
+   */
+  lineKeys?: string[]
+  /** What prints, left to right, on screen and on paper. Absent: worked out from the columns. */
+  print?: RegisterColumn[]
   /** A text column printed as a note under a document's lines, when it has one. */
   noteKey?: string
   /**
@@ -418,7 +428,23 @@ export interface RegisterSpec {
    * count it.
    */
   void?: { key: string; value: string; word: string }
-  /** The date column whose months the register subtotals by. */
+  /**
+   * The date column whose months the register subtotals by. Absent: the
+   * first column, when that is a date. `false`: no month totals.
+   */
+  monthKey?: string | false
+}
+
+/** A register with every default filled in — what the engine and the screen work from. */
+export interface RegisterSpec {
+  /** Empty when every row stands alone. */
+  documentKey: string
+  noun: { one: string; many: string }
+  lineKeys: string[]
+  print: RegisterColumn[]
+  noteKey?: string
+  void?: { key: string; value: string; word: string }
+  /** Empty when the register has no month totals. */
   monthKey: string
 }
 
@@ -433,8 +459,8 @@ export interface ReportDefinition {
   filters: ReportFilter[]
   /** The Pivot sheet, where the rows repeat a key worth grouping by. */
   pivot?: PivotSpec
-  /** Lays the report out as a register instead of a dashboard. */
-  register?: RegisterSpec
+  /** How the report prints as a register, where it differs from the default. */
+  register?: RegisterOptions
   run: (ctx: ReportContext) => Promise<ReportResult>
 }
 

@@ -125,6 +125,9 @@ export const noteRegister: ReportDefinition = {
     note: 'What has been claimed and what has been granted, by type and then by supplier. Collapse a level to read its subtotal.',
   },
 
+  // Printed as a register, one row to a line; its totals count notes.
+  register: { noun: { one: 'note', many: 'notes' } },
+
   async run({ tx, params, rowCap }) {
     const where = noteWhere(params, params.type as PurchaseAdjustmentDoc | undefined)
 

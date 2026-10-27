@@ -3,16 +3,15 @@
 import { use, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
-import { AlertCircle, ArrowLeft, Printer, RefreshCw } from 'lucide-react'
+import { AlertCircle, ArrowLeft, FileText, LayoutDashboard, Printer, RefreshCw } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
-import { ReportDashboard, TONE, type Analysis, type Tone } from '@/components/reports/Dashboard'
+import { ReportDashboard, type Analysis, type Tone } from '@/components/reports/Dashboard'
 import { PivotTable } from '@/components/reports/PivotTable'
 import { MODULE_WORDS, moduleReportsHref } from '@/components/reports/modules'
 import { FilterBar, type Filter } from '@/components/reports/FilterBar'
 import { RegisterSheet, type RegisterData } from '@/components/reports/RegisterSheet'
 import { describeReport, downloadReport, openRegisterPrint } from '@/lib/reportDownload'
-import { formatDate } from '@/lib/utils'
 
 interface Column {
   key: string
@@ -28,58 +27,15 @@ interface RunResult {
   report: { id: string; title: string; description: string }
   periodLabel: string
   appliedFilters: RegisterData['appliedFilters']
-  /** Absent on a register, which has no dashboard. */
+  /** The KPI Summary tab. Absent on a report that has none. */
   analysis?: Analysis
   rowCount: number
   totalRows: number
   truncated: boolean
   columns: Column[]
-  preview: Array<Record<string, unknown>>
-  /** Every row the query returned, for the pivot table to regroup over. */
+  /** Every row the query returned: the register, and the KPI tab's totals by group. */
   rows: Array<Record<string, unknown>>
-  /** Present when the report is laid out as a register rather than a dashboard. */
-  register?: RegisterData['register']
-}
-
-const money = (v: number) =>
-  v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-
-/**
- * A status as a badge, the same as the export prints it.
- *
- * Without this the preview showed the raw enum — COMPLETED, SENT — beside an
- * exported sheet that showed "Completed" and "Sent" on a tinted cell, and the
- * two looked like different reports. The word and the colour both come from
- * the column definition rather than from the value's spelling.
- */
-function Badge({ column, value }: { column: Column; value: unknown }) {
-  const raw = String(value)
-  const word = column.badges?.[raw] ?? raw
-  const tone = column.badgeTones?.[raw]
-  if (!tone) return <>{word}</>
-  return (
-    <span
-      className="inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium"
-      style={{
-        background: `color-mix(in srgb, ${TONE[tone]} 16%, transparent)`,
-        color: TONE[tone],
-      }}
-    >
-      {word}
-    </span>
-  )
-}
-
-function cellText(c: Column, v: unknown): string {
-  if (v == null || v === '') return '—'
-  if (c.type === 'date') return formatDate(String(v))
-  if (c.type === 'money') return `₹${money(Number(v))}`
-  if (c.type === 'percent') return `${(Number(v) * 100).toFixed(1)}%`
-  if (c.type === 'qty') {
-    return `${Number(v).toLocaleString('en-IN', { maximumFractionDigits: 3 })}${c.unit ? ` ${c.unit}` : ''}`
-  }
-  if (c.type === 'integer') return Number(v).toLocaleString('en-IN')
-  return String(v)
+  register: RegisterData['register']
 }
 
 export default function ReportPage({ params }: { params: Promise<{ id: string }> }) {
@@ -107,6 +63,11 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const [pivotDefaults, setPivotDefaults] = useState<{ rows?: string; values?: string }>({})
   /** The report's module, for the way back to that module's reports. */
   const [module, setModule] = useState<string | null>(null)
+  /*
+   * Which tab is showing. The report first, always: it is what the accounts
+   * team asked to open on. The KPIs are a tab away for whoever wants them.
+   */
+  const [view, setView] = useState<'report' | 'summary'>('report')
 
   // The definition, for the filter bar. Fetched from the same registry the
   // server runs from, so a filter added there appears here with no change.
@@ -191,7 +152,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
     [values]
   )
 
-  const exportFile = async (format: 'xlsx' | 'csv') => {
+  const exportFile = async (format: 'xlsx' | 'csv' | 'summary') => {
     setError(null)
     try {
       setMessage(describeReport(await downloadReport(id, format, applied)))
@@ -200,10 +161,10 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
     }
   }
 
-  // The printed register is the one on screen, so it prints what was last
-  // run — not filters typed since and not yet run.
-  const isRegister = Boolean(result?.register)
+  // The printed report is the one on screen, so it prints what was last run
+  // — not filters typed since and not yet run.
   const printRegister = () => openRegisterPrint(id, ranWith)
+  const hasSummary = Boolean(result?.analysis)
 
   return (
     <div className="space-y-5">
@@ -222,20 +183,22 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
           <button className="btn-ghost" onClick={() => void run()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          {isRegister && (
-            <button
-              className="btn-ghost"
-              onClick={printRegister}
-              disabled={loading}
-              title="Print, or save as PDF"
-            >
-              <Printer size={15} />
-              <span className="hidden sm:inline">Print</span>
-            </button>
-          )}
+          <button
+            className="btn-ghost"
+            onClick={printRegister}
+            disabled={loading || !result}
+            title="Print, or save as PDF"
+          >
+            <Printer size={15} />
+            <span className="hidden sm:inline">Print</span>
+          </button>
           <ExportButton
             onExport={exportFile}
-            onPdf={isRegister ? printRegister : undefined}
+            onPdf={printRegister}
+            onReport={hasSummary ? () => exportFile('summary') : undefined}
+            reportLabel="KPI summary with charts (.xlsx)"
+            reportHint="KPIs, charts and a pivot table, with the rows behind them"
+            reportLast
             disabled={loading || !result}
           />
         </div>
@@ -267,86 +230,61 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
 
       {loading && !result ? (
         <p className="text-muted-foreground text-sm">Running...</p>
-      ) : result?.register ? (
-        // A register is read as a ledger: the sheet, and nothing drawn over it.
-        <RegisterSheet data={result as RegisterData} mode="screen" />
       ) : result ? (
         <>
-          <p className="text-muted-foreground text-xs">
-            {result.periodLabel} · {result.rowCount.toLocaleString('en-IN')} {result.rowCount === 1 ? 'row' : 'rows'}
-            {result.truncated && (
-              <span className="text-amber-400">
-                {' '}
-                of {result.totalRows.toLocaleString('en-IN')} — the export will be marked PARTIAL
-              </span>
-            )}
-          </p>
-
-          {result.analysis && (
-            <ReportDashboard analysis={result.analysis} rowCount={result.rowCount} />
-          )}
-
-          {result.rows.length > 0 && (
-            <PivotTable
-              columns={result.columns}
-              rows={result.rows}
-              defaultRowKey={pivotDefaults.rows}
-              defaultValueKey={pivotDefaults.values}
-            />
-          )}
-
-          {result.preview.length > 0 && (
-            <div className="glass-card overflow-hidden p-0">
-              <div className="border-border flex items-center justify-between border-b px-4 py-2.5">
-                <h3 className="text-foreground text-sm font-semibold">The rows</h3>
-                <span className="text-muted-foreground text-xs">
-                  first {result.preview.length} of {result.rowCount.toLocaleString('en-IN')} — every
-                  row is in the export
-                </span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="subtable w-full">
-                  <thead>
-                    <tr>
-                      {result.columns.map((c) => (
-                        <th
-                          key={c.key}
-                          className={
-                            ['money', 'qty', 'integer', 'percent'].includes(c.type)
-                              ? 'text-right'
-                              : undefined
-                          }
-                        >
-                          {c.label}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.preview.map((r, i) => (
-                      <tr key={i}>
-                        {result.columns.map((c) => (
-                          <td
-                            key={c.key}
-                            className={
-                              ['money', 'qty', 'integer', 'percent'].includes(c.type)
-                                ? 'whitespace-nowrap text-right tabular-nums'
-                                : 'whitespace-nowrap'
-                            }
-                          >
-                            {c.type === 'badge' && r[c.key] != null && r[c.key] !== '' ? (
-                              <Badge column={c} value={r[c.key]} />
-                            ) : (
-                              cellText(c, r[c.key])
-                            )}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+          {hasSummary && (
+            <div className="border-border bg-secondary inline-flex rounded-lg border p-1" role="tablist">
+              {(
+                [
+                  { key: 'report', label: 'Report', icon: FileText },
+                  { key: 'summary', label: 'KPI Summary', icon: LayoutDashboard },
+                ] as const
+              ).map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={view === t.key}
+                  onClick={() => setView(t.key)}
+                  className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                    view === t.key
+                      ? 'bg-card text-foreground font-medium shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  <t.icon size={15} /> {t.label}
+                </button>
+              ))}
             </div>
+          )}
+
+          {view === 'summary' && result.analysis ? (
+            <>
+              <p className="text-muted-foreground text-xs">
+                {result.periodLabel} · {result.rowCount.toLocaleString('en-IN')}{' '}
+                {result.rowCount === 1 ? 'row' : 'rows'}
+                {result.truncated && (
+                  <span className="text-amber-400">
+                    {' '}
+                    of {result.totalRows.toLocaleString('en-IN')} — the export will be marked PARTIAL
+                  </span>
+                )}
+              </p>
+
+              <ReportDashboard analysis={result.analysis} rowCount={result.rowCount} />
+
+              {result.rows.length > 0 && (
+                <PivotTable
+                  columns={result.columns}
+                  rows={result.rows}
+                  defaultRowKey={pivotDefaults.rows}
+                  defaultValueKey={pivotDefaults.values}
+                />
+              )}
+            </>
+          ) : (
+            // The report itself: the sheet the PDF prints and the workbook holds.
+            <RegisterSheet data={result as RegisterData} mode="screen" />
           )}
         </>
       ) : null}

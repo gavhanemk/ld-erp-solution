@@ -35,15 +35,19 @@ export interface RegisterPrintColumn {
   underLabel?: string
   /** A name that may wrap. Everything else stays on one line. */
   wrap?: boolean
+  /** A party's or an item's name, given room for a few words before it wraps. */
+  wide?: boolean
 }
 
 export interface RegisterSpec {
+  /** Empty when every row stands alone. */
   documentKey: string
   noun: { one: string; many: string }
   lineKeys: string[]
   print: RegisterPrintColumn[]
   noteKey?: string
   void?: { key: string; value: string; word: string }
+  /** Empty when the register has no month totals. */
   monthKey: string
 }
 
@@ -113,7 +117,12 @@ const qty = (n: number) =>
  * a bill from another state has no CGST, and a column of "0.00" down the page
  * is figures for the eye to read that say nothing.
  */
-function text(c: RegisterColumnDef | undefined, row: Record<string, unknown>, v: unknown): string {
+function text(
+  c: RegisterColumnDef | undefined,
+  row: Record<string, unknown>,
+  v: unknown,
+  printed?: Set<string>
+): string {
   if (!c || v == null || v === '') return ''
   switch (c.type) {
     case 'date': {
@@ -128,7 +137,12 @@ function text(c: RegisterColumnDef | undefined, row: Record<string, unknown>, v:
     }
     case 'qty': {
       const n = Number(v)
-      const unit = c.unitKey ? String(row[c.unitKey] ?? '') : (c.unit ?? '')
+      // In the figure, unless the register prints a Unit column beside it.
+      const unit = c.unitKey
+        ? printed?.has(c.unitKey)
+          ? ''
+          : String(row[c.unitKey] ?? '')
+        : (c.unit ?? '')
       return `${qty(n)}${unit ? ` ${unit}` : ''}`
     }
     case 'percent':
@@ -157,12 +171,37 @@ function totalCell(c: RegisterColumnDef | undefined, t: RegisterTotal) {
   return v == null ? null : text(c, {}, v)
 }
 
+/**
+ * The paper a register prints on, and the size it is set in, by how many
+ * columns it has.
+ *
+ * Nine columns sit on a portrait page in a size anybody can read; eighteen
+ * need a landscape page and small type. One size for every report would set
+ * the short ones in the small type the long ones need.
+ */
+export function paperFor(columns: number): {
+  landscape: boolean
+  size: string
+  sub: string
+  pad: string
+} {
+  if (columns <= 9) return { landscape: false, size: '8.2pt', sub: '7.1pt', pad: '2.2pt 3.2pt' }
+  if (columns <= 10) return { landscape: true, size: '8pt', sub: '6.9pt', pad: '2.2pt 3.4pt' }
+  if (columns <= 13) return { landscape: true, size: '7.3pt', sub: '6.3pt', pad: '2pt 2.6pt' }
+  if (columns <= 16) return { landscape: true, size: '6.7pt', sub: '5.9pt', pad: '1.7pt 2pt' }
+  return { landscape: true, size: '6.2pt', sub: '5.5pt', pad: '1.5pt 1.4pt' }
+}
+
 export function RegisterSheet({ data, mode }: { data: RegisterData; mode: 'screen' | 'print' }) {
   const { register, columns, rows } = data
   const { spec, totals, letterhead } = register
   const byKey = new Map(columns.map((c) => [c.key, c]))
   const lineKeys = new Set(spec.lineKeys)
   const print = spec.print
+  // Every key that prints somewhere, so a figure knows whether its unit has
+  // a column of its own.
+  const printed = new Set(print.flatMap((p) => [p.key, p.under ?? '', ...(p.sub ?? [])]))
+  const paper = paperFor(print.length)
 
   // The label of a total runs across every column up to the first figure it
   // totals, so the figures sit under their own headings.
@@ -170,11 +209,13 @@ export function RegisterSheet({ data, mode }: { data: RegisterData; mode: 'scree
   const labelSpan = firstFigure > 0 ? firstFigure : 1
 
   // A bill's lines, kept together so the page never breaks inside one.
+  // Without a document key every row stands alone.
   const documents: Array<{ start: number; rows: Array<Record<string, unknown>> }> = []
   rows.forEach((r, i) => {
     const last = documents[documents.length - 1]
-    if (last && last.rows[0][spec.documentKey] === r[spec.documentKey]) last.rows.push(r)
-    else documents.push({ start: i, rows: [r] })
+    if (spec.documentKey && last && last.rows[0][spec.documentKey] === r[spec.documentKey]) {
+      last.rows.push(r)
+    } else documents.push({ start: i, rows: [r] })
   })
   const monthEnding = new Map(totals.months.map((m) => [m.lastRow, m]))
 
@@ -199,7 +240,18 @@ export function RegisterSheet({ data, mode }: { data: RegisterData; mode: 'scree
   )
 
   return (
-    <div className={`reg reg-${mode}`}>
+    <div
+      className={`reg reg-${mode}`}
+      style={
+        mode === 'print'
+          ? ({
+              '--reg-size': paper.size,
+              '--reg-sub': paper.sub,
+              '--reg-pad': paper.pad,
+            } as React.CSSProperties)
+          : undefined
+      }
+    >
       <style>{SHEET_CSS}</style>
 
       <header className="reg-head">
@@ -222,7 +274,7 @@ export function RegisterSheet({ data, mode }: { data: RegisterData; mode: 'scree
         {data.truncated && (
           <div className="reg-partial">
             Showing the first {data.rowCount.toLocaleString('en-IN')} of{' '}
-            {data.totalRows.toLocaleString('en-IN')} lines. Narrow the period to see every line.
+            {data.totalRows.toLocaleString('en-IN')} rows. Narrow the period to see every row.
           </div>
         )}
       </header>
@@ -271,14 +323,20 @@ export function RegisterSheet({ data, mode }: { data: RegisterData; mode: 'scree
                         const shown = i === 0 || lineKeys.has(p.key)
                         if (!shown) return <td key={p.key} />
                         const subs = (p.sub ?? [])
-                          .map((k) => text(byKey.get(k), r, r[k]))
+                          .map((k) => text(byKey.get(k), r, r[k], printed))
                           .filter(Boolean)
-                        const cls = NUMERIC.has(c?.type ?? '') ? 'num' : p.wrap ? 'wrap' : undefined
+                        const cls = NUMERIC.has(c?.type ?? '')
+                          ? 'num'
+                          : p.wrap
+                            ? `wrap${p.wide ? ' wide' : ''}`
+                            : undefined
                         return (
                           <td key={p.key} className={cls}>
-                            {text(c, r, r[p.key])}
+                            {text(c, r, r[p.key], printed)}
                             {p.under && (
-                              <span className="reg-under">{text(byKey.get(p.under), r, r[p.under])}</span>
+                              <span className="reg-under">
+                                {text(byKey.get(p.under), r, r[p.under], printed)}
+                              </span>
                             )}
                             {subs.map((s, j) => (
                               <span key={j} className="reg-sub">
@@ -331,10 +389,10 @@ const SHEET_CSS = `
   border-radius: 12px; padding: 20px 20px 14px;
   box-shadow: 0 1px 3px rgba(15, 23, 42, .12), 0 0 0 1px rgba(15, 23, 42, .06);
 }
-.reg-print { --reg-size: 6.2pt; --reg-sub: 5.5pt; --reg-pad: 1.5pt 1.4pt; }
+/* Print sizes come from paperFor(), set on the element by column count. */
 
 .reg-head { text-align: center; margin-bottom: 10px; }
-.reg-company { font-size: 1.6em; font-weight: 800; letter-spacing: .02em; text-transform: uppercase; }
+.reg-company { font-size: 1.6em; font-weight: 800; letter-spacing: .01em; }
 .reg-address { font-size: .92em; color: #333; }
 .reg-title {
   margin-top: 6px; padding: 3px 0; font-size: 1.25em; font-weight: 800; letter-spacing: .12em;
@@ -355,11 +413,13 @@ const SHEET_CSS = `
   padding: var(--reg-pad); vertical-align: top; text-align: left; white-space: nowrap;
 }
 .reg-table .num { text-align: right; }
-/* Names may take a second line; numbers, dates and codes never break. */
-.reg-table td.wrap { white-space: normal; min-width: 7.5em; }
-/* A screen has room to scroll sideways, so a name is given a line of its
-   own rather than squeezed to the narrowest it can go. */
-.reg-screen .reg-table td.wrap { min-width: 10em; }
+/* Words may take a second line; numbers, dates and codes never break. A
+   name is given room for a few words first, and more of it on a screen,
+   which can scroll sideways where paper cannot. */
+.reg-table td.wrap { white-space: normal; min-width: 4.5em; }
+.reg-table td.wide { min-width: 7.5em; }
+.reg-screen .reg-table td.wrap { min-width: 6em; }
+.reg-screen .reg-table td.wide { min-width: 10em; }
 .reg-table th {
   font-weight: 700; font-size: .9em; text-transform: uppercase; vertical-align: bottom;
   border-top: 1px solid #111; border-bottom: 1px solid #111; background: #f1f3f5;
