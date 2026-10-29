@@ -375,10 +375,15 @@ export const WASH_CARE = [
 ] as const
 
 export const createStyleSchema = z.object({
-  code,
+  // Made by the server from brand, garment type and season (LD-SH-2606);
+  // still accepted when given, as an import of existing styles does.
+  code: code.optional(),
   name,
   season: z.string().max(50).optional().nullable(),
-  brandType: BrandTypeEnum,
+  // The brand from the Brands master; its kind sets brandType on save. A
+  // brandType alone is still taken, from an import or an older screen.
+  brandId: z.string().min(1).optional().nullable(),
+  brandType: BrandTypeEnum.optional(),
   category: z.string().max(100).optional().nullable(),
   collarType: z.string().max(100).optional().nullable(),
   sleeveType: z.string().max(100).optional().nullable(),
@@ -833,6 +838,8 @@ export const createWorkstationSchema = z
     code: code.optional(),
     name,
     departmentId: z.string().min(1, 'Pick the process this belongs to'),
+    /** The one process it does (Cutting Table 3 → Cutting); empty for any of its department's. */
+    operationId: z.string().min(1).optional().nullable(),
     type: z.enum(['IN_HOUSE', 'JOB_WORK']).default('IN_HOUSE'),
     supplierId: z.string().optional().nullable(),
     capacityPerDay: z.number().int().min(0).max(1000000).optional().nullable(),
@@ -852,6 +859,7 @@ export const updateWorkstationSchema = z.object({
   code: code.optional(),
   name: name.optional(),
   departmentId: z.string().min(1).optional(),
+  operationId: z.string().min(1).optional().nullable(),
   type: z.enum(['IN_HOUSE', 'JOB_WORK']).optional(),
   supplierId: z.string().optional().nullable(),
   capacityPerDay: z.number().int().min(0).max(1000000).optional().nullable(),
@@ -860,6 +868,23 @@ export const updateWorkstationSchema = z.object({
   phone,
   isActive,
 })
+
+// ─────────────────────────────────────────────────────────────
+// Contractor — who does a process on the floor, paid by the piece
+// ─────────────────────────────────────────────────────────────
+
+const contractorFields = z.object({
+  // Made by the server (CON-001) when left out.
+  code: code.optional(),
+  name,
+  operationId: z.string().min(1, 'Pick the process they do'),
+  phone,
+  ratePerPiece: z.number().min(0).max(100000).optional().nullable(),
+  notes: optionalText,
+  isActive,
+})
+export const createContractorSchema = contractorFields
+export const updateContractorSchema = contractorFields.partial()
 
 const brokerFields = z.object({
   // Left out on a new record: the server makes one up. Still validated when
@@ -939,6 +964,8 @@ export const routingStepSchema = z.object({
   operationId: z.string().min(1, 'Pick a process'),
   departmentId: z.string().min(1, 'Pick a department'),
   workstationId: z.string().optional().nullable(),
+  /** The contractor who normally does it: one who does this process. */
+  contractorId: z.string().min(1).optional().nullable(),
   smv: z.number().min(0).max(999).optional().nullable(),
   ratePerPiece: z.number().min(0).max(100000).optional().nullable(),
   isQcStep: z.boolean().default(false),

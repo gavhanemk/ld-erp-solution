@@ -1,10 +1,13 @@
 'use client'
 
-import { useState } from 'react'
-import { FileSpreadsheet } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { FileSpreadsheet, LayoutList, Plus, Table2 } from 'lucide-react'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
-import type { FormField } from '@/components/masters/MasterFormDialog'
+import { lineFormFields as formFields } from '@/components/masters/lineFormFields'
 import { ImportWorkstationsDialog } from '@/components/masters/ImportWorkstationsDialog'
+import { RoutingMastersTabs } from '@/components/masters/RoutingMastersTabs'
+import { masterResource, type Paginated } from '@/lib/api'
+import { LinesByProcess } from '@/components/masters/LinesByProcess'
 
 /**
  * Workstations.
@@ -21,6 +24,8 @@ interface Workstation {
   type: 'IN_HOUSE' | 'JOB_WORK'
   departmentId: string
   department: { id: string; name: string } | null
+  operationId?: string | null
+  operation?: { id: string; name: string } | null
   supplierId: string | null
   supplier: { id: string; name: string } | null
   capacityPerDay: number | null
@@ -32,11 +37,18 @@ interface Workstation {
 
 const columns: Column<Workstation>[] = [
   { key: 'code', header: 'Code', sortable: true, className: 'font-mono text-xs text-teal-400 whitespace-nowrap' },
-  { key: 'name', header: 'Workstation', sortable: true, className: 'font-medium' },
+  { key: 'name', header: 'Line or table', sortable: true, className: 'font-medium' },
   {
     key: 'department',
     header: 'Process',
-    render: (w) => w.department?.name ?? <span className="text-muted-foreground">—</span>,
+    render: (w) =>
+      w.operation ? (
+        w.operation.name
+      ) : w.department ? (
+        <span title={`Any process of ${w.department.name}`}>{w.department.name}</span>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
   },
   {
     key: 'type',
@@ -96,57 +108,6 @@ const columns: Column<Workstation>[] = [
 ]
 
 /*
- * Four across on the wider card: the station, its process and who runs it,
- * then the supplier paid beside its capacity; then who to call and where.
- * Hints sit in the boxes, so it fits without scrolling.
- */
-const formFields: FormField[] = [
-  { name: 'code', label: 'Code', generated: true, section: 'Workstation' },
-  { name: 'name', label: 'Name', required: true, placeholder: 'Stitching Unit 1', section: 'Workstation', span: 2 },
-  {
-    name: 'departmentId',
-    label: 'Process',
-    type: 'select',
-    required: true,
-    section: 'Workstation',
-    optionsFrom: { resource: 'departments' },
-    placeholder: 'Which step of the line…',
-  },
-  {
-    name: 'type',
-    label: 'Run by',
-    type: 'select',
-    required: true,
-    section: 'Workstation',
-    options: [
-      { value: 'IN_HOUSE', label: 'Our own floor' },
-      { value: 'JOB_WORK', label: 'An outside unit' },
-    ],
-  },
-  {
-    name: 'supplierId',
-    label: 'Supplier paid for this work',
-    type: 'select',
-    section: 'Workstation',
-    span: 2,
-    optionsFrom: { resource: 'suppliers' },
-    placeholder: 'Needed for an outside unit',
-    help: 'Without it an outside unit’s job-work bill cannot be totalled',
-  },
-  {
-    name: 'capacityPerDay',
-    label: 'Pieces per day',
-    type: 'number',
-    section: 'Workstation',
-    placeholder: '500 (blank if it varies)',
-  },
-  { name: 'contactPerson', label: 'Contact Person', section: 'Contact' },
-  { name: 'phone', label: 'Phone', section: 'Contact', placeholder: '+91 98765 43210' },
-  { name: 'address', label: 'Address', type: 'textarea', section: 'Contact', span: 2, rows: 1 },
-  { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for production', section: 'Contact' },
-]
-
-/*
  * The process, who runs it, who is paid, whether its capacity is known, and
  * whether any routing sends work to it. Each counts what it would leave.
  */
@@ -188,33 +149,135 @@ const filterDefs: FilterDef[] = [
   },
 ]
 
+/** How many lines each process has: Cutting 4 tables, Stitching 3 lines, Washing an outside unit. */
+function LinesPerProcess({ refreshKey }: { refreshKey: number }) {
+  const [rows, setRows] = useState<Array<{ name: string; ours: number; outside: number }> | null>(null)
+  useEffect(() => {
+    let live = true
+    void masterResource<Workstation>('workstations')
+      .list({ limit: 500, active: true })
+      .then((r) => {
+        if (!live) return
+        const by = new Map<string, { name: string; ours: number; outside: number }>()
+        for (const w of (r as Paginated<Workstation>).data) {
+          const name = w.operation?.name ?? w.department?.name ?? 'No process'
+          const g = by.get(name) ?? { name, ours: 0, outside: 0 }
+          if (w.type === 'JOB_WORK') g.outside++
+          else g.ours++
+          by.set(name, g)
+        }
+        setRows([...by.values()].sort((a, b) => a.name.localeCompare(b.name)))
+      })
+      .catch(() => live && setRows([]))
+    return () => {
+      live = false
+    }
+  }, [refreshKey])
+  if (!rows?.length) return null
+  return (
+    <div className="glass-card mb-3 flex flex-wrap items-center gap-2 px-4 py-3">
+      <span className="text-muted-foreground mr-1 text-xs font-semibold uppercase tracking-wide">Lines per process</span>
+      {rows.map((g) => (
+        <span key={g.name} className="badge-neutral">
+          <b className="text-foreground">{g.name}</b>
+          {g.ours > 0 && ` · ${g.ours} on our floor`}
+          {g.outside > 0 && ` · ${g.outside} outside`}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 export default function WorkstationsPage() {
   const [importing, setImporting] = useState(false)
   // Bumped after an import, so the list and its filter counts reload.
   const [refreshKey, setRefreshKey] = useState(0)
+  // Bumped after a save here, so the lines-per-process strip reads again.
+  const [saved, setSaved] = useState(0)
+  // Process by process, or the full table with its filters and export.
+  const [view, setView] = useState<'process' | 'table'>('process')
+  const [adding, setAdding] = useState(false)
+
+  const switcher = (
+    <div className="border-border bg-secondary flex rounded-lg border p-0.5" role="tablist" aria-label="Show lines">
+      {(
+        [
+          ['process', 'By process', LayoutList],
+          ['table', 'Table', Table2],
+        ] as const
+      ).map(([key, label, Icon]) => (
+        <button
+          key={key}
+          type="button"
+          role="tab"
+          aria-selected={view === key}
+          onClick={() => setView(key)}
+          className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${view === key ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+        >
+          <Icon size={14} /> {label}
+        </button>
+      ))}
+    </div>
+  )
+  const importButton = (
+    <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
+      <FileSpreadsheet size={16} /> Import
+    </button>
+  )
 
   return (
     <>
-      <MasterTable<Workstation>
-        title="Workstations"
-        entityName="Workstation"
-        resource="workstations"
-        columns={columns}
-        formFields={formFields}
-        formColumns={4}
-        formWide
-        filterDefs={filterDefs}
-        defaultSort="code"
-        searchPlaceholder="Search name, code, process, supplier, contact..."
-        emptyMessage="No workstations yet. Add your lines and your outside job-work units."
-        refreshKey={refreshKey}
-        exportable
-        actions={
-          <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
-            <FileSpreadsheet size={16} /> Import
-          </button>
-        }
-      />
+      <RoutingMastersTabs />
+      {view === 'process' ? (
+        <>
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h1 className="page-title">Lines & tables</h1>
+              <p className="page-subtitle">Each process with the tables, lines and outside units it runs on</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {switcher}
+              {importButton}
+              <button type="button" className="btn-primary" onClick={() => setAdding(true)} data-hotkey="new" aria-keyshortcuts="Alt+N">
+                <Plus size={16} /> New Line
+              </button>
+            </div>
+          </div>
+          <LinesByProcess
+            fields={formFields}
+            refreshKey={refreshKey + saved}
+            onChanged={() => setSaved((n) => n + 1)}
+            startNew={adding}
+            onStartedNew={() => setAdding(false)}
+          />
+        </>
+      ) : (
+        <>
+          <LinesPerProcess refreshKey={refreshKey + saved} />
+          <MasterTable<Workstation>
+            title="Lines & tables"
+            entityName="Line"
+            resource="workstations"
+            columns={columns}
+            formFields={formFields}
+            formColumns={4}
+            formWide
+            filterDefs={filterDefs}
+            defaultSort="code"
+            searchPlaceholder="Search name, code, process, supplier, contact..."
+            emptyMessage="No lines yet. Add your tables and lines, and your outside job-work units."
+            refreshKey={refreshKey}
+            onChanged={() => setSaved((n) => n + 1)}
+            exportable
+            actions={
+              <>
+                {switcher}
+                {importButton}
+              </>
+            }
+          />
+        </>
+      )}
       {importing && (
         <ImportWorkstationsDialog onClose={() => setImporting(false)} onImported={() => setRefreshKey((k) => k + 1)} />
       )}

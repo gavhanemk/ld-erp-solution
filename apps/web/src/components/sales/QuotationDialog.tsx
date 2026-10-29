@@ -711,8 +711,9 @@ export function QuotationDialog({
                   resource="styles"
                   fields={styleFormFields}
                   initialValues={{
-                    ...(newStyle?.typed ? { code: newStyle.typed.toUpperCase() } : {}),
-                    brandType: 'LD_COTTON_MILLS',
+                    // The code is made by the system now, so what was searched
+                    // for becomes the name — unless it was a code nobody has.
+                    ...(newStyle?.typed && !/^[A-Za-z0-9]+(-[A-Za-z0-9]+)+$/.test(newStyle.typed.trim()) ? { name: newStyle.typed.trim() } : {}),
                     isActive: true,
                   }}
                   title="Style"

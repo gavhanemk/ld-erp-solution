@@ -2,13 +2,19 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, CircleCheck, GripVertical, Info, ListOrdered, Loader2, Lock, Plus, Route, Save, Trash2, Truck } from 'lucide-react'
-import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { changed } from './routing/track'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { styleFormFields } from '@/components/masters/styleFormFields'
+import { processFormFields } from '@/components/masters/processFormFields'
+import { lineFormFields } from '@/components/masters/lineFormFields'
+import { contractorFormFields } from '@/components/masters/contractorFormFields'
+import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 
 /**
  * A routing: the ordered path a garment takes through the factory.
@@ -42,6 +48,7 @@ export interface RoutingStep {
   operationId: string
   departmentId: string
   workstationId?: string | null
+  contractorId?: string | null
   smv?: number | string | null
   ratePerPiece?: number | string | null
   isQcStep: boolean
@@ -51,6 +58,7 @@ export interface RoutingStep {
   operation?: { id: string; name: string; code: string; kind?: Kind }
   department?: { id: string; name: string }
   workstation?: { id: string; name: string; type: string } | null
+  contractor?: { id: string; name: string } | null
 }
 
 type Person = { id: string; name: string } | null
@@ -116,7 +124,15 @@ interface Unit {
   id: string
   name: string
   departmentId: string
+  /** The one process it does, when it is tied to one (a Final QC line). */
+  operationId?: string | null
   type: 'IN_HOUSE' | 'JOB_WORK'
+}
+/** A contractor from the Routing Masters, and the process they do. */
+interface Contractor {
+  id: string
+  name: string
+  operationId: string
 }
 interface StyleOption {
   id: string
@@ -130,6 +146,7 @@ interface Row {
   key: string
   operationId: string
   workstationId: string
+  contractorId: string
   execution: Execution
   skip: Skip
   isQcStep: boolean
@@ -151,10 +168,10 @@ const APPLIES: Array<{ value: Applies; label: string }> = [
 ]
 
 /** The step columns, the same on the heading and every row of a wide screen. */
-const COLS = 'lg:grid-cols-[2.75rem_minmax(9rem,1fr)_8.5rem_minmax(11rem,1.6fr)_6rem_6rem_10.5rem_6.5rem]'
+const COLS = 'lg:grid-cols-[2.75rem_minmax(9rem,1fr)_8rem_minmax(9rem,1.2fr)_minmax(9rem,1.1fr)_5.5rem_5.5rem_10rem_6.5rem]'
 
 let seq = 0
-const blank = (): Row => ({ key: `n${++seq}`, operationId: '', workstationId: '', execution: 'IN_HOUSE', skip: 'WITH_APPROVAL', isQcStep: false, smv: '', ratePerPiece: '', instructions: '' })
+const blank = (): Row => ({ key: `n${++seq}`, operationId: '', workstationId: '', contractorId: '', execution: 'IN_HOUSE', skip: 'WITH_APPROVAL', isQcStep: false, smv: '', ratePerPiece: '', instructions: '' })
 const num = (v: string | number | null | undefined) => (v == null || v === '' ? '' : String(Number(v)))
 const figure = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 })
 const rowsOf = (steps: RoutingStep[] | undefined): Row[] =>
@@ -165,6 +182,7 @@ const rowsOf = (steps: RoutingStep[] | undefined): Row[] =>
           key: `s${++seq}`,
           operationId: s.operationId,
           workstationId: s.workstationId ?? '',
+          contractorId: s.contractorId ?? '',
           execution: s.execution ?? 'IN_HOUSE',
           skip: s.skip ?? 'WITH_APPROVAL',
           isQcStep: s.isQcStep,
@@ -195,6 +213,17 @@ export function RoutingFormDialog({
   const isEdit = Boolean(record)
   const [ops, setOps] = useState<Operation[]>([])
   const [units, setUnits] = useState<Unit[]>([])
+  const [contractors, setContractors] = useState<Contractor[]>([])
+  /*
+   * A choice that is not in a list yet, being added from that list without
+   * leaving the routing: saved to its master, then picked where it was asked
+   * for. `rowKey` is the step it was asked for on.
+   */
+  const [adding, setAdding] = useState<null | { kind: 'style' | 'process' | 'line' | 'contractor'; rowKey?: string; typed: string }>(null)
+  // A fabric being added: the new-item window, with the fabric category picked.
+  const [newFabric, setNewFabric] = useState(false)
+  const [itemCategories, setItemCategories] = useState<Array<{ id: string; name: string; parentId: string | null }>>([])
+  const mayAdd = can('masters', 'create')
   const [styles, setStyles] = useState<StyleOption[]>([])
   const [fabrics, setFabrics] = useState<Fabric[]>([])
   const [name, setName] = useState('')
@@ -238,11 +267,13 @@ export function RoutingFormDialog({
       masterResource<Unit>('workstations').list({ limit: 300, active: true }),
       masterResource<StyleOption>('styles').list({ limit: 500, active: true }),
       api.get<{ data: Fabric[] }>('/masters/routings/fabrics'),
+      masterResource<Contractor>('contractors').list({ limit: 500, active: true }),
     ])
-      .then(([o, w, s, f]) => {
+      .then(([o, w, s, f, c]) => {
         if (!alive) return
         setOps((o as Paginated<Operation>).data)
         setUnits((w as Paginated<Unit>).data)
+        setContractors((c as Paginated<Contractor>).data)
         setStyles((s as Paginated<StyleOption>).data)
         setFabrics(f.data)
       })
@@ -292,11 +323,12 @@ export function RoutingFormDialog({
 
   const set = (key: string, patch: Partial<Row>) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)))
   /** What a process usually is: outside or not, a check or not, its rate, minutes and instructions. */
-  const defaultsOf = (operationId: string): Omit<Row, 'key'> => {
-    const o = opById.get(operationId)
+  const defaultsOf = (operationId: string, given?: Operation): Omit<Row, 'key'> => {
+    const o = given ?? opById.get(operationId)
     return {
       operationId,
       workstationId: '',
+      contractorId: '',
       execution: o?.defaultExecution ?? 'IN_HOUSE',
       isQcStep: o?.kind === 'QC',
       skip: o?.kind === 'CUTTING' ? 'NEVER' : 'WITH_APPROVAL',
@@ -389,6 +421,7 @@ export function RoutingFormDialog({
         operationId: r.operationId,
         departmentId: opById.get(r.operationId)!.departmentId,
         workstationId: r.workstationId || null,
+        contractorId: r.contractorId || null,
         execution: r.execution,
         skip: kinds[i] === 'CUTTING' ? 'NEVER' : r.skip,
         isQcStep: r.isQcStep,
@@ -410,8 +443,15 @@ export function RoutingFormDialog({
 
   const unitsFor = (r: Row) => {
     const o = opById.get(r.operationId)
-    return units.filter((u) => u.departmentId === o?.departmentId && (r.execution === 'OUTSOURCED' ? u.type === 'JOB_WORK' : u.type === 'IN_HOUSE'))
+    // A line tied to one process is offered for that process only; the rest for any of their department's.
+    return units.filter(
+      (u) =>
+        (u.operationId ? u.operationId === r.operationId : u.departmentId === o?.departmentId) &&
+        (r.execution === 'OUTSOURCED' ? u.type === 'JOB_WORK' : u.type === 'IN_HOUSE'),
+    )
   }
+  /** The contractors who do this step's process. */
+  const contractorsFor = (r: Row) => contractors.filter((c) => c.operationId === r.operationId)
 
   // The route's totals, for the line above the steps.
   const minutes = rows.reduce((t, r) => t + (Number(r.smv) || 0), 0)
@@ -485,7 +525,13 @@ export function RoutingFormDialog({
             {applies === 'STYLE' && (
               <label className="block">
                 <span className="form-label">Style</span>
-                <SmartSelect className="form-input" value={styleId} onChange={(e) => setStyleId(e.target.value)}>
+                <SmartSelect
+                  className="form-input"
+                  value={styleId}
+                  onChange={(e) => setStyleId(e.target.value)}
+                  onCreate={mayAdd ? (typed) => setAdding({ kind: 'style', typed }) : undefined}
+                  createNoun="style"
+                >
                   <option value="">Pick the style…</option>
                   {styles.map((s) => (
                     <option key={s.id} value={s.id} data-sub={s.category ?? undefined}>
@@ -512,7 +558,25 @@ export function RoutingFormDialog({
           </div>
           <label className="block lg:col-span-3">
             <span className="form-label">Fabric (optional)</span>
-            <SmartSelect className="form-input" value={fabricItemId} onChange={(e) => setFabricItemId(e.target.value)} aria-label="Fabric">
+            <SmartSelect
+              className="form-input"
+              value={fabricItemId}
+              onChange={(e) => setFabricItemId(e.target.value)}
+              aria-label="Fabric"
+              onCreate={
+                mayAdd
+                  ? () => {
+                      setNewFabric(true)
+                      if (!itemCategories.length)
+                        void api
+                          .get<{ data: Array<{ id: string; name: string; parentId: string | null }> }>('/masters/item-categories?limit=500')
+                          .then((r) => setItemCategories(r.data))
+                          .catch(() => {})
+                    }
+                  : undefined
+              }
+              createNoun="fabric"
+            >
               <option value="">{fabricOptions.length ? 'Any fabric' : 'No fabric in stock records'}</option>
               {fabricOptions.map((f) => (
                 <option key={f.id} value={f.id} data-sub={stockLine(f)}>
@@ -580,6 +644,7 @@ export function RoutingFormDialog({
           <span>Process</span>
           <span>Done at</span>
           <span>Line or unit</span>
+          <span>Contractor</span>
           <span className="text-right">Minutes / pc</span>
           <span className="text-right">Rate ₹ / pc</span>
           <span>If skipped</span>
@@ -634,11 +699,18 @@ export function RoutingFormDialog({
                   </div>
                   <label className="col-span-2 block min-w-0 sm:col-span-4 lg:col-span-1">
                     <span className="form-label lg:sr-only">Process</span>
-                    <SmartSelect className="form-input h-9" value={r.operationId} onChange={(e) => pick(r.key, e.target.value)} aria-label={`Step ${i + 1} process`}>
+                    <SmartSelect
+                      className="form-input h-9"
+                      value={r.operationId}
+                      onChange={(e) => pick(r.key, e.target.value)}
+                      aria-label={`Step ${i + 1} process`}
+                      onCreate={mayAdd ? (typed) => setAdding({ kind: 'process', rowKey: r.key, typed }) : undefined}
+                      createNoun="process"
+                    >
                       <option value="">Pick a process…</option>
                       {processOptions.map((op) => (
                         <option key={op.id} value={op.id} data-sub={op.department?.name ?? undefined}>
-                          {op.inactive ? `${op.name} (switched off in the Process Master)` : op.name}
+                          {op.inactive ? `${op.name} (switched off in the Routing Masters)` : op.name}
                         </option>
                       ))}
                     </SmartSelect>
@@ -649,7 +721,7 @@ export function RoutingFormDialog({
                       className="form-input h-9"
                       value={r.execution}
                       disabled={isCut}
-                      onChange={(e) => set(r.key, { execution: e.target.value as Execution, workstationId: '' })}
+                      onChange={(e) => set(r.key, { execution: e.target.value as Execution, workstationId: '', contractorId: '' })}
                       aria-label={`Step ${i + 1} where it is done`}
                     >
                       <option value="IN_HOUSE">Our floor</option>
@@ -658,11 +730,38 @@ export function RoutingFormDialog({
                   </label>
                   <label className="block min-w-0">
                     <span className="form-label lg:sr-only">Line or unit</span>
-                    <SmartSelect className="form-input h-9" value={r.workstationId} onChange={(e) => set(r.key, { workstationId: e.target.value })} aria-label={`Step ${i + 1} line or unit`}>
+                    <SmartSelect
+                      className="form-input h-9"
+                      value={r.workstationId}
+                      onChange={(e) => set(r.key, { workstationId: e.target.value })}
+                      aria-label={`Step ${i + 1} line or unit`}
+                      onCreate={mayAdd && r.operationId ? (typed) => setAdding({ kind: 'line', rowKey: r.key, typed }) : undefined}
+                      createNoun={r.execution === 'OUTSOURCED' ? 'outside unit' : 'line or table'}
+                    >
                       <option value="">{r.execution === 'OUTSOURCED' ? 'Picked when sent' : 'Any line'}</option>
                       {unitsFor(r).map((u) => (
                         <option key={u.id} value={u.id}>
                           {u.name}
+                        </option>
+                      ))}
+                    </SmartSelect>
+                  </label>
+                  <label className="block min-w-0">
+                    <span className="form-label lg:sr-only">Contractor</span>
+                    <SmartSelect
+                      className="form-input h-9"
+                      value={r.contractorId}
+                      disabled={r.execution === 'OUTSOURCED'}
+                      onChange={(e) => set(r.key, { contractorId: e.target.value })}
+                      aria-label={`Step ${i + 1} contractor`}
+                      onCreate={mayAdd && r.operationId && r.execution !== 'OUTSOURCED' ? (typed) => setAdding({ kind: 'contractor', rowKey: r.key, typed }) : undefined}
+                      createNoun="contractor"
+                      title={r.execution === 'OUTSOURCED' ? 'An outside unit is paid as the unit, not through a contractor' : 'Who does this step; add them under Routing Masters, Contractors'}
+                    >
+                      <option value="">{r.execution === 'OUTSOURCED' ? '—' : contractorsFor(r).length ? 'Any contractor' : 'None added yet'}</option>
+                      {contractorsFor(r).map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
                         </option>
                       ))}
                     </SmartSelect>
@@ -749,7 +848,7 @@ export function RoutingFormDialog({
                       dept && dept.toLowerCase() !== o.name.toLowerCase() ? `Done by ${dept}` : null,
                       r.isQcStep || o.kind === 'QC' ? 'a check: pieces pass or fail here' : null,
                       r.instructions.trim() || null,
-                      o.inactive ? 'switched off in the Process Master: change it or take the step off' : null,
+                      o.inactive ? 'switched off in the Routing Masters: change it or take the step off' : null,
                     ].filter(Boolean)
                     return said.length ? <p className="text-muted-foreground -mt-0.5 truncate px-2 pb-1.5 text-[11px] lg:pl-[3.75rem]">{said.join(' · ')}</p> : null
                   })()}
@@ -797,7 +896,7 @@ export function RoutingFormDialog({
         {/* Processes not yet on the route, one press each. */}
         {notOnRoute.length > 0 && (
           <div className="mt-3">
-            <p className="text-muted-foreground mb-1.5 text-xs">Add a process — it goes where the Process Master&apos;s order puts it; move it if this style differs:</p>
+            <p className="text-muted-foreground mb-1.5 text-xs">Add a process — it goes where the Routing Masters&apos; order puts it; move it if this style differs:</p>
             <div className="flex flex-wrap gap-1.5">
               {notOnRoute.map((op) => (
                 <button
@@ -817,7 +916,7 @@ export function RoutingFormDialog({
         {offRoute.length > 0 && (
           <p className="mt-2 flex items-start gap-1.5 text-xs text-red-600">
             <Info size={13} className="mt-px shrink-0" />
-            {offRoute.map((r) => opById.get(r.operationId)?.name).join(', ')} {offRoute.length === 1 ? 'is' : 'are'} switched off in the Process Master. Take{' '}
+            {offRoute.map((r) => opById.get(r.operationId)?.name).join(', ')} {offRoute.length === 1 ? 'is' : 'are'} switched off in the Routing Masters. Take{' '}
             {offRoute.length === 1 ? 'it' : 'them'} off the route, or pick another process.
           </p>
         )}
@@ -832,6 +931,109 @@ export function RoutingFormDialog({
         <span className="form-label">Notes</span>
         <textarea className="form-input" rows={2} value={notes} maxLength={500} onChange={(e) => setNotes(e.target.value)} />
       </label>
+
+      {adding?.kind === 'style' && (
+        <MasterFormDialog<StyleOption & { id: string }>
+          open
+          stacked
+          onClose={() => setAdding(null)}
+          onSaved={() => {}}
+          onCreated={(row) => {
+            setStyles((ss) => [...ss, row])
+            setStyleId(row.id)
+          }}
+          resource="styles"
+          fields={styleFormFields}
+          initialValues={{ ...(adding.typed ? { name: adding.typed } : {}), isActive: true }}
+          title="Style"
+          columns={4}
+          wide
+        />
+      )}
+      {adding?.kind === 'process' && (
+        <MasterFormDialog<Operation>
+          open
+          stacked
+          onClose={() => setAdding(null)}
+          onSaved={() => {}}
+          onCreated={(row) => {
+            setOps((os) => [...os, row])
+            if (adding.rowKey) set(adding.rowKey, defaultsOf(row.id, row))
+          }}
+          resource="operations"
+          fields={processFormFields}
+          initialValues={{ ...(adding.typed ? { name: adding.typed } : {}), isActive: true }}
+          title="Process"
+          columns={3}
+        />
+      )}
+      {adding?.kind === 'line' &&
+        (() => {
+          const step = rows.find((x) => x.key === adding.rowKey)
+          const o = step ? opById.get(step.operationId) : undefined
+          return (
+            <MasterFormDialog<Unit>
+              open
+              stacked
+              onClose={() => setAdding(null)}
+              onSaved={() => {}}
+              onCreated={(row) => {
+                setUnits((us) => [...us, row])
+                // Picked on the step when it fits it: its process (or department) and where it is done.
+                const fits =
+                  step &&
+                  (row.operationId ? row.operationId === step.operationId : row.departmentId === o?.departmentId) &&
+                  (step.execution === 'OUTSOURCED' ? row.type === 'JOB_WORK' : row.type === 'IN_HOUSE')
+                if (fits && adding.rowKey) set(adding.rowKey, { workstationId: row.id })
+              }}
+              resource="workstations"
+              fields={lineFormFields}
+              initialValues={{
+                ...(adding.typed ? { name: adding.typed } : {}),
+                departmentId: o?.departmentId ?? '',
+                operationId: step?.operationId ?? '',
+                type: step?.execution === 'OUTSOURCED' ? 'JOB_WORK' : 'IN_HOUSE',
+                isActive: true,
+              }}
+              title="Line"
+              columns={4}
+              wide
+            />
+          )
+        })()}
+      {adding?.kind === 'contractor' &&
+        (() => {
+          const step = rows.find((x) => x.key === adding.rowKey)
+          return (
+            <MasterFormDialog<Contractor>
+              open
+              stacked
+              onClose={() => setAdding(null)}
+              onSaved={() => {}}
+              onCreated={(row) => {
+                setContractors((cs) => [...cs, row])
+                if (step && row.operationId === step.operationId && adding.rowKey) set(adding.rowKey, { contractorId: row.id })
+              }}
+              resource="contractors"
+              fields={contractorFormFields}
+              initialValues={{ ...(adding.typed ? { name: adding.typed } : {}), operationId: step?.operationId ?? '', isActive: true }}
+              title="Contractor"
+              columns={3}
+            />
+          )
+        })()}
+      {newFabric && (
+        <NewItemDialog
+          categories={itemCategories}
+          categoryId={itemCategories.find((c) => !c.parentId && /fabric/i.test(c.name))?.id}
+          onClose={() => setNewFabric(false)}
+          onCreated={(item: NewItem) => {
+            setNewFabric(false)
+            setFabrics((fs) => [...fs, { id: item.id, code: item.code, name: item.name, uom: item.uom?.symbol ?? '', onHand: 0, customers: 0 }])
+            setFabricItemId(item.id)
+          }}
+        />
+      )}
     </FormFrame>
   )
 }

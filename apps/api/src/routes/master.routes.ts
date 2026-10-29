@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
+import { nextStyleCode } from '../lib/masterCode'
 import { createRouting, deleteRouting, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
 import { styleOrderStages } from '../services/styleOrders.service'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
@@ -43,6 +44,8 @@ import {
   createBankAccountSchema,
   createWarehouseSchema,
   createWorkstationSchema,
+  createContractorSchema,
+  updateContractorSchema,
   updateBomSchema,
   updateBrandSchema,
   updateBrokerSchema,
@@ -896,6 +899,19 @@ router.patch('/styles/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
   next()
 })
 
+/**
+ * The code a new style would get, shown on the form while it is filled in:
+ * brand, garment type and season decide it. The code given on save is worked
+ * out again then, so two people adding a shirt at once still get two codes.
+ */
+router.get('/styles/next-code', requirePermission(MODULE, 'create'), async (req, res) => {
+  const q = (k: string) => (typeof req.query[k] === 'string' ? (req.query[k] as string) : '')
+  res.json({
+    success: true,
+    data: { code: await nextStyleCode({ brandId: q('brandId'), brandType: q('brandType'), category: q('category'), season: q('season') }) },
+  })
+})
+
 router.use(
   '/styles',
   crudRouter({
@@ -907,7 +923,18 @@ router.use(
     searchFields: ['name', 'code', 'season', 'category', 'fabricType'],
     sortableFields: ['name', 'code', 'createdAt', 'season'],
     defaultSort: { field: 'code', order: 'asc' },
-    include: { sizeGroup: { select: { id: true, name: true } } },
+    include: { sizeGroup: { select: { id: true, name: true } }, brand: { select: { id: true, name: true } } },
+    // The brand picked decides the kind (LD Cotton Mills, VHAGAR, Custom),
+    // which labels, prices and reports go by. A style must have one or the other.
+    beforeSave: async (data, before) => {
+      if (typeof data.brandId === 'string' && data.brandId) {
+        const brand = await prisma.brand.findUnique({ where: { id: data.brandId }, select: { type: true, isActive: true } })
+        if (!brand) throw new AppError('That brand is not in the Brands master.', 400, 'BRAND_NOT_FOUND')
+        return { data: { ...data, brandType: brand.type } }
+      }
+      if (!before && !data.brandType) throw new AppError('Pick the brand the style is made under.', 400, 'BRAND_REQUIRED')
+      return { data }
+    },
     filters: {
       brandType: { where: (v) => ({ brandType: { in: v } }), facets: ['brandType'] },
       category: textFilter('category'),
@@ -950,6 +977,30 @@ router.use(
         return counts
       },
     },
+  }),
+)
+
+/**
+ * Contractors: who does a process on the floor — a cutting master, a
+ * stitching contractor and their team. Picked on a routing step, beside its
+ * line. Kept, never deleted, once a routing names them: switched off instead.
+ */
+router.use(
+  '/contractors',
+  crudRouter({
+    model: 'contractor',
+    module: MODULE,
+    entityType: 'Contractor',
+    createSchema: createContractorSchema,
+    updateSchema: updateContractorSchema,
+    searchFields: ['name', 'code', 'phone', 'operation.name'],
+    sortableFields: ['name', 'code', 'createdAt'],
+    defaultSort: { field: 'name', order: 'asc' },
+    include: { operation: { select: { id: true, name: true } }, _count: { select: { routingSteps: true } } },
+    filters: {
+      operationId: { where: (v) => ({ operationId: { in: v } }), facets: ['operationId'] },
+    },
+    facets: ['operationId'],
   }),
 )
 
@@ -1851,6 +1902,7 @@ router.use(
     defaultSort: { field: 'code', order: 'asc' },
     include: {
       department: { select: { id: true, name: true } },
+      operation: { select: { id: true, name: true } },
       supplier: { select: { id: true, name: true } },
       _count: { select: { routingSteps: true } },
     },
@@ -1888,6 +1940,17 @@ router.use(
       },
     },
     facets: ['departmentId', 'type', 'supplierId', 'capacity', 'routings'],
+    // The process, when one is named, must be one of the line's department's.
+    beforeSave: async (data, before) => {
+      const operationId = data.operationId === undefined ? (before?.operationId as string | null | undefined) : (data.operationId as string | null)
+      const departmentId = (data.departmentId ?? before?.departmentId) as string | undefined
+      if (operationId && departmentId) {
+        const op = await prisma.operation.findUnique({ where: { id: operationId }, select: { departmentId: true, name: true } })
+        if (!op) throw new AppError('That process is not in the Routing Masters.', 400, 'BAD_PROCESS')
+        if (op.departmentId !== departmentId) throw new AppError(`${op.name} is not a process of this line's department. Pick one of its own, or leave it empty.`, 400, 'PROCESS_DEPARTMENT_MISMATCH')
+      }
+      return { data }
+    },
     customFacets: {
       capacity: async (where) => {
         const [set, unset] = await Promise.all([

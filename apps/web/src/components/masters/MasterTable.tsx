@@ -85,6 +85,8 @@ interface MasterTableProps<T> {
   defaultSort?: string
   /** Rendered in the header, typically a "New ..." link. */
   actions?: React.ReactNode
+  /** Called after a record is saved here, for a page that shows figures worked out from the list. */
+  onChanged?: () => void
   /** Extra query parameters merged into every list request. */
   filters?: ListParams
   emptyMessage?: string
@@ -138,6 +140,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   searchPlaceholder = 'Search...',
   defaultSort,
   actions,
+  onChanged,
   filters,
   emptyMessage = 'Nothing here yet.',
   formFields,
@@ -778,7 +781,10 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
         <MasterFormDialog<T>
           open={dialogOpen}
           onClose={() => setDialogOpen(false)}
-          onSaved={() => void load()}
+          onSaved={() => {
+            void load()
+            onChanged?.()
+          }}
           resource={resource}
           fields={formFields}
           record={editing}

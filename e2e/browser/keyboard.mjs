@@ -9,7 +9,7 @@
 // ends with "N passed, M failed" and exits non-zero on a failure.
 //
 // It WRITES a little to the demo, and only the demo: one brand named
-// "ZZKEY Brand …" (made, then renamed) and one draft purchase order (a second
+// "ZZKEY Brand …" (made, renamed, then switched off) and one draft purchase order (a second
 // order is filled in and closed unsaved, to check Copy line). Same
 // guards as every suite here: the database must be lderp_demo and the API
 // must be using it.
@@ -219,6 +219,11 @@ await check('found again with "/", opened with ↓ Enter, renamed, Ctrl+S', asyn
   const found = (await api(`/masters/brands?search=${encodeURIComponent(brand)}`)).data ?? []
   return found.some((b) => b.name === `${brand} Edited`) ? true : 'the new name was not saved'
 })
+// The test brand goes out of the brand lists again (switched off, as Delete does).
+{
+  const made = ((await api(`/masters/brands?search=${encodeURIComponent(brand)}`)).data ?? []).filter((b) => b.name.startsWith(brand))
+  for (const b of made) await fetch(`${API}/api/masters/brands/${b.id}`, { method: 'DELETE', headers: { authorization: `Bearer ${token}`, connection: 'close' } })
+}
 await check('after the save the list still answers the keyboard ("/" works)', async () => {
   await wait(500)
   await key('/')

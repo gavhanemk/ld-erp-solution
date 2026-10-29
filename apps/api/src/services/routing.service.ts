@@ -34,6 +34,7 @@ export const routingInclude = {
       operation: { select: { id: true, name: true, code: true, kind: true } },
       department: { select: { id: true, name: true } },
       workstation: { select: { id: true, name: true, type: true } },
+      contractor: { select: { id: true, name: true } },
     },
   },
   _count: { select: { mos: true, boms: true } },
@@ -137,6 +138,7 @@ const stepRow = (s: StepInput) => ({
   operationId: s.operationId,
   departmentId: s.departmentId,
   workstationId: s.workstationId ?? null,
+  contractorId: s.contractorId ?? null,
   smv: s.smv ?? null,
   ratePerPiece: s.ratePerPiece ?? null,
   isQcStep: s.isQcStep,
@@ -150,7 +152,7 @@ const stepsSignature = (steps: Array<ReturnType<typeof stepRow>>) =>
   JSON.stringify(
     [...steps]
       .sort((a, b) => a.sequence - b.sequence)
-      .map((s) => [s.operationId, s.departmentId, s.workstationId, s.smv == null ? null : Number(s.smv), s.ratePerPiece == null ? null : Number(s.ratePerPiece), s.isQcStep, s.execution, s.skip, s.instructions]),
+      .map((s) => [s.operationId, s.departmentId, s.workstationId, s.smv == null ? null : Number(s.smv), s.ratePerPiece == null ? null : Number(s.ratePerPiece), s.isQcStep, s.execution, s.skip, s.instructions, s.contractorId ?? null]),
   )
 
 const ordered = <T extends { sequence: number }>(steps: T[]) => [...steps].sort((a, b) => a.sequence - b.sequence)
@@ -159,11 +161,31 @@ const ordered = <T extends { sequence: number }>(steps: T[]) => [...steps].sort(
  * Prisma would reject a bad id with a foreign-key error that means nothing to
  * the person filling in the form, so the references are checked up front.
  */
+/**
+ * A step's contractor must still be there and must do that step's process:
+ * a stitching contractor is not picked for cutting.
+ */
+async function assertContractorsFit(db: Db, steps: Array<{ operationId: string; contractorId?: string | null }>): Promise<void> {
+  const ids = [...new Set(steps.map((s) => s.contractorId).filter(Boolean))] as string[]
+  if (!ids.length) return
+  const found = await db.contractor.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, operationId: true, operation: { select: { name: true } } } })
+  const byId = new Map(found.map((c) => [c.id, c]))
+  steps.forEach((step, i) => {
+    if (!step.contractorId) return
+    const c = byId.get(step.contractorId)
+    if (!c) throw new AppError(`Step ${i + 1}: that contractor is no longer in the Routing Masters.`, 400, 'INVALID_CONTRACTOR')
+    if (c.operationId !== step.operationId) {
+      throw new AppError(`Step ${i + 1}: ${c.name} does ${c.operation.name}, not this step's process. Pick one of its own contractors, or leave it empty.`, 400, 'STEP_CONTRACTOR_MISMATCH')
+    }
+  })
+}
+
 async function assertRoutingRefsExist(
   db: Db,
-  steps: Array<{ operationId: string; departmentId: string; workstationId?: string | null }>,
+  steps: Array<{ operationId: string; departmentId: string; workstationId?: string | null; contractorId?: string | null }>,
   styleId: string | null,
 ): Promise<void> {
+  await assertContractorsFit(db, steps)
   if (styleId) {
     const style = await db.style.findUnique({ where: { id: styleId }, select: { id: true } })
     if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')

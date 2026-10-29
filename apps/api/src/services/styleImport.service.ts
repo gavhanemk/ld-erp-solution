@@ -60,14 +60,29 @@ const distinct = (values: Array<string | null>) =>
   [...new Map(values.filter((v): v is string => Boolean(v?.trim())).map((v) => [low(v), v.trim()])).values()].sort()
 
 async function loadMasters() {
-  const [styles, sizeGroups] = await Promise.all([
+  const [styles, sizeGroups, brands] = await Promise.all([
     prisma.style.findMany({
       orderBy: { code: 'asc' },
-      include: { sizeGroup: { select: { name: true } } },
+      include: { sizeGroup: { select: { name: true } }, brand: { select: { name: true } } },
     }),
     prisma.sizeGroup.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
+    // Oldest first: the first brand of a kind stands for the kind.
+    prisma.brand.findMany({ where: { isActive: true }, select: { id: true, name: true, type: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
   ])
-  return { styles, sizeGroups }
+  return { styles, sizeGroups, brands }
+}
+
+/**
+ * The brand a sheet names: one from the Brands master by its name ("DCot"),
+ * or a kind (LD Cotton Mills, VHAGAR, Custom), which takes the first brand of
+ * that kind.
+ */
+function brandFor(typed: string | undefined, brands: Array<{ id: string; name: string; type: 'LD_COTTON_MILLS' | 'VHAGAR' | 'CUSTOM' }>) {
+  const named = brands.find((b) => low(b.name) === low(typed))
+  if (named) return { brandId: named.id, brandType: named.type }
+  const kind = BRANDS[low(typed)]
+  if (!kind) return null
+  return { brandId: brands.find((b) => b.type === kind)?.id ?? null, brandType: kind }
 }
 
 /** The template, optionally listing every style already in the system. */
@@ -82,7 +97,7 @@ export async function buildTemplate(withCurrent: boolean): Promise<Buffer> {
       sheet.addRow({
         code: s.code,
         name: s.name,
-        brand: BRAND_LABEL[s.brandType],
+        brand: s.brand?.name ?? BRAND_LABEL[s.brandType],
         category: s.category ?? '',
         season: s.season ?? '',
         fabricType: s.fabricType ?? '',
@@ -103,7 +118,7 @@ export async function buildTemplate(withCurrent: boolean): Promise<Buffer> {
     sheet,
     COLUMNS,
     {
-      brands: Object.values(BRAND_LABEL),
+      brands: distinct([...m.brands.map((b) => b.name), ...Object.values(BRAND_LABEL)]),
       garments: distinct(m.styles.map((s) => s.category)),
       seasons: distinct(m.styles.map((s) => s.season)),
       fabrics: distinct(m.styles.map((s) => s.fabricType)),
@@ -198,9 +213,9 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
     seen.set(low(code), row)
     plan.style = 'new'
 
-    const brandType = BRANDS[low(raw.brand)]
+    const brand = brandFor(raw.brand, m.brands)
     if (!raw.brand) problems.push('Brand is empty.')
-    else if (!brandType) problems.push(`No brand "${raw.brand}". Pick LD Cotton Mills, VHAGAR or Custom.`)
+    else if (!brand) problems.push(`No brand "${raw.brand}". Pick one from the Brands master, or LD Cotton Mills, VHAGAR or Custom.`)
 
     const group = raw.sizeGroup ? sizeRun.get(low(raw.sizeGroup)) : undefined
     if (raw.sizeGroup && !group) problems.push(`No size run "${raw.sizeGroup}".`)
@@ -216,7 +231,8 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
     const checked = createStyleSchema.safeParse({
       code,
       name: plan.name,
-      brandType,
+      brandId: brand?.brandId ?? null,
+      brandType: brand?.brandType,
       category: text(raw.category),
       season: text(raw.season),
       fabricType: text(raw.fabricType),
