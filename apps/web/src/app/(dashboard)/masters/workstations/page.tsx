@@ -1,10 +1,12 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { FileSpreadsheet } from 'lucide-react'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 import { ImportWorkstationsDialog } from '@/components/masters/ImportWorkstationsDialog'
+import { RoutingMastersTabs } from '@/components/masters/RoutingMastersTabs'
+import { masterResource, type Paginated } from '@/lib/api'
 
 /**
  * Workstations.
@@ -21,6 +23,8 @@ interface Workstation {
   type: 'IN_HOUSE' | 'JOB_WORK'
   departmentId: string
   department: { id: string; name: string } | null
+  operationId?: string | null
+  operation?: { id: string; name: string } | null
   supplierId: string | null
   supplier: { id: string; name: string } | null
   capacityPerDay: number | null
@@ -32,11 +36,18 @@ interface Workstation {
 
 const columns: Column<Workstation>[] = [
   { key: 'code', header: 'Code', sortable: true, className: 'font-mono text-xs text-teal-400 whitespace-nowrap' },
-  { key: 'name', header: 'Workstation', sortable: true, className: 'font-medium' },
+  { key: 'name', header: 'Line or table', sortable: true, className: 'font-medium' },
   {
     key: 'department',
     header: 'Process',
-    render: (w) => w.department?.name ?? <span className="text-muted-foreground">—</span>,
+    render: (w) =>
+      w.operation ? (
+        w.operation.name
+      ) : w.department ? (
+        <span title={`Any process of ${w.department.name}`}>{w.department.name}</span>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
   },
   {
     key: 'type',
@@ -102,15 +113,25 @@ const columns: Column<Workstation>[] = [
  */
 const formFields: FormField[] = [
   { name: 'code', label: 'Code', generated: true, section: 'Workstation' },
-  { name: 'name', label: 'Name', required: true, placeholder: 'Stitching Unit 1', section: 'Workstation', span: 2 },
+  { name: 'name', label: 'Name', required: true, placeholder: 'Cutting Table 3', section: 'Workstation', span: 2 },
   {
     name: 'departmentId',
-    label: 'Process',
+    label: 'Department',
     type: 'select',
     required: true,
     section: 'Workstation',
     optionsFrom: { resource: 'departments' },
-    placeholder: 'Which step of the line…',
+    placeholder: 'Which department runs it…',
+    resets: ['operationId'],
+  },
+  {
+    name: 'operationId',
+    label: 'Process',
+    type: 'select',
+    section: 'Workstation',
+    optionsFrom: { resource: 'operations', filter: (row, values) => row.departmentId === values.departmentId },
+    placeholder: 'Any of its department’s',
+    help: 'The one process it does: Final QC and Packing share a department, each with its own lines',
   },
   {
     name: 'type',
@@ -188,16 +209,59 @@ const filterDefs: FilterDef[] = [
   },
 ]
 
+/** How many lines each process has: Cutting 4 tables, Stitching 3 lines, Washing an outside unit. */
+function LinesPerProcess({ refreshKey }: { refreshKey: number }) {
+  const [rows, setRows] = useState<Array<{ name: string; ours: number; outside: number }> | null>(null)
+  useEffect(() => {
+    let live = true
+    void masterResource<Workstation>('workstations')
+      .list({ limit: 500, active: true })
+      .then((r) => {
+        if (!live) return
+        const by = new Map<string, { name: string; ours: number; outside: number }>()
+        for (const w of (r as Paginated<Workstation>).data) {
+          const name = w.operation?.name ?? w.department?.name ?? 'No process'
+          const g = by.get(name) ?? { name, ours: 0, outside: 0 }
+          if (w.type === 'JOB_WORK') g.outside++
+          else g.ours++
+          by.set(name, g)
+        }
+        setRows([...by.values()].sort((a, b) => a.name.localeCompare(b.name)))
+      })
+      .catch(() => live && setRows([]))
+    return () => {
+      live = false
+    }
+  }, [refreshKey])
+  if (!rows?.length) return null
+  return (
+    <div className="glass-card mb-3 flex flex-wrap items-center gap-2 px-4 py-3">
+      <span className="text-muted-foreground mr-1 text-xs font-semibold uppercase tracking-wide">Lines per process</span>
+      {rows.map((g) => (
+        <span key={g.name} className="badge-neutral">
+          <b className="text-foreground">{g.name}</b>
+          {g.ours > 0 && ` · ${g.ours} on our floor`}
+          {g.outside > 0 && ` · ${g.outside} outside`}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 export default function WorkstationsPage() {
   const [importing, setImporting] = useState(false)
   // Bumped after an import, so the list and its filter counts reload.
   const [refreshKey, setRefreshKey] = useState(0)
+  // Bumped after a save here, so the lines-per-process strip reads again.
+  const [saved, setSaved] = useState(0)
 
   return (
     <>
+      <RoutingMastersTabs />
+      <LinesPerProcess refreshKey={refreshKey + saved} />
       <MasterTable<Workstation>
-        title="Workstations"
-        entityName="Workstation"
+        title="Lines & tables"
+        entityName="Line"
         resource="workstations"
         columns={columns}
         formFields={formFields}
@@ -208,6 +272,7 @@ export default function WorkstationsPage() {
         searchPlaceholder="Search name, code, process, supplier, contact..."
         emptyMessage="No workstations yet. Add your lines and your outside job-work units."
         refreshKey={refreshKey}
+        onChanged={() => setSaved((n) => n + 1)}
         exportable
         actions={
           <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>

@@ -1254,6 +1254,8 @@ model Operation {
   productionEntries ProductionEntry[]
   moSteps           MOStep[]
   styleStepRuns     StyleStepRun[]
+  workstations      Workstation[]
+  contractors       Contractor[]
 
   @@map("operations")
 }
@@ -3708,6 +3710,9 @@ model MOStep {
   /// The unit it normally goes to: one of our lines, or an outside unit.
   workstationId String?
   workstation   Workstation?       @relation("MOStepUnit", fields: [workstationId], references: [id])
+  /// The contractor who does it, copied from the routing.
+  contractorId  String?
+  contractor    Contractor?        @relation(fields: [contractorId], references: [id])
   isQcStep      Boolean            @default(false)
   skip          StepSkip           @default(WITH_APPROVAL)
   /// What an outside unit is paid per piece, when it is done outside.
@@ -4328,6 +4333,11 @@ model Workstation {
   name           String
   departmentId   String
   department     Department      @relation(fields: [departmentId], references: [id])
+  /// The process this line does (Cutting Table 3 → Cutting). Empty: any
+  /// process of its department. Lets two processes of one department, Final
+  /// QC and Packing, each have their own lines.
+  operationId    String?
+  operation      Operation?      @relation(fields: [operationId], references: [id])
   type           WorkstationType @default(IN_HOUSE)
   /// Set when type is JOB_WORK — the party we pay for this work.
   supplierId     String?
@@ -4346,6 +4356,7 @@ model Workstation {
   jobWorkOrders     JobWorkOrder[]    @relation("JobWorkOrderUnit")
 
   @@index([code])
+  @@index([operationId])
   @@map("workstations")
 }
 
@@ -4412,6 +4423,9 @@ model RoutingStep {
   /// Optional: the specific unit this step is normally sent to.
   workstationId String?
   workstation   Workstation? @relation(fields: [workstationId], references: [id])
+  /// Optional: the contractor who normally does this step.
+  contractorId  String?
+  contractor    Contractor?  @relation(fields: [contractorId], references: [id])
   smv           Decimal?     @db.Decimal(5, 3)
   ratePerPiece  Decimal?     @db.Decimal(10, 2)
   isQcStep      Boolean      @default(false)
@@ -4424,6 +4438,31 @@ model RoutingStep {
   @@unique([routingId, sequence])
   @@map("routing_steps")
 }
+/// A contractor on the floor: a cutting master, a stitching contractor and
+/// their team, a kaj-button man. Paid by the piece for one process.
+model Contractor {
+  id           String    @id @default(cuid())
+  /// CON-001: made by the system.
+  code         String    @unique
+  name         String
+  /// The process they do: Cutting, Stitching, Kaj Button…
+  operationId  String
+  operation    Operation @relation(fields: [operationId], references: [id])
+  phone        String?
+  /// What they are paid a piece, when it is the same for every style.
+  ratePerPiece Decimal?  @db.Decimal(10, 2)
+  notes        String?
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  routingSteps RoutingStep[]
+  moSteps      MOStep[]
+
+  @@index([operationId])
+  @@map("contractors")
+}
+
 
 /// A note on one step of one style's routing, written on the style's page
 /// under Masters → Routings.

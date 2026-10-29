@@ -42,6 +42,7 @@ export interface RoutingStep {
   operationId: string
   departmentId: string
   workstationId?: string | null
+  contractorId?: string | null
   smv?: number | string | null
   ratePerPiece?: number | string | null
   isQcStep: boolean
@@ -51,6 +52,7 @@ export interface RoutingStep {
   operation?: { id: string; name: string; code: string; kind?: Kind }
   department?: { id: string; name: string }
   workstation?: { id: string; name: string; type: string } | null
+  contractor?: { id: string; name: string } | null
 }
 
 type Person = { id: string; name: string } | null
@@ -116,7 +118,15 @@ interface Unit {
   id: string
   name: string
   departmentId: string
+  /** The one process it does, when it is tied to one (a Final QC line). */
+  operationId?: string | null
   type: 'IN_HOUSE' | 'JOB_WORK'
+}
+/** A contractor from the Routing Masters, and the process they do. */
+interface Contractor {
+  id: string
+  name: string
+  operationId: string
 }
 interface StyleOption {
   id: string
@@ -130,6 +140,7 @@ interface Row {
   key: string
   operationId: string
   workstationId: string
+  contractorId: string
   execution: Execution
   skip: Skip
   isQcStep: boolean
@@ -151,10 +162,10 @@ const APPLIES: Array<{ value: Applies; label: string }> = [
 ]
 
 /** The step columns, the same on the heading and every row of a wide screen. */
-const COLS = 'lg:grid-cols-[2.75rem_minmax(9rem,1fr)_8.5rem_minmax(11rem,1.6fr)_6rem_6rem_10.5rem_6.5rem]'
+const COLS = 'lg:grid-cols-[2.75rem_minmax(9rem,1fr)_8rem_minmax(9rem,1.2fr)_minmax(9rem,1.1fr)_5.5rem_5.5rem_10rem_6.5rem]'
 
 let seq = 0
-const blank = (): Row => ({ key: `n${++seq}`, operationId: '', workstationId: '', execution: 'IN_HOUSE', skip: 'WITH_APPROVAL', isQcStep: false, smv: '', ratePerPiece: '', instructions: '' })
+const blank = (): Row => ({ key: `n${++seq}`, operationId: '', workstationId: '', contractorId: '', execution: 'IN_HOUSE', skip: 'WITH_APPROVAL', isQcStep: false, smv: '', ratePerPiece: '', instructions: '' })
 const num = (v: string | number | null | undefined) => (v == null || v === '' ? '' : String(Number(v)))
 const figure = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 })
 const rowsOf = (steps: RoutingStep[] | undefined): Row[] =>
@@ -165,6 +176,7 @@ const rowsOf = (steps: RoutingStep[] | undefined): Row[] =>
           key: `s${++seq}`,
           operationId: s.operationId,
           workstationId: s.workstationId ?? '',
+          contractorId: s.contractorId ?? '',
           execution: s.execution ?? 'IN_HOUSE',
           skip: s.skip ?? 'WITH_APPROVAL',
           isQcStep: s.isQcStep,
@@ -195,6 +207,7 @@ export function RoutingFormDialog({
   const isEdit = Boolean(record)
   const [ops, setOps] = useState<Operation[]>([])
   const [units, setUnits] = useState<Unit[]>([])
+  const [contractors, setContractors] = useState<Contractor[]>([])
   const [styles, setStyles] = useState<StyleOption[]>([])
   const [fabrics, setFabrics] = useState<Fabric[]>([])
   const [name, setName] = useState('')
@@ -238,11 +251,13 @@ export function RoutingFormDialog({
       masterResource<Unit>('workstations').list({ limit: 300, active: true }),
       masterResource<StyleOption>('styles').list({ limit: 500, active: true }),
       api.get<{ data: Fabric[] }>('/masters/routings/fabrics'),
+      masterResource<Contractor>('contractors').list({ limit: 500, active: true }),
     ])
-      .then(([o, w, s, f]) => {
+      .then(([o, w, s, f, c]) => {
         if (!alive) return
         setOps((o as Paginated<Operation>).data)
         setUnits((w as Paginated<Unit>).data)
+        setContractors((c as Paginated<Contractor>).data)
         setStyles((s as Paginated<StyleOption>).data)
         setFabrics(f.data)
       })
@@ -297,6 +312,7 @@ export function RoutingFormDialog({
     return {
       operationId,
       workstationId: '',
+      contractorId: '',
       execution: o?.defaultExecution ?? 'IN_HOUSE',
       isQcStep: o?.kind === 'QC',
       skip: o?.kind === 'CUTTING' ? 'NEVER' : 'WITH_APPROVAL',
@@ -389,6 +405,7 @@ export function RoutingFormDialog({
         operationId: r.operationId,
         departmentId: opById.get(r.operationId)!.departmentId,
         workstationId: r.workstationId || null,
+        contractorId: r.contractorId || null,
         execution: r.execution,
         skip: kinds[i] === 'CUTTING' ? 'NEVER' : r.skip,
         isQcStep: r.isQcStep,
@@ -410,8 +427,15 @@ export function RoutingFormDialog({
 
   const unitsFor = (r: Row) => {
     const o = opById.get(r.operationId)
-    return units.filter((u) => u.departmentId === o?.departmentId && (r.execution === 'OUTSOURCED' ? u.type === 'JOB_WORK' : u.type === 'IN_HOUSE'))
+    // A line tied to one process is offered for that process only; the rest for any of their department's.
+    return units.filter(
+      (u) =>
+        (u.operationId ? u.operationId === r.operationId : u.departmentId === o?.departmentId) &&
+        (r.execution === 'OUTSOURCED' ? u.type === 'JOB_WORK' : u.type === 'IN_HOUSE'),
+    )
   }
+  /** The contractors who do this step's process. */
+  const contractorsFor = (r: Row) => contractors.filter((c) => c.operationId === r.operationId)
 
   // The route's totals, for the line above the steps.
   const minutes = rows.reduce((t, r) => t + (Number(r.smv) || 0), 0)
@@ -580,6 +604,7 @@ export function RoutingFormDialog({
           <span>Process</span>
           <span>Done at</span>
           <span>Line or unit</span>
+          <span>Contractor</span>
           <span className="text-right">Minutes / pc</span>
           <span className="text-right">Rate ₹ / pc</span>
           <span>If skipped</span>
@@ -638,7 +663,7 @@ export function RoutingFormDialog({
                       <option value="">Pick a process…</option>
                       {processOptions.map((op) => (
                         <option key={op.id} value={op.id} data-sub={op.department?.name ?? undefined}>
-                          {op.inactive ? `${op.name} (switched off in the Process Master)` : op.name}
+                          {op.inactive ? `${op.name} (switched off in the Routing Masters)` : op.name}
                         </option>
                       ))}
                     </SmartSelect>
@@ -649,7 +674,7 @@ export function RoutingFormDialog({
                       className="form-input h-9"
                       value={r.execution}
                       disabled={isCut}
-                      onChange={(e) => set(r.key, { execution: e.target.value as Execution, workstationId: '' })}
+                      onChange={(e) => set(r.key, { execution: e.target.value as Execution, workstationId: '', contractorId: '' })}
                       aria-label={`Step ${i + 1} where it is done`}
                     >
                       <option value="IN_HOUSE">Our floor</option>
@@ -663,6 +688,24 @@ export function RoutingFormDialog({
                       {unitsFor(r).map((u) => (
                         <option key={u.id} value={u.id}>
                           {u.name}
+                        </option>
+                      ))}
+                    </SmartSelect>
+                  </label>
+                  <label className="block min-w-0">
+                    <span className="form-label lg:sr-only">Contractor</span>
+                    <SmartSelect
+                      className="form-input h-9"
+                      value={r.contractorId}
+                      disabled={r.execution === 'OUTSOURCED'}
+                      onChange={(e) => set(r.key, { contractorId: e.target.value })}
+                      aria-label={`Step ${i + 1} contractor`}
+                      title={r.execution === 'OUTSOURCED' ? 'An outside unit is paid as the unit, not through a contractor' : 'Who does this step; add them under Routing Masters, Contractors'}
+                    >
+                      <option value="">{r.execution === 'OUTSOURCED' ? '—' : contractorsFor(r).length ? 'Any contractor' : 'None added yet'}</option>
+                      {contractorsFor(r).map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
                         </option>
                       ))}
                     </SmartSelect>
@@ -749,7 +792,7 @@ export function RoutingFormDialog({
                       dept && dept.toLowerCase() !== o.name.toLowerCase() ? `Done by ${dept}` : null,
                       r.isQcStep || o.kind === 'QC' ? 'a check: pieces pass or fail here' : null,
                       r.instructions.trim() || null,
-                      o.inactive ? 'switched off in the Process Master: change it or take the step off' : null,
+                      o.inactive ? 'switched off in the Routing Masters: change it or take the step off' : null,
                     ].filter(Boolean)
                     return said.length ? <p className="text-muted-foreground -mt-0.5 truncate px-2 pb-1.5 text-[11px] lg:pl-[3.75rem]">{said.join(' · ')}</p> : null
                   })()}
@@ -797,7 +840,7 @@ export function RoutingFormDialog({
         {/* Processes not yet on the route, one press each. */}
         {notOnRoute.length > 0 && (
           <div className="mt-3">
-            <p className="text-muted-foreground mb-1.5 text-xs">Add a process — it goes where the Process Master&apos;s order puts it; move it if this style differs:</p>
+            <p className="text-muted-foreground mb-1.5 text-xs">Add a process — it goes where the Routing Masters&apos; order puts it; move it if this style differs:</p>
             <div className="flex flex-wrap gap-1.5">
               {notOnRoute.map((op) => (
                 <button
@@ -817,7 +860,7 @@ export function RoutingFormDialog({
         {offRoute.length > 0 && (
           <p className="mt-2 flex items-start gap-1.5 text-xs text-red-600">
             <Info size={13} className="mt-px shrink-0" />
-            {offRoute.map((r) => opById.get(r.operationId)?.name).join(', ')} {offRoute.length === 1 ? 'is' : 'are'} switched off in the Process Master. Take{' '}
+            {offRoute.map((r) => opById.get(r.operationId)?.name).join(', ')} {offRoute.length === 1 ? 'is' : 'are'} switched off in the Routing Masters. Take{' '}
             {offRoute.length === 1 ? 'it' : 'them'} off the route, or pick another process.
           </p>
         )}

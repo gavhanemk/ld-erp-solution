@@ -24,6 +24,7 @@ const PREFIX: Record<string, string> = {
   warehouse: 'WH',
   workstation: 'WS',
   item: 'ITM',
+  contractor: 'CON',
 }
 
 /**

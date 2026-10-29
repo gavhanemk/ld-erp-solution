@@ -2,6 +2,7 @@
 
 import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
+import { RoutingMastersTabs } from '@/components/masters/RoutingMastersTabs'
 
 /**
  * Processes: the things a garment can go through — cutting, stitching,
@@ -113,16 +114,19 @@ const formFields: FormField[] = [
 
 export default function ProcessesPage() {
   return (
-    <MasterTable<Process>
-      title="Process Master"
-      entityName="Process"
-      resource="operations"
-      columns={columns}
-      formFields={formFields}
-      formColumns={3}
-      defaultSort="sortOrder"
-      searchPlaceholder="Search process name or code..."
-      emptyMessage="No processes yet. Add cutting, stitching, the checks and the rest of what a garment goes through."
-    />
+    <>
+      <RoutingMastersTabs />
+      <MasterTable<Process>
+        title="Processes"
+        entityName="Process"
+        resource="operations"
+        columns={columns}
+        formFields={formFields}
+        formColumns={3}
+        defaultSort="sortOrder"
+        searchPlaceholder="Search process name or code..."
+        emptyMessage="No processes yet. Add cutting, stitching, the checks and the rest of what a garment goes through."
+      />
+    </>
   )
 }

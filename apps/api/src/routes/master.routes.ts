@@ -44,6 +44,8 @@ import {
   createBankAccountSchema,
   createWarehouseSchema,
   createWorkstationSchema,
+  createContractorSchema,
+  updateContractorSchema,
   updateBomSchema,
   updateBrandSchema,
   updateBrokerSchema,
@@ -978,6 +980,30 @@ router.use(
   }),
 )
 
+/**
+ * Contractors: who does a process on the floor — a cutting master, a
+ * stitching contractor and their team. Picked on a routing step, beside its
+ * line. Kept, never deleted, once a routing names them: switched off instead.
+ */
+router.use(
+  '/contractors',
+  crudRouter({
+    model: 'contractor',
+    module: MODULE,
+    entityType: 'Contractor',
+    createSchema: createContractorSchema,
+    updateSchema: updateContractorSchema,
+    searchFields: ['name', 'code', 'phone', 'operation.name'],
+    sortableFields: ['name', 'code', 'createdAt'],
+    defaultSort: { field: 'name', order: 'asc' },
+    include: { operation: { select: { id: true, name: true } }, _count: { select: { routingSteps: true } } },
+    filters: {
+      operationId: { where: (v) => ({ operationId: { in: v } }), facets: ['operationId'] },
+    },
+    facets: ['operationId'],
+  }),
+)
+
 // No `injectOnCreate`: a bank account belongs to the business, not to one
 // of its stores, and the model carries no companyId to fill in.
 router.use(
@@ -1876,6 +1902,7 @@ router.use(
     defaultSort: { field: 'code', order: 'asc' },
     include: {
       department: { select: { id: true, name: true } },
+      operation: { select: { id: true, name: true } },
       supplier: { select: { id: true, name: true } },
       _count: { select: { routingSteps: true } },
     },
@@ -1913,6 +1940,17 @@ router.use(
       },
     },
     facets: ['departmentId', 'type', 'supplierId', 'capacity', 'routings'],
+    // The process, when one is named, must be one of the line's department's.
+    beforeSave: async (data, before) => {
+      const operationId = data.operationId === undefined ? (before?.operationId as string | null | undefined) : (data.operationId as string | null)
+      const departmentId = (data.departmentId ?? before?.departmentId) as string | undefined
+      if (operationId && departmentId) {
+        const op = await prisma.operation.findUnique({ where: { id: operationId }, select: { departmentId: true, name: true } })
+        if (!op) throw new AppError('That process is not in the Routing Masters.', 400, 'BAD_PROCESS')
+        if (op.departmentId !== departmentId) throw new AppError(`${op.name} is not a process of this line's department. Pick one of its own, or leave it empty.`, 400, 'PROCESS_DEPARTMENT_MISMATCH')
+      }
+      return { data }
+    },
     customFacets: {
       capacity: async (where) => {
         const [set, unset] = await Promise.all([

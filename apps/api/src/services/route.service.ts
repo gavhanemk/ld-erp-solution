@@ -169,6 +169,7 @@ const routingSelect = {
       operationId: true,
       departmentId: true,
       workstationId: true,
+      contractorId: true,
       isQcStep: true,
       execution: true,
       skip: true,
@@ -254,6 +255,7 @@ export async function applyRouting(tx: Prisma.TransactionClient, moId: string, r
       departmentId: s.departmentId,
       execution: s.execution,
       workstationId: s.workstationId,
+      contractorId: s.contractorId,
       isQcStep: s.isQcStep || s.operation.kind === 'QC',
       skip: s.operation.kind === 'CUTTING' ? 'NEVER' : s.skip,
       ratePerPiece: s.ratePerPiece ?? s.operation.jobWorkRate,
@@ -307,7 +309,7 @@ export async function editRoute(tx: Prisma.TransactionClient, moId: string, inpu
   const current = ordered(
     await tx.mOStep.findMany({
       where: { moId },
-      select: { id: true, sequence: true, name: true, operationId: true, departmentId: true, kind: true, skippedAt: true, skippedById: true, skipReason: true },
+      select: { id: true, sequence: true, name: true, operationId: true, departmentId: true, kind: true, skippedAt: true, skippedById: true, skipReason: true, contractorId: true },
     }),
   )
   if (!current.length) throw new AppError('This order has no route yet. Pick a routing for it first.', 409, 'NO_ROUTE')
@@ -388,6 +390,8 @@ export async function editRoute(tx: Prisma.TransactionClient, moId: string, inpu
         skippedAt: kept?.skippedAt ?? null,
         skippedById: kept?.skippedById ?? null,
         skipReason: kept?.skipReason ?? null,
+        // A kept step keeps its contractor, when it is still the same process.
+        contractorId: kept && kept.operationId === s.operationId ? kept.contractorId : null,
       },
     })
   }
