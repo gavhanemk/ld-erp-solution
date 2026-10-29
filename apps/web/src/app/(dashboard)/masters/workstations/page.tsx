@@ -1,12 +1,13 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { FileSpreadsheet } from 'lucide-react'
+import { FileSpreadsheet, LayoutList, Plus, Table2 } from 'lucide-react'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 import { ImportWorkstationsDialog } from '@/components/masters/ImportWorkstationsDialog'
 import { RoutingMastersTabs } from '@/components/masters/RoutingMastersTabs'
 import { masterResource, type Paginated } from '@/lib/api'
+import { LinesByProcess } from '@/components/masters/LinesByProcess'
 
 /**
  * Workstations.
@@ -254,32 +255,90 @@ export default function WorkstationsPage() {
   const [refreshKey, setRefreshKey] = useState(0)
   // Bumped after a save here, so the lines-per-process strip reads again.
   const [saved, setSaved] = useState(0)
+  // Process by process, or the full table with its filters and export.
+  const [view, setView] = useState<'process' | 'table'>('process')
+  const [adding, setAdding] = useState(false)
+
+  const switcher = (
+    <div className="border-border bg-secondary flex rounded-lg border p-0.5" role="tablist" aria-label="Show lines">
+      {(
+        [
+          ['process', 'By process', LayoutList],
+          ['table', 'Table', Table2],
+        ] as const
+      ).map(([key, label, Icon]) => (
+        <button
+          key={key}
+          type="button"
+          role="tab"
+          aria-selected={view === key}
+          onClick={() => setView(key)}
+          className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${view === key ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+        >
+          <Icon size={14} /> {label}
+        </button>
+      ))}
+    </div>
+  )
+  const importButton = (
+    <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
+      <FileSpreadsheet size={16} /> Import
+    </button>
+  )
 
   return (
     <>
       <RoutingMastersTabs />
-      <LinesPerProcess refreshKey={refreshKey + saved} />
-      <MasterTable<Workstation>
-        title="Lines & tables"
-        entityName="Line"
-        resource="workstations"
-        columns={columns}
-        formFields={formFields}
-        formColumns={4}
-        formWide
-        filterDefs={filterDefs}
-        defaultSort="code"
-        searchPlaceholder="Search name, code, process, supplier, contact..."
-        emptyMessage="No workstations yet. Add your lines and your outside job-work units."
-        refreshKey={refreshKey}
-        onChanged={() => setSaved((n) => n + 1)}
-        exportable
-        actions={
-          <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
-            <FileSpreadsheet size={16} /> Import
-          </button>
-        }
-      />
+      {view === 'process' ? (
+        <>
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h1 className="page-title">Lines & tables</h1>
+              <p className="page-subtitle">Each process with the tables, lines and outside units it runs on</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {switcher}
+              {importButton}
+              <button type="button" className="btn-primary" onClick={() => setAdding(true)} data-hotkey="new" aria-keyshortcuts="Alt+N">
+                <Plus size={16} /> New Line
+              </button>
+            </div>
+          </div>
+          <LinesByProcess
+            fields={formFields}
+            refreshKey={refreshKey + saved}
+            onChanged={() => setSaved((n) => n + 1)}
+            startNew={adding}
+            onStartedNew={() => setAdding(false)}
+          />
+        </>
+      ) : (
+        <>
+          <LinesPerProcess refreshKey={refreshKey + saved} />
+          <MasterTable<Workstation>
+            title="Lines & tables"
+            entityName="Line"
+            resource="workstations"
+            columns={columns}
+            formFields={formFields}
+            formColumns={4}
+            formWide
+            filterDefs={filterDefs}
+            defaultSort="code"
+            searchPlaceholder="Search name, code, process, supplier, contact..."
+            emptyMessage="No lines yet. Add your tables and lines, and your outside job-work units."
+            refreshKey={refreshKey}
+            onChanged={() => setSaved((n) => n + 1)}
+            exportable
+            actions={
+              <>
+                {switcher}
+                {importButton}
+              </>
+            }
+          />
+        </>
+      )}
       {importing && (
         <ImportWorkstationsDialog onClose={() => setImporting(false)} onImported={() => setRefreshKey((k) => k + 1)} />
       )}
