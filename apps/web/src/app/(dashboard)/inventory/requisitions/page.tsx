@@ -330,6 +330,12 @@ function RequisitionsScreen() {
   const [dialog, setDialog] = useState(false)
   // The requisition being handed over, and the one a reason is being asked for.
   const [fulfilling, setFulfilling] = useState<Requisition | null>(null)
+  /**
+   * "Process all" on an MO's group: the requisitions to move between, by id,
+   * each opened in the ordinary Process window in turn. Read back from the
+   * list, so after each issue the figures in the switcher are fresh.
+   */
+  const [fulfilGroup, setFulfilGroup] = useState<string[] | null>(null)
   const [processTab, setProcessTab] = useState<ProcessTab>('issue')
   // Bumped after a save, so the Indents and Reservations tabs read again.
   const [saved, setSaved] = useState(0)
@@ -833,14 +839,19 @@ function RequisitionsScreen() {
   /**
    * Above an MO's (or sales order's) requisitions, on one line: the MO, its
    * sales order and customer, and how many requisitions. "Approve all" and
-   * "Issue all" show only when two or more can take that step — one is done
-   * from its own row.
+   * "Process all" show only when two or more can take that step — one is done
+   * from its own row. Process all opens the ordinary Process window, with the
+   * group's requisitions to move between at its top.
    */
   const orderHead = (mr: Requisition) => {
     const k = orderKey(mr)!
     const mine = groups.get(k) ?? []
     const approve = together.approve.filter((m) => orderKey(m) === k)
-    const issue = together.issue.filter((m) => orderKey(m) === k)
+    // The same test as each row's own Process button.
+    const process = mine.filter((m) => {
+      const f = rowFacts(m)
+      return !f.canDecide && f.canFulfil
+    })
     const Icon = mr.mo ? Factory : FileText
     return (
       <>
@@ -869,16 +880,25 @@ function RequisitionsScreen() {
         <span className="border-border bg-card text-muted-foreground rounded-full border px-2 py-0.5 text-[11px] tabular-nums">
           {mine.length} {mine.length === 1 ? 'requisition' : 'requisitions'}
         </span>
-        {(approve.length > 1 || issue.length > 1) && (
+        {(approve.length > 1 || process.length > 1) && (
           <span className="ml-auto flex gap-1.5">
             {approve.length > 1 && (
               <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOrderBulk({ action: 'approve', mrs: approve })}>
                 <ThumbsUp size={13} /> Approve all ({approve.length})
               </button>
             )}
-            {issue.length > 1 && (
-              <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOrderBulk({ action: 'issue', mrs: issue })}>
-                <PackageCheck size={13} /> Issue all ({issue.length})
+            {process.length > 1 && (
+              <button
+                type="button"
+                className="btn-secondary h-7 px-2.5 text-xs"
+                title="Open them one after another in the Process window: stock, packets and scanning, as for one"
+                onClick={() => {
+                  setFulfilGroup(process.map((m) => m.id))
+                  setProcessTab('issue')
+                  setFulfilling(process[0])
+                }}
+              >
+                <PackageCheck size={13} /> Process all ({process.length})
               </button>
             )}
           </span>
@@ -886,6 +906,66 @@ function RequisitionsScreen() {
       </>
     )
   }
+  /**
+   * At the top of the Process window opened by "Process all": the MO's
+   * requisitions, each with what it still has to give. Pressing one opens it
+   * in the same window, from fresh.
+   */
+  const groupSwitcher = (ids: string[], currentId: string) => {
+    const list = ids.map((id) => rows.find((m) => m.id === id)).filter((m): m is Requisition => !!m)
+    const head = list[0]
+    if (!head) return undefined
+    return (
+      <div className="border-primary/30 bg-primary/5 rounded-xl border px-4 py-3">
+        <p className="text-sm">
+          <span className="text-primary font-mono font-semibold">{head.mo?.moNumber ?? head.so?.soNumber}</span>
+          {head.mo && head.so && <span className="text-muted-foreground font-mono"> · {head.so.soNumber}</span>}
+          {head.so && <span className="text-foreground font-medium"> · {head.so.customer.name}</span>}
+          <span className="text-muted-foreground"> — {list.length} requisitions to process. Pick one; each is issued on its own, as from its row.</span>
+        </p>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3" role="tablist" aria-label="Requisitions of this order">
+          {list.map((m, n) => {
+            const f = rowFacts(m)
+            const owed = unitLine(f.groups, (g) => g.owed)
+            const here = m.id === currentId
+            const p = itemsPreview(m.lines.map((l) => l.item.name))
+            return (
+              <button
+                key={m.id}
+                type="button"
+                role="tab"
+                aria-selected={here}
+                onClick={() => !here && (setProcessTab('issue'), setFulfilling(m))}
+                className={`bg-card flex items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors ${
+                  here ? 'border-primary ring-primary ring-1' : 'border-border hover:bg-secondary/60'
+                }`}
+              >
+                <span
+                  className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${
+                    !owed ? 'bg-primary text-primary-foreground' : here ? 'border-primary text-primary border-2' : 'bg-secondary text-muted-foreground'
+                  }`}
+                >
+                  {!owed ? <Check size={13} /> : n + 1}
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm">
+                    <span className={`font-mono font-semibold ${here ? 'text-primary' : 'text-foreground'}`}>{m.mrNumber}</span>
+                    <span className="text-muted-foreground"> · {m.department.name}</span>
+                  </span>
+                  <span className="text-foreground block truncate text-xs" title={p.full}>
+                    {p.shown}
+                    {p.extra}
+                  </span>
+                  <span className={`block text-[11px] ${owed ? 'warn-text' : 'text-muted-foreground'}`}>{owed ? `${owed} to give` : 'All issued'}</span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
+
   /** A row inside an order's group: a thin line down the left ties it to the header. */
   const inGroup = (mr: Requisition) => (orderKey(mr) ? 'border-l-2 border-l-primary/40' : '')
 
@@ -1333,9 +1413,14 @@ function RequisitionsScreen() {
 
       {fulfilling && (
         <ProcessDialog
+          key={fulfilling.id}
           mr={fulfilling}
           startTab={processTab}
-          onClose={() => setFulfilling(null)}
+          switcher={fulfilGroup && fulfilGroup.length > 1 ? groupSwitcher(fulfilGroup, fulfilling.id) : undefined}
+          onClose={() => {
+            setFulfilling(null)
+            setFulfilGroup(null)
+          }}
           // The window stays open after a save; the list and tabs behind refresh.
           onDone={(msg, out) => {
             setSaved((n) => n + 1)

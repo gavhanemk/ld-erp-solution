@@ -98,9 +98,12 @@ export function ProcessDialog({
   startTab = 'issue',
   onClose,
   onDone,
+  switcher,
 }: {
   mr: ProcessRequisition
   startTab?: ProcessTab
+  /** Above everything: the other requisitions of the same MO, to move between them in this window. */
+  switcher?: ReactNode
   onClose: () => void
   /** After each save, so the list behind can refresh. The window stays open. */
   /** `outward`: what an issue just handed over, for its labels. */
@@ -839,6 +842,7 @@ export function ProcessDialog({
       onClose={onClose}
       busy={saving}
     >
+      {switcher}
       {/* What it is for, and who has had a hand in it — on one line, nothing cut short. */}
       <div className="rounded-xl border border-border bg-card px-4 py-3 text-sm">
         <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-7 lg:gap-x-0 lg:divide-x lg:divide-border">
