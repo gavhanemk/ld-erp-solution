@@ -12,6 +12,7 @@ import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { CuttingDialog } from './CuttingDialog'
 import { StagesDialog } from './StagesDialog'
+import { MoFlowStrip } from './MoFlowStrip'
 import { MoProductionPanel } from './floor/MoProductionPanel'
 import { PROGRESS, type Flow } from './floor/types'
 import { LIVE_MO, moStatus } from './status'
@@ -462,6 +463,20 @@ export function ManufacturingOrderDetailDialog({
                   {mo.closeReason ? ` — ${mo.closeReason}` : ''}
                 </div>
               )}
+              <MoFlowStrip
+                facts={{
+                  hasSalesOrder: !!mo.so,
+                  status: mo.status,
+                  requisitionsRaised: mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED'),
+                  materialsIssued: mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0),
+                  stagesSetUp: !!mo.steps?.length,
+                  cutStarted: !!mo.cuttingOrders?.length || (mo.totalCutQty ?? 0) > 0,
+                  planned: mo.totalPlannedQty,
+                  packed: mo.totalPackedQty,
+                }}
+                onSetUpStages={() => setSettingRoute(true)}
+                onShowMaterials={() => document.getElementById('mo-materials')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+              />
               <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
                 {[
                   ['Planned', `${pcs(mo.totalPlannedQty)} pcs`],
