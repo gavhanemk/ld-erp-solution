@@ -826,7 +826,11 @@ export function ProcessDialog({
       footerNote={
         check.problems[0] ??
         (check.work.length
-          ? `${check.work.length} ${check.work.length === 1 ? 'item' : 'items'} will be ${tab === 'issue' ? 'issued' : tab === 'reserve' ? 'kept aside' : 'put on the indent'} when you press ${current.button}.`
+          ? `${
+              check.work.length <= 2
+                ? check.work.map((w) => `${w.r.l.item.name} (${fmt(w.v)} ${w.r.unit})`).join(' and ')
+                : `${check.work.length} items`
+            } will be ${tab === 'issue' ? 'issued' : tab === 'reserve' ? 'kept aside' : 'put on the indent'} when you press ${current.button}.`
           : tab === 'issue'
             ? 'Enter how much to issue.'
             : 'Nothing changed yet.')
@@ -1009,6 +1013,25 @@ export function ProcessDialog({
             ) : summary.ready + summary.partly > 0 ? (
               // Approved, so it can be handed over by scanning: stock comes down with each sticker.
               <>
+                {/* Which items are being issued, named first, so nobody has to guess from a packet list. */}
+                <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-primary">You are issuing</p>
+                  <ul className="mt-1 space-y-1">
+                    {rows
+                      .filter((r) => r.owed > 0)
+                      .map((r) => (
+                        <li key={r.l.id} className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                          <span className="font-mono text-xs text-muted-foreground">{r.l.item.code}</span>
+                          <span className="font-semibold text-foreground">{r.l.item.name}</span>
+                          <span className="text-muted-foreground">
+                            · {fmt(r.owed)} {r.unit} to give
+                            {r.stores[0] ? ` · from ${r.stores[0].name}` : ''}
+                            {r.theirs && r.l.ownerCustomer ? ` · ${r.l.ownerCustomer.name}'s material` : ''}
+                          </span>
+                        </li>
+                      ))}
+                  </ul>
+                </div>
                 <ScanIssue
                   mrId={mr.id}
                   mrNumber={mr.mrNumber}
@@ -1039,6 +1062,7 @@ export function ProcessDialog({
                         <PickList
                           key={r.l.id}
                           item={r.l.item.name}
+                          code={r.l.item.code}
                           itemId={r.l.item.id}
                           warehouseId={r.stores[0].id}
                           store={r.stores[0].name}
