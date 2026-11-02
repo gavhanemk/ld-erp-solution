@@ -394,6 +394,8 @@ export function ManufacturingOrderDetailDialog({
         status: mo.status,
         requisitionsRaised: mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED'),
         materialsIssued: mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0),
+        materialItems: plan?.rows.filter((r) => r.required > 0).length ?? 0,
+        materialItemsIssued: plan?.rows.filter((r) => r.required > 0 && r.issued >= r.required - 0.0005).length ?? 0,
         stagesSetUp: !!mo.steps?.length,
         cutStarted: !!mo.cuttingOrders?.length || (mo.totalCutQty ?? 0) > 0,
         planned: mo.totalPlannedQty,

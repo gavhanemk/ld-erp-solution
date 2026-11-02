@@ -15,7 +15,11 @@ export interface MoFlowFacts {
   hasSalesOrder: boolean
   status: string
   requisitionsRaised: boolean
+  /** The store has issued something for this order: enough to set up its stages. */
   materialsIssued: boolean
+  /** Materials the BOM asks for, and how many of them are issued in full. */
+  materialItems: number
+  materialItemsIssued: number
   stagesSetUp: boolean
   cutStarted: boolean
   planned: number
@@ -27,7 +31,16 @@ export type MoTab = 'order' | 'materials' | 'stages' | 'packed'
 const isFinished = (f: MoFlowFacts) =>
   f.status === 'COMPLETED' || f.status === 'CLOSED' || (f.planned > 0 && f.packed >= f.planned)
 
-function stepsOf(f: MoFlowFacts): Array<{ id: MoTab; label: string; hint: string; done: boolean }> {
+/** Materials ticked only when every one is issued in full. */
+const allIssued = (f: MoFlowFacts) => f.materialItems > 0 && f.materialItemsIssued >= f.materialItems
+
+/**
+ * `done` ticks a step; `passed` says the order has moved on from it. Materials
+ * part issued are passed (stages can be set up) but not done.
+ */
+function stepsOf(
+  f: MoFlowFacts,
+): Array<{ id: MoTab; label: string; hint: string; done: boolean; passed?: boolean; partly?: string }> {
   const finished = isFinished(f)
   return [
     {
@@ -40,7 +53,9 @@ function stepsOf(f: MoFlowFacts): Array<{ id: MoTab; label: string; hint: string
       id: 'materials',
       label: 'Materials',
       hint: 'Ask the store · issued',
-      done: f.materialsIssued,
+      done: allIssued(f),
+      passed: f.materialsIssued,
+      partly: f.materialsIssued && !allIssued(f) ? `Part issued · ${f.materialItemsIssued} of ${f.materialItems} in full` : undefined,
     },
     {
       id: 'stages',
@@ -54,7 +69,7 @@ function stepsOf(f: MoFlowFacts): Array<{ id: MoTab; label: string; hint: string
 
 /** The step the order has reached: the tab to open on. */
 export function currentMoTab(f: MoFlowFacts): MoTab {
-  return stepsOf(f).find((s) => !s.done)?.id ?? 'packed'
+  return stepsOf(f).find((s) => !(s.passed ?? s.done))?.id ?? 'packed'
 }
 
 export function MoFlowStrip({
@@ -93,7 +108,9 @@ export function MoFlowStrip({
     }
   } else if (!f.stagesSetUp) {
     next = {
-      text: 'Press "Set up stages". It brings in this style’s routing — cutting, stitching, QC and the rest, with their lines and contractors.',
+      text: allIssued(f)
+        ? 'Press "Set up stages". It brings in this style’s routing — cutting, stitching, QC and the rest, with their lines and contractors.'
+        : 'Press "Set up stages" to bring in this style’s routing. The rest of the materials can be asked for on the Materials tab.',
       action: (
         <button type="button" className="btn-primary h-8 px-3 text-xs" onClick={onSetUpStages}>
           <Route size={13} /> Set up stages
@@ -177,7 +194,7 @@ export function MoFlowStrip({
                   {s.label}
                 </span>
                 <span className="text-muted-foreground block truncate text-[11px]">
-                  {here ? 'You are here' : s.done ? 'Done' : s.hint}
+                  {here ? 'You are here' : s.done ? 'Done' : s.partly ? <span className="warn-text">{s.partly}</span> : s.hint}
                 </span>
               </span>
             </button>
