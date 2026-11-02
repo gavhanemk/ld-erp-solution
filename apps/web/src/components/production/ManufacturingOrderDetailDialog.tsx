@@ -12,7 +12,7 @@ import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { CuttingDialog } from './CuttingDialog'
 import { StagesDialog } from './StagesDialog'
-import { MoFlowStrip } from './MoFlowStrip'
+import { MoFlowStrip, currentMoTab, type MoFlowFacts, type MoTab } from './MoFlowStrip'
 import { MoProductionPanel } from './floor/MoProductionPanel'
 import { PROGRESS, type Flow } from './floor/types'
 import { LIVE_MO, moStatus } from './status'
@@ -150,6 +150,8 @@ export function ManufacturingOrderDetailDialog({
   const [cutting, setCutting] = useState(false)
   const [cancellingCut, setCancellingCut] = useState<{ id: string; cutOrderNumber: string } | null>(null)
   const [settingRoute, setSettingRoute] = useState(false)
+  /** The step tab picked by hand, for this order; until then it opens on the step the order has reached. */
+  const [tabPick, setTabPick] = useState<{ moId: string; tab: MoTab } | null>(null)
   const [flow, setFlow] = useState<Flow | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
@@ -386,6 +388,21 @@ export function ManufacturingOrderDetailDialog({
     } else raiseRef.current?.focus()
   }
 
+  const facts: MoFlowFacts | null = mo
+    ? {
+        hasSalesOrder: !!mo.so,
+        status: mo.status,
+        requisitionsRaised: mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED'),
+        materialsIssued: mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0),
+        stagesSetUp: !!mo.steps?.length,
+        cutStarted: !!mo.cuttingOrders?.length || (mo.totalCutQty ?? 0) > 0,
+        planned: mo.totalPlannedQty,
+        packed: mo.totalPackedQty,
+      }
+    : null
+  const tab: MoTab = mo && tabPick?.moId === mo.id ? tabPick.tab : facts ? currentMoTab(facts) : 'order'
+  const pickTab = (t: MoTab) => mo && setTabPick({ moId: mo.id, tab: t })
+
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       <div className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="mo-detail-title">
@@ -441,6 +458,7 @@ export function ManufacturingOrderDetailDialog({
         </div>
 
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+          {mo && facts && <MoFlowStrip facts={facts} tab={tab} onTab={pickTab} onSetUpStages={() => setSettingRoute(true)} />}
           {error && (
             <div className="border-destructive/40 bg-destructive/5 flex items-start gap-3 rounded-lg border p-3">
               <AlertCircle size={16} className="text-destructive mt-0.5 shrink-0" />
@@ -463,356 +481,356 @@ export function ManufacturingOrderDetailDialog({
                   {mo.closeReason ? ` — ${mo.closeReason}` : ''}
                 </div>
               )}
-              <MoFlowStrip
-                facts={{
-                  hasSalesOrder: !!mo.so,
-                  status: mo.status,
-                  requisitionsRaised: mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED'),
-                  materialsIssued: mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0),
-                  stagesSetUp: !!mo.steps?.length,
-                  cutStarted: !!mo.cuttingOrders?.length || (mo.totalCutQty ?? 0) > 0,
-                  planned: mo.totalPlannedQty,
-                  packed: mo.totalPackedQty,
-                }}
-                onSetUpStages={() => setSettingRoute(true)}
-                onShowMaterials={() => document.getElementById('mo-materials')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-              />
-              <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
-                {[
-                  ['Planned', `${pcs(mo.totalPlannedQty)} pcs`],
-                  ['Cut', `${pcs(mo.totalCutQty ?? 0)} pcs${mo.steps?.length && mo.totalFinishedQty ? ` · ${pcs(mo.totalFinishedQty)} through` : ''}`],
-                  ['Packed', `${pcs(mo.totalPackedQty)} pcs · ${share}%`],
-                  ['Planned dates', `${mo.plannedStartDate ? formatDate(mo.plannedStartDate) : '—'} → ${mo.plannedEndDate ? formatDate(mo.plannedEndDate) : '—'}`],
-                  ['Order delivery', mo.so?.deliveryDate ? formatDate(mo.so.deliveryDate) : '—'],
-                ].map(([label, value]) => (
-                  <div key={label} className="glass-card p-3">
-                    <p className="text-muted-foreground text-[11px]">{label}</p>
-                    <p className="text-foreground mt-0.5 text-sm font-semibold tabular-nums">{value}</p>
-                    {label === 'Packed' && (
-                      <div className="bg-secondary mt-1.5 h-1.5 rounded-full" aria-hidden>
-                        <div className="bg-primary h-1.5 rounded-full" style={{ width: `${share}%` }} />
+              {tab === 'order' && (
+                <div role="tabpanel" aria-label="Order" className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
+                    {[
+                      ['Planned', `${pcs(mo.totalPlannedQty)} pcs`],
+                      ['Cut', `${pcs(mo.totalCutQty ?? 0)} pcs${mo.steps?.length && mo.totalFinishedQty ? ` · ${pcs(mo.totalFinishedQty)} through` : ''}`],
+                      ['Packed', `${pcs(mo.totalPackedQty)} pcs · ${share}%`],
+                      ['Planned dates', `${mo.plannedStartDate ? formatDate(mo.plannedStartDate) : '—'} → ${mo.plannedEndDate ? formatDate(mo.plannedEndDate) : '—'}`],
+                      ['Order delivery', mo.so?.deliveryDate ? formatDate(mo.so.deliveryDate) : '—'],
+                    ].map(([label, value]) => (
+                      <div key={label} className="glass-card p-3">
+                        <p className="text-muted-foreground text-[11px]">{label}</p>
+                        <p className="text-foreground mt-0.5 text-sm font-semibold tabular-nums">{value}</p>
+                        {label === 'Packed' && (
+                          <div className="bg-secondary mt-1.5 h-1.5 rounded-full" aria-hidden>
+                            <div className="bg-primary h-1.5 rounded-full" style={{ width: `${share}%` }} />
+                          </div>
+                        )}
                       </div>
-                    )}
+                    ))}
                   </div>
-                ))}
-              </div>
-              {mo.notes && <p className="text-muted-foreground text-sm">Notes: {mo.notes}</p>}
+                  {mo.notes && <p className="text-muted-foreground text-sm">Notes: {mo.notes}</p>}
 
-              <Section icon={Layers} title="What is being made">
-                <div className="space-y-2">
-                  {mo.lines.map((l) => (
-                    <div key={l.id} className="border-border bg-card rounded-lg border p-2.5">
-                      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-                        <p className="text-foreground text-sm font-medium">
-                          <span className="font-mono">{l.style.code}</span>
-                          {l.color ? ` · ${l.color}` : ''}
-                          {l.soLine && <span className="text-muted-foreground font-normal"> · {l.soLine.item.code}</span>}
-                        </p>
-                        <p className="text-xs">
-                          {l.bom ? (
-                            <span className="text-primary">BOM v{l.bom.version}{l.bom.color ? ` ${l.bom.color}` : ''}</span>
-                          ) : (
-                            <span className="warn-text">No approved BOM</span>
+                  <Section icon={Layers} title="What is being made">
+                    <div className="space-y-2">
+                      {mo.lines.map((l) => (
+                        <div key={l.id} className="border-border bg-card rounded-lg border p-2.5">
+                          <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                            <p className="text-foreground text-sm font-medium">
+                              <span className="font-mono">{l.style.code}</span>
+                              {l.color ? ` · ${l.color}` : ''}
+                              {l.soLine && <span className="text-muted-foreground font-normal"> · {l.soLine.item.code}</span>}
+                            </p>
+                            <p className="text-xs">
+                              {l.bom ? (
+                                <span className="text-primary">BOM v{l.bom.version}{l.bom.color ? ` ${l.bom.color}` : ''}</span>
+                              ) : (
+                                <span className="warn-text">No approved BOM</span>
+                              )}
+                              <span className="text-foreground ml-3 font-semibold tabular-nums">{pcs(l.totalQty)} pcs</span>
+                            </p>
+                          </div>
+                          {l.sizes.length > 0 && (
+                            <p className="text-muted-foreground mt-1 text-xs tabular-nums">
+                              {[...l.sizes].sort((a, b) => a.size.sequence - b.size.sequence).map((z) => `${z.size.code} ${pcs(z.qty)}`).join(' · ')}
+                            </p>
                           )}
-                          <span className="text-foreground ml-3 font-semibold tabular-nums">{pcs(l.totalQty)} pcs</span>
-                        </p>
-                      </div>
-                      {l.sizes.length > 0 && (
-                        <p className="text-muted-foreground mt-1 text-xs tabular-nums">
-                          {[...l.sizes].sort((a, b) => a.size.sequence - b.size.sequence).map((z) => `${z.size.code} ${pcs(z.qty)}`).join(' · ')}
-                        </p>
-                      )}
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              </Section>
+                  </Section>
 
-              <Section
-                id="mo-materials"
-                icon={ClipboardList}
-                title="Materials from the BOM"
-                actions={
-                  plan && live && mayRaise ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <label className="text-muted-foreground flex items-center gap-1.5 text-xs">
-                        Needed by
-                        <input type="date" className="form-input h-7 w-36 py-0 text-xs" value={requiredDate} onChange={(e) => setRequiredDate(e.target.value)} />
-                      </label>
-                      <button ref={raiseRef} type="button" className="btn-primary h-8 px-3 text-xs" onClick={() => void raise()} disabled={busy !== null || !!raiseBlocker}>
-                        {busy === 'raise' ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />} Raise requisitions
-                      </button>
-                    </div>
-                  ) : undefined
-                }
-              >
-                {loadingPlan && !plan ? (
-                  <div className="skeleton h-32 w-full rounded-lg" />
-                ) : !plan ? null : (
-                  <>
-                    {plan.missing.length > 0 && (
-                      <p className="warn-text mb-2 flex items-start gap-1.5 text-xs">
-                        <AlertCircle size={13} className="mt-px shrink-0" />
-                        No approved BOM for {plan.missing.map((m) => `${m.style}${m.color ? ` ${m.color}` : ''} (${pcs(m.pieces)} pcs)`).join(', ')}: their materials are not worked out. Approve a BOM in
-                        Masters → Bill of Materials.
-                      </p>
-                    )}
-                    {plan.rows.length === 0 ? (
-                      <p className="text-muted-foreground text-sm">Nothing to work out.</p>
-                    ) : (
-                      <div className="border-border overflow-x-auto rounded-lg border">
-                        <table ref={tableRef} className="data-table w-full min-w-[1080px]">
-                          <thead>
-                            <tr className="bg-secondary">
-                              {live && mayRaise && (
-                                <th style={{ width: 32 }}>
-                                  <input
-                                    type="checkbox"
-                                    className="accent-primary"
-                                    checked={askable.length > 0 && tickedCount === askable.length}
-                                    ref={(el) => {
-                                      if (el) el.indeterminate = tickedCount > 0 && tickedCount < askable.length
-                                    }}
-                                    disabled={askable.length === 0}
-                                    onChange={(e) => tickAll(e.target.checked)}
-                                    aria-label="Ask for all the materials"
-                                    title={askable.length === 0 ? 'All asked for already' : tickedCount === askable.length ? 'Untick all' : 'Tick all'}
-                                  />
-                                </th>
-                              )}
-                              <th>Material</th>
-                              <th>For process</th>
-                              <th style={{ textAlign: 'right' }}>Needed</th>
-                              <th style={{ textAlign: 'right' }}>In stock</th>
-                              <th style={{ textAlign: 'right' }} title="Already in requisitions raised for this order">
-                                Already asked
-                              </th>
-                              <th style={{ textAlign: 'right' }}>Issued</th>
-                              <th style={{ textAlign: 'right' }}>Short</th>
-                              {live && mayRaise && (
-                                <>
-                                  <th style={{ textAlign: 'right' }}>Ask now</th>
-                                  <th>From store</th>
-                                </>
-                              )}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {plan.rows.map((r, i) => {
-                              const a = ask[r.key]
-                              return (
-                                <tr key={r.key}>
+                </div>
+              )}
+              {tab === 'materials' && (
+                <div role="tabpanel" aria-label="Materials" className="space-y-3">
+                  <Section
+                    id="mo-materials"
+                    icon={ClipboardList}
+                    title="Materials from the BOM"
+                    actions={
+                      plan && live && mayRaise ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <label className="text-muted-foreground flex items-center gap-1.5 text-xs">
+                            Needed by
+                            <input type="date" className="form-input h-7 w-36 py-0 text-xs" value={requiredDate} onChange={(e) => setRequiredDate(e.target.value)} />
+                          </label>
+                          <button ref={raiseRef} type="button" className="btn-primary h-8 px-3 text-xs" onClick={() => void raise()} disabled={busy !== null || !!raiseBlocker}>
+                            {busy === 'raise' ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />} Raise requisitions
+                          </button>
+                        </div>
+                      ) : undefined
+                    }
+                  >
+                    {loadingPlan && !plan ? (
+                      <div className="skeleton h-32 w-full rounded-lg" />
+                    ) : !plan ? null : (
+                      <>
+                        {plan.missing.length > 0 && (
+                          <p className="warn-text mb-2 flex items-start gap-1.5 text-xs">
+                            <AlertCircle size={13} className="mt-px shrink-0" />
+                            No approved BOM for {plan.missing.map((m) => `${m.style}${m.color ? ` ${m.color}` : ''} (${pcs(m.pieces)} pcs)`).join(', ')}: their materials are not worked out. Approve a BOM in
+                            Masters → Bill of Materials.
+                          </p>
+                        )}
+                        {plan.rows.length === 0 ? (
+                          <p className="text-muted-foreground text-sm">Nothing to work out.</p>
+                        ) : (
+                          <div className="border-border overflow-x-auto rounded-lg border">
+                            <table ref={tableRef} className="data-table w-full min-w-[1080px]">
+                              <thead>
+                                <tr className="bg-secondary">
                                   {live && mayRaise && (
-                                    <td>
+                                    <th style={{ width: 32 }}>
                                       <input
                                         type="checkbox"
                                         className="accent-primary"
-                                        checked={!!a?.on}
-                                        disabled={r.toRequest <= 0}
-                                        onChange={(e) => tick(r, e.target.checked)}
-                                        aria-label={`Ask for ${r.item.code}`}
-                                        title={r.toRequest <= 0 ? 'Already asked for in full' : undefined}
+                                        checked={askable.length > 0 && tickedCount === askable.length}
+                                        ref={(el) => {
+                                          if (el) el.indeterminate = tickedCount > 0 && tickedCount < askable.length
+                                        }}
+                                        disabled={askable.length === 0}
+                                        onChange={(e) => tickAll(e.target.checked)}
+                                        aria-label="Ask for all the materials"
+                                        title={askable.length === 0 ? 'All asked for already' : tickedCount === askable.length ? 'Untick all' : 'Tick all'}
                                       />
-                                    </td>
+                                    </th>
                                   )}
-                                  <td>
-                                    <div className="text-foreground text-sm font-medium">
-                                      <span className="font-mono text-xs">{r.item.code}</span> — {r.item.name}
-                                    </div>
-                                    <div className="text-muted-foreground flex flex-wrap items-center gap-1.5 text-[11px]">
-                                      {r.styles.join(', ')}
-                                      {live && mayRaise && plan.mo.so ? (
-                                        // Whose cloth this is: the plan's guess, switchable.
-                                        <button
-                                          type="button"
-                                          className={`${r.ownership === 'CUSTOMER_OWNED' ? 'badge-purple' : 'badge-neutral'} cursor-pointer hover:opacity-80`}
-                                          onClick={() => flip(r)}
-                                          disabled={loadingPlan}
-                                          title={`Switch to ${r.ownership === 'CUSTOMER_OWNED' ? 'our own stock' : `${plan.mo.so.customer.name}'s stock`}`}
-                                        >
-                                          {r.ownership === 'CUSTOMER_OWNED' ? `${plan.mo.so.customer.name}'s` : 'Ours'} ⇄
-                                        </button>
-                                      ) : (
-                                        r.ownership === 'CUSTOMER_OWNED' && <span className="badge-purple">Customer&apos;s</span>
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="text-xs">
-                                    {live && mayRaise ? (
-                                      <SmartSelect
-                                        className="form-input h-8 w-36 py-0 text-xs"
-                                        value={a?.processId ?? ''}
-                                        onChange={(e) => setRow(r.key, { processId: e.target.value })}
-                                        aria-label={`Process for ${r.item.code}`}
-                                      >
-                                        <option value="">Process…</option>
-                                        {plan.processes.map((p) => (
-                                          <option key={p.id} value={p.id} data-sub={`Asked by ${p.department.name}`}>
-                                            {p.name}
-                                          </option>
-                                        ))}
-                                      </SmartSelect>
-                                    ) : (
-                                      r.department?.name ?? '—'
-                                    )}
-                                  </td>
-                                  <td className="text-right text-xs tabular-nums">
-                                    {qty(r.required)} {r.item.uom ?? ''}
-                                  </td>
-                                  <td className="text-right text-xs tabular-nums">{qty(r.inStock)}</td>
-                                  <td className="text-right text-xs tabular-nums">{r.requested > 0 ? qty(r.requested) : '—'}</td>
-                                  <td className={`text-right text-xs tabular-nums ${r.issued > 0 && r.issued >= r.required - 1e-9 ? 'text-primary' : ''}`} title={r.required > 0 ? `${Math.round((r.issued / r.required) * 100)}% of what is needed` : undefined}>
-                                    {r.issued > 0 ? qty(r.issued) : '—'}
-                                  </td>
-                                  <td className={`text-right text-xs tabular-nums ${r.short > 0 ? 'warn-text font-medium' : 'text-muted-foreground'}`}>{r.short > 0 ? qty(r.short) : '—'}</td>
+                                  <th>Material</th>
+                                  <th>For process</th>
+                                  <th style={{ textAlign: 'right' }}>Needed</th>
+                                  <th style={{ textAlign: 'right' }}>In stock</th>
+                                  <th style={{ textAlign: 'right' }} title="Already in requisitions raised for this order">
+                                    Already asked
+                                  </th>
+                                  <th style={{ textAlign: 'right' }}>Issued</th>
+                                  <th style={{ textAlign: 'right' }}>Short</th>
                                   {live && mayRaise && (
                                     <>
-                                      <td className="w-32 text-right">
-                                        {r.toRequest > 0 ? (
-                                          <StepInput
-                                            data-ask-row={i}
-                                            decimals
-                                            className="form-input h-8 w-28 px-2 text-right text-xs tabular-nums"
-                                            value={a?.qty ?? ''}
-                                            placeholder="0"
-                                            max={r.toRequest}
-                                            title={`${qty(r.toRequest)} still to ask for`}
-                                            onValueChange={(v) => setRow(r.key, { qty: v, on: Number(v) > 0 })}
-                                            onKeyDown={askEnter(i)}
-                                            aria-label={`Ask for ${r.item.code}, quantity`}
-                                          />
-                                        ) : (
-                                          // Nothing left to ask for: said, rather than an empty box that looks like one to fill.
-                                          <span className="text-primary text-xs font-medium">All asked</span>
-                                        )}
-                                      </td>
-                                      <td>
-                                        <SmartSelect className="form-input h-8 w-44 py-0 text-xs" value={a?.warehouseId ?? ''} onChange={(e) => setRow(r.key, { warehouseId: e.target.value })}>
-                                          <option value="">Store…</option>
-                                          {plan.warehouses.map((w) => {
-                                            const held = r.stores.find((x) => x.id === w.id)
-                                            return (
-                                              <option key={w.id} value={w.id} data-sub={held ? `${qty(held.qty)} in stock` : 'none in stock'}>
-                                                {w.name}
-                                              </option>
-                                            )
-                                          })}
-                                        </SmartSelect>
-                                      </td>
+                                      <th style={{ textAlign: 'right' }}>Ask now</th>
+                                      <th>From store</th>
                                     </>
                                   )}
                                 </tr>
-                              )
-                            })}
-                          </tbody>
-                        </table>
+                              </thead>
+                              <tbody>
+                                {plan.rows.map((r, i) => {
+                                  const a = ask[r.key]
+                                  return (
+                                    <tr key={r.key}>
+                                      {live && mayRaise && (
+                                        <td>
+                                          <input
+                                            type="checkbox"
+                                            className="accent-primary"
+                                            checked={!!a?.on}
+                                            disabled={r.toRequest <= 0}
+                                            onChange={(e) => tick(r, e.target.checked)}
+                                            aria-label={`Ask for ${r.item.code}`}
+                                            title={r.toRequest <= 0 ? 'Already asked for in full' : undefined}
+                                          />
+                                        </td>
+                                      )}
+                                      <td>
+                                        <div className="text-foreground text-sm font-medium">
+                                          <span className="font-mono text-xs">{r.item.code}</span> — {r.item.name}
+                                        </div>
+                                        <div className="text-muted-foreground flex flex-wrap items-center gap-1.5 text-[11px]">
+                                          {r.styles.join(', ')}
+                                          {live && mayRaise && plan.mo.so ? (
+                                            // Whose cloth this is: the plan's guess, switchable.
+                                            <button
+                                              type="button"
+                                              className={`${r.ownership === 'CUSTOMER_OWNED' ? 'badge-purple' : 'badge-neutral'} cursor-pointer hover:opacity-80`}
+                                              onClick={() => flip(r)}
+                                              disabled={loadingPlan}
+                                              title={`Switch to ${r.ownership === 'CUSTOMER_OWNED' ? 'our own stock' : `${plan.mo.so.customer.name}'s stock`}`}
+                                            >
+                                              {r.ownership === 'CUSTOMER_OWNED' ? `${plan.mo.so.customer.name}'s` : 'Ours'} ⇄
+                                            </button>
+                                          ) : (
+                                            r.ownership === 'CUSTOMER_OWNED' && <span className="badge-purple">Customer&apos;s</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="text-xs">
+                                        {live && mayRaise ? (
+                                          <SmartSelect
+                                            className="form-input h-8 w-36 py-0 text-xs"
+                                            value={a?.processId ?? ''}
+                                            onChange={(e) => setRow(r.key, { processId: e.target.value })}
+                                            aria-label={`Process for ${r.item.code}`}
+                                          >
+                                            <option value="">Process…</option>
+                                            {plan.processes.map((p) => (
+                                              <option key={p.id} value={p.id} data-sub={`Asked by ${p.department.name}`}>
+                                                {p.name}
+                                              </option>
+                                            ))}
+                                          </SmartSelect>
+                                        ) : (
+                                          r.department?.name ?? '—'
+                                        )}
+                                      </td>
+                                      <td className="text-right text-xs tabular-nums">
+                                        {qty(r.required)} {r.item.uom ?? ''}
+                                      </td>
+                                      <td className="text-right text-xs tabular-nums">{qty(r.inStock)}</td>
+                                      <td className="text-right text-xs tabular-nums">{r.requested > 0 ? qty(r.requested) : '—'}</td>
+                                      <td className={`text-right text-xs tabular-nums ${r.issued > 0 && r.issued >= r.required - 1e-9 ? 'text-primary' : ''}`} title={r.required > 0 ? `${Math.round((r.issued / r.required) * 100)}% of what is needed` : undefined}>
+                                        {r.issued > 0 ? qty(r.issued) : '—'}
+                                      </td>
+                                      <td className={`text-right text-xs tabular-nums ${r.short > 0 ? 'warn-text font-medium' : 'text-muted-foreground'}`}>{r.short > 0 ? qty(r.short) : '—'}</td>
+                                      {live && mayRaise && (
+                                        <>
+                                          <td className="w-32 text-right">
+                                            {r.toRequest > 0 ? (
+                                              <StepInput
+                                                data-ask-row={i}
+                                                decimals
+                                                className="form-input h-8 w-28 px-2 text-right text-xs tabular-nums"
+                                                value={a?.qty ?? ''}
+                                                placeholder="0"
+                                                max={r.toRequest}
+                                                title={`${qty(r.toRequest)} still to ask for`}
+                                                onValueChange={(v) => setRow(r.key, { qty: v, on: Number(v) > 0 })}
+                                                onKeyDown={askEnter(i)}
+                                                aria-label={`Ask for ${r.item.code}, quantity`}
+                                              />
+                                            ) : (
+                                              // Nothing left to ask for: said, rather than an empty box that looks like one to fill.
+                                              <span className="text-primary text-xs font-medium">All asked</span>
+                                            )}
+                                          </td>
+                                          <td>
+                                            <SmartSelect className="form-input h-8 w-44 py-0 text-xs" value={a?.warehouseId ?? ''} onChange={(e) => setRow(r.key, { warehouseId: e.target.value })}>
+                                              <option value="">Store…</option>
+                                              {plan.warehouses.map((w) => {
+                                                const held = r.stores.find((x) => x.id === w.id)
+                                                return (
+                                                  <option key={w.id} value={w.id} data-sub={held ? `${qty(held.qty)} in stock` : 'none in stock'}>
+                                                    {w.name}
+                                                  </option>
+                                                )
+                                              })}
+                                            </SmartSelect>
+                                          </td>
+                                        </>
+                                      )}
+                                    </tr>
+                                  )
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                        <p className="text-muted-foreground mt-2 flex items-start gap-1.5 text-xs">
+                          <Info size={13} className="mt-px shrink-0" />
+                          Needed = pieces by size × the BOM per piece, wastage included. On a job-work order the customer&apos;s fabric (and anything else
+                          they have sent us) is drawn from their own stock — click Ours / Customer&apos;s to switch a row. Pick the process each material is for — it starts filled in from what
+                          the material is. The process&apos;s department asks the store: one requisition each, waiting for approval in Inventory; the store
+                          then issues what it has and passes the rest to Purchase.
+                        </p>
+                        {live && mayRaise && raiseBlocker && <p className="warn-text mt-1 text-xs">{raiseBlocker}</p>}
+                        {mo.status === 'DRAFT' && <p className="text-muted-foreground mt-1 text-xs">Release it to ask the store for these.</p>}
+                      </>
+                    )}
+                  </Section>
+
+                  <Section icon={ClipboardList} title="Requisitions">
+                    {mo.materialRequisitions.length === 0 ? (
+                      <p className="text-muted-foreground text-sm">None raised yet.</p>
+                    ) : (
+                      <div className="divide-border divide-y text-sm">
+                        {mo.materialRequisitions.map((m) => (
+                          <div key={m.id} className="flex items-center justify-between gap-3 py-1.5">
+                            <span>
+                              <a href={`/inventory/requisitions?q=${encodeURIComponent(m.mrNumber)}`} className="text-primary font-mono text-xs hover:underline">
+                                {m.mrNumber}
+                              </a>{' '}
+                              <span className="text-muted-foreground text-xs">
+                                {m.department.name} · {m._count.lines} {m._count.lines === 1 ? 'item' : 'items'} · {formatDate(m.requestDate)}
+                              </span>
+                            </span>
+                            <span className="text-xs">
+                              {m.closedAt ? 'Closed' : m.issuedAt ? 'Issued' : m.status === 'APPROVED' ? 'Approved' : m.status === 'REJECTED' ? 'Refused' : 'Waiting approval'}
+                            </span>
+                          </div>
+                        ))}
                       </div>
                     )}
-                    <p className="text-muted-foreground mt-2 flex items-start gap-1.5 text-xs">
-                      <Info size={13} className="mt-px shrink-0" />
-                      Needed = pieces by size × the BOM per piece, wastage included. On a job-work order the customer&apos;s fabric (and anything else
-                      they have sent us) is drawn from their own stock — click Ours / Customer&apos;s to switch a row. Pick the process each material is for — it starts filled in from what
-                      the material is. The process&apos;s department asks the store: one requisition each, waiting for approval in Inventory; the store
-                      then issues what it has and passes the rest to Purchase.
-                    </p>
-                    {live && mayRaise && raiseBlocker && <p className="warn-text mt-1 text-xs">{raiseBlocker}</p>}
-                    {mo.status === 'DRAFT' && <p className="text-muted-foreground mt-1 text-xs">Release it to ask the store for these.</p>}
-                  </>
-                )}
-              </Section>
-
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <Section icon={ClipboardList} title="Requisitions">
-                  {mo.materialRequisitions.length === 0 ? (
-                    <p className="text-muted-foreground text-sm">None raised yet.</p>
-                  ) : (
-                    <div className="divide-border divide-y text-sm">
-                      {mo.materialRequisitions.map((m) => (
-                        <div key={m.id} className="flex items-center justify-between gap-3 py-1.5">
-                          <span>
-                            <a href={`/inventory/requisitions?q=${encodeURIComponent(m.mrNumber)}`} className="text-primary font-mono text-xs hover:underline">
-                              {m.mrNumber}
-                            </a>{' '}
-                            <span className="text-muted-foreground text-xs">
-                              {m.department.name} · {m._count.lines} {m._count.lines === 1 ? 'item' : 'items'} · {formatDate(m.requestDate)}
+                  </Section>
+                </div>
+              )}
+              {tab === 'stages' && (
+                <div role="tabpanel" aria-label="Stages and production" className="space-y-3">
+                  <MoProductionPanel
+                    mo={{ id: mo.id, moNumber: mo.moNumber, status: mo.status, heldAt: mo.heldAt, progress: mo.progress, steps: mo.steps ?? [] }}
+                    flow={flow}
+                    materialsIssued={mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0)}
+                    requisitionsRaised={mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED')}
+                    onLoadStages={() => setSettingRoute(true)}
+                    onChanged={(msg) => void refresh(msg)}
+                  />
+                  {!mo.steps?.length && (mo.so?.isJobWork || !!mo.cuttingOrders?.length) && (
+                  <Section
+                    icon={Scissors}
+                    title="Cutting"
+                    actions={
+                      mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'create') ? (
+                        <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setCutting(true)} disabled={busy !== null}>
+                          <Scissors size={13} /> Record cutting
+                        </button>
+                      ) : undefined
+                    }
+                  >
+                    {!mo.cuttingOrders?.length ? (
+                      <p className="text-muted-foreground text-sm">Nothing cut yet. Record each cutting: fabric used, waste and pieces by size.</p>
+                    ) : (
+                      <div className="divide-border divide-y text-sm">
+                        {mo.cuttingOrders.map((c) => (
+                          <div key={c.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${c.status === 'CANCELLED' ? 'opacity-60' : ''}`}>
+                            <span className="min-w-0">
+                              <span className="font-mono text-xs">{c.cutOrderNumber}</span> <span className="text-muted-foreground text-xs">{formatDate(c.cutDate)}</span>
+                              {c.fabricItem && (
+                                <span className="text-muted-foreground block text-[11px]">
+                                  {c.fabricItem.name}: {Number(c.fabricUsed ?? 0)} used, {Number(c.wastage ?? 0)} waste {c.fabricItem.uom?.symbol ?? ''}
+                                  {c.panelItem ? ` · panels into stock as ${c.panelItem.code}` : ''}
+                                </span>
+                              )}
                             </span>
-                          </span>
-                          <span className="text-xs">
-                            {m.closedAt ? 'Closed' : m.issuedAt ? 'Issued' : m.status === 'APPROVED' ? 'Approved' : m.status === 'REJECTED' ? 'Refused' : 'Waiting approval'}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
+                            <span className="flex items-center gap-2 text-xs tabular-nums">
+                              {c.status === 'CANCELLED' ? 'Cancelled' : `${pcs(c.actualPieces)} pcs`}
+                              {c.status !== 'CANCELLED' && can('production', 'edit') && (
+                                <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" onClick={() => setCancellingCut(c)} aria-label={`Cancel ${c.cutOrderNumber}`}>
+                                  <Ban size={13} />
+                                </button>
+                              )}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Section>
                   )}
-                </Section>
-                {!mo.steps?.length && (mo.so?.isJobWork || !!mo.cuttingOrders?.length) && (
-                <Section
-                  icon={Scissors}
-                  title="Cutting"
-                  actions={
-                    mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'create') ? (
-                      <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setCutting(true)} disabled={busy !== null}>
-                        <Scissors size={13} /> Record cutting
-                      </button>
-                    ) : undefined
-                  }
-                >
-                  {!mo.cuttingOrders?.length ? (
-                    <p className="text-muted-foreground text-sm">Nothing cut yet. Record each cutting: fabric used, waste and pieces by size.</p>
-                  ) : (
-                    <div className="divide-border divide-y text-sm">
-                      {mo.cuttingOrders.map((c) => (
-                        <div key={c.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${c.status === 'CANCELLED' ? 'opacity-60' : ''}`}>
-                          <span className="min-w-0">
-                            <span className="font-mono text-xs">{c.cutOrderNumber}</span> <span className="text-muted-foreground text-xs">{formatDate(c.cutDate)}</span>
-                            {c.fabricItem && (
-                              <span className="text-muted-foreground block text-[11px]">
-                                {c.fabricItem.name}: {Number(c.fabricUsed ?? 0)} used, {Number(c.wastage ?? 0)} waste {c.fabricItem.uom?.symbol ?? ''}
-                                {c.panelItem ? ` · panels into stock as ${c.panelItem.code}` : ''}
-                              </span>
-                            )}
-                          </span>
-                          <span className="flex items-center gap-2 text-xs tabular-nums">
-                            {c.status === 'CANCELLED' ? 'Cancelled' : `${pcs(c.actualPieces)} pcs`}
-                            {c.status !== 'CANCELLED' && can('production', 'edit') && (
-                              <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" onClick={() => setCancellingCut(c)} aria-label={`Cancel ${c.cutOrderNumber}`}>
-                                <Ban size={13} />
-                              </button>
-                            )}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </Section>
-                )}
-                <Section icon={PackageCheck} title="Packed (Finished Goods In)">
-                  {mo.fgReceipts.length === 0 ? (
-                    <p className="text-muted-foreground text-sm">Nothing booked in against it yet. Packed garments go in under Inventory → Finished Goods In, against this order.</p>
-                  ) : (
-                    <div className="divide-border divide-y text-sm">
-                      {mo.fgReceipts.map((f) => (
-                        <div key={f.id} className={`flex items-center justify-between gap-3 py-1.5 ${f.cancelledAt ? 'opacity-60' : ''}`}>
-                          <span>
-                            <span className="font-mono text-xs">{f.fgrNumber}</span> <span className="text-muted-foreground text-xs">{formatDate(f.receiptDate)}</span>
-                          </span>
-                          <span className="text-xs tabular-nums">
-                            {f.cancelledAt ? 'Cancelled' : `${pcs(f.lines.reduce((t, l) => t + Number(l.qty), 0))} pcs`}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </Section>
-              </div>
-
-              <MoProductionPanel
-                mo={{ id: mo.id, moNumber: mo.moNumber, status: mo.status, heldAt: mo.heldAt, progress: mo.progress, steps: mo.steps ?? [] }}
-                flow={flow}
-                materialsIssued={mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0)}
-                requisitionsRaised={mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED')}
-                onLoadStages={() => setSettingRoute(true)}
-                onChanged={(msg) => void refresh(msg)}
-              />
+                </div>
+              )}
+              {tab === 'packed' && (
+                <div role="tabpanel" aria-label="Packed and dispatch" className="space-y-3">
+                  <Section icon={PackageCheck} title="Packed (Finished Goods In)">
+                    {mo.fgReceipts.length === 0 ? (
+                      <p className="text-muted-foreground text-sm">Nothing booked in against it yet. Packed garments go in under Inventory → Finished Goods In, against this order.</p>
+                    ) : (
+                      <div className="divide-border divide-y text-sm">
+                        {mo.fgReceipts.map((f) => (
+                          <div key={f.id} className={`flex items-center justify-between gap-3 py-1.5 ${f.cancelledAt ? 'opacity-60' : ''}`}>
+                            <span>
+                              <span className="font-mono text-xs">{f.fgrNumber}</span> <span className="text-muted-foreground text-xs">{formatDate(f.receiptDate)}</span>
+                            </span>
+                            <span className="text-xs tabular-nums">
+                              {f.cancelledAt ? 'Cancelled' : `${pcs(f.lines.reduce((t, l) => t + Number(l.qty), 0))} pcs`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Section>
+                  <p className="text-muted-foreground text-sm">Once everything is packed, send it from Sales → Delivery challan, then bill it from Sales → Invoices.</p>
+                </div>
+              )}
             </>
           ) : null}
         </div>

@@ -1,13 +1,15 @@
 'use client'
 
 import Link from 'next/link'
-import type { ReactNode } from 'react'
-import { ArrowRight, Check, ChevronRight, Route } from 'lucide-react'
+import type { KeyboardEvent, ReactNode } from 'react'
+import { ArrowRight, Check, Route } from 'lucide-react'
 
 /**
- * Where a manufacturing order stands in the whole flow, quotation to
- * dispatch, with the one thing to do next. The routing comes in at "Stages
- * set up": that is when the style's routing is copied onto this order.
+ * A manufacturing order's window as steps, one tab each, in the order the
+ * work goes: the order, its materials, its stages, and packing. Each tab is
+ * ticked once its step is done, and the line under the tabs says the one
+ * thing to do next. The routing comes in on the Stages tab: "Set up stages"
+ * copies the style's routing onto this order.
  */
 export interface MoFlowFacts {
   hasSalesOrder: boolean
@@ -20,39 +22,74 @@ export interface MoFlowFacts {
   packed: number
 }
 
-type State = 'done' | 'now' | 'todo'
+export type MoTab = 'order' | 'materials' | 'stages' | 'packed'
 
-export function MoFlowStrip({ facts, onSetUpStages, onShowMaterials }: { facts: MoFlowFacts; onSetUpStages: () => void; onShowMaterials: () => void }) {
-  const f = facts
-  const released = f.status !== 'DRAFT'
-  const finished = f.status === 'COMPLETED' || f.status === 'CLOSED' || (f.planned > 0 && f.packed >= f.planned)
+const isFinished = (f: MoFlowFacts) =>
+  f.status === 'COMPLETED' || f.status === 'CLOSED' || (f.planned > 0 && f.packed >= f.planned)
 
-  const steps: Array<{ label: string; done: boolean }> = [
-    { label: f.hasSalesOrder ? 'Quotation & sales order' : 'Made without a sales order', done: true },
-    { label: 'Order released', done: released },
-    { label: 'Materials issued', done: f.materialsIssued },
-    { label: 'Stages set up (routing)', done: f.stagesSetUp },
-    { label: 'Cutting → stitching → QC', done: finished },
-    { label: 'Packed', done: finished },
-    { label: 'Dispatch & invoice', done: false },
+function stepsOf(f: MoFlowFacts): Array<{ id: MoTab; label: string; hint: string; done: boolean }> {
+  const finished = isFinished(f)
+  return [
+    {
+      id: 'order',
+      label: 'Order',
+      hint: f.hasSalesOrder ? 'Sales order, styles, sizes · release' : 'Styles, sizes · release',
+      done: f.status !== 'DRAFT',
+    },
+    {
+      id: 'materials',
+      label: 'Materials',
+      hint: 'Ask the store · issued',
+      done: f.materialsIssued,
+    },
+    {
+      id: 'stages',
+      label: 'Stages & production',
+      hint: 'Routing → cutting → stitching → QC',
+      done: finished,
+    },
+    { id: 'packed', label: 'Packed & dispatch', hint: 'Finished goods · challan', done: finished },
   ]
-  // The first step not done is where the order is now.
-  const nowAt = steps.findIndex((s) => !s.done)
-  const stateOf = (i: number): State => (steps[i].done ? 'done' : i === nowAt ? 'now' : 'todo')
+}
+
+/** The step the order has reached: the tab to open on. */
+export function currentMoTab(f: MoFlowFacts): MoTab {
+  return stepsOf(f).find((s) => !s.done)?.id ?? 'packed'
+}
+
+export function MoFlowStrip({
+  facts,
+  tab,
+  onTab,
+  onSetUpStages,
+}: {
+  facts: MoFlowFacts
+  tab: MoTab
+  onTab: (t: MoTab) => void
+  onSetUpStages: () => void
+}) {
+  const f = facts
+  const steps = stepsOf(f)
+  const nowAt = currentMoTab(f)
+  const go = (t: MoTab, label: ReactNode) =>
+    tab === t ? undefined : (
+      <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => onTab(t)}>
+        {label} <ArrowRight size={13} />
+      </button>
+    )
 
   let next: { text: string; action?: ReactNode }
-  if (!released) {
-    next = { text: 'Check the colours and quantities below, then press Release at the top.' }
+  if (f.status === 'DRAFT') {
+    next = {
+      text: 'Check the colours and quantities, then press Release at the top.',
+      action: go('order', 'Order'),
+    }
   } else if (!f.materialsIssued) {
     next = {
       text: f.requisitionsRaised
-        ? 'The store has to issue the materials asked for. Once issued, you can set up the stages.'
-        : 'Ask the store for the fabric and trims: raise the requisition under "Materials from the BOM".',
-      action: (
-        <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={onShowMaterials}>
-          Go to materials <ArrowRight size={13} />
-        </button>
-      ),
+        ? 'The store has to issue the materials asked for. Once issued, set up the stages.'
+        : 'Ask the store for the fabric and trims: tick them on Materials and press "Raise requisitions".',
+      action: go('materials', 'Materials'),
     }
   } else if (!f.stagesSetUp) {
     next = {
@@ -63,7 +100,7 @@ export function MoFlowStrip({ facts, onSetUpStages, onShowMaterials }: { facts: 
         </button>
       ),
     }
-  } else if (!finished) {
+  } else if (!isFinished(f)) {
     next = {
       text: f.cutStarted
         ? 'Record the work as it moves from stage to stage on Production Stages. Pieces count as packed at the last stage.'
@@ -85,31 +122,69 @@ export function MoFlowStrip({ facts, onSetUpStages, onShowMaterials }: { facts: 
     }
   }
 
+  // Left / right arrows move between the steps, as on any tab bar.
+  const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
+    e.preventDefault()
+    const i = steps.findIndex((s) => s.id === tab)
+    const to = steps[(i + (e.key === 'ArrowRight' ? 1 : steps.length - 1)) % steps.length]
+    onTab(to.id)
+    e.currentTarget.querySelector<HTMLButtonElement>(`[data-tab="${to.id}"]`)?.focus()
+  }
+
   return (
-    <div className="glass-card space-y-2.5 p-3" data-mo-flow>
-      <ol className="flex flex-wrap items-center gap-y-1.5 text-xs" aria-label="Where this order is">
+    <div
+      className="bg-card border-border sticky top-0 z-10 -mx-4 -mt-3 border-b px-4 pb-2.5 pt-3"
+      data-mo-flow
+    >
+      <div
+        className="grid grid-cols-2 gap-1.5 lg:grid-cols-4"
+        role="tablist"
+        aria-label="Steps of this order"
+        onKeyDown={onKey}
+      >
         {steps.map((s, i) => {
-          const st = stateOf(i)
+          const open = tab === s.id
+          const here = s.id === nowAt && !s.done
           return (
-            <li key={s.label} className="flex items-center" aria-current={st === 'now' ? 'step' : undefined}>
+            <button
+              key={s.id}
+              type="button"
+              role="tab"
+              data-tab={s.id}
+              aria-selected={open}
+              tabIndex={open ? 0 : -1}
+              onClick={() => onTab(s.id)}
+              className={`flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors ${
+                open ? 'border-primary bg-primary/10' : 'border-border hover:bg-secondary/60'
+              }`}
+            >
               <span
-                className={
-                  st === 'done'
-                    ? 'text-primary flex items-center gap-1 font-medium'
-                    : st === 'now'
-                      ? 'bg-primary text-primary-foreground flex items-center gap-1 rounded-full px-2.5 py-1 font-semibold'
-                      : 'text-muted-foreground flex items-center gap-1'
-                }
+                className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                  s.done
+                    ? 'bg-primary text-primary-foreground'
+                    : here
+                      ? 'border-primary text-primary border-2'
+                      : 'bg-secondary text-muted-foreground'
+                }`}
               >
-                {st === 'done' ? <Check size={13} /> : <span className="tabular-nums">{i + 1}.</span>}
-                {s.label}
+                {s.done ? <Check size={14} /> : i + 1}
               </span>
-              {i < steps.length - 1 && <ChevronRight size={14} className="text-muted-foreground mx-1" aria-hidden />}
-            </li>
+              <span className="min-w-0">
+                <span
+                  className={`block truncate text-sm font-semibold ${open ? 'text-primary' : 'text-foreground'}`}
+                >
+                  {s.label}
+                </span>
+                <span className="text-muted-foreground block truncate text-[11px]">
+                  {here ? 'You are here' : s.done ? 'Done' : s.hint}
+                </span>
+              </span>
+            </button>
           )
         })}
-      </ol>
-      <div className="border-border flex flex-wrap items-center justify-between gap-2 border-t pt-2.5">
+      </div>
+      <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2">
         <p className="text-foreground text-sm">
           <b>Next:</b> {next.text}
         </p>
