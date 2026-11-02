@@ -87,10 +87,17 @@ async function wipe() {
 
     // Stock and books
     ['stock ledger', () => prisma.stockLedger.deleteMany()],
-    ['voucher lines', () => prisma.voucherLine.deleteMany()],
-    ['vouchers', () => prisma.voucher.deleteMany()],
+    ['bill references', () => prisma.billRef.deleteMany()],
+    ['books voucher lines', () => prisma.voucherLine.deleteMany()],
+    ['books vouchers', () => prisma.voucher.deleteMany()],
+    ['ledgers', () => prisma.ledger.deleteMany()],
+    // The tree points at itself, and a parent cannot go while a child names it.
+    ['ledger groups', async () => (await prisma.ledgerGroup.updateMany({ data: { parentId: null } }), prisma.ledgerGroup.deleteMany())],
+    ['cost centres', () => prisma.costCentre.deleteMany()],
+    ['voucher lines', () => prisma.legacyVoucherLine.deleteMany()],
+    ['vouchers', () => prisma.legacyVoucher.deleteMany()],
     ['bank accounts', () => prisma.bankAccount.deleteMany()],
-    ['ledger accounts', () => prisma.account.deleteMany()],
+    ['ledger accounts', () => prisma.legacyAccount.deleteMany()],
 
     // People
     ['attendance', () => prisma.attendance.deleteMany()],
@@ -1096,7 +1103,7 @@ async function main() {
   ]
 
   for (const [code, name, groupType, opening] of accountData) {
-    await prisma.account.upsert({
+    await prisma.legacyAccount.upsert({
       where: { code },
       update: { name, groupType },
       create: { code, name, groupType, openingBalance: opening },
@@ -1230,7 +1237,7 @@ async function main() {
     workstations: await prisma.workstation.count(),
     machines: await prisma.machine.count(),
     employees: await prisma.employee.count(),
-    ledgerAccounts: await prisma.account.count(),
+    ledgerAccounts: await prisma.legacyAccount.count(),
     bankAccounts: await prisma.bankAccount.count(),
     departments: await prisma.department.count(),
     operations: await prisma.operation.count(),
