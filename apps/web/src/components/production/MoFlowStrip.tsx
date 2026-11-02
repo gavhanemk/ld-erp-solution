@@ -134,7 +134,7 @@ export function MoFlowStrip({
 
   return (
     <div
-      className="bg-card border-border sticky top-0 z-10 -mx-4 -mt-3 border-b px-4 pb-2.5 pt-3"
+      className="border-border shrink-0 border-b px-4 pb-3 pt-3"
       data-mo-flow
     >
       <div
@@ -156,7 +156,7 @@ export function MoFlowStrip({
               tabIndex={open ? 0 : -1}
               onClick={() => onTab(s.id)}
               className={`flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors ${
-                open ? 'border-primary bg-primary/10' : 'border-border hover:bg-secondary/60'
+                open ? 'border-primary bg-card ring-primary ring-1' : 'border-border bg-card hover:bg-secondary/60'
               }`}
             >
               <span

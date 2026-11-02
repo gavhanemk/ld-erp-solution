@@ -457,8 +457,8 @@ export function ManufacturingOrderDetailDialog({
           </div>
         </div>
 
+        {mo && facts && <MoFlowStrip facts={facts} tab={tab} onTab={pickTab} onSetUpStages={() => setSettingRoute(true)} />}
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
-          {mo && facts && <MoFlowStrip facts={facts} tab={tab} onTab={pickTab} onSetUpStages={() => setSettingRoute(true)} />}
           {error && (
             <div className="border-destructive/40 bg-destructive/5 flex items-start gap-3 rounded-lg border p-3">
               <AlertCircle size={16} className="text-destructive mt-0.5 shrink-0" />
