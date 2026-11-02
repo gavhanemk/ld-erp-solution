@@ -1,9 +1,40 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Thu 15 Oct 2026 — Routings: fabric instead of code, no timer, delete and "changed by" (branch `feat/routing-fabric-and-edits`)_
+_Last updated: Mon 2 Nov 2026 — Accounts, phase 1: the books (branch `feat/accounts`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Accounts, phase 1: the books (Mon 2 Nov)
+
+Branch `feat/accounts` (worktree `LD ERP Accounts`, API :5600, web :3600, test
+database `lderp_accounts` on the demo Postgres :5433). The decisions are in
+docs/07 §8 "This ERP becomes the books".
+
+**Built:**
+- **Migration `20261102120000_accounts_books`** (adds only): `ledger_groups`,
+  `ledgers`, `cost_centres`, `acc_vouchers`, `acc_voucher_lines`,
+  `acc_bill_refs`, `company.booksLockedUpTo`. The old unused `accounts` /
+  `vouchers` / `voucher_lines` tables stay; their models are `Legacy*` now.
+  **Run it on live before this merges.**
+- **Chart of accounts made on first use** (`services/accounts/chart.service.ts`):
+  29 standard groups, 14 system ledgers found by key, one ledger per
+  customer, supplier, broker, contractor and bank account (kept in step with
+  the masters), one cost centre per brand, PV/RV/CV/JV number series.
+- **Vouchers** (`services/accounts/voucher.service.ts`): Payment, Receipt,
+  Contra, Journal; bill-by-bill references; alter (audit trail) and cancel
+  with a reason; books start and closing date enforced.
+- **Reading the books** (`services/accounts/books.service.ts`): ledger
+  statement, trial balance with the opening difference shown, cash and bank;
+  last year's profit carried into the P&L A/c without a closing entry.
+- **Screens** under Accounts: Day Book (`/accounts/vouchers`, F4–F7 switch the
+  voucher type), Ledger, Cash & Bank, Trial Balance, Chart of Accounts
+  (ledgers, groups, the books' dates).
+- `tools/check-accounts.ts`: 46 checks, all passing.
+
+**Next:** phase 2, automatic posting from Sales and Purchase documents.
 
 ---
 

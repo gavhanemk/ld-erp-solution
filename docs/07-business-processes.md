@@ -778,6 +778,38 @@ with the business before HR & Payroll is designed. See §11.
 
 ## 8. Accounts & money
 
+### This ERP becomes the books (decided 2 Nov 2026)
+
+The Accounts module is built to SAB / Tally practice and becomes **LD Cotton
+Mills' main books of account**, replacing the old software for Cotton. The
+old books may run alongside for a month or two until the figures match.
+
+- **Every sales invoice, receipt, credit note, purchase bill, expense bill,
+  supplier payment and purchase note posts to the ledgers automatically**
+  (phase 2). Trial balance, P&L, balance sheet and the GST returns come from
+  here.
+- **Profit by brand.** One GSTIN and one balance sheet, but a P&L for LD
+  Cotton Mills and one for VHAGAR, through cost centres (one per brand).
+  Sales and direct costs carry the brand; shared costs can be split.
+- **The books start on the 1st of a month, after testing** (e.g. 1 Dec
+  2026). The old books give a trial balance as at the day before — with the
+  year-to-date income and expense figures, so the full-year P&L still works
+  — and the list of bills unpaid that day. Both are imported. Nothing can be
+  dated before the start.
+- **Controls:** vouchers are never deleted, only altered (kept in their
+  history, as the Companies Act audit trail requires) or cancelled with a
+  reason; the books can be closed up to a day, after which nothing on or
+  before it changes.
+- **Rules every voucher keeps:** debits equal credits; cash and bank move
+  only through Payment, Receipt and Contra, never a Journal; a party kept
+  bill by bill names the bills each amount raises or settles; brands go on
+  income and expense lines only.
+
+Phases: 1 the books (chart, vouchers, day book, ledger, trial balance) →
+2 automatic posting from Sales and Purchase → 3 outstanding, bank
+reconciliation, opening import → 4 P&L, balance sheet, brand P&L, closing
+stock → 5 GSTR-1/3B/2B and TDS → 6 dashboard and prints.
+
 ### The old system's own posture
 
 Deliberately not treated as the real ledger: **"Absolute is not your book

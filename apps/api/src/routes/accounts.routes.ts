@@ -37,7 +37,7 @@ import { cancelVoucher, moneyGroupIds, voucherSchema, writeVoucher } from '../se
  *   GET    /cost-centres  POST  PATCH /cost-centres/:id
  *   GET    /vouchers                 the day book
  *   GET    /vouchers/:id
- *   POST   /vouchers  PUT /vouchers/:id  POST /vouchers/:id/cancel
+ *   POST   /vouchers  PATCH /vouchers/:id  POST /vouchers/:id/cancel
  *   GET    /trial-balance
  *   GET    /cash-bank                every cash and bank ledger with its balance
  *
@@ -216,7 +216,7 @@ const ledgerSelect = {
   id: true,
   name: true,
   groupId: true,
-  group: { select: { id: true, name: true, nature: true } },
+  group: { select: { id: true, name: true, nature: true, systemKey: true } },
   openingBalance: true,
   billWise: true,
   systemKey: true,
@@ -643,7 +643,7 @@ router.post('/vouchers', requirePermission(MODULE, 'create'), async (req: AuthRe
 })
 
 /** Alters a voucher typed here. One written by a document changes only with its document. */
-router.put('/vouchers/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+router.patch('/vouchers/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const input = voucherSchema.parse(req.body)
   const before = await loadVoucher(req.params.id)
   if (before.status === 'CANCELLED') throw new AppError(`${before.voucherNo} is cancelled and cannot be changed`, 409, 'CANCELLED')
