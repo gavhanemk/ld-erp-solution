@@ -827,53 +827,67 @@ function RequisitionsScreen() {
       ? shown.filter((mr) => ['arrived', 'handover', 'split', 'partly'].includes(fact(mr).stage) && mr.lines.some((l) => owedOf(l) > 1e-9 && (l.available ?? 0) > 0))
       : [],
   }
-  const COLS = 13
+  // No "For" column: the customer and order are in each group's header.
+  const COLS = 12
 
-  /** Above an MO's (or sales order's) requisitions: what they are for, and all of them at once. */
+  /**
+   * Above an MO's (or sales order's) requisitions, on one line: the MO, its
+   * sales order and customer, and how many requisitions. "Approve all" and
+   * "Issue all" show only when two or more can take that step — one is done
+   * from its own row.
+   */
   const orderHead = (mr: Requisition) => {
     const k = orderKey(mr)!
     const mine = groups.get(k) ?? []
     const approve = together.approve.filter((m) => orderKey(m) === k)
     const issue = together.issue.filter((m) => orderKey(m) === k)
+    const Icon = mr.mo ? Factory : FileText
     return (
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <Factory size={15} className="text-primary shrink-0" />
-        <span className="text-sm">
-          {mr.mo ? (
+      <>
+        <Icon size={15} className="text-primary shrink-0" />
+        <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-sm">
+          {mr.mo && (
             <a href={`/production/orders?open=${mr.mo.id}`} className="text-primary font-mono font-semibold hover:underline" title="Open the manufacturing order">
               {mr.mo.moNumber}
             </a>
-          ) : (
-            <span className="text-muted-foreground">No MO</span>
           )}
           {mr.so && (
             <>
-              <span className="text-muted-foreground"> · </span>
-              <a href={`/sales/orders?q=${encodeURIComponent(mr.so.soNumber)}`} className="text-foreground font-mono hover:underline" title="Open the sales order">
+              {mr.mo && <span className="text-muted-foreground">·</span>}
+              <a
+                href={`/sales/orders?q=${encodeURIComponent(mr.so.soNumber)}`}
+                className={`font-mono hover:underline ${mr.mo ? 'text-muted-foreground' : 'text-foreground font-semibold'}`}
+                title="Open the sales order"
+              >
                 {mr.so.soNumber}
               </a>
-              <span className="text-foreground font-medium"> · {mr.so.customer.name}</span>
+              <span className="text-muted-foreground">·</span>
+              <span className="text-foreground font-medium">{mr.so.customer.name}</span>
             </>
           )}
         </span>
-        <span className="text-muted-foreground text-xs">
-          {mine.length} {mine.length === 1 ? 'requisition' : 'requisitions'}: {mine.map((m) => m.department.name).join(', ')}
+        <span className="border-border bg-card text-muted-foreground rounded-full border px-2 py-0.5 text-[11px] tabular-nums">
+          {mine.length} {mine.length === 1 ? 'requisition' : 'requisitions'}
         </span>
-        <div className="flex gap-1.5">
-          {approve.length > 0 && (
-            <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOrderBulk({ action: 'approve', mrs: approve })}>
-              <ThumbsUp size={13} /> Approve {approve.length === 1 ? '' : `all ${approve.length}`}
-            </button>
-          )}
-          {issue.length > 0 && (
-            <button type="button" className="btn-primary h-7 px-2.5 text-xs" onClick={() => setOrderBulk({ action: 'issue', mrs: issue })}>
-              <PackageCheck size={13} /> Issue {issue.length === 1 ? '' : `all ${issue.length} together`}
-            </button>
-          )}
-        </div>
-      </div>
+        {(approve.length > 1 || issue.length > 1) && (
+          <span className="ml-auto flex gap-1.5">
+            {approve.length > 1 && (
+              <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOrderBulk({ action: 'approve', mrs: approve })}>
+                <ThumbsUp size={13} /> Approve all ({approve.length})
+              </button>
+            )}
+            {issue.length > 1 && (
+              <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOrderBulk({ action: 'issue', mrs: issue })}>
+                <PackageCheck size={13} /> Issue all ({issue.length})
+              </button>
+            )}
+          </span>
+        )}
+      </>
     )
   }
+  /** A row inside an order's group: a thin line down the left ties it to the header. */
+  const inGroup = (mr: Requisition) => (orderKey(mr) ? 'border-l-2 border-l-primary/40' : '')
 
   return (
     <div className="space-y-4">
@@ -1117,8 +1131,10 @@ function RequisitionsScreen() {
                 const expanded = open === mr.id
                 return (
                   <Fragment key={mr.id}>
-                  {startsGroup(gi) && <div className="bg-primary/5 px-3 py-2">{orderHead(mr)}</div>}
-                  <div className="p-3">
+                  {startsGroup(gi) && (
+                    <div className="bg-secondary/60 border-l-primary/40 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 border-l-2 px-3 py-2">{orderHead(mr)}</div>
+                  )}
+                  <div className={`p-3 ${inGroup(mr)}`}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -1194,7 +1210,6 @@ function RequisitionsScreen() {
                       <th className="whitespace-nowrap">Req. No.</th>
                       <th className="whitespace-nowrap">Date</th>
                       <th className="whitespace-nowrap">Department</th>
-                      <th className="whitespace-nowrap">For</th>
                       <th className="whitespace-nowrap">Items</th>
                       <th className="whitespace-nowrap">Needed by</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Asked</th>
@@ -1217,14 +1232,14 @@ function RequisitionsScreen() {
                       return (
                         <Fragment key={mr.id}>
                           {startsGroup(i) && (
-                            <tr className="bg-primary/5">
-                              <td colSpan={COLS} className="!py-2">
-                                {orderHead(mr)}
+                            <tr className="bg-secondary/60 border-t border-t-border">
+                              <td colSpan={COLS} className="border-l-primary/40 border-l-2 !p-0">
+                                <div className="sticky left-0 flex w-[calc(100cqw-2px)] flex-wrap items-center gap-x-2.5 gap-y-1.5 px-4 py-2">{orderHead(mr)}</div>
                               </td>
                             </tr>
                           )}
                           <tr data-row tabIndex={i === 0 ? 0 : -1}>
-                            <td>
+                            <td className={inGroup(mr)}>
                               <button
                                 data-row-open
                                 className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
@@ -1253,16 +1268,8 @@ function RequisitionsScreen() {
                             </td>
                             <td className="whitespace-nowrap text-xs">{formatDate(mr.requestDate)}</td>
                             <td className="whitespace-nowrap text-xs">{mr.department.name}</td>
-                            <td className="whitespace-nowrap text-xs">
-                              {mr.so ? mr.so.customer.name : dash}
-                              {(mr.so || mr.mo) && (
-                                <div className="text-muted-foreground font-mono text-[10px]">
-                                  {[mr.so?.soNumber, mr.mo?.moNumber].filter(Boolean).join(' · ')}
-                                </div>
-                              )}
-                            </td>
                             <td className="text-xs">
-                              <div className="text-foreground max-w-[14rem] truncate" title={p.full}>
+                              <div className="text-foreground max-w-[11rem] truncate" title={p.full}>
                                 {p.shown}
                                 {p.extra && <span className="text-muted-foreground">{p.extra}</span>}
                               </div>
