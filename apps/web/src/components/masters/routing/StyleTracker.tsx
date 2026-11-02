@@ -37,6 +37,7 @@ import { cn } from '@/lib/utils'
 import { RoutingFormDialog, type Routing } from '@/components/masters/RoutingFormDialog'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { moStatus } from '@/components/production/status'
+import { NextSteps } from './NextSteps'
 import { changed, describe, pcs, STEP_STATE, STYLE_STATE, when, type StepState, type StyleDetail, type TrackStep } from './track'
 
 /** One order of the style on its own, as GET /masters/style-orders/:styleId gives it. */
@@ -660,7 +661,7 @@ export function StyleTracker({ styleId }: { styleId: string }) {
             </p>
           </div>
           {rows.length === 0 ? (
-            <p className="text-muted-foreground text-sm">No manufacturing orders for this style yet. Units completed appear here once an order&apos;s stages are loaded and work is recorded on its sheets.</p>
+            <NextSteps styleCode={d.style.code} />
           ) : (
             <div className="overflow-x-auto">
               <table className="data-table table-compact w-full">

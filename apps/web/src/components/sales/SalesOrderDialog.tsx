@@ -1576,7 +1576,8 @@ export function SalesOrderDialog({
                   <Field label="Buyer PO date" htmlFor="so-po-date">
                     <input id="so-po-date" type="date" className="form-input" value={poDate} onChange={(e) => setPoDate(e.target.value)} />
                   </Field>
-                  <Field label="Salesperson" icon={UserRound} htmlFor="so-salesperson" className="lg:col-span-2">
+                  {/* Job work has one field more above, so the salesperson takes one slot and the row stays full. */}
+                  <Field label="Salesperson" icon={UserRound} htmlFor="so-salesperson" className={isJobWork ? '' : 'lg:col-span-2'}>
                     <input
                       id="so-salesperson"
                       className="form-input pl-9"
@@ -1678,7 +1679,7 @@ export function SalesOrderDialog({
                           ['#', `${COL.num} sticky left-0 z-20 bg-secondary`, 'left'],
                           ['', `${COL.remove} sticky left-8 z-20 bg-secondary`, 'left'],
                           ['Category', COL.category, 'left'],
-                          ['Item', `${COL.item} border-border border-r`, 'left'],
+                          ['Item', COL.item, 'left'],
                           ['Style no.', COL.style, 'left'],
                           ['Colour', COL.colour, 'left'],
                           ['Gender', COL.gender, 'left'],
@@ -1742,7 +1743,7 @@ export function SalesOrderDialog({
                                   {f.subcategory}
                                 </div>
                               </td>
-                              <td className={`${COL.item} border-border border-r`}>
+                              <td className={COL.item}>
                                 <div className="space-y-1">
                                   {f.code}
                                   {f.name}

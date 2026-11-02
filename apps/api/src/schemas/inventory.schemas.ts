@@ -207,6 +207,9 @@ export const transferSchema = z.object({
     .min(1, 'Add at least one item'),
 })
 
+/** Linking a requisition raised against a sales order to one of its MOs. */
+export const linkRequisitionMoSchema = z.object({ moId: z.string().min(1, 'Pick the manufacturing order') })
+
 export const createRequisitionSchema = z.object({
   departmentId: id('the department asking'),
   moId: z.string().optional().nullable(),

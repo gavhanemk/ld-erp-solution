@@ -42,6 +42,7 @@ const SHOWN = 5
  */
 export function PickList({
   item,
+  code,
   itemId,
   warehouseId,
   store,
@@ -56,6 +57,8 @@ export function PickList({
   bare = false,
 }: {
   item: string
+  /** The item's code, shown before its name so the storeman knows which item the packets are. */
+  code?: string
   itemId: string
   warehouseId: string
   store: string
@@ -104,7 +107,10 @@ export function PickList({
     <div className="border-border overflow-hidden rounded-lg border">
       {!bare && (
         <div className="bg-secondary/40 flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border px-3 py-2">
-          <span className="text-foreground text-sm font-semibold">{item}</span>
+          <span className="text-foreground text-base font-semibold">
+            {code && <span className="text-muted-foreground mr-1.5 font-mono text-xs font-normal">{code}</span>}
+            {item}
+          </span>
           <span className="text-muted-foreground text-xs">
             {store} · {whose}
             {owed != null ? ` · ${qtyText(owed)} ${unit} still to give` : ''}

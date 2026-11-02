@@ -13,6 +13,7 @@ import { useAppSettings } from '@/lib/appSettings'
 import type { OutwardRef } from '@/components/packages/packageTypes'
 import { ScanIssue } from '@/components/packages/ScanIssue'
 import { PickList } from '@/components/packages/PickList'
+import { LinkMoBox } from './LinkMoBox'
 import { noBuyBox, planRows, r3, shortOf, spread, startingQty, coveredByPo, type FulfilData, type FulfilOrder, type ProcessLine } from './processPlan'
 
 /**
@@ -98,9 +99,12 @@ export function ProcessDialog({
   startTab = 'issue',
   onClose,
   onDone,
+  switcher,
 }: {
   mr: ProcessRequisition
   startTab?: ProcessTab
+  /** Above everything: the other requisitions of the same MO, to move between them in this window. */
+  switcher?: ReactNode
   onClose: () => void
   /** After each save, so the list behind can refresh. The window stays open. */
   /** `outward`: what an issue just handed over, for its labels. */
@@ -125,6 +129,10 @@ export function ProcessDialog({
   const me = currentUser()
   // Raised, approved and issued by three people; the Admin may do all three.
   const canIssue = me?.role === 'Admin' || (me?.id !== mr.raisedBy?.id && me?.id !== mr.approvedBy?.id)
+  /** The MO it was just linked to here, for one raised against a sales order alone. */
+  const [linkedMo, setLinkedMo] = useState<{ id: string; moNumber: string } | null>(null)
+  /** Raised against a sales order with no MO: nothing is issued until it is linked to one. */
+  const needsMo = !!mr.so && !mr.mo && !linkedMo
 
   const read = useCallback(async () => {
     setLoading(true)
@@ -149,8 +157,8 @@ export function ProcessDialog({
   // Each tab starts filled in: issue what stock covers, the reservation as it
   // stands, and the indent as it stands (or what stock cannot cover).
   useEffect(() => {
-    setQty(startingQty(rows, canIssue))
-  }, [rows, canIssue])
+    setQty(startingQty(rows, canIssue && !needsMo))
+  }, [rows, canIssue, needsMo])
 
   const set = (t: ProcessTab, id: string, v: string) => setQty((q) => ({ ...q, [t]: { ...q[t], [id]: v } }))
 
@@ -168,7 +176,8 @@ export function ProcessDialog({
       }
       if (tab === 'issue') {
         if (v <= 0) continue
-        if (!canIssue) problems.push(`${name}: you raised or approved this requisition, so somebody else in the store issues it.`)
+        if (needsMo) problems.push(`Link ${mr.mrNumber} to its MO first, at the top.`)
+        else if (!canIssue) problems.push(`${name}: you raised or approved this requisition, so somebody else in the store issues it.`)
         else if (v > r.owed + 1e-9) problems.push(`${name}: only ${fmt(r.owed)} ${r.unit} is still needed.`)
         else if (v > r.free + 1e-9) problems.push(`${name}: only ${fmt(r.free)} ${r.unit} is in stock.`)
         work.push({ r, v })
@@ -186,7 +195,7 @@ export function ProcessDialog({
       }
     }
     return { problems, work }
-  }, [rows, qty, tab, canIssue])
+  }, [rows, qty, tab, canIssue, needsMo, mr.mrNumber])
 
   const save = async () => {
     setError(null)
@@ -238,7 +247,7 @@ export function ProcessDialog({
     </button>
   )
 
-  const mo = mr.mo ?? null
+  const mo = linkedMo ?? mr.mo ?? null
   /** What a line is for, less the MO the top already names: "Packing", not "For MO-2627-0002 — Packing". */
   const forWhat = (l: Line) => {
     const p = l.purpose?.trim() ?? ''
@@ -826,7 +835,11 @@ export function ProcessDialog({
       footerNote={
         check.problems[0] ??
         (check.work.length
-          ? `${check.work.length} ${check.work.length === 1 ? 'item' : 'items'} will be ${tab === 'issue' ? 'issued' : tab === 'reserve' ? 'kept aside' : 'put on the indent'} when you press ${current.button}.`
+          ? `${
+              check.work.length <= 2
+                ? check.work.map((w) => `${w.r.l.item.name} (${fmt(w.v)} ${w.r.unit})`).join(' and ')
+                : `${check.work.length} items`
+            } will be ${tab === 'issue' ? 'issued' : tab === 'reserve' ? 'kept aside' : 'put on the indent'} when you press ${current.button}.`
           : tab === 'issue'
             ? 'Enter how much to issue.'
             : 'Nothing changed yet.')
@@ -835,6 +848,19 @@ export function ProcessDialog({
       onClose={onClose}
       busy={saving}
     >
+      {switcher}
+      {needsMo && mr.so && (
+        <LinkMoBox
+          mrId={mr.id}
+          mrNumber={mr.mrNumber}
+          so={mr.so}
+          onLinked={(m, message) => {
+            setLinkedMo(m)
+            setNotice(message)
+            onDone(message)
+          }}
+        />
+      )}
       {/* What it is for, and who has had a hand in it — on one line, nothing cut short. */}
       <div className="rounded-xl border border-border bg-card px-4 py-3 text-sm">
         <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-7 lg:gap-x-0 lg:divide-x lg:divide-border">
@@ -1000,7 +1026,11 @@ export function ProcessDialog({
           )}
           {tab === 'issue' &&
             data &&
-            (!canIssue ? (
+            (needsMo ? (
+              <p className="rounded-lg bg-amber-500/15 px-3 py-2 text-sm text-foreground">
+                Link it to its MO at the top; then it is issued here as usual. You can still keep items aside and buy.
+              </p>
+            ) : !canIssue ? (
               <p className="rounded-lg bg-amber-500/15 px-3 py-2 text-sm text-foreground">
                 You raised or approved this requisition, so somebody else in the store issues it. You can still keep items aside and buy.
               </p>
@@ -1009,6 +1039,25 @@ export function ProcessDialog({
             ) : summary.ready + summary.partly > 0 ? (
               // Approved, so it can be handed over by scanning: stock comes down with each sticker.
               <>
+                {/* Which items are being issued, named first, so nobody has to guess from a packet list. */}
+                <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-primary">You are issuing</p>
+                  <ul className="mt-1 space-y-1">
+                    {rows
+                      .filter((r) => r.owed > 0)
+                      .map((r) => (
+                        <li key={r.l.id} className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                          <span className="font-mono text-xs text-muted-foreground">{r.l.item.code}</span>
+                          <span className="font-semibold text-foreground">{r.l.item.name}</span>
+                          <span className="text-muted-foreground">
+                            · {fmt(r.owed)} {r.unit} to give
+                            {r.stores[0] ? ` · from ${r.stores[0].name}` : ''}
+                            {r.theirs && r.l.ownerCustomer ? ` · ${r.l.ownerCustomer.name}'s material` : ''}
+                          </span>
+                        </li>
+                      ))}
+                  </ul>
+                </div>
                 <ScanIssue
                   mrId={mr.id}
                   mrNumber={mr.mrNumber}
@@ -1039,6 +1088,7 @@ export function ProcessDialog({
                         <PickList
                           key={r.l.id}
                           item={r.l.item.name}
+                          code={r.l.item.code}
                           itemId={r.l.item.id}
                           warehouseId={r.stores[0].id}
                           store={r.stores[0].name}
@@ -1226,6 +1276,8 @@ export function ProcessDialog({
                       ? 'approved it'
                       : e.action === 'REJECT'
                         ? 'refused it'
+                        : e.linkedMo
+                          ? `linked it to ${e.linkedMo}`
                         : e.handedOver?.length
                           ? `issued ${e.handedOver.join(', ')}`
                           : e.reservedNow?.length

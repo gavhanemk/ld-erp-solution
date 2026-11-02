@@ -993,14 +993,48 @@ router.use(
     entityType: 'Contractor',
     createSchema: createContractorSchema,
     updateSchema: updateContractorSchema,
-    searchFields: ['name', 'code', 'phone', 'operation.name'],
+    searchFields: ['name', 'code', 'phone'],
     sortableFields: ['name', 'code', 'createdAt'],
     defaultSort: { field: 'name', order: 'asc' },
-    include: { operation: { select: { id: true, name: true } }, _count: { select: { routingSteps: true } } },
+    include: { _count: { select: { routingSteps: true } } },
     filters: {
-      operationId: { where: (v) => ({ operationId: { in: v } }), facets: ['operationId'] },
+      operationIds: { where: (v) => ({ operationIds: { hasSome: v } }), facets: ['operationIds'] },
     },
-    facets: ['operationId'],
+    facets: ['operationIds'],
+    // A contractor counts under each process they take on.
+    customFacets: {
+      operationIds: async (where) => {
+        const rows = await prisma.contractor.findMany({ where, select: { operationIds: true } })
+        const counts: Record<string, number> = {}
+        for (const r of rows) for (const id of new Set(r.operationIds)) counts[id] = (counts[id] ?? 0) + 1
+        return counts
+      },
+    },
+    // Each process named, so the list can say "Cutting, Stitching".
+    afterRead: async (rows) => {
+      const ids = [...new Set(rows.flatMap((r) => (r.operationIds as string[] | undefined) ?? []))]
+      const ops = ids.length ? await prisma.operation.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, sortOrder: true } }) : []
+      const byId = new Map(ops.map((o) => [o.id, o]))
+      return rows.map((r) => ({
+        ...r,
+        processes: ((r.operationIds as string[] | undefined) ?? [])
+          .map((id) => byId.get(id))
+          .filter(Boolean)
+          .sort((a, b) => a!.sortOrder - b!.sortOrder)
+          .map((o) => ({ id: o!.id, name: o!.name })),
+      }))
+    },
+    // Every process named must be one in the Routing Masters.
+    beforeSave: async (data) => {
+      const ids = data.operationIds as string[] | undefined
+      if (ids?.length) {
+        const unique = [...new Set(ids)]
+        const found = await prisma.operation.count({ where: { id: { in: unique } } })
+        if (found !== unique.length) throw new AppError('One of those processes is not in the Routing Masters.', 400, 'BAD_PROCESS')
+        return { data: { ...data, operationIds: unique } }
+      }
+      return { data }
+    },
   }),
 )
 

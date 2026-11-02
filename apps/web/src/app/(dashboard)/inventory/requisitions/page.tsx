@@ -4,7 +4,7 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState }
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import {
   Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer, FileText,
-  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock, Undo2, ThumbsUp, Layers } from 'lucide-react'
+  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock, Undo2, ThumbsUp, Layers, Factory } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { ProcessDialog, type ProcessTab } from '@/components/inventory/ProcessDialog'
@@ -330,6 +330,12 @@ function RequisitionsScreen() {
   const [dialog, setDialog] = useState(false)
   // The requisition being handed over, and the one a reason is being asked for.
   const [fulfilling, setFulfilling] = useState<Requisition | null>(null)
+  /**
+   * "Process all" on an MO's group: the requisitions to move between, by id,
+   * each opened in the ordinary Process window in turn. Read back from the
+   * list, so after each issue the figures in the switcher are fresh.
+   */
+  const [fulfilGroup, setFulfilGroup] = useState<string[] | null>(null)
   const [processTab, setProcessTab] = useState<ProcessTab>('issue')
   // Bumped after a save, so the Indents and Reservations tabs read again.
   const [saved, setSaved] = useState(0)
@@ -339,6 +345,8 @@ function RequisitionsScreen() {
   const [outward, setOutward] = useState<OutwardRef | null>(null)
   /** Several requisitions taken through one step together. */
   const [bulk, setBulk] = useState<BulkAction | null>(null)
+  /** The requisitions of one MO (or sales order) taken through one step together, from its group header. */
+  const [orderBulk, setOrderBulk] = useState<{ action: BulkAction; mrs: Requisition[] } | null>(null)
   /** A return from the floor just saved: stickers for what came back, ready to print. */
   const [inward, setInward] = useState<InwardRef | null>(null)
 
@@ -793,8 +801,26 @@ function RequisitionsScreen() {
       : dash
   }
 
-  const pages = Math.ceil(shown.length / PAGE) || 1
-  const pageRows = shown.slice((page - 1) * PAGE, page * PAGE)
+  // The requisitions of one MO sit together, under a header naming the MO and
+  // its sales order; those for a sales order with no MO group under the order.
+  // A group sits where its newest requisition would.
+  const orderKey = (mr: Requisition) => (mr.mo ? `mo:${mr.mo.id}` : mr.so ? `so:${mr.so.id}` : null)
+  const groups = new Map<string, Requisition[]>()
+  const byOrder: Requisition[] = []
+  for (const mr of shown) {
+    const k = orderKey(mr) ?? `mr:${mr.id}`
+    if (!groups.has(k)) groups.set(k, [])
+    groups.get(k)!.push(mr)
+  }
+  for (const list of groups.values()) byOrder.push(...list)
+
+  const pages = Math.ceil(byOrder.length / PAGE) || 1
+  const pageRows = byOrder.slice((page - 1) * PAGE, page * PAGE)
+  /** The first requisition of its order's group on this page: a header goes above it. */
+  const startsGroup = (i: number) => {
+    const k = orderKey(pageRows[i])
+    return !!k && (i === 0 || orderKey(pageRows[i - 1]) !== k)
+  }
 
   // Several at once, from what the list shows: an MO raises one requisition
   // per department, and each through its own window was slow work.
@@ -803,11 +829,156 @@ function RequisitionsScreen() {
   const together: Record<BulkAction, Requisition[]> = {
     approve: can('inventory', 'approve') ? shown.filter((mr) => fact(mr).stage === 'approval') : [],
     indent: can('inventory', 'edit') ? shown.filter((mr) => ['handover', 'split', 'partly'].includes(fact(mr).stage) && mr.lines.some(shortNotBought)) : [],
+    // Not one raised against a sales order with no MO: it is linked to its MO first, in Process.
     issue: can('inventory', 'edit')
-      ? shown.filter((mr) => ['arrived', 'handover', 'split', 'partly'].includes(fact(mr).stage) && mr.lines.some((l) => owedOf(l) > 1e-9 && (l.available ?? 0) > 0))
+      ? shown.filter(
+          (mr) =>
+            !(mr.so && !mr.mo) &&
+            ['arrived', 'handover', 'split', 'partly'].includes(fact(mr).stage) &&
+            mr.lines.some((l) => owedOf(l) > 1e-9 && (l.available ?? 0) > 0),
+        )
       : [],
   }
-  const COLS = 13
+  // No "For" column: the customer and order are in each group's header.
+  const COLS = 12
+
+  /**
+   * Above an MO's (or sales order's) requisitions, on one line: the MO, its
+   * sales order and customer, and how many requisitions. "Approve all" and
+   * "Process all" show only when two or more can take that step — one is done
+   * from its own row. Process all opens the ordinary Process window, with the
+   * group's requisitions to move between at its top.
+   */
+  const orderHead = (mr: Requisition) => {
+    const k = orderKey(mr)!
+    const mine = groups.get(k) ?? []
+    const approve = together.approve.filter((m) => orderKey(m) === k)
+    // The same test as each row's own Process button.
+    const process = mine.filter((m) => {
+      const f = rowFacts(m)
+      return !f.canDecide && f.canFulfil
+    })
+    const Icon = mr.mo ? Factory : FileText
+    return (
+      <>
+        <Icon size={15} className="text-primary shrink-0" />
+        <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-sm">
+          {mr.mo && (
+            <a href={`/production/orders?open=${mr.mo.id}`} className="text-primary font-mono font-semibold hover:underline" title="Open the manufacturing order">
+              {mr.mo.moNumber}
+            </a>
+          )}
+          {mr.so && (
+            <>
+              {mr.mo && <span className="text-muted-foreground">·</span>}
+              <a
+                href={`/sales/orders?q=${encodeURIComponent(mr.so.soNumber)}`}
+                className={`font-mono hover:underline ${mr.mo ? 'text-muted-foreground' : 'text-foreground font-semibold'}`}
+                title="Open the sales order"
+              >
+                {mr.so.soNumber}
+              </a>
+              <span className="text-muted-foreground">·</span>
+              <span className="text-foreground font-medium">{mr.so.customer.name}</span>
+            </>
+          )}
+        </span>
+        <span className="border-border bg-card text-muted-foreground rounded-full border px-2 py-0.5 text-[11px] tabular-nums">
+          {mine.length} {mine.length === 1 ? 'requisition' : 'requisitions'}
+        </span>
+        {!mr.mo && mine.some((m) => !m.closedAt && m.status !== 'REJECTED' && !m.issuedAt) && (
+          <span className="warn-text text-xs" title="Raised before requisitions had to come from an MO">
+            No MO: link each to its MO in Process before issuing
+          </span>
+        )}
+        {(approve.length > 1 || process.length > 1) && (
+          <span className="ml-auto flex gap-1.5">
+            {approve.length > 1 && (
+              <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOrderBulk({ action: 'approve', mrs: approve })}>
+                <ThumbsUp size={13} /> Approve all ({approve.length})
+              </button>
+            )}
+            {process.length > 1 && (
+              <button
+                type="button"
+                className="btn-secondary h-7 px-2.5 text-xs"
+                title="Open them one after another in the Process window: stock, packets and scanning, as for one"
+                onClick={() => {
+                  setFulfilGroup(process.map((m) => m.id))
+                  setProcessTab('issue')
+                  setFulfilling(process[0])
+                }}
+              >
+                <PackageCheck size={13} /> Process all ({process.length})
+              </button>
+            )}
+          </span>
+        )}
+      </>
+    )
+  }
+  /**
+   * At the top of the Process window opened by "Process all": the MO's
+   * requisitions, each with what it still has to give. Pressing one opens it
+   * in the same window, from fresh.
+   */
+  const groupSwitcher = (ids: string[], currentId: string) => {
+    const list = ids.map((id) => rows.find((m) => m.id === id)).filter((m): m is Requisition => !!m)
+    const head = list[0]
+    if (!head) return undefined
+    return (
+      <div className="border-primary/30 bg-primary/5 rounded-xl border px-4 py-3">
+        <p className="text-sm">
+          <span className="text-primary font-mono font-semibold">{head.mo?.moNumber ?? head.so?.soNumber}</span>
+          {head.mo && head.so && <span className="text-muted-foreground font-mono"> · {head.so.soNumber}</span>}
+          {head.so && <span className="text-foreground font-medium"> · {head.so.customer.name}</span>}
+          <span className="text-muted-foreground"> — {list.length} requisitions to process. Pick one; each is issued on its own, as from its row.</span>
+        </p>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3" role="tablist" aria-label="Requisitions of this order">
+          {list.map((m, n) => {
+            const f = rowFacts(m)
+            const owed = unitLine(f.groups, (g) => g.owed)
+            const here = m.id === currentId
+            const p = itemsPreview(m.lines.map((l) => l.item.name))
+            return (
+              <button
+                key={m.id}
+                type="button"
+                role="tab"
+                aria-selected={here}
+                onClick={() => !here && (setProcessTab('issue'), setFulfilling(m))}
+                className={`bg-card flex items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors ${
+                  here ? 'border-primary ring-primary ring-1' : 'border-border hover:bg-secondary/60'
+                }`}
+              >
+                <span
+                  className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${
+                    !owed ? 'bg-primary text-primary-foreground' : here ? 'border-primary text-primary border-2' : 'bg-secondary text-muted-foreground'
+                  }`}
+                >
+                  {!owed ? <Check size={13} /> : n + 1}
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm">
+                    <span className={`font-mono font-semibold ${here ? 'text-primary' : 'text-foreground'}`}>{m.mrNumber}</span>
+                    <span className="text-muted-foreground"> · {m.department.name}</span>
+                  </span>
+                  <span className="text-foreground block truncate text-xs" title={p.full}>
+                    {p.shown}
+                    {p.extra}
+                  </span>
+                  <span className={`block text-[11px] ${owed ? 'warn-text' : 'text-muted-foreground'}`}>{owed ? `${owed} to give` : 'All issued'}</span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
+
+  /** A row inside an order's group: a thin line down the left ties it to the header. */
+  const inGroup = (mr: Requisition) => (orderKey(mr) ? 'border-l-2 border-l-primary/40' : '')
 
   return (
     <div className="space-y-4">
@@ -1046,11 +1217,15 @@ function RequisitionsScreen() {
           <div className={`list-scope transition-opacity ${loading ? 'opacity-60' : ''}`}>
             {/* On a phone each requisition is a card; the table is for a wider list. */}
             <div className="list-cards divide-border divide-y">
-              {pageRows.map((mr) => {
+              {pageRows.map((mr, gi) => {
                 const r = rowFacts(mr)
                 const expanded = open === mr.id
                 return (
-                  <div key={mr.id} className="p-3">
+                  <Fragment key={mr.id}>
+                  {startsGroup(gi) && (
+                    <div className="bg-secondary/60 border-l-primary/40 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 border-l-2 px-3 py-2">{orderHead(mr)}</div>
+                  )}
+                  <div className={`p-3 ${inGroup(mr)}`}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -1112,6 +1287,7 @@ function RequisitionsScreen() {
                     </div>
                     {expanded && <div className="mt-2.5">{itemPanel(mr, r)}</div>}
                   </div>
+                  </Fragment>
                 )
               })}
             </div>
@@ -1125,7 +1301,6 @@ function RequisitionsScreen() {
                       <th className="whitespace-nowrap">Req. No.</th>
                       <th className="whitespace-nowrap">Date</th>
                       <th className="whitespace-nowrap">Department</th>
-                      <th className="whitespace-nowrap">For</th>
                       <th className="whitespace-nowrap">Items</th>
                       <th className="whitespace-nowrap">Needed by</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Asked</th>
@@ -1147,8 +1322,15 @@ function RequisitionsScreen() {
                       const short = openLines.filter((l) => (l.available ?? 0) + 1e-9 < Number(l.requestedQty) - Number(l.issuedQty))
                       return (
                         <Fragment key={mr.id}>
+                          {startsGroup(i) && (
+                            <tr className="bg-secondary/60 border-t border-t-border">
+                              <td colSpan={COLS} className="border-l-primary/40 border-l-2 !p-0">
+                                <div className="sticky left-0 flex w-[calc(100cqw-2px)] flex-wrap items-center gap-x-2.5 gap-y-1.5 px-4 py-2">{orderHead(mr)}</div>
+                              </td>
+                            </tr>
+                          )}
                           <tr data-row tabIndex={i === 0 ? 0 : -1}>
-                            <td>
+                            <td className={inGroup(mr)}>
                               <button
                                 data-row-open
                                 className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
@@ -1177,9 +1359,8 @@ function RequisitionsScreen() {
                             </td>
                             <td className="whitespace-nowrap text-xs">{formatDate(mr.requestDate)}</td>
                             <td className="whitespace-nowrap text-xs">{mr.department.name}</td>
-                            <td className="whitespace-nowrap text-xs">{mr.so ? mr.so.customer.name : dash}</td>
                             <td className="text-xs">
-                              <div className="text-foreground max-w-[14rem] truncate" title={p.full}>
+                              <div className="text-foreground max-w-[11rem] truncate" title={p.full}>
                                 {p.shown}
                                 {p.extra && <span className="text-muted-foreground">{p.extra}</span>}
                               </div>
@@ -1243,9 +1424,14 @@ function RequisitionsScreen() {
 
       {fulfilling && (
         <ProcessDialog
+          key={fulfilling.id}
           mr={fulfilling}
           startTab={processTab}
-          onClose={() => setFulfilling(null)}
+          switcher={fulfilGroup && fulfilGroup.length > 1 ? groupSwitcher(fulfilGroup, fulfilling.id) : undefined}
+          onClose={() => {
+            setFulfilling(null)
+            setFulfilGroup(null)
+          }}
           // The window stays open after a save; the list and tabs behind refresh.
           onDone={(msg, out) => {
             setSaved((n) => n + 1)
@@ -1266,6 +1452,15 @@ function RequisitionsScreen() {
             if (stickers) setInward(stickers)
             void load()
           }}
+        />
+      )}
+      {orderBulk && (
+        <BulkRequisitionDialog
+          action={orderBulk.action}
+          mrs={orderBulk.mrs}
+          onClose={() => setOrderBulk(null)}
+          onDone={() => void load()}
+          onLabels={(o) => setOutward(o)}
         />
       )}
       {bulk && (

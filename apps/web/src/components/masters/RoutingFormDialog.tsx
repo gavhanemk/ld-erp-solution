@@ -128,11 +128,11 @@ interface Unit {
   operationId?: string | null
   type: 'IN_HOUSE' | 'JOB_WORK'
 }
-/** A contractor from the Routing Masters, and the process they do. */
+/** A contractor from the Routing Masters, and the processes they take on. */
 interface Contractor {
   id: string
   name: string
-  operationId: string
+  operationIds: string[]
 }
 interface StyleOption {
   id: string
@@ -168,7 +168,7 @@ const APPLIES: Array<{ value: Applies; label: string }> = [
 ]
 
 /** The step columns, the same on the heading and every row of a wide screen. */
-const COLS = 'lg:grid-cols-[2.75rem_minmax(9rem,1fr)_8rem_minmax(9rem,1.2fr)_minmax(9rem,1.1fr)_5.5rem_5.5rem_10rem_6.5rem]'
+const COLS = 'lg:grid-cols-[2.75rem_minmax(9rem,1fr)_8rem_minmax(10rem,1.3fr)_minmax(10rem,1.2fr)_6rem_10rem_6.5rem]'
 
 let seq = 0
 const blank = (): Row => ({ key: `n${++seq}`, operationId: '', workstationId: '', contractorId: '', execution: 'IN_HOUSE', skip: 'WITH_APPROVAL', isQcStep: false, smv: '', ratePerPiece: '', instructions: '' })
@@ -450,12 +450,11 @@ export function RoutingFormDialog({
         (r.execution === 'OUTSOURCED' ? u.type === 'JOB_WORK' : u.type === 'IN_HOUSE'),
     )
   }
-  /** The contractors who do this step's process. */
-  const contractorsFor = (r: Row) => contractors.filter((c) => c.operationId === r.operationId)
+  /** The contractors who take on this step's process. */
+  const contractorsFor = (r: Row) => contractors.filter((c) => c.operationIds?.includes(r.operationId))
 
   // The route's totals, for the line above the steps.
   const minutes = rows.reduce((t, r) => t + (Number(r.smv) || 0), 0)
-  const rupees = rows.reduce((t, r) => t + (Number(r.ratePerPiece) || 0), 0)
   const outside = rows.filter((r) => r.execution === 'OUTSOURCED').length
   const notOnRoute = ops.filter((o) => !rows.some((r) => r.operationId === o.id))
 
@@ -633,7 +632,6 @@ export function RoutingFormDialog({
           <p className="text-muted-foreground mt-2 text-xs">
             {rows.length} {rows.length === 1 ? 'step' : 'steps'}
             {minutes > 0 ? ` · ${figure(minutes)} standard minutes a piece` : ''}
-            {rupees > 0 ? ` · ₹${figure(rupees)} a piece in rates` : ''}
             {outside ? ` · ${outside} at an outside unit` : ''}
           </p>
         </div>
@@ -646,7 +644,6 @@ export function RoutingFormDialog({
           <span>Line or unit</span>
           <span>Contractor</span>
           <span className="text-right">Minutes / pc</span>
-          <span className="text-right">Rate ₹ / pc</span>
           <span>If skipped</span>
           <span className="sr-only">Move, details, remove</span>
         </div>
@@ -776,18 +773,6 @@ export function RoutingFormDialog({
                       onValueChange={(v) => set(r.key, { smv: v })}
                       aria-label={`Step ${i + 1} standard minutes a piece`}
                       title="Standard minutes for one piece (SMV)"
-                    />
-                  </label>
-                  <label className="block min-w-0">
-                    <span className="form-label lg:sr-only">Rate ₹ / pc</span>
-                    <StepInput
-                      decimals
-                      className="form-input h-9 text-right tabular-nums"
-                      value={r.ratePerPiece}
-                      placeholder="—"
-                      onValueChange={(v) => set(r.key, { ratePerPiece: v })}
-                      aria-label={`Step ${i + 1} rate per piece`}
-                      title={r.execution === 'OUTSOURCED' ? 'What the outside unit is paid a piece' : 'The rate a piece for this step'}
                     />
                   </label>
                   <label className="col-span-2 block min-w-0 sm:col-span-2 lg:col-span-1">
@@ -1012,11 +997,11 @@ export function RoutingFormDialog({
               onSaved={() => {}}
               onCreated={(row) => {
                 setContractors((cs) => [...cs, row])
-                if (step && row.operationId === step.operationId && adding.rowKey) set(adding.rowKey, { contractorId: row.id })
+                if (step && row.operationIds?.includes(step.operationId) && adding.rowKey) set(adding.rowKey, { contractorId: row.id })
               }}
               resource="contractors"
               fields={contractorFormFields}
-              initialValues={{ ...(adding.typed ? { name: adding.typed } : {}), operationId: step?.operationId ?? '', isActive: true }}
+              initialValues={{ ...(adding.typed ? { name: adding.typed } : {}), operationIds: step?.operationId ? [step.operationId] : [], isActive: true }}
               title="Contractor"
               columns={3}
             />
