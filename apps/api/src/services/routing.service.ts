@@ -168,14 +168,14 @@ const ordered = <T extends { sequence: number }>(steps: T[]) => [...steps].sort(
 async function assertContractorsFit(db: Db, steps: Array<{ operationId: string; contractorId?: string | null }>): Promise<void> {
   const ids = [...new Set(steps.map((s) => s.contractorId).filter(Boolean))] as string[]
   if (!ids.length) return
-  const found = await db.contractor.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, operationId: true, operation: { select: { name: true } } } })
+  const found = await db.contractor.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, operationIds: true } })
   const byId = new Map(found.map((c) => [c.id, c]))
   steps.forEach((step, i) => {
     if (!step.contractorId) return
     const c = byId.get(step.contractorId)
     if (!c) throw new AppError(`Step ${i + 1}: that contractor is no longer in the Routing Masters.`, 400, 'INVALID_CONTRACTOR')
-    if (c.operationId !== step.operationId) {
-      throw new AppError(`Step ${i + 1}: ${c.name} does ${c.operation.name}, not this step's process. Pick one of its own contractors, or leave it empty.`, 400, 'STEP_CONTRACTOR_MISMATCH')
+    if (!c.operationIds.includes(step.operationId)) {
+      throw new AppError(`Step ${i + 1}: ${c.name} does not take on this step's process. Pick one who does, add the process to them in Routing Masters, or leave it empty.`, 400, 'STEP_CONTRACTOR_MISMATCH')
     }
   })
 }

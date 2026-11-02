@@ -128,11 +128,11 @@ interface Unit {
   operationId?: string | null
   type: 'IN_HOUSE' | 'JOB_WORK'
 }
-/** A contractor from the Routing Masters, and the process they do. */
+/** A contractor from the Routing Masters, and the processes they take on. */
 interface Contractor {
   id: string
   name: string
-  operationId: string
+  operationIds: string[]
 }
 interface StyleOption {
   id: string
@@ -450,8 +450,8 @@ export function RoutingFormDialog({
         (r.execution === 'OUTSOURCED' ? u.type === 'JOB_WORK' : u.type === 'IN_HOUSE'),
     )
   }
-  /** The contractors who do this step's process. */
-  const contractorsFor = (r: Row) => contractors.filter((c) => c.operationId === r.operationId)
+  /** The contractors who take on this step's process. */
+  const contractorsFor = (r: Row) => contractors.filter((c) => c.operationIds?.includes(r.operationId))
 
   // The route's totals, for the line above the steps.
   const minutes = rows.reduce((t, r) => t + (Number(r.smv) || 0), 0)
@@ -997,11 +997,11 @@ export function RoutingFormDialog({
               onSaved={() => {}}
               onCreated={(row) => {
                 setContractors((cs) => [...cs, row])
-                if (step && row.operationId === step.operationId && adding.rowKey) set(adding.rowKey, { contractorId: row.id })
+                if (step && row.operationIds?.includes(step.operationId) && adding.rowKey) set(adding.rowKey, { contractorId: row.id })
               }}
               resource="contractors"
               fields={contractorFormFields}
-              initialValues={{ ...(adding.typed ? { name: adding.typed } : {}), operationId: step?.operationId ?? '', isActive: true }}
+              initialValues={{ ...(adding.typed ? { name: adding.typed } : {}), operationIds: step?.operationId ? [step.operationId] : [], isActive: true }}
               title="Contractor"
               columns={3}
             />

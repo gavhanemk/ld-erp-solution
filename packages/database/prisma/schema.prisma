@@ -1255,7 +1255,6 @@ model Operation {
   moSteps           MOStep[]
   styleStepRuns     StyleStepRun[]
   workstations      Workstation[]
-  contractors       Contractor[]
 
   @@map("operations")
 }
@@ -4445,9 +4444,8 @@ model Contractor {
   /// CON-001: made by the system.
   code         String    @unique
   name         String
-  /// The process they do: Cutting, Stitching, Kaj Button…
-  operationId  String
-  operation    Operation @relation(fields: [operationId], references: [id])
+  /// The processes they take on: Cutting, Stitching, Kaj Button… (ids of operations)
+  operationIds String[]  @default([])
   phone        String?
   /// What they are paid a piece, when it is the same for every style.
   ratePerPiece Decimal?  @db.Decimal(10, 2)
@@ -4459,7 +4457,7 @@ model Contractor {
   routingSteps RoutingStep[]
   moSteps      MOStep[]
 
-  @@index([operationId])
+  @@index([operationIds], type: Gin)
   @@map("contractors")
 }
 

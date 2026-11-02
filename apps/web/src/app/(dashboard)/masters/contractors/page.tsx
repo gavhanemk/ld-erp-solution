@@ -14,8 +14,8 @@ interface Contractor {
   id: string
   code: string
   name: string
-  operationId: string
-  operation: { id: string; name: string } | null
+  operationIds: string[]
+  processes?: Array<{ id: string; name: string }>
   phone: string | null
   ratePerPiece: string | number | null
   notes: string | null
@@ -28,7 +28,7 @@ const dash = <span className="text-muted-foreground">—</span>
 const columns: Column<Contractor>[] = [
   { key: 'code', header: 'Code', sortable: true, className: 'whitespace-nowrap font-mono text-xs text-primary' },
   { key: 'name', header: 'Contractor', sortable: true, className: 'font-medium' },
-  { key: 'operation', header: 'Process', render: (c) => c.operation?.name ?? dash },
+  { key: 'processes', header: 'Processes', render: (c) => (c.processes?.length ? c.processes.map((p) => p.name).join(', ') : dash) },
   { key: 'phone', header: 'Phone', render: (c) => c.phone ?? dash },
   {
     key: 'ratePerPiece',
@@ -45,7 +45,7 @@ const columns: Column<Contractor>[] = [
   { key: 'isActive', header: 'Status', render: (c) => <ActiveBadge isActive={c.isActive} /> },
 ]
 
-const filterDefs: FilterDef[] = [{ key: 'operationId', label: 'Process', facet: 'operationId', optionsFrom: { resource: 'operations' } }]
+const filterDefs: FilterDef[] = [{ key: 'operationIds', label: 'Process', facet: 'operationIds', optionsFrom: { resource: 'operations' } }]
 
 export default function ContractorsPage() {
   return (

@@ -877,7 +877,8 @@ const contractorFields = z.object({
   // Made by the server (CON-001) when left out.
   code: code.optional(),
   name,
-  operationId: z.string().min(1, 'Pick the process they do'),
+  /** Every process they take on: cutting, or stitching and kaj button. */
+  operationIds: z.array(z.string().min(1)).min(1, 'Pick at least one process they do').max(50),
   phone,
   ratePerPiece: z.number().min(0).max(100000).optional().nullable(),
   notes: optionalText,
