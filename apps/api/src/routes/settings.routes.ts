@@ -577,6 +577,10 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   RCPT: 'Payment receipt',
   QT: 'Quotation',
   CN: 'Credit note',
+  PV: 'Payment voucher',
+  RV: 'Receipt voucher',
+  CV: 'Contra voucher',
+  JV: 'Journal voucher',
 }
 
 /**

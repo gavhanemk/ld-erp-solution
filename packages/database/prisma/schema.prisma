@@ -308,6 +308,10 @@ model User {
   salesInvoicesRaised    SalesInvoice[]            @relation("SICreatedBy")
   salesInvoicesCancelled SalesInvoice[]            @relation("SICancelledBy")
   receiptsRecorded       PaymentReceipt[]          @relation("ReceiptCreatedBy")
+  ledgersCreated         Ledger[]                  @relation("LedgerCreatedBy")
+  vouchersCreated        Voucher[]                 @relation("VoucherCreatedBy")
+  vouchersUpdated        Voucher[]                 @relation("VoucherUpdatedBy")
+  vouchersCancelled      Voucher[]                 @relation("VoucherCancelledBy")
   mosClosed              ManufacturingOrder[]      @relation("MOClosedBy")
   quotesCreated          SalesQuotation[]          @relation("QuoteCreatedBy")
   creditNotesRaised      CreditNote[]              @relation("CNCreatedBy")
@@ -482,6 +486,9 @@ model Company {
   fyStartMonth   Int       @default(4)
   /// Nothing may be dated before the books open.
   booksStartDate DateTime?
+  /// The books are closed up to and including this day: nothing dated on or
+  /// before it may be entered, changed or cancelled.
+  booksLockedUpTo DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -513,6 +520,7 @@ model Brand {
   manufacturingOrders ManufacturingOrder[]
   quotations          SalesQuotation[] @relation("QuoteBrand")
   styles              Style[]
+  costCentre          CostCentre?
 
   @@map("brands")
 }
@@ -1070,6 +1078,7 @@ model Customer {
   deliveryChallans  DeliveryChallan[]  @relation("DCCustomer")
   quotations        SalesQuotation[]   @relation("QuoteCustomer")
   ownedPackages StockPackage[] @relation("CustomerPackages")
+  ledger        Ledger?
 }
 
 /// One of the places a supplier bills from.
@@ -1163,6 +1172,7 @@ model Supplier {
   wipEvents        WipEvent[]        @relation("WipEventVendor")
   processTransfers ProcessTransfer[] @relation("TransferVendor")
   jobWorkOrders    JobWorkOrder[]    @relation("JobWorkOrderVendor")
+  ledger           Ledger?
 }
 
 model Warehouse {
@@ -4012,25 +4022,30 @@ model JobCard {
 // ACCOUNTS
 // ═══════════════════════════════════════════
 
-model Account {
-  id             String    @id @default(cuid())
-  code           String    @unique
+/// AWAITING REMOVAL. The first sketch of the books, never used by the app —
+/// only the demo seed wrote to it. The books are LedgerGroup, Ledger, Voucher,
+/// VoucherLine and BillRef below; these three tables stay until someone
+/// decides to drop them.
+model LegacyAccount {
+  id             String          @id @default(cuid())
+  code           String          @unique
   name           String
   groupType      String
   parentId       String?
-  parent         Account?  @relation("AccountHierarchy", fields: [parentId], references: [id])
-  children       Account[] @relation("AccountHierarchy")
+  parent         LegacyAccount?  @relation("AccountHierarchy", fields: [parentId], references: [id])
+  children       LegacyAccount[] @relation("AccountHierarchy")
   costCenter     String?
-  isActive       Boolean   @default(true)
-  openingBalance Decimal   @default(0) @db.Decimal(14, 2)
-  createdAt      DateTime  @default(now())
+  isActive       Boolean         @default(true)
+  openingBalance Decimal         @default(0) @db.Decimal(14, 2)
+  createdAt      DateTime        @default(now())
 
-  voucherLines VoucherLine[]
+  voucherLines LegacyVoucherLine[]
 
   @@map("accounts")
 }
 
-model Voucher {
+/// AWAITING REMOVAL — see LegacyAccount.
+model LegacyVoucher {
   id          String      @id @default(cuid())
   voucherNo   String      @unique
   type        VoucherType
@@ -4043,25 +4058,251 @@ model Voucher {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
-  lines VoucherLine[]
+  lines LegacyVoucherLine[]
 
   @@index([voucherNo])
   @@index([date])
   @@map("vouchers")
 }
 
-model VoucherLine {
-  id        String  @id @default(cuid())
+/// AWAITING REMOVAL — see LegacyAccount.
+model LegacyVoucherLine {
+  id        String        @id @default(cuid())
   voucherId String
-  voucher   Voucher @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  voucher   LegacyVoucher @relation(fields: [voucherId], references: [id], onDelete: Cascade)
   accountId String
-  account   Account @relation(fields: [accountId], references: [id])
-  debit     Decimal @default(0) @db.Decimal(14, 2)
-  credit    Decimal @default(0) @db.Decimal(14, 2)
+  account   LegacyAccount @relation(fields: [accountId], references: [id])
+  debit     Decimal       @default(0) @db.Decimal(14, 2)
+  credit    Decimal       @default(0) @db.Decimal(14, 2)
   narration String?
-  sortOrder Int     @default(0)
+  sortOrder Int           @default(0)
 
   @@map("voucher_lines")
+}
+
+/// What a group's balance is. It decides where the group shows — balance
+/// sheet for assets and liabilities, profit and loss for income and expense —
+/// and which side its balance normally sits on.
+enum LedgerNature {
+  ASSET
+  LIABILITY
+  INCOME
+  EXPENSE
+}
+
+/// The master a ledger stands for, when it stands for one.
+enum LedgerParty {
+  CUSTOMER
+  SUPPLIER
+  BROKER
+  CONTRACTOR
+  BANK
+}
+
+/// The kinds of voucher, as an Indian accountant knows them. The first four
+/// are typed in Accounts; the rest are written by the documents of Sales and
+/// Purchase and kept in step with them.
+enum VoucherKind {
+  PAYMENT
+  RECEIPT
+  CONTRA
+  JOURNAL
+  SALES
+  PURCHASE
+  CREDIT_NOTE
+  DEBIT_NOTE
+}
+
+enum VoucherState {
+  POSTED
+  CANCELLED
+}
+
+/// How one line on a party's ledger touches that party's bills.
+enum BillRefKind {
+  /// A bill raised: an invoice, a purchase bill, or a bill unpaid when the books started.
+  NEW_REF
+  /// Money or a note that settles a bill already raised.
+  AGAINST_REF
+  /// Paid or received ahead of any bill.
+  ADVANCE
+  /// Not tied to any bill.
+  ON_ACCOUNT
+}
+
+/// A group of ledgers: Sundry Debtors, Duties & Taxes, Indirect Expenses.
+/// The standard groups every install starts with carry a systemKey and cannot
+/// be deleted or moved; groups of the mill's own sit under them.
+model LedgerGroup {
+  id                 String        @id @default(cuid())
+  name               String        @unique
+  parentId           String?
+  parent             LedgerGroup?  @relation("LedgerGroupTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children           LedgerGroup[] @relation("LedgerGroupTree")
+  nature             LedgerNature
+  /// Sits above gross profit, in the trading account: sales, purchases,
+  /// direct income and direct expenses.
+  affectsGrossProfit Boolean       @default(false)
+  systemKey          String?       @unique
+  sortOrder          Int           @default(0)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  ledgers Ledger[]
+
+  @@index([parentId])
+  @@map("ledger_groups")
+}
+
+/// One account in the books. Every customer, supplier, broker, contractor and
+/// bank account has its own, made for it; the rest — sales, GST, expenses,
+/// capital, loans — are made here.
+model Ledger {
+  id             String       @id @default(cuid())
+  name           String       @unique
+  groupId        String
+  group          LedgerGroup  @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  /// The balance on the day the books start: positive is debit, negative credit.
+  openingBalance Decimal      @default(0) @db.Decimal(14, 2)
+  /// The party's bills are settled one by one, and its outstanding is kept bill by bill.
+  billWise       Boolean      @default(false)
+  /// The ledger a posting rule reaches for — CASH, ROUND_OFF, OUTPUT_CGST — so
+  /// renaming it changes nothing.
+  systemKey      String?      @unique
+  partyType      LedgerParty?
+  customerId     String?      @unique
+  customer       Customer?    @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  supplierId     String?      @unique
+  supplier       Supplier?    @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  brokerId       String?      @unique
+  broker         Broker?      @relation(fields: [brokerId], references: [id], onDelete: Restrict)
+  contractorId   String?      @unique
+  contractor     Contractor?  @relation(fields: [contractorId], references: [id], onDelete: Restrict)
+  bankAccountId  String?      @unique
+  bankAccount    BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  /// For a party that is none of our masters — a landlord, a lender — whose
+  /// PAN or GSTIN the returns need.
+  pan            String?
+  gstin          String?
+  notes          String?
+  isActive       Boolean      @default(true)
+  createdById    String?
+  createdBy      User?        @relation("LedgerCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  lines    VoucherLine[]
+  billRefs BillRef[]
+
+  @@index([groupId])
+  @@map("ledgers")
+}
+
+/// Where income and spending is booked to, so profit can be read by brand.
+/// One per brand, made for it; shared costs are split across them.
+model CostCentre {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  brandId   String?  @unique
+  brand     Brand?   @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines VoucherLine[]
+
+  @@map("cost_centres")
+}
+
+/// One entry in the books: what was debited and credited, on what day.
+///
+/// A voucher typed in Accounts has no source. One written for a sales
+/// invoice, a receipt or a purchase bill names its document, takes that
+/// document's number, and is rewritten whenever the document changes. Nothing
+/// is ever deleted: a voucher is cancelled, keeping its number and its lines,
+/// and stops counting.
+model Voucher {
+  id            String        @id @default(cuid())
+  kind          VoucherKind
+  voucherNo     String
+  /// The year the voucher belongs to, by its own date: 2627.
+  financialYear String
+  date          DateTime
+  narration     String?
+  /// The debit side's total, which the credit side equals.
+  amount        Decimal       @db.Decimal(14, 2)
+  mode          PaymentMode?
+  referenceNo   String?
+  chequeNo      String?
+  chequeDate    DateTime?
+  sourceType    String?
+  sourceId      String?
+  status        VoucherState  @default(POSTED)
+  cancelledAt   DateTime?
+  cancelledById String?
+  cancelledBy   User?         @relation("VoucherCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason  String?
+  createdById   String?
+  createdBy     User?         @relation("VoucherCreatedBy", fields: [createdById], references: [id])
+  updatedById   String?
+  updatedBy     User?         @relation("VoucherUpdatedBy", fields: [updatedById], references: [id])
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  lines VoucherLine[]
+
+  @@unique([kind, voucherNo])
+  @@unique([sourceType, sourceId])
+  @@index([date])
+  @@index([financialYear, kind])
+  @@map("acc_vouchers")
+}
+
+/// One ledger debited or credited by a voucher. Exactly one of debit and
+/// credit is above zero.
+model VoucherLine {
+  id           String      @id @default(cuid())
+  voucherId    String
+  voucher      Voucher     @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  ledgerId     String
+  ledger       Ledger      @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  debit        Decimal     @default(0) @db.Decimal(14, 2)
+  credit       Decimal     @default(0) @db.Decimal(14, 2)
+  costCentreId String?
+  costCentre   CostCentre? @relation(fields: [costCentreId], references: [id], onDelete: Restrict)
+  narration    String?
+  /// The day the bank statement shows this line, set on reconciliation.
+  bankDate     DateTime?
+  sortOrder    Int         @default(0)
+
+  billRefs BillRef[]
+
+  @@index([ledgerId])
+  @@index([voucherId])
+  @@map("acc_voucher_lines")
+}
+
+/// The part of a party's line that raises or settles one bill. A party's
+/// outstanding is the sum of these by bill number, and a bill is cleared when
+/// its sum reaches zero. A bill unpaid on the day the books started has no
+/// line: it is part of the ledger's opening balance.
+model BillRef {
+  id       String       @id @default(cuid())
+  lineId   String?
+  line     VoucherLine? @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  ledgerId String
+  ledger   Ledger       @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  kind     BillRefKind
+  /// The bill's number as the party knows it: our invoice number, their bill number.
+  billNo   String
+  billDate DateTime
+  dueDate  DateTime?
+  /// Debit positive, credit negative, the same side as its line.
+  amount   Decimal      @db.Decimal(14, 2)
+
+  @@index([ledgerId, billNo])
+  @@index([lineId])
+  @@map("acc_bill_refs")
 }
 
 model BankAccount {
@@ -4079,6 +4320,7 @@ model BankAccount {
 
   supplierPayments SupplierPayment[]
   paymentReceipts  PaymentReceipt[]
+  ledger           Ledger?
 
   @@map("bank_accounts")
 }
@@ -4313,6 +4555,7 @@ model Broker {
   customers   Customer[]
   salesOrders SalesOrder[]
   invoices    SalesInvoice[]
+  ledger      Ledger?
 
   @@index([code])
   @@map("brokers")
@@ -4456,6 +4699,7 @@ model Contractor {
 
   routingSteps RoutingStep[]
   moSteps      MOStep[]
+  ledger       Ledger?
 
   @@index([operationIds], type: Gin)
   @@map("contractors")

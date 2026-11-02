@@ -372,6 +372,12 @@ export async function seedCore(prisma: PrismaClient) {
     { docType: 'FGR', prefix: 'FGR' },
     { docType: 'QT', prefix: 'QT' },
     { docType: 'RCPT', prefix: 'RCPT' },
+    // The books: vouchers typed in Accounts, one run per type as the
+    // accountant numbers them. Accounts also makes these on first use.
+    { docType: 'PV', prefix: 'PV' },
+    { docType: 'RV', prefix: 'RV' },
+    { docType: 'CV', prefix: 'CV' },
+    { docType: 'JV', prefix: 'JV' },
   ]
 
   for (const s of series) {

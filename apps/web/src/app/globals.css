@@ -329,6 +329,17 @@
     @apply py-3 px-4 text-foreground;
   }
 
+  /* Totals at the foot of a table of figures — the books' trial balance,
+     a ledger — lined up under the columns they add up. A modifier, so the
+     lists that already dress their own footers are left as they are. */
+  .table-totals > tfoot > tr {
+    @apply border-t border-border;
+  }
+
+  .table-totals > tfoot > tr > td {
+    @apply py-3 px-4 text-foreground;
+  }
+
   /* A denser row, for a list whose cells carry two lines.
 
      The purchase order list puts a supplier over its GSTIN in one cell and an
