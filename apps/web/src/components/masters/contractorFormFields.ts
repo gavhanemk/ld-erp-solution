@@ -20,15 +20,6 @@ export const contractorFormFields: FormField[] = [
     help: 'Tick every process they take on: a routing step offers them for each',
   },
   { name: 'phone', label: 'Phone', section: 'Contractor', placeholder: '+91 98765 43210' },
-  {
-    name: 'ratePerPiece',
-    label: 'Rate per piece (₹)',
-    type: 'number',
-    section: 'Contractor',
-    placeholder: '4.50',
-    min: 0,
-    help: 'When it is the same for every style; a routing step can say its own',
-  },
   { name: 'notes', label: 'Notes', type: 'textarea', section: 'Contractor', span: 2, rows: 1, placeholder: 'Team of 6, works the night shift' },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Offered on routings', section: 'Contractor' },
 ]

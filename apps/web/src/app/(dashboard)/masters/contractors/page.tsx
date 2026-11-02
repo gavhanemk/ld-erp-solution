@@ -17,7 +17,6 @@ interface Contractor {
   operationIds: string[]
   processes?: Array<{ id: string; name: string }>
   phone: string | null
-  ratePerPiece: string | number | null
   notes: string | null
   isActive: boolean
   _count?: { routingSteps: number }
@@ -30,12 +29,6 @@ const columns: Column<Contractor>[] = [
   { key: 'name', header: 'Contractor', sortable: true, className: 'font-medium' },
   { key: 'processes', header: 'Processes', render: (c) => (c.processes?.length ? c.processes.map((p) => p.name).join(', ') : dash) },
   { key: 'phone', header: 'Phone', render: (c) => c.phone ?? dash },
-  {
-    key: 'ratePerPiece',
-    header: 'Rate / pc',
-    align: 'right',
-    render: (c) => (c.ratePerPiece == null || c.ratePerPiece === '' ? dash : `₹${Number(c.ratePerPiece).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`),
-  },
   {
     key: 'routings',
     header: 'In routings',
