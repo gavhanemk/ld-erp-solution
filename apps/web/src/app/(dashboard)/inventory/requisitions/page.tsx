@@ -829,8 +829,14 @@ function RequisitionsScreen() {
   const together: Record<BulkAction, Requisition[]> = {
     approve: can('inventory', 'approve') ? shown.filter((mr) => fact(mr).stage === 'approval') : [],
     indent: can('inventory', 'edit') ? shown.filter((mr) => ['handover', 'split', 'partly'].includes(fact(mr).stage) && mr.lines.some(shortNotBought)) : [],
+    // Not one raised against a sales order with no MO: it is linked to its MO first, in Process.
     issue: can('inventory', 'edit')
-      ? shown.filter((mr) => ['arrived', 'handover', 'split', 'partly'].includes(fact(mr).stage) && mr.lines.some((l) => owedOf(l) > 1e-9 && (l.available ?? 0) > 0))
+      ? shown.filter(
+          (mr) =>
+            !(mr.so && !mr.mo) &&
+            ['arrived', 'handover', 'split', 'partly'].includes(fact(mr).stage) &&
+            mr.lines.some((l) => owedOf(l) > 1e-9 && (l.available ?? 0) > 0),
+        )
       : [],
   }
   // No "For" column: the customer and order are in each group's header.
@@ -880,6 +886,11 @@ function RequisitionsScreen() {
         <span className="border-border bg-card text-muted-foreground rounded-full border px-2 py-0.5 text-[11px] tabular-nums">
           {mine.length} {mine.length === 1 ? 'requisition' : 'requisitions'}
         </span>
+        {!mr.mo && mine.some((m) => !m.closedAt && m.status !== 'REJECTED' && !m.issuedAt) && (
+          <span className="warn-text text-xs" title="Raised before requisitions had to come from an MO">
+            No MO: link each to its MO in Process before issuing
+          </span>
+        )}
         {(approve.length > 1 || process.length > 1) && (
           <span className="ml-auto flex gap-1.5">
             {approve.length > 1 && (

@@ -103,10 +103,16 @@ export function RequisitionDialog({
   /** Off: only the department's items. On: every item, for the odd request outside it. */
   const [allItems, setAllItems] = useState(false)
   const [requiredDate, setRequiredDate] = useState('')
-  /** The sales order the material is for: what the store reserves is held for its customer. */
-  const [soId, setSoId] = useState('')
+  /**
+   * The manufacturing order the material is for; its sales order comes with
+   * it. Empty for general use (maintenance, the office, samples). Material
+   * for a sales order goes through its MO: Sales order -> MO -> requisition.
+   */
+  const [moId, setMoId] = useState('')
   const [styles, setStyles] = useState<Array<{ id: string; code: string; name: string }>>([])
-  const [orders, setOrders] = useState<Array<{ id: string; soNumber: string; status: string; customer: { name: string } }>>([])
+  const [mos, setMos] = useState<
+    Array<{ id: string; moNumber: string; so: { soNumber: string; customer: { name: string } } | null; lines: Array<{ color: string; style: { code: string } }> }>
+  >([])
   const [notes, setNotes] = useState('')
   const [lines, setLines] = useState<Line[]>([emptyLine()])
 
@@ -117,7 +123,7 @@ export function RequisitionDialog({
     let cancelled = false
     void (async () => {
       try {
-        const [i, d, w, st, so, sty] = await Promise.all([
+        const [i, d, w, st, mo, sty] = await Promise.all([
           // Active only: a deactivated item, department or store is not offered
           // for anything new.
           masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
@@ -125,10 +131,10 @@ export function RequisitionDialog({
           masterResource<{ id: string; name: string }>('warehouses').list({ limit: 100, active: true }),
           // What is on each rack, ours and customers' apart.
           api.get<{ data: StockRow[] }>('/inventory/stock').catch(() => ({ data: [] as StockRow[] })),
-          // Sales orders still being worked on, for "For sales order".
+          // Manufacturing orders still being worked on, for "For manufacturing order".
           api
-            .get<{ data: Array<{ id: string; soNumber: string; status: string; customer: { name: string } }> }>('/sales/orders/options?open=1')
-            .catch(() => ({ data: [] as Array<{ id: string; soNumber: string; status: string; customer: { name: string } }> })),
+            .get<{ data: typeof mos }>('/inventory/requisition-mos')
+            .catch(() => ({ data: [] as typeof mos })),
           // Style numbers to suggest in the Style no. box.
           masterResource<{ id: string; code: string; name: string }>('styles')
             .list({ limit: 200, active: true })
@@ -136,7 +142,7 @@ export function RequisitionDialog({
         ])
         if (cancelled) return
         setStyles(sty.data)
-        setOrders(so.data.filter((o) => !['COMPLETED', 'CANCELLED'].includes(o.status)))
+        setMos(mo.data)
         setItems(i.data)
         setDepartments(d.data)
         setWarehouses(w.data)
@@ -269,7 +275,7 @@ export function RequisitionDialog({
       const res = await api.post<{ data: { mrNumber: string } }>('/inventory/requisitions', {
         departmentId,
         requiredDate: requiredDate || null,
-        soId: soId || null,
+        moId: moId || null,
         notes: notes || null,
         lines: filled.map((l) => ({
           itemId: l.itemId,
@@ -445,17 +451,19 @@ export function RequisitionDialog({
             )}
           </label>
           <label className="block min-w-0">
-            <span className="form-label">For sales order</span>
-            <SmartSelect className="form-input" value={soId} onChange={(e) => setSoId(e.target.value)} disabled={loadingLists}>
-              <option value="">Not for a particular order</option>
-              {orders.map((o) => (
+            <span className="form-label">For manufacturing order</span>
+            <SmartSelect className="form-input" value={moId} onChange={(e) => setMoId(e.target.value)} disabled={loadingLists}>
+              <option value="">Not for an order (general use)</option>
+              {mos.map((o) => (
                 <option key={o.id} value={o.id}>
-                  {o.soNumber} · {o.customer.name}
+                  {o.moNumber}
+                  {o.so ? ` · ${o.so.soNumber} · ${o.so.customer.name}` : ''}
+                  {o.lines.length ? ` · ${[...new Set(o.lines.map((l) => l.style.code))].join(', ')}` : ''}
                 </option>
               ))}
             </SmartSelect>
             <span className="mt-1 block text-[11px] leading-snug text-muted-foreground">
-              Stock the store reserves for it is held for this customer.
+              Material for a sales order goes through its MO; the sales order comes with it.
             </span>
           </label>
           <label className="block min-w-0">

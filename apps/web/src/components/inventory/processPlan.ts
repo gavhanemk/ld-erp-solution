@@ -51,7 +51,7 @@ export interface FulfilData {
     lastBuy: { poNumber: string; poDate: string; supplierName: string; unitRate: number } | null
     otherOpen: Array<{ poNumber: string; supplierName: string; qty: number; receivedQty: number; deliveryDate: string | null; forMr: string | null }>
   }>
-  events: Array<{ at: string; who: string; action: string; handedOver: string[] | null; reservedNow?: string[] | null; plan: unknown; closeReason: string | null }>
+  events: Array<{ at: string; who: string; action: string; handedOver: string[] | null; reservedNow?: string[] | null; plan: unknown; closeReason: string | null; linkedMo?: string | null }>
   /** The stickered rolls and boxes of these items on the racks, store by store. */
   packs?: Array<{ itemId: string; warehouseId: string; ownership: string; ownerCustomerId: string | null; packType: string; n: number; qty: number; racks: string[] | null }>
 }

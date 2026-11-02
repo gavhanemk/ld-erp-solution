@@ -153,6 +153,20 @@ const G2 = g2.body?.data
 check('T04', 'a receipt with no order is allowed, unassigned', g2.status === 200 && G2?.status === 'POSTED' && !G2.soId, err(g2))
 
 // ── B. Ownership ──
+// Material for a sales order is asked for through its MO: confirm the order
+// and plan a released MO, as the floor does.
+const mkMo = async (so) => {
+  const c = await call('POST', `/sales/orders/${so.id}/confirm`, { creditReleaseReason: 'Demo test order' })
+  if (c.status >= 300) { console.log('SO confirm failed', err(c)); process.exit(1) }
+  const soLine = (await q(`SELECT id FROM sales_order_lines WHERE "soId"=$1`, [so.id]))[0].id
+  const sizes = [{ sizeId: 'cmth89v4e002moijjgegocwv0', qty: 20 }, { sizeId: 'cmth89vci002ooijj1otoy5u8', qty: 30 }]
+  let r = await call('POST', '/production/orders', { soId: so.id, release: true, lines: [{ soLineId: soLine, sizes }] })
+  if (r.status >= 300) r = await call('POST', '/production/orders', { soId: so.id, release: true, routingId: 'cmth8e78c00n0oijjdw6rr22i', lines: [{ soLineId: soLine, sizes }] })
+  if (r.status >= 300) { console.log('MO create failed', err(r)); process.exit(1) }
+  return r.body.data
+}
+const MO_A1 = await mkMo(SO_A1), MO_B = await mkMo(SO_B)
+console.log(`MOs: ${MO_A1.moNumber} for ${SO_A1.soNumber}, ${MO_B.moNumber} for ${SO_B.soNumber}`)
 const mr = (o) => call('POST', '/inventory/requisitions', { departmentId: DEPT, warehouseId: WH, lines: [{ itemId: FAB, requestedQty: 10, ownership: 'CUSTOMER_OWNED', ownerCustomerId: A }], ...o })
 const r5 = await mr({ soId: SO_B.id })
 check('T05', "Bengal's fabric refused for Kanha's order", r5.status === 400 && r5.body?.code === 'WRONG_OWNER', err(r5))
@@ -160,6 +174,8 @@ const r6 = await mr({})
 check('T06', "Bengal's fabric refused with no order named", r6.status === 400 && r6.body?.code === 'NEEDS_ORDER', err(r6))
 const r6b = await call('POST', '/inventory/requisitions', { departmentId: DEPT, warehouseId: WH, soId: RAJ_SO, lines: [{ itemId: FAB, requestedQty: 1, ownership: 'CUSTOMER_OWNED', ownerCustomerId: RAJ }] })
 check('T06', 'customer material refused on a non-job-work order', r6b.status === 400 && r6b.body?.code === 'NOT_JOB_WORK', err(r6b))
+const r6c = await mr({ soId: SO_A1.id })
+check('M1', 'a sales order with no MO named is refused: requisitions come from the MO', r6c.status === 400 && r6c.body?.code === 'NEEDS_MO', err(r6c))
 if (JW) {
   const jw = (o) => call('POST', '/inventory/job-work', { jobWorkerId: JW, process: 'Washing', fromWarehouseId: WH, toWarehouseId: JWG, lines: [{ itemId: FAB, qty: 1, ownership: 'CUSTOMER_OWNED', ownerCustomerId: A }], ...o })
   const j1 = await jw({})
@@ -169,7 +185,7 @@ if (JW) {
 }
 
 // ── C. Stickers, one-time issue, part rolls on new stickers ──
-const ok = await mr({ soId: SO_A1.id, lines: [{ itemId: FAB, requestedQty: 40, ownership: 'CUSTOMER_OWNED', ownerCustomerId: A }] })
+const ok = await mr({ moId: MO_A1.id, lines: [{ itemId: FAB, requestedQty: 40, ownership: 'CUSTOMER_OWNED', ownerCustomerId: A }] })
 check('B1', "Bengal's fabric accepted for Bengal's job-work order", ok.status === 201, err(ok))
 const MR = ok.body?.data, LINE = MR?.lines?.[0]?.id
 const ap = await call('PATCH', `/inventory/requisitions/${MR.id}/approve`, {})
@@ -181,7 +197,7 @@ check('T02', 'a held (rejected) roll cannot be scanned out', sh.status === 409 &
 const heldNow = await bal('R')
 const usable = await bal('A')
 const want = usable + 1
-const mrBig = await mr({ soId: SO_A1.id, lines: [{ itemId: FAB, requestedQty: want, ownership: 'CUSTOMER_OWNED', ownerCustomerId: A }] })
+const mrBig = await mr({ moId: MO_A1.id, lines: [{ itemId: FAB, requestedQty: want, ownership: 'CUSTOMER_OWNED', ownerCustomerId: A }] })
 await call('PATCH', `/inventory/requisitions/${mrBig.body?.data?.id}/approve`, {})
 const big = await call('POST', `/inventory/requisitions/${mrBig.body?.data?.id}/issue`, { lines: [{ lineId: mrBig.body?.data?.lines?.[0]?.id, issueQty: want, warehouseId: WH }] })
 check('T02', `held stock is never issued: ${want} asked, only ${usable} usable (${heldNow} held)`, big.status >= 400 && (await bal('R')) === heldNow && (await bal('A')) === usable, err(big))
@@ -249,7 +265,7 @@ check('SET', "Kanha's 40 in stock on 4 stickers", gk.status === 200 && K.length 
 
 // A typed issue: the labels window takes part of a roll off its own sticker.
 const P5 = K[0]
-const mr3 = await call('POST', '/inventory/requisitions', { departmentId: DEPT, warehouseId: WH, soId: SO_B.id, lines: [{ itemId: FAB, requestedQty: 3, ownership: 'CUSTOMER_OWNED', ownerCustomerId: B }] })
+const mr3 = await call('POST', '/inventory/requisitions', { departmentId: DEPT, warehouseId: WH, moId: MO_B.id, lines: [{ itemId: FAB, requestedQty: 3, ownership: 'CUSTOMER_OWNED', ownerCustomerId: B }] })
 await call('PATCH', `/inventory/requisitions/${mr3.body.data.id}/approve`, {})
 const typed = await call('POST', `/inventory/requisitions/${mr3.body.data.id}/issue`, { lines: [{ lineId: mr3.body.data.lines[0].id, issueQty: 3, warehouseId: WH }] })
 const outw = await call('POST', '/packages/outward/apply', { type: 'MR', id: mr3.body.data.id, takes: [{ packageId: P5.id, qty: 3 }], ...FIFO_OK })

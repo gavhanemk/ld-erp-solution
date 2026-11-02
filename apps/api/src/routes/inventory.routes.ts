@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import type { z } from 'zod'
 import { prisma, Prisma } from '@ld-erp/database'
+import type { MOStatus } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { isAdmin, requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -47,6 +48,7 @@ import {
   requisitionSourcingSchema,
   requisitionPlanSchema,
   issueRequisitionSchema,
+  linkRequisitionMoSchema,
   openingStockSchema,
   rejectRequisitionSchema,
   rejectAdjustmentSchema,
@@ -1409,8 +1411,8 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       WHERE s."referenceType" = 'MATERIAL_REQUISITION' AND s."referenceId" = ${id}
       ORDER BY s."transactionDate", s."createdAt"`,
     // Who did what to it, and when, from the audit trail.
-    prisma.$queryRaw<Array<{ at: Date; action: string; who: string; handedOver: unknown; plan: unknown; reservedNow: unknown; closeReason: string | null; toBuy: string[] | null }>>`
-      SELECT a."createdAt" AS "at", a.action, u.name AS "who",
+    prisma.$queryRaw<Array<{ at: Date; action: string; who: string; handedOver: unknown; plan: unknown; reservedNow: unknown; closeReason: string | null; linkedMo: string | null; toBuy: string[] | null }>>`
+      SELECT a."createdAt" AS "at", a.action, u.name AS "who", a.after ->> 'linkedMo' AS "linkedMo",
              a.after -> 'handedOverNow' AS "handedOver", a.after -> 'plan' AS "plan",
              a.after -> 'reservedNow' AS "reservedNow",
              a.after ->> 'closeReason' AS "closeReason",
@@ -1547,6 +1549,7 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
     plan: Array.isArray(a.plan) ? (a.plan as Array<{ lineId: string; buyQty: number }>) : null,
     reservedNow: Array.isArray(a.reservedNow) ? (a.reservedNow as string[]) : null,
     closeReason: a.closeReason,
+    linkedMo: a.linkedMo,
     toBuy: a.toBuy,
   }))
 
@@ -1582,6 +1585,18 @@ export async function createRequisition(
   // The order it is for — named, or its MO's — and every customer-owned line
   // that customer's, for a job-work order of theirs.
   const order = await assertOwnersFitOrder(tx, { soId: data.soId, moId: data.moId, doc: 'requisition' }, data.lines)
+
+  // Sales order -> MO -> requisition -> issue. Material for a sales order is
+  // asked for through its manufacturing order, so what the floor draws is
+  // counted against the MO making it. One for no order at all (maintenance,
+  // the office, samples) needs neither.
+  if (data.soId && !data.moId) {
+    throw new AppError(
+      'Material for a sales order is asked for through its manufacturing order. Pick the MO (its sales order comes with it), or leave the order empty for general use.',
+      400,
+      'NEEDS_MO',
+    )
+  }
 
   // A style number that is exactly a style's code is linked to it; anything else is kept as typed.
   const typedStyles = [...new Set(data.lines.map((l) => l.styleNo?.trim()).filter((v): v is string => !!v))]
@@ -1641,6 +1656,101 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
   })
 
   res.status(201).json({ success: true, data: mr })
+})
+
+/** Released and not finished: an MO the floor is still working on. */
+const LIVE_MO: MOStatus[] = ['RELEASED', 'CUTTING', 'STITCHING', 'FINISHING', 'QC', 'PACKING']
+
+/**
+ * The manufacturing orders a new requisition can be for: released and not
+ * finished, newest first, with their sales order and styles. Under the
+ * store's own permission, as the store and the departments raise these.
+ */
+router.get('/requisition-mos', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const data = await prisma.manufacturingOrder.findMany({
+    where: { status: { in: LIVE_MO } },
+    orderBy: { createdAt: 'desc' },
+    take: 300,
+    select: {
+      id: true,
+      moNumber: true,
+      so: { select: { soNumber: true, customer: { select: { name: true } } } },
+      lines: { select: { color: true, style: { select: { code: true } } } },
+    },
+  })
+  res.json({ success: true, data })
+})
+
+/**
+ * For a requisition raised against a sales order with no MO: that order's
+ * manufacturing orders still being worked on, to link it to one.
+ */
+router.get('/requisitions/:id/mo-choices', requirePermission(MODULE, 'view'), async (req, res) => {
+  const mr = await prisma.materialRequisition.findUnique({ where: { id: req.params.id }, select: { soId: true, moId: true } })
+  if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+  const data =
+    mr.soId && !mr.moId
+      ? await prisma.manufacturingOrder.findMany({
+          where: { soId: mr.soId, status: { in: LIVE_MO } },
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            moNumber: true,
+            status: true,
+            totalPlannedQty: true,
+            lines: { select: { color: true, style: { select: { code: true } } } },
+          },
+        })
+      : []
+  res.json({ success: true, data })
+})
+
+/**
+ * Links a requisition raised against a sales order (before requisitions had
+ * to come from an MO) to one of that order's live MOs. Until then nothing is
+ * issued against it.
+ */
+router.patch('/requisitions/:id/link-mo', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { moId } = linkRequisitionMoSchema.parse(req.body)
+  const before = await prisma.materialRequisition.findUnique({ where: { id: req.params.id }, include: mrInclude })
+  if (!before) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+  if (before.moId) throw new AppError(`${before.mrNumber} is already for an MO.`, 409, 'ALREADY_LINKED')
+  if (!before.soId) throw new AppError(`${before.mrNumber} is not for an order, so it needs no MO.`, 400, 'NO_ORDER')
+  if (before.closedAt || before.status === 'REJECTED') {
+    throw new AppError(`${before.mrNumber} is ${before.closedAt ? 'closed' : 'refused'}; nothing more is issued against it.`, 400, 'NOT_OPEN')
+  }
+  const mo = await prisma.manufacturingOrder.findUnique({ where: { id: moId }, select: { id: true, moNumber: true, soId: true, status: true } })
+  if (!mo) throw new AppError('That manufacturing order does not exist', 404, 'NOT_FOUND')
+  if (mo.soId !== before.soId) {
+    throw new AppError(`${mo.moNumber} is for another sales order. Pick one of this order's MOs.`, 400, 'WRONG_MO')
+  }
+  if (!LIVE_MO.includes(mo.status)) {
+    throw new AppError(
+      mo.status === 'DRAFT' ? `${mo.moNumber} is not released yet. Release it first.` : `${mo.moNumber} is finished, so no more material goes to it.`,
+      400,
+      'MO_NOT_LIVE',
+    )
+  }
+
+  const after = await prisma.$transaction(async (tx) => {
+    await lockRequisition(tx, before.id)
+    // A customer's material still has to belong to that customer's job-work order.
+    await assertOwnersFitOrder(tx, { soId: before.soId, moId: mo.id, doc: 'requisition' }, before.lines)
+    const n = await tx.materialRequisition.updateMany({ where: { id: before.id, moId: null }, data: { moId: mo.id } })
+    if (n.count !== 1) throw new AppError(`${before.mrNumber} was linked to an MO a moment ago. Reopen it.`, 409, 'ALREADY_LINKED')
+    return tx.materialRequisition.findUniqueOrThrow({ where: { id: before.id }, include: mrInclude })
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'MaterialRequisition',
+    entityId: after.id,
+    before,
+    after: { ...after, linkedMo: mo.moNumber },
+  })
+
+  res.json({ success: true, message: `${after.mrNumber} is now for ${mo.moNumber}. It can be issued.`, data: after })
 })
 
 /**
@@ -2074,6 +2184,15 @@ export async function issueRequisition(
       `${mr.mrNumber} was issued in full on ${mr.issuedAt.toLocaleDateString('en-IN')}.`,
       409,
       'ALREADY_ISSUED',
+    )
+  }
+  // Raised against a sales order before requisitions had to come from an MO:
+  // linked to its MO first, so nothing is issued outside the MO flow.
+  if (mr.soId && !mr.moId) {
+    throw new AppError(
+      `${mr.mrNumber} is for a sales order but no manufacturing order. Link it to its MO first (Process -> Link to MO); then it is issued as usual.`,
+      409,
+      'NEEDS_MO',
     )
   }
 
