@@ -246,7 +246,11 @@ async function run(tx: Prisma.TransactionClient, userId: string) {
   // ── The trial balance agrees with itself and with the ledger ──
   let s = await booksSettings(tx)
   let tb = await trialBalance(tx, { from: s.booksStart!, to: today }, s)
-  check('the trial balance agrees', tb.totals.closingDr === tb.totals.closingCr && tb.totals.dr === tb.totals.cr, `Dr ${tb.totals.closingDr} Cr ${tb.totals.closingCr}`)
+  // The books may already hold opening balances that do not agree; whatever
+  // they are out by is carried, and nothing a voucher does changes it.
+  const agrees = (t: typeof tb) => t.totals.dr === t.totals.cr && Math.round((t.totals.closingDr - t.totals.closingCr) * 100) / 100 === t.openingDifference
+  const base = tb.openingDifference
+  check('the trial balance agrees', agrees(tb), `Dr ${tb.totals.closingDr} Cr ${tb.totals.closingCr}, opening out by ${base}`)
   const stmt = await ledgerStatement(tx, customer.id, { from: s.booksStart!, to: today }, s)
   const lastBalance = stmt.rows.length ? stmt.rows[stmt.rows.length - 1].balance : stmt.opening
   check('a ledger statement runs to its closing balance', lastBalance === stmt.closing && stmt.closing === tb.ledgers.find((l) => l.id === customer.id)?.closing, `${stmt.closing}`)
@@ -260,10 +264,11 @@ async function run(tx: Prisma.TransactionClient, userId: string) {
   await tx.ledger.update({ where: { id: capital.id }, data: { openingBalance: -100_000 } })
   s = await booksSettings(tx)
   tb = await trialBalance(tx, { from: s.booksStart!, to: today }, s)
-  check('opening balances out by ₹1,00,000 show as a difference', tb.openingDifference === -100_000, `${tb.openingDifference}`)
-  await tx.ledger.update({ where: { id: cash }, data: { openingBalance: 100_000 } })
+  check('opening balances out by ₹1,00,000 show as a difference', Math.round((tb.openingDifference - base) * 100) / 100 === -100_000, `${tb.openingDifference - base}`)
+  const cashOpening = Number((await tx.ledger.findUniqueOrThrow({ where: { id: cash }, select: { openingBalance: true } })).openingBalance)
+  await tx.ledger.update({ where: { id: cash }, data: { openingBalance: cashOpening + 100_000 } })
   tb = await trialBalance(tx, { from: s.booksStart!, to: today }, s)
-  check('and balance once the other side is entered', tb.openingDifference === 0)
+  check('and balance once the other side is entered', tb.openingDifference === base)
 
   // ── A closed year's profit is carried, with no closing entry ──
   const lastYearStart = fyStartOf(new Date(dayValue(fyStart).getTime() - 86_400_000).toISOString().slice(0, 10), company.fyStartMonth)
@@ -276,7 +281,7 @@ async function run(tx: Prisma.TransactionClient, userId: string) {
   const pl = tb.ledgers.find((l) => l.systemKey === 'PROFIT_LOSS')!
   check("last year's sales are not in this year's opening", salesRow.opening === 0, `${salesRow.opening}`)
   check("last year's profit opens in the Profit & Loss A/c", pl.opening === -1_000, `${pl.opening}`)
-  check('and the trial balance still agrees', tb.totals.closingDr === tb.totals.closingCr, `Dr ${tb.totals.closingDr} Cr ${tb.totals.closingCr}`)
+  check('and the trial balance still agrees', agrees(tb), `Dr ${tb.totals.closingDr} Cr ${tb.totals.closingCr}`)
 }
 
 main().catch((e) => {
