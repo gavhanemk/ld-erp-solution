@@ -4,7 +4,7 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState }
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import {
   Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer, FileText,
-  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock, Undo2, ThumbsUp, Layers } from 'lucide-react'
+  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock, Undo2, ThumbsUp, Layers, Factory } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { ProcessDialog, type ProcessTab } from '@/components/inventory/ProcessDialog'
@@ -339,6 +339,8 @@ function RequisitionsScreen() {
   const [outward, setOutward] = useState<OutwardRef | null>(null)
   /** Several requisitions taken through one step together. */
   const [bulk, setBulk] = useState<BulkAction | null>(null)
+  /** The requisitions of one MO (or sales order) taken through one step together, from its group header. */
+  const [orderBulk, setOrderBulk] = useState<{ action: BulkAction; mrs: Requisition[] } | null>(null)
   /** A return from the floor just saved: stickers for what came back, ready to print. */
   const [inward, setInward] = useState<InwardRef | null>(null)
 
@@ -793,8 +795,26 @@ function RequisitionsScreen() {
       : dash
   }
 
-  const pages = Math.ceil(shown.length / PAGE) || 1
-  const pageRows = shown.slice((page - 1) * PAGE, page * PAGE)
+  // The requisitions of one MO sit together, under a header naming the MO and
+  // its sales order; those for a sales order with no MO group under the order.
+  // A group sits where its newest requisition would.
+  const orderKey = (mr: Requisition) => (mr.mo ? `mo:${mr.mo.id}` : mr.so ? `so:${mr.so.id}` : null)
+  const groups = new Map<string, Requisition[]>()
+  const byOrder: Requisition[] = []
+  for (const mr of shown) {
+    const k = orderKey(mr) ?? `mr:${mr.id}`
+    if (!groups.has(k)) groups.set(k, [])
+    groups.get(k)!.push(mr)
+  }
+  for (const list of groups.values()) byOrder.push(...list)
+
+  const pages = Math.ceil(byOrder.length / PAGE) || 1
+  const pageRows = byOrder.slice((page - 1) * PAGE, page * PAGE)
+  /** The first requisition of its order's group on this page: a header goes above it. */
+  const startsGroup = (i: number) => {
+    const k = orderKey(pageRows[i])
+    return !!k && (i === 0 || orderKey(pageRows[i - 1]) !== k)
+  }
 
   // Several at once, from what the list shows: an MO raises one requisition
   // per department, and each through its own window was slow work.
@@ -808,6 +828,52 @@ function RequisitionsScreen() {
       : [],
   }
   const COLS = 13
+
+  /** Above an MO's (or sales order's) requisitions: what they are for, and all of them at once. */
+  const orderHead = (mr: Requisition) => {
+    const k = orderKey(mr)!
+    const mine = groups.get(k) ?? []
+    const approve = together.approve.filter((m) => orderKey(m) === k)
+    const issue = together.issue.filter((m) => orderKey(m) === k)
+    return (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <Factory size={15} className="text-primary shrink-0" />
+        <span className="text-sm">
+          {mr.mo ? (
+            <a href={`/production/orders?open=${mr.mo.id}`} className="text-primary font-mono font-semibold hover:underline" title="Open the manufacturing order">
+              {mr.mo.moNumber}
+            </a>
+          ) : (
+            <span className="text-muted-foreground">No MO</span>
+          )}
+          {mr.so && (
+            <>
+              <span className="text-muted-foreground"> · </span>
+              <a href={`/sales/orders?q=${encodeURIComponent(mr.so.soNumber)}`} className="text-foreground font-mono hover:underline" title="Open the sales order">
+                {mr.so.soNumber}
+              </a>
+              <span className="text-foreground font-medium"> · {mr.so.customer.name}</span>
+            </>
+          )}
+        </span>
+        <span className="text-muted-foreground text-xs">
+          {mine.length} {mine.length === 1 ? 'requisition' : 'requisitions'}: {mine.map((m) => m.department.name).join(', ')}
+        </span>
+        <div className="flex gap-1.5">
+          {approve.length > 0 && (
+            <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOrderBulk({ action: 'approve', mrs: approve })}>
+              <ThumbsUp size={13} /> Approve {approve.length === 1 ? '' : `all ${approve.length}`}
+            </button>
+          )}
+          {issue.length > 0 && (
+            <button type="button" className="btn-primary h-7 px-2.5 text-xs" onClick={() => setOrderBulk({ action: 'issue', mrs: issue })}>
+              <PackageCheck size={13} /> Issue {issue.length === 1 ? '' : `all ${issue.length} together`}
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4">
@@ -1046,11 +1112,13 @@ function RequisitionsScreen() {
           <div className={`list-scope transition-opacity ${loading ? 'opacity-60' : ''}`}>
             {/* On a phone each requisition is a card; the table is for a wider list. */}
             <div className="list-cards divide-border divide-y">
-              {pageRows.map((mr) => {
+              {pageRows.map((mr, gi) => {
                 const r = rowFacts(mr)
                 const expanded = open === mr.id
                 return (
-                  <div key={mr.id} className="p-3">
+                  <Fragment key={mr.id}>
+                  {startsGroup(gi) && <div className="bg-primary/5 px-3 py-2">{orderHead(mr)}</div>}
+                  <div className="p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -1112,6 +1180,7 @@ function RequisitionsScreen() {
                     </div>
                     {expanded && <div className="mt-2.5">{itemPanel(mr, r)}</div>}
                   </div>
+                  </Fragment>
                 )
               })}
             </div>
@@ -1147,6 +1216,13 @@ function RequisitionsScreen() {
                       const short = openLines.filter((l) => (l.available ?? 0) + 1e-9 < Number(l.requestedQty) - Number(l.issuedQty))
                       return (
                         <Fragment key={mr.id}>
+                          {startsGroup(i) && (
+                            <tr className="bg-primary/5">
+                              <td colSpan={COLS} className="!py-2">
+                                {orderHead(mr)}
+                              </td>
+                            </tr>
+                          )}
                           <tr data-row tabIndex={i === 0 ? 0 : -1}>
                             <td>
                               <button
@@ -1177,7 +1253,14 @@ function RequisitionsScreen() {
                             </td>
                             <td className="whitespace-nowrap text-xs">{formatDate(mr.requestDate)}</td>
                             <td className="whitespace-nowrap text-xs">{mr.department.name}</td>
-                            <td className="whitespace-nowrap text-xs">{mr.so ? mr.so.customer.name : dash}</td>
+                            <td className="whitespace-nowrap text-xs">
+                              {mr.so ? mr.so.customer.name : dash}
+                              {(mr.so || mr.mo) && (
+                                <div className="text-muted-foreground font-mono text-[10px]">
+                                  {[mr.so?.soNumber, mr.mo?.moNumber].filter(Boolean).join(' · ')}
+                                </div>
+                              )}
+                            </td>
                             <td className="text-xs">
                               <div className="text-foreground max-w-[14rem] truncate" title={p.full}>
                                 {p.shown}
@@ -1266,6 +1349,15 @@ function RequisitionsScreen() {
             if (stickers) setInward(stickers)
             void load()
           }}
+        />
+      )}
+      {orderBulk && (
+        <BulkRequisitionDialog
+          action={orderBulk.action}
+          mrs={orderBulk.mrs}
+          onClose={() => setOrderBulk(null)}
+          onDone={() => void load()}
+          onLabels={(o) => setOutward(o)}
         />
       )}
       {bulk && (
