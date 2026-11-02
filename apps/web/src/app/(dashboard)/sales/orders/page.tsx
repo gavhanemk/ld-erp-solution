@@ -485,7 +485,7 @@ export default function SalesOrdersPage() {
     if (orderCan.amend(o)) {
       items.push({
         key: 'amend',
-        label: 'Amend order',
+        label: 'Edit order',
         icon: <FilePenLine size={15} />,
         onClick: () => setDialog({ open: true, orderId: o.id, amend: true }),
       })
