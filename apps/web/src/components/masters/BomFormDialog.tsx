@@ -288,10 +288,10 @@ const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
 
 type Step = 1 | 2 | 3
 
-const STEPS: Array<{ id: Step; label: string }> = [
-  { id: 1, label: 'Materials' },
-  { id: 2, label: 'Costing' },
-  { id: 3, label: 'Pricing' },
+const STEPS: Array<{ id: Step; label: string; hint: string }> = [
+  { id: 1, label: 'Materials', hint: 'What goes into one piece' },
+  { id: 2, label: 'Costing', hint: 'Labour and overheads' },
+  { id: 3, label: 'Pricing', hint: 'Selling price' },
 ]
 
 /**
@@ -975,6 +975,11 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
             Everything one piece uses. A blank rate uses the item&apos;s standard rate, shown as
             &ldquo;std&rdquo; in the box; an amber outline marks what a line still needs.
           </>,
+          !frozen && (
+            <button type="button" className="btn-secondary h-8 shrink-0 px-3 text-xs" onClick={() => addLineAfter(lines.length - 1)}>
+              <Plus size={14} /> Add item
+            </button>
+          ),
         )}
 
         {/*
@@ -995,7 +1000,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
             </colgroup>
             <thead className="bg-secondary/60">
               <tr className="border-b border-border">
-                <th className={cn(th, 'pl-3 text-left')}>Item</th>
+                <th className={cn(th, 'pl-[3.75rem] text-left')}>Item</th>
                 <th className={cn(th, 'text-left')} title="The department that takes this item from the store">
                   Process
                 </th>
@@ -1600,37 +1605,37 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
           <div className="space-y-4 px-6 py-5">
             {/* Where the person is. Not clickable: each step saves on the way out. */}
             {canCost && (
-              <ol className="flex flex-wrap items-center gap-2" aria-label="Steps">
+              <ol className="flex items-center gap-3 rounded-xl border border-border bg-secondary/60 px-4 py-2.5" aria-label="Steps">
                 {STEPS.map((s, i) => {
                   const done = step > s.id
                   const active = step === s.id
                   return (
                     <Fragment key={s.id}>
-                      {i > 0 && <li aria-hidden="true" className="h-px w-8 bg-border" />}
-                      <li
-                        aria-current={active ? 'step' : undefined}
-                        className={cn(
-                          'flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm',
-                          active
-                            ? 'bg-primary/10 font-semibold text-primary'
-                            : done
-                              ? 'text-foreground'
-                              : 'text-muted-foreground',
-                        )}
-                      >
+                      {i > 0 && <li aria-hidden="true" className={cn('h-px min-w-6 flex-1', done || active ? 'bg-primary/40' : 'bg-border')} />}
+                      <li aria-current={active ? 'step' : undefined} className="flex shrink-0 items-center gap-2.5">
                         <span
                           className={cn(
-                            'flex h-6 w-6 items-center justify-center rounded-full border text-xs',
+                            'flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold',
                             active
                               ? 'border-primary bg-primary text-primary-foreground'
                               : done
                                 ? 'border-primary/40 bg-primary/10 text-primary'
-                                : 'border-border',
+                                : 'border-border bg-card text-muted-foreground',
                           )}
                         >
-                          {done ? <Check size={13} /> : s.id}
+                          {done ? <Check size={14} /> : s.id}
                         </span>
-                        {s.label}
+                        <span className="leading-tight">
+                          <span
+                            className={cn(
+                              'block text-sm',
+                              active ? 'font-semibold text-primary' : done ? 'font-medium text-foreground' : 'text-muted-foreground',
+                            )}
+                          >
+                            {s.label}
+                          </span>
+                          <span className="hidden text-[11px] text-muted-foreground sm:block">{s.hint}</span>
+                        </span>
                       </li>
                     </Fragment>
                   )
