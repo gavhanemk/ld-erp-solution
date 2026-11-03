@@ -29,6 +29,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
+import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 
 /** The six status colours are fixed; a BOM uses three of them. */
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -47,6 +48,17 @@ const MEANS: Record<string, string> = {
 /** What the list shows: what is in use and on the way, one status, or everything. */
 type View = 'live' | 'APPROVED' | 'DRAFT' | 'OBSOLETE' | 'all'
 const VIEW_STATUS: Record<View, string> = { live: 'DRAFT,APPROVED', APPROVED: 'APPROVED', DRAFT: 'DRAFT', OBSOLETE: 'OBSOLETE', all: '' }
+
+/** The dropdowns over the list: the main things a BOM is about. */
+type Facet = 'styles' | 'colours' | 'brands' | 'items' | 'priced'
+const FACETS: Array<{ key: Facet; label: string }> = [
+  { key: 'styles', label: 'Style' },
+  { key: 'colours', label: 'Colour' },
+  { key: 'brands', label: 'Brand' },
+  { key: 'items', label: 'Item used' },
+  { key: 'priced', label: 'Price' },
+]
+const NO_PICKS: Record<Facet, string[]> = { styles: [], colours: [], brands: [], items: [], priced: [] }
 
 const num = (v: unknown) => Number(v ?? 0)
 
@@ -88,6 +100,9 @@ export default function BomPage() {
   // Retired BOMs are kept for the record, out of the way until asked for.
   const [view, setView] = useState<View>('live')
   const [page, setPage] = useState(1)
+  /** What each dropdown has picked, and what each offers (with how many BOMs a choice leaves). */
+  const [picked, setPicked] = useState<Record<Facet, string[]>>(NO_PICKS)
+  const [facets, setFacets] = useState<Record<Facet, FilterChoice[]> | null>(null)
   /** How many BOMs are approved, drafts and retired, over the whole list. */
   const [counts, setCounts] = useState<{ APPROVED: number; DRAFT: number; OBSOLETE: number } | null>(null)
 
@@ -105,7 +120,7 @@ export default function BomPage() {
 
   useEffect(() => {
     setPage(1)
-  }, [debounced, view])
+  }, [debounced, view, picked])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -115,14 +130,20 @@ export default function BomPage() {
       const params = new URLSearchParams({ page: String(page), limit: String(rowsPerPage), sort: 'style', order: 'asc' })
       if (debounced) params.set('q', debounced)
       if (VIEW_STATUS[view]) params.set('status', VIEW_STATUS[view])
+      for (const f of FACETS) if (picked[f.key].length) params.set(f.key, picked[f.key].join(','))
+      // The dropdowns' choices for the same search, status and picks.
+      const facetParams = new URLSearchParams(params)
+      for (const k of ['page', 'limit', 'sort', 'order']) facetParams.delete(k)
 
       const count = (st: string) => api.get<Paginated<Bom>>(`/masters/bom?status=${st}&limit=1`).then((r) => r.pagination.total)
-      const [res, approved, draft, retired] = await Promise.all([
+      const [res, approved, draft, retired, choices] = await Promise.all([
         api.get<Paginated<Bom>>(`/masters/bom?${params.toString()}`),
         count('APPROVED'),
         count('DRAFT'),
         count('OBSOLETE'),
+        api.get<{ data: Record<Facet, FilterChoice[]> }>(`/masters/bom/facets?${facetParams.toString()}`).then((r) => r.data),
       ])
+      setFacets(choices)
       setBoms(res.data)
       setPagination(res.pagination)
       setCounts({ APPROVED: approved, DRAFT: draft, OBSOLETE: retired })
@@ -134,7 +155,7 @@ export default function BomPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, rowsPerPage, debounced, view])
+  }, [page, rowsPerPage, debounced, view, picked])
 
   useEffect(() => {
     void load()
@@ -181,6 +202,15 @@ export default function BomPage() {
   const empty = !error && boms && boms.length === 0
   const canCost = can('masters', 'approve')
   const COLS = canCost ? 9 : 7
+  /** The picks as chips under the dropdowns, each with its own ×. */
+  const chips = FACETS.flatMap((f) =>
+    picked[f.key].map((v) => ({ key: f.key, value: v, text: `${f.label}: ${facets?.[f.key]?.find((c) => c.value === v)?.label ?? '…'}` })),
+  )
+  const narrowed = chips.length > 0 || !!debounced
+  const clearAll = () => {
+    setPicked(NO_PICKS)
+    setSearch('')
+  }
   /** A tile filters the list to its BOMs; pressed again, back to what is in use. */
   const pick = (v: View) => setView((cur) => (cur === v ? 'live' : v))
 
@@ -255,7 +285,7 @@ export default function BomPage() {
         />
       </div>
 
-      <div className="glass-card flex flex-wrap items-center gap-3 p-4">
+      <div className="glass-card relative z-20 flex flex-wrap items-center gap-3 p-4">
         <div className="flex min-w-60 flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3 py-2">
           <Search size={15} className="text-muted-foreground" />
           <input
@@ -274,9 +304,35 @@ export default function BomPage() {
           <option value="OBSOLETE">Retired only</option>
           <option value="all">All, retired too</option>
         </SmartSelect>
-        <span className="ml-auto text-xs text-muted-foreground">
-          {loading && !boms ? 'Loading…' : `${pagination.total} ${pagination.total === 1 ? 'BOM' : 'BOMs'}`}
-        </span>
+        {FACETS.map((f) => (
+          <FilterMenu
+            key={f.key}
+            label={f.label}
+            choices={facets?.[f.key]}
+            selected={picked[f.key]}
+            onChange={(next) => setPicked((p) => ({ ...p, [f.key]: next }))}
+          />
+        ))}
+        <div className="flex w-full flex-wrap items-center gap-1.5">
+          {chips.map((c) => (
+            <button
+              key={`${c.key}-${c.value}`}
+              type="button"
+              onClick={() => setPicked((p) => ({ ...p, [c.key]: p[c.key].filter((v) => v !== c.value) }))}
+              className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-foreground"
+            >
+              {c.text} <X size={11} />
+            </button>
+          ))}
+          {narrowed && (
+            <button type="button" onClick={clearAll} className="text-xs text-teal-500 hover:underline">
+              Clear all
+            </button>
+          )}
+          <span className="ml-auto text-xs text-muted-foreground">
+            {loading && !boms ? 'Loading…' : `${pagination.total} ${pagination.total === 1 ? 'BOM' : 'BOMs'}`}
+          </span>
+        </div>
       </div>
 
       {notice && (
@@ -302,11 +358,11 @@ export default function BomPage() {
         <div className="glass-card p-10 text-center">
           <Layers size={22} className="mx-auto mb-3 text-muted-foreground" />
           <p className="text-sm font-medium text-foreground">
-            {debounced || view !== 'live' ? 'Nothing matches that' : 'No bills of materials yet'}
+            {narrowed || view !== 'live' ? 'Nothing matches that' : 'No bills of materials yet'}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            {debounced || view !== 'live'
-              ? 'Try the style code, or show all.'
+            {narrowed || view !== 'live'
+              ? 'Try fewer filters, or show all.'
               : 'Pick a style and list what goes into one piece — fabric, trims, buttons, packing. The cost per garment comes out of it.'}
           </p>
         </div>
