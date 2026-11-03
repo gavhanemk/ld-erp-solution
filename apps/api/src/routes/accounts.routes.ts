@@ -26,6 +26,8 @@ import { outstanding } from '../services/accounts/outstanding.service'
 import { bankReco, setBankDates } from '../services/accounts/bankReco.service'
 import * as opening from '../services/accounts/opening.service'
 import { balanceSheet, profitAndLoss, setStockValue, stockOn } from '../services/accounts/finalAccounts.service'
+import { gstr1, gstr1Json, gstr3b, match2b, read2b } from '../services/accounts/gst.service'
+import { tdsByCustomers, tdsDeducted } from '../services/accounts/tdsBooks.service'
 
 /**
  * Accounts: the books of LD Cotton Mills.
@@ -55,6 +57,10 @@ import { balanceSheet, profitAndLoss, setStockValue, stockOn } from '../services
  *   GET    /profit-loss?from=&to=    the trading and profit and loss account, by brand too
  *   GET    /balance-sheet?asOn=
  *   GET    /stock-value?on=          PATCH /stock-value   closing stock on a day
+ *   GET    /gst/gstr1?from=&to=      GET /gst/gstr1.json   outward supplies, and the portal's file
+ *   GET    /gst/gstr3b?from=&to=     the 3B working, credit set against tax
+ *   POST   /gst/2b                   a GSTR-2B file matched against the bills
+ *   GET    /tds?from=&to=            TDS deducted, paid in, owed; TDS customers deducted
  *
  * Everything is under the Accounts module's rights. Lists of ledgers make sure
  * the chart is complete first, so a customer added in Sales has a ledger by
@@ -776,7 +782,7 @@ router.get('/cash-bank', requirePermission(MODULE, 'view'), async (req, res) => 
 // OUTSTANDING
 // ═══════════════════════════════════════════
 
-const asOnOf = (v: unknown) => (typeof v === 'string' && /^d{4}-d{2}-d{2}$/.test(v) ? v : todayIst())
+const asOnOf = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : todayIst())
 
 router.get('/outstanding', requirePermission(MODULE, 'view'), async (req, res) => {
   await ensureChart()
@@ -906,8 +912,66 @@ router.patch('/stock-value', requirePermission(MODULE, 'edit'), async (req: Auth
   })
 })
 
-router.get('/gst', () => {
-  throw new AppError('GST returns are not built yet. They will appear here as soon as they are ready.', 501, 'NOT_IMPLEMENTED')
+// ═══════════════════════════════════════════
+// GST AND TDS
+// ═══════════════════════════════════════════
+
+/** A return period: the month asked for, or from and to. */
+function returnPeriod(q: Record<string, unknown>) {
+  const pick = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined)
+  const month = typeof q.month === 'string' && /^\d{4}-\d{2}$/.test(q.month) ? q.month : undefined
+  if (month) {
+    const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10)
+    return { from: `${month}-01`, to: last }
+  }
+  const to = pick(q.to) ?? todayIst()
+  const from = pick(q.from) ?? `${to.slice(0, 8)}01`
+  if (from > to) throw new AppError('The start date is after the end date', 400, 'BAD_PERIOD')
+  return { from, to }
+}
+
+router.get('/gst/gstr1', requirePermission(MODULE, 'view'), async (req, res) => {
+  const p = returnPeriod(req.query)
+  res.json({ success: true, data: await gstr1(prisma, p.from, p.to) })
+})
+
+router.get('/gst/gstr1.json', requirePermission(MODULE, 'export'), async (req: AuthRequest, res) => {
+  const p = returnPeriod(req.query)
+  const json = gstr1Json(await gstr1(prisma, p.from, p.to))
+  await writeAuditLog(req, { module: MODULE, action: 'EXPORT', entityType: 'GSTR1', entityId: json.fp, after: { from: p.from, to: p.to } })
+  res.setHeader('Content-Type', 'application/json')
+  res.setHeader('Content-Disposition', `attachment; filename="GSTR1_${json.gstin}_${json.fp}.json"`)
+  res.send(JSON.stringify(json))
+})
+
+router.get('/gst/gstr3b', requirePermission(MODULE, 'view'), async (req, res) => {
+  const p = returnPeriod(req.query)
+  res.json({ success: true, data: await gstr3b(prisma, p.from, p.to) })
+})
+
+const twoBSchema = z.object({
+  fileName: z.string().min(1).max(200),
+  /** The file itself, base64. */
+  file: z.string().min(1),
+  month: z.string().regex(/^\d{4}-\d{2}$/, 'Say which month'),
+})
+
+router.post('/gst/2b', requirePermission(MODULE, 'view'), async (req, res) => {
+  const body = twoBSchema.parse(req.body)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.from(body.file, 'base64').toString('utf8'))
+  } catch {
+    throw new AppError('That file is not the JSON of GSTR-2B. On the GST portal open GSTR-2B and download it as JSON.', 400, 'NOT_2B')
+  }
+  const p = returnPeriod({ month: body.month })
+  res.json({ success: true, data: await match2b(prisma, read2b(parsed), p.from, p.to) })
+})
+
+router.get('/tds', requirePermission(MODULE, 'view'), async (req, res) => {
+  const p = returnPeriod(req.query)
+  const [deducted, customers] = await Promise.all([tdsDeducted(prisma, p.from, p.to, todayIst()), tdsByCustomers(prisma, p.from, p.to)])
+  res.json({ success: true, data: { deducted, customers } })
 })
 
 export default router

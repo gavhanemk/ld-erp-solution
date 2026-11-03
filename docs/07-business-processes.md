@@ -851,6 +851,20 @@ flow, not too complicated"):**
 - Balance Sheet on any day; this year's profit on its own line, earlier
   years' (stock included) in the Profit & Loss A/c. No closing entries.
 
+**GST and TDS (phase 5, 3 Nov 2026):**
+
+- GST Returns: GSTR-1 from the invoices and credit notes (B2B, B2C large
+  over ₹1 lakh inter-state, B2C others by state and rate, credit notes, HSN
+  summary split B2B / B2C, documents issued) and its JSON for the portal;
+  the GSTR-3B working with input credit set against tax in the order of
+  rule 88A (IGST credit first) and reverse-charge tax in cash; GSTR-2B JSON
+  matched to bills by supplier GSTIN and their invoice number. Check the
+  portal file with the CA the first time it is filed from here.
+- TDS: deducted by section from the TDS Payable ledgers, with PAN and the
+  amount it was taken on (26Q details); paid in with an Accounts Payment
+  voucher, cleared oldest month first; due the 7th (30 April for March).
+  TDS customers deducted, by customer, for Form 26AS.
+
 Phases: 1 the books (chart, vouchers, day book, ledger, trial balance) →
 2 automatic posting from Sales and Purchase → 3 outstanding, bank
 reconciliation, opening import → 4 P&L, balance sheet, brand P&L, closing

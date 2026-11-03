@@ -1,11 +1,26 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Tue 3 Nov 2026 — Accounts, phase 4: Profit & Loss, Balance Sheet, closing stock (branch `feat/accounts-posting`)_
+_Last updated: Tue 3 Nov 2026 — Accounts, phase 5: GST returns and TDS (branch `feat/accounts-posting`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
 
 ---
+
+## Accounts, phase 5: GST returns and TDS (Tue 3 Nov)
+
+Same branch `feat/accounts-posting`. No migration.
+
+- `services/accounts/gst.service.ts`: GSTR-1 tables and portal JSON,
+  GSTR-3B working with the rule-88A set-off, GSTR-2B file matching.
+- `services/accounts/tdsBooks.service.ts`: TDS deducted by section with
+  dues and lateness, TDS deducted by customers.
+- Screens `/accounts/gst` (GSTR-1 / 3B / 2B tabs) and `/accounts/tds`.
+- Fixed: the as-on dates of Outstanding, Bank Reconciliation, Balance Sheet
+  and stock value were ignored by the API (a broken date pattern) and always
+  meant today.
+- `tools/check-accounts-phase5.ts`: 22 checks — 3B ties to the GST ledgers,
+  set-off order, 2B statuses, TDS against the bills and receipts.
 
 ## Accounts, phase 4: Profit & Loss, Balance Sheet, closing stock (Tue 3 Nov)
 

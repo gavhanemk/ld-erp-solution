@@ -166,7 +166,8 @@ export const navItems: NavItem[] = [
       { label: 'Balance Sheet', href: '/accounts/balance-sheet' },
       { label: 'Chart of Accounts', href: '/accounts/chart' },
       { label: 'Outstanding', href: '/accounts/outstanding' },
-      { label: 'GST Reports', href: '/accounts/gst', planned: true },
+      { label: 'GST Returns', href: '/accounts/gst' },
+      { label: 'TDS', href: '/accounts/tds' },
     ],
   },
   {
