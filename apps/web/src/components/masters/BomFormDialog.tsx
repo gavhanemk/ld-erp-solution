@@ -27,6 +27,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { cn, formatDate, formatRupees } from '@/lib/utils'
+import { fetchEveryPage } from '@/lib/export'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
@@ -137,7 +138,14 @@ interface ItemOption {
   type?: string
   standardRate?: string | number | null
   uom?: { symbol: string } | null
-  category?: { name: string } | null
+  category?: { id?: string; name: string; parentId?: string | null; parent?: { id: string; name: string } | null } | null
+}
+
+/** An item's main category and sub-category: a category with a parent is a sub-category. */
+const placeOf = (it: ItemOption | undefined) => {
+  const c = it?.category
+  if (!c?.id) return { main: '', sub: '' }
+  return c.parentId || c.parent ? { main: c.parent?.id ?? c.parentId ?? '', sub: c.id } : { main: c.id, sub: '' }
 }
 
 interface StyleOption {
@@ -211,6 +219,12 @@ const nothingCarried: CarriedOver = { component: null, wastagePercent: 0, notes:
 interface EditLine {
   /** A stable React key, so a line added mid-list does not take over the next line's inputs. */
   rowKey: number
+  /**
+   * The category and sub-category the item is picked from. On screen only, to
+   * narrow the item list: the BOM saves the item, and the item has its own.
+   */
+  categoryId: string
+  subCategoryId: string
   componentItemId: string
   /**
    * The department that draws it from the store. Nothing reads it yet; it is
@@ -238,6 +252,8 @@ let nextRowKey = 0
 
 const emptyLine = (): EditLine => ({
   rowKey: nextRowKey++,
+  categoryId: '',
+  subCategoryId: '',
   componentItemId: '',
   departmentId: '',
   qtyPerUnit: '',
@@ -375,6 +391,9 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       record?.lines?.length
         ? record.lines.map((l) => ({
             rowKey: nextRowKey++,
+            // Filled from the item once the item list is in.
+            categoryId: '',
+            subCategoryId: '',
             componentItemId: l.componentItemId,
             departmentId: l.departmentId ?? '',
             qtyPerUnit: String(l.qtyPerUnit),
@@ -409,7 +428,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
 
     void Promise.all([
       masterResource<StyleOption>('styles').list({ limit: 200, active: true }),
-      masterResource<ItemOption>('items').list({ limit: 200, active: true }),
+      fetchEveryPage<ItemOption>((page) => `/masters/items?limit=200&active=true&page=${page}`).then((r) => ({ data: r.rows })),
       masterResource<DepartmentOption>('departments').list({ limit: 200, active: true }),
     ])
       .then(([s, i, d]) => {
@@ -484,6 +503,54 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
     () => [...itemsById.values()].sort((a, b) => a.code.localeCompare(b.code)),
     [itemsById],
   )
+
+  /** The main categories that have items, by name. */
+  const mainCategories = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const it of items) {
+      const c = it.category
+      if (!c?.id) continue
+      if (c.parent) m.set(c.parent.id, c.parent.name)
+      else if (!c.parentId) m.set(c.id, c.name)
+    }
+    return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+  }, [items])
+
+  /** A main category's sub-categories that have items. */
+  const subCategoriesOf = (mainId: string) => {
+    const m = new Map<string, string>()
+    for (const it of items) {
+      const c = it.category
+      if (c?.id && (c.parent?.id ?? c.parentId) === mainId) m.set(c.id, c.name)
+    }
+    return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+  }
+
+  /** Whether an item sits in a category and sub-category (blank means any). */
+  const fits = (itemId: string, mainId: string, subId: string) => {
+    const at = placeOf(itemsById.get(itemId))
+    return (!mainId || at.main === mainId) && (!subId || at.sub === subId)
+  }
+
+  /** The items a line offers: those in its category and sub-category, and always the one it holds. */
+  const itemsFor = (l: EditLine) => itemOptions.filter((i) => i.id === l.componentItemId || fits(i.id, l.categoryId, l.subCategoryId))
+
+  // A BOM opened for editing: each line's category and sub-category from its
+  // item, once the items are in.
+  useEffect(() => {
+    if (!items.length) return
+    setLines((ls) => {
+      let changed = false
+      const next = ls.map((l) => {
+        if (!l.componentItemId || l.categoryId) return l
+        const at = placeOf(itemsById.get(l.componentItemId))
+        if (!at.main) return l
+        changed = true
+        return { ...l, categoryId: at.main, subCategoryId: at.sub }
+      })
+      return changed ? next : ls
+    })
+  }, [items, itemsById])
 
   const style = styles.find((s) => s.id === styleId) ?? record?.style
   const styleColours = style?.colors ?? []
@@ -985,10 +1052,12 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
           type and row dividers, tighter cells.
         */}
         <div className="overflow-x-auto rounded-lg border border-border bg-card">
-          <table className="w-full min-w-[860px] table-fixed text-sm">
+          <table className="w-full min-w-[1140px] table-fixed text-sm">
             <colgroup>
+              <col className="w-36" />
+              <col className="w-36" />
               <col />
-              <col className="w-40" />
+              <col className="w-36" />
               {/* Wide enough for 1.7325 beside its unit and the number spinner. */}
               <col className="w-36" />
               <col className="w-32" />
@@ -997,7 +1066,10 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
             </colgroup>
             <thead className="bg-secondary/60">
               <tr className="border-b border-border">
-                <th className={cn(th, 'pl-[3.75rem] text-left')}>Item</th>
+                <th className={cn(th, 'pl-3 text-left')}>Category</th>
+                <th className={cn(th, 'text-left')}>Sub-category</th>
+                {/* Over the item box, past its icon (8px cell padding + 40px icon + 8px gap). */}
+                <th className={cn(th, 'pl-14 text-left')}>Item</th>
                 <th className={cn(th, 'text-left')} title="The department that takes this item from the store">
                   Process
                 </th>
@@ -1021,6 +1093,57 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
                 return (
                   <tr key={line.rowKey} className="border-b border-border/50">
                     <td className="py-2 pl-3 pr-2 align-middle">
+                      <SmartSelect
+                        className={cn(field, 'min-w-0')}
+                        value={line.categoryId}
+                        disabled={frozen}
+                        aria-label={`Line ${index + 1} category`}
+                        autoFocus={line.rowKey === addedKey}
+                        onChange={(e) => {
+                          const categoryId = e.target.value
+                          // Another category: its own sub-categories, and an item that is not in it goes.
+                          const keep = !!line.componentItemId && fits(line.componentItemId, categoryId, '')
+                          setLine(index, {
+                            categoryId,
+                            subCategoryId: keep ? placeOf(itemsById.get(line.componentItemId)).sub : '',
+                            ...(keep ? {} : { componentItemId: '', carried: nothingCarried }),
+                          })
+                        }}
+                      >
+                        <option value="">All categories</option>
+                        {mainCategories.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </SmartSelect>
+                    </td>
+                    <td className="px-2 py-2 align-middle">
+                      {(() => {
+                        const subs = line.categoryId ? subCategoriesOf(line.categoryId) : []
+                        return (
+                          <SmartSelect
+                            className={cn(field, 'min-w-0')}
+                            value={line.subCategoryId}
+                            disabled={frozen || subs.length === 0}
+                            aria-label={`Line ${index + 1} sub-category`}
+                            onChange={(e) => {
+                              const subCategoryId = e.target.value
+                              const keep = !!line.componentItemId && fits(line.componentItemId, line.categoryId, subCategoryId)
+                              setLine(index, { subCategoryId, ...(keep ? {} : { componentItemId: '', carried: nothingCarried }) })
+                            }}
+                          >
+                            <option value="">{!line.categoryId ? 'Pick a category' : subs.length ? 'All sub-categories' : 'None under it'}</option>
+                            {subs.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </SmartSelect>
+                        )
+                      })()}
+                    </td>
+                    <td className="px-2 py-2 align-middle">
                       <div className="flex items-stretch gap-2">
                         <span
                           aria-hidden="true"
@@ -1039,21 +1162,23 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
                           disabled={frozen}
                           title={item?.name}
                           aria-label={`Line ${index + 1} item`}
-                          autoFocus={line.rowKey === addedKey}
                           createNoun="item"
                           onCreate={mayAddItem && !frozen ? (typed) => setAddingItem({ rowKey: line.rowKey, typed }) : undefined}
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            const at = placeOf(itemsById.get(e.target.value))
                             setLine(index, {
                               componentItemId: e.target.value,
+                              // The item's own category and sub-category, so the boxes say where it is.
+                              ...(at.main ? { categoryId: at.main, subCategoryId: at.sub } : {}),
                               // A different item is a different line: what the old
                               // one carried (its part, wastage, sizes) was about
                               // that item, not this one.
                               carried: nothingCarried,
                             })
-                          }
+                          }}
                         >
                           <option value="">Select item...</option>
-                          {itemOptions.map((i) => (
+                          {itemsFor(line).map((i) => (
                             <option key={i.id} value={i.id}>
                               {i.code} — {i.name}
                             </option>
@@ -1171,7 +1296,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
 
             <tfoot>
               <tr className="bg-primary/5">
-                <td colSpan={4} className="py-3 pl-3 pr-2">
+                <td colSpan={6} className="py-3 pl-3 pr-2">
                   <div className="flex items-center justify-between gap-3">
                     <Layers size={16} className="shrink-0 text-primary" />
                     <span className="text-right text-sm font-medium text-primary">
@@ -1582,7 +1707,8 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
           {summary || 'Pick a style and colour, then list what goes into one piece.'}
         </>
       }
-      width="max-w-7xl"
+      // The whole width beside the sidebar, as the order forms: the component lines need it.
+      width="max-w-none"
       primary={primaryButton}
       error={error}
       busy={saving}
@@ -1682,13 +1808,26 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
           onSaved={() => {}}
           onCreated={(row) => {
             setItems((list) => [...list.filter((i) => i.id !== row.id), row])
+            const at = placeOf(row)
             setLines((ls) =>
-              ls.map((l) => (l.rowKey === addingItem.rowKey ? { ...l, componentItemId: row.id, carried: nothingCarried } : l)),
+              ls.map((l) =>
+                l.rowKey === addingItem.rowKey
+                  ? { ...l, componentItemId: row.id, ...(at.main ? { categoryId: at.main, subCategoryId: at.sub } : {}), carried: nothingCarried }
+                  : l,
+              ),
             )
           }}
           resource="items"
           fields={itemFormFields}
-          initialValues={{ ...(addingItem.typed ? { name: addingItem.typed } : {}), isActive: true }}
+          initialValues={(() => {
+            const line = lines.find((l) => l.rowKey === addingItem.rowKey)
+            return {
+              ...(addingItem.typed ? { name: addingItem.typed } : {}),
+              ...(line?.categoryId ? { mainCategoryId: line.categoryId } : {}),
+              ...(line?.subCategoryId ? { subCategoryId: line.subCategoryId } : {}),
+              isActive: true,
+            }
+          })()}
           title="Item"
           columns={4}
           wide
