@@ -1,8 +1,7 @@
 'use client'
 
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  X,
   Loader2,
   AlertCircle,
   Plus,
@@ -29,7 +28,8 @@ import {
 import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { cn, formatDate, formatRupees } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
-import { useEscape } from '@/lib/useEscape'
+import { FormFrame } from '@/components/ui/FormFrame'
+import { Section } from '@/components/purchase/Section'
 
 export interface BomLineSize {
   id?: string
@@ -176,7 +176,10 @@ interface Props {
    * else always starts on the materials.
    */
   startStep?: 1 | 2 | 3
-  /** Opened over another dialog (a quotation), so it has to sit above that one. */
+  /**
+   * Opened over another dialog (a quotation). The form frame already sits
+   * above the one behind it; kept so the caller's prop still type-checks.
+   */
   stacked?: boolean
 }
 
@@ -307,7 +310,7 @@ const STEPS: Array<{ id: Step; label: string; hint: string }> = [
  * a fact about how the garment is made, price is a commercial call that moves
  * with each buyer.
  */
-export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, stacked = false }: Props) {
+export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }: Props) {
   const canCost = can('masters', 'approve')
 
   const [styles, setStyles] = useState<StyleOption[]>([])
@@ -320,6 +323,11 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
   // edited, and becomes the new BOM once the first step has saved one.
   const [current, setCurrent] = useState<Bom | null>(null)
   const [step, setStep] = useState<Step>(1)
+  /** The top of the window's body: each step opens there, not where the last one was scrolled to. */
+  const topRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    topRef.current?.scrollIntoView({ block: 'start' })
+  }, [step])
 
   const [styleId, setStyleId] = useState('')
   const [color, setColor] = useState('')
@@ -435,7 +443,6 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
   }, [open, step, styleId, frozen])
 
   // Escape closes this window only — not the ones behind it.
-  useEscape(onClose, open)
   useEffect(() => {
     if (!open) return
     const prev = document.body.style.overflow
@@ -803,8 +810,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
     })
   }
 
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault()
+  const submit = () => {
     if (step === 1) {
       // An approver looking at an approved BOM just moves on: nothing on this
       // step can change except the notes, which have their own button.
@@ -825,34 +831,16 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
 
   /** Header cells: one style, so every column label sits on the same line. */
   const th = 'px-2 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground'
-  /**
-   * Fields sit on a tinted panel, so they take the card colour to stand out
-   * from it — white on grey in the light theme, an inset well in the dark.
-   */
-  const field = 'form-input bg-card'
-  /** The quiet panel each part of the form sits in. */
-  const panel = 'rounded-xl border border-border bg-secondary/60 p-4'
+  /** Fields as on every other form. */
+  const field = 'form-input'
   /** Row buttons are icon-only and square; switched off, they fade rather than keep their colour. */
   const rowBtn = 'p-2 disabled:pointer-events-none disabled:opacity-40'
   /** A figure worked out, not typed: a box that looks like a field but takes no cursor. */
   const readout =
     'flex items-center justify-end gap-2 rounded-lg border border-border bg-secondary/60 px-3 py-2.5'
 
-  /** The header of each panel: an icon tile, a title, and what the panel is for. */
-  const panelHead = (Icon: LucideIcon, heading: React.ReactNode, sub: React.ReactNode, action?: React.ReactNode) => (
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="flex min-w-0 items-start gap-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <Icon size={16} />
-        </div>
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-foreground">{heading}</h3>
-          <p className="text-xs text-muted-foreground">{sub}</p>
-        </div>
-      </div>
-      {action}
-    </div>
-  )
+  /** What a section is for, in a line under its title bar. */
+  const hint = (text: React.ReactNode) => <p className="mb-3 text-xs text-muted-foreground">{text}</p>
 
   /** The row buttons shared by the material and costing tables. */
   const rowButtons = (onAdd: () => void, onRemove: () => void, label: string) => (
@@ -897,7 +885,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
 
   const materialsStep = (
     <>
-      <section className={panel} aria-label="BOM details">
+      <Section icon={Shirt} title="Style and colour">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label className="form-label" htmlFor="bom-style">
@@ -962,24 +950,24 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
             Style and colour are fixed once a BOM is made. To cost another colour, copy this BOM.
           </p>
         )}
-      </section>
+      </Section>
 
-      <section className={cn(panel, 'space-y-3')}>
-        {panelHead(
-          Layers,
-          <>
-            Components
-            {filledLines > 0 && <span className="ml-1.5 font-normal text-muted-foreground">({filledLines})</span>}
-          </>,
-          <>
-            Everything one piece uses. A blank rate uses the item&apos;s standard rate, shown as
-            &ldquo;std&rdquo; in the box; an amber outline marks what a line still needs.
-          </>,
-          !frozen && (
-            <button type="button" className="btn-secondary h-8 shrink-0 px-3 text-xs" onClick={() => addLineAfter(lines.length - 1)}>
+      <Section
+        icon={Layers}
+        title={filledLines > 0 ? `Components (${filledLines})` : 'Components'}
+        actions={
+          frozen ? undefined : (
+            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => addLineAfter(lines.length - 1)}>
               <Plus size={14} /> Add item
             </button>
-          ),
+          )
+        }
+      >
+        {hint(
+          <>
+            Everything one piece uses. A blank rate uses the item&apos;s standard rate, shown as &ldquo;std&rdquo; in the box; an amber
+            outline marks what a line still needs.
+          </>,
         )}
 
         {/*
@@ -1189,22 +1177,19 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
             </tfoot>
           </table>
         </div>
-      </section>
+      </Section>
 
-      <section className={panel}>
-        <label className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground" htmlFor="bom-notes">
-          <FileText size={16} className="text-primary" />
-          Notes
-        </label>
+      <Section icon={FileText} title="Notes">
         <textarea
           id="bom-notes"
+          aria-label="Notes"
           rows={2}
           className={field}
           placeholder="Anything the cutting floor or the store should know about this BOM"
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
         />
-      </section>
+      </Section>
     </>
   )
 
@@ -1399,33 +1384,20 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
 
   const costingStep = (
     <>
-      <section className={cn(panel, 'space-y-3')}>
-        {panelHead(
-          Users,
-          'Labour',
-          'What one piece pays the people who make it, in rupees — in-house lines and outside job workers alike.',
-          fillAction,
-        )}
+      <Section icon={Users} title="Labour" actions={fillAction}>
+        {hint('What one piece pays the people who make it, in rupees — in-house lines and outside job workers alike.')}
         {costTable('LABOUR')}
-      </section>
+      </Section>
 
-      <section className={cn(panel, 'space-y-3')}>
-        {panelHead(
-          Factory,
-          'Overheads',
-          'Everything else one piece has to carry — power, rent, transport. Type rupees, or a percentage of material and labour together.',
-        )}
+      <Section icon={Factory} title="Overheads">
+        {hint('Everything else one piece has to carry — power, rent, transport. Type rupees, or a percentage of material and labour together.')}
         {costTable('OVERHEAD')}
-      </section>
+      </Section>
 
-      <section className={cn(panel, 'space-y-3')}>
-        {panelHead(
-          IndianRupee,
-          'Cost of one piece',
-          'Material from the first step, with the labour and overheads above.',
-        )}
+      <Section icon={IndianRupee} title="Cost of one piece">
+        {hint('Material from the first step, with the labour and overheads above.')}
         {buildUp(material, labourCost, overheadCost, liveCost)}
-      </section>
+      </Section>
     </>
   )
 
@@ -1442,20 +1414,18 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
       </div>
     ) : (
       <>
-        <section className={cn(panel, 'space-y-3')}>
-          {panelHead(Layers, 'Cost of one piece', 'As saved on the costing step.')}
+        <Section icon={Layers} title="Cost of one piece">
+          {hint('As saved on the costing step.')}
           {buildUp(
             Number(current?.totalCost ?? 0),
             Number(current?.labourCost ?? 0),
             Number(current?.overheadCost ?? 0),
             cost,
           )}
-        </section>
+        </Section>
 
-        <section className={cn(panel, 'space-y-4')}>
-          {panelHead(
-            IndianRupee,
-            'Selling price',
+        <Section icon={IndianRupee} title="Selling price">
+          {hint(
             'Type a margin and the price is worked out, or type the price and the margin is worked back. The margin is a share of the selling price — at 20%, the price is the cost ÷ 0.80. Prices are before GST, rounded up to the rupee.',
           )}
 
@@ -1542,7 +1512,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
               </p>
             )}
           </div>
-        </section>
+        </Section>
       </>
     )
 
@@ -1573,180 +1543,126 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
         : 'Save price'
   const primaryMoves = primaryLabel === 'Next' || primaryLabel === 'Save and continue'
 
+  const primaryButton = (
+    <button type="button" className="btn-primary" onClick={submit} disabled={saving || (step === 3 && cost <= 0)}>
+      {saving ? <Loader2 size={15} className="animate-spin" /> : primaryMoves ? null : <Save size={15} />}
+      {primaryLabel}
+      {!saving && primaryMoves && <ArrowRight size={15} />}
+    </button>
+  )
+
+  /** What step 1 still lacks, said in the footer. */
+  const stillNeeds =
+    step === 1 && !frozen
+      ? [missingQty > 0 && `${missingQty} line${missingQty === 1 ? ' needs' : 's need'} a quantity`, missingProcess > 0 && `${missingProcess} without a process`]
+          .filter(Boolean)
+          .join(' · ')
+      : ''
+
   return (
-    <div className={cn('fixed inset-0 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8', stacked ? 'z-[60]' : 'z-50')}>
-      {/*
-        Solid rather than see-through glass: the form's panels are tinted, and
-        over a dimmed page the glass turned the whole body the same grey.
-      */}
-      <div className="glass-card w-full max-w-7xl my-auto bg-card" role="dialog" aria-modal="true" aria-label={title}>
-        <form onSubmit={submit}>
-          {/* The header stays in view while a long component list scrolls. */}
-          <div className="sticky top-0 z-10 flex items-center justify-between gap-4 rounded-t-xl border-b border-border bg-card px-6 py-4">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                <Box size={18} />
-              </div>
-              <div className="min-w-0">
-                <h2 className="text-lg font-semibold text-foreground">{title}</h2>
-                <p className="mt-0.5 truncate text-sm text-muted-foreground">
-                  {summary || 'Pick a style and colour, then list what goes into one piece.'}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {statusBadge && <span className={statusBadge.cls}>{statusBadge.label}</span>}
-              <button type="button" onClick={onClose} className="btn-ghost p-2" aria-label="Close">
-                <X size={18} />
-              </button>
-            </div>
+    // The form frame every data-entry form sits in: it stops at the sidebar, so
+    // the menu stays usable, and opened over a quotation it sits above it.
+    <FormFrame
+      icon={Box}
+      title={title}
+      subtitle={
+        <>
+          {statusBadge && <span className={cn(statusBadge.cls, 'mr-2 align-middle')}>{statusBadge.label}</span>}
+          {summary || 'Pick a style and colour, then list what goes into one piece.'}
+        </>
+      }
+      width="max-w-7xl"
+      primary={primaryButton}
+      error={error}
+      busy={saving}
+      onClose={onClose}
+      footerNote={stillNeeds ? <span className="text-accent">{stillNeeds}</span> : undefined}
+      footer={
+        <>
+          <div className="mr-2 text-right">
+            <p className="text-xs text-muted-foreground">{footerFigure.label}</p>
+            <p className="font-mono text-sm font-bold text-foreground">{footerFigure.amount !== null ? formatRupees(footerFigure.amount) : '—'}</p>
           </div>
-
-          <div className="space-y-4 px-6 py-5">
-            {/* Where the person is. Not clickable: each step saves on the way out. */}
-            {canCost && (
-              <ol className="flex items-center gap-3 rounded-xl border border-border bg-secondary/60 px-4 py-2.5" aria-label="Steps">
-                {STEPS.map((s, i) => {
-                  const done = step > s.id
-                  const active = step === s.id
-                  return (
-                    <Fragment key={s.id}>
-                      {i > 0 && <li aria-hidden="true" className={cn('h-px min-w-6 flex-1', done || active ? 'bg-primary/40' : 'bg-border')} />}
-                      <li aria-current={active ? 'step' : undefined} className="flex shrink-0 items-center gap-2.5">
-                        <span
-                          className={cn(
-                            'flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold',
-                            active
-                              ? 'border-primary bg-primary text-primary-foreground'
-                              : done
-                                ? 'border-primary/40 bg-primary/10 text-primary'
-                                : 'border-border bg-card text-muted-foreground',
-                          )}
-                        >
-                          {done ? <Check size={14} /> : s.id}
-                        </span>
-                        <span className="leading-tight">
-                          <span
-                            className={cn(
-                              'block text-sm',
-                              active ? 'font-semibold text-primary' : done ? 'font-medium text-foreground' : 'text-muted-foreground',
-                            )}
-                          >
-                            {s.label}
-                          </span>
-                          <span className="hidden text-[11px] text-muted-foreground sm:block">{s.hint}</span>
-                        </span>
-                      </li>
-                    </Fragment>
-                  )
-                })}
-              </ol>
-            )}
-
-            {frozen && step !== 3 && (
-              <div className="flex items-start gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
-                <AlertCircle size={16} className="mt-0.5 shrink-0 text-accent" />
-                <p className="text-sm text-foreground">
-                  This BOM is approved, so its components and costing cannot be changed — only the
-                  notes{canCost ? ' and the price' : ''}. Copy it to a new version, or to another
-                  colour, from the BOM list instead.
-                </p>
-              </div>
-            )}
-
-            {notice && (
-              <div className="flex items-start gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
-                <AlertCircle size={16} className="mt-0.5 shrink-0 text-accent" />
-                <p className="text-sm text-foreground">{notice}</p>
-              </div>
-            )}
-
-            {step === 1 && materialsStep}
-            {step === 2 && costingStep}
-            {step === 3 && pricingStep}
-          </div>
-
-          {/* The footer stays in view too, so the total and Save are never scrolled away. */}
-          <div className="sticky bottom-0 z-10 space-y-3 rounded-b-xl border-t border-border bg-card px-6 py-4">
-            {error && (
-              <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
-                <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
-                <p className="text-sm text-red-400">{error}</p>
-              </div>
-            )}
-
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-xs text-accent">
-                {step === 1 &&
-                  !frozen &&
-                  [
-                    missingQty > 0 &&
-                      `${missingQty} line${missingQty === 1 ? ' needs' : 's need'} a quantity`,
-                    missingProcess > 0 && `${missingProcess} without a process`,
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
-              </p>
-
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="mr-2 text-right">
-                  <p className="text-xs text-muted-foreground">{footerFigure.label}</p>
-                  <p className="font-mono text-sm font-bold text-foreground">
-                    {footerFigure.amount !== null ? formatRupees(footerFigure.amount) : '—'}
-                  </p>
-                </div>
-
-                {step === 1 ? (
-                  <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
-                    Cancel
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setError(null)
-                      setStep((step - 1) as Step)
-                    }}
-                    className="btn-secondary"
-                    disabled={saving}
-                  >
-                    <ArrowLeft size={15} />
-                    Back
-                  </button>
-                )}
-
-                {/* An approver on an approved BOM can still correct its notes. */}
-                {step === 1 && canCost && frozen && (
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    disabled={saving}
-                    onClick={() => saveMaterials('close')}
-                  >
-                    <Save size={15} />
-                    Save notes
-                  </button>
-                )}
-
-                <button
-                  type="submit"
-                  className="btn-primary"
-                  disabled={saving || (step === 3 && cost <= 0)}
-                >
-                  {saving ? (
-                    <Loader2 size={15} className="animate-spin" />
-                  ) : primaryMoves ? null : (
-                    <Save size={15} />
+          {step === 1 ? (
+            <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
+              Cancel
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setError(null)
+                setStep((step - 1) as Step)
+              }}
+              className="btn-secondary"
+              disabled={saving}
+            >
+              <ArrowLeft size={15} />
+              Back
+            </button>
+          )}
+          {/* An approver on an approved BOM can still correct its notes. */}
+          {step === 1 && canCost && frozen && (
+            <button type="button" className="btn-secondary" disabled={saving} onClick={() => saveMaterials('close')}>
+              <Save size={15} />
+              Save notes
+            </button>
+          )}
+        </>
+      }
+    >
+      <div ref={topRef} className="-mt-3 h-0" aria-hidden="true" />
+      {/* Where the person is, as the MO window's steps. Not clickable: each step saves on the way out. */}
+      {canCost && (
+        <ol className="grid grid-cols-3 gap-1.5" aria-label="Steps">
+          {STEPS.map((s) => {
+            const done = step > s.id
+            const active = step === s.id
+            return (
+              <li
+                key={s.id}
+                aria-current={active ? 'step' : undefined}
+                className={cn('flex items-center gap-2.5 rounded-lg border bg-card px-3 py-2', active ? 'border-primary ring-1 ring-primary' : 'border-border')}
+              >
+                <span
+                  className={cn(
+                    'flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold',
+                    done ? 'bg-primary text-primary-foreground' : active ? 'border-2 border-primary text-primary' : 'bg-secondary text-muted-foreground',
                   )}
-                  {primaryLabel}
-                  {!saving && primaryMoves && <ArrowRight size={15} />}
-                </button>
-              </div>
-            </div>
-          </div>
-        </form>
-      </div>
-    </div>
+                >
+                  {done ? <Check size={14} /> : s.id}
+                </span>
+                <span className="min-w-0">
+                  <span className={cn('block truncate text-sm font-semibold', active ? 'text-primary' : 'text-foreground')}>{s.label}</span>
+                  <span className="block truncate text-[11px] text-muted-foreground">{s.hint}</span>
+                </span>
+              </li>
+            )
+          })}
+        </ol>
+      )}
+
+      {frozen && step !== 3 && (
+        <div className="flex items-start gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-accent" />
+          <p className="text-sm text-foreground">
+            This BOM is approved, so its components and costing cannot be changed — only the notes{canCost ? ' and the price' : ''}. Copy it
+            to a new version, or to another colour, from the BOM list instead.
+          </p>
+        </div>
+      )}
+
+      {notice && (
+        <div className="flex items-start gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-accent" />
+          <p className="text-sm text-foreground">{notice}</p>
+        </div>
+      )}
+
+      {step === 1 && materialsStep}
+      {step === 2 && costingStep}
+      {step === 3 && pricingStep}
+    </FormFrame>
   )
 }
 
