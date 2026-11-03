@@ -836,6 +836,21 @@ flow, not too complicated"):**
   the books less uncredited deposits plus unpaid cheques is what the bank
   should show. Bank dates survive a document or voucher being rewritten.
 
+**Final accounts (phase 4, 3 Nov 2026):**
+
+- Stock is kept periodically, the usual Indian way: purchases go to the
+  purchase accounts, and the goods on hand are valued at the end of a period.
+  A day's closing stock is inventory's own value of the mill's stock
+  (customers' material left out) unless the accountant values that day
+  (a year-end count, work in progress); before the books start it is the
+  stock brought in with the opening trial balance.
+- Profit & Loss: trading account to gross profit, then other income and
+  indirect expenses to net profit; by brand, with stock and anything no
+  brand carries under "Not split". A period cannot start inside the old
+  books' year-to-date figures, so it runs from 1 April there.
+- Balance Sheet on any day; this year's profit on its own line, earlier
+  years' (stock included) in the Profit & Loss A/c. No closing entries.
+
 Phases: 1 the books (chart, vouchers, day book, ledger, trial balance) →
 2 automatic posting from Sales and Purchase → 3 outstanding, bank
 reconciliation, opening import → 4 P&L, balance sheet, brand P&L, closing

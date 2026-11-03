@@ -25,6 +25,7 @@ import { pendingDocuments, postPending, SOURCE_LABEL } from '../services/account
 import { outstanding } from '../services/accounts/outstanding.service'
 import { bankReco, setBankDates } from '../services/accounts/bankReco.service'
 import * as opening from '../services/accounts/opening.service'
+import { balanceSheet, profitAndLoss, setStockValue, stockOn } from '../services/accounts/finalAccounts.service'
 
 /**
  * Accounts: the books of LD Cotton Mills.
@@ -51,6 +52,9 @@ import * as opening from '../services/accounts/opening.service'
  *   GET    /opening                  where the opening position stands
  *   GET    /opening/balances-template  POST /opening/balances   the old trial balance
  *   GET    /opening/bills-template     POST /opening/bills      the old unpaid bills
+ *   GET    /profit-loss?from=&to=    the trading and profit and loss account, by brand too
+ *   GET    /balance-sheet?asOn=
+ *   GET    /stock-value?on=          PATCH /stock-value   closing stock on a day
  *
  * Everything is under the Accounts module's rights. Lists of ledgers make sure
  * the chart is complete first, so a customer added in Sales has a ledger by
@@ -858,6 +862,48 @@ router.post('/opening/bills', requirePermission(MODULE, 'edit'), async (req: Aut
   const done = await prisma.$transaction((tx) => opening.runBills(tx, buffer, fileName), { timeout: 120_000 })
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'OpeningBills', entityId: `IMPORT-${Date.now()}`, after: { fileName, ...done.summary } })
   res.json({ success: true, data: done, message: `Old bills brought in for ${done.created.length} part${done.created.length === 1 ? 'y' : 'ies'}.` })
+})
+
+// ═══════════════════════════════════════════
+// FINAL ACCOUNTS
+// ═══════════════════════════════════════════
+
+router.get('/profit-loss', requirePermission(MODULE, 'view'), async (req, res) => {
+  await ensureChart()
+  const s = await booksSettings(prisma)
+  res.json({ success: true, data: await profitAndLoss(prisma, periodFrom(req.query, s), s) })
+})
+
+router.get('/balance-sheet', requirePermission(MODULE, 'view'), async (req, res) => {
+  await ensureChart()
+  const s = await booksSettings(prisma)
+  res.json({ success: true, data: await balanceSheet(prisma, asOnOf(req.query.asOn), s) })
+})
+
+router.get('/stock-value', requirePermission(MODULE, 'view'), async (req, res) => {
+  const s = await booksSettings(prisma)
+  res.json({ success: true, data: await stockOn(prisma, asOnOf(req.query.on), s) })
+})
+
+const stockValueSchema = z.object({
+  on: ymd,
+  /** Null hands the day back to inventory's own value. */
+  value: z.number().min(0, 'Stock cannot be below nothing').max(99_999_999_999).nullable(),
+  notes: z.string().trim().max(500).optional().nullable(),
+})
+
+router.patch('/stock-value', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const body = stockValueSchema.parse(req.body)
+  const s = await booksSettings(prisma)
+  const before = await stockOn(prisma, body.on, s)
+  await prisma.$transaction((tx) => setStockValue(tx, body.on, body.value, body.notes || null, req.user!.id))
+  const after = await stockOn(prisma, body.on, s)
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockValue', entityId: body.on, before, after })
+  res.json({
+    success: true,
+    data: after,
+    message: body.value === null ? `Stock on ${body.on} is back to inventory's value.` : `Stock on ${body.on} set at ₹${body.value.toFixed(2)}.`,
+  })
 })
 
 router.get('/gst', () => {

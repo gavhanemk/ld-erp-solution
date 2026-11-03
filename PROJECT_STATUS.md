@@ -1,11 +1,26 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Tue 3 Nov 2026 — Accounts, phase 3: old books in, outstanding, bank reconciliation (branch `feat/accounts-posting`)_
+_Last updated: Tue 3 Nov 2026 — Accounts, phase 4: Profit & Loss, Balance Sheet, closing stock (branch `feat/accounts-posting`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
 
 ---
+
+## Accounts, phase 4: Profit & Loss, Balance Sheet, closing stock (Tue 3 Nov)
+
+Same branch `feat/accounts-posting`. **Migration
+`20261103100000_accounts_stock_values`** (one new table, adds only) — run it
+on live before this merges.
+
+- `services/accounts/finalAccounts.service.ts`: stock on a day (opening
+  stock before the books start; the accountant's value for that day; else
+  inventory's own value), profit and loss by brand, balance sheet with the
+  year's profit and earlier years' stock carried without closing entries.
+- `/accounts/profit-loss` (by brand, "Value it" for closing stock) and
+  `/accounts/balance-sheet` (group tree, opening difference shown).
+- `tools/check-accounts-phase4.ts`: 21 checks — balances on any day and
+  across a year end, P&L = balance sheet profit, brands add up, periods add up.
 
 ## Accounts, phase 3: old books in, outstanding, bank reconciliation (Tue 3 Nov)
 
