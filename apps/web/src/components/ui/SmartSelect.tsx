@@ -16,7 +16,7 @@ import {
 } from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import { Check, ChevronDown, Plus, Search } from 'lucide-react'
-import { focusNext } from '@/lib/keys'
+import { focusNext, focusNextBox } from '@/lib/keys'
 
 /**
  * A dropdown you can type into.
@@ -147,7 +147,8 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
   const listRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   // Where focus goes once the list shuts: on to the next box (1), back (-1), or stay (0).
-  const advance = useRef<0 | 1 | -1>(0)
+  /** How focus goes on once the list closes: Enter to the next box, Tab to the next field either way. */
+  const advance = useRef<0 | 1 | -1 | 'enter'>(0)
   // Letters typed in a short list, to jump to the choice they start.
   const typed = useRef({ text: '', at: 0 })
   const jumpOnOpen = useRef<string | null>(null)
@@ -274,7 +275,7 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
       // Nothing matches what was typed: Enter adds it, if adding is offered.
       if (!visible.length && onCreate && query.trim()) create()
       else if (visible[active] && !visible[active].disabled) {
-        advance.current = 1
+        advance.current = 'enter'
         choose(visible[active])
       }
     } else if (e.key === 'Escape') {
@@ -296,11 +297,17 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
     }
   }
 
-  // On the closed box: arrows and Enter open it, and a letter opens it
-  // already searching for that letter.
+  // On the closed box: arrows, Space and Enter open it, and a letter opens it
+  // already searching for that letter. Enter on a box already filled goes on
+  // to the next box instead, as from any other box; to change it, type or ↓.
   const onTriggerKey = (e: KeyboardEvent<HTMLButtonElement>) => {
     // Alt, Ctrl or ⌘ with a key is a shortcut (Alt+↓ to the next line, Ctrl+S): not for the list.
     if (open || e.altKey || e.ctrlKey || e.metaKey) return
+    if (e.key === 'Enter' && !e.shiftKey && current !== '') {
+      e.preventDefault()
+      focusNextBox(e.currentTarget)
+      return
+    }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
       setOpen(true)
@@ -385,7 +392,9 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
             e.preventDefault()
             trigger.focus()
             setTimeout(() => {
-              if (document.activeElement === trigger) focusNext(trigger, dir)
+              if (document.activeElement !== trigger) return
+              if (dir === 'enter') focusNextBox(trigger)
+              else focusNext(trigger, dir)
             }, 30)
           }}
           className="border-border bg-card text-foreground z-[1000] flex max-h-[min(22rem,var(--radix-popover-content-available-height))] w-max max-w-[min(30rem,92vw)] min-w-[var(--radix-popover-trigger-width)] flex-col overflow-hidden rounded-xl border shadow-xl"

@@ -34,7 +34,8 @@ const GROUPS: Array<{ title: string; keys: Array<[string[], string]> }> = [
     title: 'In a form',
     keys: [
       [['Tab', 'shift+Tab'], 'Next box, box before'],
-      [['Enter'], 'In a dropdown: choose, and go to the next box'],
+      [['Enter'], 'Next box — from any box, a filled dropdown, a notes box or a tick'],
+      [['shift+Enter'], 'In a notes or address box: a new line'],
       [['Space'], 'Tick or untick a checkbox'],
       [['↑', '↓'], 'In a number box: one more, one less'],
     ],
@@ -60,7 +61,7 @@ const GROUPS: Array<{ title: string; keys: Array<[string[], string]> }> = [
   {
     title: 'In a dropdown',
     keys: [
-      [['Enter', '↓'], 'Open it'],
+      [['↓', 'Space'], 'Open it (Enter opens an empty one)'],
       [['a–z'], 'Type to find'],
       [['↑', '↓'], 'Move through the choices'],
       [['Enter', 'Tab'], 'Choose, and go to the next box'],

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
-import { focusBefore, isTyping, keepTabInside, keyLabel, matches, placeFocus, tabbables, topDialog, trackFocus, useHotkeys } from '@/lib/keys'
+import { focusBefore, isTyping, keepTabInside, keyLabel, matches, placeFocus, tabbables, topDialog, trackFocus, useHotkeys, boxesIn, focusNextBox } from '@/lib/keys'
 import { CommandPalette, earlyKeys, rememberVisit } from './CommandPalette'
 import { ShortcutHelp } from './ShortcutHelp'
 import { DocWindow } from './DocWindow'
@@ -101,30 +101,27 @@ const linesBeside = (row: HTMLElement) => (row.parentElement ? [...row.parentEle
 /**
  * Enter in a box of a form, or of a window, goes on to the next box — it
  * never sends the form. A form is saved on purpose: its button, or Ctrl+S.
+ * In a notes or address box Enter goes on too, and Shift+Enter starts a new
+ * line; on a tick it goes on as well (Space ticks it).
  *
  * Left alone: a box that does something with Enter itself (a scan box, a
  * reason box — they mark the key handled), a list's search box, a box with a
- * suggestion list open, a text area, and a form of one box (a barcode
- * scanner ends each code with Enter, and that Enter is the submit).
+ * suggestion list open, and a form of one box (a barcode scanner ends each
+ * code with Enter, and that Enter is the submit).
  */
 function enterToNext(e: KeyboardEvent, el: HTMLElement) {
   if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return
-  if (!(el instanceof HTMLInputElement) || !isTyping(el)) return
+  const tick = el instanceof HTMLInputElement && el.type === 'checkbox'
+  const typing = (el instanceof HTMLInputElement && isTyping(el)) || el instanceof HTMLTextAreaElement
+  if (!typing && !tick) return
   if (el.matches('[data-hotkey="search"], [data-enter-own]') || el.getAttribute('aria-expanded') === 'true') return
-  const form = el.form
+  const form = (el as HTMLInputElement | HTMLTextAreaElement).form
   const dialog = el.closest<HTMLElement>('[role="dialog"]')
   if (!form && !dialog) return
   const scope = (form ?? dialog) as HTMLElement
-  const boxes = tabbables(scope).filter((c) => c.matches('input, select, textarea, [role="combobox"]') && !c.matches('[type="checkbox"], [type="radio"]'))
-  if (form && !dialog && boxes.filter((b) => b instanceof HTMLInputElement && isTyping(b)).length < 2) return
+  if (form && !dialog && boxesIn(scope).filter((b) => b instanceof HTMLInputElement && isTyping(b)).length < 2) return
   e.preventDefault()
-  const next = boxes[boxes.indexOf(el) + 1]
-  if (next) {
-    next.focus()
-    if (next instanceof HTMLInputElement && isTyping(next)) next.select()
-  } else if (form) {
-    window.dispatchEvent(new CustomEvent('ld:note', { detail: `Last box. Press ${keyLabel('mod+s')}, or the save button, to save.` }))
-  }
+  focusNextBox(el)
 }
 
 export function KeyboardLayer() {
