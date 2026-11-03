@@ -5,6 +5,7 @@ import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
+import { postWithin } from '../services/accounts/posting.service'
 import { applyRoundOff, nextDocumentNumber } from '../lib/docNumber'
 import { priceNote, notedQtyByGrnLine, syncBillAdjustments } from '../services/purchaseNote.service'
 import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
@@ -5035,6 +5036,9 @@ async function bookBill(
   // A service order is done as far as it has been billed.
   for (const poId of servicePos) await syncOrderFromReceipts(tx, poId)
 
+  // Into the books: the purchase or expense, the input GST and the supplier's bill.
+  await postWithin(tx, 'PURCHASE_BILL', created.id, userId)
+
   return { bill: created, debitNoteRaised: toDebitNote.length > 0 }
 }
 
@@ -5329,6 +5333,9 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
     ])
     for (const poId of touched) await syncOrderFromReceipts(tx, poId)
 
+    // Its voucher follows the bill as it now stands.
+    await postWithin(tx, 'PURCHASE_BILL', billId, req.user!.id)
+
     return tx.purchaseInvoice.findUniqueOrThrow({
       where: { id: billId },
       include: billInclude,
@@ -5377,23 +5384,31 @@ router.patch(
     // Cancelled, never deleted: the number stays spent and the record stays
     // visible. The quantities it claimed are freed for another bill because the
     // match counts only bills that are not cancelled.
-    const after = await prisma.purchaseInvoice.update({
-      where: { id: before.id },
-      data: {
-        status: 'CANCELLED',
-        balanceAmount: 0,
-        notes: reason
-          ? `${before.notes ? before.notes + '\n' : ''}Cancelled: ${reason}`
-          : before.notes,
-      },
-      include: billInclude,
-    })
+    //
+    // One transaction, so the books can refuse it: a bill dated in a closed
+    // period cannot be cancelled, and its voucher is cancelled with it.
+    const after = await prisma.$transaction(async (tx) => {
+      const cancelled = await tx.purchaseInvoice.update({
+        where: { id: before.id },
+        data: {
+          status: 'CANCELLED',
+          balanceAmount: 0,
+          notes: reason
+            ? `${before.notes ? before.notes + '\n' : ''}Cancelled: ${reason}`
+            : before.notes,
+        },
+        include: billInclude,
+      })
 
-    // A cancelled bill no longer counts against its service order.
-    const servicePos = new Set(
-      after.lines.map((l) => l.poLine?.poId).filter((id): id is string => Boolean(id))
-    )
-    for (const poId of servicePos) await syncOrderFromReceipts(prisma, poId)
+      // A cancelled bill no longer counts against its service order.
+      const servicePos = new Set(
+        cancelled.lines.map((l) => l.poLine?.poId).filter((id): id is string => Boolean(id))
+      )
+      for (const poId of servicePos) await syncOrderFromReceipts(tx, poId)
+
+      await postWithin(tx, 'PURCHASE_BILL', before.id, req.user!.id)
+      return cancelled
+    })
 
     await writeAuditLog(req, {
       module: MODULE,
@@ -5841,6 +5856,7 @@ async function recordPayment(
   })
 
   await syncBillFromPayments(tx, bill.id)
+  await postWithin(tx, 'SUPPLIER_PAYMENT', created.id, userId)
 
   return created
 }
@@ -5912,6 +5928,7 @@ router.post(
       })
 
       if (before.invoiceId) await syncBillFromPayments(tx, before.invoiceId)
+      await postWithin(tx, 'SUPPLIER_PAYMENT', before.id, req.user!.id)
 
       return updated
     })

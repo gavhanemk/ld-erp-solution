@@ -1,11 +1,34 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Mon 2 Nov 2026 — Accounts, phase 1: the books (branch `feat/accounts`)_
+_Last updated: Tue 3 Nov 2026 — Accounts, phase 2: Sales and Purchase post to the books (branch `feat/accounts-posting`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
 
 ---
+
+## Accounts, phase 2: Sales and Purchase post to the books (Tue 3 Nov)
+
+Branch `feat/accounts-posting` (off main after #58; same worktree and ports).
+No migration. Decisions in docs/07 §8.
+
+- `services/accounts/posting.service.ts`: one voucher per document, written
+  inside the document's own save and rewritten when it changes — sales invoice
+  (+ brokerage journal), payment received, credit note, purchase bill, supplier
+  payment, posted purchase note. Cancel/reverse cancels the voucher. A closed
+  period refuses the save; any other posting fault rolls back to a savepoint,
+  is logged, and the document waits in Accounts as "not in the books".
+- Hooked into createInvoice/cancelInvoice, createReceipt/allocateReceipt/
+  reverseReceipt, createCreditNote/applyCreditNote/cancelCreditNote, bookBill
+  (also cash expenses), bill edit and cancel (cancel now one transaction),
+  recordPayment and reverse, note post/cancel/GST treatment, and SO amend when
+  the brand changes.
+- `GET /api/accounts/posting`, `POST /api/accounts/posting/run`; moving the
+  books' start posts or removes documents; closing refuses while any wait.
+- Day Book banner "not in the books yet" with Bring them in; voucher window
+  links to its document; Accounts vouchers cannot settle document bills.
+- `tools/check-accounts-posting.ts`: 11 checks — every document posts, every
+  customer's ledger equals Sales outstanding, every supplier's equals Purchase.
 
 ## Accounts, phase 1: the books (Mon 2 Nov)
 

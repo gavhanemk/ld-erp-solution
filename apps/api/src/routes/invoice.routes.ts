@@ -5,6 +5,7 @@ import { prisma } from '@ld-erp/database'
 import { AuthRequest, requirePermission, userCan } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
+import { postWithin } from '../services/accounts/posting.service'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
@@ -729,6 +730,8 @@ export async function createInvoice(tx: Prisma.TransactionClient, data: InvoiceI
   if (data.eWayBillNumber && !dc.eWayBillNumber) {
     await tx.deliveryChallan.update({ where: { id: dc.id }, data: { eWayBillNumber: data.eWayBillNumber } })
   }
+  // Into the books with it: the sale, and the broker's commission.
+  await postWithin(tx, 'SALES_INVOICE', created.id, userId)
   return tx.salesInvoice.findUniqueOrThrow({ where: { id: created.id }, include: invoiceInclude })
 }
 
@@ -791,6 +794,7 @@ export async function cancelInvoice(tx: Prisma.TransactionClient, id: string, us
     data: { status: 'CANCELLED', balanceAmount: 0, cancelledAt: new Date(), cancelledById: userId, cancelReason: reason },
     include: invoiceInclude,
   })
+  await postWithin(tx, 'SALES_INVOICE', before.id, userId)
   return { before, after }
 }
 

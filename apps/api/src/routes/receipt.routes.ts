@@ -5,6 +5,7 @@ import { prisma } from '@ld-erp/database'
 import { AuthRequest, userCan } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
+import { postWithin } from '../services/accounts/posting.service'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { heldUntil, longDay, notHeld } from '../lib/cheques'
@@ -458,6 +459,7 @@ export async function createReceipt(tx: Prisma.TransactionClient, data: ReceiptI
     },
   })
   await writeAllocations(tx, created.id, planned)
+  await postWithin(tx, 'SALES_RECEIPT', created.id, userId)
   return tx.paymentReceipt.findUniqueOrThrow({ where: { id: created.id }, include: receiptInclude })
 }
 
@@ -521,6 +523,8 @@ export async function allocateReceipt(
     where: { id: receipt.id },
     data: { onAccount: round2(Number(receipt.onAccount) - applied.cash), tdsAmount: round2(Number(receipt.tdsAmount) + applied.tds) },
   })
+  // The money moves from on account to the invoices it now settles.
+  await postWithin(tx, 'SALES_RECEIPT', receipt.id)
   return tx.paymentReceipt.findUniqueOrThrow({ where: { id: receipt.id }, include: receiptInclude })
 }
 
@@ -567,6 +571,7 @@ export async function reverseReceipt(tx: Prisma.TransactionClient, id: string, u
     data: { status: 'REVERSED', reversedAt: new Date(), reversedById: userId, reversalReason: reason },
   })
   for (const a of before.allocations) await syncInvoiceFromReceipts(tx, a.invoiceId)
+  await postWithin(tx, 'SALES_RECEIPT', before.id, userId)
   return tx.paymentReceipt.findUniqueOrThrow({ where: { id: before.id }, include: receiptInclude })
 }
 

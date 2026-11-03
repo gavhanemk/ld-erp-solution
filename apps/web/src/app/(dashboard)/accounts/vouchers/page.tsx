@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { AlertCircle, BookOpen, Plus, RefreshCw, Search, Settings2 } from 'lucide-react'
+import { AlertCircle, BookOpen, FileInput, Loader2, Plus, RefreshCw, Search, Settings2 } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
@@ -10,7 +10,23 @@ import { asDate, asNumber, downloadRows, fetchEveryPage, type ExportColumn, type
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { VoucherDialog } from '@/components/accounts/VoucherDialog'
 import { VoucherView } from '@/components/accounts/VoucherView'
-import { KIND_BADGE, KIND_LABEL, day, inr, todayIst, type BooksSummary, type ManualKind, type VoucherKind } from '@/components/accounts/books'
+import { KIND_BADGE, KIND_LABEL, SOURCE_LABEL, day, inr, sourceLink, todayIst, type BooksSummary, type ManualKind, type VoucherKind } from '@/components/accounts/books'
+
+interface Waiting {
+  sourceType: string
+  number: string
+  date: string
+  party: string
+  amount: number
+  reason: 'missing' | 'cancel' | 'reopen' | 'before-start'
+}
+
+const WHY: Record<Waiting['reason'], string> = {
+  missing: 'not in the books',
+  cancel: 'cancelled, voucher still standing',
+  reopen: 'live again, voucher cancelled',
+  'before-start': 'dated before the books start',
+}
 
 interface Row {
   id: string
@@ -74,6 +90,18 @@ export default function DayBookPage() {
   const [form, setForm] = useState<{ open: boolean; kind: ManualKind; id: string | null }>({ open: false, kind: 'PAYMENT', id: null })
   const [viewing, setViewing] = useState<string | null>(null)
   const mayCreate = can('accounts', 'create')
+
+  // Sales and Purchase documents whose voucher does not match them yet.
+  const [waiting, setWaiting] = useState<{ count: number; pending: Waiting[] } | null>(null)
+  const [showWaiting, setShowWaiting] = useState(false)
+  const [bringing, setBringing] = useState(false)
+  const loadWaiting = useCallback(() => {
+    api
+      .get<{ data: { count: number; pending: Waiting[] } }>('/accounts/posting')
+      .then((r) => setWaiting(r.data))
+      .catch(() => setWaiting(null))
+  }, [])
+  useEffect(() => loadWaiting(), [loadWaiting])
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search)
@@ -155,6 +183,22 @@ export default function DayBookPage() {
   const pages = Math.ceil(total / LIMIT) || 1
   const notStarted = summary && !summary.booksStart
 
+  const bringIn = async () => {
+    setBringing(true)
+    setError(null)
+    try {
+      const res = await api.post<{ message: string; data: { failed: Array<{ label: string; number: string; reason: string }> } }>('/accounts/posting/run', {})
+      const failed = res.data.failed
+      setMessage(failed.length ? `${res.message} First: ${failed[0].label} ${failed[0].number} — ${failed[0].reason}` : res.message)
+      loadWaiting()
+      void load()
+    } catch (err) {
+      setError(apiErrorMessage(err, 'Could not bring the documents into the books.'))
+    } finally {
+      setBringing(false)
+    }
+  }
+
   return (
     <div className="space-y-5">
       <div className="page-header gap-3">
@@ -183,6 +227,44 @@ export default function DayBookPage() {
           <Link href="/accounts/chart?tab=settings" className="btn-secondary h-8 px-3 text-xs">
             <Settings2 size={14} /> Set it
           </Link>
+        </div>
+      )}
+      {!notStarted && waiting && waiting.count > 0 && (
+        <div className="border-accent/40 bg-accent/5 rounded-lg border p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm">
+              <span className="font-medium">
+                {waiting.count} {waiting.count === 1 ? 'document' : 'documents'} from Sales and Purchase {waiting.count === 1 ? 'is' : 'are'} not in the books yet.
+              </span>{' '}
+              Every new invoice, bill, receipt and payment goes in as it is saved; these were saved before, or while something was wrong.
+            </p>
+            <div className="flex items-center gap-2">
+              <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setShowWaiting((s) => !s)}>
+                {showWaiting ? 'Hide them' : 'See which'}
+              </button>
+              {can('accounts', 'edit') && (
+                <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => void bringIn()} disabled={bringing}>
+                  {bringing ? <Loader2 size={14} className="animate-spin" /> : <FileInput size={14} />} Bring them in
+                </button>
+              )}
+            </div>
+          </div>
+          {showWaiting && (
+            <ul className="border-border mt-2 max-h-60 space-y-1 overflow-y-auto border-t pt-2 text-xs">
+              {waiting.pending.map((w) => (
+                <li key={`${w.sourceType}:${w.number}`} className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                  <span className="text-muted-foreground w-24 tabular-nums">{day(w.date)}</span>
+                  <Link href={sourceLink(w.sourceType, w.number)} className="text-primary font-mono hover:underline">
+                    {w.number}
+                  </Link>
+                  <span className="text-muted-foreground">{SOURCE_LABEL[w.sourceType] ?? w.sourceType}</span>
+                  <span className="text-foreground">{w.party}</span>
+                  <span className="tabular-nums">₹{inr(w.amount)}</span>
+                  <span className="text-muted-foreground">— {WHY[w.reason]}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
       {error && (

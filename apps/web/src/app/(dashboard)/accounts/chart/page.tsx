@@ -362,8 +362,16 @@ function BooksSettings({ summary, onSaved }: { summary: BooksSummary; onSaved: (
     setSaving(true)
     setError(null)
     try {
-      await api.patch('/accounts/settings', { ...(start ? { booksStart: start } : {}), lockedUpTo: locked || null })
-      onSaved('The books’ dates are saved')
+      const res = await api.patch<{ posting: { posted: number; failed: unknown[] } | null }>('/accounts/settings', {
+        ...(start ? { booksStart: start } : {}),
+        lockedUpTo: locked || null,
+      })
+      const p = res.posting
+      onSaved(
+        p
+          ? `The books’ dates are saved. ${p.posted} Sales and Purchase document${p.posted === 1 ? '' : 's'} brought into the books${p.failed.length ? `; ${p.failed.length} could not be — see the Day Book` : ''}.`
+          : 'The books’ dates are saved.',
+      )
     } catch (err) {
       setError(apiErrorMessage(err, 'Could not save the dates.'))
     } finally {
@@ -378,7 +386,7 @@ function BooksSettings({ summary, onSaved }: { summary: BooksSummary; onSaved: (
           <CalendarCheck size={18} /> The day the books start
         </h2>
         <p className="text-muted-foreground text-sm">
-          Nothing can be dated before it. Opening balances on each ledger are as at this day — the old books&apos; trial balance on the day before. It can move only while no voucher is dated before the new day.
+          Nothing can be dated before it. Opening balances on each ledger are as at this day — the old books&apos; trial balance on the day before. Every Sales and Purchase document from this day on goes into the books by itself; ones before it stay out. It can move only while no voucher typed here is dated before the new day.
         </p>
         <input type="date" className="form-input max-w-[200px]" value={start} max={todayIst()} disabled={!may} onChange={(e) => setStart(e.target.value)} aria-label="Books start" />
         <p className="text-muted-foreground text-xs">

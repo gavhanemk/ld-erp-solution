@@ -62,6 +62,39 @@ export interface OpenBill {
   /** Signed: what is owed to us is positive. */
   pending: number
   raised: boolean
+  /** A customer's invoice or a supplier's bill: settled only from Sales or Purchase. */
+  fromDocument?: boolean
+}
+
+/** The Sales and Purchase documents that post to the books, as Accounts names them. */
+export const SOURCE_LABEL: Record<string, string> = {
+  SALES_INVOICE: 'Sales invoice',
+  BROKERAGE: 'Brokerage on invoice',
+  SALES_RECEIPT: 'Payment received',
+  CREDIT_NOTE: 'Credit note',
+  PURCHASE_BILL: 'Purchase bill',
+  SUPPLIER_PAYMENT: 'Supplier payment',
+  PURCHASE_NOTE: 'Purchase note',
+}
+
+/** Where a document that wrote a voucher is opened. */
+export function sourceLink(sourceType: string, number: string): string {
+  const q = encodeURIComponent(number)
+  switch (sourceType) {
+    case 'SALES_INVOICE':
+    case 'BROKERAGE':
+      return `/sales/invoices?q=${q}`
+    case 'SALES_RECEIPT':
+      return `/sales/payments?tab=receipts&q=${q}`
+    case 'CREDIT_NOTE':
+      return '/sales/returns'
+    case 'PURCHASE_BILL':
+      return `/purchase/bills?q=${q}`
+    case 'SUPPLIER_PAYMENT':
+      return '/purchase/payments'
+    default:
+      return '/purchase/debit-notes'
+  }
 }
 
 /** The four typed here, in the order Tally's keys put them, with the key each answers to. */

@@ -21,6 +21,7 @@ import {
   trialBalance,
 } from '../services/accounts/books.service'
 import { cancelVoucher, moneyGroupIds, voucherSchema, writeVoucher } from '../services/accounts/voucher.service'
+import { pendingDocuments, postPending, SOURCE_LABEL } from '../services/accounts/posting.service'
 
 /**
  * Accounts: the books of LD Cotton Mills.
@@ -40,6 +41,8 @@ import { cancelVoucher, moneyGroupIds, voucherSchema, writeVoucher } from '../se
  *   POST   /vouchers  PATCH /vouchers/:id  POST /vouchers/:id/cancel
  *   GET    /trial-balance
  *   GET    /cash-bank                every cash and bank ledger with its balance
+ *   GET    /posting                  Sales and Purchase documents not yet in the books
+ *   POST   /posting/run              bring them in
  *
  * Everything is under the Accounts module's rights. Lists of ledgers make sure
  * the chart is complete first, so a customer added in Sales has a ledger by
@@ -88,7 +91,9 @@ router.patch('/settings', requirePermission(MODULE, 'approve'), async (req: Auth
   const before = await booksSettings(prisma)
   const start = body.booksStart ?? before.booksStart
   if (body.booksStart && body.booksStart !== before.booksStart) {
-    const earlier = await prisma.voucher.findFirst({ where: { status: 'POSTED', date: { lt: dayValue(body.booksStart) } }, select: { voucherNo: true } })
+    // A voucher typed here stays; one written by a document simply leaves the
+    // books with it when they start after its date.
+    const earlier = await prisma.voucher.findFirst({ where: { status: 'POSTED', sourceType: null, date: { lt: dayValue(body.booksStart) } }, select: { voucherNo: true } })
     if (earlier) throw new AppError(`${earlier.voucherNo} is dated before ${body.booksStart}. The books cannot start after a voucher already in them.`, 409, 'VOUCHERS_BEFORE')
     if (before.lockedUpTo && before.booksStart && before.lockedUpTo >= before.booksStart) {
       throw new AppError('The books are closed. Reopen them before moving the day they start.', 409, 'PERIOD_LOCKED')
@@ -98,6 +103,17 @@ router.patch('/settings', requirePermission(MODULE, 'approve'), async (req: Auth
     if (body.lockedUpTo > todayIst()) throw new AppError('The books cannot be closed past today.', 400, 'FUTURE_DATE')
     if (!start) throw new AppError('Set the day the books start first.', 400, 'BOOKS_NOT_STARTED')
     if (body.lockedUpTo < start) throw new AppError('The closing date comes before the books start.', 400, 'BEFORE_BOOKS')
+    // Once closed, nothing dated in the period can go in, so it all goes in first.
+    if (!body.booksStart || body.booksStart === before.booksStart) {
+      const waiting = (await pendingDocuments(prisma)).pending.filter((p) => p.date <= body.lockedUpTo!)
+      if (waiting.length) {
+        throw new AppError(
+          `${waiting.length} document${waiting.length === 1 ? ' is' : 's are'} dated on or before ${body.lockedUpTo} and not in the books yet (first: ${waiting[0].number}). Bring them in from the Day Book before closing.`,
+          409,
+          'DOCUMENTS_WAITING',
+        )
+      }
+    }
   }
   await prisma.company.update({
     where: { id: company.id },
@@ -108,7 +124,55 @@ router.patch('/settings', requirePermission(MODULE, 'approve'), async (req: Auth
   })
   const after = await booksSettings(prisma)
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'BooksSettings', entityId: company.id, before, after })
-  res.json({ success: true, data: after })
+  // A new start brings the documents from that day into the books, and takes
+  // out the ones now before it.
+  const posting = after.booksStart !== before.booksStart ? await postPending(prisma, req.user!.id) : null
+  res.json({ success: true, data: after, posting })
+})
+
+// ═══════════════════════════════════════════
+// DOCUMENTS INTO THE BOOKS
+// ═══════════════════════════════════════════
+
+/**
+ * GET /api/accounts/posting
+ *
+ * Sales and Purchase documents whose voucher does not match them. Normally
+ * empty: every document posts as it is saved. A document saved while a
+ * posting rule failed, or one from before this was switched on, shows here.
+ */
+router.get('/posting', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const { booksStart, pending } = await pendingDocuments(prisma)
+  res.json({
+    success: true,
+    data: {
+      booksStart,
+      count: pending.length,
+      pending: pending.slice(0, 500).map((p) => ({ ...p, label: SOURCE_LABEL[p.sourceType] })),
+    },
+  })
+})
+
+/**
+ * POST /api/accounts/posting/run { all?: boolean }
+ *
+ * Posts every waiting document, each on its own, and says which could not
+ * be. With `all`, every document in the books' period is posted again.
+ */
+router.post('/posting/run', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { all } = z.object({ all: z.boolean().optional() }).parse(req.body ?? {})
+  const result = await postPending(prisma, req.user!.id, all ?? false)
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'BooksPosting', entityId: 'documents', after: { all: !!all, posted: result.posted, failed: result.failed.length } })
+  const label = (t: keyof typeof SOURCE_LABEL) => SOURCE_LABEL[t]
+  res.json({
+    success: true,
+    data: { ...result, failed: result.failed.map((f) => ({ ...f, label: label(f.sourceType) })) },
+    message: result.failed.length
+      ? `${result.posted} brought into the books; ${result.failed.length} could not be.`
+      : result.posted
+        ? `${result.posted} document${result.posted === 1 ? '' : 's'} brought into the books.`
+        : 'Every document is already in the books.',
+  })
 })
 
 // ═══════════════════════════════════════════

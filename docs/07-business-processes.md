@@ -805,6 +805,22 @@ old books may run alongside for a month or two until the figures match.
   bill by bill names the bills each amount raises or settles; brands go on
   income and expense lines only.
 
+**Automatic posting (phase 2, decided 3 Nov 2026 — "standard ERP and accounts
+flow, not too complicated"):**
+
+- Brokerage is owed from the day the invoice is raised: a journal per invoice,
+  Dr Brokerage on Sales, Cr the broker (bill by bill). The broker is paid from
+  an Accounts Payment voucher, with TDS 194H deducted there.
+- Goods bills go to a ledger per item category ("Purchase – Fabric"); expense
+  bills to a ledger per expense head; charges to a ledger per charge type.
+  All are made the first time they are needed; the accountant may move them.
+- Money from customers and to suppliers is entered only in Sales → Payments
+  Received and Purchase → Supplier Payments. An Accounts voucher cannot settle
+  an invoice or a supplier's bill, so Sales, Purchase and the ledgers always
+  agree. Brokers, loans, expenses, salaries, GST and TDS go through Accounts.
+- Closing the books blocks Sales and Purchase from saving, changing or
+  cancelling anything dated in the closed period.
+
 Phases: 1 the books (chart, vouchers, day book, ledger, trial balance) →
 2 automatic posting from Sales and Purchase → 3 outstanding, bank
 reconciliation, opening import → 4 P&L, balance sheet, brand P&L, closing

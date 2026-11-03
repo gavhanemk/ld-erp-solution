@@ -226,6 +226,12 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
         if (!openCache.has(led.id)) openCache.set(led.id, await openBills(tx, led.id, existing?.id))
         const open = openCache.get(led.id)!.find((o) => o.billNo === billNo)
         if (!open) throw new AppError(`Line ${i + 1}: ${led.name} has no open bill ${billNo}`, 400, 'NO_SUCH_BILL')
+        // An invoice or a supplier's bill is settled where Sales and Purchase
+        // can see it, so their balances and the ledger never disagree.
+        if (open.fromDocument) {
+          const where = open.raisedBy === 'PURCHASE_BILL' ? 'Purchase → Supplier Payments, or a purchase note' : 'Sales → Payments Received, or a credit note'
+          throw new AppError(`Line ${i + 1}: ${billNo} is settled from ${where}, not from an Accounts voucher.`, 400, 'BILL_FROM_DOCUMENT')
+        }
         const key = `${led.id}:${billNo}`
         const left = r2(open.pending + (taken.get(key) ?? 0))
         const amount = r2(sign * b.amount)

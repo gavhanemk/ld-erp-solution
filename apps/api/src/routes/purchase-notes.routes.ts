@@ -6,6 +6,7 @@ import { lockRow } from '../lib/lockRow'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
+import { postWithin } from '../services/accounts/posting.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
 import {
@@ -941,6 +942,7 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
     })
 
     if (before.billId) await syncBillAdjustments(tx, before.billId)
+    await postWithin(tx, 'PURCHASE_NOTE', before.id, req.user!.id)
 
     // Read back AFTER the bill has been resynced, not before. Reading it with
     // the update returned the balance as it stood a moment earlier, so the
@@ -1023,15 +1025,21 @@ router.patch(
       )
     }
 
-    const note = await prisma.purchaseNote.update({
-      where: { id: before.id },
-      data: {
-        gstTreatment: data.gstTreatment,
-        gstNote: data.gstNote ?? null,
-        gstTreatedById: req.user!.id,
-        gstTreatedAt: new Date(),
-      },
-      include: noteInclude,
+    // On a posted note this decides whether its GST moves our input credit, so
+    // its voucher is rewritten in the same transaction.
+    const note = await prisma.$transaction(async (tx) => {
+      const updated = await tx.purchaseNote.update({
+        where: { id: before.id },
+        data: {
+          gstTreatment: data.gstTreatment,
+          gstNote: data.gstNote ?? null,
+          gstTreatedById: req.user!.id,
+          gstTreatedAt: new Date(),
+        },
+        include: noteInclude,
+      })
+      await postWithin(tx, 'PURCHASE_NOTE', before.id, req.user!.id)
+      return updated
     })
 
     await writeAuditLog(req, {
@@ -1107,6 +1115,7 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
     })
 
     if (wasPosted && before.billId) await syncBillAdjustments(tx, before.billId)
+    await postWithin(tx, 'PURCHASE_NOTE', before.id, req.user!.id)
 
     return { note, moved, wasPosted }
   })

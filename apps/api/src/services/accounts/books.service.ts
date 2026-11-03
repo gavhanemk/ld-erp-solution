@@ -355,21 +355,33 @@ export async function openBills(tx: Tx, ledgerId: string, exceptVoucherId?: stri
       ledgerId,
       OR: [{ lineId: null }, { line: { voucher: { status: 'POSTED', ...(exceptVoucherId ? { id: { not: exceptVoucherId } } : {}) } } }],
     },
-    select: { kind: true, billNo: true, billDate: true, dueDate: true, amount: true },
+    select: { kind: true, billNo: true, billDate: true, dueDate: true, amount: true, line: { select: { voucher: { select: { sourceType: true } } } } },
   })
-  const bills = new Map<string, { billNo: string; billDate: Date; dueDate: Date | null; raised: boolean; pending: number }>()
+  type Bill = { billNo: string; billDate: Date; dueDate: Date | null; raised: boolean; pending: number; kind: string | null; raisedBy: string | null }
+  const bills = new Map<string, Bill>()
   for (const r of refs) {
-    const b = bills.get(r.billNo) ?? { billNo: r.billNo, billDate: r.billDate, dueDate: r.dueDate, raised: false, pending: 0 }
+    const b = bills.get(r.billNo) ?? { billNo: r.billNo, billDate: r.billDate, dueDate: r.dueDate, raised: false, pending: 0, kind: null, raisedBy: null }
     b.pending = r2(b.pending + Number(r.amount))
     if (r.kind !== 'AGAINST_REF') {
       b.raised = true
       b.billDate = r.billDate
       b.dueDate = r.dueDate
+      b.kind = r.kind
+      b.raisedBy = r.line?.voucher.sourceType ?? null
     }
     bills.set(r.billNo, b)
   }
   return [...bills.values()]
     .filter((b) => Math.abs(b.pending) >= 0.005)
     .sort((a, b) => a.billDate.getTime() - b.billDate.getTime() || a.billNo.localeCompare(b.billNo))
-    .map((b) => ({ billNo: b.billNo, billDate: istDay(b.billDate), dueDate: b.dueDate ? istDay(b.dueDate) : null, pending: b.pending, raised: b.raised }))
+    .map((b) => ({
+      billNo: b.billNo,
+      billDate: istDay(b.billDate),
+      dueDate: b.dueDate ? istDay(b.dueDate) : null,
+      pending: b.pending,
+      raised: b.raised,
+      /** A customer's invoice or a supplier's bill, settled only from Sales or Purchase. */
+      fromDocument: b.kind === 'NEW_REF' && !!b.raisedBy && b.raisedBy !== 'BROKERAGE',
+      raisedBy: b.raisedBy,
+    }))
 }

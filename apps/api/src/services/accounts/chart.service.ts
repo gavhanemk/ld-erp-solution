@@ -80,6 +80,18 @@ export const SYSTEM_LEDGERS: Array<{ key: string; name: string; group: string }>
   { key: 'TDS_RECEIVABLE', name: 'TDS Receivable', group: 'LOANS_ADVANCES' },
   { key: 'ROUND_OFF', name: 'Round Off', group: 'INDIRECT_EXPENSES' },
   { key: 'BANK_CHARGES', name: 'Bank Charges', group: 'INDIRECT_EXPENSES' },
+  // What the documents of Sales and Purchase post to, beyond the above.
+  { key: 'SALES_RETURNS', name: 'Sales Returns & Allowances', group: 'SALES_ACCOUNTS' },
+  { key: 'SALES_OTHER_CHARGES', name: 'Other Charges – Sales', group: 'DIRECT_INCOMES' },
+  { key: 'PURCHASE_RETURNS', name: 'Purchase Returns & Adjustments', group: 'PURCHASE_ACCOUNTS' },
+  { key: 'BROKERAGE', name: 'Brokerage on Sales', group: 'INDIRECT_EXPENSES' },
+  // A cheque taken without saying which bank it goes into. Filed with cash, so
+  // banking it is a Contra like any deposit.
+  { key: 'CHEQUES_IN_HAND', name: 'Cheques in Hand', group: 'CASH_IN_HAND' },
+  { key: 'RCM_CGST', name: 'CGST Payable on Reverse Charge', group: 'DUTIES_TAXES' },
+  { key: 'RCM_SGST', name: 'SGST Payable on Reverse Charge', group: 'DUTIES_TAXES' },
+  { key: 'RCM_IGST', name: 'IGST Payable on Reverse Charge', group: 'DUTIES_TAXES' },
+  { key: 'TDS_PAYABLE', name: 'TDS Payable', group: 'DUTIES_TAXES' },
 ]
 
 /** The voucher types typed in Accounts, and the number series each is issued from. */
@@ -301,12 +313,90 @@ export async function ensureChart(force = false): Promise<void> {
   return running
 }
 
-/** The id of a system ledger, for the posting rules. */
-export async function systemLedgerId(tx: Tx, key: string): Promise<string> {
-  const l = await tx.ledger.findUnique({ where: { systemKey: key }, select: { id: true } })
-  if (l) return l.id
-  await ensureChart(true)
-  const again = await tx.ledger.findUnique({ where: { systemKey: key }, select: { id: true } })
-  if (!again) throw new Error(`The ${key} ledger is missing from the chart of accounts`)
-  return again.id
+// ═══════════════════════════════════════════
+// LEDGERS FOR THE POSTING RULES
+//
+// A sales invoice or a supplier's bill posts inside its own save. Whatever
+// ledger it needs is found, or made there and then in the same transaction,
+// so a document never waits for Accounts to have been opened first.
+// ═══════════════════════════════════════════
+
+/** Names already used that start the way this one does, for picking a free one. */
+async function namesLike(tx: Tx, base: string): Promise<Set<string>> {
+  const rows = await tx.ledger.findMany({ where: { name: { startsWith: base.trim(), mode: 'insensitive' } }, select: { name: true } })
+  return new Set(rows.map((r) => r.name.toLowerCase()))
+}
+
+/** A standard group's id; the standard groups are made first on a database that has none. */
+export async function groupIdByKey(tx: Tx, key: string): Promise<string> {
+  const g = await tx.ledgerGroup.findUnique({ where: { systemKey: key }, select: { id: true } })
+  if (g) return g.id
+  const made = (await ensureGroups(tx)).get(key)
+  if (!made) throw new Error(`There is no standard group ${key}`)
+  return made
+}
+
+/**
+ * The ledger kept under a key. The fixed ones are in SYSTEM_LEDGERS; the
+ * ones a posting rule makes per category, expense head, charge or TDS section
+ * say how to make themselves the first time.
+ */
+export async function keyedLedgerId(tx: Tx, key: string, make?: { name: string; group: string }): Promise<string> {
+  const have = await tx.ledger.findUnique({ where: { systemKey: key }, select: { id: true } })
+  if (have) return have.id
+  const spec = make ?? SYSTEM_LEDGERS.find((l) => l.key === key)
+  if (!spec) throw new Error(`No ledger is set up for ${key}`)
+  const name = freeName(spec.name, null, await namesLike(tx, spec.name))
+  const made = await tx.ledger.create({ data: { name, systemKey: key, groupId: await groupIdByKey(tx, spec.group) }, select: { id: true } })
+  return made.id
+}
+
+const PARTY_FIELD: Record<LedgerParty, 'customerId' | 'supplierId' | 'brokerId' | 'contractorId' | 'bankAccountId'> = {
+  CUSTOMER: 'customerId',
+  SUPPLIER: 'supplierId',
+  BROKER: 'brokerId',
+  CONTRACTOR: 'contractorId',
+  BANK: 'bankAccountId',
+}
+
+/** The ledger of a customer, supplier, broker, contractor or bank account, made if it has none yet. */
+export async function partyLedgerId(tx: Tx, type: LedgerParty, masterId: string): Promise<string> {
+  const field = PARTY_FIELD[type]
+  const have = await tx.ledger.findFirst({ where: { [field]: masterId }, select: { id: true } })
+  if (have) return have.id
+  let name: string
+  let code: string | null = null
+  let isActive = true
+  let group = PARTY_HOME[type].group
+  if (type === 'BANK') {
+    const b = await tx.bankAccount.findUniqueOrThrow({ where: { id: masterId } })
+    name = bankLedgerName(b)
+    isActive = b.isActive
+    if (['CC', 'OD'].includes((b.accountType ?? '').toUpperCase())) group = 'BANK_OD'
+  } else {
+    const where = { where: { id: masterId }, select: { code: true, name: true, isActive: true } }
+    const m =
+      type === 'CUSTOMER'
+        ? await tx.customer.findUniqueOrThrow(where)
+        : type === 'SUPPLIER'
+          ? await tx.supplier.findUniqueOrThrow(where)
+          : type === 'BROKER'
+            ? await tx.broker.findUniqueOrThrow(where)
+            : await tx.contractor.findUniqueOrThrow(where)
+    name = m.name
+    code = m.code
+    isActive = m.isActive
+  }
+  const made = await tx.ledger.create({
+    data: {
+      name: freeName(name, code, await namesLike(tx, name)),
+      groupId: await groupIdByKey(tx, group),
+      partyType: type,
+      billWise: PARTY_HOME[type].billWise,
+      isActive,
+      [field]: masterId,
+    },
+    select: { id: true },
+  })
+  return made.id
 }
