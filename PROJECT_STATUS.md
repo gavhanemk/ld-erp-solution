@@ -1,11 +1,31 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Tue 3 Nov 2026 — Accounts, phase 5: GST returns and TDS (branch `feat/accounts-posting`)_
+_Last updated: Tue 3 Nov 2026 — Accounts, phase 6: dashboard and prints (branch `feat/accounts-posting`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
 
 ---
+
+## Accounts, phase 6: dashboard and prints (Tue 3 Nov)
+
+Same branch `feat/accounts-posting`. No migration. This is the last planned
+phase; phases 2–6 go to live together, after migration
+`20261103100000_accounts_stock_values` is run on live.
+
+- `services/accounts/dashboard.service.ts` and `GET /api/accounts/dashboard`;
+  screen `/accounts/dashboard` (Sidebar: Accounts → Dashboard, no longer
+  "planned").
+- `GET /api/accounts/vouchers/:id/print` → `/print/voucher/[id]`;
+  `GET /api/accounts/ledgers/:id/print-statement` →
+  `/print/ledger-statement/[id]?from&to[&confirm=1]` (statement of account,
+  or confirmation of accounts). Print templates VCH and SOA.
+- Print links: voucher window, Ledger header (Print, Confirmation for a
+  party), Outstanding party row (Print statement, Confirmation letter).
+- `tools/check-accounts-phase6.ts`: 26 checks — every dashboard figure
+  against Outstanding, P&L, the cash and bank ledgers, the TDS register and
+  the Day Book's pending list; months add up to the year; money in less out
+  equals the change in cash and bank; the to-do flags come and go.
 
 ## Accounts, phase 5: GST returns and TDS (Tue 3 Nov)
 

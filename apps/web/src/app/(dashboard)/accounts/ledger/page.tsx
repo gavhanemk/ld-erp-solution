@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertCircle, BookText, RefreshCw } from 'lucide-react'
+import { AlertCircle, BookText, FileSignature, Printer, RefreshCw } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { asDate, asNumber, downloadRows, type ExportColumn, type ExportFormat } from '@/lib/export'
@@ -129,6 +129,22 @@ export default function LedgerPage() {
           <button className="btn-ghost" onClick={() => void load()} disabled={loading} aria-label="Refresh">
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
+          {data && (
+            <a className="btn-secondary" href={`/print/ledger-statement/${data.ledger.id}?from=${from}&to=${to}`} target="_blank" rel="noreferrer" title="This account for the period, to print or send">
+              <Printer size={15} /> Print
+            </a>
+          )}
+          {data?.ledger.partyType && (
+            <a
+              className="btn-secondary"
+              href={`/print/ledger-statement/${data.ledger.id}?from=${from}&to=${to}&confirm=1`}
+              target="_blank"
+              rel="noreferrer"
+              title="The statement with a request to sign and return the balance — what auditors ask for at the year end"
+            >
+              <FileSignature size={15} /> Confirmation
+            </a>
+          )}
           <ExportButton onExport={exportIt} disabled={loading || !data} />
         </div>
       </div>

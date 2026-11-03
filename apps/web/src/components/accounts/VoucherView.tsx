@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Ban, BookOpenCheck, History, Pencil, X } from 'lucide-react'
+import { AlertCircle, Ban, BookOpenCheck, History, Pencil, Printer, X } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
@@ -138,6 +138,11 @@ export function VoucherView({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {v && (
+              <a className="btn-secondary" href={`/print/voucher/${v.id}`} target="_blank" rel="noreferrer" title="The voucher as it is filed, with room to sign">
+                <Printer size={15} /> Print
+              </a>
+            )}
             {typedHere && live && can('accounts', 'edit') && (
               <button type="button" className="btn-secondary" onClick={() => onAlter(v.id, v.kind as ManualKind)}>
                 <Pencil size={15} /> Alter

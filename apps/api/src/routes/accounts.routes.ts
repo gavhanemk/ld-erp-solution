@@ -28,6 +28,8 @@ import * as opening from '../services/accounts/opening.service'
 import { balanceSheet, profitAndLoss, setStockValue, stockOn } from '../services/accounts/finalAccounts.service'
 import { gstr1, gstr1Json, gstr3b, match2b, read2b } from '../services/accounts/gst.service'
 import { tdsByCustomers, tdsDeducted } from '../services/accounts/tdsBooks.service'
+import { accountsDashboard } from '../services/accounts/dashboard.service'
+import { amountInWords, getPrintHeader } from '../lib/printData'
 
 /**
  * Accounts: the books of LD Cotton Mills.
@@ -61,6 +63,9 @@ import { tdsByCustomers, tdsDeducted } from '../services/accounts/tdsBooks.servi
  *   GET    /gst/gstr3b?from=&to=     the 3B working, credit set against tax
  *   POST   /gst/2b                   a GSTR-2B file matched against the bills
  *   GET    /tds?from=&to=            TDS deducted, paid in, owed; TDS customers deducted
+ *   GET    /dashboard                the accounts at a glance
+ *   GET    /vouchers/:id/print       a voucher as it is filed
+ *   GET    /ledgers/:id/print-statement?from=&to=   a party's account, to send them
  *
  * Everything is under the Accounts module's rights. Lists of ledgers make sure
  * the chart is complete first, so a customer added in Sales has a ledger by
@@ -506,6 +511,52 @@ router.get('/ledgers/:id/statement', requirePermission(MODULE, 'view'), async (r
   res.json({ success: true, data })
 })
 
+/**
+ * GET /api/accounts/ledgers/:id/print-statement?from=&to=
+ *
+ * A party's account as it is sent to them: who they are, every entry in the
+ * period with its running balance, and the bills still open on the last day.
+ */
+router.get('/ledgers/:id/print-statement', requirePermission(MODULE, 'view'), async (req, res) => {
+  const s = await booksSettings(prisma)
+  const period = periodFrom(req.query, s)
+  const [statement, header, ledger] = await Promise.all([
+    ledgerStatement(prisma, req.params.id, period, s),
+    getPrintHeader('SOA'),
+    prisma.ledger.findUnique({
+      where: { id: req.params.id },
+      select: {
+        name: true,
+        pan: true,
+        gstin: true,
+        billWise: true,
+        customer: { select: { code: true, gstin: true, pan: true, phone: true, email: true, billingAddress: true, billingCity: true, billingState: true, billingPincode: true } },
+        supplier: { select: { code: true, gstin: true, pan: true, phone: true, email: true, address: true, city: true, state: true, pincode: true } },
+        broker: { select: { code: true, gstin: true, pan: true, phone: true, email: true, address: true, city: true, state: true } },
+      },
+    }),
+  ])
+  if (!ledger) throw new AppError('Ledger not found', 404, 'NOT_FOUND')
+  const c = ledger.customer
+  const m = ledger.supplier ?? ledger.broker
+  const party = {
+    name: ledger.name,
+    code: (c ?? m)?.code ?? null,
+    gstin: c?.gstin ?? m?.gstin ?? ledger.gstin,
+    pan: c?.pan ?? m?.pan ?? ledger.pan,
+    phone: (c ?? m)?.phone ?? null,
+    email: (c ?? m)?.email ?? null,
+    address: c
+      ? [c.billingAddress, c.billingCity, c.billingState, c.billingPincode].filter(Boolean).join(', ')
+      : m
+        ? [m.address, m.city, m.state, 'pincode' in m ? m.pincode : null].filter(Boolean).join(', ')
+        : null,
+  }
+  // The bills still open on the last day of the statement, for a party kept bill by bill.
+  const open = ledger.billWise ? (await outstanding(prisma, ledger.customer ? 'receivable' : 'payable', period.to)).parties.find((p) => p.ledgerId === req.params.id)?.bills ?? [] : []
+  res.json({ success: true, data: { ...header, party, statement, openBills: open, closingInWords: amountInWords(Math.abs(statement.closing)) } })
+})
+
 router.get('/ledgers/:id/bills', requirePermission(MODULE, 'view'), async (req, res) => {
   const except = str(req.query.exceptVoucherId)
   res.json({ success: true, data: await openBills(prisma, req.params.id, except) })
@@ -715,6 +766,12 @@ router.get('/vouchers/:id', requirePermission(MODULE, 'view'), async (req, res) 
   res.json({ success: true, data: { ...shapeVoucher(v, money), history } })
 })
 
+/** GET /api/accounts/vouchers/:id/print — the voucher as it is filed, signed for. */
+router.get('/vouchers/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const [v, money, header] = await Promise.all([loadVoucher(req.params.id), moneyGroupIds(prisma), getPrintHeader('VCH')])
+  res.json({ success: true, data: { ...header, voucher: shapeVoucher(v, money), amountInWords: amountInWords(Number(v.amount)) } })
+})
+
 router.post('/vouchers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const input = voucherSchema.parse(req.body)
   await ensureChart()
@@ -873,6 +930,11 @@ router.post('/opening/bills', requirePermission(MODULE, 'edit'), async (req: Aut
 // ═══════════════════════════════════════════
 // FINAL ACCOUNTS
 // ═══════════════════════════════════════════
+
+router.get('/dashboard', requirePermission(MODULE, 'view'), async (_req, res) => {
+  await ensureChart()
+  res.json({ success: true, data: await accountsDashboard(prisma, todayIst()) })
+})
 
 router.get('/profit-loss', requirePermission(MODULE, 'view'), async (req, res) => {
   await ensureChart()

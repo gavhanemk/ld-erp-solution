@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { AlertCircle, ChevronDown, ChevronRight, HandCoins, RefreshCw, Search, Wallet } from 'lucide-react'
+import { AlertCircle, ChevronDown, ChevronRight, FileSignature, HandCoins, Printer, RefreshCw, Search, Wallet } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { asDate, asNumber, downloadRows, type ExportColumn, type ExportFormat } from '@/lib/export'
@@ -306,6 +306,20 @@ export default function OutstandingPage() {
                                 ))}
                               </tbody>
                             </table>
+                            <div className="flex flex-wrap items-center gap-2 px-2 pb-2 pt-1">
+                              <a className="btn-secondary h-8 px-3 text-xs" href={`/print/ledger-statement/${p.ledgerId}?to=${asOn}`} target="_blank" rel="noreferrer">
+                                <Printer size={13} /> Print statement
+                              </a>
+                              <a
+                                className="btn-secondary h-8 px-3 text-xs"
+                                href={`/print/ledger-statement/${p.ledgerId}?to=${asOn}&confirm=1`}
+                                target="_blank"
+                                rel="noreferrer"
+                                title="The statement with a request to sign and return the balance"
+                              >
+                                <FileSignature size={13} /> Confirmation letter
+                              </a>
+                            </div>
                           </td>
                         </tr>
                       )}

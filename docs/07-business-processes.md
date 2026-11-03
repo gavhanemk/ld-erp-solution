@@ -865,6 +865,28 @@ flow, not too complicated"):**
   voucher, cleared oldest month first; due the 7th (30 April for March).
   TDS customers deducted, by customer, for Form 26AS.
 
+**Dashboard and prints (phase 6, 3 Nov 2026):**
+
+- Accounts → Dashboard: cash in hand, money at the bank (all accounts
+  together, cash credit used shown below), what customers owe and what is
+  owed to suppliers (past due, and supplier bills falling due this week),
+  GST to pay (last month's return until the 20th, then this month so far)
+  and TDS to pay in, the year's sales, purchases, profit and closing stock,
+  and two month-by-month charts (sales vs purchases; money in vs money out,
+  transfers between cash and bank left out). A "To do" list at the top
+  names what wants doing: documents not in the books, last month not
+  closed, bank entries over a month old never matched to the statement,
+  opening balances that do not agree, TDS paid late, deductees without PAN.
+  Every figure is the same number as the screen it opens.
+- Prints: every voucher (Print in the voucher window) with its lines, the
+  bills it settles, the amount in words and signatures (prepared, checked,
+  authorised, and the receiver's on a payment). A party's statement of
+  account (Print on the Ledger, Print statement under a party on
+  Outstanding) with running balance and the bills still open; the same
+  page as a **confirmation of accounts** letter (Confirmation) asking the
+  party to sign and return the balance — what the auditors ask for at the
+  year end.
+
 Phases: 1 the books (chart, vouchers, day book, ledger, trial balance) →
 2 automatic posting from Sales and Purchase → 3 outstanding, bank
 reconciliation, opening import → 4 P&L, balance sheet, brand P&L, closing

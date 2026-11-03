@@ -156,7 +156,7 @@ export const navItems: NavItem[] = [
   {
     label: 'Accounts', icon: BookOpen,
     children: [
-      { label: 'Dashboard', href: '/accounts/dashboard', planned: true },
+      { label: 'Dashboard', href: '/accounts/dashboard' },
       { label: 'Day Book', href: '/accounts/vouchers' },
       { label: 'Ledger', href: '/accounts/ledger' },
       { label: 'Cash & Bank', href: '/accounts/bank' },
