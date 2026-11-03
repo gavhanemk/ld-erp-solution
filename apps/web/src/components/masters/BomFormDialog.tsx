@@ -30,6 +30,8 @@ import { cn, formatDate, formatRupees } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { itemFormFields } from '@/components/masters/itemFormFields'
 
 export interface BomLineSize {
   id?: string
@@ -315,6 +317,13 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
 
   const [styles, setStyles] = useState<StyleOption[]>([])
   const [items, setItems] = useState<ItemOption[]>([])
+  /**
+   * A new item being made from a component line's dropdown, in the Items
+   * master's own form over this one. Saved, it is in Masters → Items like any
+   * other, and goes into that line.
+   */
+  const [addingItem, setAddingItem] = useState<{ rowKey: number; typed: string } | null>(null)
+  const mayAddItem = can('masters', 'create')
   const [departments, setDepartments] = useState<DepartmentOption[]>([])
   const [routings, setRoutings] = useState<RoutingOption[]>([])
   const [gstRate, setGstRate] = useState<number | null>(null)
@@ -1031,6 +1040,8 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
                           title={item?.name}
                           aria-label={`Line ${index + 1} item`}
                           autoFocus={line.rowKey === addedKey}
+                          createNoun="item"
+                          onCreate={mayAddItem && !frozen ? (typed) => setAddingItem({ rowKey: line.rowKey, typed }) : undefined}
                           onChange={(e) =>
                             setLine(index, {
                               componentItemId: e.target.value,
@@ -1662,6 +1673,27 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       {step === 1 && materialsStep}
       {step === 2 && costingStep}
       {step === 3 && pricingStep}
+
+      {addingItem && (
+        <MasterFormDialog<ItemOption & Record<string, unknown>>
+          open
+          stacked
+          onClose={() => setAddingItem(null)}
+          onSaved={() => {}}
+          onCreated={(row) => {
+            setItems((list) => [...list.filter((i) => i.id !== row.id), row])
+            setLines((ls) =>
+              ls.map((l) => (l.rowKey === addingItem.rowKey ? { ...l, componentItemId: row.id, carried: nothingCarried } : l)),
+            )
+          }}
+          resource="items"
+          fields={itemFormFields}
+          initialValues={{ ...(addingItem.typed ? { name: addingItem.typed } : {}), isActive: true }}
+          title="Item"
+          columns={4}
+          wide
+        />
+      )}
     </FormFrame>
   )
 }
