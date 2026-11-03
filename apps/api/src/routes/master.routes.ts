@@ -2341,7 +2341,8 @@ const bomInclude = {
   },
 }
 
-const BOM_SORT_FIELDS = ['createdAt', 'version', 'color', 'totalCost', 'status']
+// 'style': by style code, then colour, newest first — a style's BOMs together, as the list shows them.
+const BOM_SORT_FIELDS = ['createdAt', 'version', 'color', 'totalCost', 'status', 'style']
 const BOM_STATUSES = ['DRAFT', 'APPROVED', 'OBSOLETE']
 
 /**
@@ -2854,16 +2855,18 @@ router.get('/bom', requirePermission(MODULE, 'view'), async (req: AuthRequest, r
   if (typeof req.query.styleId === 'string' && req.query.styleId) where.styleId = req.query.styleId
   if (typeof req.query.color === 'string' && req.query.color) where.color = req.query.color
 
+  // One status, or several with commas ("DRAFT,APPROVED": the ones in use and on the way).
   if (typeof req.query.status === 'string' && req.query.status) {
-    const status = req.query.status.toUpperCase()
-    if (!BOM_STATUSES.includes(status)) {
+    const statuses = req.query.status.toUpperCase().split(',').map((x) => x.trim()).filter(Boolean)
+    const wrong = statuses.find((x) => !BOM_STATUSES.includes(x))
+    if (wrong || !statuses.length) {
       throw new AppError(
         `'${req.query.status}' is not a BOM status. Use one of: ${BOM_STATUSES.join(', ')}.`,
         400,
         'INVALID_STATUS',
       )
     }
-    where.status = status
+    where.status = statuses.length === 1 ? statuses[0] : { in: statuses }
   }
 
   if (q) {
@@ -2879,7 +2882,10 @@ router.get('/bom', requirePermission(MODULE, 'view'), async (req: AuthRequest, r
     prisma.bOM.findMany({
       where,
       include: bomInclude,
-      orderBy: { [sortField]: sortOrder },
+      orderBy:
+        sortField === 'style'
+          ? [{ style: { code: sortOrder } }, { color: 'asc' }, { createdAt: 'desc' }]
+          : { [sortField]: sortOrder },
       skip: (page - 1) * limit,
       take: limit,
     }),

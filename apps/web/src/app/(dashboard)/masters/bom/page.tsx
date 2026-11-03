@@ -26,6 +26,9 @@ import { useAppSettings } from '@/lib/appSettings'
 import { useEscape } from '@/lib/useEscape'
 import { BomFormDialog, type Bom } from '@/components/masters/BomFormDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { KpiTile, TONE } from '@/components/dashboard/DashKit'
+import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { ScrollableTable } from '@/components/tables/ScrollableTable'
 
 /** The six status colours are fixed; a BOM uses three of them. */
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -33,6 +36,17 @@ const STATUS: Record<string, { label: string; cls: string }> = {
   APPROVED: { label: 'Approved', cls: 'badge-success' },
   OBSOLETE: { label: 'Obsolete', cls: 'badge-neutral' },
 }
+
+/** What a status means for using the BOM, beside its badge. */
+const MEANS: Record<string, string> = {
+  APPROVED: 'In use',
+  DRAFT: 'Not in use yet',
+  OBSOLETE: 'Replaced',
+}
+
+/** What the list shows: what is in use and on the way, one status, or everything. */
+type View = 'live' | 'APPROVED' | 'DRAFT' | 'OBSOLETE' | 'all'
+const VIEW_STATUS: Record<View, string> = { live: 'DRAFT,APPROVED', APPROVED: 'APPROVED', DRAFT: 'DRAFT', OBSOLETE: 'OBSOLETE', all: '' }
 
 const num = (v: unknown) => Number(v ?? 0)
 
@@ -71,9 +85,11 @@ export default function BomPage() {
 
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
-  const [activeOnly, setActiveOnly] = useState(true)
-  const [status, setStatus] = useState('')
+  // Retired BOMs are kept for the record, out of the way until asked for.
+  const [view, setView] = useState<View>('live')
   const [page, setPage] = useState(1)
+  /** How many BOMs are approved, drafts and retired, over the whole list. */
+  const [counts, setCounts] = useState<{ APPROVED: number; DRAFT: number; OBSOLETE: number } | null>(null)
 
   const [expanded, setExpanded] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -89,20 +105,27 @@ export default function BomPage() {
 
   useEffect(() => {
     setPage(1)
-  }, [debounced, activeOnly, status])
+  }, [debounced, view])
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const params = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
+      // A style's BOMs together, colour by colour, newest first.
+      const params = new URLSearchParams({ page: String(page), limit: String(rowsPerPage), sort: 'style', order: 'asc' })
       if (debounced) params.set('q', debounced)
-      if (activeOnly) params.set('active', 'true')
-      if (status) params.set('status', status)
+      if (VIEW_STATUS[view]) params.set('status', VIEW_STATUS[view])
 
-      const res = await api.get<Paginated<Bom>>(`/masters/bom?${params.toString()}`)
+      const count = (st: string) => api.get<Paginated<Bom>>(`/masters/bom?status=${st}&limit=1`).then((r) => r.pagination.total)
+      const [res, approved, draft, retired] = await Promise.all([
+        api.get<Paginated<Bom>>(`/masters/bom?${params.toString()}`),
+        count('APPROVED'),
+        count('DRAFT'),
+        count('OBSOLETE'),
+      ])
       setBoms(res.data)
       setPagination(res.pagination)
+      setCounts({ APPROVED: approved, DRAFT: draft, OBSOLETE: retired })
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?',
@@ -111,7 +134,7 @@ export default function BomPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, rowsPerPage, debounced, activeOnly, status])
+  }, [page, rowsPerPage, debounced, view])
 
   useEffect(() => {
     void load()
@@ -156,6 +179,20 @@ export default function BomPage() {
   }
 
   const empty = !error && boms && boms.length === 0
+  const canCost = can('masters', 'approve')
+  const COLS = canCost ? 9 : 7
+  /** A tile filters the list to its BOMs; pressed again, back to what is in use. */
+  const pick = (v: View) => setView((cur) => (cur === v ? 'live' : v))
+
+  // The page's BOMs under their style, each style where its first BOM falls.
+  const styleOf = (b: Bom) => b.styleId ?? b.style?.code ?? b.id
+  const rows = boms ?? []
+  const perStyle = new Map<string, Bom[]>()
+  for (const b of rows) {
+    const k = styleOf(b)
+    if (!perStyle.has(k)) perStyle.set(k, [])
+    perStyle.get(k)!.push(b)
+  }
 
   return (
     <div className="space-y-6">
@@ -163,9 +200,7 @@ export default function BomPage() {
         <div>
           <h1 className="page-title">Bill of Materials</h1>
           <p className="page-subtitle">
-            {loading && !boms
-              ? 'Loading...'
-              : `${pagination.total} BOM${pagination.total === 1 ? '' : 's'}`}
+            What goes into one piece of each style and colour, and what it costs. The approved BOM is the one orders use.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -189,53 +224,74 @@ export default function BomPage() {
         </div>
       </div>
 
-      <div className="glass-card p-4 flex flex-wrap items-center gap-3">
-        <div className="flex-1 min-w-60 flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <KpiTile
+          icon={CheckCircle2}
+          tone={TONE.emerald}
+          label="Approved"
+          value={counts ? String(counts.APPROVED) : '…'}
+          sub={view === 'APPROVED' ? 'showing only these · click to show all' : 'in use: orders and MOs take these'}
+          onClick={() => pick('APPROVED')}
+          active={view === 'APPROVED'}
+        />
+        <KpiTile
+          icon={PencilLine}
+          tone={TONE.amber}
+          label="Drafts"
+          value={counts ? String(counts.DRAFT) : '…'}
+          valueClass={counts?.DRAFT ? 'text-amber-500' : 'text-foreground'}
+          sub={view === 'DRAFT' ? 'showing only these · click to show all' : 'to check and approve'}
+          onClick={() => pick('DRAFT')}
+          active={view === 'DRAFT'}
+        />
+        <KpiTile
+          icon={Archive}
+          tone={TONE.sky}
+          label="Retired"
+          value={counts ? String(counts.OBSOLETE) : '…'}
+          sub={view === 'OBSOLETE' ? 'showing only these · click to show all' : 'replaced or no longer offered · kept for the record'}
+          onClick={() => pick('OBSOLETE')}
+          active={view === 'OBSOLETE'}
+        />
+      </div>
+
+      <div className="glass-card flex flex-wrap items-center gap-3 p-4">
+        <div className="flex min-w-60 flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3 py-2">
           <Search size={15} className="text-muted-foreground" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by style name, code or version..."
-            className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground flex-1 focus:outline-none"
+            placeholder="Search style code, style name, colour or version..."
+            className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
             aria-label="Search BOMs"
             data-hotkey="search"
           />
         </div>
-        <SmartSelect
-          className="form-input w-auto"
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          aria-label="Filter by status"
-        >
-          <option value="">Any status</option>
-          <option value="DRAFT">Draft</option>
-          <option value="APPROVED">Approved</option>
-          <option value="OBSOLETE">Obsolete</option>
+        <SmartSelect className="form-input w-auto" value={view} onChange={(e) => setView(e.target.value as View)} aria-label="Show">
+          <option value="live">In use and drafts</option>
+          <option value="APPROVED">Approved only</option>
+          <option value="DRAFT">Drafts only</option>
+          <option value="OBSOLETE">Retired only</option>
+          <option value="all">All, retired too</option>
         </SmartSelect>
-        <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={activeOnly}
-            onChange={(e) => setActiveOnly(e.target.checked)}
-            className="accent-teal-500"
-          />
-          Active only
-        </label>
+        <span className="ml-auto text-xs text-muted-foreground">
+          {loading && !boms ? 'Loading…' : `${pagination.total} ${pagination.total === 1 ? 'BOM' : 'BOMs'}`}
+        </span>
       </div>
 
       {notice && (
-        <div className="glass-card p-4 flex items-start gap-3 border-amber-500/40">
-          <AlertCircle size={18} className="text-amber-400 mt-0.5 shrink-0" />
+        <div className="glass-card flex items-start gap-3 border-amber-500/40 p-4">
+          <AlertCircle size={18} className="mt-0.5 shrink-0 text-amber-400" />
           <p className="text-sm text-foreground">{notice}</p>
         </div>
       )}
 
       {error && (
-        <div className="glass-card p-4 flex items-start gap-3 border-red-500/40">
-          <AlertCircle size={18} className="text-red-400 mt-0.5 shrink-0" />
+        <div className="glass-card flex items-start gap-3 border-red-500/40 p-4">
+          <AlertCircle size={18} className="mt-0.5 shrink-0 text-red-400" />
           <div>
             <p className="text-sm font-semibold text-red-400">Could not load bills of materials</p>
-            <p className="text-xs text-muted-foreground mt-1">{error}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{error}</p>
           </div>
         </div>
       )}
@@ -244,37 +300,95 @@ export default function BomPage() {
 
       {empty && (
         <div className="glass-card p-10 text-center">
-          <Layers size={22} className="text-muted-foreground mx-auto mb-3" />
-          <p className="text-sm text-foreground font-medium">
-            {debounced || status ? 'Nothing matches that' : 'No bills of materials yet'}
+          <Layers size={22} className="mx-auto mb-3 text-muted-foreground" />
+          <p className="text-sm font-medium text-foreground">
+            {debounced || view !== 'live' ? 'Nothing matches that' : 'No bills of materials yet'}
           </p>
-          <p className="text-xs text-muted-foreground mt-1">
-            {debounced || status
-              ? 'Try the style code, or clear the filters.'
+          <p className="mt-1 text-xs text-muted-foreground">
+            {debounced || view !== 'live'
+              ? 'Try the style code, or show all.'
               : 'Pick a style and list what goes into one piece — fabric, trims, buttons, packing. The cost per garment comes out of it.'}
           </p>
         </div>
       )}
 
-      <div className="space-y-3">
-        {(boms ?? []).map((bom, i) => (
-          <BomRow
-            key={bom.id}
-            bom={bom}
-            first={i === 0}
-            open={expanded === bom.id}
-            busy={busy}
-            onToggle={() => setExpanded(expanded === bom.id ? null : bom.id)}
-            onEdit={() => {
-              setEditing(bom)
-              setDialogOpen(true)
-            }}
-            onApprove={() => approve(bom)}
-            onCopy={() => copy(bom)}
-            onRetire={() => retire(bom)}
-          />
-        ))}
-      </div>
+      {rows.length > 0 && (
+        <div className={cn('glass-card list-scope overflow-hidden p-0 transition-opacity', loading && 'opacity-60')}>
+          <ScrollableTable>
+            <table className="data-table table-compact min-w-full">
+              <thead>
+                <tr className="bg-secondary">
+                  <th style={{ width: 44 }} />
+                  <th className="whitespace-nowrap">Colour · version</th>
+                  <th className="whitespace-nowrap">Status</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                    Components
+                  </th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                    Material / pc
+                  </th>
+                  {canCost && (
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                      Cost / pc
+                    </th>
+                  )}
+                  {canCost && (
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                      Selling price
+                    </th>
+                  )}
+                  <th className="whitespace-nowrap">Approved</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((bom, i) => {
+                  const k = styleOf(bom)
+                  const head = i === 0 || styleOf(rows[i - 1]) !== k
+                  const mine = perStyle.get(k) ?? []
+                  const colours = [...new Set(mine.map((b) => b.color).filter(Boolean))]
+                  return (
+                    <Fragment key={bom.id}>
+                      {head && (
+                        <tr className="border-t border-t-border bg-secondary/60">
+                          <td colSpan={COLS} className="!p-0">
+                            <div className="sticky left-0 flex w-[100cqw] flex-wrap items-center gap-x-2.5 gap-y-1 px-4 py-2">
+                              <Layers size={15} className="shrink-0 text-primary" />
+                              <span className="font-mono text-sm font-semibold text-primary">{bom.style?.code}</span>
+                              <span className="text-sm font-medium text-foreground">{bom.style?.name}</span>
+                              {bom.style?.brandType === 'VHAGAR' && <span className="vhagar-accent text-xs font-bold">VHAGAR</span>}
+                              <span className="rounded-full border border-border bg-card px-2 py-0.5 text-[11px] text-muted-foreground tabular-nums">
+                                {mine.length} {mine.length === 1 ? 'BOM' : 'BOMs'}
+                                {colours.length > 0 ? ` · ${colours.length} ${colours.length === 1 ? 'colour' : 'colours'}` : ''}
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      <BomLine
+                        bom={bom}
+                        first={i === 0}
+                        cols={COLS}
+                        canCost={canCost}
+                        open={expanded === bom.id}
+                        busy={busy}
+                        onToggle={() => setExpanded(expanded === bom.id ? null : bom.id)}
+                        onEdit={() => {
+                          setEditing(bom)
+                          setDialogOpen(true)
+                        }}
+                        onApprove={() => approve(bom)}
+                        onCopy={() => copy(bom)}
+                        onRetire={() => retire(bom)}
+                      />
+                    </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
+          </ScrollableTable>
+        </div>
+      )}
 
       {pagination.pages > 1 && (
         <div className="glass-card p-4 flex items-center justify-between">
@@ -324,10 +438,13 @@ export default function BomPage() {
   )
 }
 
-interface RowProps {
+interface LineProps {
   bom: Bom
   open: boolean
   busy: boolean
+  canCost: boolean
+  /** Columns in the table, for the detail row under a line. */
+  cols: number
   onToggle: () => void
   onEdit: () => void
   onApprove: () => void
@@ -337,8 +454,121 @@ interface RowProps {
   first?: boolean
 }
 
-function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire, first }: RowProps) {
+/**
+ * One BOM as a line of the table: its colour and version, what its status
+ * means, its figures, who approved it, and what can be done to it. Opened,
+ * the full detail sits under it.
+ */
+function BomLine({ bom, open, busy, canCost, cols, onToggle, onEdit, onApprove, onCopy, onRetire, first }: LineProps) {
   const status = STATUS[bom.status] ?? STATUS.DRAFT
+  const material = num(bom.totalCost)
+  const cost = bom.costPerPiece != null ? num(bom.costPerPiece) : material + num(bom.labourCost) + num(bom.overheadCost)
+  const price = bom.sellingPrice != null ? num(bom.sellingPrice) : null
+  const n = bom.lines?.length ?? 0
+  const mayApprove = bom.status === 'DRAFT' && can('masters', 'approve')
+
+  const actions: RowAction[] = [
+    { key: 'edit', label: bom.status === 'APPROVED' ? 'Open (price and notes)' : 'Edit', icon: <Pencil size={14} />, onClick: onEdit },
+    ...(mayApprove ? [{ key: 'approve', label: 'Approve', icon: <CheckCircle2 size={14} />, onClick: onApprove }] : []),
+    { key: 'copy', label: 'Copy to a new version or colour', icon: <Copy size={14} />, onClick: onCopy },
+    ...(bom.status !== 'OBSOLETE' || bom.isActive
+      ? [{ key: 'retire', label: 'Stop offering', icon: <Ban size={14} />, onClick: onRetire, danger: true }]
+      : []),
+  ]
+
+  return (
+    <>
+      <tr data-row tabIndex={first ? 0 : -1} className={cn(bom.status === 'OBSOLETE' && 'opacity-70')}>
+        <td>
+          <button
+            onClick={onToggle}
+            className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary transition-colors hover:bg-primary/20"
+            aria-label={`${open ? 'Hide' : 'Show'} the components and costing of ${bomLabel(bom)}`}
+            aria-expanded={open}
+            title={open ? 'Hide details' : 'Show components and costing'}
+            data-row-open
+          >
+            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        </td>
+        <td className="whitespace-nowrap">
+          <div className="text-sm font-medium text-foreground">
+            {bom.color ?? (
+              (bom.style?.colors?.length ?? 0) > 0 ? (
+                // Made before BOMs were per colour. Copying it to each colour is
+                // how it gets one, so it is flagged rather than left to look normal.
+                <span className="badge-warning">Colour not set</span>
+              ) : (
+                <span className="text-muted-foreground">All colours</span>
+              )
+            )}
+          </div>
+          <div className="font-mono text-[11px] text-muted-foreground">
+            v{bom.version}
+            {bom.baseSize && ` · sized on ${bom.baseSize.label}`}
+          </div>
+        </td>
+        <td className="whitespace-nowrap">
+          <span className={status.cls}>{status.label}</span>
+          {!bom.isActive && <span className="badge-danger ml-1.5">Not offered</span>}
+          <div className="mt-0.5 text-[11px] text-muted-foreground">{MEANS[bom.status] ?? ''}</div>
+        </td>
+        <td className="whitespace-nowrap text-right tabular-nums">{n}</td>
+        <td className="whitespace-nowrap text-right font-mono text-sm">{formatRupees(material)}</td>
+        {canCost && <td className="whitespace-nowrap text-right font-mono text-sm font-semibold text-foreground">{formatRupees(cost)}</td>}
+        {canCost && (
+          <td className="whitespace-nowrap text-right">
+            {price !== null ? (
+              <>
+                <div className="font-mono text-sm font-semibold text-primary">{formatRupees(price)}</div>
+                {bom.marginPercent != null && <div className="text-[11px] text-muted-foreground">{percent(bom.marginPercent)} margin</div>}
+              </>
+            ) : (
+              <span className="text-xs text-muted-foreground">Not priced</span>
+            )}
+          </td>
+        )}
+        <td className="whitespace-nowrap text-xs">
+          {bom.approvedBy ? (
+            <>
+              <div className="text-foreground">{bom.approvedBy.name}</div>
+              {bom.approvedAt && <div className="text-muted-foreground">{formatDate(bom.approvedAt)}</div>}
+            </>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </td>
+        <td className="whitespace-nowrap text-right">
+          <div className="flex justify-end gap-1.5">
+            {mayApprove ? (
+              <button className="btn-primary h-7 px-2.5 text-xs" onClick={onApprove} disabled={busy}>
+                <CheckCircle2 size={13} /> Approve
+              </button>
+            ) : (
+              <button className="btn-secondary h-7 px-2.5 text-xs" onClick={onEdit} disabled={busy}>
+                <Pencil size={13} /> {bom.status === 'APPROVED' ? 'Open' : 'Edit'}
+              </button>
+            )}
+            <ActionMenu label={`Actions for ${bomLabel(bom)}`} items={actions} />
+          </div>
+        </td>
+      </tr>
+      {open && (
+        <tr>
+          <td colSpan={cols} className="!p-0 bg-secondary/30">
+            {/* Sized to the visible list, not the scrolling table. */}
+            <div className="sticky left-0 w-[100cqw]">
+              <BomDetail bom={bom} />
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+/** Everything about one BOM: what its status means, the cost sum, its components and costing, its notes. */
+function BomDetail({ bom }: { bom: Bom }) {
   // Labour, overhead, cost and price reach only those who may approve masters;
   // the API leaves them out for everyone else, who see material alone.
   const canCost = can('masters', 'approve')
@@ -403,101 +633,8 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
   }, [bom.lines])
 
   return (
-    <div className="glass-card overflow-hidden" data-row tabIndex={first ? 0 : -1}>
-      <div className="flex flex-wrap items-center gap-3 p-4">
-        <button
-          onClick={onToggle}
-          className="btn-ghost p-1"
-          aria-label={open ? 'Collapse' : 'Expand'}
-          data-row-open
-        >
-          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </button>
+    <div className="space-y-6 px-4 py-4">
 
-        <div className="flex-1 min-w-48">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-xs text-teal-400">{bom.style?.code}</span>
-            <span className="text-sm font-medium text-foreground truncate">{bom.style?.name}</span>
-            {bom.color ? (
-              <span className="text-sm text-foreground">· {bom.color}</span>
-            ) : (
-              (bom.style?.colors?.length ?? 0) > 0 && (
-                // Made before BOMs were per colour. Copying it to each colour is
-                // how it gets one, so it is flagged rather than left to look normal.
-                <span className="badge-warning">Colour not set</span>
-              )
-            )}
-            <span className="badge-neutral">v{bom.version}</span>
-            <span className={status.cls}>{status.label}</span>
-            {!bom.isActive && <span className="badge-danger">Not offered</span>}
-          </div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {bom.lines?.length ?? 0} component
-            {bom.lines?.length === 1 ? '' : 's'}
-            {bom.baseSize && ` · sized on ${bom.baseSize.label}`}
-            {bom.style?.brandType === 'VHAGAR' && (
-              <span className="vhagar-accent font-bold ml-2">VHAGAR</span>
-            )}
-          </p>
-        </div>
-
-        {canCost ? (
-          <div className="flex items-center gap-5 text-right">
-            <div>
-              <p className="font-mono text-sm font-bold text-foreground">{formatRupees(cost)}</p>
-              <p className="text-xs text-muted-foreground">cost per piece</p>
-            </div>
-            <div>
-              <p className={cn('font-mono text-sm font-bold', price !== null ? 'text-primary' : 'text-muted-foreground')}>
-                {price !== null ? formatRupees(price) : '—'}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {price !== null && bom.marginPercent != null ? `price · ${percent(bom.marginPercent)} margin` : 'not priced'}
-              </p>
-            </div>
-          </div>
-        ) : (
-          <div className="text-right">
-            <p className="font-mono text-sm font-bold text-foreground">{formatRupees(material)}</p>
-            <p className="text-xs text-muted-foreground">material per piece</p>
-          </div>
-        )}
-
-        <div className="flex items-center gap-1">
-          <button className="btn-ghost p-1.5" onClick={onEdit} disabled={busy} title="Edit">
-            <Pencil size={14} />
-          </button>
-          {bom.status === 'DRAFT' && (
-            <button
-              className="btn-ghost p-1.5 text-emerald-400"
-              onClick={onApprove}
-              disabled={busy}
-              title="Approve BOM"
-            >
-              <CheckCircle2 size={14} />
-            </button>
-          )}
-          <button
-            className="btn-ghost p-1.5"
-            onClick={onCopy}
-            disabled={busy}
-            title="Copy to a new version or another colour"
-          >
-            <Copy size={14} />
-          </button>
-          <button
-            className="btn-ghost p-1.5 text-red-400"
-            onClick={onRetire}
-            disabled={busy}
-            title="Stop offering this BOM"
-          >
-            <Ban size={14} />
-          </button>
-        </div>
-      </div>
-
-      {open && (
-        <div className="space-y-6 border-t border-border px-4 py-4">
           {/* What this BOM's status means, said once, in words, before any numbers. */}
           <div className="flex items-start gap-3 rounded-lg border border-border bg-secondary/40 px-4 py-3">
             <note.icon size={16} className={cn('mt-0.5 shrink-0', note.iconClass)} />
@@ -823,8 +960,6 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
               <p className="whitespace-pre-line text-sm text-foreground">{bom.notes}</p>
             </section>
           )}
-        </div>
-      )}
     </div>
   )
 }
