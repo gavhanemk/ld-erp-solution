@@ -3,7 +3,7 @@ import type { BillRefKind, Prisma, VoucherKind } from '@prisma/client'
 import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf, nextDocumentNumber } from '../../lib/docNumber'
 import { VOUCHER_SERIES } from './chart.service'
-import { bankDatesOf, bankKey, booksSettings, dayValue, istDay, openBills, r2, todayIst, type BooksSettings } from './books.service'
+import { bankDatesOf, bankKey, booksSettings, dayText, dayValue, istDay, openBills, r2, todayIst, type BooksSettings } from './books.service'
 
 /**
  * Vouchers typed in Accounts: Payment, Receipt, Contra and Journal.
@@ -117,10 +117,10 @@ export function checkDay(day: string, s: BooksSettings, what = 'A voucher') {
     throw new AppError('Set the day the books start (Settings → Company) before entering vouchers.', 409, 'BOOKS_NOT_STARTED')
   }
   if (day < s.booksStart) {
-    throw new AppError(`${what} cannot be dated before the books start on ${s.booksStart}.`, 400, 'BEFORE_BOOKS')
+    throw new AppError(`${what} cannot be dated before the books start on ${dayText(s.booksStart)}.`, 400, 'BEFORE_BOOKS')
   }
   if (s.lockedUpTo && day <= s.lockedUpTo) {
-    throw new AppError(`The books are closed up to ${s.lockedUpTo}. ${what} dated ${day} cannot be entered, changed or cancelled.`, 409, 'PERIOD_LOCKED')
+    throw new AppError(`The books are closed up to ${dayText(s.lockedUpTo)}. ${what} dated ${dayText(day)} cannot be entered, changed or cancelled.`, 409, 'PERIOD_LOCKED')
   }
   if (day > todayIst()) {
     throw new AppError(`${what} cannot be dated after today.`, 400, 'FUTURE_DATE')
@@ -332,7 +332,7 @@ export async function cancelVoucher(tx: Tx, id: string, reason: string, userId: 
   if (v.sourceType) throw new AppError(`${v.voucherNo} was written by its document. Cancel the document, and its voucher goes with it.`, 409, 'FROM_DOCUMENT')
   const s = await booksSettings(tx)
   if (s.lockedUpTo && istDay(v.date) <= s.lockedUpTo) {
-    throw new AppError(`The books are closed up to ${s.lockedUpTo}; ${v.voucherNo} cannot be cancelled.`, 409, 'PERIOD_LOCKED')
+    throw new AppError(`The books are closed up to ${dayText(s.lockedUpTo)}; ${v.voucherNo} cannot be cancelled.`, 409, 'PERIOD_LOCKED')
   }
   const raised = v.lines.flatMap((l) => l.billRefs).filter((r) => r.kind !== 'AGAINST_REF')
   for (const r of raised) {

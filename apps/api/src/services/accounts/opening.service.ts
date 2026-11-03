@@ -3,7 +3,7 @@ import { prisma } from '@ld-erp/database'
 import type { Prisma } from '@prisma/client'
 import { AppError } from '../../middleware/errorHandler'
 import { addDropdowns, addHowToSheet, addTemplateSheet, readSheetRows, type SheetColumn } from '../../lib/sheet'
-import { booksSettings, dayValue, istDay, r2 } from './books.service'
+import { booksSettings, dayText, dayValue, istDay, r2 } from './books.service'
 
 /**
  * The old books into the new: the trial balance on the day before the books
@@ -52,7 +52,7 @@ async function mustBeOpen(tx: Tx | typeof prisma) {
   const s = await booksSettings(tx as Tx)
   if (!s.booksStart) throw new AppError('Set the day the books start (Chart of Accounts → Books) first: opening balances are as at that day.', 409, 'BOOKS_NOT_STARTED')
   if (s.lockedUpTo && s.lockedUpTo >= s.booksStart) {
-    throw new AppError(`The books are closed up to ${s.lockedUpTo}, which includes the opening balances.`, 409, 'PERIOD_LOCKED')
+    throw new AppError(`The books are closed up to ${dayText(s.lockedUpTo)}, which includes the opening balances.`, 409, 'PERIOD_LOCKED')
   }
   return s
 }

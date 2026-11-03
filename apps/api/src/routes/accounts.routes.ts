@@ -8,6 +8,7 @@ import { writeAuditLog } from '../lib/audit'
 import { ensureChart } from '../services/accounts/chart.service'
 import {
   booksSettings,
+  dayText,
   dayValue,
   fyStartOf,
   istDay,
@@ -117,7 +118,7 @@ router.patch('/settings', requirePermission(MODULE, 'approve'), async (req: Auth
     // A voucher typed here stays; one written by a document simply leaves the
     // books with it when they start after its date.
     const earlier = await prisma.voucher.findFirst({ where: { status: 'POSTED', sourceType: null, date: { lt: dayValue(body.booksStart) } }, select: { voucherNo: true } })
-    if (earlier) throw new AppError(`${earlier.voucherNo} is dated before ${body.booksStart}. The books cannot start after a voucher already in them.`, 409, 'VOUCHERS_BEFORE')
+    if (earlier) throw new AppError(`${earlier.voucherNo} is dated before ${dayText(body.booksStart)}. The books cannot start after a voucher already in them.`, 409, 'VOUCHERS_BEFORE')
     if (before.lockedUpTo && before.booksStart && before.lockedUpTo >= before.booksStart) {
       throw new AppError('The books are closed. Reopen them before moving the day they start.', 409, 'PERIOD_LOCKED')
     }
@@ -131,7 +132,7 @@ router.patch('/settings', requirePermission(MODULE, 'approve'), async (req: Auth
       const waiting = (await pendingDocuments(prisma)).pending.filter((p) => p.date <= body.lockedUpTo!)
       if (waiting.length) {
         throw new AppError(
-          `${waiting.length} document${waiting.length === 1 ? ' is' : 's are'} dated on or before ${body.lockedUpTo} and not in the books yet (first: ${waiting[0].number}). Bring them in from the Day Book before closing.`,
+          `${waiting.length} document${waiting.length === 1 ? ' is' : 's are'} dated on or before ${dayText(body.lockedUpTo)} and not in the books yet (first: ${waiting[0].number}). Bring them in from the Day Book before closing.`,
           409,
           'DOCUMENTS_WAITING',
         )
@@ -414,7 +415,7 @@ const ledgerSchema = z.object({
 async function refuseClosedOpening() {
   const s = await booksSettings(prisma)
   if (s.lockedUpTo && s.booksStart && s.lockedUpTo >= s.booksStart) {
-    throw new AppError(`The books are closed up to ${s.lockedUpTo}, which includes the opening balances.`, 409, 'PERIOD_LOCKED')
+    throw new AppError(`The books are closed up to ${dayText(s.lockedUpTo)}, which includes the opening balances.`, 409, 'PERIOD_LOCKED')
   }
 }
 
@@ -606,10 +607,10 @@ router.patch('/cost-centres/:id', requirePermission(MODULE, 'edit'), async (req:
 const KINDS = Object.keys(KIND_LABEL) as VoucherKind[]
 
 /**
- * GET /api/accounts/vouchers?from=&to=&kind=PAYMENT,RECEIPT&status=all&q=&ledgerId=&page=&limit=
+ * GET /api/accounts/vouchers?from=&to=&kind=PAYMENT,RECEIPT&status=all&q=&ledgerId=&page=&limit=&order=asc
  *
- * The day book: every voucher in the period, oldest first within a day, with
- * its lines. From the first of this month unless asked otherwise. Cancelled
+ * The day book: every voucher in the period, newest first (oldest first with
+ * order=asc), with its lines. From the first of this month unless asked otherwise. Cancelled
  * vouchers are left out unless asked for.
  */
 router.get('/vouchers', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -618,6 +619,8 @@ router.get('/vouchers', requirePermission(MODULE, 'view'), async (req, res) => {
   const period = periodFrom({ from: req.query.from ?? `${today.slice(0, 8)}01`, to: req.query.to }, s)
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+  // Newest first on screen, so a voucher just saved is at the top; ?order=asc for a register in date order.
+  const order: Prisma.SortOrder = req.query.order === 'asc' ? 'asc' : 'desc'
   const where: Prisma.VoucherWhereInput = {
     date: { gte: new Date(`${period.from}T00:00:00+05:30`), lte: new Date(`${period.to}T23:59:59.999+05:30`) },
   }
@@ -641,7 +644,7 @@ router.get('/vouchers', requirePermission(MODULE, 'view'), async (req, res) => {
   const [rows, total, sums] = await Promise.all([
     prisma.voucher.findMany({
       where,
-      orderBy: [{ date: 'asc' }, { createdAt: 'asc' }],
+      orderBy: [{ date: order }, { createdAt: order }],
       skip: (page - 1) * limit,
       take: limit,
       select: {

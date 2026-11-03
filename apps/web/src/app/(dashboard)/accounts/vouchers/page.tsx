@@ -61,8 +61,8 @@ const periodStart = () => {
 }
 
 /**
- * The day book: every voucher in a period, as it went into the books, oldest
- * first. Each row names the ledgers it debited and credited; clicking one
+ * The day book: every voucher in a period, newest first, so one just saved
+ * is at the top; the export runs oldest first, as a register. Each row names the ledgers it debited and credited; clicking one
  * opens it, with its history and, for one typed here, Alter and Cancel.
  *
  * New voucher (Alt+N) opens a Payment; F4–F7 in that window switch to Contra,
@@ -125,8 +125,8 @@ export default function DayBookPage() {
   useEffect(() => setPage(1), [from, to, kind, status, debounced, ledgerId])
 
   const url = useCallback(
-    (p: number, limit: number) => {
-      const qs = new URLSearchParams({ from, to, page: String(p), limit: String(limit) })
+    (p: number, limit: number, order: 'asc' | 'desc' = 'desc') => {
+      const qs = new URLSearchParams({ from, to, page: String(p), limit: String(limit), order })
       if (kind) qs.set('kind', kind)
       if (status) qs.set('status', status)
       if (debounced) qs.set('q', debounced)
@@ -169,7 +169,7 @@ export default function DayBookPage() {
 
   const exportList = async (format: ExportFormat) => {
     try {
-      const { rows: all } = await fetchEveryPage<Row>((p) => url(p, 200))
+      const { rows: all } = await fetchEveryPage<Row>((p) => url(p, 200, 'asc'))
       if (!all.length) {
         setMessage('Nothing to export — no vouchers in this period.')
         return

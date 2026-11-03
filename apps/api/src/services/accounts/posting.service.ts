@@ -3,7 +3,7 @@ import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf } from '../../lib/docNumber'
 import { logger } from '../../utils/logger'
 import { keyedLedgerId, partyLedgerId } from './chart.service'
-import { bankDatesOf, bankKey, booksSettings, dayValue, istDay, r2, type BooksSettings } from './books.service'
+import { bankDatesOf, bankKey, booksSettings, dayText, dayValue, istDay, r2, type BooksSettings } from './books.service'
 
 /**
  * Sales and Purchase documents into the books.
@@ -490,7 +490,7 @@ const PLANNERS: Record<SourceType, (tx: Tx, id: string) => Promise<Plan | null>>
 
 const lockedError = (s: BooksSettings, what: string, day: string) =>
   new AppError(
-    `The books are closed up to ${s.lockedUpTo}, so ${what} dated ${day} cannot be saved, changed or cancelled. Ask Accounts to reopen the period if it must change.`,
+    `The books are closed up to ${dayText(s.lockedUpTo!)}, so ${what} dated ${dayText(day)} cannot be saved, changed or cancelled. Ask Accounts to reopen the period if it must change.`,
     409,
     'PERIOD_LOCKED',
   )

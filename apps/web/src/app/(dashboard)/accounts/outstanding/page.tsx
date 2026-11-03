@@ -274,7 +274,7 @@ export default function OutstandingPage() {
                           </td>
                         ))}
                         <td className="text-muted-foreground text-right tabular-nums">{amountOrBlank(p.advance)}</td>
-                        <td className="text-right font-semibold tabular-nums">{inr(p.net)}{p.net < 0 ? ' ↺' : ''}</td>
+                        <td className="whitespace-nowrap text-right font-semibold tabular-nums">{inr(p.net)}{p.net < 0 ? ' ↺' : ''}</td>
                       </tr>
                       {isOpen && (
                         <tr>

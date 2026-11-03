@@ -35,6 +35,10 @@ export function istDay(d: Date): string {
 
 /** How a voucher's date is stored: midnight UTC of that day. */
 export const dayValue = (ymd: string) => new Date(`${ymd}T00:00:00Z`)
+
+/** A day as people read it in a message: "03 Nov 2026". */
+export const dayText = (ymd: string) =>
+  new Date(`${ymd.slice(0, 10)}T00:00:00Z`).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' })
 const dayStart = (ymd: string) => new Date(`${ymd}T00:00:00+05:30`)
 const dayEnd = (ymd: string) => new Date(`${ymd}T23:59:59.999+05:30`)
 

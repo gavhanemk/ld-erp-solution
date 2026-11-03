@@ -26,6 +26,12 @@ phase; phases 2–6 go to live together, after migration
   against Outstanding, P&L, the cash and bank ledgers, the TDS register and
   the Day Book's pending list; months add up to the year; money in less out
   equals the change in cash and bank; the to-do flags come and go.
+- Full check the same day (all 145 checks, 13 HTTP, 13 document flows, 29
+  screens in Chrome, a voucher entered/printed/cancelled through the form).
+  Fixed from it: the Day Book now lists newest first, so a voucher just
+  saved is at the top (Excel export stays oldest first); "books are closed"
+  and "before the books start" messages say "03 Nov 2026", not
+  "2026-11-03"; Outstanding's Net column no longer wraps the ↺ mark.
 
 ## Accounts, phase 5: GST returns and TDS (Tue 3 Nov)
 

@@ -1,6 +1,6 @@
 import type { LedgerNature, Prisma } from '@prisma/client'
 import { AppError } from '../../middleware/errorHandler'
-import { booksSettings, dayBefore, dayValue, fyStartOf, ledgerFigures, r2, todayIst, type BooksSettings } from './books.service'
+import { booksSettings, dayBefore, dayText, dayValue, fyStartOf, ledgerFigures, r2, todayIst, type BooksSettings } from './books.service'
 
 /**
  * The final accounts: profit and loss for a period, the balance sheet on a
@@ -84,7 +84,7 @@ export async function setStockValue(tx: Tx, day: string, value: number | null, n
   if (!s.booksStart || day < s.booksStart) {
     throw new AppError('Stock before the books start is the opening stock, brought in with the trial balance.', 400, 'BEFORE_BOOKS')
   }
-  if (s.lockedUpTo && day <= s.lockedUpTo) throw new AppError(`The books are closed up to ${s.lockedUpTo}; the stock on ${day} cannot change.`, 409, 'PERIOD_LOCKED')
+  if (s.lockedUpTo && day <= s.lockedUpTo) throw new AppError(`The books are closed up to ${dayText(s.lockedUpTo)}; the stock on ${dayText(day)} cannot change.`, 409, 'PERIOD_LOCKED')
   if (day > todayIst()) throw new AppError('Stock cannot be valued for a day still to come.', 400, 'FUTURE_DATE')
   if (value === null) {
     await tx.stockValue.deleteMany({ where: { asOn: dayValue(day) } })
