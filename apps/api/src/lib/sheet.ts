@@ -25,7 +25,14 @@ export function cellText(v: ExcelJS.CellValue): string {
   if (typeof v === 'number') return String(v)
   if (typeof v === 'string') return v.trim()
   if (typeof v === 'boolean') return v ? 'true' : 'false'
-  if (v instanceof Date) return v.toISOString().slice(0, 10)
+  if (v instanceof Date) {
+    // A date cell in an .xlsx comes as midnight UTC. One read from a .csv
+    // comes as midnight where the server is — in India that is 18:30 UTC the
+    // day before — so its own calendar day is taken instead of UTC's.
+    if (v.getUTCHours() === 0 && v.getUTCMinutes() === 0) return v.toISOString().slice(0, 10)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${v.getFullYear()}-${pad(v.getMonth() + 1)}-${pad(v.getDate())}`
+  }
   if (typeof v === 'object') {
     if ('richText' in v) return v.richText.map((r) => r.text).join('').trim()
     if ('result' in v) return cellText(v.result as ExcelJS.CellValue)
@@ -103,7 +110,9 @@ export async function readSheetRows<K extends string>(
 ): Promise<Array<{ row: number; raw: Partial<Record<K, string>> }>> {
   const wb = new ExcelJS.Workbook()
   try {
-    if (/\.csv$/i.test(fileName)) await wb.csv.read(Readable.from(file))
+    // Every cell of a .csv is kept as it was typed: left to itself the reader
+    // takes 12-08-2026 for 8 December, month first, the American way round.
+    if (/\.csv$/i.test(fileName)) await wb.csv.read(Readable.from(file), { map: (value: unknown) => value })
     // exceljs types its own Buffer; Node's is the same bytes.
     else await wb.xlsx.load(file as unknown as ExcelJS.Buffer)
   } catch {

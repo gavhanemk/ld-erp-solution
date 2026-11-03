@@ -821,6 +821,21 @@ flow, not too complicated"):**
 - Closing the books blocks Sales and Purchase from saving, changing or
   cancelling anything dated in the closed period.
 
+**Old books in, outstanding and bank (phase 3, 3 Nov 2026):**
+
+- The old books come in from two sheets under Chart of Accounts → Opening:
+  the trial balance on the day before the books start (income and expense
+  with their year-to-date figures), and every bill still unpaid that day.
+  A party's old bills decide its opening balance, as in Tally.
+- Old bills are settled from an Accounts Receipt (customers) or Payment
+  (suppliers, brokers); ERP invoices and bills stay with Sales and Purchase.
+  A party's old bills cannot be replaced once money is set against them.
+- Outstanding (Accounts) is the whole picture, old bills included, aged from
+  the due date (or the bill date); each party's net equals its ledger.
+- Bank reconciliation: each bank entry gets the day the statement shows it;
+  the books less uncredited deposits plus unpaid cheques is what the bank
+  should show. Bank dates survive a document or voucher being rewritten.
+
 Phases: 1 the books (chart, vouchers, day book, ledger, trial balance) →
 2 automatic posting from Sales and Purchase → 3 outstanding, bank
 reconciliation, opening import → 4 P&L, balance sheet, brand P&L, closing

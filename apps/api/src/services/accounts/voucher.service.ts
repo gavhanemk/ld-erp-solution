@@ -3,7 +3,7 @@ import type { BillRefKind, Prisma, VoucherKind } from '@prisma/client'
 import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf, nextDocumentNumber } from '../../lib/docNumber'
 import { VOUCHER_SERIES } from './chart.service'
-import { booksSettings, dayValue, istDay, openBills, r2, todayIst, type BooksSettings } from './books.service'
+import { bankDatesOf, bankKey, booksSettings, dayValue, istDay, openBills, r2, todayIst, type BooksSettings } from './books.service'
 
 /**
  * Vouchers typed in Accounts: Payment, Receipt, Contra and Journal.
@@ -279,7 +279,9 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
     chequeDate: input.chequeDate ? dayValue(input.chequeDate) : null,
   }
   let id: string
+  let banked = new Map<string, Date>()
   if (existing) {
+    banked = await bankDatesOf(tx, existing.id)
     await tx.voucherLine.deleteMany({ where: { voucherId: existing.id } })
     await tx.voucher.update({ where: { id: existing.id }, data: { ...header, updatedById: userId } })
     id = existing.id
@@ -296,6 +298,7 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
         credit: l.side === 'CR' ? r2(l.amount) : 0,
         costCentreId: l.costCentreId || null,
         narration: l.narration || null,
+        bankDate: banked.get(bankKey(l.ledgerId, l.side === 'DR' ? l.amount : -l.amount)) ?? null,
         sortOrder: i,
         billRefs: {
           create: refsByLine[i].map((r) => ({

@@ -1,11 +1,28 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Tue 3 Nov 2026 — Accounts, phase 2: Sales and Purchase post to the books (branch `feat/accounts-posting`)_
+_Last updated: Tue 3 Nov 2026 — Accounts, phase 3: old books in, outstanding, bank reconciliation (branch `feat/accounts-posting`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
 
 ---
+
+## Accounts, phase 3: old books in, outstanding, bank reconciliation (Tue 3 Nov)
+
+Same branch `feat/accounts-posting`. No migration.
+
+- **Opening** tab (Chart of Accounts): import the old trial balance and the
+  unpaid bills (`services/accounts/opening.service.ts`, the shared sheet
+  import dialog); each party's opening = its bills less advances.
+- **Outstanding** (`/accounts/outstanding`): receivable / payable from the
+  ledgers' bill references, aged, advances apart, gap shown as "Not split
+  into bills"; totals equal Sundry Debtors / Creditors in the trial balance.
+- **Bank Reconciliation** (`/accounts/bank-reco`): bank dates per entry,
+  balance the bank should show, statement difference; bank dates kept when
+  a voucher is rewritten.
+- `lib/sheet.ts`: .csv cells kept as typed (12-08-2026 was read as 8 Dec) and
+  CSV dates no longer a day early in India — fixes every import.
+- `tools/check-accounts-phase3.ts`: 19 checks.
 
 ## Accounts, phase 2: Sales and Purchase post to the books (Tue 3 Nov)
 

@@ -2,14 +2,15 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, CalendarCheck, FolderTree, Info, Loader2, Lock, Pencil, Plus, RefreshCw, Search, Trash2, Wallet, X } from 'lucide-react'
+import { AlertCircle, CalendarCheck, FileSpreadsheet, FolderTree, Info, Loader2, Lock, Pencil, Plus, ReceiptText, RefreshCw, Scale, Search, Trash2, Wallet, X } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { LedgerDialog } from '@/components/accounts/LedgerDialog'
+import { OpeningBalancesImport, OpeningBillsImport } from '@/components/accounts/OpeningImports'
 import { NATURE_LABEL, day, drCr, todayIst, type BooksSummary, type Group, type Ledger } from '@/components/accounts/books'
 
-type Tab = 'ledgers' | 'groups' | 'settings'
+type Tab = 'ledgers' | 'groups' | 'opening' | 'settings'
 
 const KIND_FILTERS: Array<{ value: string; label: string }> = [
   { value: '', label: 'Every ledger' },
@@ -50,7 +51,7 @@ export default function ChartOfAccountsPage() {
 
   useEffect(() => {
     const t = new URLSearchParams(window.location.search).get('tab')
-    if (t === 'groups' || t === 'settings') setTab(t)
+    if (t === 'groups' || t === 'opening' || t === 'settings') setTab(t)
   }, [])
 
   const load = useCallback(async () => {
@@ -140,6 +141,7 @@ export default function ChartOfAccountsPage() {
               [
                 { key: 'ledgers', label: 'Ledgers', icon: Wallet, count: ledgers.length },
                 { key: 'groups', label: 'Groups', icon: FolderTree, count: groups.length },
+                { key: 'opening', label: 'Opening', icon: Scale, count: null },
                 { key: 'settings', label: 'Books', icon: CalendarCheck, count: null },
               ] as const
             ).map((t) => (
@@ -322,6 +324,7 @@ export default function ChartOfAccountsPage() {
         </div>
       )}
 
+      {tab === 'opening' && <OpeningPosition onChanged={(m) => (setMessage(m), void load())} />}
       {tab === 'settings' && summary && <BooksSettings summary={summary} onSaved={(m) => (setMessage(m), void load())} />}
 
       <LedgerDialog
@@ -343,6 +346,128 @@ export default function ChartOfAccountsPage() {
           onSaved={(m) => {
             setMessage(m)
             void load()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+interface Opening {
+  booksStart: string | null
+  ledgers: number
+  debit: number
+  credit: number
+  difference: number
+  oldBills: number
+  unsplit: Array<{ name: string; opening: number; inBills: number }>
+}
+
+/**
+ * Where the opening position stands, and the two sheets that bring it in
+ * from the old books: the trial balance, and the bills still unpaid.
+ */
+function OpeningPosition({ onChanged }: { onChanged: (message: string) => void }) {
+  const [data, setData] = useState<Opening | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [importing, setImporting] = useState<'balances' | 'bills' | null>(null)
+  const may = can('accounts', 'edit')
+  const load = useCallback(() => {
+    api
+      .get<{ data: Opening }>('/accounts/opening')
+      .then((r) => setData(r.data))
+      .catch((err) => setError(apiErrorMessage(err, 'Could not load the opening balances.')))
+  }, [])
+  useEffect(() => load(), [load])
+
+  if (error) return <p className="text-destructive text-sm">{error}</p>
+  if (!data) return <div className="skeleton h-40 w-full rounded-xl" />
+  const rupees = (n: number) => `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  return (
+    <div className="space-y-4">
+      {!data.booksStart && (
+        <p className="border-accent/40 bg-accent/5 rounded-lg border p-3 text-sm">Set the day the books start (the Books tab) first: opening balances are as at that day.</p>
+      )}
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+        {[
+          { label: 'Opening debits', value: rupees(data.debit), warn: false },
+          { label: 'Opening credits', value: rupees(data.credit), warn: false },
+          { label: 'Out by', value: data.difference === 0 ? 'Nothing — they agree' : drCr(data.difference), warn: data.difference !== 0 },
+          { label: 'Old unpaid bills', value: String(data.oldBills), warn: false },
+        ].map((c) => (
+          <div key={c.label} className="glass-card p-3">
+            <p className="text-muted-foreground text-[11px] leading-tight">{c.label}</p>
+            <p className={`mt-0.5 text-lg font-semibold tabular-nums leading-tight ${c.warn ? 'text-accent' : 'text-foreground'}`}>{c.value}</p>
+          </div>
+        ))}
+      </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="glass-card space-y-3 p-5">
+          <h2 className="text-foreground flex items-center gap-2 text-lg font-semibold">
+            <FileSpreadsheet size={18} /> 1. The trial balance
+          </h2>
+          <p className="text-muted-foreground text-sm">
+            The old books&apos; trial balance on the day before {data.booksStart ? day(data.booksStart) : 'the books start'}: capital, loans, bank, cash, stock, duties, and this year&apos;s income and expenses to that day. One figure per ledger.
+          </p>
+          {may && (
+            <button className="btn-primary" onClick={() => setImporting('balances')} disabled={!data.booksStart}>
+              <FileSpreadsheet size={15} /> Bring in the trial balance
+            </button>
+          )}
+        </div>
+        <div className="glass-card space-y-3 p-5">
+          <h2 className="text-foreground flex items-center gap-2 text-lg font-semibold">
+            <ReceiptText size={18} /> 2. Unpaid bills
+          </h2>
+          <p className="text-muted-foreground text-sm">
+            Every customer&apos;s invoice, supplier&apos;s bill and broker&apos;s commission still unpaid that day. Each party opens owing the total of its bills. These old bills are settled later from an Accounts Receipt or Payment.
+          </p>
+          {may && (
+            <button className="btn-primary" onClick={() => setImporting('bills')} disabled={!data.booksStart}>
+              <ReceiptText size={15} /> Bring in unpaid bills
+            </button>
+          )}
+        </div>
+      </div>
+      {data.unsplit.length > 0 && (
+        <div className="glass-card overflow-hidden p-0">
+          <p className="border-border text-foreground border-b px-4 py-2.5 text-sm font-medium">Parties whose old bills do not add up to their opening balance</p>
+          <table className="data-table w-full">
+            <thead>
+              <tr>
+                <th>Party</th>
+                <th className="w-44 text-right">Opening</th>
+                <th className="w-44 text-right">In old bills</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.unsplit.map((u) => (
+                <tr key={u.name}>
+                  <td>{u.name}</td>
+                  <td className="text-right tabular-nums">{drCr(u.opening)}</td>
+                  <td className="text-right tabular-nums">{drCr(u.inBills)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="border-border text-muted-foreground border-t px-4 py-2.5 text-xs">The difference shows in Outstanding as &quot;Not split into bills&quot;. Bring in their unpaid bills to split it.</p>
+        </div>
+      )}
+      {importing === 'balances' && (
+        <OpeningBalancesImport
+          onClose={() => setImporting(null)}
+          onImported={() => {
+            load()
+            onChanged('Opening balances brought in.')
+          }}
+        />
+      )}
+      {importing === 'bills' && (
+        <OpeningBillsImport
+          onClose={() => setImporting(null)}
+          onImported={() => {
+            load()
+            onChanged('Unpaid bills brought in.')
           }}
         />
       )}

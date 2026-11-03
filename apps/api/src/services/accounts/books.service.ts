@@ -68,6 +68,17 @@ export async function booksSettings(tx: Tx): Promise<BooksSettings> {
   }
 }
 
+/**
+ * The bank dates a voucher's lines carry, kept by ledger and amount, so a
+ * voucher rewritten without changing its bank line stays reconciled. A
+ * changed amount has to be reconciled again.
+ */
+export async function bankDatesOf(tx: Tx, voucherId: string): Promise<Map<string, Date>> {
+  const lines = await tx.voucherLine.findMany({ where: { voucherId, bankDate: { not: null } }, select: { ledgerId: true, debit: true, credit: true, bankDate: true } })
+  return new Map(lines.map((l) => [bankKey(l.ledgerId, Number(l.debit) - Number(l.credit)), l.bankDate!]))
+}
+export const bankKey = (ledgerId: string, signed: number) => `${ledgerId}|${r2(signed).toFixed(2)}`
+
 /** A period from the query string: this financial year to today unless asked otherwise. */
 export function periodFrom(query: Record<string, unknown>, s: BooksSettings): { from: string; to: string } {
   const pick = (v: unknown) => (typeof v === 'string' && YMD.test(v) ? v : undefined)

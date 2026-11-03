@@ -22,6 +22,9 @@ import {
 } from '../services/accounts/books.service'
 import { cancelVoucher, moneyGroupIds, voucherSchema, writeVoucher } from '../services/accounts/voucher.service'
 import { pendingDocuments, postPending, SOURCE_LABEL } from '../services/accounts/posting.service'
+import { outstanding } from '../services/accounts/outstanding.service'
+import { bankReco, setBankDates } from '../services/accounts/bankReco.service'
+import * as opening from '../services/accounts/opening.service'
 
 /**
  * Accounts: the books of LD Cotton Mills.
@@ -43,6 +46,11 @@ import { pendingDocuments, postPending, SOURCE_LABEL } from '../services/account
  *   GET    /cash-bank                every cash and bank ledger with its balance
  *   GET    /posting                  Sales and Purchase documents not yet in the books
  *   POST   /posting/run              bring them in
+ *   GET    /outstanding?side=receivable|payable&asOn=
+ *   GET    /bank-reco/:ledgerId?asOn=   PATCH /bank-reco   the bank dates
+ *   GET    /opening                  where the opening position stands
+ *   GET    /opening/balances-template  POST /opening/balances   the old trial balance
+ *   GET    /opening/bills-template     POST /opening/bills      the old unpaid bills
  *
  * Everything is under the Accounts module's rights. Lists of ledgers make sure
  * the chart is complete first, so a customer added in Sales has a ledger by
@@ -758,6 +766,98 @@ router.get('/cash-bank', requirePermission(MODULE, 'view'), async (req, res) => 
     .map((l) => ({ ...l, group: info.get(l.id)!.group.name, isActive: info.get(l.id)!.isActive, bank: info.get(l.id)!.bankAccount }))
     .filter((l) => l.isActive || l.closing !== 0 || l.dr !== 0 || l.cr !== 0)
   res.json({ success: true, data: { period, rows, total: r2(rows.reduce((t, l) => t + l.closing, 0)) } })
+})
+
+// ═══════════════════════════════════════════
+// OUTSTANDING
+// ═══════════════════════════════════════════
+
+const asOnOf = (v: unknown) => (typeof v === 'string' && /^d{4}-d{2}-d{2}$/.test(v) ? v : todayIst())
+
+router.get('/outstanding', requirePermission(MODULE, 'view'), async (req, res) => {
+  await ensureChart()
+  const side = req.query.side === 'payable' ? 'payable' : 'receivable'
+  res.json({ success: true, data: await outstanding(prisma, side, asOnOf(req.query.asOn)) })
+})
+
+// ═══════════════════════════════════════════
+// BANK RECONCILIATION
+// ═══════════════════════════════════════════
+
+router.get('/bank-reco/:ledgerId', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await bankReco(prisma, req.params.ledgerId, asOnOf(req.query.asOn)) })
+})
+
+const bankDatesSchema = z.object({
+  entries: z
+    .array(z.object({ lineId: z.string().min(1), bankDate: ymd.nullable() }))
+    .min(1, 'Nothing to save')
+    .max(1000),
+})
+
+router.patch('/bank-reco', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { entries } = bankDatesSchema.parse(req.body)
+  const n = await prisma.$transaction((tx) => setBankDates(tx, entries))
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'BankReconciliation', entityId: entries[0].lineId, after: { entries } })
+  res.json({ success: true, message: `${n} bank date${n === 1 ? '' : 's'} saved` })
+})
+
+// ═══════════════════════════════════════════
+// OPENING BALANCES FROM THE OLD BOOKS
+// ═══════════════════════════════════════════
+
+const importBody = z.object({
+  fileName: z.string().min(1).max(200),
+  /** The file itself, base64. */
+  file: z.string().min(1),
+  confirm: z.boolean().optional(),
+})
+
+const sendSheet = (res: import('express').Response, name: string, buffer: Buffer) => {
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+}
+
+router.get('/opening', requirePermission(MODULE, 'view'), async (_req, res) => {
+  await ensureChart()
+  res.json({ success: true, data: await opening.openingSummary() })
+})
+
+router.get('/opening/balances-template', requirePermission(MODULE, 'edit'), async (req, res) => {
+  await ensureChart()
+  const current = req.query.withCurrent === 'true'
+  sendSheet(res, current ? 'opening-balances-with-ledgers.xlsx' : 'opening-balances-template.xlsx', await opening.balancesTemplate(current))
+})
+
+router.post('/opening/balances', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const buffer = Buffer.from(file, 'base64')
+  if (!confirm) {
+    const { plans, summary } = await opening.planBalances(prisma, buffer, fileName)
+    return res.json({ success: true, data: { summary, rows: plans } })
+  }
+  const done = await prisma.$transaction((tx) => opening.runBalances(tx, buffer, fileName), { timeout: 120_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'OpeningBalances', entityId: `IMPORT-${Date.now()}`, after: { fileName, ...done.summary } })
+  res.json({ success: true, data: done, message: `Opening balances brought in: ${done.created.length} ledger${done.created.length === 1 ? '' : 's'} set.` })
+})
+
+router.get('/opening/bills-template', requirePermission(MODULE, 'edit'), async (req, res) => {
+  await ensureChart()
+  const current = req.query.withCurrent === 'true'
+  sendSheet(res, current ? 'unpaid-bills-current.xlsx' : 'unpaid-bills-template.xlsx', await opening.billsTemplate(current))
+})
+
+router.post('/opening/bills', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const buffer = Buffer.from(file, 'base64')
+  if (!confirm) {
+    const { plans, openings, summary } = await opening.planBills(prisma, buffer, fileName)
+    return res.json({ success: true, data: { summary, rows: plans, openings: [...openings.values()] } })
+  }
+  const done = await prisma.$transaction((tx) => opening.runBills(tx, buffer, fileName), { timeout: 120_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'OpeningBills', entityId: `IMPORT-${Date.now()}`, after: { fileName, ...done.summary } })
+  res.json({ success: true, data: done, message: `Old bills brought in for ${done.created.length} part${done.created.length === 1 ? 'y' : 'ies'}.` })
 })
 
 router.get('/gst', () => {

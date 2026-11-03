@@ -3,7 +3,7 @@ import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf } from '../../lib/docNumber'
 import { logger } from '../../utils/logger'
 import { keyedLedgerId, partyLedgerId } from './chart.service'
-import { booksSettings, dayValue, istDay, r2, type BooksSettings } from './books.service'
+import { bankDatesOf, bankKey, booksSettings, dayValue, istDay, r2, type BooksSettings } from './books.service'
 
 /**
  * Sales and Purchase documents into the books.
@@ -586,8 +586,9 @@ async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan:
       where: { id: existing.id },
       data: { ...header, status: 'POSTED', cancelledAt: null, cancelledById: null, cancelReason: null, updatedById: userId ?? null },
     })
+    const banked = await bankDatesOf(tx, existing.id)
     await tx.voucherLine.deleteMany({ where: { voucherId: existing.id } })
-    await writeLines(tx, existing.id, plan)
+    await writeLines(tx, existing.id, plan, banked)
     return 'updated'
   }
 
@@ -598,7 +599,7 @@ async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan:
   return 'created'
 }
 
-async function writeLines(tx: Tx, voucherId: string, plan: Plan) {
+async function writeLines(tx: Tx, voucherId: string, plan: Plan, banked = new Map<string, Date>()) {
   // Debits first, then credits, as a voucher reads.
   const ordered = [...plan.lines].sort((a, b) => (b.amount > 0 ? 1 : 0) - (a.amount > 0 ? 1 : 0))
   for (const [i, l] of ordered.entries()) {
@@ -609,6 +610,7 @@ async function writeLines(tx: Tx, voucherId: string, plan: Plan) {
         debit: l.amount > 0 ? l.amount : 0,
         credit: l.amount < 0 ? -l.amount : 0,
         costCentreId: l.costCentreId,
+        bankDate: banked.get(bankKey(l.ledgerId, l.amount)) ?? null,
         sortOrder: i,
         billRefs: {
           create: l.refs
