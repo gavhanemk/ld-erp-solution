@@ -33,6 +33,7 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { itemFormFields } from '@/components/masters/itemFormFields'
+import { processFormFields } from '@/components/masters/processFormFields'
 
 export interface BomLineSize {
   id?: string
@@ -153,6 +154,13 @@ interface StyleOption {
   code: string
   name: string
   colors: string[]
+}
+
+/** A process from Routing Masters: what a labour row is paid for, and the department that does it. */
+interface ProcessOption {
+  id: string
+  name: string
+  departmentId: string | null
 }
 
 interface DepartmentOption {
@@ -341,6 +349,10 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
   const [addingItem, setAddingItem] = useState<{ rowKey: number; typed: string } | null>(null)
   const mayAddItem = can('masters', 'create')
   const [departments, setDepartments] = useState<DepartmentOption[]>([])
+  /** The processes in Routing Masters, in floor order: the labour rows' Work. */
+  const [processes, setProcesses] = useState<ProcessOption[]>([])
+  /** A new process being added from a labour row, in the Routing Masters form over this one. */
+  const [addingProcess, setAddingProcess] = useState<{ rowKey: number; typed: string } | null>(null)
   const [routings, setRoutings] = useState<RoutingOption[]>([])
   const [gstRate, setGstRate] = useState<number | null>(null)
 
@@ -430,11 +442,15 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       masterResource<StyleOption>('styles').list({ limit: 200, active: true }),
       fetchEveryPage<ItemOption>((page) => `/masters/items?limit=200&active=true&page=${page}`).then((r) => ({ data: r.rows })),
       masterResource<DepartmentOption>('departments').list({ limit: 200, active: true }),
+      masterResource<ProcessOption>('operations')
+        .list({ limit: 300, active: true, sort: 'sortOrder', order: 'asc' })
+        .catch(() => ({ data: [] as ProcessOption[] })),
     ])
-      .then(([s, i, d]) => {
+      .then(([s, i, d, o]) => {
         setStyles((s as Paginated<StyleOption>).data)
         setItems((i as Paginated<ItemOption>).data)
         setDepartments((d as Paginated<DepartmentOption>).data)
+        setProcesses((o as Paginated<ProcessOption>).data)
       })
       .catch(() => setError('Could not load styles, items and departments.'))
 
@@ -1386,15 +1402,45 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
             {rows.map((row) => (
               <tr key={row.rowKey} className="border-b border-border/50">
                 <td className="py-2 pl-3 pr-2 align-middle">
-                  <input
-                    className={field}
-                    value={row.name}
-                    disabled={frozen}
-                    autoFocus={row.rowKey === addedKey}
-                    placeholder={kind === 'LABOUR' ? 'e.g. Stitching' : 'e.g. Factory overhead'}
-                    aria-label={`${kind === 'LABOUR' ? 'Labour' : 'Overhead'} name`}
-                    onChange={(e) => setCostRow(row.rowKey, { name: e.target.value })}
-                  />
+                  {kind === 'LABOUR' ? (
+                    (() => {
+                      // A name typed before Work was a process still shows, so the row reads as it was saved.
+                      const known = processes.some((o) => o.name.toLowerCase() === row.name.trim().toLowerCase())
+                      return (
+                        <SmartSelect
+                          className={field}
+                          value={known ? (processes.find((o) => o.name.toLowerCase() === row.name.trim().toLowerCase())?.name ?? row.name) : row.name}
+                          disabled={frozen}
+                          autoFocus={row.rowKey === addedKey}
+                          aria-label="Labour work"
+                          createNoun="process"
+                          onCreate={!frozen && can('masters', 'create') ? (typed) => setAddingProcess({ rowKey: row.rowKey, typed }) : undefined}
+                          onChange={(e) => {
+                            const op = processes.find((o) => o.name === e.target.value)
+                            setCostRow(row.rowKey, { name: e.target.value, ...(op?.departmentId ? { departmentId: op.departmentId } : {}) })
+                          }}
+                        >
+                          <option value="">Pick the work…</option>
+                          {row.name.trim() && !known && <option value={row.name}>{row.name} (not in Routing Masters)</option>}
+                          {processes.map((o) => (
+                            <option key={o.id} value={o.name}>
+                              {o.name}
+                            </option>
+                          ))}
+                        </SmartSelect>
+                      )
+                    })()
+                  ) : (
+                    <input
+                      className={field}
+                      value={row.name}
+                      disabled={frozen}
+                      autoFocus={row.rowKey === addedKey}
+                      placeholder="e.g. Factory overhead"
+                      aria-label="Overhead name"
+                      onChange={(e) => setCostRow(row.rowKey, { name: e.target.value })}
+                    />
+                  )}
                 </td>
                 <td className="px-2 py-2 align-middle">
                   {kind === 'LABOUR' ? (
@@ -1800,6 +1846,23 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       {step === 2 && costingStep}
       {step === 3 && pricingStep}
 
+      {addingProcess && (
+        <MasterFormDialog<ProcessOption & Record<string, unknown>>
+          open
+          stacked
+          onClose={() => setAddingProcess(null)}
+          onSaved={() => {}}
+          onCreated={(row) => {
+            setProcesses((list) => [...list.filter((o) => o.id !== row.id), row])
+            setCostRow(addingProcess.rowKey, { name: row.name, ...(row.departmentId ? { departmentId: row.departmentId } : {}) })
+          }}
+          resource="operations"
+          fields={processFormFields}
+          initialValues={{ ...(addingProcess.typed ? { name: addingProcess.typed } : {}), isActive: true }}
+          title="Process"
+          columns={3}
+        />
+      )}
       {addingItem && (
         <MasterFormDialog<ItemOption & Record<string, unknown>>
           open
