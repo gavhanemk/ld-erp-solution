@@ -200,7 +200,7 @@ await check('typed, a dropdown chosen by keys, Ctrl+S: the brand is saved', asyn
   await wait(300)
   await key('Control+s')
   await page.locator('form[role="dialog"]').waitFor({ state: 'detached', timeout: 8000 })
-  const found = (await api(`/masters/brands?search=${encodeURIComponent(brand)}`)).data ?? []
+  const found = (await api(`/masters/brands?q=${encodeURIComponent(brand)}`)).data ?? []
   return found.some((b) => b.name === brand) ? true : 'not in the brands list after saving'
 })
 await check('found again with "/", opened with ↓ Enter, renamed, Ctrl+S', async () => {
@@ -216,12 +216,12 @@ await check('found again with "/", opened with ↓ Enter, renamed, Ctrl+S', asyn
   await type(' Edited')
   await key('Control+s')
   await page.locator('form[role="dialog"]').waitFor({ state: 'detached', timeout: 8000 })
-  const found = (await api(`/masters/brands?search=${encodeURIComponent(brand)}`)).data ?? []
+  const found = (await api(`/masters/brands?q=${encodeURIComponent(brand)}`)).data ?? []
   return found.some((b) => b.name === `${brand} Edited`) ? true : 'the new name was not saved'
 })
 // The test brand goes out of the brand lists again (switched off, as Delete does).
 {
-  const made = ((await api(`/masters/brands?search=${encodeURIComponent(brand)}`)).data ?? []).filter((b) => b.name.startsWith(brand))
+  const made = ((await api(`/masters/brands?q=${encodeURIComponent(brand)}`)).data ?? []).filter((b) => b.name.startsWith(brand))
   for (const b of made) await fetch(`${API}/api/masters/brands/${b.id}`, { method: 'DELETE', headers: { authorization: `Bearer ${token}`, connection: 'close' } })
 }
 await check('after the save the list still answers the keyboard ("/" works)', async () => {
