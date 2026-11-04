@@ -8,6 +8,7 @@ import { writeAuditLog } from '../lib/audit'
 import { ensureChart } from '../services/accounts/chart.service'
 import {
   booksSettings,
+  dayText,
   dayValue,
   fyStartOf,
   istDay,
@@ -21,6 +22,15 @@ import {
   trialBalance,
 } from '../services/accounts/books.service'
 import { cancelVoucher, moneyGroupIds, voucherSchema, writeVoucher } from '../services/accounts/voucher.service'
+import { pendingDocuments, postPending, SOURCE_LABEL } from '../services/accounts/posting.service'
+import { outstanding } from '../services/accounts/outstanding.service'
+import { bankReco, setBankDates } from '../services/accounts/bankReco.service'
+import * as opening from '../services/accounts/opening.service'
+import { balanceSheet, profitAndLoss, setStockValue, stockOn } from '../services/accounts/finalAccounts.service'
+import { gstr1, gstr1Json, gstr3b, match2b, read2b } from '../services/accounts/gst.service'
+import { tdsByCustomers, tdsDeducted } from '../services/accounts/tdsBooks.service'
+import { accountsDashboard } from '../services/accounts/dashboard.service'
+import { amountInWords, getPrintHeader } from '../lib/printData'
 
 /**
  * Accounts: the books of LD Cotton Mills.
@@ -40,6 +50,23 @@ import { cancelVoucher, moneyGroupIds, voucherSchema, writeVoucher } from '../se
  *   POST   /vouchers  PATCH /vouchers/:id  POST /vouchers/:id/cancel
  *   GET    /trial-balance
  *   GET    /cash-bank                every cash and bank ledger with its balance
+ *   GET    /posting                  Sales and Purchase documents not yet in the books
+ *   POST   /posting/run              bring them in
+ *   GET    /outstanding?side=receivable|payable&asOn=
+ *   GET    /bank-reco/:ledgerId?asOn=   PATCH /bank-reco   the bank dates
+ *   GET    /opening                  where the opening position stands
+ *   GET    /opening/balances-template  POST /opening/balances   the old trial balance
+ *   GET    /opening/bills-template     POST /opening/bills      the old unpaid bills
+ *   GET    /profit-loss?from=&to=    the trading and profit and loss account, by brand too
+ *   GET    /balance-sheet?asOn=
+ *   GET    /stock-value?on=          PATCH /stock-value   closing stock on a day
+ *   GET    /gst/gstr1?from=&to=      GET /gst/gstr1.json   outward supplies, and the portal's file
+ *   GET    /gst/gstr3b?from=&to=     the 3B working, credit set against tax
+ *   POST   /gst/2b                   a GSTR-2B file matched against the bills
+ *   GET    /tds?from=&to=            TDS deducted, paid in, owed; TDS customers deducted
+ *   GET    /dashboard                the accounts at a glance
+ *   GET    /vouchers/:id/print       a voucher as it is filed
+ *   GET    /ledgers/:id/print-statement?from=&to=   a party's account, to send them
  *
  * Everything is under the Accounts module's rights. Lists of ledgers make sure
  * the chart is complete first, so a customer added in Sales has a ledger by
@@ -88,8 +115,10 @@ router.patch('/settings', requirePermission(MODULE, 'approve'), async (req: Auth
   const before = await booksSettings(prisma)
   const start = body.booksStart ?? before.booksStart
   if (body.booksStart && body.booksStart !== before.booksStart) {
-    const earlier = await prisma.voucher.findFirst({ where: { status: 'POSTED', date: { lt: dayValue(body.booksStart) } }, select: { voucherNo: true } })
-    if (earlier) throw new AppError(`${earlier.voucherNo} is dated before ${body.booksStart}. The books cannot start after a voucher already in them.`, 409, 'VOUCHERS_BEFORE')
+    // A voucher typed here stays; one written by a document simply leaves the
+    // books with it when they start after its date.
+    const earlier = await prisma.voucher.findFirst({ where: { status: 'POSTED', sourceType: null, date: { lt: dayValue(body.booksStart) } }, select: { voucherNo: true } })
+    if (earlier) throw new AppError(`${earlier.voucherNo} is dated before ${dayText(body.booksStart)}. The books cannot start after a voucher already in them.`, 409, 'VOUCHERS_BEFORE')
     if (before.lockedUpTo && before.booksStart && before.lockedUpTo >= before.booksStart) {
       throw new AppError('The books are closed. Reopen them before moving the day they start.', 409, 'PERIOD_LOCKED')
     }
@@ -98,6 +127,17 @@ router.patch('/settings', requirePermission(MODULE, 'approve'), async (req: Auth
     if (body.lockedUpTo > todayIst()) throw new AppError('The books cannot be closed past today.', 400, 'FUTURE_DATE')
     if (!start) throw new AppError('Set the day the books start first.', 400, 'BOOKS_NOT_STARTED')
     if (body.lockedUpTo < start) throw new AppError('The closing date comes before the books start.', 400, 'BEFORE_BOOKS')
+    // Once closed, nothing dated in the period can go in, so it all goes in first.
+    if (!body.booksStart || body.booksStart === before.booksStart) {
+      const waiting = (await pendingDocuments(prisma)).pending.filter((p) => p.date <= body.lockedUpTo!)
+      if (waiting.length) {
+        throw new AppError(
+          `${waiting.length} document${waiting.length === 1 ? ' is' : 's are'} dated on or before ${dayText(body.lockedUpTo)} and not in the books yet (first: ${waiting[0].number}). Bring them in from the Day Book before closing.`,
+          409,
+          'DOCUMENTS_WAITING',
+        )
+      }
+    }
   }
   await prisma.company.update({
     where: { id: company.id },
@@ -108,7 +148,55 @@ router.patch('/settings', requirePermission(MODULE, 'approve'), async (req: Auth
   })
   const after = await booksSettings(prisma)
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'BooksSettings', entityId: company.id, before, after })
-  res.json({ success: true, data: after })
+  // A new start brings the documents from that day into the books, and takes
+  // out the ones now before it.
+  const posting = after.booksStart !== before.booksStart ? await postPending(prisma, req.user!.id) : null
+  res.json({ success: true, data: after, posting })
+})
+
+// ═══════════════════════════════════════════
+// DOCUMENTS INTO THE BOOKS
+// ═══════════════════════════════════════════
+
+/**
+ * GET /api/accounts/posting
+ *
+ * Sales and Purchase documents whose voucher does not match them. Normally
+ * empty: every document posts as it is saved. A document saved while a
+ * posting rule failed, or one from before this was switched on, shows here.
+ */
+router.get('/posting', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const { booksStart, pending } = await pendingDocuments(prisma)
+  res.json({
+    success: true,
+    data: {
+      booksStart,
+      count: pending.length,
+      pending: pending.slice(0, 500).map((p) => ({ ...p, label: SOURCE_LABEL[p.sourceType] })),
+    },
+  })
+})
+
+/**
+ * POST /api/accounts/posting/run { all?: boolean }
+ *
+ * Posts every waiting document, each on its own, and says which could not
+ * be. With `all`, every document in the books' period is posted again.
+ */
+router.post('/posting/run', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { all } = z.object({ all: z.boolean().optional() }).parse(req.body ?? {})
+  const result = await postPending(prisma, req.user!.id, all ?? false)
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'BooksPosting', entityId: 'documents', after: { all: !!all, posted: result.posted, failed: result.failed.length } })
+  const label = (t: keyof typeof SOURCE_LABEL) => SOURCE_LABEL[t]
+  res.json({
+    success: true,
+    data: { ...result, failed: result.failed.map((f) => ({ ...f, label: label(f.sourceType) })) },
+    message: result.failed.length
+      ? `${result.posted} brought into the books; ${result.failed.length} could not be.`
+      : result.posted
+        ? `${result.posted} document${result.posted === 1 ? '' : 's'} brought into the books.`
+        : 'Every document is already in the books.',
+  })
 })
 
 // ═══════════════════════════════════════════
@@ -327,7 +415,7 @@ const ledgerSchema = z.object({
 async function refuseClosedOpening() {
   const s = await booksSettings(prisma)
   if (s.lockedUpTo && s.booksStart && s.lockedUpTo >= s.booksStart) {
-    throw new AppError(`The books are closed up to ${s.lockedUpTo}, which includes the opening balances.`, 409, 'PERIOD_LOCKED')
+    throw new AppError(`The books are closed up to ${dayText(s.lockedUpTo)}, which includes the opening balances.`, 409, 'PERIOD_LOCKED')
   }
 }
 
@@ -424,6 +512,52 @@ router.get('/ledgers/:id/statement', requirePermission(MODULE, 'view'), async (r
   res.json({ success: true, data })
 })
 
+/**
+ * GET /api/accounts/ledgers/:id/print-statement?from=&to=
+ *
+ * A party's account as it is sent to them: who they are, every entry in the
+ * period with its running balance, and the bills still open on the last day.
+ */
+router.get('/ledgers/:id/print-statement', requirePermission(MODULE, 'view'), async (req, res) => {
+  const s = await booksSettings(prisma)
+  const period = periodFrom(req.query, s)
+  const [statement, header, ledger] = await Promise.all([
+    ledgerStatement(prisma, req.params.id, period, s),
+    getPrintHeader('SOA'),
+    prisma.ledger.findUnique({
+      where: { id: req.params.id },
+      select: {
+        name: true,
+        pan: true,
+        gstin: true,
+        billWise: true,
+        customer: { select: { code: true, gstin: true, pan: true, phone: true, email: true, billingAddress: true, billingCity: true, billingState: true, billingPincode: true } },
+        supplier: { select: { code: true, gstin: true, pan: true, phone: true, email: true, address: true, city: true, state: true, pincode: true } },
+        broker: { select: { code: true, gstin: true, pan: true, phone: true, email: true, address: true, city: true, state: true } },
+      },
+    }),
+  ])
+  if (!ledger) throw new AppError('Ledger not found', 404, 'NOT_FOUND')
+  const c = ledger.customer
+  const m = ledger.supplier ?? ledger.broker
+  const party = {
+    name: ledger.name,
+    code: (c ?? m)?.code ?? null,
+    gstin: c?.gstin ?? m?.gstin ?? ledger.gstin,
+    pan: c?.pan ?? m?.pan ?? ledger.pan,
+    phone: (c ?? m)?.phone ?? null,
+    email: (c ?? m)?.email ?? null,
+    address: c
+      ? [c.billingAddress, c.billingCity, c.billingState, c.billingPincode].filter(Boolean).join(', ')
+      : m
+        ? [m.address, m.city, m.state, 'pincode' in m ? m.pincode : null].filter(Boolean).join(', ')
+        : null,
+  }
+  // The bills still open on the last day of the statement, for a party kept bill by bill.
+  const open = ledger.billWise ? (await outstanding(prisma, ledger.customer ? 'receivable' : 'payable', period.to)).parties.find((p) => p.ledgerId === req.params.id)?.bills ?? [] : []
+  res.json({ success: true, data: { ...header, party, statement, openBills: open, closingInWords: amountInWords(Math.abs(statement.closing)) } })
+})
+
 router.get('/ledgers/:id/bills', requirePermission(MODULE, 'view'), async (req, res) => {
   const except = str(req.query.exceptVoucherId)
   res.json({ success: true, data: await openBills(prisma, req.params.id, except) })
@@ -473,10 +607,10 @@ router.patch('/cost-centres/:id', requirePermission(MODULE, 'edit'), async (req:
 const KINDS = Object.keys(KIND_LABEL) as VoucherKind[]
 
 /**
- * GET /api/accounts/vouchers?from=&to=&kind=PAYMENT,RECEIPT&status=all&q=&ledgerId=&page=&limit=
+ * GET /api/accounts/vouchers?from=&to=&kind=PAYMENT,RECEIPT&status=all&q=&ledgerId=&page=&limit=&order=asc
  *
- * The day book: every voucher in the period, oldest first within a day, with
- * its lines. From the first of this month unless asked otherwise. Cancelled
+ * The day book: every voucher in the period, newest first (oldest first with
+ * order=asc), with its lines. From the first of this month unless asked otherwise. Cancelled
  * vouchers are left out unless asked for.
  */
 router.get('/vouchers', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -485,6 +619,8 @@ router.get('/vouchers', requirePermission(MODULE, 'view'), async (req, res) => {
   const period = periodFrom({ from: req.query.from ?? `${today.slice(0, 8)}01`, to: req.query.to }, s)
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+  // Newest first on screen, so a voucher just saved is at the top; ?order=asc for a register in date order.
+  const order: Prisma.SortOrder = req.query.order === 'asc' ? 'asc' : 'desc'
   const where: Prisma.VoucherWhereInput = {
     date: { gte: new Date(`${period.from}T00:00:00+05:30`), lte: new Date(`${period.to}T23:59:59.999+05:30`) },
   }
@@ -508,7 +644,7 @@ router.get('/vouchers', requirePermission(MODULE, 'view'), async (req, res) => {
   const [rows, total, sums] = await Promise.all([
     prisma.voucher.findMany({
       where,
-      orderBy: [{ date: 'asc' }, { createdAt: 'asc' }],
+      orderBy: [{ date: order }, { createdAt: order }],
       skip: (page - 1) * limit,
       take: limit,
       select: {
@@ -633,6 +769,12 @@ router.get('/vouchers/:id', requirePermission(MODULE, 'view'), async (req, res) 
   res.json({ success: true, data: { ...shapeVoucher(v, money), history } })
 })
 
+/** GET /api/accounts/vouchers/:id/print — the voucher as it is filed, signed for. */
+router.get('/vouchers/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const [v, money, header] = await Promise.all([loadVoucher(req.params.id), moneyGroupIds(prisma), getPrintHeader('VCH')])
+  res.json({ success: true, data: { ...header, voucher: shapeVoucher(v, money), amountInWords: amountInWords(Number(v.amount)) } })
+})
+
 router.post('/vouchers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const input = voucherSchema.parse(req.body)
   await ensureChart()
@@ -696,8 +838,205 @@ router.get('/cash-bank', requirePermission(MODULE, 'view'), async (req, res) => 
   res.json({ success: true, data: { period, rows, total: r2(rows.reduce((t, l) => t + l.closing, 0)) } })
 })
 
-router.get('/gst', () => {
-  throw new AppError('GST returns are not built yet. They will appear here as soon as they are ready.', 501, 'NOT_IMPLEMENTED')
+// ═══════════════════════════════════════════
+// OUTSTANDING
+// ═══════════════════════════════════════════
+
+const asOnOf = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : todayIst())
+
+router.get('/outstanding', requirePermission(MODULE, 'view'), async (req, res) => {
+  await ensureChart()
+  const side = req.query.side === 'payable' ? 'payable' : 'receivable'
+  res.json({ success: true, data: await outstanding(prisma, side, asOnOf(req.query.asOn)) })
+})
+
+// ═══════════════════════════════════════════
+// BANK RECONCILIATION
+// ═══════════════════════════════════════════
+
+router.get('/bank-reco/:ledgerId', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await bankReco(prisma, req.params.ledgerId, asOnOf(req.query.asOn)) })
+})
+
+const bankDatesSchema = z.object({
+  entries: z
+    .array(z.object({ lineId: z.string().min(1), bankDate: ymd.nullable() }))
+    .min(1, 'Nothing to save')
+    .max(1000),
+})
+
+router.patch('/bank-reco', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { entries } = bankDatesSchema.parse(req.body)
+  const n = await prisma.$transaction((tx) => setBankDates(tx, entries))
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'BankReconciliation', entityId: entries[0].lineId, after: { entries } })
+  res.json({ success: true, message: `${n} bank date${n === 1 ? '' : 's'} saved` })
+})
+
+// ═══════════════════════════════════════════
+// OPENING BALANCES FROM THE OLD BOOKS
+// ═══════════════════════════════════════════
+
+const importBody = z.object({
+  fileName: z.string().min(1).max(200),
+  /** The file itself, base64. */
+  file: z.string().min(1),
+  confirm: z.boolean().optional(),
+})
+
+const sendSheet = (res: import('express').Response, name: string, buffer: Buffer) => {
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+}
+
+router.get('/opening', requirePermission(MODULE, 'view'), async (_req, res) => {
+  await ensureChart()
+  res.json({ success: true, data: await opening.openingSummary() })
+})
+
+router.get('/opening/balances-template', requirePermission(MODULE, 'edit'), async (req, res) => {
+  await ensureChart()
+  const current = req.query.withCurrent === 'true'
+  sendSheet(res, current ? 'opening-balances-with-ledgers.xlsx' : 'opening-balances-template.xlsx', await opening.balancesTemplate(current))
+})
+
+router.post('/opening/balances', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const buffer = Buffer.from(file, 'base64')
+  if (!confirm) {
+    const { plans, summary } = await opening.planBalances(prisma, buffer, fileName)
+    return res.json({ success: true, data: { summary, rows: plans } })
+  }
+  const done = await prisma.$transaction((tx) => opening.runBalances(tx, buffer, fileName), { timeout: 120_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'OpeningBalances', entityId: `IMPORT-${Date.now()}`, after: { fileName, ...done.summary } })
+  res.json({ success: true, data: done, message: `Opening balances brought in: ${done.created.length} ledger${done.created.length === 1 ? '' : 's'} set.` })
+})
+
+router.get('/opening/bills-template', requirePermission(MODULE, 'edit'), async (req, res) => {
+  await ensureChart()
+  const current = req.query.withCurrent === 'true'
+  sendSheet(res, current ? 'unpaid-bills-current.xlsx' : 'unpaid-bills-template.xlsx', await opening.billsTemplate(current))
+})
+
+router.post('/opening/bills', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const buffer = Buffer.from(file, 'base64')
+  if (!confirm) {
+    const { plans, openings, summary } = await opening.planBills(prisma, buffer, fileName)
+    return res.json({ success: true, data: { summary, rows: plans, openings: [...openings.values()] } })
+  }
+  const done = await prisma.$transaction((tx) => opening.runBills(tx, buffer, fileName), { timeout: 120_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'OpeningBills', entityId: `IMPORT-${Date.now()}`, after: { fileName, ...done.summary } })
+  res.json({ success: true, data: done, message: `Old bills brought in for ${done.created.length} part${done.created.length === 1 ? 'y' : 'ies'}.` })
+})
+
+// ═══════════════════════════════════════════
+// FINAL ACCOUNTS
+// ═══════════════════════════════════════════
+
+router.get('/dashboard', requirePermission(MODULE, 'view'), async (_req, res) => {
+  await ensureChart()
+  res.json({ success: true, data: await accountsDashboard(prisma, todayIst()) })
+})
+
+router.get('/profit-loss', requirePermission(MODULE, 'view'), async (req, res) => {
+  await ensureChart()
+  const s = await booksSettings(prisma)
+  res.json({ success: true, data: await profitAndLoss(prisma, periodFrom(req.query, s), s) })
+})
+
+router.get('/balance-sheet', requirePermission(MODULE, 'view'), async (req, res) => {
+  await ensureChart()
+  const s = await booksSettings(prisma)
+  res.json({ success: true, data: await balanceSheet(prisma, asOnOf(req.query.asOn), s) })
+})
+
+router.get('/stock-value', requirePermission(MODULE, 'view'), async (req, res) => {
+  const s = await booksSettings(prisma)
+  res.json({ success: true, data: await stockOn(prisma, asOnOf(req.query.on), s) })
+})
+
+const stockValueSchema = z.object({
+  on: ymd,
+  /** Null hands the day back to inventory's own value. */
+  value: z.number().min(0, 'Stock cannot be below nothing').max(99_999_999_999).nullable(),
+  notes: z.string().trim().max(500).optional().nullable(),
+})
+
+router.patch('/stock-value', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const body = stockValueSchema.parse(req.body)
+  const s = await booksSettings(prisma)
+  const before = await stockOn(prisma, body.on, s)
+  await prisma.$transaction((tx) => setStockValue(tx, body.on, body.value, body.notes || null, req.user!.id))
+  const after = await stockOn(prisma, body.on, s)
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockValue', entityId: body.on, before, after })
+  res.json({
+    success: true,
+    data: after,
+    message: body.value === null ? `Stock on ${body.on} is back to inventory's value.` : `Stock on ${body.on} set at ₹${body.value.toFixed(2)}.`,
+  })
+})
+
+// ═══════════════════════════════════════════
+// GST AND TDS
+// ═══════════════════════════════════════════
+
+/** A return period: the month asked for, or from and to. */
+function returnPeriod(q: Record<string, unknown>) {
+  const pick = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined)
+  const month = typeof q.month === 'string' && /^\d{4}-\d{2}$/.test(q.month) ? q.month : undefined
+  if (month) {
+    const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10)
+    return { from: `${month}-01`, to: last }
+  }
+  const to = pick(q.to) ?? todayIst()
+  const from = pick(q.from) ?? `${to.slice(0, 8)}01`
+  if (from > to) throw new AppError('The start date is after the end date', 400, 'BAD_PERIOD')
+  return { from, to }
+}
+
+router.get('/gst/gstr1', requirePermission(MODULE, 'view'), async (req, res) => {
+  const p = returnPeriod(req.query)
+  res.json({ success: true, data: await gstr1(prisma, p.from, p.to) })
+})
+
+router.get('/gst/gstr1.json', requirePermission(MODULE, 'export'), async (req: AuthRequest, res) => {
+  const p = returnPeriod(req.query)
+  const json = gstr1Json(await gstr1(prisma, p.from, p.to))
+  await writeAuditLog(req, { module: MODULE, action: 'EXPORT', entityType: 'GSTR1', entityId: json.fp, after: { from: p.from, to: p.to } })
+  res.setHeader('Content-Type', 'application/json')
+  res.setHeader('Content-Disposition', `attachment; filename="GSTR1_${json.gstin}_${json.fp}.json"`)
+  res.send(JSON.stringify(json))
+})
+
+router.get('/gst/gstr3b', requirePermission(MODULE, 'view'), async (req, res) => {
+  const p = returnPeriod(req.query)
+  res.json({ success: true, data: await gstr3b(prisma, p.from, p.to) })
+})
+
+const twoBSchema = z.object({
+  fileName: z.string().min(1).max(200),
+  /** The file itself, base64. */
+  file: z.string().min(1),
+  month: z.string().regex(/^\d{4}-\d{2}$/, 'Say which month'),
+})
+
+router.post('/gst/2b', requirePermission(MODULE, 'view'), async (req, res) => {
+  const body = twoBSchema.parse(req.body)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.from(body.file, 'base64').toString('utf8'))
+  } catch {
+    throw new AppError('That file is not the JSON of GSTR-2B. On the GST portal open GSTR-2B and download it as JSON.', 400, 'NOT_2B')
+  }
+  const p = returnPeriod({ month: body.month })
+  res.json({ success: true, data: await match2b(prisma, read2b(parsed), p.from, p.to) })
+})
+
+router.get('/tds', requirePermission(MODULE, 'view'), async (req, res) => {
+  const p = returnPeriod(req.query)
+  const [deducted, customers] = await Promise.all([tdsDeducted(prisma, p.from, p.to, todayIst()), tdsByCustomers(prisma, p.from, p.to)])
+  res.json({ success: true, data: { deducted, customers } })
 })
 
 export default router

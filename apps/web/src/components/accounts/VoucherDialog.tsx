@@ -330,7 +330,8 @@ export function VoucherDialog({
   /** Open bills of a party the line works against: a credit settles what is owed to us, a debit what we owe. */
   const billsFor = (l: Line) => {
     const side = intended(l)
-    return (bills[l.ledgerId] ?? []).filter((b) => (side === 'CR' ? b.pending > 0 : b.pending < 0))
+    // Invoices and suppliers' bills are settled from Sales and Purchase, not here.
+    return (bills[l.ledgerId] ?? []).filter((b) => !b.fromDocument && (side === 'CR' ? b.pending > 0 : b.pending < 0))
   }
 
   const settleOldest = (l: Line) => {

@@ -156,14 +156,18 @@ export const navItems: NavItem[] = [
   {
     label: 'Accounts', icon: BookOpen,
     children: [
-      { label: 'Dashboard', href: '/accounts/dashboard', planned: true },
+      { label: 'Dashboard', href: '/accounts/dashboard' },
       { label: 'Day Book', href: '/accounts/vouchers' },
       { label: 'Ledger', href: '/accounts/ledger' },
       { label: 'Cash & Bank', href: '/accounts/bank' },
+      { label: 'Bank Reconciliation', href: '/accounts/bank-reco' },
       { label: 'Trial Balance', href: '/accounts/trial-balance' },
+      { label: 'Profit & Loss', href: '/accounts/profit-loss' },
+      { label: 'Balance Sheet', href: '/accounts/balance-sheet' },
       { label: 'Chart of Accounts', href: '/accounts/chart' },
-      { label: 'Outstanding', href: '/accounts/outstanding', planned: true },
-      { label: 'GST Reports', href: '/accounts/gst', planned: true },
+      { label: 'Outstanding', href: '/accounts/outstanding' },
+      { label: 'GST Returns', href: '/accounts/gst' },
+      { label: 'TDS', href: '/accounts/tds' },
     ],
   },
   {

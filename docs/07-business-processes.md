@@ -805,6 +805,88 @@ old books may run alongside for a month or two until the figures match.
   bill by bill names the bills each amount raises or settles; brands go on
   income and expense lines only.
 
+**Automatic posting (phase 2, decided 3 Nov 2026 — "standard ERP and accounts
+flow, not too complicated"):**
+
+- Brokerage is owed from the day the invoice is raised: a journal per invoice,
+  Dr Brokerage on Sales, Cr the broker (bill by bill). The broker is paid from
+  an Accounts Payment voucher, with TDS 194H deducted there.
+- Goods bills go to a ledger per item category ("Purchase – Fabric"); expense
+  bills to a ledger per expense head; charges to a ledger per charge type.
+  All are made the first time they are needed; the accountant may move them.
+- Money from customers and to suppliers is entered only in Sales → Payments
+  Received and Purchase → Supplier Payments. An Accounts voucher cannot settle
+  an invoice or a supplier's bill, so Sales, Purchase and the ledgers always
+  agree. Brokers, loans, expenses, salaries, GST and TDS go through Accounts.
+- Closing the books blocks Sales and Purchase from saving, changing or
+  cancelling anything dated in the closed period.
+
+**Old books in, outstanding and bank (phase 3, 3 Nov 2026):**
+
+- The old books come in from two sheets under Chart of Accounts → Opening:
+  the trial balance on the day before the books start (income and expense
+  with their year-to-date figures), and every bill still unpaid that day.
+  A party's old bills decide its opening balance, as in Tally.
+- Old bills are settled from an Accounts Receipt (customers) or Payment
+  (suppliers, brokers); ERP invoices and bills stay with Sales and Purchase.
+  A party's old bills cannot be replaced once money is set against them.
+- Outstanding (Accounts) is the whole picture, old bills included, aged from
+  the due date (or the bill date); each party's net equals its ledger.
+- Bank reconciliation: each bank entry gets the day the statement shows it;
+  the books less uncredited deposits plus unpaid cheques is what the bank
+  should show. Bank dates survive a document or voucher being rewritten.
+
+**Final accounts (phase 4, 3 Nov 2026):**
+
+- Stock is kept periodically, the usual Indian way: purchases go to the
+  purchase accounts, and the goods on hand are valued at the end of a period.
+  A day's closing stock is inventory's own value of the mill's stock
+  (customers' material left out) unless the accountant values that day
+  (a year-end count, work in progress); before the books start it is the
+  stock brought in with the opening trial balance.
+- Profit & Loss: trading account to gross profit, then other income and
+  indirect expenses to net profit; by brand, with stock and anything no
+  brand carries under "Not split". A period cannot start inside the old
+  books' year-to-date figures, so it runs from 1 April there.
+- Balance Sheet on any day; this year's profit on its own line, earlier
+  years' (stock included) in the Profit & Loss A/c. No closing entries.
+
+**GST and TDS (phase 5, 3 Nov 2026):**
+
+- GST Returns: GSTR-1 from the invoices and credit notes (B2B, B2C large
+  over ₹1 lakh inter-state, B2C others by state and rate, credit notes, HSN
+  summary split B2B / B2C, documents issued) and its JSON for the portal;
+  the GSTR-3B working with input credit set against tax in the order of
+  rule 88A (IGST credit first) and reverse-charge tax in cash; GSTR-2B JSON
+  matched to bills by supplier GSTIN and their invoice number. Check the
+  portal file with the CA the first time it is filed from here.
+- TDS: deducted by section from the TDS Payable ledgers, with PAN and the
+  amount it was taken on (26Q details); paid in with an Accounts Payment
+  voucher, cleared oldest month first; due the 7th (30 April for March).
+  TDS customers deducted, by customer, for Form 26AS.
+
+**Dashboard and prints (phase 6, 3 Nov 2026):**
+
+- Accounts → Dashboard: cash in hand, money at the bank (all accounts
+  together, cash credit used shown below), what customers owe and what is
+  owed to suppliers (past due, and supplier bills falling due this week),
+  GST to pay (last month's return until the 20th, then this month so far)
+  and TDS to pay in, the year's sales, purchases, profit and closing stock,
+  and two month-by-month charts (sales vs purchases; money in vs money out,
+  transfers between cash and bank left out). A "To do" list at the top
+  names what wants doing: documents not in the books, last month not
+  closed, bank entries over a month old never matched to the statement,
+  opening balances that do not agree, TDS paid late, deductees without PAN.
+  Every figure is the same number as the screen it opens.
+- Prints: every voucher (Print in the voucher window) with its lines, the
+  bills it settles, the amount in words and signatures (prepared, checked,
+  authorised, and the receiver's on a payment). A party's statement of
+  account (Print on the Ledger, Print statement under a party on
+  Outstanding) with running balance and the bills still open; the same
+  page as a **confirmation of accounts** letter (Confirmation) asking the
+  party to sign and return the balance — what the auditors ask for at the
+  year end.
+
 Phases: 1 the books (chart, vouchers, day book, ledger, trial balance) →
 2 automatic posting from Sales and Purchase → 3 outstanding, bank
 reconciliation, opening import → 4 P&L, balance sheet, brand P&L, closing

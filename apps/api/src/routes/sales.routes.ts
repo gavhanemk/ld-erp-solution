@@ -5,6 +5,7 @@ import { AuthRequest, isAdmin, requirePermission, userCan } from '../middleware/
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
+import { postWithin } from '../services/accounts/posting.service'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { findHsn, gstRateFor, loadHsnIndex } from '../lib/hsn'
 import { closeCheck, orderReconciliation } from '../services/reconciliation.service'
@@ -1280,6 +1281,15 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       },
       include: savedOrderInclude,
     })
+    // The order's brand is where its invoices' sales are booked; a new brand
+    // moves them, and their credit notes, to the new brand's profit.
+    if (after.brandId !== before.brandId) {
+      const invoices = await tx.salesInvoice.findMany({ where: { soId: before.id }, select: { id: true, creditNotes: { select: { id: true } } } })
+      for (const inv of invoices) {
+        await postWithin(tx, 'SALES_INVOICE', inv.id, req.user!.id)
+        for (const cn of inv.creditNotes) await postWithin(tx, 'CREDIT_NOTE', cn.id, req.user!.id)
+      }
+    }
     return { before, after }
   })
 

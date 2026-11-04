@@ -35,6 +35,10 @@ export function istDay(d: Date): string {
 
 /** How a voucher's date is stored: midnight UTC of that day. */
 export const dayValue = (ymd: string) => new Date(`${ymd}T00:00:00Z`)
+
+/** A day as people read it in a message: "03 Nov 2026". */
+export const dayText = (ymd: string) =>
+  new Date(`${ymd.slice(0, 10)}T00:00:00Z`).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' })
 const dayStart = (ymd: string) => new Date(`${ymd}T00:00:00+05:30`)
 const dayEnd = (ymd: string) => new Date(`${ymd}T23:59:59.999+05:30`)
 
@@ -68,12 +72,24 @@ export async function booksSettings(tx: Tx): Promise<BooksSettings> {
   }
 }
 
+/**
+ * The bank dates a voucher's lines carry, kept by ledger and amount, so a
+ * voucher rewritten without changing its bank line stays reconciled. A
+ * changed amount has to be reconciled again.
+ */
+export async function bankDatesOf(tx: Tx, voucherId: string): Promise<Map<string, Date>> {
+  const lines = await tx.voucherLine.findMany({ where: { voucherId, bankDate: { not: null } }, select: { ledgerId: true, debit: true, credit: true, bankDate: true } })
+  return new Map(lines.map((l) => [bankKey(l.ledgerId, Number(l.debit) - Number(l.credit)), l.bankDate!]))
+}
+export const bankKey = (ledgerId: string, signed: number) => `${ledgerId}|${r2(signed).toFixed(2)}`
+
 /** A period from the query string: this financial year to today unless asked otherwise. */
 export function periodFrom(query: Record<string, unknown>, s: BooksSettings): { from: string; to: string } {
   const pick = (v: unknown) => (typeof v === 'string' && YMD.test(v) ? v : undefined)
   const to = pick(query.to) ?? todayIst()
   let from = pick(query.from) ?? fyStartOf(to, s.fyStartMonth)
-  if (s.booksStart && from < s.booksStart && !pick(query.from)) from = s.booksStart
+  // From the day the books start, once it has come; set ahead of go-live, the year to date.
+  if (s.booksStart && from < s.booksStart && s.booksStart <= to && !pick(query.from)) from = s.booksStart
   if (from > to) throw new AppError('The start date is after the end date', 400, 'BAD_PERIOD')
   return { from, to }
 }
@@ -355,21 +371,33 @@ export async function openBills(tx: Tx, ledgerId: string, exceptVoucherId?: stri
       ledgerId,
       OR: [{ lineId: null }, { line: { voucher: { status: 'POSTED', ...(exceptVoucherId ? { id: { not: exceptVoucherId } } : {}) } } }],
     },
-    select: { kind: true, billNo: true, billDate: true, dueDate: true, amount: true },
+    select: { kind: true, billNo: true, billDate: true, dueDate: true, amount: true, line: { select: { voucher: { select: { sourceType: true } } } } },
   })
-  const bills = new Map<string, { billNo: string; billDate: Date; dueDate: Date | null; raised: boolean; pending: number }>()
+  type Bill = { billNo: string; billDate: Date; dueDate: Date | null; raised: boolean; pending: number; kind: string | null; raisedBy: string | null }
+  const bills = new Map<string, Bill>()
   for (const r of refs) {
-    const b = bills.get(r.billNo) ?? { billNo: r.billNo, billDate: r.billDate, dueDate: r.dueDate, raised: false, pending: 0 }
+    const b = bills.get(r.billNo) ?? { billNo: r.billNo, billDate: r.billDate, dueDate: r.dueDate, raised: false, pending: 0, kind: null, raisedBy: null }
     b.pending = r2(b.pending + Number(r.amount))
     if (r.kind !== 'AGAINST_REF') {
       b.raised = true
       b.billDate = r.billDate
       b.dueDate = r.dueDate
+      b.kind = r.kind
+      b.raisedBy = r.line?.voucher.sourceType ?? null
     }
     bills.set(r.billNo, b)
   }
   return [...bills.values()]
     .filter((b) => Math.abs(b.pending) >= 0.005)
     .sort((a, b) => a.billDate.getTime() - b.billDate.getTime() || a.billNo.localeCompare(b.billNo))
-    .map((b) => ({ billNo: b.billNo, billDate: istDay(b.billDate), dueDate: b.dueDate ? istDay(b.dueDate) : null, pending: b.pending, raised: b.raised }))
+    .map((b) => ({
+      billNo: b.billNo,
+      billDate: istDay(b.billDate),
+      dueDate: b.dueDate ? istDay(b.dueDate) : null,
+      pending: b.pending,
+      raised: b.raised,
+      /** A customer's invoice or a supplier's bill, settled only from Sales or Purchase. */
+      fromDocument: b.kind === 'NEW_REF' && !!b.raisedBy && b.raisedBy !== 'BROKERAGE',
+      raisedBy: b.raisedBy,
+    }))
 }

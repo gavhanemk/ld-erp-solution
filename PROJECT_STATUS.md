@@ -1,11 +1,112 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Mon 2 Nov 2026 — Accounts, phase 1: the books (branch `feat/accounts`)_
+_Last updated: Tue 3 Nov 2026 — Accounts, phase 6: dashboard and prints (branch `feat/accounts-posting`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
 
 ---
+
+## Accounts, phase 6: dashboard and prints (Tue 3 Nov)
+
+Same branch `feat/accounts-posting`. No migration. This is the last planned
+phase; phases 2–6 go to live together, after migration
+`20261103100000_accounts_stock_values` is run on live.
+
+- `services/accounts/dashboard.service.ts` and `GET /api/accounts/dashboard`;
+  screen `/accounts/dashboard` (Sidebar: Accounts → Dashboard, no longer
+  "planned").
+- `GET /api/accounts/vouchers/:id/print` → `/print/voucher/[id]`;
+  `GET /api/accounts/ledgers/:id/print-statement` →
+  `/print/ledger-statement/[id]?from&to[&confirm=1]` (statement of account,
+  or confirmation of accounts). Print templates VCH and SOA.
+- Print links: voucher window, Ledger header (Print, Confirmation for a
+  party), Outstanding party row (Print statement, Confirmation letter).
+- `tools/check-accounts-phase6.ts`: 26 checks — every dashboard figure
+  against Outstanding, P&L, the cash and bank ledgers, the TDS register and
+  the Day Book's pending list; months add up to the year; money in less out
+  equals the change in cash and bank; the to-do flags come and go.
+- Full check the same day (all 145 checks, 13 HTTP, 13 document flows, 29
+  screens in Chrome, a voucher entered/printed/cancelled through the form).
+  Fixed from it: the Day Book now lists newest first, so a voucher just
+  saved is at the top (Excel export stays oldest first); "books are closed"
+  and "before the books start" messages say "03 Nov 2026", not
+  "2026-11-03"; Outstanding's Net column no longer wraps the ↺ mark.
+- 4 Nov: the books' start can be set ahead of go-live (e.g. 1 Dec on
+  4 Nov). Until the day comes, the reports open on the year to date
+  instead of failing with "the start date is after the end date";
+  documents and vouchers dated before it stay out.
+  `tools/check-accounts-future-start.ts`: 11 checks.
+
+## Accounts, phase 5: GST returns and TDS (Tue 3 Nov)
+
+Same branch `feat/accounts-posting`. No migration.
+
+- `services/accounts/gst.service.ts`: GSTR-1 tables and portal JSON,
+  GSTR-3B working with the rule-88A set-off, GSTR-2B file matching.
+- `services/accounts/tdsBooks.service.ts`: TDS deducted by section with
+  dues and lateness, TDS deducted by customers.
+- Screens `/accounts/gst` (GSTR-1 / 3B / 2B tabs) and `/accounts/tds`.
+- Fixed: the as-on dates of Outstanding, Bank Reconciliation, Balance Sheet
+  and stock value were ignored by the API (a broken date pattern) and always
+  meant today.
+- `tools/check-accounts-phase5.ts`: 22 checks — 3B ties to the GST ledgers,
+  set-off order, 2B statuses, TDS against the bills and receipts.
+
+## Accounts, phase 4: Profit & Loss, Balance Sheet, closing stock (Tue 3 Nov)
+
+Same branch `feat/accounts-posting`. **Migration
+`20261103100000_accounts_stock_values`** (one new table, adds only) — run it
+on live before this merges.
+
+- `services/accounts/finalAccounts.service.ts`: stock on a day (opening
+  stock before the books start; the accountant's value for that day; else
+  inventory's own value), profit and loss by brand, balance sheet with the
+  year's profit and earlier years' stock carried without closing entries.
+- `/accounts/profit-loss` (by brand, "Value it" for closing stock) and
+  `/accounts/balance-sheet` (group tree, opening difference shown).
+- `tools/check-accounts-phase4.ts`: 21 checks — balances on any day and
+  across a year end, P&L = balance sheet profit, brands add up, periods add up.
+
+## Accounts, phase 3: old books in, outstanding, bank reconciliation (Tue 3 Nov)
+
+Same branch `feat/accounts-posting`. No migration.
+
+- **Opening** tab (Chart of Accounts): import the old trial balance and the
+  unpaid bills (`services/accounts/opening.service.ts`, the shared sheet
+  import dialog); each party's opening = its bills less advances.
+- **Outstanding** (`/accounts/outstanding`): receivable / payable from the
+  ledgers' bill references, aged, advances apart, gap shown as "Not split
+  into bills"; totals equal Sundry Debtors / Creditors in the trial balance.
+- **Bank Reconciliation** (`/accounts/bank-reco`): bank dates per entry,
+  balance the bank should show, statement difference; bank dates kept when
+  a voucher is rewritten.
+- `lib/sheet.ts`: .csv cells kept as typed (12-08-2026 was read as 8 Dec) and
+  CSV dates no longer a day early in India — fixes every import.
+- `tools/check-accounts-phase3.ts`: 19 checks.
+
+## Accounts, phase 2: Sales and Purchase post to the books (Tue 3 Nov)
+
+Branch `feat/accounts-posting` (off main after #58; same worktree and ports).
+No migration. Decisions in docs/07 §8.
+
+- `services/accounts/posting.service.ts`: one voucher per document, written
+  inside the document's own save and rewritten when it changes — sales invoice
+  (+ brokerage journal), payment received, credit note, purchase bill, supplier
+  payment, posted purchase note. Cancel/reverse cancels the voucher. A closed
+  period refuses the save; any other posting fault rolls back to a savepoint,
+  is logged, and the document waits in Accounts as "not in the books".
+- Hooked into createInvoice/cancelInvoice, createReceipt/allocateReceipt/
+  reverseReceipt, createCreditNote/applyCreditNote/cancelCreditNote, bookBill
+  (also cash expenses), bill edit and cancel (cancel now one transaction),
+  recordPayment and reverse, note post/cancel/GST treatment, and SO amend when
+  the brand changes.
+- `GET /api/accounts/posting`, `POST /api/accounts/posting/run`; moving the
+  books' start posts or removes documents; closing refuses while any wait.
+- Day Book banner "not in the books yet" with Bring them in; voucher window
+  links to its document; Accounts vouchers cannot settle document bills.
+- `tools/check-accounts-posting.ts`: 11 checks — every document posts, every
+  customer's ledger equals Sales outstanding, every supplier's equals Purchase.
 
 ## Accounts, phase 1: the books (Mon 2 Nov)
 

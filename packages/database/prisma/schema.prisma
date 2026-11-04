@@ -312,6 +312,7 @@ model User {
   vouchersCreated        Voucher[]                 @relation("VoucherCreatedBy")
   vouchersUpdated        Voucher[]                 @relation("VoucherUpdatedBy")
   vouchersCancelled      Voucher[]                 @relation("VoucherCancelledBy")
+  stockValuesSet         StockValue[]              @relation("StockValueSetBy")
   mosClosed              ManufacturingOrder[]      @relation("MOClosedBy")
   quotesCreated          SalesQuotation[]          @relation("QuoteCreatedBy")
   creditNotesRaised      CreditNote[]              @relation("CNCreatedBy")
@@ -4280,6 +4281,24 @@ model VoucherLine {
   @@index([ledgerId])
   @@index([voucherId])
   @@map("acc_voucher_lines")
+}
+
+/// A day's closing stock as the accountant puts it, in place of the value
+/// inventory gives on its own: a physical count at the year end, work in
+/// progress taken in. Only that day; every other day takes inventory's value.
+model StockValue {
+  id             String   @id @default(cuid())
+  asOn           DateTime @unique
+  value          Decimal  @db.Decimal(14, 2)
+  /// What inventory said that day, kept beside it.
+  inventoryValue Decimal? @db.Decimal(14, 2)
+  notes          String?
+  setById        String?
+  setBy          User?    @relation("StockValueSetBy", fields: [setById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("acc_stock_values")
 }
 
 /// The part of a party's line that raises or settles one bill. A party's

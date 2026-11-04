@@ -5,6 +5,7 @@ import { prisma } from '@ld-erp/database'
 import { AuthRequest, requirePermission, userCan } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
+import { postWithin } from '../services/accounts/posting.service'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
@@ -304,6 +305,7 @@ export async function createCreditNote(tx: Prisma.TransactionClient, data: Credi
 
   await tx.salesInvoice.update({ where: { id: inv.id }, data: { creditedAmount: { increment: applied } } })
   await syncInvoiceFromReceipts(tx, inv.id)
+  await postWithin(tx, 'CREDIT_NOTE', note.id, userId)
   return tx.creditNote.findUniqueOrThrow({ where: { id: note.id }, include: noteInclude })
 }
 
@@ -409,6 +411,7 @@ export async function cancelCreditNote(tx: Prisma.TransactionClient, id: string,
     await tx.salesInvoice.update({ where: { id: before.invoiceId }, data: { creditedAmount: { decrement: applied } } })
     await syncInvoiceFromReceipts(tx, before.invoiceId)
   }
+  await postWithin(tx, 'CREDIT_NOTE', before.id, userId)
   return { before, after }
 }
 
@@ -443,7 +446,9 @@ export async function applyCreditNote(
     await syncInvoiceFromReceipts(tx, a.invoiceId)
   }
   const applied = round2(planned.reduce((s, a) => s + a.amount, 0))
-  return tx.creditNote.update({ where: { id: note.id }, data: { onAccount: round2(held - applied) }, include: noteInclude })
+  const updated = await tx.creditNote.update({ where: { id: note.id }, data: { onAccount: round2(held - applied) }, include: noteInclude })
+  await postWithin(tx, 'CREDIT_NOTE', note.id, userId)
+  return updated
 }
 
 const applySchema = z.object({

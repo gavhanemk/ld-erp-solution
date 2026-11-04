@@ -1,14 +1,14 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertCircle, BookText, RefreshCw } from 'lucide-react'
+import { AlertCircle, BookText, FileSignature, Printer, RefreshCw } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { asDate, asNumber, downloadRows, type ExportColumn, type ExportFormat } from '@/lib/export'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { VoucherDialog } from '@/components/accounts/VoucherDialog'
 import { VoucherView } from '@/components/accounts/VoucherView'
-import { BILL_KIND_LABEL, KIND_BADGE, amountOrBlank, day, drCr, fyStartOf, inr, todayIst, type BillKind, type BooksSummary, type Ledger, type ManualKind, type VoucherKind } from '@/components/accounts/books'
+import { BILL_KIND_LABEL, KIND_BADGE, amountOrBlank, day, drCr, fyStartOf, inr, reportStart, todayIst, type BillKind, type BooksSummary, type Ledger, type ManualKind, type VoucherKind } from '@/components/accounts/books'
 
 interface StatementRow {
   lineId: string
@@ -65,8 +65,7 @@ export default function LedgerPage() {
         const [s, l] = await Promise.all([api.get<{ data: BooksSummary }>('/accounts/summary'), api.get<{ data: Ledger[] }>('/accounts/ledgers')])
         setSummary(s.data)
         setLedgers(l.data)
-        const start = s.data.booksStart && s.data.booksStart > s.data.fyStart ? s.data.booksStart : s.data.fyStart
-        setFrom(p.get('from') ?? start)
+        setFrom(p.get('from') ?? reportStart(s.data))
         if (p.get('to')) setTo(p.get('to')!)
         setLedgerId(p.get('id') ?? l.data.find((x) => x.systemKey === 'CASH')?.id ?? '')
       } catch (err) {
@@ -129,6 +128,22 @@ export default function LedgerPage() {
           <button className="btn-ghost" onClick={() => void load()} disabled={loading} aria-label="Refresh">
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
+          {data && (
+            <a className="btn-secondary" href={`/print/ledger-statement/${data.ledger.id}?from=${from}&to=${to}`} target="_blank" rel="noreferrer" title="This account for the period, to print or send">
+              <Printer size={15} /> Print
+            </a>
+          )}
+          {data?.ledger.partyType && (
+            <a
+              className="btn-secondary"
+              href={`/print/ledger-statement/${data.ledger.id}?from=${from}&to=${to}&confirm=1`}
+              target="_blank"
+              rel="noreferrer"
+              title="The statement with a request to sign and return the balance — what auditors ask for at the year end"
+            >
+              <FileSignature size={15} /> Confirmation
+            </a>
+          )}
           <ExportButton onExport={exportIt} disabled={loading || !data} />
         </div>
       </div>

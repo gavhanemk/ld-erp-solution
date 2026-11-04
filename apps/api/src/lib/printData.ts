@@ -92,6 +92,10 @@ const DEFAULT_TITLES: Record<string, string> = {
   // and a job worker's account of what they were sent and sent back.
   CMS: 'CUSTOMER MATERIAL STATEMENT',
   JWS: 'JOB WORK STATEMENT',
+  // The books: a voucher as the accountant files it, and a party's account as
+  // it is sent to them.
+  VCH: 'VOUCHER',
+  SOA: 'STATEMENT OF ACCOUNT',
 }
 
 export async function getPrintHeader(docType: string): Promise<PrintHeader> {

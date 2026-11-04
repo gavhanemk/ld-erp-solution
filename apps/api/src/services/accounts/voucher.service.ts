@@ -3,7 +3,7 @@ import type { BillRefKind, Prisma, VoucherKind } from '@prisma/client'
 import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf, nextDocumentNumber } from '../../lib/docNumber'
 import { VOUCHER_SERIES } from './chart.service'
-import { booksSettings, dayValue, istDay, openBills, r2, todayIst, type BooksSettings } from './books.service'
+import { bankDatesOf, bankKey, booksSettings, dayText, dayValue, istDay, openBills, r2, todayIst, type BooksSettings } from './books.service'
 
 /**
  * Vouchers typed in Accounts: Payment, Receipt, Contra and Journal.
@@ -117,10 +117,10 @@ export function checkDay(day: string, s: BooksSettings, what = 'A voucher') {
     throw new AppError('Set the day the books start (Settings → Company) before entering vouchers.', 409, 'BOOKS_NOT_STARTED')
   }
   if (day < s.booksStart) {
-    throw new AppError(`${what} cannot be dated before the books start on ${s.booksStart}.`, 400, 'BEFORE_BOOKS')
+    throw new AppError(`${what} cannot be dated before the books start on ${dayText(s.booksStart)}.`, 400, 'BEFORE_BOOKS')
   }
   if (s.lockedUpTo && day <= s.lockedUpTo) {
-    throw new AppError(`The books are closed up to ${s.lockedUpTo}. ${what} dated ${day} cannot be entered, changed or cancelled.`, 409, 'PERIOD_LOCKED')
+    throw new AppError(`The books are closed up to ${dayText(s.lockedUpTo)}. ${what} dated ${dayText(day)} cannot be entered, changed or cancelled.`, 409, 'PERIOD_LOCKED')
   }
   if (day > todayIst()) {
     throw new AppError(`${what} cannot be dated after today.`, 400, 'FUTURE_DATE')
@@ -226,6 +226,12 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
         if (!openCache.has(led.id)) openCache.set(led.id, await openBills(tx, led.id, existing?.id))
         const open = openCache.get(led.id)!.find((o) => o.billNo === billNo)
         if (!open) throw new AppError(`Line ${i + 1}: ${led.name} has no open bill ${billNo}`, 400, 'NO_SUCH_BILL')
+        // An invoice or a supplier's bill is settled where Sales and Purchase
+        // can see it, so their balances and the ledger never disagree.
+        if (open.fromDocument) {
+          const where = open.raisedBy === 'PURCHASE_BILL' ? 'Purchase → Supplier Payments, or a purchase note' : 'Sales → Payments Received, or a credit note'
+          throw new AppError(`Line ${i + 1}: ${billNo} is settled from ${where}, not from an Accounts voucher.`, 400, 'BILL_FROM_DOCUMENT')
+        }
         const key = `${led.id}:${billNo}`
         const left = r2(open.pending + (taken.get(key) ?? 0))
         const amount = r2(sign * b.amount)
@@ -273,7 +279,9 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
     chequeDate: input.chequeDate ? dayValue(input.chequeDate) : null,
   }
   let id: string
+  let banked = new Map<string, Date>()
   if (existing) {
+    banked = await bankDatesOf(tx, existing.id)
     await tx.voucherLine.deleteMany({ where: { voucherId: existing.id } })
     await tx.voucher.update({ where: { id: existing.id }, data: { ...header, updatedById: userId } })
     id = existing.id
@@ -290,6 +298,7 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
         credit: l.side === 'CR' ? r2(l.amount) : 0,
         costCentreId: l.costCentreId || null,
         narration: l.narration || null,
+        bankDate: banked.get(bankKey(l.ledgerId, l.side === 'DR' ? l.amount : -l.amount)) ?? null,
         sortOrder: i,
         billRefs: {
           create: refsByLine[i].map((r) => ({
@@ -323,7 +332,7 @@ export async function cancelVoucher(tx: Tx, id: string, reason: string, userId: 
   if (v.sourceType) throw new AppError(`${v.voucherNo} was written by its document. Cancel the document, and its voucher goes with it.`, 409, 'FROM_DOCUMENT')
   const s = await booksSettings(tx)
   if (s.lockedUpTo && istDay(v.date) <= s.lockedUpTo) {
-    throw new AppError(`The books are closed up to ${s.lockedUpTo}; ${v.voucherNo} cannot be cancelled.`, 409, 'PERIOD_LOCKED')
+    throw new AppError(`The books are closed up to ${dayText(s.lockedUpTo)}; ${v.voucherNo} cannot be cancelled.`, 409, 'PERIOD_LOCKED')
   }
   const raised = v.lines.flatMap((l) => l.billRefs).filter((r) => r.kind !== 'AGAINST_REF')
   for (const r of raised) {
