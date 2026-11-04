@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ClipboardCheck,
+  CheckCircle2,
   Loader2,
   AlertCircle,
   Plus,
@@ -34,6 +36,7 @@ import { Section } from '@/components/purchase/Section'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { itemFormFields } from '@/components/masters/itemFormFields'
 import { processFormFields } from '@/components/masters/processFormFields'
+import { BomReviewDialog } from '@/components/masters/BomReviewDialog'
 
 export interface BomLineSize {
   id?: string
@@ -280,6 +283,31 @@ const emptyCostRow = (kind: EditCostRow['kind']): EditCostRow => ({
 
 const round = (n: number, dp: number) => Number(n.toFixed(dp))
 
+/** The materials as they would be saved: what tells a change from none. */
+const materialsKey = (ls: EditLine[]) =>
+  JSON.stringify(
+    ls
+      .filter((l) => l.componentItemId && l.qtyPerUnit.trim() !== '')
+      .map((l) => [
+        l.componentItemId,
+        l.departmentId || '',
+        Number(l.qtyPerUnit),
+        l.unitCost.trim() === '' ? null : Number(l.unitCost),
+        l.carried.wastagePercent,
+        l.carried.component ?? '',
+        l.carried.notes ?? '',
+        l.carried.sizes,
+      ]),
+  )
+
+/** The labour and overheads as they would be saved. */
+const costingKey = (rows: EditCostRow[]) =>
+  JSON.stringify(
+    rows
+      .filter((r) => r.name.trim() !== '' || r.value.trim() !== '')
+      .map((r) => [r.kind, r.name.trim(), r.departmentId || '', r.kind === 'LABOUR' ? 'PER_PIECE' : r.basis, Number(r.value)]),
+  )
+
 /**
  * The same sums the server does, so the figure on screen is the figure that
  * will be saved. Margin is a share of the selling price, rounded to the paisa
@@ -388,7 +416,22 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
 
   const isEdit = Boolean(current)
-  const frozen = Boolean(current && current.status !== 'DRAFT')
+  /** Retired: kept for the record, changed no more. */
+  const frozen = Boolean(current && current.status === 'OBSOLETE')
+  /**
+   * Approved and in use: open to change, but a change to its materials or
+   * costing is saved as a new version (a draft), so orders and MOs made from
+   * this one keep it. Its price and notes change on this one.
+   */
+  const revising = current?.status === 'APPROVED'
+  /** The materials, costing and notes as opened, to tell a change from none. */
+  const [baseline, setBaseline] = useState<{ materials: string; costing: string; notes: string } | null>(null)
+  /** The version a new draft was made from, while it waits for approval. */
+  const [revisedFrom, setRevisedFrom] = useState<string | null>(null)
+  /** Saved as a draft: Review and approve now, or later. */
+  const [savedDraft, setSavedDraft] = useState<Bom | null>(null)
+  const [reviewing, setReviewing] = useState<string | null>(null)
+  const mayApprove = can('masters', 'approve')
 
   useEffect(() => {
     if (!open) return
@@ -399,36 +442,38 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
     setColor(record?.color ?? '')
     setNotes(record?.notes ?? '')
     setAddedKey(null)
-    setLines(
-      record?.lines?.length
-        ? record.lines.map((l) => ({
-            rowKey: nextRowKey++,
-            // Filled from the item once the item list is in.
-            categoryId: '',
-            subCategoryId: '',
-            componentItemId: l.componentItemId,
-            departmentId: l.departmentId ?? '',
-            qtyPerUnit: String(l.qtyPerUnit),
-            unitCost: l.unitCost != null ? String(l.unitCost) : '',
-            carried: {
-              component: l.component ?? null,
-              wastagePercent: Number(l.wastagePercent ?? 0),
-              notes: l.notes ?? null,
-              sizes: (l.sizes ?? []).map((s) => ({ sizeId: s.sizeId, qtyPerUnit: Number(s.qtyPerUnit) })),
-            },
-          }))
-        : [emptyLine()],
-    )
-    setCostRows(
-      (record?.costLines ?? []).map((c) => ({
-        rowKey: nextRowKey++,
-        kind: c.kind,
-        name: c.name,
-        departmentId: c.departmentId ?? '',
-        basis: c.basis,
-        value: plain(c.value),
-      })),
-    )
+    const startLines: EditLine[] = record?.lines?.length
+      ? record.lines.map((l) => ({
+          rowKey: nextRowKey++,
+          // Filled from the item once the item list is in.
+          categoryId: '',
+          subCategoryId: '',
+          componentItemId: l.componentItemId,
+          departmentId: l.departmentId ?? '',
+          qtyPerUnit: String(l.qtyPerUnit),
+          unitCost: l.unitCost != null ? String(l.unitCost) : '',
+          carried: {
+            component: l.component ?? null,
+            wastagePercent: Number(l.wastagePercent ?? 0),
+            notes: l.notes ?? null,
+            sizes: (l.sizes ?? []).map((s) => ({ sizeId: s.sizeId, qtyPerUnit: Number(s.qtyPerUnit) })),
+          },
+        }))
+      : [emptyLine()]
+    const startRows: EditCostRow[] = (record?.costLines ?? []).map((c) => ({
+      rowKey: nextRowKey++,
+      kind: c.kind,
+      name: c.name,
+      departmentId: c.departmentId ?? '',
+      basis: c.basis,
+      value: plain(c.value),
+    }))
+    setLines(startLines)
+    setCostRows(startRows)
+    setBaseline({ materials: materialsKey(startLines), costing: costingKey(startRows), notes: record?.notes ?? '' })
+    setRevisedFrom(null)
+    setSavedDraft(null)
+    setReviewing(null)
     setMargin(plain(record?.marginPercent))
     setPrice(plain(record?.sellingPrice))
     setPriceSource('margin')
@@ -753,6 +798,37 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
     }
   }
 
+  /** The next free version for this style and colour: 1.0 becomes 1.1, past any already taken. */
+  const nextVersion = async (b: Bom) => {
+    const q = new URLSearchParams({ styleId: b.styleId, limit: '200' })
+    if (b.color) q.set('color', b.color)
+    const all = await api.get<Paginated<Bom>>(`/masters/bom?${q.toString()}`)
+    const taken = new Set(all.data.filter((x) => (x.color ?? null) === (b.color ?? null)).map((x) => x.version))
+    let major = 1
+    let minor = 0
+    for (const v of [b.version, ...taken]) {
+      const m = /^(\d+)\.(\d+)$/.exec(v)
+      if (m && (Number(m[1]) > major || (Number(m[1]) === major && Number(m[2]) > minor))) {
+        major = Number(m[1])
+        minor = Number(m[2])
+      }
+    }
+    let next = `${major}.${minor + 1}`
+    while (taken.has(next)) {
+      minor += 1
+      next = `${major}.${minor + 1}`
+    }
+    return next
+  }
+
+  /** A copy of the approved BOM as the next version, a draft: what the change is saved into. */
+  const reviseFrom = async (b: Bom) => {
+    const res = await api.post<SaveResponse>(`/masters/bom/${b.id}/copy`, { version: await nextVersion(b) })
+    setCurrent(res.data)
+    setRevisedFrom(b.version)
+    return { draft: res.data, from: b.version }
+  }
+
   const saveMaterials = (then: 'close' | 'next') => {
     // An approved BOM's components are locked, and the server refuses a save
     // that sends them at all — so only the note goes, which it does allow.
@@ -812,9 +888,45 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       return
     }
 
+    // An approved BOM: materials as they were are not saved again (a changed
+    // note goes on this version); changed ones go into a new version.
+    if (revising) {
+      if (materialsKey(lines) === baseline?.materials) {
+        void run(async () => {
+          if (notes !== (baseline?.notes ?? '')) {
+            const res = await api.patch<SaveResponse>(`/masters/bom/${current!.id}`, { notes })
+            setCurrent(res.data)
+            onSaved(res.message)
+          }
+          if (then === 'close') {
+            onClose()
+            return
+          }
+          setNotice(null)
+          setStep(2)
+        })
+        return
+      }
+      void run(async () => {
+        const { draft, from } = await reviseFrom(current!)
+        const res = await api.patch<SaveResponse>(`/masters/bom/${draft.id}`, { notes, lines: payloadLines })
+        setCurrent(res.data)
+        onSaved(res.message)
+        if (then === 'close') {
+          setSavedDraft(res.data)
+          return
+        }
+        setNotice(
+          `Saved as v${res.data.version}, a new draft. v${from} stays in use until v${res.data.version} is approved.${res.message ? ` ${res.message}` : ''}`,
+        )
+        setStep(2)
+      })
+      return
+    }
+
     // Version, routing, base size and whether it is offered are not sent. A new
     // BOM starts at version 1.0 with none of the others; an edit keeps whatever
-    // it had. Later versions come from Copy on the BOM list.
+    // it had. Later versions come from editing an approved one, or Copy.
     void run(async () => {
       const res = isEdit
         ? await api.patch<SaveResponse>(`/masters/bom/${current!.id}`, { notes, lines: payloadLines })
@@ -827,7 +939,8 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       setCurrent(res.data)
       onSaved(res.message)
       if (then === 'close') {
-        onClose()
+        // Saved as a draft: approve it now, or later.
+        setSavedDraft(res.data)
         return
       }
       // A rate warning ("one component has no rate yet") is worth keeping in
@@ -866,6 +979,26 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       value: Number(r.value),
     }))
 
+    if (revising) {
+      if (costingKey(costRows) === baseline?.costing) {
+        setNotice(null)
+        setStep(3)
+        return
+      }
+      void run(async () => {
+        const { draft, from } = await reviseFrom(current!)
+        const res = await api.patch<SaveResponse>(`/masters/bom/${draft.id}`, { costLines: payload })
+        setCurrent(res.data)
+        onSaved(res.message)
+        setMargin(plain(res.data.marginPercent))
+        setPrice(plain(res.data.sellingPrice))
+        setPriceSource('margin')
+        setNotice(`Saved as v${res.data.version}, a new draft. v${from} stays in use until v${res.data.version} is approved.`)
+        setStep(3)
+      })
+      return
+    }
+
     void run(async () => {
       const res = await api.patch<SaveResponse>(`/masters/bom/${current!.id}`, { costLines: payload })
       setCurrent(res.data)
@@ -898,7 +1031,8 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       )
       setCurrent(res.data)
       onSaved(res.message)
-      onClose()
+      if (res.data.status === 'DRAFT') setSavedDraft(res.data)
+      else onClose()
     })
   }
 
@@ -1681,10 +1815,10 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
           )}
 
           <div className="space-y-1 text-xs text-muted-foreground">
-            {frozen && (
+            {revising && (
               <p>
-                The cost is locked because this BOM is approved. The price stays open, and every
-                change is kept in the log.
+                The cost stays as approved; to change it, go back and change the materials or labour, which makes a new version.
+                The price changes on this version, and every change is kept in the log.
               </p>
             )}
             {current?.pricedBy && (
@@ -1829,8 +1963,18 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
         <div className="flex items-start gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
           <AlertCircle size={16} className="mt-0.5 shrink-0 text-accent" />
           <p className="text-sm text-foreground">
-            This BOM is approved, so its components and costing cannot be changed — only the notes{canCost ? ' and the price' : ''}. Copy it
-            to a new version, or to another colour, from the BOM list instead.
+            This BOM is retired, so it is kept as it was. Copy it to a new version, or to another colour, from the BOM list to use it again.
+          </p>
+        </div>
+      )}
+
+      {revising && step !== 3 && (
+        <div className="flex items-start gap-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-primary" />
+          <p className="text-sm text-foreground">
+            <b>This BOM is approved and in use.</b> Change its materials or costing and the change is saved as a new version, a draft:
+            v{current?.version} stays in use until the new version is approved, and orders and MOs already made keep v{current?.version}.
+            {canCost ? ' Its price and notes change on this version.' : ' Its notes change on this version.'}
           </p>
         </div>
       )}
@@ -1846,6 +1990,60 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       {step === 2 && costingStep}
       {step === 3 && pricingStep}
 
+      {savedDraft && !reviewing && (
+        <FormFrame
+          icon={CheckCircle2}
+          title="Saved as a draft"
+          subtitle={`${savedDraft.style?.code ?? style?.code ?? ''}${savedDraft.color ? ` · ${savedDraft.color}` : ''} · v${savedDraft.version}`}
+          width="max-w-lg"
+          primaryInHeader={false}
+          onClose={onClose}
+          primary={
+            mayApprove ? (
+              <button type="button" className="btn-primary" onClick={() => setReviewing(savedDraft.id)}>
+                <ClipboardCheck size={15} /> Review and approve now
+              </button>
+            ) : (
+              <button type="button" className="btn-primary" onClick={onClose}>
+                OK
+              </button>
+            )
+          }
+          footer={
+            mayApprove ? (
+              <button type="button" className="btn-secondary" onClick={onClose}>
+                Later
+              </button>
+            ) : undefined
+          }
+        >
+          <div className="space-y-2 px-1 py-1">
+            <p className="text-sm text-foreground">
+              Orders and MOs use only an approved BOM, so this one is <b>not in use yet</b>.
+              {revisedFrom ? ` Until it is approved, v${revisedFrom} stays in use.` : ''}
+            </p>
+            <p className="text-sm text-muted-foreground">
+              {mayApprove
+                ? 'Review it now and approve it, or approve it later from Bill of Materials → Drafts.'
+                : 'Someone who may approve masters approves it, from Bill of Materials → Drafts.'}
+            </p>
+          </div>
+        </FormFrame>
+      )}
+      {reviewing && (
+        <BomReviewDialog
+          bomId={reviewing}
+          onClose={onClose}
+          onEdit={() => {
+            setReviewing(null)
+            setSavedDraft(null)
+          }}
+          onApproved={(message) => {
+            onSaved(message)
+            onClose()
+          }}
+        />
+      )}
       {addingProcess && (
         <MasterFormDialog<ProcessOption & Record<string, unknown>>
           open
