@@ -173,3 +173,8 @@ export function fyStartOf(ymd: string, startMonth = 4): string {
   const m = Number(ymd.slice(5, 7))
   return `${m >= startMonth ? y : y - 1}-${String(startMonth).padStart(2, '0')}-01`
 }
+
+/** Where a report opens: the day the books start, once it has come and falls in this year; otherwise the year's first day. */
+export function reportStart(s: BooksSummary): string {
+  return s.booksStart && s.booksStart > s.fyStart && s.booksStart <= s.today ? s.booksStart : s.fyStart
+}

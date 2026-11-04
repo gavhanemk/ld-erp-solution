@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { AlertCircle, Landmark, Plus, RefreshCw, Wallet } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { VoucherDialog } from '@/components/accounts/VoucherDialog'
-import { amountOrBlank, day, drCr, inr, todayIst, type BooksSummary, type ManualKind } from '@/components/accounts/books'
+import { amountOrBlank, day, drCr, inr, reportStart, todayIst, type BooksSummary, type ManualKind } from '@/components/accounts/books'
 
 interface MoneyRow {
   id: string
@@ -39,7 +39,7 @@ export default function CashBankPage() {
       .get<{ data: BooksSummary }>('/accounts/summary')
       .then((r) => {
         setSummary(r.data)
-        setFrom(r.data.booksStart && r.data.booksStart > r.data.fyStart ? r.data.booksStart : r.data.fyStart)
+        setFrom(reportStart(r.data))
       })
       .catch((err) => setError(apiErrorMessage(err, 'Could not load the books.')))
   }, [])

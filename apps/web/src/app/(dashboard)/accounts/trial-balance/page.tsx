@@ -6,7 +6,7 @@ import { AlertCircle, AlertTriangle, ChevronDown, ChevronRight, RefreshCw, Scale
 import { api, apiErrorMessage } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { downloadRows, type ExportColumn, type ExportFormat } from '@/lib/export'
-import { amountOrBlank, day, drCr, fyStartOf, inr, r2, todayIst, type BooksSummary, type Nature } from '@/components/accounts/books'
+import { amountOrBlank, day, drCr, fyStartOf, inr, r2, reportStart, todayIst, type BooksSummary, type Nature } from '@/components/accounts/books'
 
 interface Figures {
   opening: number
@@ -64,7 +64,7 @@ export default function TrialBalancePage() {
       .get<{ data: BooksSummary }>('/accounts/summary')
       .then((r) => {
         setSummary(r.data)
-        setFrom(r.data.booksStart && r.data.booksStart > r.data.fyStart ? r.data.booksStart : r.data.fyStart)
+        setFrom(reportStart(r.data))
       })
       .catch((err) => setError(apiErrorMessage(err, 'Could not load the books.')))
   }, [])

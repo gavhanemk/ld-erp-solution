@@ -88,7 +88,8 @@ export function periodFrom(query: Record<string, unknown>, s: BooksSettings): { 
   const pick = (v: unknown) => (typeof v === 'string' && YMD.test(v) ? v : undefined)
   const to = pick(query.to) ?? todayIst()
   let from = pick(query.from) ?? fyStartOf(to, s.fyStartMonth)
-  if (s.booksStart && from < s.booksStart && !pick(query.from)) from = s.booksStart
+  // From the day the books start, once it has come; set ahead of go-live, the year to date.
+  if (s.booksStart && from < s.booksStart && s.booksStart <= to && !pick(query.from)) from = s.booksStart
   if (from > to) throw new AppError('The start date is after the end date', 400, 'BAD_PERIOD')
   return { from, to }
 }

@@ -8,7 +8,7 @@ import { asDate, asNumber, downloadRows, type ExportColumn, type ExportFormat } 
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { VoucherDialog } from '@/components/accounts/VoucherDialog'
 import { VoucherView } from '@/components/accounts/VoucherView'
-import { BILL_KIND_LABEL, KIND_BADGE, amountOrBlank, day, drCr, fyStartOf, inr, todayIst, type BillKind, type BooksSummary, type Ledger, type ManualKind, type VoucherKind } from '@/components/accounts/books'
+import { BILL_KIND_LABEL, KIND_BADGE, amountOrBlank, day, drCr, fyStartOf, inr, reportStart, todayIst, type BillKind, type BooksSummary, type Ledger, type ManualKind, type VoucherKind } from '@/components/accounts/books'
 
 interface StatementRow {
   lineId: string
@@ -65,8 +65,7 @@ export default function LedgerPage() {
         const [s, l] = await Promise.all([api.get<{ data: BooksSummary }>('/accounts/summary'), api.get<{ data: Ledger[] }>('/accounts/ledgers')])
         setSummary(s.data)
         setLedgers(l.data)
-        const start = s.data.booksStart && s.data.booksStart > s.data.fyStart ? s.data.booksStart : s.data.fyStart
-        setFrom(p.get('from') ?? start)
+        setFrom(p.get('from') ?? reportStart(s.data))
         if (p.get('to')) setTo(p.get('to')!)
         setLedgerId(p.get('id') ?? l.data.find((x) => x.systemKey === 'CASH')?.id ?? '')
       } catch (err) {

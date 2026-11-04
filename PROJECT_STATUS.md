@@ -32,6 +32,11 @@ phase; phases 2–6 go to live together, after migration
   saved is at the top (Excel export stays oldest first); "books are closed"
   and "before the books start" messages say "03 Nov 2026", not
   "2026-11-03"; Outstanding's Net column no longer wraps the ↺ mark.
+- 4 Nov: the books' start can be set ahead of go-live (e.g. 1 Dec on
+  4 Nov). Until the day comes, the reports open on the year to date
+  instead of failing with "the start date is after the end date";
+  documents and vouchers dated before it stay out.
+  `tools/check-accounts-future-start.ts`: 11 checks.
 
 ## Accounts, phase 5: GST returns and TDS (Tue 3 Nov)
 
