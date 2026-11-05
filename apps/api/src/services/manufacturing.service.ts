@@ -421,9 +421,12 @@ export async function syncMoPacked(tx: Prisma.TransactionClient, moId: string) {
  *   every material issued in full → in production (cutting recorded) →
  *   packing (pieces booked into finished goods) → completed.
  *
+ * One more, off the road: its sales order is short-closed or cancelled and
+ * nothing was made on it (ORDER_CLOSED), so it is only waiting to be closed.
+ *
  * Worked out from what has been done, never stored, so it cannot go stale.
  */
-export const MO_STAGES = ['DRAFT', 'NOT_ASKED', 'ASKED', 'PART_ISSUED', 'ISSUED', 'IN_PRODUCTION', 'PACKING', 'COMPLETED', 'CLOSED'] as const
+export const MO_STAGES = ['DRAFT', 'NOT_ASKED', 'ASKED', 'PART_ISSUED', 'ISSUED', 'IN_PRODUCTION', 'PACKING', 'ORDER_CLOSED', 'COMPLETED', 'CLOSED'] as const
 export type MoStage = (typeof MO_STAGES)[number]
 
 /** Released and not finished. */
@@ -444,6 +447,34 @@ const atMaterials: Prisma.ManufacturingOrderWhereInput = {
   totalPackedQty: { lte: 0 },
   totalCutQty: { lte: 0 },
   cuttingOrders: { none: liveCutting },
+}
+
+/** Sales orders that are over: nothing more is made for them. */
+const CLOSED_ORDER = ['COMPLETED', 'CANCELLED']
+const soClosed: Prisma.ManufacturingOrderWhereInput = { so: { status: { in: ['COMPLETED', 'CANCELLED'] } } }
+const soOpen: Prisma.ManufacturingOrderWhereInput = { OR: [{ soId: null }, { so: { status: { notIn: ['COMPLETED', 'CANCELLED'] } } }] }
+
+/**
+ * Which of these manufacturing orders work has started on, and what: material
+ * issued to it, cutting recorded, or pieces packed, the first found, in a few
+ * words. One with none of these has made nothing, and closes with its sales
+ * order when that is cancelled or short-closed.
+ */
+export async function workStarted(db: Db, moIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  if (!moIds.length) return out
+  const [made, cut, issued] = await Promise.all([
+    db.manufacturingOrder.findMany({
+      where: { id: { in: moIds }, OR: [{ totalPackedQty: { gt: 0 } }, { totalCutQty: { gt: 0 } }, { fgReceipts: { some: { cancelledAt: null } } }] },
+      select: { id: true, totalPackedQty: true },
+    }),
+    db.cuttingOrder.findMany({ where: { moId: { in: moIds }, ...liveCutting }, select: { moId: true, cutOrderNumber: true } }),
+    db.materialRequisition.findMany({ where: { moId: { in: moIds }, ...issuedMr }, select: { moId: true, mrNumber: true } }),
+  ])
+  for (const m of made) out.set(m.id, m.totalPackedQty > 0 ? 'pieces packed' : 'pieces cut')
+  for (const c of cut) if (!out.has(c.moId)) out.set(c.moId, `cutting on ${c.cutOrderNumber}`)
+  for (const r of issued) if (r.moId && !out.has(r.moId)) out.set(r.moId, `material issued on ${r.mrNumber}`)
+  return out
 }
 
 /**
@@ -472,15 +503,16 @@ export interface MoStageOf {
   materialItemsInFull?: number
 }
 
-/** The stage of each of these orders, by id. */
+/** The stage of each of these orders, by id. `soStatus`: its sales order's, when it has one. */
 export async function moStages(
   db: Db,
-  mos: Array<{ id: string; status: MOStatus; totalCutQty: number; totalPackedQty: number }>,
+  mos: Array<{ id: string; status: MOStatus; totalCutQty: number; totalPackedQty: number; soStatus?: string | null }>,
 ): Promise<Map<string, MoStageOf>> {
   const out = new Map<string, MoStageOf>()
   const open: typeof mos = []
   for (const mo of mos) {
-    if (mo.status === 'DRAFT' || mo.status === 'COMPLETED' || mo.status === 'CLOSED') out.set(mo.id, { stage: mo.status })
+    if (mo.status === 'COMPLETED' || mo.status === 'CLOSED') out.set(mo.id, { stage: mo.status })
+    else if (mo.status === 'DRAFT') out.set(mo.id, { stage: mo.soStatus && CLOSED_ORDER.includes(mo.soStatus) ? 'ORDER_CLOSED' : 'DRAFT' })
     else if (mo.totalPackedQty > 0) out.set(mo.id, { stage: 'PACKING' })
     else open.push(mo)
   }
@@ -498,6 +530,8 @@ export async function moStages(
   for (const mo of open) {
     if (mo.totalCutQty > 0 || cut.has(mo.id)) out.set(mo.id, { stage: 'IN_PRODUCTION' })
     else if (issued.has(mo.id)) toCount.push(mo.id)
+    // Nothing made on it, and its sales order is over: only waiting to be closed.
+    else if (mo.soStatus && CLOSED_ORDER.includes(mo.soStatus)) out.set(mo.id, { stage: 'ORDER_CLOSED' })
     else out.set(mo.id, { stage: asked.has(mo.id) ? 'ASKED' : 'NOT_ASKED' })
   }
   const counted = await fewAtATime(toCount, (id) => materialsInFull(db, id))
@@ -517,17 +551,25 @@ export async function moStages(
 export async function stageWhere(db: Db, stage: MoStage, within: Prisma.ManufacturingOrderWhereInput = {}): Promise<Prisma.ManufacturingOrderWhereInput> {
   switch (stage) {
     case 'DRAFT':
+      return { AND: [{ status: 'DRAFT' }, soOpen] }
     case 'COMPLETED':
     case 'CLOSED':
       return { status: stage }
+    case 'ORDER_CLOSED':
+      return {
+        AND: [
+          soClosed,
+          { OR: [{ status: 'DRAFT' }, { AND: [atMaterials, { materialRequisitions: { none: issuedMr } }] }] },
+        ],
+      }
     case 'PACKING':
       return { status: { in: ON_FLOOR }, totalPackedQty: { gt: 0 } }
     case 'IN_PRODUCTION':
       return { status: { in: ON_FLOOR }, totalPackedQty: { lte: 0 }, OR: [{ totalCutQty: { gt: 0 } }, { cuttingOrders: { some: liveCutting } }] }
     case 'NOT_ASKED':
-      return { ...atMaterials, materialRequisitions: { none: askingMr } }
+      return { AND: [atMaterials, soOpen, { materialRequisitions: { none: askingMr } }] }
     case 'ASKED':
-      return { ...atMaterials, materialRequisitions: { some: askingMr, none: issuedMr } }
+      return { AND: [atMaterials, soOpen, { materialRequisitions: { some: askingMr, none: issuedMr } }] }
     case 'PART_ISSUED':
     case 'ISSUED': {
       const some = await db.manufacturingOrder.findMany({

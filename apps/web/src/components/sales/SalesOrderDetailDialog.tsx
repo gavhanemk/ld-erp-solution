@@ -90,7 +90,8 @@ export interface OrderDetailFull {
   shortClosedBy: Person | null
   revisions: Array<{ id: string; version: number; reason: string; changedAt: string; changedBy: Person }>
   lines: OrderLineView[]
-  manufacturingOrders: Array<{ id: string; moNumber: string; status: string; totalPackedQty: string | number | null }>
+  /** workStarted: what has been done on it (material issued, cut, packed); null when nothing has. */
+  manufacturingOrders: Array<{ id: string; moNumber: string; status: string; totalPackedQty: string | number | null; workStarted?: string | null }>
   materialRequisitions: Array<{ id: string; mrNumber: string; status: string; closedAt: string | null }>
   /** The customer's material received against it (job work). */
   customerMaterial?: Array<{ id: string; grnNumber: string; status: string; receiptDate: string }>
@@ -276,8 +277,10 @@ export function SalesOrderDetailDialog({
       ? { label: 'All sent · to close', cls: 'badge-warning' }
       : salesOrderStatus(o)
     : null
+  // Something made or sent: material issued, cutting or packing on a manufacturing order, or goods out.
+  // A manufacturing order released with none of that has made nothing, and closes if the order is cancelled.
   const started = o
-    ? o.manufacturingOrders.some((m) => m.status !== 'CLOSED') || o.deliveryChallans.length > 0 || dispatched > 0
+    ? o.manufacturingOrders.some((m) => m.status !== 'CLOSED' && !!m.workStarted) || o.deliveryChallans.length > 0 || dispatched > 0
     : false
   const late =
     o && o.deliveryDate && OPEN_ORDER_STATUSES.includes(o.status) && new Date(o.deliveryDate) < new Date(new Date().toDateString())

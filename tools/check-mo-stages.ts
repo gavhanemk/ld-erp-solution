@@ -4,7 +4,10 @@
 // with nothing issued, which ask for nothing; one raised; part issued; every
 // material in full; some handed back; given to a cutter; cut; part packed;
 // all packed; closed. At each step the stage, and the Status filter finding
-// the order at that stage and at no other.
+// the order at that stage and at no other. Along the way, its sales order
+// cancelled: "sales order closed" while nothing is made on it, its own stage
+// once work has started; and what work has started, as cancelling and
+// short-closing the sales order read it.
 //
 // Rolled back: nothing is kept and no number series moves. It needs the demo
 // masters (FAB-COT-001, FG-SHRT-001, style LD-SH-2601 with a size run, a
@@ -16,7 +19,7 @@ import type { Prisma } from '@prisma/client'
 import { prisma } from '../packages/database/src/index'
 import { createSalesOrderSchema, prepareOrder } from '../apps/api/src/routes/sales.routes'
 import { createMo, createMoSchema, releaseMo } from '../apps/api/src/routes/production.routes'
-import { MO_STAGES, moStages, stageWhere, type MoStage } from '../apps/api/src/services/manufacturing.service'
+import { MO_STAGES, moStages, stageWhere, workStarted, type MoStage } from '../apps/api/src/services/manufacturing.service'
 
 let pass = 0
 let fail = 0
@@ -74,8 +77,8 @@ async function main() {
 
         // The stage, and the filter: the order turns up under its stage and no other.
         const stageIs = async (label: string, want: MoStage, items?: [number, number]) => {
-          const row = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: mo.id }, select: { id: true, status: true, totalCutQty: true, totalPackedQty: true } })
-          const got = (await moStages(tx, [row])).get(mo.id)
+          const row = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: mo.id }, select: { id: true, status: true, totalCutQty: true, totalPackedQty: true, so: { select: { status: true } } } })
+          const got = (await moStages(tx, [{ ...row, soStatus: row.so?.status ?? null }])).get(mo.id)
           const found: string[] = []
           for (const s of MO_STAGES) {
             const where: Prisma.ManufacturingOrderWhereInput = { AND: [{ id: mo.id }, await stageWhere(tx, s, { id: mo.id })] }
@@ -89,11 +92,26 @@ async function main() {
           )
         }
 
+        // What work has started on it, as cancelling and short-closing its sales order read it.
+        const startedIs = async (label: string, want: RegExp | null) => {
+          const got = (await workStarted(tx, [mo.id])).get(mo.id) ?? null
+          check(`${label}: ${want ? `work started (${want.source})` : 'nothing made on it'}`, want ? !!got && want.test(got) : got === null, `${got}`)
+        }
+        // Its sales order over: the stage says so only while nothing was made on it.
+        const soOverIs = async (label: string, want: MoStage, items?: [number, number]) => {
+          await tx.salesOrder.update({ where: { id: so.id }, data: { status: 'CANCELLED' } })
+          await stageIs(`${label}, its sales order cancelled`, want, items)
+          await tx.salesOrder.update({ where: { id: so.id }, data: { status: 'CONFIRMED' } })
+        }
+
         // ── Draft, then released ──
         const mo = await createMo(tx, createMoSchema.parse({ soId: so.id, lines: [{ soLineId: so.lines[0].id, sizes: [{ sizeId: S1.id, qty: 10 }, { sizeId: S2.id, qty: 10 }] }] }), user.id)
         await stageIs('a draft', 'DRAFT')
+        await soOverIs('a draft', 'ORDER_CLOSED')
         await releaseMo(tx, mo.id)
         await stageIs('released, nothing asked of the store', 'NOT_ASKED')
+        await startedIs('released', null)
+        await soOverIs('released, nothing asked', 'ORDER_CLOSED')
 
         // ── Requisitions that ask for nothing: rejected, or closed with nothing issued ──
         const mr = (n: string, data: Partial<Prisma.MaterialRequisitionUncheckedCreateInput>, lines: Array<{ itemId: string; requestedQty: number; issuedQty?: number }>) =>
@@ -114,10 +132,14 @@ async function main() {
         await stageIs('a requisition raised, waiting for approval', 'ASKED')
         await tx.materialRequisition.update({ where: { id: ask.id }, data: { status: 'APPROVED' } })
         await stageIs('approved, nothing issued yet', 'ASKED')
+        await startedIs('asked, nothing issued', null)
+        await soOverIs('asked, nothing issued', 'ORDER_CLOSED')
         const [fabLine, trimLine] = [ask.lines.find((l) => l.itemId === fabric.id)!, ask.lines.find((l) => l.itemId === trim.id)!]
         await tx.materialRequisitionLine.update({ where: { id: fabLine.id }, data: { issuedQty: 30 } })
         await tx.materialRequisitionLine.update({ where: { id: trimLine.id }, data: { issuedQty: 100 } })
         await stageIs('the fabric issued in full, 100 of 160 trims', 'PART_ISSUED', [1, 2])
+        await startedIs('material issued', /^material issued on ZZ-MR-/)
+        await soOverIs('material issued', 'PART_ISSUED', [1, 2])
         await tx.materialRequisitionLine.update({ where: { id: trimLine.id }, data: { issuedQty: 160 } })
         await stageIs('every material issued in full', 'ISSUED', [2, 2])
         await tx.materialRequisitionLine.update({ where: { id: fabLine.id }, data: { returnedQty: 2 } })
@@ -129,11 +151,14 @@ async function main() {
         await stageIs('a cutting sheet cancelled does not count', 'ISSUED', [2, 2])
         await tx.cuttingOrder.update({ where: { id: cutting.id }, data: { status: 'IN_PROGRESS' } })
         await stageIs('given to a cutter, nothing cut yet', 'IN_PRODUCTION')
+        await startedIs('given to a cutter', /^cutting on ZZ-CUT-/)
         await tx.cuttingOrder.update({ where: { id: cutting.id }, data: { status: 'COMPLETED', actualPieces: 20 } })
         await tx.manufacturingOrder.update({ where: { id: mo.id }, data: { totalCutQty: 20 } })
         await stageIs('20 cut', 'IN_PRODUCTION')
+        await soOverIs('20 cut', 'IN_PRODUCTION')
         await tx.manufacturingOrder.update({ where: { id: mo.id }, data: { totalPackedQty: 8 } })
         await stageIs('8 of 20 packed', 'PACKING')
+        await startedIs('8 packed', /^pieces packed$/)
         await tx.manufacturingOrder.update({ where: { id: mo.id }, data: { totalPackedQty: 20, status: 'COMPLETED' } })
         await stageIs('all 20 packed', 'COMPLETED')
         await tx.manufacturingOrder.update({ where: { id: mo.id }, data: { status: 'CLOSED' } })

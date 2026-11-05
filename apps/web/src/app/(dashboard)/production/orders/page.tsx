@@ -1,13 +1,14 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertCircle, CalendarDays, CheckCircle2, Eye, Info, Pencil, Plus, RefreshCw, Search } from 'lucide-react'
+import { AlertCircle, Ban, CalendarDays, CheckCircle2, Eye, Info, Pencil, Plus, RefreshCw, Search } from 'lucide-react'
 import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { FLOOR_NOTE, MO_STAGE, moStage } from '@/components/production/status'
 import { PROGRESS } from '@/components/production/floor/types'
 import { ManufacturingOrderDialog } from '@/components/production/ManufacturingOrderDialog'
@@ -129,6 +130,9 @@ export default function ManufacturingOrdersPage() {
 
   const [form, setForm] = useState<{ open: boolean; soId: string | null; moId: string | null }>({ open: false, soId: null, moId: null })
   const [viewId, setViewId] = useState<string | null>(null)
+  /** One whose sales order is over, being closed. */
+  const [closing, setClosing] = useState<MoRow | null>(null)
+  const [closeBusy, setCloseBusy] = useState(false)
 
   const mayCreate = can('production', 'create')
   const mayEdit = can('production', 'edit')
@@ -196,6 +200,23 @@ export default function ManufacturingOrdersPage() {
     }
   }
 
+  const closeMo = async (mo: MoRow, reason: string) => {
+    setCloseBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.post<{ message?: string }>(`/production/orders/${mo.id}/close`, { reason })
+      setMessage(res.message ?? `${mo.moNumber} closed.`)
+      setClosing(null)
+      void load()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not close it.')
+      setClosing(null)
+    } finally {
+      setCloseBusy(false)
+    }
+  }
+
   const rowActions = (mo: MoRow): RowAction[] => {
     const items: RowAction[] = [{ key: 'view', label: 'Open — materials and progress', icon: <Eye size={15} />, onClick: () => setViewId(mo.id) }]
     // Editable until the store issues material to it (or cutting or packing starts), released or not.
@@ -205,8 +226,12 @@ export default function ManufacturingOrdersPage() {
       // Shown, greyed, with what is in the way: a missing Edit reads as a fault.
       items.push({ key: 'edit', label: 'Edit', icon: <Pencil size={15} />, disabled: true, hint: `Cannot be edited: ${mo.editBlock}.` })
     }
-    if (mo.status === 'DRAFT' && mayEdit) {
+    if (mo.status === 'DRAFT' && mayEdit && mo.stage !== 'ORDER_CLOSED') {
       items.push({ key: 'release', label: 'Release to the floor', icon: <CheckCircle2 size={15} />, onClick: () => void release(mo) })
+    }
+    // Its sales order is over and nothing was made on it: all that is left is closing it.
+    if (mo.stage === 'ORDER_CLOSED' && mayEdit) {
+      items.push({ key: 'close', label: 'Close — its sales order is closed', icon: <Ban size={15} />, danger: true, onClick: () => setClosing(mo) })
     }
     return items
   }
@@ -420,6 +445,19 @@ export default function ManufacturingOrdersPage() {
           </p>
         </div>
       </div>
+
+      {closing && (
+        <ReasonDialog
+          title={`Close ${closing.moNumber}?`}
+          description={`${closing.soNumber ?? 'Its sales order'} is closed and nothing was issued, cut or packed on this order. It stays on file as closed, with your reason; its requisitions close with it.`}
+          confirmLabel="Close it"
+          initialReason={`${closing.soNumber ?? 'The sales order'} is closed: nothing more is made for it`}
+          danger
+          busy={closeBusy}
+          onCancel={() => setClosing(null)}
+          onConfirm={(reason) => void closeMo(closing, reason)}
+        />
+      )}
 
       <ManufacturingOrderDialog
         open={form.open}

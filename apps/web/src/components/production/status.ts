@@ -38,6 +38,11 @@ export const MO_STAGE: Record<string, StatusLook & { hint: string }> = {
   ISSUED: { label: 'Materials issued', cls: 'badge-info', hint: 'Every material issued in full; ready for cutting' },
   IN_PRODUCTION: { label: 'In production', cls: 'badge-info', hint: 'Cutting recorded; the pieces are moving through their stages' },
   PACKING: { label: 'Packing', cls: 'badge-info', hint: 'Some pieces packed into finished goods, not all yet' },
+  ORDER_CLOSED: {
+    label: 'Sales order closed',
+    cls: 'badge-warning',
+    hint: 'Its sales order is short-closed, cancelled or completed, and nothing was made on this order: close it',
+  },
   COMPLETED: { label: 'Completed', cls: 'badge-success', hint: 'All pieces packed' },
   CLOSED: { label: 'Closed', cls: 'badge-neutral', hint: 'Closed with a reason' },
 }

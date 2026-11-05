@@ -34,7 +34,19 @@ interface MoDetail {
   createdBy: { name: string } | null
   closedBy: { name: string } | null
   brand: { name: string }
-  so: { id: string; soNumber: string; status: string; isJobWork: boolean; deliveryDate: string | null; customerPORef: string | null; customer: { name: string } } | null
+  so: {
+    id: string
+    soNumber: string
+    status: string
+    isJobWork: boolean
+    deliveryDate: string | null
+    customerPORef: string | null
+    customer: { name: string }
+    shortClosedAt?: string | null
+    shortCloseReason?: string | null
+    cancelledAt?: string | null
+    cancelReason?: string | null
+  } | null
   lines: Array<{
     id: string
     color: string
@@ -150,6 +162,8 @@ export function ManufacturingOrderDetailDialog({
   const [loadingPlan, setLoadingPlan] = useState(false)
   const [busy, setBusy] = useState<'release' | 'raise' | 'close' | 'short' | null>(null)
   const [closing, setClosing] = useState(false)
+  /** The reason the Close box starts with: its sales order's, when that is what ended it. */
+  const [closeWith, setCloseWith] = useState('')
   const [completingShort, setCompletingShort] = useState(false)
   const [cutting, setCutting] = useState(false)
   const [cancellingCut, setCancellingCut] = useState<{ id: string; cutOrderNumber: string } | null>(null)
@@ -409,9 +423,19 @@ export function ManufacturingOrderDetailDialog({
         cutStarted: !!mo.cuttingOrders?.length || (mo.totalCutQty ?? 0) > 0,
         planned: mo.totalPlannedQty,
         packed: mo.totalPackedQty,
+        orderClosed: mo.stage === 'ORDER_CLOSED',
       }
     : null
   const tab: MoTab = mo && tabPick?.moId === mo.id ? tabPick.tab : facts ? currentMoTab(facts) : 'order'
+  /** Its sales order is over (short-closed, cancelled or completed) while this order is still open: when, and why. */
+  const soOver =
+    mo?.so && (mo.so.status === 'COMPLETED' || mo.so.status === 'CANCELLED') && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED'
+      ? mo.so.status === 'CANCELLED'
+        ? { word: 'cancelled', when: mo.so.cancelledAt ?? null, why: mo.so.cancelReason ?? null }
+        : mo.so.shortClosedAt
+          ? { word: 'short-closed', when: mo.so.shortClosedAt, why: mo.so.shortCloseReason ?? null }
+          : { word: 'completed', when: null, why: null }
+      : null
   const pickTab = (t: MoTab) => mo && setTabPick({ moId: mo.id, tab: t })
 
   return createPortal(
@@ -474,7 +498,14 @@ export function ManufacturingOrderDetailDialog({
               </button>
             )}
             {mo && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
-              <button className="btn-ghost text-destructive" onClick={() => setClosing(true)} disabled={busy !== null}>
+              <button
+                className="btn-ghost text-destructive"
+                onClick={() => {
+                  setCloseWith('')
+                  setClosing(true)
+                }}
+                disabled={busy !== null}
+              >
                 <Ban size={15} /> Close
               </button>
             )}
@@ -495,6 +526,36 @@ export function ManufacturingOrderDetailDialog({
           {message && (
             <div className="border-primary/40 bg-primary/5 rounded-lg border p-3">
               <p className="text-primary text-sm">{message}</p>
+            </div>
+          )}
+          {mo?.so && soOver && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+              <div className="flex min-w-0 items-start gap-3">
+                <Ban size={16} className="mt-0.5 shrink-0 text-amber-600" />
+                <p className="text-foreground text-sm">
+                  <b>
+                    {mo.so.soNumber} is {soOver.word}
+                  </b>
+                  {soOver.when ? ` on ${formatDate(soOver.when)}` : ''}
+                  {soOver.why ? ` (${soOver.why})` : ''}, so nothing more is made for it.{' '}
+                  {mo.stage === 'ORDER_CLOSED'
+                    ? 'Nothing was issued, cut or packed on this order, so close it.'
+                    : 'Finish what is already on the floor, or close this order.'}
+                </p>
+              </div>
+              {can('production', 'edit') && (
+                <button
+                  type="button"
+                  className="btn-secondary h-8 shrink-0 px-3 text-xs"
+                  onClick={() => {
+                    setCloseWith(`${mo.so!.soNumber} ${soOver.word}${soOver.why ? `: ${soOver.why}` : ''}`)
+                    setClosing(true)
+                  }}
+                  disabled={busy !== null}
+                >
+                  <Ban size={13} /> Close this MO
+                </button>
+              )}
             </div>
           )}
           {editNote && (
@@ -577,7 +638,7 @@ export function ManufacturingOrderDetailDialog({
                     icon={ClipboardList}
                     title="Materials from the BOM"
                     actions={
-                      plan && live && mayRaise ? (
+                      plan && live && mayRaise && mo?.stage !== 'ORDER_CLOSED' ? (
                         <div className="flex flex-wrap items-center gap-2">
                           <label className="text-muted-foreground flex items-center gap-1.5 text-xs">
                             Needed by
@@ -923,9 +984,10 @@ export function ManufacturingOrderDetailDialog({
       {closing && mo && (
         <ReasonDialog
           title={`Close ${mo.moNumber}?`}
-          description="It stays on file as closed, with your reason, and its pieces can be planned again. Requisitions already raised stay open in Inventory for the store to close."
+          description="It stays on file as closed, with your reason, and its pieces can be planned again. Its requisitions the store has issued nothing on close with it, and any stock held for them is free again."
           confirmLabel="Close it"
           placeholder="Buyer changed the fabric"
+          initialReason={closeWith}
           danger
           busy={busy === 'close'}
           onCancel={() => setClosing(false)}

@@ -24,6 +24,8 @@ export interface MoFlowFacts {
   cutStarted: boolean
   planned: number
   packed: number
+  /** Its sales order is over and nothing was made on it: all that is left is closing it. */
+  orderClosed?: boolean
 }
 
 export type MoTab = 'order' | 'materials' | 'stages' | 'packed'
@@ -94,7 +96,9 @@ export function MoFlowStrip({
     )
 
   let next: { text: string; action?: ReactNode }
-  if (f.status === 'DRAFT') {
+  if (f.orderClosed) {
+    next = { text: 'Its sales order is closed and nothing was made on this order, so nothing more is asked or made: close it with "Close this MO" below.' }
+  } else if (f.status === 'DRAFT') {
     next = {
       text: 'Check the colours and quantities, then press Release at the top.',
       action: go('order', 'Order'),

@@ -9,7 +9,7 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
 import { ensureJobCards } from '../services/jobCard.service'
-import { attachLateBoms, materialPlan, MO_STAGES, moStages, orderForPlanning, PLANNABLE_ORDER_STATUSES, stageWhere, type MoStage } from '../services/manufacturing.service'
+import { attachLateBoms, materialPlan, MO_STAGES, moStages, orderForPlanning, PLANNABLE_ORDER_STATUSES, stageWhere, workStarted, type MoStage } from '../services/manufacturing.service'
 import { cancelCutting, createCutting, cuttingPrep, cuttingSchema } from '../services/cutting.service'
 import { applyRouting, routingProblem, stylesOfMo } from '../services/route.service'
 import floorRoutes from './productionFloor.routes'
@@ -148,6 +148,11 @@ const moInclude = {
       deliveryDate: true,
       customerPORef: true,
       customer: { select: { id: true, name: true } },
+      // Short-closed or cancelled: when and why, for an order still open under it.
+      shortClosedAt: true,
+      shortCloseReason: true,
+      cancelledAt: true,
+      cancelReason: true,
     },
   },
   lines: {
@@ -248,7 +253,7 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       where,
       include: {
         brand: { select: { id: true, name: true, type: true } },
-        so: { select: { id: true, soNumber: true, status: true, deliveryDate: true, customer: { select: { name: true } } } },
+        so: { select: { id: true, soNumber: true, status: true, shortClosedAt: true, deliveryDate: true, customer: { select: { name: true } } } },
         lines: { select: { color: true, bomId: true, style: { select: { code: true } } } },
         routing: { select: { code: true } },
         _count: { select: { materialRequisitions: true, steps: true } },
@@ -276,7 +281,7 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
     mo.status === 'COMPLETED' || mo.status === 'CLOSED'
       ? `${mo.moNumber} is ${mo.status.toLowerCase()}`
       : mo.so && !(PLANNABLE_ORDER_STATUSES as readonly string[]).includes(mo.so.status)
-        ? `${mo.so.soNumber} is ${mo.so.status.toLowerCase().replace(/_/g, ' ')}, so nothing more is planned for it`
+        ? `${mo.so.soNumber} is ${mo.so.shortClosedAt ? 'short-closed' : mo.so.status.toLowerCase().replace(/_/g, ' ')}, so nothing more is planned for it`
         : issued.has(mo.id)
           ? 'The store has issued material to it'
           : cut.has(mo.id)
@@ -284,7 +289,7 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
             : packed.has(mo.id)
               ? 'Pieces of it are packed'
               : null
-  const stages = await moStages(prisma, orders)
+  const stages = await moStages(prisma, orders.map((o) => ({ ...o, soStatus: o.so?.status ?? null })))
 
   res.json({
     success: true,
@@ -375,7 +380,7 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
   await attachLateBoms(prisma, req.params.id)
   const order = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, include: moInclude })
   if (!order) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
-  const [editBlock, stages] = await Promise.all([moEditBlock(prisma, order), moStages(prisma, [order])])
+  const [editBlock, stages] = await Promise.all([moEditBlock(prisma, order), moStages(prisma, [{ ...order, soStatus: order.so?.status ?? null }])])
   res.json({ success: true, data: { ...order, editBlock, stage: stages.get(order.id)?.stage ?? order.status } })
 })
 
@@ -425,9 +430,10 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
  */
 export async function moEditBlock(db: Prisma.TransactionClient | typeof prisma, mo: { id: string; moNumber: string; status: string }) {
   if (mo.status === 'COMPLETED' || mo.status === 'CLOSED') return `${mo.moNumber} is ${mo.status.toLowerCase()}, so it can no longer be changed.`
-  const order = await db.manufacturingOrder.findUnique({ where: { id: mo.id }, select: { so: { select: { soNumber: true, status: true } } } })
+  const order = await db.manufacturingOrder.findUnique({ where: { id: mo.id }, select: { so: { select: { soNumber: true, status: true, shortClosedAt: true } } } })
   if (order?.so && !(PLANNABLE_ORDER_STATUSES as readonly string[]).includes(order.so.status)) {
-    return `${order.so.soNumber} is ${order.so.status.toLowerCase().replace(/_/g, ' ')}, so nothing more is planned for it and ${mo.moNumber} can no longer be changed.`
+    const word = order.so.shortClosedAt ? 'short-closed' : order.so.status.toLowerCase().replace(/_/g, ' ')
+    return `${order.so.soNumber} is ${word}, so nothing more is planned for it and ${mo.moNumber} can no longer be changed.`
   }
   const issued = await db.materialRequisition.findFirst({
     where: { moId: mo.id, lines: { some: { issuedQty: { gt: 0 } } } },
@@ -756,6 +762,15 @@ export async function raiseRequisitions(tx: Prisma.TransactionClient, moId: stri
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   if (mo.status === 'DRAFT') throw new AppError(`Release ${mo.moNumber} before asking the store for its materials`, 409, 'NOT_RELEASED')
   if (mo.status === 'CLOSED' || mo.status === 'COMPLETED') throw new AppError(`${mo.moNumber} is ${mo.status.toLowerCase()}`, 409, 'NOT_OPEN')
+  // Its sales order is over and nothing was made on it: nothing more is made for it. Work already
+  // on the floor (issued, cut, packed) can still be given what it needs to finish.
+  if (mo.soId) {
+    const order = await tx.salesOrder.findUniqueOrThrow({ where: { id: mo.soId }, select: { soNumber: true, status: true, shortClosedAt: true } })
+    if ((order.status === 'COMPLETED' || order.status === 'CANCELLED') && !(await workStarted(tx, [mo.id])).size) {
+      const word = order.status === 'CANCELLED' ? 'cancelled' : order.shortClosedAt ? 'short-closed' : 'completed'
+      throw new AppError(`${order.soNumber} is ${word} and nothing was made on ${mo.moNumber}, so nothing is asked of the store for it. Close ${mo.moNumber} instead.`, 409, 'ORDER_NOT_OPEN')
+    }
+  }
 
   // Checked against the plan, so a double click or a stale screen cannot ask
   // for the same material twice, nor a customer's cloth be drawn for anyone

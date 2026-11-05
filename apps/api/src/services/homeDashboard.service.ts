@@ -93,6 +93,7 @@ const MO_STAGES: Array<[string, string]> = [
   ['ISSUED', 'Materials issued'],
   ['IN_PRODUCTION', 'In production'],
   ['PACKING', 'Packing'],
+  ['ORDER_CLOSED', 'Sales order closed'],
   ['COMPLETED', 'Completed'],
   ['CLOSED', 'Closed'],
 ]
@@ -567,13 +568,13 @@ export async function homeDashboard(opts: { days: number; access: HomeAccess }) 
           prisma.manufacturingOrder.count({
             where: { status: { notIn: ['DRAFT', 'COMPLETED', 'CLOSED'] }, plannedEndDate: { lt: todayStart } },
           }),
-          // Released and not finished: where each stands, as the MO list says it.
+          // Not finished: where each stands, as the MO list says it.
           prisma.manufacturingOrder.findMany({
-            where: { status: { notIn: ['DRAFT', 'COMPLETED', 'CLOSED'] } },
-            select: { id: true, status: true, totalCutQty: true, totalPackedQty: true, totalPlannedQty: true },
+            where: { status: { notIn: ['COMPLETED', 'CLOSED'] } },
+            select: { id: true, status: true, totalCutQty: true, totalPackedQty: true, totalPlannedQty: true, so: { select: { status: true } } },
           }),
         ])
-        const stageOf = await moStages(prisma, onFloor)
+        const stageOf = await moStages(prisma, onFloor.map((m) => ({ ...m, soStatus: m.so?.status ?? null })))
 
         series('produced')
         const daily = new Map<string, { target: number; achieved: number; rejection: number }>()
@@ -640,9 +641,9 @@ export async function homeDashboard(opts: { days: number; access: HomeAccess }) 
             }))
             .sort((a, b) => a.line.localeCompare(b.line, undefined, { numeric: true })),
           fortnight: [...daily.entries()].map(([day, d]) => ({ day, ...d })),
-          // Draft, completed and closed by their status; the rest by where the work stands.
+          // Completed and closed by their status; the rest by where the work stands.
           stages: MO_STAGES.map(([status, label]) => {
-            const here = ['DRAFT', 'COMPLETED', 'CLOSED'].includes(status) ? null : onFloor.filter((m) => stageOf.get(m.id)?.stage === status)
+            const here = ['COMPLETED', 'CLOSED'].includes(status) ? null : onFloor.filter((m) => stageOf.get(m.id)?.stage === status)
             return {
               status,
               label,

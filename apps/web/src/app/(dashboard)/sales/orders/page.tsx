@@ -84,6 +84,8 @@ interface SalesOrderRow {
   pieces: number
   dispatched: number
   pending: number
+  /** Material issued, cutting or packing on one of its manufacturing orders: short-closed then, not cancelled. */
+  workStarted?: boolean
 }
 
 interface Brief {
@@ -443,10 +445,9 @@ export default function SalesOrdersPage() {
    * Written once and shared by the table and the phone cards; who may do what
    * is decided in orderActions, which the detail uses too.
    *
-   * On the list, cancel is offered only while nothing can have started (a
-   * draft, or a confirmed order with nothing sent), and short-close only once
-   * the order is in production or part sent. The detail, which can see the
-   * production orders, offers both exactly.
+   * Cancel while nothing has been made or sent (manufacturing orders with
+   * nothing issued, cut or packed close with it), short-close once something
+   * has: the API says whether work has started on its manufacturing orders.
    */
   const rowActions = (o: SalesOrderRow): RowAction[] => {
     const items: RowAction[] = [
@@ -490,7 +491,7 @@ export default function SalesOrdersPage() {
         onClick: () => setDialog({ open: true, orderId: o.id, amend: true }),
       })
     }
-    if (orderCan.shortClose(o) && (o.status !== 'CONFIRMED' || o.dispatched > 0)) {
+    if (orderCan.shortClose(o) && (o.workStarted || o.dispatched > 0)) {
       items.push({
         key: 'short-close',
         label: 'Short-close',
@@ -498,7 +499,7 @@ export default function SalesOrdersPage() {
         onClick: () => setAsking({ action: 'short-close', order: o }),
       })
     }
-    if (orderCan.cancel(o) && o.dispatched === 0) {
+    if (orderCan.cancel(o) && o.dispatched === 0 && !o.workStarted) {
       items.push({
         key: 'cancel',
         label: 'Cancel order',
