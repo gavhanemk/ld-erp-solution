@@ -724,6 +724,26 @@ Rules added in the same check:
 - A quotation becomes one order. One past its valid-until date has its
   price agreed again (the date moved) before it becomes an order.
 
+### Calling off an order: cancel or short-close (5 Nov 2026)
+
+Set after a short-closed order was left with its manufacturing order open,
+showing work still due:
+
+- **Cancel while nothing has been made or sent.** "Made" means work on a
+  manufacturing order: material issued to it, cutting, or packing. One that
+  was only released, requisitions raised or not, has made nothing, so the
+  order can still be cancelled (by someone who approves orders), and that
+  manufacturing order closes with it, its unissued requisitions too.
+- **Short-close once something has been made or sent.** Its manufacturing
+  orders nothing was made on close with it. One with work on the floor
+  stays open, to be finished or closed in Production.
+- A manufacturing order left open after its sales order closed shows
+  **Sales order closed** on its list and window and is closed in one step;
+  nothing more is asked of the store for it.
+- A manufacturing order's status follows the work: Materials not asked →
+  Materials asked → Part issued → Materials issued (every item in full) →
+  In production (cutting recorded) → Packing → Completed.
+
 ---
 
 ## 7. HR & people
