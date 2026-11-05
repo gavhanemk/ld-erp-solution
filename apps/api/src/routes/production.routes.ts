@@ -262,7 +262,22 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
         prisma.manufacturingOrder.findMany({ where: { id: { in: ids }, fgReceipts: { some: { cancelledAt: null } } }, select: { id: true } }),
       ])
     : [[], [], []]
-  const started = new Set([...issuedTo.map((m) => m.moId), ...cutOn.map((c) => c.moId), ...packedOn.map((m) => m.id)])
+  const issued = new Set(issuedTo.map((m) => m.moId))
+  const cut = new Set(cutOn.map((c) => c.moId))
+  const packed = new Set(packedOn.map((m) => m.id))
+  /** Why a row's plan can no longer be changed, in a few words; null while it can. */
+  const blockOf = (mo: (typeof orders)[number]) =>
+    mo.status === 'COMPLETED' || mo.status === 'CLOSED'
+      ? `${mo.moNumber} is ${mo.status.toLowerCase()}`
+      : mo.so && !(PLANNABLE_ORDER_STATUSES as readonly string[]).includes(mo.so.status)
+        ? `${mo.so.soNumber} is ${mo.so.status.toLowerCase().replace(/_/g, ' ')}, so nothing more is planned for it`
+        : issued.has(mo.id)
+          ? 'The store has issued material to it'
+          : cut.has(mo.id)
+            ? 'Cutting is recorded on it'
+            : packed.has(mo.id)
+              ? 'Pieces of it are packed'
+              : null
 
   res.json({
     success: true,
@@ -270,12 +285,9 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       id: mo.id,
       moNumber: mo.moNumber,
       status: mo.status,
-      // Its plan can still be changed: nothing issued to it, cut or packed, and not finished.
-      editable:
-        !started.has(mo.id) &&
-        mo.status !== 'COMPLETED' &&
-        mo.status !== 'CLOSED' &&
-        (!mo.so || (PLANNABLE_ORDER_STATUSES as readonly string[]).includes(mo.so.status)),
+      // Its plan can still be changed (nothing issued to it, cut or packed; it and its order open), and if not, why.
+      editable: blockOf(mo) === null,
+      editBlock: blockOf(mo),
       brand: mo.brand,
       soId: mo.so?.id ?? null,
       customer: mo.so?.customer.name ?? null,

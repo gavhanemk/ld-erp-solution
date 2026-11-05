@@ -19,6 +19,8 @@ interface MoRow {
   status: string
   /** Its plan can still change: nothing issued to it, cut or packed yet. */
   editable?: boolean
+  /** Why it cannot, in a few words. */
+  editBlock?: string | null
   brand: { id: string; name: string; type: string }
   soId: string | null
   customer: string | null
@@ -151,6 +153,9 @@ export default function ManufacturingOrdersPage() {
     // Editable until the store issues material to it (or cutting or packing starts), released or not.
     if (mayEdit && mo.editable) {
       items.push({ key: 'edit', label: mo.status === 'DRAFT' ? 'Edit draft' : 'Edit', icon: <Pencil size={15} />, onClick: () => setForm({ open: true, soId: null, moId: mo.id }) })
+    } else if (mayEdit && mo.editBlock && mo.status !== 'COMPLETED' && mo.status !== 'CLOSED') {
+      // Shown, greyed, with what is in the way: a missing Edit reads as a fault.
+      items.push({ key: 'edit', label: 'Edit', icon: <Pencil size={15} />, disabled: true, hint: `Cannot be edited: ${mo.editBlock}.` })
     }
     if (mo.status === 'DRAFT' && mayEdit) {
       items.push({ key: 'release', label: 'Release to the floor', icon: <CheckCircle2 size={15} />, onClick: () => void release(mo) })

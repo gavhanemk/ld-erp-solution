@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, Info, Layers, Loader2, PackageCheck, Pencil, Send, X, Scissors } from 'lucide-react'
+import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, Info, Layers, Loader2, Lock, PackageCheck, Pencil, Send, X, Scissors } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
@@ -157,6 +157,8 @@ export function ManufacturingOrderDetailDialog({
   const [flow, setFlow] = useState<Flow | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  /** Why Edit did nothing, once it was pressed on an order that can no longer be changed. */
+  const [editNote, setEditNote] = useState<string | null>(null)
 
   /** The floor picture, for an order with a route. */
   const loadFlow = useCallback(async (id: string) => {
@@ -173,6 +175,7 @@ export function ManufacturingOrderDetailDialog({
       try {
         const data = (await api.get<{ data: MoDetail }>(`/production/orders/${id}`)).data
         setMo(data)
+        setEditNote(null)
         if (data.steps?.length) await loadFlow(id)
         else setFlow(null)
       } catch (err) {
@@ -435,25 +438,27 @@ export function ManufacturingOrderDetailDialog({
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {mo && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
+            {mo && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
+              // Always pressable: an order that can no longer be changed shows a lock, and pressing
+              // it says what is in the way, rather than a button that silently does nothing.
               <button
                 className="btn-secondary"
-                onClick={() => onEdit(mo.id)}
-                disabled={busy !== null || !!mo.editBlock}
-                title={mo.editBlock ?? 'Change the plan: pieces, sizes, dates, routing. Open until the store issues material to it.'}
+                onClick={() => (mo.editBlock ? setEditNote(mo.editBlock) : onEdit(mo.id))}
+                disabled={busy !== null}
+                aria-disabled={!!mo.editBlock}
+                title={
+                  mo.editBlock
+                    ? `Cannot be edited: ${mo.editBlock}`
+                    : 'Change the plan: pieces, sizes, dates, routing. Open until the store issues material to it.'
+                }
               >
-                <Pencil size={15} /> Edit
+                {mo.editBlock ? <Lock size={15} /> : <Pencil size={15} />} {mo.status === 'DRAFT' ? 'Edit draft' : 'Edit'}
               </button>
             )}
             {mo?.status === 'DRAFT' && can('production', 'edit') && (
-              <>
-                <button className="btn-secondary" onClick={() => onEdit(mo.id)} disabled={busy !== null}>
-                  <Pencil size={15} /> Edit draft
-                </button>
-                <button className="btn-primary" onClick={() => void releaseIt()} disabled={busy !== null}>
-                  {busy === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Release
-                </button>
-              </>
+              <button className="btn-primary" onClick={() => void releaseIt()} disabled={busy !== null}>
+                {busy === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Release
+              </button>
             )}
             {mo && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && mo.totalPackedQty > 0 && mo.totalPackedQty < mo.totalPlannedQty && can('production', 'edit') && (
               <button className="btn-secondary" onClick={() => setCompletingShort(true)} disabled={busy !== null} title="Some pieces will not be made: finish with what is packed">
@@ -482,6 +487,14 @@ export function ManufacturingOrderDetailDialog({
           {message && (
             <div className="border-primary/40 bg-primary/5 rounded-lg border p-3">
               <p className="text-primary text-sm">{message}</p>
+            </div>
+          )}
+          {editNote && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+              <Lock size={16} className="mt-0.5 shrink-0 text-amber-600" />
+              <p className="text-foreground text-sm">
+                <b>This order cannot be edited.</b> {editNote}
+              </p>
             </div>
           )}
           {loading && !mo ? (
