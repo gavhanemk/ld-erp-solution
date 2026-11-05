@@ -118,6 +118,7 @@ export function KpiTile({
   active = false,
   title,
   children,
+  compact = false,
 }: {
   icon: React.ElementType
   tone?: string
@@ -130,8 +131,23 @@ export function KpiTile({
   active?: boolean
   title?: string
   children?: React.ReactNode
+  /** One short row, the figure beside its name: for a list page, so the table starts high. */
+  compact?: boolean
 }) {
-  const body = (
+  const body = compact ? (
+    <div className="flex min-w-0 items-center gap-3">
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ background: `${tone}18`, color: tone }}>
+        <Icon size={17} />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-baseline gap-2">
+          <span className={`text-xl font-semibold leading-none tabular-nums tracking-tight ${valueClass}`}>{value}</span>
+          <span className="truncate text-xs font-medium text-muted-foreground">{label}</span>
+        </div>
+        {sub && <p className="mt-1 truncate text-[11px] text-muted-foreground">{sub}</p>}
+      </div>
+    </div>
+  ) : (
     <>
       <div className="flex items-start justify-between gap-2">
         <span className="text-xs font-medium text-muted-foreground">{label}</span>
@@ -144,12 +160,14 @@ export function KpiTile({
       {children && <div className="mt-3">{children}</div>}
     </>
   )
-  const cls = `glass-card block min-w-0 rounded-xl p-4 text-left transition-all ${
+  // A compact tile's line may be cut short: the whole of it shows on hover.
+  const tip = title ?? (compact && typeof sub === 'string' ? sub : undefined)
+  const cls = `glass-card block min-w-0 rounded-xl ${compact ? 'px-3.5 py-2.5' : 'p-4'} text-left transition-all ${
     href || onClick ? 'hover:border-primary/40 hover:shadow-md' : ''
   } ${active ? 'border-primary ring-2 ring-primary/25' : ''}`
   if (href)
     return (
-      <Link href={href} className={cls} title={title}>
+      <Link href={href} className={cls} title={tip}>
         {body}
       </Link>
     )
@@ -157,7 +175,7 @@ export function KpiTile({
   // filters sat lower than its neighbours; laid out as a column it starts at the top.
   if (onClick)
     return (
-      <button type="button" onClick={onClick} className={cls.replace('block', 'flex flex-col justify-start')} title={title}>
+      <button type="button" onClick={onClick} className={cls.replace('block', 'flex flex-col justify-start')} title={tip}>
         {body}
       </button>
     )
