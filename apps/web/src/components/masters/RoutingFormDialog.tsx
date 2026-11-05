@@ -15,6 +15,7 @@ import { processFormFields } from '@/components/masters/processFormFields'
 import { lineFormFields } from '@/components/masters/lineFormFields'
 import { contractorFormFields } from '@/components/masters/contractorFormFields'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
+import { fetchEveryPage } from '@/lib/export'
 
 /**
  * A routing: the ordered path a garment takes through the factory.
@@ -140,6 +141,11 @@ interface StyleOption {
   name: string
   category: string | null
 }
+/** Which fabrics each style's BOMs use (draft and approved), and those fabrics' names. */
+interface BomFabrics {
+  pairs: Array<{ styleId: string; fabricItemId: string; colors: string[] }>
+  fabrics: Array<{ id: string; code: string; name: string; uom: string }>
+}
 
 type Applies = 'STYLE' | 'CATEGORY' | 'ANY'
 interface Row {
@@ -226,6 +232,12 @@ export function RoutingFormDialog({
   const mayAdd = can('masters', 'create')
   const [styles, setStyles] = useState<StyleOption[]>([])
   const [fabrics, setFabrics] = useState<Fabric[]>([])
+  const [bomFab, setBomFab] = useState<BomFabrics>({ pairs: [], fabrics: [] })
+  /** Every style or every fabric, past what the BOMs narrow the list to. */
+  const [allStyles, setAllStyles] = useState(false)
+  const [allFabrics, setAllFabrics] = useState(false)
+  /** Which of the two the form filled in itself, from the other's BOM: it does not narrow the other back. */
+  const [filled, setFilled] = useState<'style' | 'fabric' | null>(null)
   const [name, setName] = useState('')
   const [fabricItemId, setFabricItemId] = useState('')
   const [applies, setApplies] = useState<Applies>('STYLE')
@@ -257,6 +269,9 @@ export function RoutingFormDialog({
     setRows(rowsOf(from?.steps))
     setOpenKey(null)
     setError(null)
+    setAllStyles(false)
+    setAllFabrics(false)
+    setFilled(null)
   }, [open, record, preset])
 
   useEffect(() => {
@@ -265,17 +280,21 @@ export function RoutingFormDialog({
     void Promise.all([
       masterResource<Operation>('operations').list({ limit: 300, active: true, sort: 'sortOrder', order: 'asc' }),
       masterResource<Unit>('workstations').list({ limit: 300, active: true }),
-      masterResource<StyleOption>('styles').list({ limit: 500, active: true }),
+      // Every style, page by page: a list stops at 200, and the rest went missing from Style and Category.
+      fetchEveryPage<StyleOption>((page) => `/masters/styles?limit=200&active=true&page=${page}`).then((r) => r.rows),
       api.get<{ data: Fabric[] }>('/masters/routings/fabrics'),
       masterResource<Contractor>('contractors').list({ limit: 500, active: true }),
+      // What the BOMs say; without it the lists are simply not narrowed.
+      api.get<{ data: BomFabrics }>('/masters/routings/bom-fabrics').catch(() => ({ data: { pairs: [], fabrics: [] } as BomFabrics })),
     ])
-      .then(([o, w, s, f, c]) => {
+      .then(([o, w, s, f, c, b]) => {
         if (!alive) return
         setOps((o as Paginated<Operation>).data)
         setUnits((w as Paginated<Unit>).data)
         setContractors((c as Paginated<Contractor>).data)
-        setStyles((s as Paginated<StyleOption>).data)
+        setStyles(s)
         setFabrics(f.data)
+        setBomFab(b.data)
       })
       .catch(() => alive && setError('Could not load the processes, units and fabrics. Is the API running?'))
     return () => {
@@ -313,13 +332,68 @@ export function RoutingFormDialog({
   // The fabrics with stock records — and the routing's own, the same way as
   // its processes, if it has since dropped off that list.
   const fabricOptions = useMemo(() => {
+    const list: Fabric[] = [...fabrics]
+    const have = new Set(list.map((f) => f.id))
+    // Named on a BOM but never received yet: still a cloth the style is made from.
+    for (const f of bomFab.fabrics) {
+      if (have.has(f.id)) continue
+      list.push({ ...f, onHand: 0, customers: 0 })
+      have.add(f.id)
+    }
     const own = (record ?? preset?.from)?.fabric
-    if (!own || fabrics.some((f) => f.id === own.id)) return fabrics
-    return [...fabrics, { id: own.id, code: own.code, name: own.name, uom: own.uom?.symbol ?? '', onHand: 0, customers: 0, missing: true }]
-  }, [fabrics, record, preset])
+    if (own && !have.has(own.id)) list.push({ id: own.id, code: own.code, name: own.name, uom: own.uom?.symbol ?? '', onHand: 0, customers: 0, missing: true })
+    return list
+  }, [fabrics, bomFab, record, preset])
+  // A style's BOM fabrics (with the colours whose BOM has each), and a fabric's styles. Where a
+  // BOM exists the other list narrows to it; where none does, everything is offered.
+  const fabricsOfStyle = useMemo(() => {
+    const m = new Map<string, Map<string, string[]>>()
+    for (const p of bomFab.pairs) m.set(p.styleId, (m.get(p.styleId) ?? new Map<string, string[]>()).set(p.fabricItemId, p.colors))
+    return m
+  }, [bomFab])
+  const stylesOfFabric = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const p of bomFab.pairs) m.set(p.fabricItemId, (m.get(p.fabricItemId) ?? new Set<string>()).add(p.styleId))
+    return m
+  }, [bomFab])
   const categories = useMemo(() => [...new Set(styles.map((s) => s.category?.trim()).filter(Boolean) as string[])].sort(), [styles])
 
   if (!open) return null
+
+  // What each list offers now: a picked style with a BOM narrows Fabric to that BOM's fabrics,
+  // a picked fabric that a BOM uses narrows Style to those styles. The one already picked stays.
+  // A value the form filled in itself does not narrow the list it came from: the person is still choosing that one.
+  const styleBom = applies === 'STYLE' && styleId && filled !== 'style' ? fabricsOfStyle.get(styleId) : undefined
+  const fabricBom = applies === 'STYLE' && fabricItemId && filled !== 'fabric' ? stylesOfFabric.get(fabricItemId) : undefined
+  const shownFabrics = styleBom && !allFabrics ? fabricOptions.filter((f) => styleBom.has(f.id) || f.id === fabricItemId) : fabricOptions
+  const shownStyles = fabricBom && !allStyles ? styles.filter((st) => fabricBom.has(st.id) || st.id === styleId) : styles
+  // Picking one fills in the other when its BOM leaves just one, and the other is empty or was
+  // only filled in from the last pick: a changed style brings its own fabric, not the last one's.
+  const pickStyle = (id: string) => {
+    setStyleId(id)
+    setAllFabrics(false)
+    const fs = id ? fabricsOfStyle.get(id) : undefined
+    const one = fs?.size === 1 ? [...fs.keys()][0] : null
+    if (!fabricItemId || filled === 'fabric') {
+      setFabricItemId(one ?? '')
+      setFilled(one ? 'fabric' : null)
+    } else setFilled(null)
+  }
+  const pickFabric = (id: string) => {
+    setFabricItemId(id)
+    setAllStyles(false)
+    const ss = id && applies === 'STYLE' ? stylesOfFabric.get(id) : undefined
+    const one = ss?.size === 1 ? [...ss][0] : null
+    if (applies === 'STYLE' && (!styleId || filled === 'style')) {
+      setStyleId(one ?? '')
+      setFilled(one ? 'style' : null)
+    } else setFilled(null)
+  }
+  const swap = (label: string, on: () => void) => (
+    <button type="button" className="text-primary font-medium hover:underline" onClick={on}>
+      {label}
+    </button>
+  )
 
   const set = (key: string, patch: Partial<Row>) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)))
   /** What a process usually is: outside or not, a check or not, its rate, minutes and instructions. */
@@ -527,18 +601,35 @@ export function RoutingFormDialog({
                 <SmartSelect
                   className="form-input"
                   value={styleId}
-                  onChange={(e) => setStyleId(e.target.value)}
+                  onChange={(e) => pickStyle(e.target.value)}
                   onCreate={mayAdd ? (typed) => setAdding({ kind: 'style', typed }) : undefined}
                   createNoun="style"
                 >
                   <option value="">Pick the style…</option>
-                  {styles.map((s) => (
-                    <option key={s.id} value={s.id} data-sub={s.category ?? undefined}>
+                  {shownStyles.map((s) => (
+                    <option
+                      key={s.id}
+                      value={s.id}
+                      data-sub={[s.category, fabricBom?.has(s.id) ? 'its BOM uses this fabric' : null].filter(Boolean).join(' · ') || undefined}
+                    >
                       {s.code} — {s.name}
                     </option>
                   ))}
                 </SmartSelect>
               </label>
+            )}
+            {applies === 'STYLE' && fabricItemId && filled !== 'fabric' && (
+              <p className="text-muted-foreground mt-1 text-[11px]">
+                {!fabricBom ? (
+                  'No BOM uses this fabric yet, so every style is offered.'
+                ) : allStyles ? (
+                  <>Every style. {swap(`Only the ${fabricBom.size} whose BOM uses this fabric`, () => setAllStyles(false))}</>
+                ) : (
+                  <>
+                    {fabricBom.size === 1 ? 'The style' : `The ${fabricBom.size} styles`} whose BOM uses this fabric. {swap('Show all styles', () => setAllStyles(true))}
+                  </>
+                )}
+              </p>
             )}
             {applies === 'CATEGORY' && (
               <label className="block">
@@ -555,12 +646,13 @@ export function RoutingFormDialog({
             )}
             {applies === 'ANY' && <p className="text-muted-foreground pt-6 text-xs">Followed by any style that has no routing of its own and none for its category.</p>}
           </div>
-          <label className="block lg:col-span-3">
+          <div className="lg:col-span-3">
+          <label className="block">
             <span className="form-label">Fabric (optional)</span>
             <SmartSelect
               className="form-input"
               value={fabricItemId}
-              onChange={(e) => setFabricItemId(e.target.value)}
+              onChange={(e) => pickFabric(e.target.value)}
               aria-label="Fabric"
               onCreate={
                 mayAdd
@@ -577,13 +669,35 @@ export function RoutingFormDialog({
               createNoun="fabric"
             >
               <option value="">{fabricOptions.length ? 'Any fabric' : 'No fabric in stock records'}</option>
-              {fabricOptions.map((f) => (
-                <option key={f.id} value={f.id} data-sub={stockLine(f)}>
-                  {f.name}
-                </option>
-              ))}
+              {shownFabrics.map((f) => {
+                const colors = styleBom?.get(f.id)
+                return (
+                  <option
+                    key={f.id}
+                    value={f.id}
+                    data-sub={[colors ? `On its BOM${colors.length ? ` · ${colors.join(', ')}` : ''}` : null, stockLine(f)].filter(Boolean).join(' · ')}
+                  >
+                    {f.name}
+                  </option>
+                )
+              })}
             </SmartSelect>
           </label>
+          {applies === 'STYLE' && styleId && filled !== 'style' && (
+            <p className="text-muted-foreground mt-1 text-[11px]">
+              {!styleBom ? (
+                'This style has no BOM yet, so every fabric is offered.'
+              ) : allFabrics ? (
+                <>Every fabric. {swap("Only this style's BOM fabrics", () => setAllFabrics(false))}</>
+              ) : (
+                <>
+                  {styleBom.size === 1 ? "The fabric on this style's BOM." : `The ${styleBom.size} fabrics on this style's BOMs.`} {swap('Show all fabrics', () => setAllFabrics(true))}
+                </>
+              )}
+              {fabricItemId && styleBom && !styleBom.has(fabricItemId) && <span className="warn-text"> The fabric picked is not on its BOM.</span>}
+            </p>
+          )}
+          </div>
           <label className="border-border bg-card flex cursor-pointer items-start gap-2.5 self-end rounded-lg border px-3 py-2 text-sm lg:col-span-3">
             <input type="checkbox" className="accent-primary mt-0.5 h-4 w-4" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
             <span>
