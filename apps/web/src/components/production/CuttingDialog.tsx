@@ -197,7 +197,11 @@ export function CuttingDialog({ moId, onClose, onSaved }: { moId: string; onClos
     <FormFrame
       icon={Scissors}
       title={`Cutting${prep ? ` · ${prep.mo.moNumber}` : ''}`}
-      subtitle={routed ? 'One lay: the fabric, the marker, and the pieces by size — tied into bundles, ready for the next step.' : 'Fabric used, cut waste and pieces cut by size.'}
+      subtitle={
+        routed
+          ? 'One lay: the fabric, the marker, and the pieces by size — tied into bundles, ready for the next step.'
+          : 'Fabric used, cut waste and pieces cut by size. Cut here, the pieces get no bundles and the order carries on without stages.'
+      }
       width="max-w-5xl"
       primary={
         <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving || !!blocker}>

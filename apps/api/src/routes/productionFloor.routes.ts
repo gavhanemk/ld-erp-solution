@@ -85,12 +85,25 @@ router.post('/orders/:id/routing', requirePermission(MODULE, 'edit'), async (req
     .object({ routingId: z.string().min(1, 'Pick a routing'), steps: z.array(routeStepSchema).min(1).max(60).optional() })
     .parse(req.body)
   const routing = await prisma.$transaction(async (tx) => {
-    const mo = await tx.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { moNumber: true, status: true } })
+    const mo = await tx.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { moNumber: true, status: true, totalPackedQty: true } })
     if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
     if (mo.status === 'CLOSED' || mo.status === 'COMPLETED') throw new AppError(`${mo.moNumber} is ${mo.status.toLowerCase()}.`, 409, 'NOT_OPEN')
-    const oldCuts = await tx.cuttingOrder.count({ where: { moId: req.params.id, status: { not: 'CANCELLED' }, bundles: { none: {} } } })
-    if (oldCuts) {
-      throw new AppError(`Pieces were cut on ${mo.moNumber} before it had a route, without bundles. It carries on as it is; new orders take a route.`, 409, 'CUT_WITHOUT_ROUTE')
+    // Cut the old way, from the order's own Cutting, before it had stages: those pieces have no
+    // bundles for the stages to move, so the order carries on without stages unless they are cancelled.
+    const oldCuts = await tx.cuttingOrder.findMany({ where: { moId: req.params.id, status: { not: 'CANCELLED' }, bundles: { none: {} } }, select: { cutOrderNumber: true } })
+    if (oldCuts.length) {
+      const which = oldCuts.map((c) => c.cutOrderNumber).join(', ')
+      throw new AppError(
+        `${mo.moNumber} was cut the old way (${which}) before its stages were set up, so it carries on without stages: record its cutting under Cutting on the order, and book what is packed in Inventory → Finished Goods In. ${
+          mo.totalPackedQty > 0 ? 'Some of it is already packed, so it stays without stages.' : `To use stages instead, cancel ${oldCuts.length === 1 ? 'that cutting' : 'those cuttings'} first.`
+        }`,
+        409,
+        'CUT_WITHOUT_ROUTE',
+      )
+    }
+    // Packed without stages (its old cuttings since cancelled): stages now would cut and pack the same pieces again.
+    if (mo.totalPackedQty > 0) {
+      throw new AppError(`${pcs(mo.totalPackedQty)} pcs of ${mo.moNumber} were packed without stages, so it carries on without them.`, 409, 'PACKED_WITHOUT_ROUTE')
     }
     // Production starts once the materials are with the floor: the stages
     // are loaded after the store has issued them.

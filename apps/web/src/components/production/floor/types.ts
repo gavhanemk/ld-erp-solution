@@ -255,6 +255,8 @@ export interface JobCardDetail extends Flow {
   /** Each stage's figures, size by size. */
   sizeFigures: Record<string, StepFigures[]>
   cuttings: JobCardCutting[]
+  /** Cut the old way before the order had stages (cutting numbers): it carries on without them. */
+  cutWithoutStages?: string[]
   log: LogEntry[]
   materials: { issued: boolean; requisitions: Array<{ id: string; mrNumber: string; status: string; department: string; issued: boolean; closed: boolean }> }
 }

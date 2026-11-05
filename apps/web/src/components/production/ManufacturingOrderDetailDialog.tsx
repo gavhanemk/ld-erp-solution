@@ -435,6 +435,12 @@ export function ManufacturingOrderDetailDialog({
     } else raiseRef.current?.focus()
   }
 
+  /**
+   * Cuttings recorded the old way, before the order had stages: not cancelled and without bundles,
+   * as the server counts them when it refuses to load stages (CUT_WITHOUT_ROUTE).
+   */
+  const moOpen = !!mo && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED'
+  const cutWithoutStages = mo && moOpen && !mo.steps?.length ? (mo.cuttingOrders ?? []).filter((c) => c.status !== 'CANCELLED' && !c._count?.bundles).map((c) => c.cutOrderNumber) : []
   /** Requisitions still asking the store: not rejected, and not closed with nothing issued. */
   const raised = !!mo?.materialRequisitions.some((m) => m.status !== 'REJECTED' && (!m.closedAt || !!m.issuedAt))
   const facts: MoFlowFacts | null = mo
@@ -447,6 +453,7 @@ export function ManufacturingOrderDetailDialog({
         materialItemsIssued: plan?.rows.filter((r) => r.required > 0 && r.issued >= r.required - 0.0005).length ?? 0,
         stagesSetUp: !!mo.steps?.length,
         cutStarted: !!mo.cuttingOrders?.length || (mo.totalCutQty ?? 0) > 0,
+        cutWithoutStages: cutWithoutStages,
         planned: mo.totalPlannedQty,
         packed: mo.totalPackedQty,
         orderClosed: mo.stage === 'ORDER_CLOSED',
@@ -541,7 +548,7 @@ export function ManufacturingOrderDetailDialog({
           </div>
         </div>
 
-        {mo && facts && <MoFlowStrip facts={facts} tab={tab} onTab={pickTab} onSetUpStages={() => setSettingRoute(true)} />}
+        {mo && facts && <MoFlowStrip facts={facts} tab={tab} onTab={pickTab} onSetUpStages={moOpen && can('production', 'edit') ? () => setSettingRoute(true) : undefined} />}
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
           {error && (
             <div className="border-destructive/40 bg-destructive/5 flex items-start gap-3 rounded-lg border p-3">
@@ -949,6 +956,8 @@ export function ManufacturingOrderDetailDialog({
                     flow={flow}
                     materialsIssued={mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0)}
                     requisitionsRaised={raised}
+                    cutWithoutStages={cutWithoutStages}
+                    packed={mo.totalPackedQty}
                     onLoadStages={() => setSettingRoute(true)}
                     onChanged={(msg) => void refresh(msg)}
                   />
@@ -965,7 +974,9 @@ export function ManufacturingOrderDetailDialog({
                     }
                   >
                     {!mo.cuttingOrders?.length ? (
-                      <p className="text-muted-foreground text-sm">Nothing cut yet. Record each cutting: fabric used, waste and pieces by size.</p>
+                      <p className="text-muted-foreground text-sm">
+                        Nothing cut yet. Record each cutting: fabric used, waste and pieces by size. Cut here, the pieces get no bundles and the order then carries on without stages; to use stages, set them up before cutting.
+                      </p>
                     ) : (
                       <div className="divide-border divide-y text-sm">
                         {mo.cuttingOrders.map((c) => (

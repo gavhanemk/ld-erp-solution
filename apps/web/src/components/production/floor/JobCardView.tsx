@@ -142,7 +142,9 @@ export function JobCardView({ jobCardId, onClose, onChanged }: { jobCardId: stri
             <Section icon={Route} title="Process forms">
               {!d.steps.length ? (
                 <p className="text-muted-foreground text-sm">
-                  No stages yet. Once {d.mo.moNumber}&apos;s materials are issued, load its stages on the manufacturing order: a form follows for each.
+                  {d.cutWithoutStages?.length
+                    ? `No stages: ${d.mo.moNumber} was cut the old way (${d.cutWithoutStages.join(', ')}) before stages were set up, so it carries on without them. Its cutting is recorded on the manufacturing order.`
+                    : `No stages yet. Once ${d.mo.moNumber}’s materials are issued, load its stages on the manufacturing order: a form follows for each.`}
                 </p>
               ) : (
                 <div className="border-border overflow-x-auto rounded-lg border">

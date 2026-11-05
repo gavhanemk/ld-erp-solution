@@ -702,9 +702,14 @@ export async function jobCardDetail(db: Db, id: string) {
     }),
   )
   const issued = requisitions.some((r) => r.lines.some((l) => Number(l.issuedQty) > 0))
+  // Cut the old way, from the order's own Cutting, before it had stages: the order carries on without them.
+  const cutWithoutStages = flow.steps.length
+    ? []
+    : (await db.cuttingOrder.findMany({ where: { moId: card.moId, status: { not: 'CANCELLED' }, bundles: { none: {} } }, select: { cutOrderNumber: true }, orderBy: { createdAt: 'asc' } })).map((c) => c.cutOrderNumber)
 
   return {
     ...flow,
+    cutWithoutStages,
     card: {
       ...card,
       meters: card.meters == null ? null : Number(card.meters),
