@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { AuthRequest, requirePermission } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
+import { assertNotCancelling } from '../services/orderCancel.service'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
@@ -548,6 +549,7 @@ export async function loadOpenOrder(tx: Prisma.TransactionClient, soId: string) 
       'ORDER_NOT_OPEN',
     )
   }
+  await assertNotCancelling(tx, order.id, 'nothing is dispatched for it')
   return order
 }
 

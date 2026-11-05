@@ -13,6 +13,7 @@ import { attachLateBoms, materialPlan, MO_STAGES, moStages, orderForPlanning, PL
 import { cancelCutting, createCutting, cuttingPrep, cuttingSchema } from '../services/cutting.service'
 import { applyRouting, routingProblem, stylesOfMo } from '../services/route.service'
 import floorRoutes from './productionFloor.routes'
+import { assertNotCancelling } from '../services/orderCancel.service'
 
 /**
  * Manufacturing orders: what the factory is to make for a sales order.
@@ -83,6 +84,7 @@ const reasonSchema = z.object({ reason: z.string().trim().min(5, 'Say why, in a 
  * order line carries. Lines with nothing to make are left off.
  */
 async function shapeLines(tx: Prisma.TransactionClient, soId: string, input: z.infer<typeof moBodySchema>, exceptMoId?: string) {
+  await assertNotCancelling(tx, soId, 'nothing more is planned for it')
   const { so, lines } = await orderForPlanning(tx, soId, exceptMoId)
   if (!(PLANNABLE_ORDER_STATUSES as readonly string[]).includes(so.status)) {
     throw new AppError(
@@ -505,6 +507,7 @@ export async function releaseMo(tx: Prisma.TransactionClient, id: string) {
   const mo = await tx.manufacturingOrder.findUnique({ where: { id }, select: { id: true, moNumber: true, status: true, soId: true } })
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   if (mo.status !== 'DRAFT') throw new AppError(`${mo.moNumber} is already ${mo.status.toLowerCase()}`, 409, 'NOT_DRAFT')
+  await assertNotCancelling(tx, mo.soId, `${mo.moNumber} is not released`)
   if (mo.soId) {
     const so = await tx.salesOrder.findUniqueOrThrow({ where: { id: mo.soId }, select: { soNumber: true, status: true } })
     if (!(PLANNABLE_ORDER_STATUSES as readonly string[]).includes(so.status)) {
@@ -762,6 +765,7 @@ export async function raiseRequisitions(tx: Prisma.TransactionClient, moId: stri
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   if (mo.status === 'DRAFT') throw new AppError(`Release ${mo.moNumber} before asking the store for its materials`, 409, 'NOT_RELEASED')
   if (mo.status === 'CLOSED' || mo.status === 'COMPLETED') throw new AppError(`${mo.moNumber} is ${mo.status.toLowerCase()}`, 409, 'NOT_OPEN')
+  await assertNotCancelling(tx, mo.soId, 'nothing more is asked of the store for it')
   // Its sales order is over and nothing was made on it: nothing more is made for it. Work already
   // on the floor (issued, cut, packed) can still be given what it needs to finish.
   if (mo.soId) {

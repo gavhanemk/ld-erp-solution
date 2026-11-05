@@ -184,9 +184,10 @@ f = rc?.fabric?.find((x) => x.item.id === FAB)
 check('X3', 'the order\'s fabric balances: 298 = 288.9 cut + 9.1 sent back; 200 pieces = 198 + 2', near(f?.received, 298) && near(f?.issuedNet, 288.9) && near(f?.returned, 9.1) && near(f?.leftForOrder, 0) && rc?.balanced === true, JSON.stringify(f && { r: f.received, n: f.issuedNet, b: f.returned, l: f.leftForOrder, bal: rc?.balanced }))
 
 // ── 11. Exceptions: a manager may close with material unaccounted, with a reason ──
-// (a) Called off with its MO released but never started (nothing issued, cut
-// or packed) and their fabric still here: cancelled, not short-closed, and
-// the MO closes with it.
+// (a) Called off with its MO released but never started and their fabric
+// still here: not cancelled outright but asked for, which puts the MO on hold
+// and stops everything for the order, then approved with a manager's
+// exception for the fabric. The MO closes with it.
 const so4 = must(await call('POST', '/sales/orders', { customerId: A, isJobWork: true, lines: [{ itemId: FG, totalQty: 20, unitPrice: 20, sizes: [{ sizeId: S38, qty: 10 }, { sizeId: S40, qty: 10 }] }] }), 'order 4')
 must(await call('POST', `/sales/orders/${so4.id}/confirm`, { creditReleaseReason: 'Demo test order' }), 'confirm 4')
 const so4Line = (await q(`SELECT id FROM sales_order_lines WHERE "soId"=$1`, [so4.id]))[0].id
@@ -195,22 +196,106 @@ const g4 = await receiveQcApprove({ customerId: A, soId: so4.id, warehouseId: WH
 await g4.qc()
 must(await call('POST', `/inventory/customer-grn/${g4.rcv.id}/post`, {}), 'approval 4')
 const e0 = await call('POST', `/sales/orders/${so4.id}/short-close`, { reason: 'Buyer cancelled the rest' })
-check('E1', `nothing issued, cut or packed on ${mo4.moNumber}: the order is cancelled, not short-closed`, e0.status === 409 && e0.body?.code === 'NOTHING_STARTED' && (e0.body?.message ?? '').includes(mo4.moNumber), err(e0))
-const e1 = await call('POST', `/sales/orders/${so4.id}/cancel`, { reason: 'Buyer cancelled the rest' })
-check('E1', 'cancelling with 30 m of their fabric here is refused, saying why', e1.status === 409 && e1.body?.code === 'MATERIAL_UNACCOUNTED' && /30 mtr/.test(e1.body?.message ?? ''), err(e1))
-const e2 = await call('POST', `/sales/orders/${so4.id}/cancel`, { reason: 'Buyer cancelled the rest', materialException: 'Customer asked us to keep the fabric for their next order' }, SALES)
+check('E1', `nothing issued, cut or packed on ${mo4.moNumber}: it is not short-closed`, e0.status === 409 && e0.body?.code === 'NOTHING_STARTED' && (e0.body?.message ?? '').includes(mo4.moNumber), err(e0))
+const k0 = await call('POST', `/sales/orders/${so4.id}/cancel`, { reason: 'Buyer cancelled the rest' })
+check('E1', `with ${mo4.moNumber} raised it is not cancelled outright: its cancellation is asked for`, k0.status === 409 && k0.body?.code === 'NEEDS_REQUEST', err(k0))
+const rq4 = await call('POST', `/sales/orders/${so4.id}/cancellation/request`, { reason: 'Buyer cancelled the rest' }, SALES)
+const mo4Held = (await q(`SELECT "heldAt" h, "holdReason" r FROM manufacturing_orders WHERE id=$1`, [mo4.id]))[0]
+check('E1', `asked for by sales: ${mo4.moNumber} goes on hold, saying why`, rq4.status === 200 && !!mo4Held.h && (mo4Held.r ?? '').startsWith(`Cancellation requested for ${so4.soNumber}`), `${err(rq4)} ${JSON.stringify(mo4Held)}`)
+const rq4b = await call('POST', `/sales/orders/${so4.id}/cancellation/request`, { reason: 'Asked twice' }, SALES)
+check('E1', 'asked once: a second request is refused', rq4b.status === 409 && rq4b.body?.code === 'ALREADY_REQUESTED', err(rq4b))
+// While it waits nothing more is asked of the store, packed, sent, resumed or short-closed.
+const held4 = [
+  await call('POST', `/production/orders/${mo4.id}/requisitions`, { lines: [{ itemId: FAB, warehouseId: WH, qty: 1, ownership: 'CUSTOMER_OWNED', ownerCustomerId: A, departmentId: CUTTING }] }),
+  await call('POST', '/finished-goods', { warehouseId: STORE, soId: so4.id, lines: [{ itemId: FG, sizeId: S38, qty: 1 }] }),
+  await call('POST', '/sales/challans', { soId: so4.id, warehouseId: STORE, lines: [{ soLineId: so4Line, sizes: [{ sizeId: S38, qty: 1 }] }] }),
+  await call('POST', `/production/orders/${mo4.id}/resume`, {}),
+  await call('POST', `/sales/orders/${so4.id}/short-close`, { reason: 'Buyer cancelled the rest' }),
+]
+check('E1', 'while it waits: no requisition, packing, challan, resume or short-close', held4.every((r) => r.status === 409 && r.body?.code === 'CANCEL_REQUESTED'), held4.map(err).join(' | '))
+const imp4 = (await call('GET', `/sales/orders/${so4.id}/cancellation`)).body?.data
+check('E2', `the impact: waiting, ${mo4.moNumber} closes on approval, 30 m of their fabric to account for`, imp4?.request?.pending === true && imp4?.mos?.some((m) => m.moNumber === mo4.moNumber && m.closes) && imp4?.gaps?.some((g) => g.qty === 30) && (imp4?.effects?.[0] ?? '').includes('is cancelled'), JSON.stringify({ r: imp4?.request?.pending, mos: imp4?.mos?.map((m) => [m.moNumber, m.closes]), gaps: imp4?.gaps?.map((g) => g.qty), e: imp4?.effects?.[0] }))
+const e1 = await call('POST', `/sales/orders/${so4.id}/cancellation/approve`, {})
+check('E2', 'approving with 30 m of their fabric here is refused, saying why', e1.status === 409 && e1.body?.code === 'MATERIAL_UNACCOUNTED' && /30 mtr/.test(e1.body?.message ?? ''), err(e1))
+const e2 = await call('POST', `/sales/orders/${so4.id}/cancellation/approve`, { materialException: 'Customer asked us to keep the fabric for their next order' }, SALES)
 check('E2', 'a sales manager who does not approve stock cannot make the exception', e2.status === 403 && e2.body?.code === 'NEEDS_MANAGER', err(e2))
-const mo4Open = (await q(`SELECT status::text s FROM manufacturing_orders WHERE id=$1`, [mo4.id]))[0].s
-check('E2', `refused, ${mo4.moNumber} stays as it was`, mo4Open === 'RELEASED', `status=${mo4Open}`)
-const e3 = await call('POST', `/sales/orders/${so4.id}/cancel`, { reason: 'Buyer cancelled the rest', materialException: 'Customer asked us to keep the fabric for their next order' })
-const so4Row = (await q(`SELECT status::text s, "materialExceptionReason" r, "materialExceptionById" b, "materialExceptionSnapshot" snap FROM sales_orders WHERE id=$1`, [so4.id]))[0]
-check('E3', 'a manager cancels it with the reason; who, why and what was missing are kept', e3.status === 200 && so4Row.s === 'CANCELLED' && so4Row.r?.includes('next order') && so4Row.b && so4Row.snap?.gaps?.[0]?.qty === 30, `${err(e3)} ${JSON.stringify(so4Row)}`)
-const mo4Row = (await q(`SELECT status::text s, "closeReason" r FROM manufacturing_orders WHERE id=$1`, [mo4.id]))[0]
-check('E3', `${mo4.moNumber}, never started, is closed with it, saying why`, mo4Row.s === 'CLOSED' && (mo4Row.r ?? '').includes(`${so4.soNumber} cancelled`) && (e3.body?.message ?? '').includes(mo4.moNumber), `${JSON.stringify(mo4Row)} ${e3.body?.message}`)
+const mo4Open = (await q(`SELECT status::text s, "heldAt" h FROM manufacturing_orders WHERE id=$1`, [mo4.id]))[0]
+check('E2', `refused, ${mo4.moNumber} stays as it was, on hold`, mo4Open.s === 'RELEASED' && !!mo4Open.h, JSON.stringify(mo4Open))
+const e3 = await call('POST', `/sales/orders/${so4.id}/cancellation/approve`, { materialException: 'Customer asked us to keep the fabric for their next order' })
+const so4Row = (await q(`SELECT status::text s, "cancelReason" c, "cancelRequestReason" q, "materialExceptionReason" r, "materialExceptionById" b, "materialExceptionSnapshot" snap FROM sales_orders WHERE id=$1`, [so4.id]))[0]
+check('E3', 'a manager approves it with the reason: cancelled; who asked, why, and what was missing are kept', e3.status === 200 && so4Row.s === 'CANCELLED' && so4Row.c === 'Buyer cancelled the rest' && so4Row.q === 'Buyer cancelled the rest' && so4Row.r?.includes('next order') && so4Row.b && so4Row.snap?.gaps?.[0]?.qty === 30, `${err(e3)} ${JSON.stringify(so4Row)}`)
+const mo4Row = (await q(`SELECT status::text s, "closeReason" r, "heldAt" h FROM manufacturing_orders WHERE id=$1`, [mo4.id]))[0]
+check('E3', `${mo4.moNumber} is closed with it, saying why, off hold`, mo4Row.s === 'CLOSED' && (mo4Row.r ?? '').includes(`${so4.soNumber} cancelled`) && !mo4Row.h && (e3.body?.message ?? '').includes(mo4.moNumber), `${JSON.stringify(mo4Row)} ${e3.body?.message}`)
 const aud = await q(`SELECT action::text a FROM audit_logs WHERE "entityType"='SalesOrderMaterialException' AND "entityId"=$1`, [so4.id])
 check('E3', 'and the exception is in the audit trail', aud.length === 1 && aud[0].a === 'APPROVE', JSON.stringify(aud))
 const mo4Aud = await q(`SELECT 1 FROM audit_logs WHERE "entityType"='ManufacturingOrder' AND "entityId"=$1 AND action='UPDATE'`, [mo4.id])
-check('E3', `and so is ${mo4.moNumber} closing`, mo4Aud.length >= 1, `entries=${mo4Aud.length}`)
+check('E3', `and so is ${mo4.moNumber} going on hold and closing`, mo4Aud.length >= 2, `entries=${mo4Aud.length}`)
+
+// (a3) Asked for, then withdrawn: the order carries on. Asked again, approved.
+const so8 = must(await call('POST', '/sales/orders', { customerId: A, isJobWork: true, lines: [{ itemId: FG, totalQty: 4, unitPrice: 20, sizes: [{ sizeId: S38, qty: 2 }, { sizeId: S40, qty: 2 }] }] }), 'order 8')
+must(await call('POST', `/sales/orders/${so8.id}/confirm`, { creditReleaseReason: 'Demo test order' }), 'confirm 8')
+const so8Line = (await q(`SELECT id FROM sales_order_lines WHERE "soId"=$1`, [so8.id]))[0].id
+const mo8 = must(await call('POST', '/production/orders', { soId: so8.id, release: true, lines: [{ soLineId: so8Line, sizes: [{ sizeId: S38, qty: 2 }, { sizeId: S40, qty: 2 }] }] }), 'MO 8')
+const w1 = await call('POST', `/sales/orders/${so8.id}/cancellation/request`, { reason: 'Buyer may call it off' }, SALES)
+const w2 = await call('POST', `/sales/orders/${so8.id}/cancellation/withdraw`, {}, SALES)
+const mo8Now = (await q(`SELECT "heldAt" h FROM manufacturing_orders WHERE id=$1`, [mo8.id]))[0]
+const so8Now = (await q(`SELECT status::text s, "cancelRequestedAt" c FROM sales_orders WHERE id=$1`, [so8.id]))[0]
+check('E6', `withdrawn: the order carries on, ${mo8.moNumber} off hold`, w1.status === 200 && w2.status === 200 && !mo8Now.h && !so8Now.c && so8Now.s === 'IN_PRODUCTION', `${err(w1)} ${err(w2)} ${JSON.stringify({ mo8Now, so8Now })}`)
+const w3 = await call('POST', `/sales/orders/${so8.id}/cancellation/request`, { reason: 'Buyer called it off' }, SALES)
+const w4 = await call('POST', `/sales/orders/${so8.id}/cancellation/approve`, {})
+const so8Done = (await q(`SELECT status::text s FROM sales_orders WHERE id=$1`, [so8.id]))[0].s
+const mo8Done = (await q(`SELECT status::text s FROM manufacturing_orders WHERE id=$1`, [mo8.id]))[0].s
+check('E6', `asked again and approved: cancelled, ${mo8.moNumber} closed`, w3.status === 200 && w4.status === 200 && so8Done === 'CANCELLED' && mo8Done === 'CLOSED', `${err(w3)} ${err(w4)} ${so8Done} ${mo8Done}`)
+
+// (a4) Asked for after goods went out: approved, it is short-closed at what was sent.
+const so9 = must(await call('POST', '/sales/orders', { customerId: A, isJobWork: true, lines: [{ itemId: FG, totalQty: 6, unitPrice: 20, sizes: [{ sizeId: S38, qty: 2 }, { sizeId: S40, qty: 4 }] }] }), 'order 9')
+must(await call('POST', `/sales/orders/${so9.id}/confirm`, { creditReleaseReason: 'Demo test order' }), 'confirm 9')
+const so9Line = (await q(`SELECT id FROM sales_order_lines WHERE "soId"=$1`, [so9.id]))[0].id
+const mo9 = must(await call('POST', '/production/orders', { soId: so9.id, release: true, lines: [{ soLineId: so9Line, sizes: [{ sizeId: S38, qty: 2 }] }] }), 'MO 9')
+must(await call('POST', '/finished-goods', { warehouseId: STORE, soId: so9.id, lines: [{ itemId: FG, sizeId: S40, qty: 4 }] }), 'FG 9')
+must(await call('POST', '/sales/challans', { soId: so9.id, warehouseId: STORE, dispatch: true, lines: [{ soLineId: so9Line, sizes: [{ sizeId: S40, qty: 4 }] }] }), 'DC 9')
+const imp9 = (await call('GET', `/sales/orders/${so9.id}/cancellation`)).body?.data
+const a1 = await call('POST', `/sales/orders/${so9.id}/cancellation/request`, { reason: 'Buyer does not want the other two' }, SALES)
+const a2 = await call('POST', `/sales/orders/${so9.id}/cancellation/approve`, {})
+const so9Done = (await q(`SELECT status::text s, "shortCloseReason" r, (SELECT SUM("pendingQty")::float8 FROM sales_order_lines WHERE "soId"=$1) p FROM sales_orders WHERE id=$1`, [so9.id]))[0]
+const mo9Done = (await q(`SELECT status::text s FROM manufacturing_orders WHERE id=$1`, [mo9.id]))[0].s
+check('E7', `4 of 6 sent: the impact says short-closed; approved, it is, nothing pending, ${mo9.moNumber} closed`, (imp9?.effects?.[0] ?? '').includes('short-closed at the 4 pieces sent') && a1.status === 200 && a2.status === 200 && so9Done.s === 'COMPLETED' && so9Done.r === 'Buyer does not want the other two' && so9Done.p === 0 && mo9Done === 'CLOSED', `${imp9?.effects?.[0]} ${err(a1)} ${err(a2)} ${JSON.stringify(so9Done)} ${mo9Done}`)
+
+// (a5) Called off with material out on the floor: nothing more is issued while
+// it waits, the unused fabric comes back on a floor return when the store has
+// it, and approval closes what is still asked for. The issue and the return
+// stay on record.
+const so10 = must(await call('POST', '/sales/orders', { customerId: A, isJobWork: true, lines: [{ itemId: FG, totalQty: 10, unitPrice: 20, sizes: [{ sizeId: S38, qty: 5 }, { sizeId: S40, qty: 5 }] }] }), 'order 10')
+must(await call('POST', `/sales/orders/${so10.id}/confirm`, { creditReleaseReason: 'Demo test order' }), 'confirm 10')
+const so10Line = (await q(`SELECT id FROM sales_order_lines WHERE "soId"=$1`, [so10.id]))[0].id
+const g10 = await receiveQcApprove({ customerId: A, soId: so10.id, warehouseId: WH, challanNumber: `BTH/DC/${tag}-10`, lines: [{ itemId: FAB, challanQty: 20, receivedQty: 20 }] })
+await g10.qc()
+must(await call('POST', `/inventory/customer-grn/${g10.rcv.id}/post`, {}), 'approval 10')
+const mo10 = must(await call('POST', '/production/orders', { soId: so10.id, release: true, lines: [{ soLineId: so10Line, sizes: [{ sizeId: S38, qty: 5 }, { sizeId: S40, qty: 5 }] }] }), 'MO 10')
+must(await call('POST', `/production/orders/${mo10.id}/requisitions`, { lines: [
+  { itemId: FAB, warehouseId: WH, qty: 10, ownership: 'CUSTOMER_OWNED', ownerCustomerId: A, departmentId: CUTTING },
+  { itemId: BTN, warehouseId: WH, qty: 80, ownership: 'OWNED', departmentId: STITCHING },
+] }), 'requisitions 10')
+const mrs10 = await q(`SELECT m.id, m."mrNumber" n, l.id "lineId", l."itemId" i FROM material_requisitions m JOIN material_requisition_lines l ON l."mrId" = m.id WHERE m."moId"=$1`, [mo10.id])
+const fab10 = mrs10.find((m) => m.i === FAB), btn10 = mrs10.find((m) => m.i === BTN)
+for (const m of [fab10, btn10]) must(await call('PATCH', `/inventory/requisitions/${m.id}/approve`, {}), 'MR approval 10')
+must(await call('POST', `/inventory/requisitions/${fab10.id}/issue`, {}), 'fabric issue 10')
+await settleLabels('MR', fab10.id)
+must(await call('POST', `/sales/orders/${so10.id}/cancellation/request`, { reason: 'Buyer cancelled before cutting' }, SALES), 'request 10')
+const iss10 = await call('POST', `/inventory/requisitions/${btn10.id}/issue`, {})
+check('E8', `while it waits nothing more is issued: ${btn10.n} is refused`, iss10.status === 409 && iss10.body?.code === 'CANCEL_REQUESTED', err(iss10))
+let imp10 = (await call('GET', `/sales/orders/${so10.id}/cancellation`)).body?.data
+const fabRow = (d) => d?.materials?.find((m) => m.item.code === d.materials.find((x) => x.customers)?.item.code)
+check('E8', `the impact: 10 m of their fabric with production; ${btn10.n} closes on approval, ${fab10.n} can be returned`, fabRow(imp10)?.withProduction === 10 && imp10?.requisitions?.some((r) => r.mrNumber === btn10.n && r.closes) && imp10?.requisitions?.some((r) => r.mrNumber === fab10.n && r.returnable && !r.closes), JSON.stringify({ fab: fabRow(imp10), mrs: imp10?.requisitions }))
+const back10 = await call('POST', `/inventory/requisitions/${fab10.id}/return`, { reason: 'Order called off before cutting', lines: [{ lineId: fab10.lineId, qty: 10, warehouseId: WH }] })
+imp10 = (await call('GET', `/sales/orders/${so10.id}/cancellation`)).body?.data
+check('E8', 'returns still go on while it waits: the 10 m is back in the store once received', back10.status === 200 && fabRow(imp10)?.withProduction === 0 && fabRow(imp10)?.returned === 10, `${err(back10)} ${JSON.stringify(fabRow(imp10))}`)
+const ap10 = await call('POST', `/sales/orders/${so10.id}/cancellation/approve`, { materialException: 'Customer collects all 20 m themselves next week' })
+const so10Done = (await q(`SELECT status::text s FROM sales_orders WHERE id=$1`, [so10.id]))[0].s
+const mo10Done = (await q(`SELECT status::text s FROM manufacturing_orders WHERE id=$1`, [mo10.id]))[0].s
+const mrs10Done = await q(`SELECT m."mrNumber" n, m."closedAt" c, l."issuedQty"::float8 iss, l."returnedQty"::float8 ret FROM material_requisitions m JOIN material_requisition_lines l ON l."mrId" = m.id WHERE m."moId"=$1`, [mo10.id])
+const fabDone = mrs10Done.find((m) => m.n === fab10.n), btnDone = mrs10Done.find((m) => m.n === btn10.n)
+check('E8', `approved: cancelled, ${mo10.moNumber} and ${btn10.n} closed; ${fab10.n}'s 10 m issued and 10 m returned stay on record`, ap10.status === 200 && so10Done === 'CANCELLED' && mo10Done === 'CLOSED' && !!btnDone?.c && fabDone?.iss === 10 && fabDone?.ret === 10, `${err(ap10)} ${so10Done} ${mo10Done} ${JSON.stringify(mrs10Done)}`)
 
 // (a2) Short-closed once goods have gone: an MO nothing was made on closes with it.
 const so7 = must(await call('POST', '/sales/orders', { customerId: A, isJobWork: true, lines: [{ itemId: FG, totalQty: 6, unitPrice: 20, sizes: [{ sizeId: S38, qty: 2 }, { sizeId: S40, qty: 4 }] }] }), 'order 7')
@@ -220,7 +305,7 @@ const mo7 = must(await call('POST', '/production/orders', { soId: so7.id, releas
 must(await call('POST', '/finished-goods', { warehouseId: STORE, soId: so7.id, lines: [{ itemId: FG, sizeId: S40, qty: 4 }] }), 'FG 7')
 must(await call('POST', '/sales/challans', { soId: so7.id, warehouseId: STORE, dispatch: true, lines: [{ soLineId: so7Line, sizes: [{ sizeId: S40, qty: 4 }] }] }), 'DC 7')
 const cx7 = await call('POST', `/sales/orders/${so7.id}/cancel`, { reason: 'Buyer does not want the rest' })
-check('E5', '4 of 6 sent: cancelling is refused, short-close instead', cx7.status === 409 && cx7.body?.code === 'CANNOT_CANCEL', err(cx7))
+check('E5', '4 of 6 sent: it is not cancelled outright', cx7.status === 409 && cx7.body?.code === 'NEEDS_REQUEST', err(cx7))
 const sc7 = await call('POST', `/sales/orders/${so7.id}/short-close`, { reason: 'Buyer does not want the rest' })
 const so7Now = (await q(`SELECT status::text s FROM sales_orders WHERE id=$1`, [so7.id]))[0].s
 const mo7Row = (await q(`SELECT status::text s, "closeReason" r FROM manufacturing_orders WHERE id=$1`, [mo7.id]))[0]

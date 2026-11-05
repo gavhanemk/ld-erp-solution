@@ -62,6 +62,8 @@ interface MoDetail {
   /** Why its plan can no longer be changed (material issued, cut, packed, finished); null while it can. */
   editBlock?: string | null
   heldAt: string | null
+  /** Why it is on hold: a floor hold, or its sales order's cancellation waiting for approval. */
+  holdReason?: string | null
   totalStitchedQty?: number
   totalFinishedQty?: number
   materialRequisitions: Array<{
@@ -526,6 +528,18 @@ export function ManufacturingOrderDetailDialog({
           {message && (
             <div className="border-primary/40 bg-primary/5 rounded-lg border p-3">
               <p className="text-primary text-sm">{message}</p>
+            </div>
+          )}
+          {mo?.heldAt && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+              <Lock size={16} className="mt-0.5 shrink-0 text-amber-600" />
+              <p className="text-foreground text-sm">
+                <b>On hold</b>
+                {mo.holdReason ? `: ${mo.holdReason}` : ''}. Nothing is issued, cut, moved or packed for it{' '}
+                {mo.holdReason?.startsWith('Cancellation requested for')
+                  ? 'until the cancellation is approved or withdrawn, on its sales order.'
+                  : 'until it is resumed.'}
+              </p>
             </div>
           )}
           {mo?.so && soOver && (

@@ -291,6 +291,7 @@ model User {
   creditReleasedSOs    SalesOrder[]                @relation("SOCreditReleasedBy")
   cancelledSOs         SalesOrder[]                @relation("SOCancelledBy")
   shortClosedSOs       SalesOrder[]                @relation("SOShortClosedBy")
+  cancelRequestedSOs   SalesOrder[]                @relation("SOCancelRequestedBy")
   soRevisions          SalesOrderRevision[]        @relation("SORevisionChangedBy")
   createdEnquiries     PurchaseEnquiry[]           @relation("EnquiryCreatedBy")
   createdPOs           PurchaseOrder[]             @relation("POCreatedBy")
@@ -1370,6 +1371,14 @@ model SalesOrder {
   shortClosedBy       User?     @relation("SOShortClosedBy", fields: [shortClosedById], references: [id])
   shortClosedAt       DateTime?
   shortCloseReason    String?
+  /// A cancellation asked for, at any stage, and not decided yet. Until it is
+  /// approved (the order is cancelled, or short-closed at what was sent) or
+  /// withdrawn, its manufacturing orders are on hold: nothing is issued,
+  /// moved, packed or sent for it. Kept after approval: who asked, and why.
+  cancelRequestedById String?
+  cancelRequestedBy   User?     @relation("SOCancelRequestedBy", fields: [cancelRequestedById], references: [id])
+  cancelRequestedAt   DateTime?
+  cancelRequestReason String?
   /// A job-work order: our own material used on it (trims, thread) is either
   /// covered by the job charge (IN_JOB_CHARGE) or billed to the customer
   /// separately (BILLED), as agreed with them. Its cost is tracked either way.

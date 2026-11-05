@@ -24,6 +24,7 @@ import { qcByGrnLine } from '../services/grnQc.service'
 import { packageRule, positionOf } from '../services/package.service'
 import { getPreference } from '../lib/preferences'
 import { createPurchaseNoteIn } from './purchase-notes.routes'
+import { assertNotCancelling, soOfMo } from '../services/orderCancel.service'
 import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
 import { inventoryDashboard } from '../services/inventoryDashboard.service'
@@ -1597,6 +1598,7 @@ export async function createRequisition(
       'NEEDS_MO',
     )
   }
+  await assertNotCancelling(tx, data.soId ?? (await soOfMo(tx, data.moId)), 'no requisition is raised for it')
 
   // A style number that is exactly a style's code is linked to it; anything else is kept as typed.
   const typedStyles = [...new Set(data.lines.map((l) => l.styleNo?.trim()).filter((v): v is string => !!v))]
@@ -2195,6 +2197,8 @@ export async function issueRequisition(
       'NEEDS_MO',
     )
   }
+  // Its order's cancellation is waiting: nothing more goes out for it.
+  await assertNotCancelling(tx, mr.soId ?? (await soOfMo(tx, mr.moId)), 'nothing more is issued for it')
 
   // docs/04-business-rules.md, section 7: raised, approved and issued by
   // three different people — except the Admin, as for approving; the

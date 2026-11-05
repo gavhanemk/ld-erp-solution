@@ -35,7 +35,12 @@ export function salesOrderStatus(order: {
   status: string
   sentForApprovalAt?: string | null
   approvedAt?: string | null
+  cancelRequestedAt?: string | null
 }): StatusLook {
+  // Its cancellation is waiting for approval: production on hold, nothing sent.
+  if (order.cancelRequestedAt && OPEN_ORDER_STATUSES.includes(order.status)) {
+    return { label: 'Cancel requested', cls: 'badge-danger' }
+  }
   // Only a customer over their credit limit, or blacklisted, waits for anyone.
   if (order.status === 'DRAFT' && order.sentForApprovalAt) {
     return { label: 'Credit hold', cls: 'badge-warning' }

@@ -1,6 +1,7 @@
 import type { MOStatus, Prisma, PrismaClient, ProcessKind, StepExecution, WipBucket, WipEventType } from '@prisma/client'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
+import { assertNotCancelling } from './orderCancel.service'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balancesOf, flowsOf, keyOf, lockMo, postEvent, reverseEvent, type BalanceRow, type Move } from './wip.service'
 import { destinationsFrom, isCheck, isLastStep, nextStepAfter, passedBy, type RouteStep } from './route.service'
@@ -1116,8 +1117,9 @@ export async function holdMo(tx: Tx, moId: string, reason: string, userId: strin
 
 export async function resumeMo(tx: Tx, moId: string) {
   await lockMo(tx, moId)
-  const mo = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: moId }, select: { moNumber: true, heldAt: true } })
+  const mo = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: moId }, select: { moNumber: true, heldAt: true, soId: true } })
   if (!mo.heldAt) throw new AppError(`${mo.moNumber} is not on hold.`, 409, 'NOT_HELD')
+  await assertNotCancelling(tx, mo.soId, `${mo.moNumber} stays on hold`)
   return tx.manufacturingOrder.update({ where: { id: moId }, data: { heldAt: null, heldById: null, holdReason: null } })
 }
 

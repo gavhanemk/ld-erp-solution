@@ -724,19 +724,42 @@ Rules added in the same check:
 - A quotation becomes one order. One past its valid-until date has its
   price agreed again (the date moved) before it becomes an order.
 
-### Calling off an order: cancel or short-close (5 Nov 2026)
+### Calling off an order: cancellation at any stage (5 Nov 2026)
 
-Set after a short-closed order was left with its manufacturing order open,
-showing work still due:
+A customer can cancel after the MO is raised, material is asked for or
+issued, or production has started. Nothing closes an order by itself.
 
-- **Cancel while nothing has been made or sent.** "Made" means work on a
-  manufacturing order: material issued to it, cutting, or packing. One that
-  was only released, requisitions raised or not, has made nothing, so the
-  order can still be cancelled (by someone who approves orders), and that
-  manufacturing order closes with it, its unissued requisitions too.
-- **Short-close once something has been made or sent.** Its manufacturing
-  orders nothing was made on close with it. One with work on the floor
-  stays open, to be finished or closed in Production.
+1. **Nothing asked for, made or sent** (no MO, no requisition in use, no
+   challan, no invoice): **Cancel order** cancels it at once, with a reason.
+2. **Anything more: Request cancellation**, at any stage, with the
+   customer's reason (anyone who edits orders). The order's manufacturing
+   orders go **on hold**. Until the request is decided nothing more is
+   issued, requisitioned, cut, moved between stages, packed or dispatched
+   for it, its MOs are not released or resumed, and the order is not edited
+   or short-closed. Floor returns still go on.
+3. **The cancellation window** shows everything it touches, as it stands:
+   pieces ordered, sent, cut, on the floor (by stage, at outside units, on
+   the way), packed and in the store; each material asked for, issued, used
+   in cutting, returned and still with production; requisitions; purchase
+   orders and enquiries raised for them; a job-work customer's material.
+4. **Unused material goes back only on a floor return** (Return on its
+   requisition), into stock when the store receives it. Nothing is put back
+   on paper.
+5. **Approve cancellation** (someone who approves orders): open requisitions
+   close and the stock held for the order is freed, its MOs close, and the
+   order is **cancelled**, or **short-closed at what was sent** when goods
+   already went out. A job-work customer's material must be accounted for,
+   or a manager who approves stock records an exception. Purchase orders
+   already placed are listed, not cancelled: Purchase cancels the balance
+   with the supplier or keeps it for stock.
+6. **Withdraw request**: the customer changed their mind; the holds come off
+   and work carries on.
+
+Every issue, cutting, transfer, receipt, challan and return stays on record,
+linked to the order. Short-close remains for ending an order at what was
+sent (production came out short; the buyer takes less); its MOs nothing was
+made on close with it.
+
 - A manufacturing order left open after its sales order closed shows
   **Sales order closed** on its list and window and is closed in one step;
   nothing more is asked of the store for it.

@@ -341,6 +341,8 @@ function RequisitionsScreen() {
   const [saved, setSaved] = useState(0)
   const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
   const [returning, setReturning] = useState<Requisition | null>(null)
+  // ?return=<id>: from a sales order's cancellation, to record its unused material coming back.
+  const returnAsked = params.get('return')
   /** Stock that just went out: its labels, and the packages it came from. */
   const [outward, setOutward] = useState<OutwardRef | null>(null)
   /** Several requisitions taken through one step together. */
@@ -385,6 +387,16 @@ function RequisitionsScreen() {
   useEffect(() => {
     void load()
   }, [load])
+
+  // Opened to record a return: once the requisitions are in, its return window opens, and the link is spent.
+  useEffect(() => {
+    if (!returnAsked || !rows.length) return
+    const mr = rows.find((r) => r.id === returnAsked)
+    if (mr) setReturning(mr)
+    const next = new URLSearchParams(params.toString())
+    next.delete('return')
+    router.replace(next.toString() ? `${pathname}?${next}` : pathname)
+  }, [returnAsked, rows, params, pathname, router])
 
   useEffect(() => {
     setPage(1)
