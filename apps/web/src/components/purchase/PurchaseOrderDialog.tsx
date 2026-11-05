@@ -1437,6 +1437,45 @@ export function PurchaseOrderDialog({
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
 
   /**
+   * Whether an item is filed under a category choice: the category itself or
+   * one of its sub-categories, or — with a sub-category picked — that one.
+   */
+  const itemFits = (itemId: string, categoryId: string, subcategoryId: string) => {
+    const item = itemId ? itemById.get(itemId) : undefined
+    if (!item) return true
+    if (subcategoryId) return item.categoryId === subcategoryId
+    if (!categoryId) return true
+    const filed = categories.find((c) => c.id === item.categoryId)
+    return item.categoryId === categoryId || filed?.parentId === categoryId
+  }
+
+  /**
+   * Picks a row's category, or its sub-category under the same category.
+   *
+   * An item that is not filed under the new choice goes, with what came with
+   * it — its code, its GST rate and a style it filled in. Left in place it
+   * read "Buttons & Fasteners" beside Cotton Oxford: a row contradicting
+   * itself, and an order that would go out with the wrong thing on it. What
+   * was typed by hand (quantity, rate, description) stays.
+   */
+  const chooseCategory = (index: number, categoryId: string, subcategoryId = '') => {
+    const line = lines[index]
+    if (itemFits(line.itemId, categoryId, subcategoryId)) {
+      setLine(index, { categoryId, subcategoryId })
+      return
+    }
+    const itemStyle = itemById.get(line.itemId)?.style?.code ?? ''
+    setLine(index, {
+      categoryId,
+      subcategoryId,
+      itemId: '',
+      codeText: '',
+      gstRate: '',
+      ...(itemStyle && line.styleNo === itemStyle ? { styleNo: '', styleId: '' } : {}),
+    })
+  }
+
+  /**
    * Puts an item on one row.
    *
    * The master's rate and GST are offered rather than imposed: the rate on
@@ -2742,8 +2781,9 @@ export function PurchaseOrderDialog({
                                 onChange={(e) =>
                                   // Clearing the subcategory with it: the one
                                   // chosen a moment ago belongs to the category
-                                  // just replaced.
-                                  setLine(i, { categoryId: e.target.value, subcategoryId: '' })
+                                  // just replaced. An item from another
+                                  // category goes too — see chooseCategory.
+                                  chooseCategory(i, e.target.value)
                                 }
                                 aria-label={`Row ${i + 1} category`}
                               >
@@ -2764,7 +2804,7 @@ export function PurchaseOrderDialog({
                                 className={cell}
                                 value={view.subcategoryId}
                                 disabled={subs.length === 0}
-                                onChange={(e) => setLine(i, { subcategoryId: e.target.value })}
+                                onChange={(e) => chooseCategory(i, view.categoryId, e.target.value)}
                                 aria-label={`Row ${i + 1} subcategory`}
                               >
                                 {/* Short, because this box is half the width of
@@ -3089,9 +3129,7 @@ export function PurchaseOrderDialog({
                           <SmartSelect
                             className={cell}
                             value={view.categoryId}
-                            onChange={(e) =>
-                              setLine(i, { categoryId: e.target.value, subcategoryId: '' })
-                            }
+                            onChange={(e) => chooseCategory(i, e.target.value)}
                             aria-label={`Row ${i + 1} category`}
                           >
                             <option value="">All categories</option>
@@ -3108,7 +3146,7 @@ export function PurchaseOrderDialog({
                             className={cell}
                             value={view.subcategoryId}
                             disabled={subs.length === 0}
-                            onChange={(e) => setLine(i, { subcategoryId: e.target.value })}
+                            onChange={(e) => chooseCategory(i, view.categoryId, e.target.value)}
                             aria-label={`Row ${i + 1} subcategory`}
                           >
                             <option value="">{subs.length === 0 ? 'None' : 'All'}</option>
