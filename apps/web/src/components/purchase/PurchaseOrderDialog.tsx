@@ -295,6 +295,9 @@ interface Option {
   billingAddress?: string | null
   billingCity?: string | null
   billingPincode?: string | null
+  /** On an item: the style it is a garment of, as the item master sends it. */
+  styleId?: string | null
+  style?: { id: string; code: string; name: string } | null
 }
 
 interface Attachment {
@@ -388,8 +391,10 @@ const COL = {
   remove: 'w-16',
   item: 'w-64',
   category: 'w-40',
-  style: 'w-24',
-  description: 'w-36',
+  // Wide enough for a whole style code (LD-SH-2601) now that it fills in
+  // from the item; at w-24 its last digit was cut off.
+  style: 'w-28',
+  description: 'w-32',
   qty: 'w-20',
   rate: 'w-24',
   // Wide enough for the figure and the % / rupees switch beside it. At w-28
@@ -630,6 +635,15 @@ export function PurchaseOrderDialog({
    * the form does not decide which charges exist, Masters → Charges does.
    */
   const [charges, setCharges] = useState<Record<string, string>>({})
+  /**
+   * The charges added to this order, in the order they were added.
+   *
+   * The totals used to show a box for every purchase charge in the master,
+   * whether the order had it or not — so a near-duplicate entry in the master
+   * ("Freight / Courier" and "Freight / Courier Charges") showed twice on
+   * every order. Now a charge appears only once somebody adds it.
+   */
+  const [shownCharges, setShownCharges] = useState<string[]>([])
   const [otherCharges, setOtherCharges] = useState('')
 
   /**
@@ -640,6 +654,32 @@ export function PurchaseOrderDialog({
    */
   const [pctOpen, setPctOpen] = useState<string | null>(null)
   const [pctOf, setPctOf] = useState<Record<string, string>>({})
+
+  /** Takes a charge off the order: its row, its amount and its helper go. */
+  const removeCharge = (id: string) => {
+    setShownCharges((prev) => prev.filter((x) => x !== id))
+    setCharges((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setPctOpen((open) => (open === id ? null : open))
+  }
+
+  /*
+   * Charges already on a saved order whose type has since been retired in the
+   * master. The server only takes live purchase charges, so they cannot be
+   * saved again — said here rather than dropped without a word.
+   */
+  const retiredCharges = useMemo(
+    () =>
+      chargeTypes.length === 0
+        ? []
+        : (record?.charges ?? []).filter(
+            (c) => Number(c.amount) > 0 && !chargeTypes.some((t) => t.id === c.chargeTypeId)
+          ),
+    [record, chargeTypes]
+  )
   /*
    * What each item on the form has been bought at before, keyed by item.
    *
@@ -838,6 +878,9 @@ export function PurchaseOrderDialog({
     )
     setCharges(
       Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(c.amount)]))
+    )
+    setShownCharges(
+      (record?.charges ?? []).filter((c) => Number(c.amount) > 0).map((c) => c.chargeTypeId)
     )
     setOtherCharges(num(record?.otherCharges) > 0 ? String(record?.otherCharges) : '')
     setPctOpen(null)
@@ -1433,9 +1476,28 @@ export function PurchaseOrderDialog({
     const cat = categories.find((c) => c.id === item?.categoryId)
     const line = lines[index]
 
+    /*
+     * The style comes with the item when the item is a style's garment —
+     * "Formal Shirt LD-SH-2601 — Sky Blue" is style LD-SH-2601. Only into an
+     * empty box, or one still holding the previous item's own style, so a
+     * style somebody typed by hand is never overwritten; changing to an item
+     * with no style clears a style the last item brought.
+     */
+    const previousStyle = itemById.get(line.itemId)?.style?.code ?? ''
+    const styleBoxIsOurs =
+      !String(line.styleNo ?? '').trim() || (previousStyle !== '' && line.styleNo === previousStyle)
+    const styleFill = !styleBoxIsOurs
+      ? {}
+      : item?.style
+        ? { styleNo: item.style.code, styleId: item.style.id }
+        : previousStyle
+          ? { styleNo: '', styleId: '' }
+          : {}
+
     setLine(index, {
       itemId,
       codeText: item?.code ?? '',
+      ...styleFill,
       ...(cat
         ? cat.parentId
           ? { categoryId: cat.parentId, subcategoryId: cat.id }
@@ -3762,10 +3824,10 @@ export function PurchaseOrderDialog({
 
                   <Row label="Gross total" value={totals.grossTotal} />
 
-                  {/* One row per charge the mill uses on purchases, taken from
-                    the charge master rather than written into this form. Add a
-                    charge there and a row appears here; change its GST rate
-                    there and this follows. */}
+                  {/* Only the charges this order carries. "+ Add a charge" offers
+                    the purchase charges from Masters → Extra Charges that are
+                    not on it yet; each one keeps the GST rate the master gives
+                    it. An order with no charges shows no charge rows at all. */}
                   {chargeTypes.length === 0 ? (
                     <p className="text-muted-foreground py-1 text-xs">
                       No purchase charges are set up yet — add them under{' '}
@@ -3781,7 +3843,10 @@ export function PurchaseOrderDialog({
                     </p>
                   ) : (
                     <div className="space-y-1.5 pt-0.5">
-                      {totals.chargeRows.map((c) => {
+                      {shownCharges
+                        .map((id) => totals.chargeRows.find((c) => c.chargeTypeId === id))
+                        .filter((c): c is NonNullable<typeof c> => Boolean(c))
+                        .map((c) => {
                         const helperOpen = pctOpen === c.chargeTypeId
                         return (
                           <div key={c.chargeTypeId}>
@@ -3833,6 +3898,15 @@ export function PurchaseOrderDialog({
                                   }
                                   aria-label={`${c.name} amount`}
                                 />
+                                <button
+                                  type="button"
+                                  onClick={() => removeCharge(c.chargeTypeId)}
+                                  className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                                  title={`Take ${c.name} off this order`}
+                                  aria-label={`Remove ${c.name}`}
+                                >
+                                  <X size={14} />
+                                </button>
                               </div>
                             </div>
 
@@ -3855,7 +3929,37 @@ export function PurchaseOrderDialog({
                             )}
                           </div>
                         )
-                      })}
+                        })}
+                      {chargeTypes.some((t) => !shownCharges.includes(t.id)) && (
+                        <SmartSelect
+                          className="form-input h-8 w-full text-xs"
+                          value=""
+                          onChange={(e) => {
+                            const id = e.target.value
+                            if (id) setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
+                          }}
+                          aria-label="Add a charge"
+                        >
+                          <option value="">+ Add a charge — freight, transport, dyeing…</option>
+                          {chargeTypes
+                            .filter((t) => !shownCharges.includes(t.id))
+                            .map((t) => (
+                              <option key={t.id} value={t.id}>
+                                {`${t.name} (${Number(t.defaultGstRate)}% GST)`}
+                              </option>
+                            ))}
+                        </SmartSelect>
+                      )}
+                      {retiredCharges.length > 0 && (
+                        <p className="warn-text text-xs">
+                          {retiredCharges
+                            .map((c) => `${c.chargeType?.name ?? 'A charge'} (₹${Number(c.amount)})`)
+                            .join(', ')}{' '}
+                          {retiredCharges.length === 1 ? 'is' : 'are'} no longer a purchase charge in
+                          the master, so {retiredCharges.length === 1 ? 'it is' : 'they are'} left off
+                          when you save. Add it again under another charge if it still applies.
+                        </p>
+                      )}
                     </div>
                   )}
 
