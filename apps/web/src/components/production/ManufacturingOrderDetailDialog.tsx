@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, Info, Layers, Loader2, Lock, PackageCheck, Pencil, Send, X, Scissors } from 'lucide-react'
+import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, History, Info, Layers, Loader2, Lock, PackageCheck, Pencil, Send, X, Scissors } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
@@ -143,20 +143,37 @@ const pcs = (n: number) => n.toLocaleString('en-IN')
  * per department, where it is approved, issued from stock or passed to
  * Purchase in the ordinary way.
  */
+/** One entry of its history: who did what to it, and when. */
+interface HistoryEntry {
+  id: string
+  at: string
+  by: string | null
+  what: string
+  changes: string[]
+}
+
+const when = (iso: string) =>
+  new Date(iso).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+
 export function ManufacturingOrderDetailDialog({
   moId,
   onClose,
   onEdit,
   onChanged,
+  notice = null,
 }: {
   moId: string | null
   onClose: () => void
   onEdit: (id: string) => void
   onChanged: (message: string) => void
+  /** A save just made in the order's form: confirmed at the top as the window opens. */
+  notice?: string | null
 }) {
   const [mounted, setMounted] = useState(false)
   useEffect(() => setMounted(true), [])
   const [mo, setMo] = useState<MoDetail | null>(null)
+  /** Who changed what on it, and when: the audit trail, newest first. */
+  const [history, setHistory] = useState<HistoryEntry[] | null>(null)
   const [plan, setPlan] = useState<MaterialPlan | null>(null)
   const [ask, setAsk] = useState<Ask>({})
   const [requiredDate, setRequiredDate] = useState('')
@@ -190,6 +207,11 @@ export function ManufacturingOrderDetailDialog({
   const load = useCallback(
     async (id: string) => {
       setLoading(true)
+      // Its history alongside: a quiet failure leaves it empty, never the window.
+      void api
+        .get<{ data: HistoryEntry[] }>(`/production/orders/${id}/history`)
+        .then((res) => setHistory(res.data))
+        .catch(() => setHistory([]))
       try {
         const data = (await api.get<{ data: MoDetail }>(`/production/orders/${id}`)).data
         setMo(data)
@@ -235,7 +257,9 @@ export function ManufacturingOrderDetailDialog({
   useEffect(() => {
     if (!moId) return
     setError(null)
-    setMessage(null)
+    // Opened straight after a save in the form: that save is confirmed here, where the person now is.
+    setMessage(notice)
+    setHistory(null)
     setMo(null)
     setFlow(null)
     setPlan(null)
@@ -526,8 +550,23 @@ export function ManufacturingOrderDetailDialog({
             </div>
           )}
           {message && (
-            <div className="border-primary/40 bg-primary/5 rounded-lg border p-3">
-              <p className="text-primary text-sm">{message}</p>
+            <div className="border-primary/40 bg-primary/5 flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3">
+              <p className="text-primary flex min-w-0 items-start gap-2 text-sm">
+                <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
+                <span>{message}</span>
+              </p>
+              {history && history.length > 0 && (
+                <button
+                  type="button"
+                  className="btn-secondary h-8 shrink-0 px-3 text-xs"
+                  onClick={() => {
+                    pickTab('order')
+                    setTimeout(() => document.getElementById('mo-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60)
+                  }}
+                >
+                  <History size={13} /> See history
+                </button>
+              )}
             </div>
           )}
           {mo?.heldAt && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && (
@@ -643,6 +682,44 @@ export function ManufacturingOrderDetailDialog({
                     </div>
                   </Section>
 
+                  <div id="mo-history" className="scroll-mt-3">
+                    <Section icon={History} title="History">
+                      {history === null ? (
+                        <div className="space-y-2">
+                          {Array.from({ length: 3 }).map((_, i) => (
+                            <div key={i} className="skeleton h-9 w-full rounded-lg" />
+                          ))}
+                        </div>
+                      ) : history.length === 0 ? (
+                        <p className="text-muted-foreground text-sm">Nothing recorded for it yet.</p>
+                      ) : (
+                        <ol className="border-border relative space-y-3 border-l pl-4">
+                          {history.map((h, i) => (
+                            <li key={h.id} className="relative">
+                              <span
+                                className={`absolute -left-[21px] top-1.5 h-2.5 w-2.5 rounded-full border-2 border-card ${i === 0 ? 'bg-primary' : 'bg-muted-foreground/50'}`}
+                                aria-hidden
+                              />
+                              <p className="text-sm">
+                                <span className="text-foreground font-semibold">{h.what}</span>
+                                <span className="text-muted-foreground">
+                                  {' '}
+                                  · {h.by ?? 'Someone'} · {when(h.at)}
+                                </span>
+                              </p>
+                              {h.changes.length > 0 && (
+                                <ul className="text-muted-foreground mt-0.5 space-y-0.5 text-xs">
+                                  {h.changes.map((c, j) => (
+                                    <li key={j}>{c}</li>
+                                  ))}
+                                </ul>
+                              )}
+                            </li>
+                          ))}
+                        </ol>
+                      )}
+                    </Section>
+                  </div>
                 </div>
               )}
               {tab === 'materials' && (

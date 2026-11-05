@@ -14,6 +14,7 @@ import { cancelCutting, createCutting, cuttingPrep, cuttingSchema } from '../ser
 import { applyRouting, routingProblem, stylesOfMo } from '../services/route.service'
 import floorRoutes from './productionFloor.routes'
 import { assertNotCancelling } from '../services/orderCancel.service'
+import { moChanges, moHistory } from '../services/moHistory.service'
 
 /**
  * Manufacturing orders: what the factory is to make for a sales order.
@@ -386,6 +387,11 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
   res.json({ success: true, data: { ...order, editBlock, stage: stages.get(order.id)?.stage ?? order.status } })
 })
 
+/** GET /api/production/orders/:id/history — who changed what on it, and when, newest first. */
+router.get('/orders/:id/history', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await moHistory(prisma, req.params.id) })
+})
+
 /** Raises a manufacturing order inside the caller's transaction. Exported for the checks that roll it back. */
 export async function createMo(tx: Prisma.TransactionClient, data: z.infer<typeof createMoSchema>, userId: string) {
   const { so, total, create } = await shapeLines(tx, data.soId, data)
@@ -499,7 +505,11 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
   const note = waiting.length
     ? ` ${waiting.map((m) => m.mrNumber).join(', ')} ${waiting.length === 1 ? 'was' : 'were'} raised for the plan before: check ${waiting.length === 1 ? 'it' : 'them'} against Materials, which shows what is still to ask for.`
     : ''
-  res.json({ success: true, message: `${after.moNumber} saved.${note}`, data: after })
+  const changes = moChanges(before, after)
+  const said = changes.length
+    ? `: ${changes.slice(0, 4).join('; ')}${changes.length > 4 ? `; and ${changes.length - 4} more (see History)` : ''}`
+    : ', nothing changed'
+  res.json({ success: true, message: `${after.moNumber} saved${said}.${note}`, data: after })
 })
 
 /** Releases a draft inside the caller's transaction. */

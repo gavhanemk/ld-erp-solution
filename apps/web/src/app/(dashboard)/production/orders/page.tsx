@@ -130,6 +130,8 @@ export default function ManufacturingOrdersPage() {
 
   const [form, setForm] = useState<{ open: boolean; soId: string | null; moId: string | null }>({ open: false, soId: null, moId: null })
   const [viewId, setViewId] = useState<string | null>(null)
+  /** A save just made in the form, confirmed in the window it opens. */
+  const [savedNote, setSavedNote] = useState<string | null>(null)
   /** One whose sales order is over, being closed. */
   const [closing, setClosing] = useState<MoRow | null>(null)
   const [closeBusy, setCloseBusy] = useState(false)
@@ -468,14 +470,20 @@ export default function ManufacturingOrdersPage() {
           setMessage(msg)
           setError(null)
           void load()
+          setSavedNote(msg)
           setViewId(id)
         }}
       />
       <ManufacturingOrderDetailDialog
         moId={viewId}
-        onClose={() => setViewId(null)}
+        notice={savedNote}
+        onClose={() => {
+          setViewId(null)
+          setSavedNote(null)
+        }}
         onEdit={(id) => {
           setViewId(null)
+          setSavedNote(null)
           setForm({ open: true, soId: null, moId: id })
         }}
         onChanged={(msg) => {
