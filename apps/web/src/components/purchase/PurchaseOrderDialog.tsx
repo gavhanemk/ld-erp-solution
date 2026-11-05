@@ -44,6 +44,8 @@ import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } f
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { priceDocument, defaultChargeGstRate } from '@ld-erp/shared'
+import { ChargeGstSelect, TaxBreakdown } from '@/components/purchase/TaxBreakdown'
 
 /**
  * Raising a purchase order.
@@ -443,8 +445,15 @@ function NotBuiltNote({ children }: { children: React.ReactNode }) {
   )
 }
 
-/** The percentage helper's key for the Other charges box, which has no id. */
-const OTHER_PCT = '__other'
+/**
+ * Whether a charge type is the "Other Charges" one.
+ *
+ * Matched by name, ignoring case and spaces, because it is an ordinary row in
+ * Masters → Charges put there by a migration — it has no flag of its own, and
+ * "Other charges" or "OTHER CHARGES" typed by hand is the same charge.
+ */
+const isOtherChargesType = (t: { name: string }) =>
+  t.name.replace(/\s+/g, '').toLowerCase() === 'othercharges'
 
 /**
  * Works a charge out as a share of the order, so nobody reaches for a phone.
@@ -644,7 +653,28 @@ export function PurchaseOrderDialog({
    * every order. Now a charge appears only once somebody adds it.
    */
   const [shownCharges, setShownCharges] = useState<string[]>([])
-  const [otherCharges, setOtherCharges] = useState('')
+  /**
+   * The GST % chosen for each charge on this order, keyed by charge type id.
+   *
+   * Chosen on the order, not read off the master: freight billed by the
+   * supplier with the goods is taxed at the goods' rate, so the same charge
+   * can be 5% on one order and 12% on the next. A charge starts on the rate
+   * defaultChargeGstRate() offers when it is added and keeps whatever is
+   * picked after that — it does not move by itself when a line's rate does.
+   */
+  const [chargeGst, setChargeGst] = useState<Record<string, string>>({})
+  /**
+   * The untaxed "Other charges" figure of an order saved before charges
+   * carried their own GST. '' when there is none.
+   *
+   * Such an order is moved onto the "Other Charges" charge type as soon as the
+   * charge master has loaded (see the effect below), and from then on it is
+   * taxed like any other charge. Only when that type cannot be found does the
+   * figure stay here, priced as before: added after tax, with no GST.
+   */
+  const [legacyOther, setLegacyOther] = useState('')
+  /** True once a saved "Other charges" figure has been moved onto its charge row. */
+  const [otherMoved, setOtherMoved] = useState(false)
 
   /**
    * Which charge's percentage helper is open, and what has been typed into it.
@@ -663,7 +693,17 @@ export function PurchaseOrderDialog({
       delete next[id]
       return next
     })
+    setChargeGst((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
     setPctOpen((open) => (open === id ? null : open))
+    // Taking off the row that a saved "Other charges" figure was moved onto
+    // also takes away the note asking to check its GST %. Without this the
+    // note would come back if the row were added again by hand, when there is
+    // nothing moved left to check.
+    if (chargeTypes.find(isOtherChargesType)?.id === id) setOtherMoved(false)
   }
 
   /*
@@ -882,7 +922,14 @@ export function PurchaseOrderDialog({
     setShownCharges(
       (record?.charges ?? []).filter((c) => Number(c.amount) > 0).map((c) => c.chargeTypeId)
     )
-    setOtherCharges(num(record?.otherCharges) > 0 ? String(record?.otherCharges) : '')
+    // Each charge reopens at the GST % it was saved with, not today's default.
+    setChargeGst(
+      Object.fromEntries(
+        (record?.charges ?? []).map((c) => [c.chargeTypeId, String(Number(c.gstRate ?? 0))])
+      )
+    )
+    setLegacyOther(num(record?.otherCharges) > 0 ? String(Number(record?.otherCharges)) : '')
+    setOtherMoved(false)
     setPctOpen(null)
     setPctOf({})
     setAttachments([])
@@ -1248,17 +1295,22 @@ export function PurchaseOrderDialog({
       .join(', ') ||
     null
 
-  // Where the goods land. Our own address unless the order says a customer,
-  // and it is this — not our state — that the supplier's state is compared
-  // against, because goods are taxed where they are delivered.
+  // Where the supply is taxed: always our own state.
+  //
+  // This form used to take the delivery customer's state when goods were sent
+  // straight to a customer, and a customer across the border turned CGST +
+  // SGST into IGST. That is not how a purchase works. When the supplier ships
+  // to somebody else on our say-so, the supply is still made to us — we are
+  // the buyer billed — and its place is our own state (IGST Act s.10(1)(b),
+  // the "bill-to / ship-to" rule). So the customer only changes where the
+  // goods go, never the tax on the supplier's bill.
   //
   // Read exactly as the server reads it, so the split shown here is the one
   // that is saved: a state code left blank falls back to the GSTIN's first two
   // digits, for the supplier and for us alike.
-  const placeOfSupply =
-    customerStateCode || company?.stateCode || company?.gstin?.slice(0, 2) || null
+  const placeOfSupply = company?.stateCode || company?.gstin?.slice(0, 2) || null
 
-  const taxMode = !supplier
+  const taxMode: 'CGST_SGST' | 'IGST' | 'NONE' | null = !supplier
     ? null
     : !supplier.gstin
       ? 'NONE'
@@ -1278,77 +1330,155 @@ export function PurchaseOrderDialog({
   const lineDiscountOf = (l: PoLine) => {
     if (poType !== 'ITEM_LEVEL') return 0
     const typed = num(l.discount)
-    if ((l.discountUnit ?? '%') === '%') return Math.min(typed, 100)
+    // Kept to 6 decimals, the same as the saved order keeps it (the server
+    // cuts it there too). Rounding once here means the totals on screen and
+    // the figure sent both use the stored percent, so on a very large line a
+    // ₹ discount cannot show a paisa different from what the order saves.
+    const six = (n: number) => Math.round(n * 1e6) / 1e6
+    if ((l.discountUnit ?? '%') === '%') return six(Math.min(typed, 100))
     // Rupees. Capped at the line's own value, so a discount cannot take a line
     // below nothing.
     const gross = num(l.qty) * num(l.unitRate)
-    return gross > 0 ? Math.min((typed / gross) * 100, 100) : 0
+    return gross > 0 ? six(Math.min((typed / gross) * 100, 100)) : 0
   }
   const orderDiscount = poType === 'ORDER_LEVEL' ? num(discountAmount) : 0
 
+  /** The "Other Charges" charge type, when Masters → Charges has one. */
+  const otherChargeType = chargeTypes.find(isOtherChargesType) ?? null
+
+  /**
+   * The GST % a charge starts on when it is added to this order.
+   *
+   * The goods' rate when the lines share one, because a charge the supplier
+   * bills with the goods is part of their value; the charge master's own rate
+   * only while there are no goods yet. See defaultChargeGstRate(). Only rows
+   * with an item are read — a blank row has no rate worth following — and of
+   * those only the ones whose GST % has been filled in. A row picked from an
+   * enquiry with no rate quoted yet would otherwise count as 0% and start the
+   * charge at nothing instead of at the charge master's rate.
+   */
+  const startingGstFor = (t: ChargeTypeOption) =>
+    defaultChargeGstRate(
+      activeLines
+        .filter((l) => l.gstRate !== '' && l.gstRate != null)
+        .map((l) => num(l.gstRate)),
+      num(t.defaultGstRate)
+    )
+  /** The GST % on a charge as it stands: the one chosen, else where it starts. */
+  const chargeGstOf = (t: ChargeTypeOption) => chargeGst[t.id] ?? String(startingGstFor(t))
+
+  /** Puts a charge on the order, at the GST % it starts on. */
+  const addCharge = (id: string) => {
+    const t = chargeTypes.find((x) => x.id === id)
+    if (!t) return
+    setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
+    setChargeGst((prev) => (prev[id] !== undefined ? prev : { ...prev, [id]: String(startingGstFor(t)) }))
+  }
+
+  /*
+   * An order saved with the old untaxed "Other charges" box, reopened.
+   *
+   * The figure is moved onto the "Other Charges" charge row at the GST % that
+   * row would start on, and the box it came from is sent back as 0 — so once
+   * this order is saved again its other charges are taxed like any other
+   * charge. The buyer is told, beside the row, to check the rate. Until the
+   * charge master has loaded, or when it has no "Other Charges" row at all,
+   * nothing moves and the figure is priced the old way.
+   */
+  useEffect(() => {
+    if (!open || !legacyOther || !otherChargeType) return
+    const id = otherChargeType.id
+    const amount = num(legacyOther)
+    setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
+    setCharges((prev) => ({ ...prev, [id]: String(Number((num(prev[id]) + amount).toFixed(2))) }))
+    setChargeGst((prev) =>
+      prev[id] !== undefined ? prev : { ...prev, [id]: String(startingGstFor(otherChargeType)) }
+    )
+    setLegacyOther('')
+    setOtherMoved(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, legacyOther, otherChargeType?.id])
+
+  /*
+   * Every figure on the form, from the one calculation.
+   *
+   * priceDocument() is the same sum the server runs when the order is saved
+   * and the bill runs when it is booked, so what is shown here is what is
+   * stored, to the paisa. It is given only rows that have an item — a blank
+   * row is not part of the order — the order discount where the dropdown
+   * allows one, each charge at the GST % chosen for it, and the old untaxed
+   * "Other charges" figure only on an order that still has one.
+   *
+   * While no supplier is chosen there is no telling CGST + SGST from IGST, so
+   * the tax is previewed as CGST + SGST and the panel says so. The tax itself
+   * comes to the same either way; only the split waits for the supplier.
+   */
   const totals = useMemo(() => {
-    const lineGross = lines.map((l) => num(l.qty) * num(l.unitRate))
-    const lineAmounts = lines.map((l, i) => lineGross[i] * (1 - lineDiscountOf(l) / 100))
-    const subtotal = lineAmounts.reduce((sum, n) => sum + n, 0)
+    const shown = shownCharges
+      .map((id) => chargeTypes.find((t) => t.id === id))
+      .filter((t): t is ChargeTypeOption => Boolean(t))
 
-    const discount = Math.min(orderDiscount, subtotal)
-    const taxable = subtotal - discount
-    const factor = subtotal > 0 ? taxable / subtotal : 1
+    const result = priceDocument({
+      lines: activeLines.map((l) => ({
+        qty: num(l.qty),
+        rate: num(l.unitRate),
+        discountPct: lineDiscountOf(l),
+        gstRate: num(l.gstRate),
+      })),
+      orderDiscount,
+      charges: shown.map((t) => ({ key: t.id, amount: num(charges[t.id]), gstRate: num(chargeGstOf(t)) })),
+      untaxedExtra: num(legacyOther),
+      split: taxMode ?? 'CGST_SGST',
+    })
 
-    const lineTax =
-      taxMode === 'NONE'
-        ? 0
-        : lines.reduce((sum, l, i) => sum + lineAmounts[i] * factor * (num(l.gstRate) / 100), 0)
+    // Each row's own amount — what it comes to after its own discount, before
+    // the order discount and tax — as the Amount column has always shown it.
+    // A row without an item is not priced, so it reads 0.
+    let k = 0
+    const lineAmounts = lines.map((l) => {
+      if (!l.itemId) return 0
+      const p = result.lines[k++]
+      return p ? Math.round((p.gross - p.discount) * 100) / 100 : 0
+    })
 
     /*
-     * Each charge is taxed at its own rate and is not discountable — the
-     * mill's discount is negotiated on the goods, not on the transporter's
-     * bill. Kept as rows so each one can be shown with its own GST.
+     * The charges on this order, one row each, with the GST % chosen for each
+     * and the tax it carries. Not discountable — the mill's discount is
+     * negotiated on the goods, not on the transporter's bill.
      */
-    const chargeRows = chargeTypes
-      .map((t) => ({
-        chargeTypeId: t.id,
-        name: t.name,
-        gstRate: num(t.defaultGstRate),
-        percentOfValue: num(t.percentOfValue),
-        amount: num(charges[t.id]),
-      }))
-      .map((c) => ({ ...c, tax: taxMode === 'NONE' ? 0 : c.amount * (c.gstRate / 100) }))
-
-    const chargeTotal = chargeRows.reduce((sum, c) => sum + c.amount, 0)
-    const chargeTax = chargeRows.reduce((sum, c) => sum + c.tax, 0)
-    const tax = lineTax + chargeTax
-
-    // No GST of its own, and added after tax — the way the old system had it.
-    const other = num(otherCharges)
-
-    const beforeRound = taxable + chargeTotal + tax + other
-    const total = Math.round(beforeRound)
+    const chargeRows = shown.map((t, i) => ({
+      chargeTypeId: t.id,
+      name: t.name,
+      gstRate: num(chargeGstOf(t)),
+      percentOfValue: num(t.percentOfValue),
+      amount: result.charges[i]?.amount ?? 0,
+      tax: result.charges[i]?.tax ?? 0,
+    }))
 
     /*
      * "Total discount" is every discount on the order added up, and "Gross
-     * total" is what is left after them. Two rows that only make sense read in
-     * that order, which is why the old form put them that way round.
+     * total" is what is left of the goods after them. Two rows that only make
+     * sense read in that order, which is why the old form put them that way
+     * round.
      */
-    const totalDiscount =
-      lines.reduce((sum, l, i) => sum + lineGross[i] * (lineDiscountOf(l) / 100), 0) + discount
-
     return {
+      result,
       lineAmounts,
-      subtotal,
-      discount,
-      totalDiscount,
-      grossTotal: taxable,
-      taxable,
       chargeRows,
-      chargeTotal,
-      other,
-      tax,
-      roundOff: total - beforeRound,
-      total,
+      totalDiscount: result.totalDiscount,
+      grossTotal: result.goodsTaxable,
+      taxable: result.taxable,
+      chargeTotal: result.chargeTotal,
+      untaxedExtra: result.untaxedExtra,
+      cgst: result.cgst,
+      sgst: result.sgst,
+      igst: result.igst,
+      tax: result.tax,
+      roundOff: result.roundOff,
+      total: result.total,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines, discountAmount, taxMode, poType, chargeTypes, charges, otherCharges])
+  }, [lines, discountAmount, taxMode, poType, chargeTypes, shownCharges, charges, chargeGst, legacyOther])
 
   /**
    * What a charge's percentage box opens on.
@@ -1949,13 +2079,16 @@ export function PurchaseOrderDialog({
     // Only an order-level order has one. Sending whatever is in the box on an
     // item-level order would take the discount twice.
     discountAmount: poType === 'ORDER_LEVEL' ? num(discountAmount) : 0,
-    // Only the kind and the amount. The GST rate is read off the charge type
-    // on the server, so a rate corrected in the master since this form loaded
-    // cannot be overridden from the browser.
+    // The kind, the amount and the GST % chosen for it on this order. The
+    // server prices the order again with the same calculation, so the rate
+    // sent is the rate the figures on the screen were worked out at.
     charges: totals.chargeRows
       .filter((c) => c.amount > 0)
-      .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount })),
-    otherCharges: num(otherCharges),
+      .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: c.gstRate })),
+    // 0 on every new order, and on an old one once its figure has moved onto
+    // the "Other Charges" row. Only an old order whose charge master has no
+    // such row still sends its untaxed figure, so saving it loses nothing.
+    otherCharges: num(legacyOther),
     notes: notes.trim() || null,
     terms: terms.trim() || null,
     /*
@@ -1973,6 +2106,8 @@ export function PurchaseOrderDialog({
       qty: num(l.qty),
       unitRate: num(l.unitRate),
       // A percentage whichever unit it was typed in — see `lineDiscountOf`.
+      // Sent unrounded: the column keeps six decimals, so ₹100 off a line of
+      // ₹333.33 is stored as the percentage that gives back exactly ₹100.
       discount: lineDiscountOf(l),
       gstRate: num(l.gstRate),
     })),
@@ -3615,17 +3750,21 @@ export function PurchaseOrderDialog({
                               <p className="text-muted-foreground text-xs">
                                 {customerAddress || 'No address on this customer.'}
                               </p>
-                              {/* The tax follows the goods, so a customer in another
-                                state changes what the supplier may charge. Said
-                                here rather than discovered on their bill. */}
+                              {/* Said because it used to work the other way. The
+                                supplier still bills us, so the tax follows our
+                                own state wherever the goods are sent — a
+                                customer in another state does not turn it into
+                                IGST (IGST Act s.10(1)(b), bill-to / ship-to). */}
                               {customerStateCode && (
                                 <p className="text-muted-foreground mt-1 text-xs">
-                                  Delivered in state {customerStateCode} —{' '}
-                                  {supplier
-                                    ? taxMode === 'CGST_SGST'
-                                      ? 'same state as the supplier, so CGST + SGST'
-                                      : 'a different state from the supplier, so IGST'
-                                    : 'choose a supplier to see the tax split'}
+                                  Delivered in state {customerStateCode}. The supplier
+                                  still bills us, so the GST follows our own state,
+                                  not the customer&apos;s
+                                  {supplier && taxMode === 'CGST_SGST'
+                                    ? ' — CGST + SGST on this order.'
+                                    : supplier && taxMode === 'IGST'
+                                      ? ' — IGST on this order, as the supplier is in another state.'
+                                      : '.'}
                                 </p>
                               )}
                             </div>
@@ -3828,11 +3967,13 @@ export function PurchaseOrderDialog({
 
               {/* The calculation, beside the delivery box as the old ERP had it.
 
-                Every row it had, in its order: the discount, the gross, one
-                row per charge the mill uses on purchases, the tax split, other
-                charges, and what the order comes to. The charge rows are read
-                from the charge master rather than written into this form, so
-                adding one there adds a row here. */}
+                In its order: the discount, the gross, one row per charge on
+                this order with its own GST %, what GST is worked out on, where
+                the GST comes from rate by rate, the tax split, and what the
+                order comes to. Every figure is read from priceDocument(), the
+                same sum the server saves and the bill books. The charges
+                offered are read from the charge master rather than written
+                into this form, so adding one there offers it here. */}
               <Section icon={Calculator} title="Totals">
                 <div className="space-y-1.5 text-sm">
                   {/* Where the discount sits follows the dropdown at the top of
@@ -3863,9 +4004,12 @@ export function PurchaseOrderDialog({
                   <Row label="Gross total" value={totals.grossTotal} />
 
                   {/* Only the charges this order carries. "+ Add a charge" offers
-                    the purchase charges from Masters → Extra Charges that are
-                    not on it yet; each one keeps the GST rate the master gives
-                    it. An order with no charges shows no charge rows at all. */}
+                    the purchase charges from Masters → Charges that are not on
+                    it yet — "Other Charges" among them, taxed like the rest.
+                    Each row has its own GST % beside its amount, chosen on
+                    this order: it starts on the goods' rate and the buyer sets
+                    it to whatever the supplier's bill charges. An order with
+                    no charges shows no charge rows at all. */}
                   {chargeTypes.length === 0 ? (
                     <p className="text-muted-foreground py-1 text-xs">
                       No purchase charges are set up yet — add them under{' '}
@@ -3881,10 +4025,7 @@ export function PurchaseOrderDialog({
                     </p>
                   ) : (
                     <div className="space-y-1.5 pt-0.5">
-                      {shownCharges
-                        .map((id) => totals.chargeRows.find((c) => c.chargeTypeId === id))
-                        .filter((c): c is NonNullable<typeof c> => Boolean(c))
-                        .map((c) => {
+                      {totals.chargeRows.map((c) => {
                         const helperOpen = pctOpen === c.chargeTypeId
                         return (
                           <div key={c.chargeTypeId}>
@@ -3901,11 +4042,19 @@ export function PurchaseOrderDialog({
                             <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
                               <span className="text-muted-foreground min-w-[9rem] flex-1">
                                 {c.name}
+                                {/* The charge's own GST, under its name, so it
+                                  is never folded unseen into the tax rows. */}
+                                {c.tax > 0 && (
+                                  <span className="block text-[11px] tabular-nums">
+                                    + ₹{inr(c.tax)} GST
+                                  </span>
+                                )}
                               </span>
                               {/* The amount box stays where the other boxes are
                                 and the helper button goes to its left, so the
                                 right edge of every figure on this panel still
-                                lines up down one column. */}
+                                lines up down one column. The GST % sits right
+                                after the amount it applies to. */}
                               <div className="ml-auto flex shrink-0 items-center gap-1.5">
                                 <button
                                   type="button"
@@ -3936,6 +4085,14 @@ export function PurchaseOrderDialog({
                                   }
                                   aria-label={`${c.name} amount`}
                                 />
+                                <ChargeGstSelect
+                                  value={chargeGst[c.chargeTypeId] ?? String(c.gstRate)}
+                                  onChange={(rate) =>
+                                    setChargeGst((prev) => ({ ...prev, [c.chargeTypeId]: rate }))
+                                  }
+                                  label={c.name}
+                                  disabled={taxMode === 'NONE'}
+                                />
                                 <button
                                   type="button"
                                   onClick={() => removeCharge(c.chargeTypeId)}
@@ -3947,6 +4104,16 @@ export function PurchaseOrderDialog({
                                 </button>
                               </div>
                             </div>
+
+                            {/* Only on an old order whose untaxed "Other
+                              charges" figure has just been moved onto this
+                              row: the rate it now carries was picked by the
+                              form, not by anyone reading the supplier's bill. */}
+                            {otherMoved && otherChargeType?.id === c.chargeTypeId && (
+                              <p className="warn-text mt-1 text-xs">
+                                Other charges are now taxed like any other charge — check its GST %.
+                              </p>
+                            )}
 
                             {helperOpen && (
                               <PercentOfGross
@@ -3967,23 +4134,25 @@ export function PurchaseOrderDialog({
                             )}
                           </div>
                         )
-                        })}
+                      })}
                       {chargeTypes.some((t) => !shownCharges.includes(t.id)) && (
                         <SmartSelect
                           className="form-input h-8 w-full text-xs"
                           value=""
                           onChange={(e) => {
-                            const id = e.target.value
-                            if (id) setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
+                            if (e.target.value) addCharge(e.target.value)
                           }}
                           aria-label="Add a charge"
                         >
                           <option value="">+ Add a charge — freight, transport, dyeing…</option>
+                          {/* Names only: the GST % is chosen on the row once
+                            the charge is added, so the master's rate here
+                            would only be a figure that may not apply. */}
                           {chargeTypes
                             .filter((t) => !shownCharges.includes(t.id))
                             .map((t) => (
                               <option key={t.id} value={t.id}>
-                                {`${t.name} (${Number(t.defaultGstRate)}% GST)`}
+                                {t.name}
                               </option>
                             ))}
                         </SmartSelect>
@@ -4001,87 +4170,40 @@ export function PurchaseOrderDialog({
                     </div>
                   )}
 
-                  {taxMode === 'CGST_SGST' && (
+                  {/* What GST is worked out on: the goods after discounts and
+                    the charges together. Shown only when there are charges —
+                    without them it is the gross total again, one row up. */}
+                  {totals.chargeTotal > 0 && (
+                    <Row label="Taxable value (goods + charges)" value={totals.taxable} />
+                  )}
+
+                  {/* One line per GST rate, goods and charges shown apart, so
+                    the tax rows below can be traced back to what made them.
+                    It also says so when the supplier is not registered. */}
+                  <TaxBreakdown result={totals.result} split={taxMode} />
+
+                  {/* SGST + CGST within the state, IGST across a state line —
+                    never both, and never two halves of a tax the supplier
+                    cannot charge. Until a supplier is chosen the tax is
+                    previewed as SGST + CGST; the note under the grand total
+                    says the split is still to come. */}
+                  {(taxMode === 'CGST_SGST' || taxMode === null) && (
                     <>
-                      <Row label="SGST" value={totals.tax / 2} />
-                      <Row label="CGST" value={totals.tax / 2} />
+                      <Row label="SGST" value={totals.sgst} />
+                      <Row label="CGST" value={totals.cgst} />
                     </>
                   )}
-                  {/* Not SGST + CGST when the goods cross a state line. The
-                    split follows the place of supply, and showing two halves
-                    of a tax the supplier cannot charge would misstate the
-                    order, so this row says what it really is. */}
-                  {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
-                  {taxMode === 'NONE' && (
-                    <p className="text-muted-foreground py-1 text-xs">
-                      No GST — this supplier is not registered.
-                    </p>
-                  )}
-                  {taxMode === null && (
-                    <>
-                      <Row label="SGST" value={0} />
-                      <Row label="CGST" value={0} />
-                    </>
-                  )}
+                  {taxMode === 'IGST' && <Row label="IGST" value={totals.igst} />}
 
                   <Row label="Total tax" value={totals.tax} />
 
-                  {/* Carries no GST of its own and is added after tax, which is
-                    how the mill's old system had it. */}
-                  <div>
-                    <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-                      <label
-                        htmlFor="po-other-charges"
-                        className="text-muted-foreground min-w-[9rem] flex-1"
-                      >
-                        Other charges
-                      </label>
-                      <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                        {/* No rate of its own, so this helper opens empty. It
-                          is here because the sum is the same one — a
-                          percentage of the goods — and a helper on every box
-                          but this one is the sort of gap that sends somebody
-                          back to their phone. */}
-                        <button
-                          type="button"
-                          onClick={() => setPctOpen(pctOpen === OTHER_PCT ? null : OTHER_PCT)}
-                          className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${
-                            pctOpen === OTHER_PCT
-                              ? 'border-primary/30 bg-primary/10 text-primary'
-                              : 'btn-ghost border-border'
-                          }`}
-                          title="Work other charges out as a percentage of the gross total"
-                          aria-expanded={pctOpen === OTHER_PCT}
-                          aria-label="Work out other charges as a percentage"
-                        >
-                          <Percent size={14} />
-                        </button>
-                        <input
-                          id="po-other-charges"
-                          type="number"
-                          step="any"
-                          min={0}
-                          className="form-input h-8 w-28 text-right"
-                          placeholder="0.00"
-                          value={otherCharges}
-                          onChange={(e) => setOtherCharges(e.target.value)}
-                        />
-                      </div>
-                    </div>
-
-                    {pctOpen === OTHER_PCT && (
-                      <PercentOfGross
-                        name="other charges"
-                        base={totals.grossTotal}
-                        value={pctOf[OTHER_PCT] ?? ''}
-                        onChange={(next) => setPctOf((prev) => ({ ...prev, [OTHER_PCT]: next }))}
-                        onUse={(amount) => {
-                          setOtherCharges(String(amount))
-                          setPctOpen(null)
-                        }}
-                      />
-                    )}
-                  </div>
+                  {/* Only an old order, saved before other charges carried GST,
+                    whose charge master has no "Other Charges" row to move the
+                    figure onto. Priced as it was then: no GST, added after
+                    tax, so the order still adds up to what was agreed. */}
+                  {totals.untaxedExtra > 0 && (
+                    <Row label="Other charges (no GST, saved before)" value={totals.untaxedExtra} />
+                  )}
 
                   {/* Shown whenever the total was rounded, and only then.
                     The grand total is taken to the nearest rupee, which is how
@@ -4102,7 +4224,7 @@ export function PurchaseOrderDialog({
 
                   {taxMode === null && (
                     <p className="text-muted-foreground pt-1 text-xs">
-                      Choose a supplier to see whether the tax splits into SGST + CGST or is IGST.
+                      Pick the supplier to see whether this is CGST + SGST or IGST.
                     </p>
                   )}
                 </div>

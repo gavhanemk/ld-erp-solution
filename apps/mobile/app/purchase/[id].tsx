@@ -48,6 +48,21 @@ interface Order {
   igst: string
   roundOff: string
   totalAmount: string
+  /**
+   * The old untaxed "Other charges" box. Only orders saved before Other
+   * Charges became a charge type of its own carry one; it is added after tax.
+   */
+  otherCharges?: string | null
+  /**
+   * Freight, transport, packing and the rest, each with the GST rate chosen
+   * for it on the order. Their tax is inside the CGST/SGST/IGST figures.
+   */
+  charges?: {
+    id: string
+    amount: string
+    gstRate: string
+    chargeType: { name: string }
+  }[]
   placeOfSupplyCode?: string | null
   supplier: {
     name: string
@@ -240,7 +255,7 @@ export default function PurchaseOrderDetail() {
               />
               <Row label="Rate" value={`₹${money(line.unitRate)}`} />
               {Number(line.discount) > 0 ? (
-                <Row label="Discount" value={`${Number(line.discount)}%`} />
+                <Row label="Discount" value={`${Number(Number(line.discount).toFixed(2))}%`} />
               ) : null}
               <Row label="GST" value={`${Number(line.gstRate)}%`} />
             </View>
@@ -253,6 +268,21 @@ export default function PurchaseOrderDetail() {
             <Row label="Discount" value={`-₹${money(data.discountAmount)}`} />
           ) : null}
           <Row label="Taxable value" value={`₹${money(data.taxableAmount)}`} />
+
+          {/* Each charge on its own row with the GST rate it carries, so the
+              rows here add up to the total the way they do on the paper. The
+              rate is left off when the order carries no GST at all. */}
+          {(data.charges ?? []).map((c) => (
+            <Row
+              key={c.id}
+              label={
+                taxMode === 'NONE'
+                  ? c.chargeType.name
+                  : `${c.chargeType.name} · GST ${Number(c.gstRate)}%`
+              }
+              value={`₹${money(c.amount)}`}
+            />
+          ))}
 
           {/* Which tax rows appear follows what the server worked out from the
               two state codes, so the phone can never disagree with the paper. */}
@@ -268,6 +298,12 @@ export default function PurchaseOrderDetail() {
               No GST — this supplier is not registered.
             </Text>
           )}
+
+          {/* The old untaxed box, on orders saved before Other Charges was a
+              charge type. It carries no GST, so it sits after the tax rows. */}
+          {Number(data.otherCharges ?? 0) > 0 ? (
+            <Row label="Other charges (no GST)" value={`₹${money(data.otherCharges ?? 0)}`} />
+          ) : null}
 
           {Number(data.roundOff) !== 0 ? (
             <Row label="Rounding" value={money(data.roundOff)} />

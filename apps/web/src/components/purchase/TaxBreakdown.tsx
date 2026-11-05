@@ -108,7 +108,7 @@ export function ChargeGstSelect({
 
   return (
     <SmartSelect
-      className="form-input h-8 w-[5.5rem] shrink-0 text-right text-xs"
+      className="form-input h-8 w-[7rem] shrink-0 text-right text-xs"
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
