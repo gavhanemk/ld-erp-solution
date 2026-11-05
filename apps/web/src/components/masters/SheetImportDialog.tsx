@@ -202,6 +202,8 @@ export function SheetImportDialog<R extends SheetRowPlan, S extends SheetSummary
       title={config.title}
       subtitle={config.subtitle}
       primary={primary}
+      // Imported: its one Done sits at the bottom only.
+      primaryInHeader={!done}
       footer={
         !done && (
           <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>

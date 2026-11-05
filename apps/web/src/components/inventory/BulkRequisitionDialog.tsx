@@ -165,19 +165,16 @@ export function BulkRequisitionDialog({
       title={w.title}
       subtitle={`${count} ${count === 1 ? 'requisition' : 'requisitions'} from the list`}
       width="max-w-3xl"
+      // All done: nothing left to run, so the only button is one Close (and the × in the corner).
       primary={
-        ran && !chosen.length ? (
-          <button type="button" className="btn-primary" onClick={onClose}>
-            Close
-          </button>
-        ) : (
+        ran && !chosen.length ? null : (
           <button type="button" className="btn-primary" onClick={() => void run()} disabled={running || !plans || !chosen.length}>
             {running ? <Loader2 size={15} className="animate-spin" /> : <w.icon size={15} />} {w.button(chosen.length)}
           </button>
         )
       }
       footer={
-        <button type="button" className="btn-secondary" onClick={onClose} disabled={running}>
+        <button type="button" className={ran && !chosen.length ? 'btn-primary' : 'btn-secondary'} onClick={onClose} disabled={running}>
           {ran ? 'Close' : 'Cancel'}
         </button>
       }
