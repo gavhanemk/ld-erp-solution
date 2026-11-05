@@ -8,7 +8,7 @@ import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
-import { MO_STATUS, moStatus } from '@/components/production/status'
+import { FLOOR_NOTE, MO_STAGE, moStage } from '@/components/production/status'
 import { PROGRESS } from '@/components/production/floor/types'
 import { ManufacturingOrderDialog } from '@/components/production/ManufacturingOrderDialog'
 import { ManufacturingOrderDetailDialog } from '@/components/production/ManufacturingOrderDetailDialog'
@@ -17,6 +17,11 @@ interface MoRow {
   id: string
   moNumber: string
   status: string
+  /** Where the work stands: materials not asked, asked, issued, in production, packing… (MO_STAGE). */
+  stage: string
+  /** Part issued or issued: the materials its BOM asks for, and how many are issued in full. */
+  materialItems: number | null
+  materialItemsInFull: number | null
   /** Its plan can still change: nothing issued to it, cut or packed yet. */
   editable?: boolean
   /** Why it cannot, in a few words. */
@@ -45,7 +50,10 @@ interface MoRow {
 
 const pcs = (n: number) => n.toLocaleString('en-IN')
 
-/** The floor's state under the order's own, for an order on the floor with a route. */
+/**
+ * Beside the stage: on hold, or, once it is being made, what the floor says
+ * needs a look (QC pending, rework, count short) or that every piece is through.
+ */
 function FloorState({ mo }: { mo: MoRow }) {
   if (mo.held) {
     return (
@@ -54,9 +62,47 @@ function FloorState({ mo }: { mo: MoRow }) {
       </span>
     )
   }
-  if (!mo.routed || ['DRAFT', 'CLOSED'].includes(mo.status)) return null
-  const p = PROGRESS[mo.progress ?? 'NOT_STARTED'] ?? PROGRESS.NOT_STARTED
-  return <span className={p.cls}>{p.label}</span>
+  if (!mo.routed || !['IN_PRODUCTION', 'PACKING'].includes(mo.stage) || !mo.progress || !FLOOR_NOTE.has(mo.progress)) return null
+  const p = PROGRESS[mo.progress]
+  return p ? <span className={p.cls}>{p.label}</span> : null
+}
+
+/** What has been asked of the store for it, and how much of that is issued. */
+function Materials({ mo }: { mo: MoRow }) {
+  const n = mo.requisitions
+  const asked = `${n} ${n === 1 ? 'requisition' : 'requisitions'}`
+  if (mo.withoutBom > 0) return <span className="warn-text whitespace-nowrap">{mo.withoutBom} without a BOM</span>
+  switch (mo.stage) {
+    case 'DRAFT':
+      return <span className="text-muted-foreground whitespace-nowrap">After release</span>
+    case 'NOT_ASKED':
+      return <span className="warn-text whitespace-nowrap">Not asked for yet</span>
+    case 'ASKED':
+      return (
+        <div className="whitespace-nowrap">
+          <span className="text-foreground">{asked}</span>
+          <div className="text-muted-foreground text-[11px]">Nothing issued yet</div>
+        </div>
+      )
+    case 'PART_ISSUED':
+      return (
+        <div className="whitespace-nowrap" title="Items the BOM asks for, and how many of them the store has issued in full">
+          <span className="warn-text">
+            {mo.materialItemsInFull ?? 0} of {mo.materialItems ?? 0} issued in full
+          </span>
+          <div className="text-muted-foreground text-[11px]">{asked}</div>
+        </div>
+      )
+    case 'ISSUED':
+      return (
+        <div className="whitespace-nowrap">
+          <span className="text-foreground">All {mo.materialItems ?? ''} issued in full</span>
+          <div className="text-muted-foreground text-[11px]">{asked}</div>
+        </div>
+      )
+    default:
+      return n > 0 ? <span className="text-foreground whitespace-nowrap">{asked}</span> : <span className="text-muted-foreground">—</span>
+  }
 }
 
 /**
@@ -66,7 +112,7 @@ function FloorState({ mo }: { mo: MoRow }) {
  * the order), released to the floor, and its materials worked out from the
  * BOM and asked of the store. Packed is what has been booked into finished
  * goods against it. Links in: ?make=<sales order id> opens a new one for
- * that order; ?open=<id> opens one.
+ * that order; ?open=<id> opens one; ?stage=<stage> lists those at it.
  */
 export default function ManufacturingOrdersPage() {
   const { rowsPerPage } = useAppSettings()
@@ -77,7 +123,7 @@ export default function ManufacturingOrdersPage() {
   const [message, setMessage] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
-  const [status, setStatus] = useState('')
+  const [stage, setStage] = useState('')
   const [openOnly, setOpenOnly] = useState(true)
   const [page, setPage] = useState(1)
 
@@ -91,8 +137,10 @@ export default function ManufacturingOrdersPage() {
     const params = new URLSearchParams(window.location.search)
     const make = params.get('make')
     const openId = params.get('open')
+    const at = params.get('stage')
     if (make && can('production', 'create')) setForm({ open: true, soId: make, moId: null })
     if (openId) setViewId(openId)
+    if (at && MO_STAGE[at]) setStage(at)
   }, [])
 
   useEffect(() => {
@@ -107,7 +155,7 @@ export default function ManufacturingOrdersPage() {
     try {
       const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
       if (debounced) qs.set('q', debounced)
-      if (status) qs.set('status', status)
+      if (stage) qs.set('stage', stage)
       else if (openOnly) qs.set('open', '1')
       const res = await api.get<Paginated<MoRow>>(`/production/orders?${qs}`)
       if (ticket !== latestLoad.current) return
@@ -126,14 +174,14 @@ export default function ManufacturingOrdersPage() {
     } finally {
       if (ticket === latestLoad.current) setLoading(false)
     }
-  }, [page, rowsPerPage, debounced, status, openOnly])
+  }, [page, rowsPerPage, debounced, stage, openOnly])
 
   useEffect(() => {
     void load()
   }, [load])
   useEffect(() => {
     setPage(1)
-  }, [debounced, status, openOnly])
+  }, [debounced, stage, openOnly])
 
   const release = async (mo: MoRow) => {
     if (!window.confirm(`Release ${mo.moNumber} to the floor?${mo.soNumber ? ` ${mo.soNumber} goes into production.` : ''}`)) return
@@ -209,16 +257,16 @@ export default function ManufacturingOrdersPage() {
               data-hotkey="search"
             />
           </div>
-          <SmartSelect className="form-input h-8 min-w-0 px-1.5 py-0 text-[11px] sm:w-36 sm:px-3 sm:text-xs" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by status">
+          <SmartSelect className="form-input h-8 min-w-0 px-1.5 py-0 text-[11px] sm:w-44 sm:px-3 sm:text-xs" value={stage} onChange={(e) => setStage(e.target.value)} aria-label="Filter by status">
             <option value="">{openOnly ? 'Open ones' : 'All statuses'}</option>
-            {Object.entries(MO_STATUS).map(([v, s]) => (
+            {Object.entries(MO_STAGE).map(([v, s]) => (
               <option key={v} value={v}>
                 {s.label}
               </option>
             ))}
           </SmartSelect>
           <label className="text-muted-foreground flex cursor-pointer items-center gap-1.5 text-xs">
-            <input type="checkbox" className="accent-primary" checked={openOnly} disabled={!!status} onChange={(e) => setOpenOnly(e.target.checked)} />
+            <input type="checkbox" className="accent-primary" checked={openOnly} disabled={!!stage} onChange={(e) => setOpenOnly(e.target.checked)} />
             Hide completed and closed
           </label>
           <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
@@ -235,14 +283,14 @@ export default function ManufacturingOrdersPage() {
         ) : rows.length === 0 ? (
           <div className="px-4 py-10 text-center">
             <p className="text-muted-foreground text-sm">
-              {search || status ? 'No manufacturing orders match these filters.' : 'None open. Press New MO, or Plan production on a confirmed sales order.'}
+              {search || stage ? 'No manufacturing orders match these filters.' : 'None open. Press New MO, or Plan production on a confirmed sales order.'}
             </p>
           </div>
         ) : (
           <div className="list-scope">
             <div className="list-cards divide-border divide-y">
               {rows.map((mo) => {
-                const s = moStatus(mo.status)
+                const s = moStage(mo.stage, mo.status)
                 const share = mo.totalPlannedQty > 0 ? Math.min(100, Math.round((mo.totalPackedQty / mo.totalPlannedQty) * 100)) : 0
                 return (
                   <div key={mo.id} className="p-3">
@@ -252,7 +300,9 @@ export default function ManufacturingOrdersPage() {
                           <button type="button" className="text-primary font-mono text-xs font-semibold hover:underline" onClick={() => setViewId(mo.id)}>
                             {mo.moNumber}
                           </button>
-                          <span className={s.cls}>{s.label}</span>
+                          <span className={s.cls} title={s.hint}>
+                            {s.label}
+                          </span>
                           <FloorState mo={mo} />
                         </div>
                         <p className="text-foreground mt-1 font-medium leading-snug">{mo.customer ?? '—'}</p>
@@ -290,7 +340,7 @@ export default function ManufacturingOrdersPage() {
                 </thead>
                 <tbody>
                   {rows.map((mo, i) => {
-                    const s = moStatus(mo.status)
+                    const s = moStage(mo.stage, mo.status)
                     const share = mo.totalPlannedQty > 0 ? Math.min(100, Math.round((mo.totalPackedQty / mo.totalPlannedQty) * 100)) : 0
                     const late = mo.plannedEndDate && new Date(mo.plannedEndDate) < new Date(new Date().toDateString()) && !['COMPLETED', 'CLOSED'].includes(mo.status)
                     return (
@@ -331,17 +381,7 @@ export default function ManufacturingOrdersPage() {
                           </div>
                         </td>
                         <td className="col-wide text-xs">
-                          {mo.withoutBom > 0 ? (
-                            <span className="warn-text">{mo.withoutBom} without a BOM</span>
-                          ) : mo.requisitions > 0 ? (
-                            <span className="text-foreground">
-                              {mo.requisitions} {mo.requisitions === 1 ? 'requisition' : 'requisitions'}
-                            </span>
-                          ) : mo.status === 'DRAFT' ? (
-                            <span className="text-muted-foreground">After release</span>
-                          ) : (
-                            <span className="warn-text">Not asked for yet</span>
-                          )}
+                          <Materials mo={mo} />
                         </td>
                         <td className={`whitespace-nowrap text-xs ${late ? 'text-destructive font-medium' : ''}`}>
                           {mo.plannedEndDate ? formatDate(mo.plannedEndDate) : '—'}
@@ -349,7 +389,7 @@ export default function ManufacturingOrdersPage() {
                         </td>
                         <td>
                           <div className="flex flex-col items-start gap-1">
-                            <span className={s.cls} title={mo.closeReason ?? undefined}>
+                            <span className={`${s.cls} whitespace-nowrap`} title={mo.closeReason ?? s.hint}>
                               {s.label}
                             </span>
                             <FloorState mo={mo} />
@@ -374,8 +414,9 @@ export default function ManufacturingOrdersPage() {
         <div className="border-border bg-secondary/40 flex items-start gap-2 border-t px-4 py-2">
           <Info size={14} className="text-primary mt-0.5 shrink-0" />
           <p className="text-muted-foreground text-xs">
-            Raised from a confirmed sales order and released to the floor, which puts the order In production. Open one to see the materials its BOM
-            needs and ask the store for them. Packed counts what is booked into Finished Goods In against it.
+            Status follows the work: Draft → Materials not asked → Materials asked → Part issued → Materials issued → In production → Packing →
+            Completed. Open one to see the materials its BOM needs and ask the store for them. Packed counts what is booked into Finished Goods In
+            against it.
           </p>
         </div>
       </div>

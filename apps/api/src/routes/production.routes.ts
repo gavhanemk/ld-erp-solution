@@ -9,7 +9,7 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
 import { ensureJobCards } from '../services/jobCard.service'
-import { attachLateBoms, materialPlan, orderForPlanning, PLANNABLE_ORDER_STATUSES } from '../services/manufacturing.service'
+import { attachLateBoms, materialPlan, MO_STAGES, moStages, orderForPlanning, PLANNABLE_ORDER_STATUSES, stageWhere, type MoStage } from '../services/manufacturing.service'
 import { cancelCutting, createCutting, cuttingPrep, cuttingSchema } from '../services/cutting.service'
 import { applyRouting, routingProblem, stylesOfMo } from '../services/route.service'
 import floorRoutes from './productionFloor.routes'
@@ -207,7 +207,7 @@ const moInclude = {
   closedBy: { select: { id: true, name: true } },
 } satisfies Prisma.ManufacturingOrderInclude
 
-// GET /api/production/orders — filters: q, status, soId, brandId, open=1, page, limit.
+// GET /api/production/orders — filters: q, status, stage (see moStages), soId, brandId, open=1, page, limit.
 router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
@@ -233,9 +233,15 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       ],
     })
   }
-  const where: Prisma.ManufacturingOrderWhereInput = and.length ? { AND: and } : {}
   // Lines planned before their BOM was approved pick it up, so "without a BOM" is true.
   await attachLateBoms(prisma)
+  // Where the work stands: the list's Status filter.
+  const stage = text(req.query.stage)
+  if (stage) {
+    if (!(MO_STAGES as readonly string[]).includes(stage)) throw new AppError(`Unknown stage '${stage}'`, 400, 'BAD_STAGE')
+    and.push(await stageWhere(prisma, stage as MoStage, { AND: [...and] }))
+  }
+  const where: Prisma.ManufacturingOrderWhereInput = and.length ? { AND: and } : {}
 
   const [orders, total] = await Promise.all([
     prisma.manufacturingOrder.findMany({
@@ -278,6 +284,7 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
             : packed.has(mo.id)
               ? 'Pieces of it are packed'
               : null
+  const stages = await moStages(prisma, orders)
 
   res.json({
     success: true,
@@ -285,6 +292,10 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       id: mo.id,
       moNumber: mo.moNumber,
       status: mo.status,
+      // Where the work stands (materials asked, issued, in production, packing): its status says only "released".
+      stage: stages.get(mo.id)?.stage ?? mo.status,
+      materialItems: stages.get(mo.id)?.materialItems ?? null,
+      materialItemsInFull: stages.get(mo.id)?.materialItemsInFull ?? null,
       // Its plan can still be changed (nothing issued to it, cut or packed; it and its order open), and if not, why.
       editable: blockOf(mo) === null,
       editBlock: blockOf(mo),
@@ -364,7 +375,8 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
   await attachLateBoms(prisma, req.params.id)
   const order = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, include: moInclude })
   if (!order) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
-  res.json({ success: true, data: { ...order, editBlock: await moEditBlock(prisma, order) } })
+  const [editBlock, stages] = await Promise.all([moEditBlock(prisma, order), moStages(prisma, [order])])
+  res.json({ success: true, data: { ...order, editBlock, stage: stages.get(order.id)?.stage ?? order.status } })
 })
 
 /** Raises a manufacturing order inside the caller's transaction. Exported for the checks that roll it back. */

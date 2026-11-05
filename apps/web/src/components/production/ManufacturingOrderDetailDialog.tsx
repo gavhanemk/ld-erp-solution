@@ -15,12 +15,14 @@ import { StagesDialog } from './StagesDialog'
 import { MoFlowStrip, currentMoTab, type MoFlowFacts, type MoTab } from './MoFlowStrip'
 import { MoProductionPanel } from './floor/MoProductionPanel'
 import { PROGRESS, type Flow } from './floor/types'
-import { LIVE_MO, moStatus } from './status'
+import { FLOOR_NOTE, LIVE_MO, moStage } from './status'
 
 interface MoDetail {
   id: string
   moNumber: string
   status: string
+  /** Where the work stands: materials not asked, asked, issued, in production, packing… (MO_STAGE). */
+  stage?: string
   plannedStartDate: string | null
   plannedEndDate: string | null
   totalPlannedQty: number
@@ -362,7 +364,7 @@ export function ManufacturingOrderDetailDialog({
   }
 
   if (!moId || !mounted) return null
-  const s = mo ? moStatus(mo.status) : null
+  const s = mo ? moStage(mo.stage, mo.status) : null
   const share = mo && mo.totalPlannedQty > 0 ? Math.min(100, Math.round((mo.totalPackedQty / mo.totalPlannedQty) * 100)) : 0
   const setRow = (key: string, patch: Partial<Ask[string]>) => setAsk((a) => ({ ...a, [key]: { ...a[key], ...patch } }))
   /*
@@ -393,11 +395,13 @@ export function ManufacturingOrderDetailDialog({
     } else raiseRef.current?.focus()
   }
 
+  /** Requisitions still asking the store: not rejected, and not closed with nothing issued. */
+  const raised = !!mo?.materialRequisitions.some((m) => m.status !== 'REJECTED' && (!m.closedAt || !!m.issuedAt))
   const facts: MoFlowFacts | null = mo
     ? {
         hasSalesOrder: !!mo.so,
         status: mo.status,
-        requisitionsRaised: mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED'),
+        requisitionsRaised: raised,
         materialsIssued: mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0),
         materialItems: plan?.rows.filter((r) => r.required > 0).length ?? 0,
         materialItemsIssued: plan?.rows.filter((r) => r.required > 0 && r.issued >= r.required - 0.0005).length ?? 0,
@@ -423,8 +427,12 @@ export function ManufacturingOrderDetailDialog({
                 <h2 id="mo-detail-title" className="text-foreground font-mono text-xl font-semibold tracking-tight">
                   {mo?.moNumber ?? 'Manufacturing order'}
                 </h2>
-                {s && <span className={s.cls}>{s.label}</span>}
-                {mo?.steps?.length && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' ? (
+                {s && (
+                  <span className={s.cls} title={s.hint}>
+                    {s.label}
+                  </span>
+                )}
+                {mo?.steps?.length && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.progress && FLOOR_NOTE.has(mo.progress) ? (
                   <span className={(PROGRESS[mo.progress ?? 'NOT_STARTED'] ?? PROGRESS.NOT_STARTED).cls}>{(PROGRESS[mo.progress ?? 'NOT_STARTED'] ?? PROGRESS.NOT_STARTED).label}</span>
                 ) : null}
                 {mo?.heldAt && <span className="badge-warning">On hold</span>}
@@ -788,7 +796,7 @@ export function ManufacturingOrderDetailDialog({
                     mo={{ id: mo.id, moNumber: mo.moNumber, status: mo.status, heldAt: mo.heldAt, progress: mo.progress, steps: mo.steps ?? [] }}
                     flow={flow}
                     materialsIssued={mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0)}
-                    requisitionsRaised={mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED')}
+                    requisitionsRaised={raised}
                     onLoadStages={() => setSettingRoute(true)}
                     onChanged={(msg) => void refresh(msg)}
                   />

@@ -556,13 +556,15 @@ export function HomeDashboard() {
                         .filter((st) => !['DRAFT', 'CLOSED'].includes(st.status))
                         .map((st, i, all) => (
                           <span key={st.status} className="flex items-center gap-1.5">
-                            <span
-                              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] ${st.count ? 'border-transparent font-semibold text-foreground' : 'border-border text-muted-foreground'}`}
+                            <Link
+                              href={`/production/orders?stage=${st.status}`}
+                              title={`Manufacturing orders at ${st.label}`}
+                              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] hover:underline ${st.count ? 'border-transparent font-semibold text-foreground' : 'border-border text-muted-foreground'}`}
                               style={st.count ? { background: `${MODULE.production.colour}1f` } : undefined}
                             >
                               {st.label}
                               <span className="tabular-nums">{st.count}</span>
-                            </span>
+                            </Link>
                             {i < all.length - 1 && <span className="text-muted-foreground">›</span>}
                           </span>
                         ))}

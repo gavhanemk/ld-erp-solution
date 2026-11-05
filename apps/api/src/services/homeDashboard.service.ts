@@ -1,5 +1,6 @@
 import { prisma } from '@ld-erp/database'
 import { onHand, reorderStatus } from './stock.service'
+import { moStages } from './manufacturing.service'
 import { getNumericPreference } from '../lib/preferences'
 
 /**
@@ -83,13 +84,14 @@ const PO_STAGES: Array<[string, string]> = [
   ['COMPLETED', 'Received'],
   ['CANCELLED', 'Cancelled'],
 ]
+/** Where manufacturing orders stand: the MO list's stages (moStages), in the order the work goes. */
 const MO_STAGES: Array<[string, string]> = [
   ['DRAFT', 'Draft'],
-  ['RELEASED', 'Released'],
-  ['CUTTING', 'Cutting'],
-  ['STITCHING', 'Stitching'],
-  ['FINISHING', 'Finishing'],
-  ['QC', 'QC'],
+  ['NOT_ASKED', 'Materials not asked'],
+  ['ASKED', 'Materials asked'],
+  ['PART_ISSUED', 'Part issued'],
+  ['ISSUED', 'Materials issued'],
+  ['IN_PRODUCTION', 'In production'],
   ['PACKING', 'Packing'],
   ['COMPLETED', 'Completed'],
   ['CLOSED', 'Closed'],
@@ -552,7 +554,7 @@ export async function homeDashboard(opts: { days: number; access: HomeAccess }) 
     ? (async () => {
         const fortnight = addDays(today, -13)
         const since = istStart(fortnight < prevFromDay ? fortnight : prevFromDay)
-        const [byStatus, entries, lateMOs] = await Promise.all([
+        const [byStatus, entries, lateMOs, onFloor] = await Promise.all([
           prisma.manufacturingOrder.groupBy({
             by: ['status'],
             _count: { _all: true },
@@ -565,7 +567,13 @@ export async function homeDashboard(opts: { days: number; access: HomeAccess }) 
           prisma.manufacturingOrder.count({
             where: { status: { notIn: ['DRAFT', 'COMPLETED', 'CLOSED'] }, plannedEndDate: { lt: todayStart } },
           }),
+          // Released and not finished: where each stands, as the MO list says it.
+          prisma.manufacturingOrder.findMany({
+            where: { status: { notIn: ['DRAFT', 'COMPLETED', 'CLOSED'] } },
+            select: { id: true, status: true, totalCutQty: true, totalPackedQty: true, totalPlannedQty: true },
+          }),
         ])
+        const stageOf = await moStages(prisma, onFloor)
 
         series('produced')
         const daily = new Map<string, { target: number; achieved: number; rejection: number }>()
@@ -632,12 +640,16 @@ export async function homeDashboard(opts: { days: number; access: HomeAccess }) 
             }))
             .sort((a, b) => a.line.localeCompare(b.line, undefined, { numeric: true })),
           fortnight: [...daily.entries()].map(([day, d]) => ({ day, ...d })),
-          stages: MO_STAGES.map(([status, label]) => ({
-            status,
-            label,
-            count: count(status),
-            planned: byStatus.find((g) => g.status === status)?._sum.totalPlannedQty ?? 0,
-          })),
+          // Draft, completed and closed by their status; the rest by where the work stands.
+          stages: MO_STAGES.map(([status, label]) => {
+            const here = ['DRAFT', 'COMPLETED', 'CLOSED'].includes(status) ? null : onFloor.filter((m) => stageOf.get(m.id)?.stage === status)
+            return {
+              status,
+              label,
+              count: here ? here.length : count(status),
+              planned: here ? here.reduce((s, m) => s + m.totalPlannedQty, 0) : (byStatus.find((g) => g.status === status)?._sum.totalPlannedQty ?? 0),
+            }
+          }),
           activeOrders: byStatus
             .filter((g) => !['DRAFT', 'COMPLETED', 'CLOSED'].includes(g.status))
             .reduce((n, g) => n + g._count._all, 0),

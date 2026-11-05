@@ -1,4 +1,4 @@
-import type { Prisma, PrismaClient } from '@prisma/client'
+import type { MOStatus, Prisma, PrismaClient } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 
 type Db = PrismaClient | Prisma.TransactionClient
@@ -408,4 +408,134 @@ export async function syncMoPacked(tx: Prisma.TransactionClient, moId: string) {
       actualEndDate: status === 'COMPLETED' ? (mo.status === 'COMPLETED' ? undefined : new Date()) : null,
     },
   })
+}
+
+/**
+ * Where a manufacturing order stands, in the words its list and its window
+ * show. Its own status says draft, released, completed or closed, and
+ * "released" covers everything from asking the store for materials to the
+ * last pieces being packed. The stage splits that the way the work goes, the
+ * same steps as the order's window:
+ *
+ *   materials not asked for → asked, the store yet to issue → part issued →
+ *   every material issued in full → in production (cutting recorded) →
+ *   packing (pieces booked into finished goods) → completed.
+ *
+ * Worked out from what has been done, never stored, so it cannot go stale.
+ */
+export const MO_STAGES = ['DRAFT', 'NOT_ASKED', 'ASKED', 'PART_ISSUED', 'ISSUED', 'IN_PRODUCTION', 'PACKING', 'COMPLETED', 'CLOSED'] as const
+export type MoStage = (typeof MO_STAGES)[number]
+
+/** Released and not finished. */
+const ON_FLOOR: MOStatus[] = ['RELEASED', 'CUTTING', 'STITCHING', 'FINISHING', 'QC', 'PACKING']
+
+/** A requisition still asking: not rejected, and not closed with nothing issued. */
+const askingMr: Prisma.MaterialRequisitionWhereInput = {
+  status: { not: 'REJECTED' },
+  OR: [{ closedAt: null }, { lines: { some: { issuedQty: { gt: 0 } } } }],
+}
+/** A requisition the store has issued something against. */
+const issuedMr: Prisma.MaterialRequisitionWhereInput = { lines: { some: { issuedQty: { gt: 0 } } } }
+const liveCutting: Prisma.CuttingOrderWhereInput = { status: { not: 'CANCELLED' } }
+
+/** On the floor with nothing cut or packed: still at its materials. */
+const atMaterials: Prisma.ManufacturingOrderWhereInput = {
+  status: { in: ON_FLOOR },
+  totalPackedQty: { lte: 0 },
+  totalCutQty: { lte: 0 },
+  cuttingOrders: { none: liveCutting },
+}
+
+/**
+ * How many of the materials its BOM asks for are issued in full, by the rule
+ * the window's Materials step ticks by: issued, less returned, at least what
+ * is required.
+ */
+async function materialsInFull(db: Db, moId: string) {
+  const { rows } = await materialPlan(db, moId)
+  const needed = rows.filter((r) => r.required > 0)
+  const inFull = needed.filter((r) => r.issued >= r.required - 0.0005).length
+  return { items: needed.length, inFull, all: needed.length > 0 && inFull >= needed.length }
+}
+
+/** `fn` over `list` a few at a time, so a long list does not take every connection at once. */
+async function fewAtATime<T, R>(list: T[], fn: (t: T) => Promise<R>, size = 8): Promise<R[]> {
+  const out: R[] = []
+  for (let i = 0; i < list.length; i += size) out.push(...(await Promise.all(list.slice(i, i + size).map(fn))))
+  return out
+}
+
+export interface MoStageOf {
+  stage: MoStage
+  /** Part issued or issued: the materials its BOM asks for, and how many are issued in full. */
+  materialItems?: number
+  materialItemsInFull?: number
+}
+
+/** The stage of each of these orders, by id. */
+export async function moStages(
+  db: Db,
+  mos: Array<{ id: string; status: MOStatus; totalCutQty: number; totalPackedQty: number }>,
+): Promise<Map<string, MoStageOf>> {
+  const out = new Map<string, MoStageOf>()
+  const open: typeof mos = []
+  for (const mo of mos) {
+    if (mo.status === 'DRAFT' || mo.status === 'COMPLETED' || mo.status === 'CLOSED') out.set(mo.id, { stage: mo.status })
+    else if (mo.totalPackedQty > 0) out.set(mo.id, { stage: 'PACKING' })
+    else open.push(mo)
+  }
+  if (!open.length) return out
+  const ids = open.map((m) => m.id)
+  const [cutOn, askedOn, issuedOn] = await Promise.all([
+    db.cuttingOrder.findMany({ where: { moId: { in: ids }, ...liveCutting }, select: { moId: true }, distinct: ['moId'] }),
+    db.materialRequisition.findMany({ where: { moId: { in: ids }, ...askingMr }, select: { moId: true }, distinct: ['moId'] }),
+    db.materialRequisition.findMany({ where: { moId: { in: ids }, ...issuedMr }, select: { moId: true }, distinct: ['moId'] }),
+  ])
+  const cut = new Set(cutOn.map((c) => c.moId))
+  const asked = new Set(askedOn.map((m) => m.moId))
+  const issued = new Set(issuedOn.map((m) => m.moId))
+  const toCount: string[] = []
+  for (const mo of open) {
+    if (mo.totalCutQty > 0 || cut.has(mo.id)) out.set(mo.id, { stage: 'IN_PRODUCTION' })
+    else if (issued.has(mo.id)) toCount.push(mo.id)
+    else out.set(mo.id, { stage: asked.has(mo.id) ? 'ASKED' : 'NOT_ASKED' })
+  }
+  const counted = await fewAtATime(toCount, (id) => materialsInFull(db, id))
+  toCount.forEach((id, i) => {
+    const c = counted[i]
+    out.set(id, { stage: c.all ? 'ISSUED' : 'PART_ISSUED', materialItems: c.items, materialItemsInFull: c.inFull })
+  })
+  return out
+}
+
+/**
+ * The orders at a stage, for the list's Status filter. Part issued and issued
+ * differ only by what the BOM asks for, so those are counted order by order
+ * among the ones with something issued; `within` (search, brand, sales
+ * order) narrows them first.
+ */
+export async function stageWhere(db: Db, stage: MoStage, within: Prisma.ManufacturingOrderWhereInput = {}): Promise<Prisma.ManufacturingOrderWhereInput> {
+  switch (stage) {
+    case 'DRAFT':
+    case 'COMPLETED':
+    case 'CLOSED':
+      return { status: stage }
+    case 'PACKING':
+      return { status: { in: ON_FLOOR }, totalPackedQty: { gt: 0 } }
+    case 'IN_PRODUCTION':
+      return { status: { in: ON_FLOOR }, totalPackedQty: { lte: 0 }, OR: [{ totalCutQty: { gt: 0 } }, { cuttingOrders: { some: liveCutting } }] }
+    case 'NOT_ASKED':
+      return { ...atMaterials, materialRequisitions: { none: askingMr } }
+    case 'ASKED':
+      return { ...atMaterials, materialRequisitions: { some: askingMr, none: issuedMr } }
+    case 'PART_ISSUED':
+    case 'ISSUED': {
+      const some = await db.manufacturingOrder.findMany({
+        where: { AND: [within, atMaterials, { materialRequisitions: { some: issuedMr } }] },
+        select: { id: true },
+      })
+      const counted = await fewAtATime(some, (m) => materialsInFull(db, m.id))
+      return { id: { in: some.filter((_, i) => counted[i].all === (stage === 'ISSUED')).map((m) => m.id) } }
+    }
+  }
 }
