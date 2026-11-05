@@ -538,11 +538,13 @@ export function ManufacturingOrderDetailDialog({
                   setClosing(true)
                 }}
                 disabled={busy !== null}
+                title="Call this manufacturing order off. Nothing is deleted: it stays on file as Closed, with your reason."
               >
-                <Ban size={15} /> Close
+                <Ban size={15} /> Cancel MO
               </button>
             )}
-            <button onClick={onClose} className="btn-ghost p-2" aria-label="Close" disabled={busy !== null}>
+            <span className="bg-border mx-1 hidden h-6 w-px sm:block" aria-hidden />
+            <button onClick={onClose} className="btn-ghost p-2" aria-label="Close this window" title="Close this window" disabled={busy !== null}>
               <X size={18} />
             </button>
           </div>
@@ -599,8 +601,8 @@ export function ManufacturingOrderDetailDialog({
                   {soOver.when ? ` on ${formatDate(soOver.when)}` : ''}
                   {soOver.why ? ` (${soOver.why})` : ''}, so nothing more is made for it.{' '}
                   {mo.stage === 'ORDER_CLOSED'
-                    ? 'Nothing was issued, cut or packed on this order, so close it.'
-                    : 'Finish what is already on the floor, or close this order.'}
+                    ? 'Nothing was issued, cut or packed on this order, so cancel it.'
+                    : 'Finish what is already on the floor, or cancel this order.'}
                 </p>
               </div>
               {can('production', 'edit') && (
@@ -613,7 +615,7 @@ export function ManufacturingOrderDetailDialog({
                   }}
                   disabled={busy !== null}
                 >
-                  <Ban size={13} /> Close this MO
+                  <Ban size={13} /> Cancel this MO
                 </button>
               )}
             </div>
@@ -1085,9 +1087,10 @@ export function ManufacturingOrderDetailDialog({
       )}
       {closing && mo && (
         <ReasonDialog
-          title={`Close ${mo.moNumber}?`}
-          description="It stays on file as closed, with your reason, and its pieces can be planned again. Its requisitions the store has issued nothing on close with it, and any stock held for them is free again."
-          confirmLabel="Close it"
+          title={`Cancel ${mo.moNumber}?`}
+          description="Nothing is deleted: it stays on file as Closed, with your reason, and its pieces can be planned again. Its requisitions the store has issued nothing on close with it, and any stock held for them is free again. What was already issued, cut or packed stays as it is."
+          confirmLabel="Cancel the MO"
+          cancelLabel="Keep it"
           placeholder="Buyer changed the fabric"
           initialReason={closeWith}
           danger

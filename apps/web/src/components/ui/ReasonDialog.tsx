@@ -19,6 +19,7 @@ export function ReasonDialog({
   title,
   description,
   confirmLabel = 'Confirm',
+  cancelLabel = 'Cancel',
   danger = false,
   minLength = 5,
   placeholder = 'One line is enough',
@@ -31,6 +32,8 @@ export function ReasonDialog({
   title: string
   description: React.ReactNode
   confirmLabel?: string
+  /** The button that backs out: "Keep it" where the action itself is a cancel. */
+  cancelLabel?: string
   /** Red rather than teal, for an action that cannot be undone. */
   danger?: boolean
   minLength?: number
@@ -94,7 +97,7 @@ export function ReasonDialog({
 
         <div className="mt-5 flex justify-end gap-2">
           <button type="button" className="btn-secondary" onClick={onCancel} disabled={busy}>
-            Cancel
+            {cancelLabel}
           </button>
           <button
             type="button"

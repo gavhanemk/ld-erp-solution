@@ -110,7 +110,7 @@ export function MoFlowStrip({
 
   let next: { text: string; action?: ReactNode }
   if (f.orderClosed) {
-    next = { text: 'Its sales order is closed and nothing was made on this order, so nothing more is asked or made: close it with "Close this MO" below.' }
+    next = { text: 'Its sales order is closed and nothing was made on this order, so nothing more is asked or made: cancel it with "Cancel this MO" below.' }
   } else if (f.status === 'DRAFT') {
     next = {
       text: 'Check the colours and quantities, then press Release at the top.',

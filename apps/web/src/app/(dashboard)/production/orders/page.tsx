@@ -233,7 +233,7 @@ export default function ManufacturingOrdersPage() {
     }
     // Its sales order is over and nothing was made on it: all that is left is closing it.
     if (mo.stage === 'ORDER_CLOSED' && mayEdit) {
-      items.push({ key: 'close', label: 'Close — its sales order is closed', icon: <Ban size={15} />, danger: true, onClick: () => setClosing(mo) })
+      items.push({ key: 'close', label: 'Cancel MO — its sales order is closed', icon: <Ban size={15} />, danger: true, onClick: () => setClosing(mo) })
     }
     return items
   }
@@ -450,9 +450,10 @@ export default function ManufacturingOrdersPage() {
 
       {closing && (
         <ReasonDialog
-          title={`Close ${closing.moNumber}?`}
-          description={`${closing.soNumber ?? 'Its sales order'} is closed and nothing was issued, cut or packed on this order. It stays on file as closed, with your reason; its requisitions close with it.`}
-          confirmLabel="Close it"
+          title={`Cancel ${closing.moNumber}?`}
+          description={`${closing.soNumber ?? 'Its sales order'} is closed and nothing was issued, cut or packed on this order. Nothing is deleted: it stays on file as Closed, with your reason; its requisitions close with it.`}
+          confirmLabel="Cancel the MO"
+          cancelLabel="Keep it"
           initialReason={`${closing.soNumber ?? 'The sales order'} is closed: nothing more is made for it`}
           danger
           busy={closeBusy}
