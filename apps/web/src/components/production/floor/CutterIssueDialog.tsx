@@ -28,8 +28,11 @@ interface Fabric {
 }
 
 export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; onClose: () => void; onSaved: (message: string) => void }) {
+  const cutting = d.steps.find((s) => s.kind === 'CUTTING')
+  // The routing's cutting contractor, if it names one: who usually gets the lay.
+  const routed = cutting?.contractor?.name ?? null
   const [fabrics, setFabrics] = useState<Fabric[]>([])
-  const [cutterName, setCutterName] = useState('')
+  const [cutterName, setCutterName] = useState(routed ?? '')
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
   const [lotNo, setLotNo] = useState(d.card.lotNo ?? '')
   const [ratio, setRatio] = useState(d.card.ratio ?? '')
@@ -59,12 +62,13 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
     }
   }, [d.mo.id])
 
-  // Every contractor named before, on any order, to pick from — this order's first.
-  const [everyone, setEveryone] = useState<Array<{ name: string; cuts: number }>>([])
+  // Every contractor named before, on any order, and the cutting contractors in the
+  // Contractors master, to pick from — the routing's and this order's first.
+  const [everyone, setEveryone] = useState<Array<{ name: string; cuts: number; inMaster?: boolean }>>([])
   useEffect(() => {
     let alive = true
     api
-      .get<{ data: Array<{ name: string; cuts: number }> }>('/production/cutting-contractors')
+      .get<{ data: Array<{ name: string; cuts: number; inMaster?: boolean }> }>('/production/cutting-contractors')
       .then((res) => alive && setEveryone(res.data))
       .catch(() => {})
     return () => {
@@ -72,13 +76,19 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
     }
   }, [])
   const known = useMemo(() => {
-    const here = [...new Set(d.cuttings.map((c) => c.cutterName).filter(Boolean) as string[])]
-    const rest = everyone.filter((c) => !here.some((h) => h.toLowerCase() === c.name.toLowerCase()))
-    return [...here.map((name) => ({ value: name, label: 'on this order' })), ...rest.map((c) => ({ value: c.name, label: `${c.cuts} ${c.cuts === 1 ? 'cutting' : 'cuttings'} before` }))]
-  }, [d.cuttings, everyone])
+    const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase()
+    const here = [...new Set(d.cuttings.map((c) => c.cutterName).filter(Boolean) as string[])].filter((h) => !routed || !same(h, routed))
+    const rest = everyone.filter((c) => !here.some((h) => same(h, c.name)) && !(routed && same(routed, c.name)))
+    const before = (c: { cuts: number; inMaster?: boolean }) =>
+      [c.cuts ? `${c.cuts} ${c.cuts === 1 ? 'cutting' : 'cuttings'} before` : null, c.inMaster ? 'Contractors master' : null].filter(Boolean).join(' · ')
+    return [
+      ...(routed ? [{ value: routed, label: 'on the routing' }] : []),
+      ...here.map((name) => ({ value: name, label: 'on this order' })),
+      ...rest.map((c) => ({ value: c.name, label: before(c) })),
+    ]
+  }, [d.cuttings, everyone, routed])
   // A name nobody has used before is fine, but worth a second look for spelling.
   const typedNew = !!cutterName.trim() && !known.some((k) => k.value.toLowerCase() === cutterName.trim().replace(/\s+/g, ' ').toLowerCase())
-  const cutting = d.steps.find((s) => s.kind === 'CUTTING')
   const sizes = useMemo(
     () =>
       (d.line?.sizes ?? []).map((z) => {

@@ -63,6 +63,8 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
           department: { select: { id: true, name: true } },
           workstationId: true,
           workstation: { select: { id: true, name: true, type: true, supplier: { select: { id: true, name: true } } } },
+          // Who normally does it, from the routing: the cutting sheet and "Done by" start with them.
+          contractor: { select: { id: true, name: true } },
         },
       },
     },

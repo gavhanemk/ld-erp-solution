@@ -37,7 +37,7 @@ import { flowSummary } from '../services/floorView.service'
 import { processCode } from '../services/challanNo'
 import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
-import { createCutting, cuttingContractors, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
+import { contractorsFor, createCutting, cuttingContractors, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
 import { boardCards, ensureJobCards, fillJobCardBlanks, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
 
 /**
@@ -728,6 +728,13 @@ router.get('/stage-sheets', requirePermission(MODULE, 'view'), async (req, res) 
 /** GET /cutting-contractors — every cutting contractor named before, latest first, for the pick list. */
 router.get('/cutting-contractors', requirePermission(MODULE, 'view'), async (_req, res) => {
   res.json({ success: true, data: await cuttingContractors(prisma) })
+})
+
+/** GET /contractors?operationId= — the Contractors master's people for one process, for "Done by". */
+router.get('/contractors', requirePermission(MODULE, 'view'), async (req, res) => {
+  const operationId = text(req.query.operationId)
+  if (!operationId) throw new AppError('Say which process', 400, 'NO_PROCESS')
+  res.json({ success: true, data: await contractorsFor(prisma, operationId) })
 })
 
 /** POST /orders/:id/cutting-issues — sizes issued to a cutting contractor, on the cutting sheet. */

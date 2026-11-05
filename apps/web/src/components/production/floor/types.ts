@@ -45,6 +45,8 @@ export interface FlowStep {
   department: { id: string; name: string }
   workstationId: string | null
   workstation: { id: string; name: string; type: string; supplier: { id: string; name: string } | null } | null
+  /** Who normally does it, from the routing. */
+  contractor?: { id: string; name: string } | null
   next: { id: string; name: string; execution: 'IN_HOUSE' | 'OUTSOURCED' } | null
   last: boolean
   lastActivity: string | null

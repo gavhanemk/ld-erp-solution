@@ -302,6 +302,26 @@ export function RoutingFormDialog({
     }
   }, [open])
 
+  // Back on this tab after adding contractors or lines under Routing Masters in
+  // another: the step lists take them in, and nothing typed here is lost.
+  useEffect(() => {
+    if (!open) return
+    const back = () => {
+      if (document.visibilityState !== 'visible') return
+      void Promise.all([
+        masterResource<Contractor>('contractors').list({ limit: 500, active: true }),
+        masterResource<Unit>('workstations').list({ limit: 300, active: true }),
+      ])
+        .then(([c, w]) => {
+          setContractors((c as Paginated<Contractor>).data)
+          setUnits((w as Paginated<Unit>).data)
+        })
+        .catch(() => {})
+    }
+    document.addEventListener('visibilitychange', back)
+    return () => document.removeEventListener('visibilitychange', back)
+  }, [open])
+
   // The list is the processes in use. One switched off since this routing was
   // made still has to show on its step, or the step reads "Pick a process" and
   // the routing cannot be saved at all — so the routing's own are added back,

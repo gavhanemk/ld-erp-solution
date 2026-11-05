@@ -1,11 +1,12 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Boxes, ClipboardList, Hammer, Loader2 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { SuggestInput } from '@/components/ui/SuggestInput'
 import { BundleQtyTable, overRows, rowTotal, type QtyColumn, type QtyValues } from './BundleQtyTable'
 import { bundleRows } from './useFlow'
 import { isCheck, newClientKey, pcs, type Flow } from './types'
@@ -41,7 +42,27 @@ export function WorkDialog({ flow, stepId, onClose, onSaved }: { flow: Flow; ste
   const [values, setValues] = useState<QtyValues>({})
   const [reworkStepId, setReworkStepId] = useState(defaultRework.id)
   const [reason, setReason] = useState('')
-  const [personName, setPersonName] = useState('')
+  // Work starts with the routing's contractor for this step, if it names one; a check is the checker's.
+  const [personName, setPersonName] = useState(!check ? step.contractor?.name ?? '' : '')
+  // This process's contractors in the Contractors master, to pick from.
+  const [listed, setListed] = useState<Array<{ id: string; name: string }>>([])
+  useEffect(() => {
+    let alive = true
+    api
+      .get<{ data: Array<{ id: string; name: string }> }>(`/production/contractors?operationId=${encodeURIComponent(step.operationId)}`)
+      .then((res) => alive && setListed(res.data))
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [step.operationId])
+  const people = useMemo(() => {
+    const own = step.contractor
+    return [
+      ...(own ? [{ value: own.name, label: 'on the routing' }] : []),
+      ...listed.filter((c) => c.id !== own?.id).map((c) => ({ value: c.name, label: 'Contractors master' })),
+    ]
+  }, [listed, step.contractor])
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
   const [notes, setNotes] = useState('')
   const [saving, setSaving] = useState(false)
@@ -147,7 +168,7 @@ export function WorkDialog({ flow, stepId, onClose, onSaved }: { flow: Flow; ste
         )}
         <label className="block">
           <span className="form-label">Done by</span>
-          <input className="form-input" value={personName} maxLength={120} placeholder={check ? 'Checker' : 'Line or operator'} onChange={(e) => setPersonName(e.target.value)} />
+          <SuggestInput className="form-input" value={personName} maxLength={120} placeholder={check ? 'Checker' : 'Line, operator or contractor'} onValueChange={setPersonName} suggestions={people} aria-label="Done by" />
         </label>
         <label className="block">
           <span className="form-label">On</span>

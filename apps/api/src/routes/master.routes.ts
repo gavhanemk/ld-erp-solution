@@ -1024,8 +1024,21 @@ router.use(
           .map((o) => ({ id: o!.id, name: o!.name })),
       }))
     },
+    // One name, one person: "Ramesh" and "ramesh " are the same contractor on every pick list.
+    uniqueFields: ['name'],
     // Every process named must be one in the Routing Masters.
-    beforeSave: async (data) => {
+    beforeSave: async (raw, before) => {
+      const data = typeof raw.name === 'string' ? { ...raw, name: raw.name.trim().replace(/\s+/g, ' ') } : raw
+      // Also against names saved with stray spaces before they were tidied ("Ramesh ").
+      if (typeof data.name === 'string') {
+        const key = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase()
+        const others = await prisma.contractor.findMany({ where: before?.id ? { NOT: { id: before.id as string } } : {}, select: { name: true, code: true, isActive: true } })
+        const clash = others.find((c) => key(c.name) === key(data.name as string))
+        if (clash && !(before && key(String(before.name ?? '')) === key(data.name))) {
+          const inactive = clash.isActive === false ? ', inactive — edit it to bring it back' : ''
+          throw new ZodError([{ code: 'custom', path: ['name'], message: `${clash.name.trim()} (${clash.code}) already exists${inactive}. If it is a different one, add something to tell them apart, such as the town.` }])
+        }
+      }
       const ids = data.operationIds as string[] | undefined
       if (ids?.length) {
         const unique = [...new Set(ids)]
