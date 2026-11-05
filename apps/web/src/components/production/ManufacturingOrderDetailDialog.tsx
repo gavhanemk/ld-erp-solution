@@ -45,6 +45,8 @@ interface MoDetail {
   routing: { id: string; code: string; name: string; version: number } | null
   steps: Array<{ id: string; sequence: number; name: string; kind: string; execution: string; isQcStep: boolean; skippedAt: string | null; department: { name: string } }>
   progress: string | null
+  /** Why its plan can no longer be changed (material issued, cut, packed, finished); null while it can. */
+  editBlock?: string | null
   heldAt: string | null
   totalStitchedQty?: number
   totalFinishedQty?: number
@@ -433,6 +435,16 @@ export function ManufacturingOrderDetailDialog({
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {mo && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
+              <button
+                className="btn-secondary"
+                onClick={() => onEdit(mo.id)}
+                disabled={busy !== null || !!mo.editBlock}
+                title={mo.editBlock ?? 'Change the plan: pieces, sizes, dates, routing. Open until the store issues material to it.'}
+              >
+                <Pencil size={15} /> Edit
+              </button>
+            )}
             {mo?.status === 'DRAFT' && can('production', 'edit') && (
               <>
                 <button className="btn-secondary" onClick={() => onEdit(mo.id)} disabled={busy !== null}>

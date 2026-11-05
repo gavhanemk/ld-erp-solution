@@ -242,7 +242,7 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       where,
       include: {
         brand: { select: { id: true, name: true, type: true } },
-        so: { select: { id: true, soNumber: true, deliveryDate: true, customer: { select: { name: true } } } },
+        so: { select: { id: true, soNumber: true, status: true, deliveryDate: true, customer: { select: { name: true } } } },
         lines: { select: { color: true, bomId: true, style: { select: { code: true } } } },
         routing: { select: { code: true } },
         _count: { select: { materialRequisitions: true, steps: true } },
@@ -253,6 +253,16 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
     }),
     prisma.manufacturingOrder.count({ where }),
   ])
+  // Which of them work has started on (material issued, cutting recorded, packed): not to be edited.
+  const ids = orders.map((o) => o.id)
+  const [issuedTo, cutOn, packedOn] = ids.length
+    ? await Promise.all([
+        prisma.materialRequisition.findMany({ where: { moId: { in: ids }, lines: { some: { issuedQty: { gt: 0 } } } }, select: { moId: true }, distinct: ['moId'] }),
+        prisma.cuttingOrder.findMany({ where: { moId: { in: ids }, status: { not: 'CANCELLED' } }, select: { moId: true }, distinct: ['moId'] }),
+        prisma.manufacturingOrder.findMany({ where: { id: { in: ids }, fgReceipts: { some: { cancelledAt: null } } }, select: { id: true } }),
+      ])
+    : [[], [], []]
+  const started = new Set([...issuedTo.map((m) => m.moId), ...cutOn.map((c) => c.moId), ...packedOn.map((m) => m.id)])
 
   res.json({
     success: true,
@@ -260,6 +270,12 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       id: mo.id,
       moNumber: mo.moNumber,
       status: mo.status,
+      // Its plan can still be changed: nothing issued to it, cut or packed, and not finished.
+      editable:
+        !started.has(mo.id) &&
+        mo.status !== 'COMPLETED' &&
+        mo.status !== 'CLOSED' &&
+        (!mo.so || (PLANNABLE_ORDER_STATUSES as readonly string[]).includes(mo.so.status)),
       brand: mo.brand,
       soId: mo.so?.id ?? null,
       customer: mo.so?.customer.name ?? null,
@@ -336,7 +352,7 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
   await attachLateBoms(prisma, req.params.id)
   const order = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, include: moInclude })
   if (!order) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
-  res.json({ success: true, data: order })
+  res.json({ success: true, data: { ...order, editBlock: await moEditBlock(prisma, order) } })
 })
 
 /** Raises a manufacturing order inside the caller's transaction. Exported for the checks that roll it back. */
@@ -375,14 +391,44 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
   })
 })
 
-/** PATCH /api/production/orders/:id — a draft changed: dates, notes, pieces. */
+/**
+ * Why a manufacturing order can no longer be changed, or null when it can.
+ *
+ * Its plan stays open, released or not and with requisitions raised or not,
+ * until work has really started on it: material issued from the store to
+ * it, cutting recorded, pieces packed, or the order finished. After that the
+ * floor is working to the plan as it stands.
+ */
+export async function moEditBlock(db: Prisma.TransactionClient | typeof prisma, mo: { id: string; moNumber: string; status: string }) {
+  if (mo.status === 'COMPLETED' || mo.status === 'CLOSED') return `${mo.moNumber} is ${mo.status.toLowerCase()}, so it can no longer be changed.`
+  const order = await db.manufacturingOrder.findUnique({ where: { id: mo.id }, select: { so: { select: { soNumber: true, status: true } } } })
+  if (order?.so && !(PLANNABLE_ORDER_STATUSES as readonly string[]).includes(order.so.status)) {
+    return `${order.so.soNumber} is ${order.so.status.toLowerCase().replace(/_/g, ' ')}, so nothing more is planned for it and ${mo.moNumber} can no longer be changed.`
+  }
+  const issued = await db.materialRequisition.findFirst({
+    where: { moId: mo.id, lines: { some: { issuedQty: { gt: 0 } } } },
+    select: { mrNumber: true },
+  })
+  if (issued) return `The store has issued material to ${mo.moNumber} (${issued.mrNumber}), so its plan can no longer be changed.`
+  const cut = await db.cuttingOrder.findFirst({ where: { moId: mo.id, status: { not: 'CANCELLED' } }, select: { cutOrderNumber: true } })
+  if (cut) return `Cutting is recorded on ${mo.moNumber} (${cut.cutOrderNumber}), so its plan can no longer be changed.`
+  const packed = await db.manufacturingOrder.count({ where: { id: mo.id, fgReceipts: { some: { cancelledAt: null } } } })
+  if (packed) return `Pieces of ${mo.moNumber} are packed, so its plan can no longer be changed.`
+  return null
+}
+
+/**
+ * PATCH /api/production/orders/:id — the plan changed: dates, notes, pieces,
+ * routing. A draft, or a released order nothing has been issued to yet.
+ */
 router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = moBodySchema.parse(req.body)
   const { before, after } = await prisma.$transaction(
     async (tx) => {
       const before = await tx.manufacturingOrder.findUnique({ where: { id: req.params.id }, include: moInclude })
       if (!before) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
-      if (before.status !== 'DRAFT') throw new AppError(`${before.moNumber} has been released, so its plan can no longer be changed`, 409, 'NOT_DRAFT')
+      const block = await moEditBlock(tx, before)
+      if (block) throw new AppError(block, 409, 'MO_STARTED')
       if (!before.soId) throw new AppError(`${before.moNumber} is not for a sales order`, 409, 'NO_ORDER')
       const { total, create } = await shapeLines(tx, before.soId, data, before.id)
       await tx.mOLine.deleteMany({ where: { moId: before.id } })
@@ -414,7 +460,14 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     { timeout: 30_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: after.id, before, after })
-  res.json({ success: true, message: `${after.moNumber} saved`, data: after })
+  const waiting = await prisma.materialRequisition.findMany({
+    where: { moId: after.id, closedAt: null, status: { in: ['PENDING', 'APPROVED'] } },
+    select: { mrNumber: true },
+  })
+  const note = waiting.length
+    ? ` ${waiting.map((m) => m.mrNumber).join(', ')} ${waiting.length === 1 ? 'was' : 'were'} raised for the plan before: check ${waiting.length === 1 ? 'it' : 'them'} against Materials, which shows what is still to ask for.`
+    : ''
+  res.json({ success: true, message: `${after.moNumber} saved.${note}`, data: after })
 })
 
 /** Releases a draft inside the caller's transaction. */
