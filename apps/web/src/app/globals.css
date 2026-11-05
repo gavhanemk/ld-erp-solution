@@ -468,6 +468,46 @@
     }
   }
 
+  /* ── A long table keeps its header and its sideways bar in sight ─────────
+
+     A wide list scrolled sideways in a box as tall as all its rows, so the
+     sideways scrollbar sat under the last of them, a hundred rows down, and
+     the header row went up off the screen with the first. Now every table
+     box (a list's rows, and any sideways-scrolling box with a table straight
+     inside it, on a page or in a window) is no taller than the screen
+     leaves under the 64px top bar, and scrolls both ways itself: the header
+     holds at its top while the rows go by, and the sideways bar runs along
+     its bottom edge, in view. A short table is its own height, as before.
+
+     TableScrollLayer gives the wheel to the page first, until the table's top
+     reaches the top of the screen, so the box never leaves its bottom edge
+     under the fold. Screen only: a printed table runs on. */
+  @media screen {
+    .list-rows,
+    :where(.overflow-x-auto, .overflow-auto):not(main):has(> table) {
+      max-height: calc(100dvh - 8.5rem);
+      overflow: auto;
+      /* A row brought into view by the arrow keys stops below the held header, not under it. */
+      scroll-padding-top: 2.75rem;
+    }
+
+    /* Any table straight inside such a box, in a list or a window, the small
+       tables inside an expanded row aside: they keep their own quiet header. */
+    .data-table > thead,
+    :where(.list-rows, .overflow-x-auto, .overflow-auto) > table:not(.subtable) > thead {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background-color: hsl(var(--secondary));
+    }
+
+    /* The line under the header moves with it; a collapsed border would stay behind. */
+    .data-table > thead > tr:last-child > th,
+    :where(.list-rows, .overflow-x-auto, .overflow-auto) > table:not(.subtable) > thead > tr:last-child > th {
+      box-shadow: inset 0 -1px 0 hsl(var(--border));
+    }
+  }
+
 
   /* ── The table inside an expanded row ────────────────────────────────────
 

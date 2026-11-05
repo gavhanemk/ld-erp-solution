@@ -339,7 +339,7 @@ function OrderPanel({
           Switch <span className="font-semibold">Garment tags</span> on for {order.moNumber} to give its pieces their codes.
         </p>
       )}
-      <div className="border-t border-border bg-card">
+      <div className="overflow-x-auto border-t border-border bg-card">
         <table className="data-table table-compact w-full [&>tbody>tr>td]:py-1.5">
           <thead>
             <tr className="bg-secondary">
