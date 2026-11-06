@@ -599,6 +599,35 @@
            transition-all duration-200;
   }
 
+  /* A switched-off button looks switched off: faded, no glow, no hover, and a
+     not-allowed pointer. Without this a disabled button kept its colour, its
+     glow and even its hover, so it read as a button that does nothing when
+     pressed (the Change sizes window, 6 Nov 2026). The routing form and the
+     purchase order's Use button already did this by hand. A button that sets
+     its own disabled look keeps it: utilities come after these rules. */
+  .btn-primary:disabled,
+  .btn-secondary:disabled,
+  .btn-ghost:disabled,
+  .btn-danger:disabled {
+    @apply cursor-not-allowed opacity-50 shadow-none;
+  }
+
+  .btn-primary:disabled:hover {
+    @apply bg-teal-500 shadow-none;
+  }
+
+  .btn-secondary:disabled:hover {
+    @apply bg-secondary;
+  }
+
+  .btn-ghost:disabled:hover {
+    background: transparent;
+  }
+
+  .btn-danger:disabled:hover {
+    @apply bg-red-500/10;
+  }
+
   /* Form Inputs */
   .form-input {
     @apply w-full px-3 py-2.5 rounded-lg text-sm
