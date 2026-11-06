@@ -57,7 +57,8 @@ export function SizeTable({
   rows,
 }: {
   d: JobCardDetail
-  rows: Array<{ label: string; of: (sizeId: string) => number; total?: number; tone?: 'muted' | 'primary' | 'warn' }>
+  /** signed: a change, shown as +20 / −20 (a size change moves pieces between sizes, so its total is nought). */
+  rows: Array<{ label: string; of: (sizeId: string) => number; total?: number; tone?: 'muted' | 'primary' | 'warn'; signed?: boolean }>
 }) {
   const sizes = d.line?.sizes ?? []
   if (!sizes.length) return null
@@ -80,15 +81,16 @@ export function SizeTable({
             const values = sizes.map((z) => r.of(z.id))
             const total = r.total ?? values.reduce((s, n) => s + n, 0)
             const cls = r.tone === 'muted' ? 'text-muted-foreground' : r.tone === 'primary' ? 'text-primary' : r.tone === 'warn' ? 'warn-text' : ''
+            const shown = (v: number) => (r.signed ? (v > 0 ? `+${pcs(v)}` : v < 0 ? `−${pcs(-v)}` : '—') : v ? pcs(v) : '—')
             return (
               <tr key={r.label}>
                 <td className={`whitespace-nowrap text-xs font-medium ${cls}`}>{r.label}</td>
                 {values.map((v, i) => (
                   <td key={sizes[i].id} className={`text-right text-xs tabular-nums ${cls}`}>
-                    {v ? pcs(v) : '—'}
+                    {shown(v)}
                   </td>
                 ))}
-                <td className={`text-right text-xs font-semibold tabular-nums ${cls}`}>{pcs(total)}</td>
+                <td className={`text-right text-xs font-semibold tabular-nums ${cls}`}>{r.signed ? shown(total) : pcs(total)}</td>
               </tr>
             )
           })}

@@ -165,7 +165,7 @@ async function takeBackCount(tx: Tx, t: TakeBackFacts, reason: string, userId: s
  */
 export async function destinationsOf<T extends RouteStep>(db: Tx | PrismaClient, mo: { id: string; steps: T[] }, fromId: string) {
   const [bundles, sent] = await Promise.all([
-    db.productionBundle.findMany({ where: { moId: mo.id }, select: { id: true, qty: true, parentId: true } }),
+    db.productionBundle.findMany({ where: { moId: mo.id }, select: { id: true, qty: true, parentId: true, splitAtStepId: true } }),
     db.processTransferLine.findMany({
       where: { transfer: { moId: mo.id, isRework: false, status: { not: 'CANCELLED' } } },
       select: { bundleId: true, dispatchedQty: true, transfer: { select: { toStepId: true } } },
@@ -1076,6 +1076,214 @@ export async function unpackForReceipt(tx: Tx, fgReceiptId: string, reason: stri
   for (const moId of new Set(packs.map((p) => p.moId))) await syncProgress(tx, moId)
 }
 
+// ─── Size changes (size jumps at stitching) ───────────────────
+
+export const sizeChangeSchema = z.object({
+  stepId: z.string().min(1, 'Say which step'),
+  /** Each bundle, the size its pieces are made as, and how many. */
+  lines: z
+    .array(z.object({ bundleId: z.string().min(1), toSizeId: z.string().min(1, 'Pick the size they are made as'), qty: pcs }))
+    .min(1, 'Pick the pieces made as another size'),
+  reason: reasonText,
+  personName: person,
+  eventDate: z.coerce.date().optional(),
+  notes: note,
+  clientKey,
+})
+
+/**
+ * A size jump: pieces of a bundle made as another size of the order at
+ * stitching (cut as M, made as L). They move into a new bundle of the new
+ * size, made from the old one at this step and numbered next on the order,
+ * with its own sticker; the old bundle keeps everything it went through. Only
+ * at stitching done on our own floor, only on pieces in hand or done there —
+ * not on a transfer card, at an outside unit, or waiting for a decision — and
+ * only to a size on the order line. The order's planned sizes are never
+ * edited, and nothing is posted to stock: finished goods take the pieces by
+ * their new size when they are packed.
+ */
+export async function changeSizes(tx: Tx, moId: string, d: z.infer<typeof sizeChangeSchema>, userId: string) {
+  const mo = await openMo(tx, moId)
+  if (await seen(tx, d.clientKey)) {
+    const ev = await tx.wipEvent.findUniqueOrThrow({ where: { clientKey: d.clientKey! }, select: { id: true } })
+    return { eventId: ev.id, bundleIds: (await tx.sizeChange.findMany({ where: { eventId: ev.id }, select: { toBundleId: true } })).map((c) => c.toBundleId), duplicate: true }
+  }
+  const step = stepOf(mo, d.stepId)
+  if (step.kind !== 'STITCHING') throw new AppError(`Sizes change only at stitching, not at ${step.name}.`, 400, 'NOT_AT_STITCHING')
+  if (step.execution !== 'IN_HOUSE') {
+    throw new AppError(`${step.name} on ${mo.moNumber} is done by an outside unit; sizes change only where stitching is done on our own floor.`, 400, 'NOT_AT_STITCHING')
+  }
+
+  // One line per bundle and new size.
+  const merged = new Map<string, { bundleId: string; toSizeId: string; qty: number }>()
+  for (const l of d.lines) {
+    if (l.qty <= 0) continue
+    const k = `${l.bundleId}|${l.toSizeId}`
+    const had = merged.get(k)
+    merged.set(k, had ? { ...had, qty: had.qty + l.qty } : { ...l })
+  }
+  const lines = [...merged.values()]
+  if (!lines.length) throw new AppError('Enter how many pieces of each bundle are made as another size.', 400, 'NOTHING_RECORDED')
+  const ids = [...new Set(lines.map((l) => l.bundleId))]
+  const bundles = await tx.productionBundle.findMany({
+    where: { id: { in: ids }, moId },
+    select: { id: true, code: true, moLineId: true, sizeId: true, cuttingOrderId: true, size: { select: { code: true } } },
+  })
+  if (bundles.length !== ids.length) throw new AppError('One of those bundles is not on this order.', 400, 'BAD_BUNDLE')
+  if (new Set(bundles.map((b) => b.moLineId)).size > 1) throw new AppError('Change one job card’s sizes at a time: these bundles are of different colours.', 400, 'ONE_JOB_CARD')
+  const byId = new Map(bundles.map((b) => [b.id, b]))
+  const moLineId = bundles[0].moLineId
+  const onOrder = new Map(
+    (await tx.mOLineSize.findMany({ where: { moLineId }, select: { sizeId: true, size: { select: { code: true, sequence: true } } }, orderBy: { size: { sequence: 'asc' } } })).map((z) => [
+      z.sizeId,
+      z.size.code,
+    ]),
+  )
+  for (const l of lines) {
+    const b = byId.get(l.bundleId)!
+    if (!b.sizeId) throw new AppError(`${b.code} has no size, so it cannot change size.`, 400, 'NO_SIZE')
+    if (l.toSizeId === b.sizeId) throw new AppError(`${b.code} is already size ${b.size?.code}.`, 400, 'SAME_SIZE')
+    if (!onOrder.has(l.toSizeId)) {
+      throw new AppError(`Pieces can be made only as a size on the order: ${[...onOrder.values()].join(', ')}.`, 400, 'NOT_ON_ORDER')
+    }
+  }
+
+  // Pieces that reached stitching past a step change nothing until their card is taken back.
+  const cameIn = await tx.processTransfer.findMany({
+    where: { moId, toStepId: step.id, isRework: false, status: { not: 'CANCELLED' }, lines: { some: { bundleId: { in: ids } } } },
+    select: { transferNumber: true, fromStepId: true },
+  })
+  const cameWrong = cameIn.map((t) => ({ t, by: passedBy(mo.steps, t.fromStepId, step.id) })).find((x) => x.by.length)
+  if (cameWrong) {
+    throw new AppError(
+      `${cameWrong.t.transferNumber} brought these pieces to ${step.name} past ${cameWrong.by.map((s) => s.name).join(', ')}. Take that card back first, then send the pieces on in the route's order.`,
+      409,
+      'TAKE_BACK_FIRST',
+    )
+  }
+
+  // Pieces given to an outside unit for this step were stitched there, where sizes do not change.
+  const viaUnit = await tx.processTransfer.findMany({
+    where: { moId, toStepId: step.id, vendorId: { not: null }, status: { not: 'CANCELLED' }, lines: { some: { bundleId: { in: ids } } } },
+    select: { transferNumber: true, vendor: { select: { name: true } }, lines: { select: { bundleId: true } } },
+  })
+  for (const t of viaUnit) {
+    const b = t.lines.map((l) => byId.get(l.bundleId)).find(Boolean)
+    if (b) {
+      throw new AppError(
+        `${b.code} was stitched by ${t.vendor?.name ?? 'an outside unit'} (${t.transferNumber}); sizes change only on pieces stitched on our own floor.`,
+        409,
+        'STITCHED_OUTSIDE',
+      )
+    }
+  }
+
+  // Pieces in hand first, then those done and waiting to go on.
+  const held = await balancesOf(tx, moId, moLineId)
+  const left = new Map<string, number>()
+  for (const r of held) if (r.stepId === step.id && !r.vendorId && (r.bucket === 'WIP' || r.bucket === 'DONE')) left.set(`${r.bundleId}|${r.bucket}`, (left.get(`${r.bundleId}|${r.bucket}`) ?? 0) + r.qty)
+  const asked = new Map<string, number>()
+  for (const l of lines) asked.set(l.bundleId, (asked.get(l.bundleId) ?? 0) + l.qty)
+  for (const [bundleId, n] of asked) {
+    const there = (left.get(`${bundleId}|WIP`) ?? 0) + (left.get(`${bundleId}|DONE`) ?? 0)
+    if (n > there) {
+      throw new AppError(`${byId.get(bundleId)!.code}: ${there} in hand or done at ${step.name}, so ${n} is more than there is.`, 409, 'NOT_ENOUGH_PIECES')
+    }
+  }
+  const take = (bundleId: string, bucket: 'WIP' | 'DONE', want: number) => {
+    const k = `${bundleId}|${bucket}`
+    const n = Math.min(want, left.get(k) ?? 0)
+    left.set(k, (left.get(k) ?? 0) - n)
+    return n
+  }
+
+  // A new bundle for each old bundle and new size, numbered next on the order.
+  const top = await tx.productionBundle.aggregate({ where: { moId }, _max: { bundleNo: true } })
+  let no = top._max.bundleNo ?? 0
+  const moves: Move[] = []
+  const made: Array<{ from: (typeof bundles)[number]; toId: string; toCode: string; toSizeId: string; qty: number }> = []
+  for (const l of lines) {
+    const from = byId.get(l.bundleId)!
+    const inHand = take(from.id, 'WIP', l.qty)
+    const done = take(from.id, 'DONE', l.qty - inHand)
+    no += 1
+    const child = await tx.productionBundle.create({
+      data: {
+        code: `${mo.moNumber}-B${String(no).padStart(3, '0')}`,
+        bundleNo: no,
+        moId,
+        moLineId,
+        cuttingOrderId: from.cuttingOrderId,
+        sizeId: l.toSizeId,
+        qty: l.qty,
+        parentId: from.id,
+        splitAtStepId: step.id,
+      },
+      select: { id: true, code: true },
+    })
+    moves.push(
+      { stepId: step.id, bundleId: from.id, bucket: 'WIP', qty: -inHand },
+      { stepId: step.id, bundleId: child.id, bucket: 'WIP', qty: inHand },
+      { stepId: step.id, bundleId: from.id, bucket: 'DONE', qty: -done },
+      { stepId: step.id, bundleId: child.id, bucket: 'DONE', qty: done },
+    )
+    made.push({ from, toId: child.id, toCode: child.code, toSizeId: l.toSizeId, qty: l.qty })
+  }
+  const event = await postEvent(tx, {
+    moId,
+    type: 'SIZE_CHANGE',
+    stepId: step.id,
+    reason: d.reason,
+    personName: d.personName,
+    eventDate: d.eventDate,
+    notes: d.notes,
+    clientKey: d.clientKey,
+    createdById: userId,
+    moves,
+    shortMessage: (detail) => `${detail}, so that is more than is in hand there.`,
+  })
+  for (const m of made) {
+    await tx.sizeChange.create({
+      data: {
+        moId,
+        moLineId,
+        stepId: step.id,
+        eventId: event.id,
+        fromBundleId: m.from.id,
+        toBundleId: m.toId,
+        fromSizeId: m.from.sizeId!,
+        toSizeId: m.toSizeId,
+        qty: m.qty,
+        reason: d.reason,
+        createdById: userId,
+      },
+    })
+  }
+  await syncProgress(tx, moId)
+  return {
+    eventId: event.id,
+    bundleIds: made.map((m) => m.toId),
+    duplicate: false,
+    step: step.name,
+    moves: made.map((m) => ({ from: m.from.code, fromSize: m.from.size?.code ?? '', to: m.toCode, toSize: onOrder.get(m.toSizeId) ?? '', qty: m.qty })),
+  }
+}
+
+/**
+ * Takes a size change back: the pieces go back into the bundles they came
+ * from, while every one of them is still where the change put them. The new
+ * bundles stay on record, marked undone.
+ */
+export async function undoSizeChange(tx: Tx, eventId: string, reason: string, userId: string) {
+  const ev = await tx.wipEvent.findUnique({ where: { id: eventId }, select: { moId: true, type: true } })
+  if (!ev || ev.type !== 'SIZE_CHANGE') throw new AppError('That size change was not found.', 404, 'NOT_FOUND')
+  await openMo(tx, ev.moId)
+  const out = await reverseEvent(tx, eventId, reason, userId)
+  await tx.sizeChange.updateMany({ where: { eventId }, data: { undoneAt: new Date(), undoneById: userId, undoReason: reason } })
+  await syncProgress(tx, ev.moId)
+  return out
+}
+
 // ─── Undo ─────────────────────────────────────────────────────
 
 const UNDOABLE: WipEventType[] = ['PROCESS', 'DECIDE', 'REWORK_DONE', 'VENDOR_RETURN', 'SETTLE']
@@ -1088,6 +1296,7 @@ const UNDOABLE: WipEventType[] = ['PROCESS', 'DECIDE', 'REWORK_DONE', 'VENDOR_RE
 export async function undoEvent(tx: Tx, eventId: string, reason: string, userId: string) {
   const ev = await tx.wipEvent.findUnique({ where: { id: eventId }, select: { moId: true, type: true, transferId: true, jobWorkOrderId: true } })
   if (!ev) throw new AppError('That entry was not found.', 404, 'NOT_FOUND')
+  if (ev.type === 'SIZE_CHANGE') return undoSizeChange(tx, eventId, reason, userId)
   await openMo(tx, ev.moId)
   if (!UNDOABLE.includes(ev.type)) {
     throw new AppError('Take that back on its own document: cancel the transfer, the cutting, or the finished-goods receipt.', 400, 'UNDO_ON_DOCUMENT')
@@ -1160,7 +1369,10 @@ export function figuresFrom(steps: FigureStep[], planned: number, held: Array<Pi
     // A working step sends pieces on, and packs them, straight from in hand:
     // those were done there too.
     const straightOn = outOf(s.id, 'WIP', ['DISPATCH', 'EXCESS', 'PACK'])
-    const completed = inOf(s.id, 'DONE', ['CUT', 'PROCESS', 'VENDOR_RETURN', 'REWORK_DONE', 'DECIDE']) - outOf(s.id, 'DONE', ['DECIDE']) + straightOn
+    // Done pieces made as another size here count as done in the size they
+    // are made as; for a job card or an order the two sides cancel out.
+    const completed =
+      inOf(s.id, 'DONE', ['CUT', 'PROCESS', 'VENDOR_RETURN', 'REWORK_DONE', 'DECIDE', 'SIZE_CHANGE']) - outOf(s.id, 'DONE', ['DECIDE', 'SIZE_CHANGE']) + straightOn
     const sentOn = outOf(s.id, 'DONE', ['DISPATCH', 'EXCESS']) + outOf(s.id, 'WIP', ['DISPATCH', 'EXCESS']) - inOf(s.id, 'DONE', ['SETTLE'])
     const figures = {
       received,

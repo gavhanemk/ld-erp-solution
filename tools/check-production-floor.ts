@@ -63,7 +63,25 @@ const ROLLBACK = new Error('ROLLBACK')
 const stamp = Date.now().toString(36)
 type Tx = Prisma.TransactionClient
 
+/** Only ever on this machine: the worktree's .env files point at the live database. */
+function refuseUnlessLocal() {
+  for (const name of ['DATABASE_URL', 'DIRECT_URL'] as const) {
+    const url = process.env[name]
+    if (!url && name === 'DIRECT_URL') continue
+    let host = ''
+    try {
+      host = new URL(url ?? '').hostname
+    } catch {
+      host = ''
+    }
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      throw new Error(`Refusing to run: ${name} points at "${host || 'nothing'}", not a database on this machine. Set DATABASE_URL and DIRECT_URL to the demo database and run again.`)
+    }
+  }
+}
+
 async function main() {
+  refuseUnlessLocal()
   const cust = await prisma.customer.findFirst({ where: { isActive: true, isBlacklisted: false, OR: [{ shippingStateCode: { not: null } }, { billingStateCode: { not: null } }] }, select: { id: true } })
   const brand = await prisma.brand.findFirst({ where: { isActive: true } })
   const fabric = await prisma.item.findUnique({ where: { code: 'FAB-COT-001' } })

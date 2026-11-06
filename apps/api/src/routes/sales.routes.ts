@@ -1203,17 +1203,21 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       }
     }
 
-    // Each size keeps what was already sent in it. A size cannot drop below
-    // that, nor come off a line while any of it has gone.
+    // Each size keeps what was already sent in it: a size cannot be lowered
+    // below that, nor come off a line while any of it has gone. Dispatch may
+    // send a size over its order within the line's total (sizes made as other
+    // sizes at stitching), so a size left as it was stands even then.
     data.lines.forEach((l, i) => {
       if (!l.id) return
       const old = oldLines.get(l.id)!
       const wanted = new Map((l.sizes ?? []).map((s) => [s.sizeId, s.qty]))
       for (const os of old.sizes) {
         const sent = Number(os.deliveredQty)
-        if (sent > 0 && (wanted.get(os.sizeId) ?? 0) < sent) {
+        const want = wanted.get(os.sizeId) ?? 0
+        if (sent > 0 && want < sent && want < Number(os.qty)) {
+          const floor = Math.min(sent, Number(os.qty))
           throw new AppError(
-            `Line ${i + 1}: ${sent} pieces of ${old.item.code} in size ${os.size.code} have already been sent, so that size cannot go below ${sent}`,
+            `Line ${i + 1}: ${sent} pieces of ${old.item.code} in size ${os.size.code} have already been sent, so that size cannot go below ${floor}`,
             409,
             'BELOW_DELIVERED',
           )

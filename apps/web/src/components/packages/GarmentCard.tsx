@@ -26,8 +26,31 @@ export interface GarmentDetail {
   poRef: string | null
   buyer: string | null
   receipt: { id: string; fgrNumber: string; receiptDate: string; cancelledAt: string | null }
-  bundle: { code: string; bundleNo: number; qty: number; cutOrder: string | null; cutDate: string | null; lot: string | null; jobCard: string | null } | null
-  production: Array<{ date: string; type: string; step: string; check: boolean; changes: string[]; ref: string | null; by: string | null; reversed: boolean }>
+  bundle: {
+    code: string
+    bundleNo: number
+    qty: number
+    cutOrder: string | null
+    cutDate: string | null
+    lot: string | null
+    jobCard: string | null
+    /** Made from another bundle when its pieces were made as this size at stitching: cut as M, made as L. */
+    madeFrom?: { code: string; size: string; step: string } | null
+  } | null
+  production: Array<{
+    date: string
+    type: string
+    step: string
+    check: boolean
+    changes: string[]
+    ref: string | null
+    by: string | null
+    reversed: boolean
+    /** The bundle whose pieces these were: the piece's own, or the one it was made from. */
+    bundle?: string | null
+    /** A size change: why it was made. */
+    sizeChange?: { made: boolean; reason: string } | null
+  }>
   events: Array<{ type: string; notes: string | null; referenceNumber: string | null; by: string | null; at: string }>
 }
 
@@ -53,6 +76,8 @@ const EVENT: Record<string, string> = {
   VOIDED: 'Tag withdrawn',
 }
 const day = (d: string | null) => (d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—')
+/** MO-2627-0001-B003 → B003. */
+const shortBundle = (code: string) => code.split('-').pop() ?? code
 const when = (d: string) => new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })
 
 /**
@@ -99,6 +124,7 @@ export function GarmentCard({ g, onChange, onDone }: { g: GarmentDetail; onChang
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 text-sm sm:grid-cols-4">
             <Fact label="Size">
               <span className="text-2xl font-bold text-foreground">{g.size || '—'}</span>
+              {g.bundle?.madeFrom && <div className="text-xs text-muted-foreground">Cut as {g.bundle.madeFrom.size}</div>}
             </Fact>
             <Fact label="Colour">{g.color}</Fact>
             <Fact label="Store">{g.store}</Fact>
@@ -171,7 +197,10 @@ export function GarmentCard({ g, onChange, onDone }: { g: GarmentDetail; onChang
               <p className="text-sm text-muted-foreground">
                 Sewn in bundle <span className="font-mono font-semibold text-foreground">{g.bundle.code}</span> ({g.bundle.qty} pieces)
                 {g.bundle.cutOrder ? `, cut on ${g.bundle.cutOrder} ${day(g.bundle.cutDate)}` : ''}
-                {g.bundle.jobCard ? ` · job card ${g.bundle.jobCard}` : ''}. The steps below are that bundle's.
+                {g.bundle.jobCard ? ` · job card ${g.bundle.jobCard}` : ''}.{' '}
+                {g.bundle.madeFrom
+                  ? `Its pieces were cut as ${g.bundle.madeFrom.size} in bundle ${shortBundle(g.bundle.madeFrom.code)} and made as ${g.size || 'this size'} at ${g.bundle.madeFrom.step}: the steps before that are ${shortBundle(g.bundle.madeFrom.code)}'s.`
+                  : "The steps below are that bundle's."}
               </p>
               <ol className="space-y-1.5">
                 {g.production.map((e, i) => (
@@ -183,6 +212,10 @@ export function GarmentCard({ g, onChange, onDone }: { g: GarmentDetail; onChang
                       </span>{' '}
                       <span className="text-foreground">{e.changes.join(', ')}</span>
                       {e.reversed && <span className="ml-1 text-xs">(reversed)</span>}
+                      {!e.sizeChange && e.bundle && e.bundle !== g.bundle?.code && (
+                        <span className="ml-1.5 rounded border border-border bg-secondary px-1.5 font-mono text-[11px] text-muted-foreground">{shortBundle(e.bundle)}</span>
+                      )}
+                      {e.sizeChange?.reason && <div className="text-xs text-foreground">Why: {e.sizeChange.reason}</div>}
                       <div className="text-xs text-muted-foreground">
                         {when(e.date)}
                         {e.by ? ` · ${e.by}` : ''}

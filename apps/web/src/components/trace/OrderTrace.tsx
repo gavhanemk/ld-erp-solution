@@ -25,7 +25,12 @@ export interface OrderItem {
   scrapped: number
   /** Where its pieces are on the floor now. */
   nowAt: Array<{ step: string; qty: number; outside: boolean }>
-  sizes: Array<{ code: string; ordered: number; cut: number; intoFg: number; inStore: number; despatched: number }>
+  /**
+   * Size by size. `changed` is what size changes at stitching moved into (+)
+   * or out of (−) the size; `revised` is ordered + changed, what finished
+   * goods follow. The sales order keeps the buyer's sizes.
+   */
+  sizes: Array<{ code: string; ordered: number; cut: number; changed?: number; revised?: number; intoFg: number; inStore: number; despatched: number }>
 }
 
 export interface OrderStory {
@@ -102,13 +107,23 @@ function ItemsView({ items, open }: { items: OrderItem[]; open: (t: Target) => v
       </Section>
     )
   }
-  const sizeRows: Array<{ key: 'ordered' | 'cut' | 'intoFg' | 'inStore' | 'despatched'; label: string }> = [
+  type SizeKey = 'ordered' | 'cut' | 'changed' | 'revised' | 'intoFg' | 'inStore' | 'despatched'
+  type SizeCell = OrderItem['sizes'][number]
+  const sizeRows: Array<{ key: SizeKey; label: string; hint?: string }> = [
     { key: 'ordered', label: 'Ordered' },
     { key: 'cut', label: 'Cut' },
+    { key: 'changed', label: 'Size changed', hint: 'Pieces made as this size (+) or as another size (−) at stitching' },
+    { key: 'revised', label: 'Revised', hint: 'Ordered, plus or minus the size changes: what finished goods follow' },
     { key: 'intoFg', label: 'Finished' },
     { key: 'inStore', label: 'In the store' },
     { key: 'despatched', label: 'Despatched' },
   ]
+  const val = (z: SizeCell, k: SizeKey) => (k === 'changed' ? (z.changed ?? 0) : k === 'revised' ? (z.revised ?? z.ordered + (z.changed ?? 0)) : z[k])
+  /** "+20", "−20". */
+  const signed = (v: number) => (v > 0 ? `+${qty(v)}` : `−${qty(-v)}`)
+  const changedIn = (it: OrderItem) => it.sizes.filter((z) => (z.changed ?? 0) !== 0)
+  // Rows for a size change only on an item that had one.
+  const rowsFor = (it: OrderItem) => (changedIn(it).length ? sizeRows : sizeRows.filter((r) => r.key !== 'changed' && r.key !== 'revised'))
   return (
     <div className="space-y-3">
       {items.map((it) => (
@@ -157,23 +172,46 @@ function ItemsView({ items, open }: { items: OrderItem[]; open: (t: Target) => v
                     </tr>
                   </thead>
                   <tbody>
-                    {sizeRows.map((r) => {
-                      const total = it.sizes.reduce((t, z) => t + z[r.key], 0)
+                    {rowsFor(it).map((r) => {
+                      const total = it.sizes.reduce((t, z) => t + val(z, r.key), 0)
                       return (
                         <tr key={r.key}>
-                          <td className="whitespace-nowrap font-medium text-foreground">{r.label}</td>
-                          {it.sizes.map((z) => (
-                            <td key={z.code} className={`text-right tabular-nums ${r.key !== 'ordered' && z[r.key] < z.ordered ? 'text-muted-foreground' : ''}`}>
-                              {z[r.key] ? qty(z[r.key]) : <span className="text-muted-foreground">—</span>}
-                            </td>
-                          ))}
-                          <td className="text-right font-semibold tabular-nums">{qty(total)}</td>
+                          <td className="whitespace-nowrap font-medium text-foreground" title={r.hint}>
+                            {r.label}
+                          </td>
+                          {it.sizes.map((z) => {
+                            const v = val(z, r.key)
+                            if (r.key === 'changed') {
+                              return (
+                                <td key={z.code} className={`text-right font-semibold tabular-nums ${v > 0 ? 'text-emerald-600' : v < 0 ? 'warn-text' : ''}`}>
+                                  {v ? signed(v) : <span className="font-normal text-muted-foreground">—</span>}
+                                </td>
+                              )
+                            }
+                            // Cut is against the order; what comes after the change, against the revised count.
+                            const against = r.key === 'cut' ? z.ordered : val(z, 'revised')
+                            return (
+                              <td
+                                key={z.code}
+                                className={`text-right tabular-nums ${r.key === 'revised' ? 'font-semibold text-foreground' : r.key !== 'ordered' && v < against ? 'text-muted-foreground' : ''}`}
+                              >
+                                {v ? qty(v) : <span className="text-muted-foreground">—</span>}
+                              </td>
+                            )
+                          })}
+                          <td className="text-right font-semibold tabular-nums">{r.key === 'changed' ? <span className="text-muted-foreground">{total ? signed(total) : '0'}</span> : qty(total)}</td>
                         </tr>
                       )
                     })}
                   </tbody>
                 </table>
               </div>
+            )}
+            {changedIn(it).length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                Sizes changed at stitching: {changedIn(it).map((z) => `${z.code} ${signed(z.changed ?? 0)}`).join(', ')}. The sales order keeps the buyer&apos;s sizes; finished goods come in as the
+                pieces were made, and the delivery challan decides how many of each size go.
+              </p>
             )}
           </div>
         </div>

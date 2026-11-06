@@ -1,5 +1,6 @@
 import type { MOStatus, Prisma, PrismaClient } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { netSizeChanges } from './sizeChanges.service'
 
 type Db = PrismaClient | Prisma.TransactionClient
 
@@ -96,6 +97,7 @@ export async function orderForPlanning(db: Db, soId: string, exceptMoId?: string
       mo: { status: { not: 'CLOSED' }, ...(exceptMoId ? { id: { not: exceptMoId } } : {}) },
     },
     select: {
+      id: true,
       soLineId: true,
       totalQty: true,
       sizes: { select: { sizeId: true, qty: true } },
@@ -105,8 +107,12 @@ export async function orderForPlanning(db: Db, soId: string, exceptMoId?: string
     },
   })
   // An order completed short (597 of 600) holds only what it packed: the
-  // pieces it never made are free to plan again.
+  // pieces it never made are free to plan again. Size by size it holds what
+  // it packed, up to each size as made: its plan moved by any size jumps at
+  // stitching (cut as M, made as L), so an L made in place of an M counts
+  // as an L.
   const shortIds = [...new Set(plannedRows.filter((p) => p.mo.status === 'COMPLETED' && p.mo.closedAt).map((p) => p.moId))]
+  const jumpsOf = new Map(await Promise.all(shortIds.map(async (moId) => [moId, await netSizeChanges(db, { moId })] as const)))
   const packedRows = shortIds.length
     ? await db.finishedGoodsReceiptLine.findMany({
         where: { receipt: { moId: { in: shortIds }, cancelledAt: null } },
@@ -123,10 +129,15 @@ export async function orderForPlanning(db: Db, soId: string, exceptMoId?: string
     shortIds.includes(p.moId) && p.soLine
       ? {
           soLineId: p.soLineId,
+          // Sizes changed at stitching on an order completed short: only the line's total is still to make.
+          jumped: p.sizes.some((z) => (jumpsOf.get(p.moId)?.(p.id, z.sizeId) ?? 0) !== 0),
           totalQty: Math.min(p.totalQty, packedOf(p.moId, p.soLine.itemId, null)),
-          sizes: p.sizes.map((z) => ({ sizeId: z.sizeId, qty: Math.min(z.qty, packedOf(p.moId, p.soLine!.itemId, z.sizeId)) })),
+          sizes: p.sizes.map((z) => {
+            const revised = Math.max(0, z.qty + (jumpsOf.get(p.moId)?.(p.id, z.sizeId) ?? 0))
+            return { sizeId: z.sizeId, qty: Math.min(revised, packedOf(p.moId, p.soLine!.itemId, z.sizeId)) }
+          }),
         }
-      : { soLineId: p.soLineId, totalQty: p.totalQty, sizes: p.sizes },
+      : { soLineId: p.soLineId, jumped: false, totalQty: p.totalQty, sizes: p.sizes },
   )
 
   const lines = await Promise.all(
@@ -139,6 +150,13 @@ export async function orderForPlanning(db: Db, soId: string, exceptMoId?: string
       for (const p of mine) for (const s of p.sizes) plannedBySize.set(s.sizeId, (plannedBySize.get(s.sizeId) ?? 0) + s.qty)
       const plannedTotal = mine.reduce((s, p) => s + p.totalQty, 0)
       const ordered = Number(l.totalQty)
+      const remaining = Math.max(0, ordered - plannedTotal)
+      // What each size has left, in the order's size run, never more in all
+      // than the line has left: after a size jump one size can be made over
+      // its order and another under, and only the line's total is still to
+      // make (ordered M 200 / L 150, packed M 175 / L 170 on an order
+      // completed short: 5 left, all M — not 25 M).
+      let left = mine.some((p) => p.jumped) ? remaining : Number.POSITIVE_INFINITY
       return {
         soLineId: l.id,
         item: { id: l.item.id, code: l.item.code, name: l.item.name },
@@ -152,10 +170,12 @@ export async function orderForPlanning(db: Db, soId: string, exceptMoId?: string
             : null,
         ordered,
         planned: plannedTotal,
-        remaining: Math.max(0, ordered - plannedTotal),
+        remaining,
         sizes: l.sizes.map((s) => {
           const was = plannedBySize.get(s.sizeId) ?? 0
-          return { sizeId: s.sizeId, code: s.size.code, ordered: Number(s.qty), planned: was, remaining: Math.max(0, Number(s.qty) - was) }
+          const own = Math.min(Math.max(0, Number(s.qty) - was), left)
+          left -= own
+          return { sizeId: s.sizeId, code: s.size.code, ordered: Number(s.qty), planned: was, remaining: own }
         }),
       }
     }),
@@ -168,7 +188,9 @@ export async function orderForPlanning(db: Db, soId: string, exceptMoId?: string
  *
  * For every BOM line: the pieces of each size times that size's quantity per
  * piece (the line's own where the BOM gives none by size), wastage already
- * in. Grouped by material, by whose it is — a customer-supplied line draws on
+ * in. A material that differs by size counts each size as now made, after
+ * any size jumps at stitching; cloth, cut before, counts the sizes planned.
+ * Grouped by material, by whose it is — a customer-supplied line draws on
  * the customer's own stock — and by the department the BOM gives it to, which
  * is who asks the store for it. Beside each: what is in stock, store by
  * store, what this order has already asked for, and what has been issued.
@@ -181,6 +203,7 @@ export async function orderForPlanning(db: Db, soId: string, exceptMoId?: string
  * plan's "ours / customer's" switch — keyed by item and department.
  */
 export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<string> } = {}) {
+  const jumped = await netSizeChanges(db, { moId })
   const mo = await db.manufacturingOrder.findUnique({
     where: { id: moId },
     select: {
@@ -188,6 +211,7 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
       moNumber: true,
       status: true,
       so: { select: { id: true, soNumber: true, customerId: true, isJobWork: true, customer: { select: { name: true } } } },
+      steps: { select: { departmentId: true, sequence: true, sizeChanges: { where: { undoneAt: null }, select: { id: true }, take: 1 } } },
       lines: {
         select: {
           id: true,
@@ -226,6 +250,11 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     },
   })
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  // Where sizes first changed on this order's route, and where each department first works on it:
+  // what a department uses before that step was used in the sizes as cut.
+  const jumpAt = Math.min(Infinity, ...mo.steps.filter((s) => s.sizeChanges.length).map((s) => s.sequence))
+  const firstStepOf = new Map<string, number>()
+  for (const s of mo.steps) firstStepOf.set(s.departmentId, Math.min(firstStepOf.get(s.departmentId) ?? Infinity, s.sequence))
 
   // What this customer has sent us before: on a job-work order, theirs to use.
   const supplied = new Set<string>(
@@ -261,14 +290,24 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
       missing.push({ style: line.style.code, color: line.color, pieces: line.totalQty })
       continue
     }
+    // Each size as it is now made: the plan moved by size jumps at stitching
+    // (20 cut as M made as L: M 180, L 170). The line's total is the same.
+    const revised = line.sizes.map((sz) => ({ sizeId: sz.sizeId, qty: Math.max(0, sz.qty + jumped(line.id, sz.sizeId)) }))
     for (const b of line.bom.lines) {
-      const bySize = new Map(b.sizes.map((s) => [s.sizeId, Number(s.effectiveQty)]))
-      const required = line.sizes.length
-        ? line.sizes.reduce((s, sz) => s + sz.qty * (bySize.get(sz.sizeId) ?? Number(b.effectiveQty)), 0)
-        : line.totalQty * Number(b.effectiveQty)
-      const baseKey = `${b.componentItem.id}|${b.department?.id ?? ''}`
       const cat = b.componentItem.category
       const isFabric = /fabric/i.test(cat?.name ?? '') || /fabric/i.test(cat?.parent?.name ?? '')
+      const bySize = new Map(b.sizes.map((s) => [s.sizeId, Number(s.effectiveQty)]))
+      // A material that differs by size (a size label) follows the sizes as
+      // made, so the labels for a size jumped into can be asked for. Cloth,
+      // and whatever Cutting draws, was used before any size changed, in the
+      // sizes planned, so it stays on the plan. A material the same for every
+      // size comes to the same total either way.
+      const cutBefore = isFabric || /cutting/i.test(b.department?.name ?? '') || (!!b.department && (firstStepOf.get(b.department.id) ?? Infinity) < jumpAt)
+      const counts = b.sizes.length && !cutBefore ? revised : line.sizes
+      const required = line.sizes.length
+        ? counts.reduce((s, sz) => s + sz.qty * (bySize.get(sz.sizeId) ?? Number(b.effectiveQty)), 0)
+        : line.totalQty * Number(b.effectiveQty)
+      const baseKey = `${b.componentItem.id}|${b.department?.id ?? ''}`
       const byDefault = !!mo.so && (b.customerSupplied || (mo.so.isJobWork && (supplied.has(b.componentItem.id) || isFabric)))
       const theirs = !!mo.so && (opts.swap?.has(baseKey) ? !byDefault : byDefault)
       const ownership = theirs ? 'CUSTOMER_OWNED' : 'OWNED'

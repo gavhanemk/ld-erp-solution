@@ -10,6 +10,7 @@ import { applyRouting, assertSameStages, editRoute, editRouteSchema, passedBy, r
 import {
   billSchema,
   cancelTransfer,
+  changeSizes,
   closeJobWorkOrder,
   decide,
   decideSchema,
@@ -28,12 +29,15 @@ import {
   setReturnBill,
   settleSchema,
   settleShort,
+  sizeChangeSchema,
   undoEvent,
+  undoSizeChange,
   vendorReturn,
   vendorReturnSchema,
   workSchema,
 } from '../services/floor.service'
 import { flowSummary } from '../services/floorView.service'
+import { orderSizes, sizeChangeHistory } from '../services/sizeChanges.service'
 import { processCode } from '../services/challanNo'
 import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
@@ -94,8 +98,8 @@ router.post('/orders/:id/routing', requirePermission(MODULE, 'edit'), async (req
     if (oldCuts.length) {
       const which = oldCuts.map((c) => c.cutOrderNumber).join(', ')
       throw new AppError(
-        `${mo.moNumber} was cut the old way (${which}) before its stages were set up, so it carries on without stages: record its cutting under Cutting on the order, and book what is packed in Inventory → Finished Goods In. ${
-          mo.totalPackedQty > 0 ? 'Some of it is already packed, so it stays without stages.' : `To use stages instead, cancel ${oldCuts.length === 1 ? 'that cutting' : 'those cuttings'} first.`
+        `${mo.moNumber} was cut the old way (${which}) before its stages were set up, so it carries on without stages: book what is packed in Inventory → Finished Goods In. ${
+          mo.totalPackedQty > 0 ? 'Some of it is already packed, so it stays without stages.' : `To use stages instead, first cancel ${oldCuts.length === 1 ? 'that cutting' : 'those cuttings'} under Cutting on the order.`
         }`,
         409,
         'CUT_WITHOUT_ROUTE',
@@ -539,7 +543,66 @@ router.post('/events/:id/undo', requirePermission(MODULE, 'edit'), async (req: A
   const { reason } = reasonSchema.parse(req.body)
   const out = await prisma.$transaction((tx) => undoEvent(tx, req.params.id, reason, req.user!.id), T)
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'WipEvent', entityId: req.params.id, after: { undoneBy: out.reversal.id, reason } })
+  if (out.event.type === 'SIZE_CHANGE') await auditSizeChangeUndo(req, req.params.id, out.event.moId, reason)
   res.json({ success: true, message: 'Undone: the pieces are back where they were.' })
+})
+
+// ─── Size changes (size jumps at stitching) ───────────────────
+
+/** "20 pcs M → L, 50 pcs XL → XXL": a size change in a line. */
+const sizeMoves = (moves: Array<{ fromSize: string; toSize: string; qty: number }>) => {
+  const by = new Map<string, number>()
+  for (const m of moves) by.set(`${m.fromSize} → ${m.toSize}`, (by.get(`${m.fromSize} → ${m.toSize}`) ?? 0) + m.qty)
+  return [...by].map(([k, n]) => `${pcs(n)} pcs ${k}`).join(', ')
+}
+
+/** The order's history line for a size change taken back: what it moved, and why it was taken back. */
+async function auditSizeChangeUndo(req: AuthRequest, eventId: string, moId: string, reason: string) {
+  const rows = await prisma.sizeChange.findMany({
+    where: { eventId },
+    select: { qty: true, step: { select: { name: true } }, fromBundle: { select: { code: true } }, toBundle: { select: { code: true } }, fromSize: { select: { code: true } }, toSize: { select: { code: true } } },
+  })
+  const moves = rows.map((r) => ({ from: r.fromBundle.code, fromSize: r.fromSize.code, to: r.toBundle.code, toSize: r.toSize.code, qty: r.qty }))
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: moId, after: { sizeChangeUndone: { eventId, step: rows[0]?.step.name ?? null, reason, moves } } })
+  return moves
+}
+
+/** GET /orders/:id/sizes — each line's sizes: planned, moved by size changes, revised, packed; and every size change. */
+router.get('/orders/:id/sizes', requirePermission(MODULE, 'view'), async (req, res) => {
+  const [lines, history] = await Promise.all([orderSizes(prisma, req.params.id), sizeChangeHistory(prisma, { moId: req.params.id })])
+  res.json({ success: true, data: { lines, history } })
+})
+
+/**
+ * POST /orders/:id/size-changes — pieces made as another size at stitching
+ * (a size jump), each bundle's into a new bundle of the new size. Anyone who
+ * records the floor's work may, with a reason. Prints follow: the new bundles' stickers.
+ */
+router.post('/orders/:id/size-changes', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = sizeChangeSchema.parse(req.body)
+  const out = await prisma.$transaction((tx) => changeSizes(tx, req.params.id, data, req.user!.id), T)
+  if (out.duplicate) return res.json({ success: true, message: 'That was already saved.', data: { eventId: out.eventId, bundleIds: out.bundleIds } })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'ManufacturingOrder',
+    entityId: req.params.id,
+    after: { sizeChange: { eventId: out.eventId, step: out.step, reason: data.reason, moves: out.moves } },
+  })
+  const made = out.moves!.map((m) => m.to.split('-').pop()).join(', ')
+  res.status(201).json({
+    success: true,
+    message: `Sizes changed at ${out.step}: ${sizeMoves(out.moves!)}. New ${out.moves!.length === 1 ? 'bundle' : 'bundles'} ${made}: print ${out.moves!.length === 1 ? 'its sticker' : 'their stickers'}.`,
+    data: { eventId: out.eventId, bundleIds: out.bundleIds },
+  })
+})
+
+/** POST /size-changes/:eventId/undo — the pieces go back to their bundles, while still where the change put them. production:edit, like every undo. */
+router.post('/size-changes/:eventId/undo', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { reason } = reasonSchema.parse(req.body)
+  const out = await prisma.$transaction((tx) => undoSizeChange(tx, req.params.eventId, reason, req.user!.id), T)
+  const moves = await auditSizeChangeUndo(req, req.params.eventId, out.event.moId, reason)
+  res.json({ success: true, message: `Size change undone (${sizeMoves(moves)}): the pieces are back in the bundles they came from.` })
 })
 
 // ─── Job work orders ──────────────────────────────────────────
@@ -775,7 +838,12 @@ router.post('/cutting/:id/receive', requirePermission(MODULE, 'create'), async (
 
 // ─── Prints: bundle stickers and the cutting document ─────────
 
-/** GET /orders/:id/stickers?cutting=&ids=a,b — what each bundle's sticker says. */
+/**
+ * GET /orders/:id/stickers?cutting=&line=&ids=a,b — what each bundle's sticker says. A bundle made
+ * from another by a size change at stitching names the bundle and size it was made from, and every
+ * bundle says what it holds now beside what was tied into it. `cutting` gives the bundles cut in
+ * that lay only, not those made from them later as another size (`line` and `ids` give those too).
+ */
 router.get('/orders/:id/stickers', requirePermission(MODULE, 'view'), async (req, res) => {
   const cuttingId = text(req.query.cutting)
   const moLineId = text(req.query.line)
@@ -789,7 +857,12 @@ router.get('/orders/:id/stickers', requirePermission(MODULE, 'view'), async (req
   })
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   const bundles = await prisma.productionBundle.findMany({
-    where: { moId: req.params.id, ...(cuttingId ? { cuttingOrderId: cuttingId } : {}), ...(moLineId ? { moLineId } : {}), ...(ids.length ? { id: { in: ids } } : {}) },
+    where: {
+      moId: req.params.id,
+      ...(cuttingId ? { cuttingOrderId: cuttingId, parentId: null } : {}),
+      ...(moLineId ? { moLineId } : {}),
+      ...(ids.length ? { id: { in: ids } } : {}),
+    },
     orderBy: { bundleNo: 'asc' },
     select: {
       id: true,
@@ -797,22 +870,48 @@ router.get('/orders/:id/stickers', requirePermission(MODULE, 'view'), async (req
       bundleNo: true,
       qty: true,
       size: { select: { code: true } },
+      parent: { select: { code: true, bundleNo: true, size: { select: { code: true } } } },
+      sizeChangeIn: { select: { undoneAt: true } },
       moLine: { select: { color: true, style: { select: { code: true, name: true } } } },
       cuttingOrder: { select: { cutOrderNumber: true, cutDate: true, lotNo: true, status: true } },
     },
   })
+  // What each bundle holds now: the sum of its entries anywhere on the floor (a balance is never
+  // stored), leaving out pieces packed into finished goods or written off — those have left it.
+  // Pieces short, damaged or set aside still count: they wait for a decision against the bundle.
+  // A bundle with no entries at all holds what was tied into it.
+  const gone = new Set<string>(['PACKED', 'PACKED_B', 'SCRAPPED'])
+  const held = bundles.length
+    ? await prisma.wipEntry.groupBy({ by: ['bundleId', 'bucket'], where: { bundleId: { in: bundles.map((b) => b.id) } }, _sum: { qty: true } })
+    : []
+  const now = new Map<string, number>()
+  for (const r of held) now.set(r.bundleId, (now.get(r.bundleId) ?? 0) + (gone.has(r.bucket) ? 0 : (r._sum.qty ?? 0)))
   const company = await prisma.company.findFirst({ select: { name: true } })
   res.json({
     success: true,
     data: {
       company: company?.name ?? '',
       mo,
-      bundles: bundles.filter((b) => b.cuttingOrder.status !== 'CANCELLED'),
+      bundles: bundles
+        .map((b) => ({
+          id: b.id,
+          code: b.code,
+          bundleNo: b.bundleNo,
+          qty: b.qty,
+          now: now.get(b.id) ?? b.qty,
+          size: b.size,
+          parent: b.parent,
+          undone: !!b.sizeChangeIn?.undoneAt,
+          moLine: b.moLine,
+          cuttingOrder: b.cuttingOrder,
+        }))
+        // Not a cancelled lay's, and not a bundle of a size change since undone that holds nothing.
+        .filter((b) => b.cuttingOrder.status !== 'CANCELLED' && !(b.undone && b.now === 0)),
     },
   })
 })
 
-/** GET /cutting/:id/print — the cutting document: the lay, sizes planned and cut, and the bundles. */
+/** GET /cutting/:id/print — the cutting document: the lay, sizes planned and cut, the bundles, and any made from them later as another size. */
 router.get('/cutting/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
   const cut = await prisma.cuttingOrder.findUnique({
     where: { id: req.params.id },
@@ -845,18 +944,50 @@ router.get('/cutting/:id/print', requirePermission(MODULE, 'view'), async (req, 
           so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } },
         },
       },
-      bundles: { orderBy: { bundleNo: 'asc' }, select: { id: true, code: true, bundleNo: true, qty: true, size: { select: { code: true } } } },
+      bundles: {
+        orderBy: { bundleNo: 'asc' },
+        select: {
+          id: true,
+          code: true,
+          bundleNo: true,
+          qty: true,
+          size: { select: { code: true } },
+          parentId: true,
+          sizeChangeIn: {
+            select: { qty: true, undoneAt: true, step: { select: { name: true } }, fromBundle: { select: { bundleNo: true } }, fromSize: { select: { code: true } }, toSize: { select: { code: true } } },
+          },
+        },
+      },
     },
   })
   if (!cut) throw new AppError('Cutting not found', 404, 'NOT_FOUND')
+  // A bundle made later from one of this lay's, as another size at stitching, carries the lay too
+  // (every piece traces back to where it was cut) but was not cut here: the document lists only the
+  // bundles tied at cutting, and names the others in a note under them. Undone ones are left out.
+  const bundles = cut.bundles.filter((b) => !b.parentId).map((b) => ({ id: b.id, code: b.code, bundleNo: b.bundleNo, qty: b.qty, size: b.size }))
+  const madeAsOtherSize = cut.bundles.flatMap((b) =>
+    b.parentId && b.sizeChangeIn && !b.sizeChangeIn.undoneAt
+      ? [
+          {
+            id: b.id,
+            bundleNo: b.bundleNo,
+            size: b.sizeChangeIn.toSize.code,
+            qty: b.sizeChangeIn.qty,
+            fromBundleNo: b.sizeChangeIn.fromBundle.bundleNo,
+            fromSize: b.sizeChangeIn.fromSize.code,
+            step: b.sizeChangeIn.step.name,
+          },
+        ]
+      : [],
+  )
   // Where its bundles are now: what has gone on to the next step.
   const held = await balancesOf(prisma, cut.mo.id)
-  const ids = new Set(cut.bundles.map((b) => b.id))
+  const ids = new Set(bundles.map((b) => b.id))
   const atCutting = held.filter((r) => ids.has(r.bundleId) && r.bucket === 'DONE')
   const steps = await prisma.mOStep.findMany({ where: { moId: cut.mo.id, kind: 'CUTTING' }, select: { id: true } })
   const cuttingStepIds = new Set(steps.map((s) => s.id))
   const waiting = atCutting.filter((r) => cuttingStepIds.has(r.stepId)).reduce((s, r) => s + r.qty, 0)
-  res.json({ success: true, data: { ...(await getPrintHeader('CUT')), cutting: cut, waitingAtCutting: waiting } })
+  res.json({ success: true, data: { ...(await getPrintHeader('CUT')), cutting: { ...cut, bundles }, madeAsOtherSize, waitingAtCutting: waiting } })
 })
 
 export default router

@@ -37,11 +37,13 @@ const isFinished = (f: MoFlowFacts) =>
 
 /**
  * An order cut the old way, from its own Cutting, before it had stages: the server refuses
- * stages for it (CUT_WITHOUT_ROUTE). Said the same on the strip and the Stages tab.
+ * stages for it (CUT_WITHOUT_ROUTE). No more cutting is recorded that way (6 Nov 2026), so it
+ * carries on as it is. Said the same on the strip, the Stages tab and the job card; `where`
+ * says where its cuttings can be cancelled from.
  */
-export function oldCutNote(cuts: string[], packed: number, where = 'under Cutting') {
-  return `Cut the old way (${cuts.join(', ')}) before stages were set up, so this order carries on without stages: record its cutting ${where}, and book what is packed in Inventory → Finished Goods In. ${
-    packed > 0 ? 'Some of it is already packed, so it stays without stages.' : `To use stages instead, cancel ${cuts.length === 1 ? 'that cutting' : 'those cuttings'} first.`
+export function oldCutNote(cuts: string[], packed: number, where = 'under Cutting on the Stages tab') {
+  return `Cut the old way (${cuts.join(', ')}) before stages were set up, so this order carries on without stages: book what is packed in Inventory → Finished Goods In. ${
+    packed > 0 ? 'Some of it is already packed, so it stays without stages.' : `To use stages instead, first cancel ${cuts.length === 1 ? 'that cutting' : 'those cuttings'} ${where}.`
   }`
 }
 

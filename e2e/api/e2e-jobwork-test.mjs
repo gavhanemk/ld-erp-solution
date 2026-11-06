@@ -1,8 +1,9 @@
 // A job-work order end to end, on the DEMO API (E2E_API, default 5101) and DEMO database (lderp_demo) only:
 // BOM → order → customer's fabric received, QC'd, approved → MO → requisition,
-// issue → cutting against the BOM → floor return → finished goods → dispatch →
-// invoice (with our own trims billed) → payment → closing, with the
-// customer's material accounted for. Then the closing rule's exceptions.
+// issue → stages → cutting on the cutting sheet, against the BOM → floor
+// return → cutting to packing → finished goods → dispatch → invoice (with our
+// own trims billed) → payment → closing, with the customer's material
+// accounted for. Then the closing rule's exceptions.
 import { API, demoDb, adminLogin, staffLogins, exit } from '../lib/demo.mjs'
 const db = await demoDb()
 const q = async (sql, p = []) => (await db.query(sql, p)).rows
@@ -41,6 +42,31 @@ const settleLabels = async (type, id) => {
 const receiveQcApprove = async (body) => {
   const rcv = must(await call('POST', '/inventory/customer-grn', { action: 'SUBMIT', ...body }, KEEPER), 'receipt')
   return { rcv, qc: (rejects) => call('POST', `/inventory/customer-grn/${rcv.id}/inspect`, { lines: rcv.lines.map((l, i) => ({ lineId: l.id, rejectedQty: rejects?.[i]?.qty ?? 0, rejectReason: rejects?.[i]?.reason ?? null })), inspectionNotes: 'Shade and width checked, roll by roll' }, QC) }
+}
+
+// Every order is cut on its cutting sheet once its stages are set up (6 Nov 2026). The tests' own
+// routing for LD-SH-2601 is cutting then packing, both on our floor: made once through the API,
+// switched on only while an order takes its stages, so it is never offered on real orders nor
+// shown as the style's routing.
+const TEST_ROUTING = 'ZZTEST-RT-CUTPACK'
+const stagesFor = async (moId) => {
+  const op = async (code) => (await q(`SELECT id, "departmentId" FROM operations WHERE code = $1`, [code]))[0]
+  const cutOp = await op('OP-CUT'), pkgOp = await op('OP-PKG')
+  if (!cutOp || !pkgOp) { console.log('setup failed: processes OP-CUT and OP-PKG are not in the demo masters'); process.exit(1) }
+  let rt = (await q(`SELECT id, "isActive" a FROM routings WHERE code = $1`, [TEST_ROUTING]))[0]
+  if (!rt) {
+    rt = must(await call('POST', '/masters/routings', {
+      code: TEST_ROUTING, name: 'ZZTEST cut and pack (API tests)', styleId: STYLE, notes: 'Made by the API tests; switched off between runs.',
+      steps: [
+        { sequence: 1, operationId: cutOp.id, departmentId: cutOp.departmentId, execution: 'IN_HOUSE', skip: 'NEVER' },
+        { sequence: 2, operationId: pkgOp.id, departmentId: pkgOp.departmentId, execution: 'IN_HOUSE' },
+      ],
+    }), 'test routing')
+  } else if (!rt.a) must(await call('PATCH', `/masters/routings/${rt.id}`, { isActive: true }), 'test routing on')
+  const r = await call('POST', `/production/orders/${moId}/routing`, { routingId: rt.id })
+  must(await call('PATCH', `/masters/routings/${rt.id}`, { isActive: false }), 'test routing off')
+  const steps = await q(`SELECT id, kind::text k FROM mo_steps WHERE "moId"=$1 ORDER BY sequence`, [moId])
+  return { r, cutStep: steps.find((s) => s.k === 'CUTTING')?.id, packStep: steps.find((s) => s.k === 'PACKING')?.id, count: steps.length }
 }
 
 // ── 1. The BOM: Sky Blue shirt, the customer's poplin by size, our buttons ──
@@ -103,9 +129,16 @@ const mrId = (await q(`SELECT "mrId" FROM material_requisition_lines WHERE "mrId
 const outNow = await q(`SELECT "itemId", SUM("outQty")::float8 n FROM stock_ledger WHERE "referenceId" = ANY($1::text[]) GROUP BY 1`, [mrIds])
 check('P3', `two requisitions (cutting, stitching) issued: 290 m of their fabric and 1,600 of our buttons`, mrIds.length === 2 && issues.every((r) => r.status === 200) && outNow.find((r) => r.itemId === FAB)?.n === 290 && outNow.find((r) => r.itemId === BTN)?.n === 1600, `${issues.map(err).join(' | ')} ${JSON.stringify(outNow)}`)
 
-// ── 5. Cutting: 200 pieces, 282.5 m used, 6.4 m wasted; 1.1 m back from the floor ──
-const cut = await call('POST', `/production/orders/${mo.id}/cutting`, { moLineId: moLine.id, fabricItemId: FAB, fabricUsed: 282.5, wastage: 6.4, noOfLayers: 40, lotNo: `LOT-${tag}`, sizes: [{ sizeId: S38, qty: 80 }, { sizeId: S40, qty: 120 }] })
-check('C1', '200 pieces cut from 288.9 m', cut.status === 201 || cut.status === 200, err(cut))
+// ── 5. Cutting on the cutting sheet: 200 pieces, 282.5 m used, 6.4 m wasted; 1.1 m back from the floor ──
+// Without stages nothing is cut any more; with them, sizes go to a cutting contractor and come back cut, in bundles.
+const sizes200 = [{ sizeId: S38, qty: 80 }, { sizeId: S40, qty: 120 }]
+const oldCut = await call('POST', `/production/orders/${mo.id}/cutting`, { moLineId: moLine.id, fabricItemId: FAB, fabricUsed: 282.5, wastage: 6.4, sizes: sizes200 })
+check('C0', `${mo.moNumber} has no stages yet: cutting it the old way is refused`, oldCut.status === 409 && oldCut.body?.code === 'NEEDS_STAGES', err(oldCut))
+const staged = await stagesFor(mo.id)
+check('C0', 'its materials issued, it takes its stages: cutting, then packing', staged.r.status === 200 && staged.count === 2 && !!staged.cutStep && !!staged.packStep, `${err(staged.r)} steps=${staged.count}`)
+const issue = must(await call('POST', `/production/orders/${mo.id}/cutting-issues`, { moLineId: moLine.id, cutterName: 'ZZTEST Cutter', fabricItemId: FAB, fabricGiven: 290, noOfLayers: 40, lotNo: `LOT-${tag}`, planned: sizes200 }), 'issue to the cutting contractor')
+const cut = await call('POST', `/production/cutting/${issue.id}/receive`, { fabricUsed: 282.5, wastage: 6.4, bundleSize: 0, sizes: sizes200 })
+check('C1', '200 pieces cut from 288.9 m, back from the cutting contractor in a bundle a size', cut.status === 200 && cut.body?.data?.actualPieces === 200 && cut.body?.data?.bundles === 2, `${err(cut)} pieces=${cut.body?.data?.actualPieces} bundles=${cut.body?.data?.bundles}`)
 let rc = (await call('GET', `/sales/orders/${so.id}/reconciliation`)).body?.data
 let f = rc?.fabric?.find((x) => x.item.id === FAB)
 check('C2', `the BOM allows ${BOM_FAB} m for the 200 cut; 288.9 used and wasted`, near(f?.bomForCut, BOM_FAB) && near(f?.used, 282.5) && near(f?.waste, 6.4), JSON.stringify(f && { bomForCut: f.bomForCut, used: f.used, waste: f.waste }))
@@ -118,7 +151,19 @@ rc = (await call('GET', `/sales/orders/${so.id}/reconciliation`)).body?.data
 f = rc?.fabric?.find((x) => x.item.id === FAB)
 check('C3', 'the 1.1 m comes back from the floor: nothing left on it', back.status === 200 && near(f?.issuedNotCut, 0) && near(f?.issuedNet, 288.9), `${err(back)} ${JSON.stringify(f && { net: f.issuedNet, floor: f.issuedNotCut })}`)
 
-// ── 6. Finished goods: 198 good, 2 B-grade ──
+// ── 6. The floor, then finished goods: 198 good, 2 B-grade ──
+// Both bundles from cutting to packing, counted in there, and recorded: 198 done, 2 set aside as B-grade.
+const bundles = await q(`SELECT id, "sizeId", qty FROM production_bundles WHERE "cuttingOrderId"=$1 ORDER BY "bundleNo"`, [issue.id])
+const b38 = bundles.find((b) => b.sizeId === S38), b40 = bundles.find((b) => b.sizeId === S40)
+if (!b38 || !b40) { console.log(`setup failed: the cutting made ${bundles.length} bundles, not one for each size`); process.exit(1) }
+const sent = await call('POST', `/production/orders/${mo.id}/transfers`, { fromStepId: staged.cutStep, lines: bundles.map((b) => ({ bundleId: b.id, qty: b.qty })), issuedBy: 'ZZTEST Cutter' })
+const counted = sent.status < 300
+  ? await call('POST', `/production/transfers/${sent.body.data.id}/receive`, { lines: sent.body.data.lines.map((l) => ({ lineId: l.id, qty: l.dispatchedQty })), receivedBy: 'ZZTEST Packer' })
+  : sent
+const worked = counted.status < 300
+  ? await call('POST', `/production/orders/${mo.id}/steps/${staged.packStep}/work`, { lines: [{ bundleId: b38.id, done: 80 }, { bundleId: b40.id, done: 118, bGrade: 2 }], personName: 'ZZTEST Packer' })
+  : counted
+check('W1', 'both bundles sent from cutting to packing, counted in, and recorded there: 198 done, 2 B-grade', sent.status === 201 && counted.status === 200 && worked.status === 201, `${err(sent)} | ${err(counted)} | ${err(worked)}`)
 const fgr = await call('POST', '/finished-goods', { warehouseId: STORE, moId: mo.id, lines: [
   { itemId: FG, sizeId: S38, qty: 80, grade: 'A' },
   { itemId: FG, sizeId: S40, qty: 118, grade: 'A' },
@@ -143,9 +188,21 @@ const prep = await call('GET', `/sales/invoices/prepare?dcId=${DC.id}`)
 const own = prep.body?.data?.ownMaterial
 const btnCost = r2(-Number((await q(`SELECT COALESCE(SUM(("inQty"-"outQty")*"unitRate"),0)::float8 v FROM stock_ledger WHERE "referenceId" = ANY($1::text[]) AND "itemId"=$2`, [mrIds, BTN]))[0].v))
 check('I1', `the invoice form offers our 1,600 buttons to bill: ₹${btnCost} at cost`, prep.status === 200 && btnCost > 500 && near(own?.cost, btnCost, 0.01) && near(own?.toBill, btnCost, 0.01) && own?.billed === 0, `${err(prep)} ${JSON.stringify(own)} cost=${btnCost}`)
-const ct = (await q(`SELECT id FROM charge_types WHERE name = 'ZZTEST Trims supplied'`))[0]?.id ??
+// The tests' own charge type for our trims: made once, and switched back on if someone switched it off.
+const ctRow = (await q(`SELECT id, "isActive" a, "applyOnSale" s FROM charge_types WHERE name = 'ZZTEST Trims supplied'`))[0]
+const ct = ctRow?.id ??
   must(await call('POST', '/masters/charge-types', { name: 'ZZTEST Trims supplied', defaultGstRate: 12, applyOnSale: true }), 'charge type').id
-const inv = await call('POST', '/sales/invoices', { dcId: DC.id, charges: [{ chargeTypeId: ct, amount: btnCost, ownMaterial: true }] })
+// The charge type is switched on only around the invoices that need it, and back as it was found even if one fails.
+const ctWasOff = !!ctRow && (!ctRow.a || !ctRow.s)
+const withCharge = async (fn) => {
+  if (ctWasOff) must(await call('PATCH', `/masters/charge-types/${ct}`, { isActive: true, applyOnSale: true }), 'charge type switched on')
+  try {
+    return await fn()
+  } finally {
+    if (ctWasOff) await call('PATCH', `/masters/charge-types/${ct}`, { isActive: ctRow.a, applyOnSale: ctRow.s })
+  }
+}
+const inv = await withCharge(() => call('POST', '/sales/invoices', { dcId: DC.id, charges: [{ chargeTypeId: ct, amount: btnCost, ownMaterial: true }] }))
 const INV = inv.body?.data
 const gst = soLine.g
 const goods = r2(198 * 20 + 2 * 10)
@@ -330,7 +387,7 @@ must(await call('POST', `/sales/orders/${so6.id}/confirm`, { creditReleaseReason
 const so6Line = (await q(`SELECT id FROM sales_order_lines WHERE "soId"=$1`, [so6.id]))[0].id
 must(await call('POST', '/finished-goods', { warehouseId: STORE, soId: so6.id, lines: [{ itemId: FG, sizeId: S38, qty: 2 }, { itemId: FG, sizeId: S40, qty: 2 }] }), 'FG 6')
 const dc6 = must(await call('POST', '/sales/challans', { soId: so6.id, warehouseId: STORE, dispatch: true, lines: [{ soLineId: so6Line, sizes: [{ sizeId: S38, qty: 2 }, { sizeId: S40, qty: 2 }] }] }), 'DC 6')
-const inv6 = await call('POST', '/sales/invoices', { dcId: dc6.id, charges: [{ chargeTypeId: ct, amount: 50, ownMaterial: true }] })
+const inv6 = await withCharge(() => call('POST', '/sales/invoices', { dcId: dc6.id, charges: [{ chargeTypeId: ct, amount: 50, ownMaterial: true }] }))
 check('B1', 'an order whose job charge covers our trims refuses a trims charge', inv6.status === 400 && inv6.body?.code === 'OWN_MATERIAL_NOT_BILLED', err(inv6))
 const so6Now = (await q(`SELECT status::text s FROM sales_orders WHERE id=$1`, [so6.id]))[0].s
 check('B2', 'an order with no customer material of its own completes on full dispatch, as before', so6Now === 'COMPLETED', `status=${so6Now}`)

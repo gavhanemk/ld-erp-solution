@@ -13,6 +13,7 @@ import { lockRow } from '../lib/lockRow'
 import { OPEN_ORDER_STATUSES } from '../services/salesOrder.service'
 import { closeCheck } from '../services/reconciliation.service'
 import { afterChallanCancelled, afterChallanDispatched } from '../services/garmentHooks.service'
+import { netSizeChanges } from '../services/sizeChanges.service'
 
 /**
  * Delivery challans: the goods leaving for the buyer against a sales order.
@@ -25,9 +26,15 @@ import { afterChallanCancelled, afterChallanDispatched } from '../services/garme
  *   - each order line's sent and pending pieces move, size by size;
  *   - the order becomes Part dispatched, or Completed with nothing pending.
  *
- * Sending more than the order still wants is allowed for an edge case, with a
- * note saying why (the business's answer of 9 Oct 2026). A size the order line
- * does not carry is refused: amend the order to add it.
+ * Sending more than the order line still wants, all its sizes together, is
+ * allowed for an edge case, with a note saying why (the business's answer of
+ * 9 Oct 2026). Within the line's total the sizes may differ from the order
+ * with no note: pieces cut as one size are sometimes made as another at
+ * stitching (a size jump), the order keeps the buyer's sizes, and the challan
+ * is where it is decided how many of each go (the business's answer of 6 Nov
+ * 2026). A size's sent can then pass what it ordered; the line's pending is
+ * what completes the order. A size the order line does not carry is refused:
+ * amend the order to add it.
  *
  * Mounted at /api/sales/challans, under the sales permissions.
  */
@@ -135,7 +142,9 @@ async function defaultStore(itemIds: string[], owner: ReturnType<typeof ownerFor
  * GET /api/sales/challans/prepare?soId=&warehouseId=
  *
  * Everything the challan form needs for one order: its lines, each size's
- * ordered, sent and pending pieces, and what is packed in the chosen store.
+ * ordered, sent and pending pieces (never below nothing; `over` is what was
+ * sent beyond the size's order, after a size jump), and what is packed in the
+ * chosen store.
  * Stock is read here, under the sales permission, so a sales coordinator does
  * not need Inventory rights to see what can be sent.
  */
@@ -149,6 +158,12 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
   const { stores, id: fallback } = await defaultStore(order.lines.map((l) => l.itemId), owner)
   const warehouseId = text(req.query.warehouseId) ?? fallback
 
+  // What size changes at stitching added to each size of each line: "Fill what can go" makes up a
+  // line's total only from those, never from other stock of a size the buyer did not ask for.
+  const moLines = await prisma.mOLine.findMany({ where: { soLineId: { in: order.lines.map((l) => l.id) } }, select: { id: true, soLineId: true } })
+  const net = moLines.length ? await netSizeChanges(prisma, { moLineId: { in: moLines.map((m) => m.id) } }) : () => 0
+  const gainedOf = (soLineId: string, sizeId: string) => Math.max(0, moLines.filter((m) => m.soLineId === soLineId).reduce((t, m) => t + net(m.id, sizeId), 0))
+
   const lines = await Promise.all(
     order.lines.map(async (l) => {
       const ordered = Number(l.totalQty)
@@ -161,7 +176,9 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
               sequence: s.size.sequence,
               ordered: Number(s.qty),
               sent: Number(s.deliveredQty),
-              pending: Math.max(0, Number(s.qty) - Number(s.deliveredQty)),
+              pending: Math.max(0, round2(Number(s.qty) - Number(s.deliveredQty))),
+              over: Math.max(0, round2(Number(s.deliveredQty) - Number(s.qty))),
+              gained: gainedOf(l.id, s.sizeId),
               inStock: warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId, owner) : 0,
               inStockB: warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId, owner, 'B') : 0,
             }))
@@ -353,10 +370,11 @@ function shapeLines(order: OrderForDispatch, data: ChallanInput) {
     if (seen.has(key)) throw new AppError(`${line.item.code}${input.grade === 'B' ? ' (B-grade)' : ''} appears twice on the challan`, 400, 'BAD_LINE')
     seen.add(key)
 
+    // Only sizes the order line carries: a size jump at stitching goes only
+    // to one of them, so anything else is a mistake or a change to the order.
     const ordered = new Map(line.sizes.map((s) => [s.sizeId, s]))
-    let sizes: Array<{ sizeId: string; code: string; qty: number; pending: number }> = []
+    let sizes: Array<{ sizeId: string; code: string; qty: number }> = []
     let qty: number
-    let pending: number
     if (line.sizes.length) {
       sizes = (input.sizes ?? [])
         .filter((s) => s.qty > 0)
@@ -369,37 +387,34 @@ function shapeLines(order: OrderForDispatch, data: ChallanInput) {
               'SIZE_NOT_ORDERED',
             )
           }
-          return { sizeId: s.sizeId, code: o.size.code, qty: s.qty, pending: Math.max(0, Number(o.qty) - Number(o.deliveredQty)) }
+          return { sizeId: s.sizeId, code: o.size.code, qty: s.qty }
         })
       qty = sizes.reduce((s, z) => s + z.qty, 0)
-      pending = Math.max(0, Number(line.totalQty) - Number(line.deliveredQty))
     } else {
       qty = input.qty ?? 0
-      pending = Math.max(0, Number(line.totalQty) - Number(line.deliveredQty))
     }
+    const pending = Math.max(0, round2(Number(line.totalQty) - Number(line.deliveredQty)))
     return { input, line, sizes, qty, pending }
   })
 
   const real = out.filter((l) => l.qty > 0)
   if (real.length === 0) throw new AppError('Put the pieces to send against at least one line', 400, 'NOTHING_TO_SEND')
 
-  // More than the order still wants: allowed, but only with a word on why.
+  // More than the order line still wants, all its sizes together: allowed,
+  // but only with a word on why. A size over its own pending within the
+  // line's total needs none — sizes may differ from the order after a size
+  // jump (ordered M 200 / L 150, made M 180 / L 170: all 350 go, no note).
   // Good and B-grade pieces of one order line count together against it.
-  const sentFor = (soLineId: string, sizeId?: string) =>
-    real
-      .filter((x) => x.line.id === soLineId)
-      .reduce((s, x) => s + (sizeId ? (x.sizes.find((z) => z.sizeId === sizeId)?.qty ?? 0) : x.qty), 0)
+  const sentFor = (soLineId: string) => round2(real.filter((x) => x.line.id === soLineId).reduce((s, x) => s + x.qty, 0))
   for (const l of real) {
-    const over = l.line.sizes.length
-      ? l.sizes.filter((s) => sentFor(l.line.id, s.sizeId) > s.pending)
-      : sentFor(l.line.id) > l.pending
-        ? [{ code: '' }]
-        : []
+    const sending = sentFor(l.line.id)
     const noted = real.some((x) => x.line.id === l.line.id && x.input.overNote?.trim())
-    if (over.length && !noted) {
-      const which = over.map((s) => s.code).filter(Boolean).join(', ')
+    if (sending > l.pending && !noted) {
+      const n = (v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 2 })
       throw new AppError(
-        `${l.line.item.code}: more than the order still wants${which ? ` in size ${which}` : ''}. Add a note saying why.`,
+        l.pending > 0
+          ? `${l.line.item.code}: ${n(sending)} pcs is more than the ${n(l.pending)} the order still wants. Add a note saying why.`
+          : `${l.line.item.code}: all the order wanted has been sent. Add a note saying why ${n(sending)} more pcs go.`,
         400,
         'OVER_NEEDS_NOTE',
       )
@@ -538,6 +553,8 @@ export async function writeChallan(
 }
 
 export async function loadOpenOrder(tx: Prisma.TransactionClient, soId: string) {
+  // One dispatch at a time per order, each reading what was sent fresh.
+  await tx.$queryRaw`SELECT id FROM ld_erp.sales_orders WHERE id = ${soId} FOR UPDATE`
   const order = await tx.salesOrder.findUnique({ where: { id: soId }, include: orderForDispatch })
   if (!order) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
   if (!OPEN_ORDER_STATUSES.includes(order.status)) {
@@ -615,7 +632,21 @@ router.post('/:id/dispatch', requirePermission(MODULE, 'create'), async (req: Au
       const before = await tx.deliveryChallan.findUnique({ where: { id: req.params.id }, include: challanInclude })
       if (!before) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
       if (before.status !== 'DRAFT') throw new AppError(`${before.dcNumber} has already gone`, 409, 'NOT_DRAFT')
-      await loadOpenOrder(tx, before.soId)
+      const order = await loadOpenOrder(tx, before.soId)
+      // A draft does not move what is pending, so one checked when it was saved may now go past what the line still wants.
+      shapeLines(order, {
+        soId: before.soId,
+        warehouseId: before.warehouseId ?? '',
+        lines: before.lines
+          .filter((l) => l.soLineId)
+          .map((l) => ({
+            soLineId: l.soLineId!,
+            grade: l.grade === 'B' ? ('B' as const) : ('A' as const),
+            sizes: l.sizes.filter((z) => z.sizeId).map((z) => ({ sizeId: z.sizeId!, qty: Number(z.qty) })),
+            qty: Number(l.qty),
+            overNote: l.overNote,
+          })),
+      })
       await dispatchChallan(tx, before.id, req.user!.id)
       const after = await tx.deliveryChallan.findUniqueOrThrow({ where: { id: before.id }, include: challanInclude })
       return { before, after }

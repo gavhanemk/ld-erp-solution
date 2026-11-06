@@ -311,14 +311,19 @@ check('D3', 'stock by size went down by exactly what was sent', (await stk(TRO, 
 SO1 = await getOrder(SO1.id)
 check('D3', 'the order shows each line and size sent and pending, and is part dispatched', SO1.status === 'PARTIALLY_DISPATCHED' && N(lineOf(SO1, TRO.id).deliveredQty) === 15 && N(lineOf(SO1, TRO.id).pendingQty) === 45 && N(sizeOf(lineOf(SO1, TRO.id), TS[30]).deliveredQty) === 5 && N(lineOf(SO1, SHI.id).pendingQty) === 20, JSON.stringify(SO1.lines.map((l) => [l.deliveredQty, l.pendingQty])))
 const dcBefore = await series('DC')
-const overNo = await call('POST', '/sales/challans', dcBody(SO1.id, [{ soLineId: L1.id, sizes: sizes(TS, { 30: 7 }) }]), SALES)
-check('D4', 'more than the order still wants in a size (7 of size 30, 5 pending) is stopped without a note', overNo.status === 400 && overNo.body?.code === 'OVER_NEEDS_NOTE' && /size 30/.test(overNo.body?.message ?? ''), err(overNo))
+// The note is judged on the line's total, all sizes together (size jumps, 6 Nov 2026): 47 chinos against 45 pending.
+const overNo = await call('POST', '/sales/challans', dcBody(SO1.id, [{ soLineId: L1.id, sizes: sizes(TS, { 30: 7, 32: 10, 34: 20, 36: 10 }) }]), SALES)
+check('D4', 'more than the order line still wants (47 chinos, 45 pending) is stopped without a note', overNo.status === 400 && overNo.body?.code === 'OVER_NEEDS_NOTE' && /47/.test(overNo.body?.message ?? '') && /45/.test(overNo.body?.message ?? ''), err(overNo))
 const t34 = await stk(TRO, 34)
 const tooMany = await call('POST', '/sales/challans', dcBody(SO1.id, [{ soLineId: L1.id, sizes: sizes(TS, { 34: t34 + 1 }), overNote: 'Testing the stock check' }]), SALES)
 check('D5', `more than is in stock (${t34 + 1} of size 34, ${t34} on hand) is refused, naming the size`, tooMany.status === 400 && tooMany.body?.code === 'INSUFFICIENT_STOCK' && /size 34/.test(tooMany.body?.message ?? ''), err(tooMany))
 const noSize = await call('POST', '/sales/challans', dcBody(SO1.id, [{ soLineId: L1.id, sizes: sizes(TS, { 28: 1 }) }]), SALES)
 check('D5', 'a size the order does not carry is refused', noSize.status === 400 && noSize.body?.code === 'SIZE_NOT_ORDERED', err(noSize))
 check('D5', 'refused challans take no number and move no stock', (await series('DC')) === dcBefore && (await stk(TRO, 34)) === t34)
+// A size over its own pending within the line's total is sizes swapped (a size jump at stitching): no note. Saved as a draft, then called off.
+const swapDc = await call('POST', '/sales/challans', dcBody(SO1.id, [{ soLineId: L1.id, sizes: sizes(TS, { 30: 7 }) }], { dispatch: false }), SALES)
+const swapDcX = swapDc.body?.data?.id ? await call('POST', `/sales/challans/${swapDc.body.data.id}/cancel`, { reason: 'Only checking the size rule' }, SALES) : null
+check('D4', 'a size over its own pending (7 of size 30, 5 pending) within the line\'s 45 needs no note', swapDc.status === 201 && swapDc.body?.data?.status === 'DRAFT' && !swapDc.body?.data?.lines?.[0]?.overNote && swapDcX?.status === 200, `${err(swapDc)}${swapDcX ? ` / ${err(swapDcX)}` : ''}`)
 const dc2r = await call('POST', '/sales/challans', dcBody(SO1.id, [{ soLineId: L1.id, sizes: sizes(TS, { 30: 7, 36: 10 }), overNote: 'Buyer asked for 2 extra in size 30 on the phone' }, { soLineId: L2.id, sizes: sizes(SS, { L: 4 }) }], { eWayBillNumber: `EWB${RUN}02` }), SALES)
 const DC2 = must(dc2r, 'the second challan')
 check('D6', `${DC2.dcNumber}: sending more than pending is allowed with a note, and the note is kept`, dc2r.status === 201 && DC2.lines.some((l) => l.overNote?.includes('2 extra')))

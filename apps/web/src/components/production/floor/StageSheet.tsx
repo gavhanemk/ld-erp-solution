@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
+  ArrowLeftRight,
   Ban,
   ClipboardCheck,
   ClipboardList,
@@ -32,9 +33,10 @@ import { ReworkDoneDialog } from './ReworkDoneDialog'
 import { VendorReturnDialog } from './VendorReturnDialog'
 import { SendBackDialog } from './SendBackDialog'
 import { ReturnBillDialog } from './ReturnBillDialog'
+import { SizeChangeDialog } from './SizeChangeDialog'
 import { sendsFromHand } from './useFlow'
 import { transferStatus } from './transferStatus'
-import { isCheck, pcs, type FlowStep, type FlowTransfer, type JobCardDetail, type JobWorkReturn, type LogEntry } from './types'
+import { bundleShort, isCheck, pcs, revisedQty, type FlowStep, type FlowTransfer, type JobCardDetail, type JobWorkReturn, type LogEntry } from './types'
 import { BundleTable, type SheetPiece } from './BundleTable'
 import { PieceList } from './PieceList'
 
@@ -60,6 +62,8 @@ type Open =
   | { kind: 'bill'; vendor: string; ret: JobWorkReturn }
   | { kind: 'undo'; eventId: string; label: string }
   | { kind: 'cancelTransfer'; transfer: FlowTransfer }
+  | { kind: 'sizes' }
+  | { kind: 'undoSize'; eventId: string; label: string }
 
 const openWindow = (url: string) => window.open(url, '_blank', 'noopener')
 const TERMINAL = ['SCRAPPED', 'PACKED', 'PACKED_B']
@@ -79,6 +83,10 @@ export interface SheetRow {
   damaged: number
   rejected: number
   rework: number
+  /** Pieces made as another size here (out of this bundle) or arriving as this bundle's size (in), with a note saying from or to which bundle. */
+  sizeIn: number
+  sizeOut: number
+  sizeNote: string | null
   balance: number
   sign: string
   document: string | null
@@ -88,6 +96,7 @@ export interface SheetRow {
 /** The sheet's lines: one per entry and bundle, with each bundle's running balance at the stage. */
 export function sheetRows(d: JobCardDetail, step: FlowStep): SheetRow[] {
   const bundleOf = new Map(d.bundles.map((b) => [b.id, b]))
+  const changeOf = new Map((d.sizeChanges ?? []).map((c) => [c.eventId, c]))
   const mine = d.log.filter((e) => e.stepId === step.id)
   const groups = new Map<string, LogEntry[]>()
   for (const e of mine) {
@@ -107,12 +116,25 @@ export function sheetRows(d: JobCardDetail, step: FlowStep): SheetRow[] {
       damaged: sum((e) => e.qty > 0 && e.bucket === 'DAMAGED'),
       rejected: sum((e) => e.qty > 0 && e.bucket === 'REJECTED'),
       rework: sum((e) => e.qty > 0 && e.bucket === 'REWORK'),
+      sizeIn: sum((e) => e.type === 'SIZE_CHANGE' && e.qty > 0),
+      sizeOut: sum((e) => e.type === 'SIZE_CHANGE' && e.qty < 0),
     }
     const change = list.filter((e) => !TERMINAL.includes(e.bucket)).reduce((s, e) => s + e.qty, 0)
     const bal = (balance.get(e0.bundleId) ?? 0) + change
     balance.set(e0.bundleId, bal)
-    if (!row.in && !row.processed && !row.out && !row.damaged && !row.rejected && !row.rework) continue
+    if (!row.in && !row.processed && !row.out && !row.damaged && !row.rejected && !row.rework && !row.sizeIn && !row.sizeOut) continue
     const b = bundleOf.get(e0.bundleId)
+    // A size change: which new bundles took this one's pieces, or which bundle this one was made from.
+    const sc = row.sizeIn || row.sizeOut ? changeOf.get(e0.eventId) : undefined
+    const sizeNote = row.sizeOut
+      ? (sc?.moves.filter((m) => m.from.bundleId === e0.bundleId).map((m) => `${pcs(m.qty)} made as ${m.to.size} → ${bundleShort(m.to.code)}`).join(', ') ?? null) || 'Made as another size'
+      : row.sizeIn
+        ? (() => {
+            const m = sc?.moves.find((x) => x.to.bundleId === e0.bundleId)
+            const from = m ? `${bundleShort(m.from.code)} (${m.from.size})` : b?.parent ? `${bundleShort(b.parent.code)}${b.parent.size ? ` (${b.parent.size})` : ''}` : 'another bundle'
+            return `${pcs(row.sizeIn)} made as ${b?.size?.code ?? 'this size'}, from ${from}`
+          })()
+        : null
     rows.push({
       key,
       eventId: e0.eventId,
@@ -123,6 +145,7 @@ export function sheetRows(d: JobCardDetail, step: FlowStep): SheetRow[] {
       size: b?.size?.code ?? null,
       sizeId: e0.sizeId,
       ...row,
+      sizeNote,
       balance: bal,
       sign: e0.person ?? e0.by,
       document: e0.document,
@@ -143,6 +166,7 @@ const EVENT_LABEL: Record<string, string> = {
   VENDOR_RETURN: 'Back from unit',
   DISPATCH: 'Transferred',
   PACK: 'Into finished goods',
+  SIZE_CHANGE: 'Size change',
 }
 
 export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: FlowStep; onChanged: (message: string) => void }) {
@@ -204,6 +228,12 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   const jwos = d.jobWorkOrders.filter((j) => j.step.id === step.id)
   const toDecide = (f?.damagedNow ?? 0) + (f?.rejectedNow ?? 0)
   const canSend = (f?.waiting ?? 0) + (fromHand ? f?.inHand ?? 0 : 0) > 0
+  // Size jumps: only at stitching on our own floor, on pieces in hand or done here.
+  const sizeStep = step.kind === 'STITCHING' && !outside
+  const mayChangeSizes = mayCreate && sizeStep && sizes.length > 1 && !cameWrong.length && (f?.inHand ?? 0) + (f?.waiting ?? 0) > 0
+  const sizesChanged = sizes.some((z) => (z.changed ?? 0) !== 0)
+  const changedHere = sizes.some((z) => (fig(z.id)?.sizeIn ?? 0) + (fig(z.id)?.sizeOut ?? 0) > 0)
+  const changesHere = (d.sizeChanges ?? []).filter((c) => c.step.id === step.id)
 
   const post = async (path: string, body: unknown, fallback: string) => {
     setBusy(true)
@@ -342,12 +372,24 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
 
       <NextSteps items={steps} idle={idle} />
 
-      <Section icon={ClipboardCheck} title="Size details">
+      <Section
+        icon={ClipboardCheck}
+        title="Size details"
+        actions={
+          mayChangeSizes ? (
+            <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOpen({ kind: 'sizes' })} title="Pieces cut as one size made as another size of the order">
+              <ArrowLeftRight size={13} /> Change sizes
+            </button>
+          ) : undefined
+        }
+      >
         <SizeTable
           d={d}
           rows={[
-            { label: 'Order', of: (id) => sizes.find((z) => z.id === id)?.qty ?? 0, tone: 'muted' },
+            { label: sizesChanged ? 'Order (planned)' : 'Order', of: (id) => sizes.find((z) => z.id === id)?.qty ?? 0, tone: 'muted' },
+            ...(sizesChanged ? [{ label: 'Revised (size changes)', of: (id: string) => revisedQty(sizes.find((z) => z.id === id) ?? { qty: 0 }), tone: 'muted' as const }] : []),
             { label: outside ? 'Sent to unit' : 'Received (in)', of: (id) => fig(id)?.received ?? 0 },
+            ...(changedHere ? [{ label: 'Size changed here', of: (id: string) => (fig(id)?.sizeIn ?? 0) - (fig(id)?.sizeOut ?? 0), signed: true, tone: 'primary' as const }] : []),
             { label: check ? 'Passed' : 'Processed', of: (id) => fig(id)?.completed ?? 0, tone: 'primary' },
             { label: step.last ? 'Into finished goods' : 'Sent on', of: (id) => (step.last ? fig(id)?.packed ?? 0 : fig(id)?.sentOn ?? 0) },
             { label: check ? 'Failed / damaged' : 'Damaged', of: (id) => (fig(id)?.damaged ?? 0) + (fig(id)?.rejected ?? 0), tone: 'warn' },
@@ -361,6 +403,52 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
               .filter(Boolean)
               .join(' · ')}
           </p>
+        )}
+        {changesHere.length > 0 && (
+          <div className="border-border mt-3 rounded-lg border">
+            <p className="border-border text-foreground border-b px-3 py-1.5 text-xs font-semibold">Size changes here</p>
+            <ul className="divide-border divide-y">
+              {changesHere.map((c) => (
+                <li key={c.eventId} className={`flex flex-wrap items-start justify-between gap-2 px-3 py-2 text-xs ${c.undone ? 'opacity-60' : ''}`}>
+                  <span className="min-w-0">
+                    <span className="text-foreground font-medium">
+                      {c.moves.map((m) => `${pcs(m.qty)} pcs ${m.from.size} → ${m.to.size} (${bundleShort(m.from.code)} → ${bundleShort(m.to.code)})`).join(', ')}
+                    </span>
+                    <span className="text-muted-foreground block">
+                      {formatDate(c.date)} · {c.personName ? `${c.personName}, recorded by ${c.by}` : c.by} · {c.reason}
+                    </span>
+                    {c.undone && (
+                      <span className="text-muted-foreground block">
+                        Undone{c.undone.by ? ` by ${c.undone.by}` : ''} on {formatDate(c.undone.at)}
+                        {c.undone.reason ? `: ${c.undone.reason}` : ''}
+                      </span>
+                    )}
+                  </span>
+                  <span className="flex items-center gap-1">
+                    {!c.undone && (
+                      <button
+                        type="button"
+                        className="btn-ghost h-6 px-2 text-xs"
+                        title="Print the new bundles' stickers"
+                        onClick={() => openWindow(`/print/bundles?mo=${d.mo.id}&ids=${c.moves.map((m) => m.to.bundleId).join(',')}`)}
+                      >
+                        <Printer size={12} /> Stickers
+                      </button>
+                    )}
+                    {!c.undone && mayEdit && (
+                      <button
+                        type="button"
+                        className="btn-ghost text-muted-foreground h-6 px-2 text-xs"
+                        onClick={() => setOpen({ kind: 'undoSize', eventId: c.eventId, label: c.moves.map((m) => `${m.from.size} → ${m.to.size}`).join(', ') })}
+                      >
+                        <Undo2 size={12} /> Undo
+                      </button>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
       </Section>
 
@@ -405,6 +493,7 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
               rows={allRows}
               step={step}
               pieces={pieces}
+              madeAs={(id) => cardBundles.filter((c) => c.parent?.id === id && !c.undone).reduce((s, c) => s + c.qty, 0)}
               canUndo={(r) => mayEdit && UNDOABLE.includes(r.type)}
               onUndo={(r) => setOpen({ kind: 'undo', eventId: r.eventId, label: `${EVENT_LABEL[r.type] ?? 'Entry'} of ${formatDate(r.date)}` })}
               onPiece={(code) => {
@@ -432,6 +521,7 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
                   <th style={{ textAlign: 'right' }} className="warn-text">
                     {check ? 'Failed / damaged' : 'Damaged'}
                   </th>
+                  {sizeStep && <th>Size change</th>}
                   <th style={{ textAlign: 'right' }}>Balance</th>
                   <th>Sign</th>
                   <th>Document</th>
@@ -448,6 +538,7 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
                     <td className="text-right text-xs tabular-nums">{r.processed ? pcs(r.processed) : ''}</td>
                     <td className="text-right text-xs tabular-nums">{r.out ? pcs(r.out) : ''}</td>
                     <td className="warn-text text-right text-xs tabular-nums">{r.damaged + r.rejected ? pcs(r.damaged + r.rejected) : ''}{r.rework ? <span className="text-muted-foreground"> ({pcs(r.rework)} rework)</span> : null}</td>
+                    {sizeStep && <td className="text-primary text-xs">{r.sizeNote ?? ''}</td>}
                     <td className="text-right text-xs font-medium tabular-nums">{pcs(r.balance)}</td>
                     <td className="text-muted-foreground text-xs">{r.sign}</td>
                     <td className="text-muted-foreground font-mono text-[11px]">{r.document ?? ''}</td>
@@ -476,7 +567,7 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
                   <td className="text-right text-xs font-semibold tabular-nums">{pcs(tot('processed'))}</td>
                   <td className="text-right text-xs font-semibold tabular-nums">{pcs(tot('out'))}</td>
                   <td className="warn-text text-right text-xs font-semibold tabular-nums">{pcs(tot('damaged') + tot('rejected'))}</td>
-                  <td colSpan={4} />
+                  <td colSpan={sizeStep ? 5 : 4} />
                 </tr>
               </tfoot>
             </table>
@@ -631,6 +722,28 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
           busy={busy}
           onCancel={() => setOpen(null)}
           onConfirm={(reason) => void post(`/production/events/${open.eventId}/undo`, { reason }, 'Undone.')}
+        />
+      )}
+      {open?.kind === 'sizes' && (
+        <SizeChangeDialog
+          d={d}
+          step={step}
+          onClose={() => setOpen(null)}
+          onSaved={(m, bundleIds) => {
+            done(m)
+            if (bundleIds.length) openWindow(`/print/bundles?mo=${d.mo.id}&ids=${bundleIds.join(',')}`)
+          }}
+        />
+      )}
+      {open?.kind === 'undoSize' && (
+        <ReasonDialog
+          title={`Undo the size change (${open.label})?`}
+          description="The pieces go back into the bundles they came from, and the new bundles' stickers are no longer valid. Refused once any of those pieces has moved on."
+          confirmLabel="Undo it"
+          danger
+          busy={busy}
+          onCancel={() => setOpen(null)}
+          onConfirm={(reason) => void post(`/production/size-changes/${open.eventId}/undo`, { reason }, 'Size change undone.')}
         />
       )}
       {open?.kind === 'cancelTransfer' && (

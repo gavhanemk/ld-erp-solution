@@ -113,7 +113,8 @@ card, or the job-work challan), `/print/bundles` (stickers, Code 128 drawn by
 | File | Holds |
 |---|---|
 | `services/wip.service.ts` | The ledger: `postEvent`, `reverseEvent`, `balancesOf`, `flowsOf`, `lockMo` |
-| `services/floor.service.ts` | Everything that moves pieces: `dispatch` (transfer), `receive` (count in), `settleShort`, `cancelTransfer`, `recordWork`, `decide`, `reworkDone`, `vendorReturn`, `sendBack`, `syncChallans`, `closeJobWorkOrder`, `packForReceipt`/`unpackForReceipt`, `undoEvent`, hold/resume; and the figures — `stepFigures` / `figuresFrom`, `syncProgress` |
+| `services/floor.service.ts` | Everything that moves pieces: `dispatch` (transfer), `receive` (count in), `settleShort`, `cancelTransfer`, `recordWork`, `decide`, `reworkDone`, `vendorReturn`, `sendBack`, `syncChallans`, `closeJobWorkOrder`, `packForReceipt`/`unpackForReceipt`, `changeSizes`/`undoSizeChange` (size jumps at stitching), `undoEvent`, hold/resume; and the figures — `stepFigures` / `figuresFrom`, `syncProgress` |
+| `services/sizeChanges.service.ts` | Size jumps read back, never written: `netSizeChanges` (what each line's sizes gained or gave up), `sizeChangeHistory`, `orderSizes` (planned, changed, revised, packed, to pack) |
 | `services/cutting.service.ts` | `issueToCutter` (sizes to a contractor), `createCutting` (received cut → bundles + `CUT` event; with `issueId` it completes that issue), `cancelCutting`, `cuttingPrep` |
 | `services/route.service.ts` | Routings: `checkRouteSteps`, `applyRouting` (copies steps to the MO), `editRoute`, `skipStep`/`restoreStep`, `nextStepAfter`, `isLastStep` |
 | `services/jobCard.service.ts` | `ensureJobCards`, the job card lists, `stageSheets` / `stageTabs`, `jobCardDetail` (everything a sheet shows) |
@@ -122,7 +123,7 @@ card, or the job-work challan), `/print/bundles` (stickers, Code 128 drawn by
 | `services/styleTrack.service.ts` | Routings by style: which routing a style follows, and each step's state and units completed, read from `stepFigures` over the style's order lines (closed orders left out). Writes only a step's note (`style_step_runs`); never `wip_*` |
 | `services/routing.service.ts` | The routing master: `createRouting` / `updateRouting` / `deleteRouting` (code made from the style; who made and changed it; delete refused while an order or BOM uses it), and `fabricStock` — the fabric items with stock, for the form |
 | `routes/styleTracking.routes.ts` | Its endpoints, mounted at `/api/masters/style-tracking` |
-| `routes/production.routes.ts` | MOs, requisitions, the older cutting endpoints. `release()` makes the job cards |
+| `routes/production.routes.ts` | MOs, requisitions, the older cutting endpoints (`POST /orders/:id/cutting` refuses an order without stages since 6 Nov 2026). `release()` makes the job cards |
 
 ### Web
 
@@ -220,6 +221,32 @@ route also need `production:approve`.
 been issued (in the route handler, `POST /orders/:id/routing`).
 `issueToCutter` refuses the same, and refuses an MO without stages. Both check
 "some material has been issued", not "every requisition fully issued" — see §5.
+Every order is cut on its cutting sheet: the older one-step cutting on the
+order window is gone (6 Nov 2026), and `POST /orders/:id/cutting` refuses an
+order without stages (`NEEDS_STAGES`).
+
+**Size jumps (6 Nov 2026).** At stitching on our own floor, pieces cut as one
+size can be made as another size *of the order line* (cut M, made L): the
+Stitching sheet's **Change sizes**. `changeSizes` never edits a bundle: each
+old bundle's pieces go into a **new bundle** of the new size — next bundle
+number, `parentId` the old one, `splitAtStepId` the stitching step, same line
+and lay — in one `SIZE_CHANGE` event at the same step and bucket (in hand
+first, then done), with a `size_changes` row each (who, when, why). The ledger
+refuses a split that does not keep every place's count, gives pieces to
+anything but a brand-new child of the giving bundle, or crosses colour lines.
+A child shares its parent's route only up to the step it was made at
+(`destinationsFrom`). The order's planned sizes (`MOLineSize`) are never
+edited: a line's revised size is planned + changes not undone, worked out by
+`netSizeChanges`, never stored. Nothing is posted to stock: Finished Goods In
+takes pieces by each bundle's current size, so it accepts the revised sizes
+and nothing beyond what was made. The sales order keeps the buyer's sizes;
+the delivery challan may swap sizes within a line's total without a note.
+Anyone with `production:create` may change sizes, with a reason; the undo
+(`undoSizeChange`, `production:edit`) puts the pieces back while they are
+still where the change put them. Not at outside units, not at any other step,
+and never by editing a bundle's `sizeId` in place — every entry keeps the size
+its bundle had when it was written, so that would split one bundle's history
+across two sizes.
 
 ---
 
@@ -236,9 +263,11 @@ mixes styles needing different routes cannot be loaded (`applyRouting` refuses
 with `ROUTING_DOES_NOT_FIT`); split it into two MOs for now. Per-line routes
 would mean `mo_steps` per line.
 
-**Bundle split and merge.** The `SPLIT` event type and `ProductionBundle.parentId`
-exist; nothing uses them yet. The original brief asks for authorised splitting
-when part of a bundle goes ahead.
+**Bundle split and merge.** Size jumps use `ProductionBundle.parentId` and
+`splitAtStepId` (§4). A plain split of a bundle without a size change — the
+original brief asks for authorised splitting when part of a bundle goes ahead
+— is still not built; the `SPLIT` event type follows the same ledger rules
+when it is.
 
 **"Materials issued" is loose.** It means some material is issued to the MO.
 If the business wants every requisition fully issued before cutting, tighten it
@@ -256,8 +285,9 @@ Accounts is deliberately untouched for now.
 **Leftovers.** `GET /production/job-work-orders` has no screen any more (outside
 work shows on the stage's sheet). The sidebar's `qcInDailyProduction` filter
 still names `/production/qc`, which no longer exists. The older one-step
-cutting (`POST /orders/:id/cutting`, `CuttingDialog`) is kept for MOs without
-stages — the job-work orders that put cut panels into a store.
+cutting on the order window (`CuttingDialog`) was removed on 6 Nov 2026;
+orders already cut that way keep their cuttings, listed (and cancellable) on
+the order window, and carry on without stages.
 
 ---
 
@@ -301,7 +331,12 @@ series moves. They need the demo masters (listed at the top of each).
 cd apps/api
 npx tsx ../../tools/check-production-flow.ts    # 31 checks — the job-card flow
 npx tsx ../../tools/check-production-floor.ts   # 91 checks — routes, transfers, QC, outside units
+npx tsx ../../tools/check-size-change.ts        # 101 checks — size jumps, from the change to finished goods and undo
 ```
+
+All three refuse to run unless `DATABASE_URL` (and `DIRECT_URL`) point at a
+database on this machine: the worktree's `.env` files point at the live
+database, so set both to the demo one for the run.
 
 Run both after any change to `wip.service.ts`, `floor.service.ts`,
 `cutting.service.ts` or `jobCard.service.ts`. They are the fastest way to know

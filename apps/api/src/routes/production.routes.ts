@@ -618,18 +618,43 @@ router.post('/orders/:id/complete-short', requirePermission(MODULE, 'edit'), asy
 })
 
 /**
- * GET  /api/production/orders/:id/cutting — what the cutting form needs: the
+ * GET  /api/production/orders/:id/cutting — what the cutting sheet needs: the
  *      fabric issued to the order and how much is accounted for, pieces by
  *      size planned and cut, earlier cuttings, panel items and stores.
- * POST /api/production/orders/:id/cutting — one cutting: fabric used, waste,
- *      pieces by size, and optionally the panels into a store.
- * POST /api/production/cutting/:id/cancel — takes it back, with a reason.
+ * POST /api/production/orders/:id/cutting — one cutting in one step: fabric
+ *      used, waste, pieces by size. Only on an order with stages, where it
+ *      ties the pieces into bundles; nothing on the screens uses it any more.
+ *      Since 6 Nov 2026 every order is cut on its cutting sheet once its
+ *      stages are set up: sizes issued to a cutting contractor, then received
+ *      back cut (productionFloor.routes: cutting-issues, cutting/:id/receive).
+ *      Orders cut the old way, without stages, keep their cuttings.
+ * POST /api/production/cutting/:id/cancel — takes it back, with a reason. An
+ *      old cutting without stages is cancelled here too, which is how such an
+ *      order can still take stages.
  */
 router.get('/orders/:id/cutting', requirePermission(MODULE, 'view'), async (req, res) => {
   res.json({ success: true, data: await prisma.$transaction((tx) => cuttingPrep(tx, req.params.id)) })
 })
 
 router.post('/orders/:id/cutting', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  // No more cutting without stages (6 Nov 2026): the pieces would get no
+  // bundles, so nothing could move them on or change their size.
+  const mo = await prisma.manufacturingOrder.findUnique({
+    where: { id: req.params.id },
+    select: { moNumber: true, totalPackedQty: true, _count: { select: { steps: true, cuttingOrders: { where: { status: { not: 'CANCELLED' }, bundles: { none: {} } } } } } },
+  })
+  if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  if (!mo._count.steps) {
+    // Cut the old way already, or packed without stages: it cannot take stages, so say what it can still do.
+    const legacy = mo._count.cuttingOrders > 0 || mo.totalPackedQty > 0
+    throw new AppError(
+      legacy
+        ? `${mo.moNumber} was cut the old way, and more cutting is no longer recorded that way: book what is packed in Inventory → Finished Goods In.${mo.totalPackedQty > 0 ? '' : ' To use stages instead, first cancel its old cuttings under Cutting on the order.'}`
+        : `Cutting is recorded on the cutting sheet once ${mo.moNumber}'s stages are set up: set up stages, then issue sizes to a cutting contractor.`,
+      409,
+      'NEEDS_STAGES',
+    )
+  }
   const data = cuttingSchema.parse(req.body)
   const cut = await prisma.$transaction((tx) => createCutting(tx, req.params.id, data, req.user!.id, { mayApprove: userCan(req.user, MODULE, 'approve') }), {
     timeout: 60_000,

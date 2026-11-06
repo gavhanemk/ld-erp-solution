@@ -3,6 +3,7 @@ import { AppError } from '../middleware/errorHandler'
 import { balancesOf } from './wip.service'
 import { isLastStep, nextStepAfter } from './route.service'
 import { stepFigures } from './floor.service'
+import { netSizeChanges } from './sizeChanges.service'
 
 /**
  * What the floor screens show, read off the production ledger: an order's
@@ -74,7 +75,7 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
   const planned = moLineId ? mo.lines.find((l) => l.id === moLineId)?.totalQty ?? 0 : mo.totalPlannedQty
   const ofLine = moLineId ? { moLineId } : {}
 
-  const [figures, held, bundles, transfers, jobWorkOrders, events, lastAt] = await Promise.all([
+  const [figures, held, bundles, transfers, jobWorkOrders, events, lastAt, changed] = await Promise.all([
     mo.steps.length ? stepFigures(db, mo.id, mo.steps, planned, moLineId) : Promise.resolve([]),
     balancesOf(db as Prisma.TransactionClient, mo.id, moLineId),
     db.productionBundle.findMany({
@@ -87,6 +88,10 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
         qty: true,
         moLineId: true,
         size: { select: { id: true, code: true, sequence: true } },
+        // Made from another bundle by a size change at stitching: which, where, and whether it was undone.
+        parent: { select: { id: true, code: true, size: { select: { code: true } } } },
+        splitAtStepId: true,
+        sizeChangeIn: { select: { undoneAt: true } },
         cuttingOrder: { select: { cutOrderNumber: true, status: true, lotNo: true } },
       },
     }),
@@ -174,6 +179,7 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
       },
     }),
     db.wipEntry.groupBy({ by: ['stepId'], where: { moId: mo.id, ...ofLine }, _max: { createdAt: true } }),
+    netSizeChanges(db, { moId: mo.id }),
   ])
 
   const lastActivity = new Map(lastAt.map((r) => [r.stepId, r._max.createdAt]))
@@ -213,10 +219,14 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
         cutting: b.cuttingOrder.cutOrderNumber,
         lotNo: b.cuttingOrder.lotNo,
         cancelled: b.cuttingOrder.status === 'CANCELLED',
+        /** Made from this bundle at this step by a size change; undone when the change was taken back. */
+        parent: b.parent ? { id: b.parent.id, code: b.parent.code, size: b.parent.size?.code ?? null } : null,
+        madeAtStepId: b.splitAtStepId,
+        undone: !!b.sizeChangeIn?.undoneAt,
         places: placesOf.get(b.id) ?? [],
       }
     })
-    .filter((b) => !b.cancelled || b.places.length)
+    .filter((b) => (!b.cancelled && !b.undone) || b.places.length)
 
   const jwos = jobWorkOrders.map((j) => {
     // On a job card, only what moved of its own bundles.
@@ -290,7 +300,8 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
         color: l.color,
         totalQty: l.totalQty,
         item: l.soLine?.item ?? null,
-        sizes: l.sizes.map((z) => ({ id: z.sizeId, code: z.size.code, sequence: z.size.sequence, qty: z.qty })).sort((a, b) => a.sequence - b.sequence),
+        // Planned, and moved by size changes at stitching: the revised count is qty + changed.
+        sizes: l.sizes.map((z) => ({ id: z.sizeId, code: z.size.code, sequence: z.size.sequence, qty: z.qty, changed: changed(l.id, z.sizeId) })).sort((a, b) => a.sequence - b.sequence),
       })),
     steps,
     bundles: bundleList,

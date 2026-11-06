@@ -46,6 +46,8 @@ interface Label {
       cut: { date: string; ref: string | null; by: string | null } | null
       steps: Array<{ name: string; check: boolean; outside: boolean; done: boolean; date: string | null; by: string | null; challan: string | null }>
       packed: { date: string; ref: string | null; store: string | null } | null
+      /** Cut as one size and made as another at stitching, oldest first. */
+      sizeChanges?: Array<{ from: string; fromSize: string; to: string; toSize: string; qty: number; step: string; date: string; reason: string }>
     } | null
   }
 }
@@ -327,6 +329,9 @@ function DetailTag({ g, maker }: { g: Label; maker: Maker }) {
             .filter(Boolean)
             .join(' · '),
         )}
+        {j?.sizeChanges?.length
+          ? row('Size', `cut ${j.sizeChanges[0].fromSize}, ` + j.sizeChanges.map((c) => `made ${c.toSize} at ${c.step} (${bundleNo(c.from)} → ${bundleNo(c.to)})`).join(', then '))
+          : null}
         {outside.length > 0 &&
           row(
             'Outside',

@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { figuresFrom, type FigureStep, type Flows } from './floor.service'
 import { flowSummary } from './floorView.service'
+import { sizeChangeHistory } from './sizeChanges.service'
 import { isCheck, nextStepAfter, passedBy } from './route.service'
 
 /**
@@ -631,7 +632,7 @@ export async function jobCardDetail(db: Db, id: string) {
   })
   if (!card) throw new AppError('Job card not found', 404, 'NOT_FOUND')
 
-  const [flow, cuttings, bySize, log, requisitions] = await Promise.all([
+  const [flow, cuttings, bySize, log, requisitions, sizeChanges] = await Promise.all([
     flowSummary(db, card.moId, { moLineId: card.moLineId, jobCardId: card.id }),
     db.cuttingOrder.findMany({
       where: { moLineId: card.moLineId },
@@ -657,7 +658,7 @@ export async function jobCardDetail(db: Db, id: string) {
         notes: true,
         fabricItem: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
         createdBy: { select: { name: true } },
-        _count: { select: { bundles: true } },
+        _count: { select: { bundles: { where: { parentId: null } } } },
       },
     }),
     ledgerBy(db, { moLineId: card.moLineId }, 'sizeId'),
@@ -692,13 +693,43 @@ export async function jobCardDetail(db: Db, id: string) {
       orderBy: { createdAt: 'asc' },
       select: { id: true, mrNumber: true, status: true, issuedAt: true, closedAt: true, department: { select: { name: true } }, lines: { select: { issuedQty: true } } },
     }),
+    sizeChangeHistory(db, { moLineId: card.moLineId }),
   ])
 
   const line = flow.lines[0]
+  // Size by size. A size change at stitching moves pieces from one size to
+  // another: each size shows them where it happened (sizeIn, sizeOut), and
+  // from the next step on it expects its revised count, not its planned one.
+  const steps = flow.steps as FigureStep[]
+  const sorted = [...steps].sort((a, b) => a.sequence - b.sequence)
   const sizeFigures = Object.fromEntries(
     (line?.sizes ?? []).map((z) => {
       const { held, flows } = bySize(z.id)
-      return [z.id, flow.steps.length ? figuresFrom(flow.steps as FigureStep[], z.qty, held, flows) : []]
+      if (!steps.length) return [z.id, []]
+      const changedAt = (side: Flows['ins'], stepId: string) => side.filter((r) => r.stepId === stepId && r.eventType === 'SIZE_CHANGE').reduce((t, r) => t + r.qty, 0)
+      const plannedAt = new Map<string, number>()
+      const moved = new Map<string, { sizeIn: number; sizeOut: number }>()
+      let carried = 0
+      for (const s of sorted) {
+        plannedAt.set(s.id, z.qty + carried)
+        const sizeIn = changedAt(flows.ins, s.id)
+        const sizeOut = changedAt(flows.outs, s.id)
+        moved.set(s.id, { sizeIn, sizeOut })
+        carried += sizeIn - sizeOut
+      }
+      const byPlan = new Map<number, ReturnType<typeof figuresFrom>>()
+      const figsFor = (planned: number) => {
+        if (!byPlan.has(planned)) byPlan.set(planned, figuresFrom(steps, planned, held, flows))
+        return byPlan.get(planned)!
+      }
+      return [
+        z.id,
+        figsFor(z.qty).map((f) => {
+          const planned = plannedAt.get(f.stepId) ?? z.qty
+          const g = planned === z.qty ? f : figsFor(planned).find((x) => x.stepId === f.stepId)!
+          return { ...g, ...(moved.get(f.stepId) ?? { sizeIn: 0, sizeOut: 0 }) }
+        }),
+      ]
     }),
   )
   const issued = requisitions.some((r) => r.lines.some((l) => Number(l.issuedQty) > 0))
@@ -710,6 +741,8 @@ export async function jobCardDetail(db: Db, id: string) {
   return {
     ...flow,
     cutWithoutStages,
+    /** Size changes made on this card at stitching, newest first. */
+    sizeChanges,
     card: {
       ...card,
       meters: card.meters == null ? null : Number(card.meters),

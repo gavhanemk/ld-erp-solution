@@ -377,6 +377,8 @@ model User {
   mosHeld              ManufacturingOrder[]   @relation("MOHeldBy")
   moStepsSkipped       MOStep[]               @relation("MOStepSkippedBy")
   wipEventsMade        WipEvent[]             @relation("WipEventCreatedBy")
+  sizeChangesMade      SizeChange[]           @relation("SizeChangeCreatedBy")
+  sizeChangesUndone    SizeChange[]           @relation("SizeChangeUndoneBy")
   transfersMade        ProcessTransfer[]      @relation("TransferCreatedBy")
   transfersCancelled   ProcessTransfer[]      @relation("TransferCancelledBy")
   jobWorkOrdersMade    JobWorkOrder[]         @relation("JobWorkOrderCreatedBy")
@@ -3446,6 +3448,7 @@ model ManufacturingOrder {
   steps          MOStep[]
   bundles        ProductionBundle[]
   wipEvents      WipEvent[]
+  sizeChanges    SizeChange[]
   transfers      ProcessTransfer[]
   jobWorkOrders  JobWorkOrder[]
   jobCards       JobCard[]
@@ -3481,6 +3484,8 @@ model MOLine {
   bundles       ProductionBundle[]
   /// Its job card: the line as the floor works it.
   jobCard       JobCard?
+  /// Pieces made as another size than planned (size jumps at stitching).
+  sizeChanges   SizeChange[]
 
   @@index([soLineId])
   @@map("mo_lines")
@@ -3693,6 +3698,8 @@ enum WipEventType {
   VENDOR_RETURN
   PACK
   SPLIT
+  /// Pieces of a bundle carried on as another size, in a new bundle made from it.
+  SIZE_CHANGE
   REVERSAL
 }
 
@@ -3750,6 +3757,9 @@ model MOStep {
   transfersFrom ProcessTransfer[]  @relation("TransferFromStep")
   transfersTo   ProcessTransfer[]  @relation("TransferToStep")
   jobWorkOrders JobWorkOrder[]
+  /// Bundles made here from another bundle, and the size changes made here.
+  bundlesMadeHere ProductionBundle[] @relation("BundleSplitStep")
+  sizeChanges     SizeChange[]
 
   @@unique([moId, sequence])
   @@map("mo_steps")
@@ -3777,10 +3787,17 @@ model ProductionBundle {
   parentId       String?
   parent         ProductionBundle?  @relation("BundleSplit", fields: [parentId], references: [id])
   children       ProductionBundle[] @relation("BundleSplit")
+  /// The step where it was made from its parent. It shares its parent's route
+  /// only up to there: from that step on it goes its own way.
+  splitAtStepId  String?
+  splitAtStep    MOStep?            @relation("BundleSplitStep", fields: [splitAtStepId], references: [id])
   createdAt      DateTime           @default(now())
 
   wipEntries     WipEntry[]
   transferLines  ProcessTransferLine[]
+  /// Size changes that took pieces out of it, and the one that made it.
+  sizeChangesOut SizeChange[]       @relation("SizeChangeFrom")
+  sizeChangeIn   SizeChange?        @relation("SizeChangeTo")
 
   @@unique([moId, bundleNo])
   @@index([cuttingOrderId])
@@ -3840,6 +3857,7 @@ model WipEvent {
   createdAt      DateTime              @default(now())
 
   entries        WipEntry[]
+  sizeChanges    SizeChange[]
 
   @@index([moId, createdAt])
   @@index([stepId])
@@ -3877,6 +3895,51 @@ model WipEntry {
   @@index([eventId])
   @@index([vendorId, bucket])
   @@map("wip_entries")
+}
+
+/// A size jump: pieces of one bundle made as another size at stitching, on
+/// our own floor. They move into a new bundle of the new size, made from the
+/// old one, so every piece still traces back to the bundle and lay it was cut
+/// in. Nothing is edited: not the old bundle, not its entries, not the order's
+/// planned sizes. An order line's revised sizes are its planned sizes plus
+/// these (those not undone), worked out, never stored.
+model SizeChange {
+  id           String             @id @default(cuid())
+  moId         String
+  mo           ManufacturingOrder @relation(fields: [moId], references: [id], onDelete: Cascade)
+  moLineId     String
+  moLine       MOLine             @relation(fields: [moLineId], references: [id], onDelete: Cascade)
+  /// The stitching step it was done at.
+  stepId       String
+  step         MOStep             @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  /// The SIZE_CHANGE entry on the floor ledger that moved the pieces.
+  eventId      String
+  event        WipEvent           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  fromBundleId String
+  fromBundle   ProductionBundle   @relation("SizeChangeFrom", fields: [fromBundleId], references: [id], onDelete: Cascade)
+  /// The bundle made for these pieces.
+  toBundleId   String             @unique
+  toBundle     ProductionBundle   @relation("SizeChangeTo", fields: [toBundleId], references: [id], onDelete: Cascade)
+  fromSizeId   String
+  fromSize     Size               @relation("SizeChangeFromSize", fields: [fromSizeId], references: [id])
+  toSizeId     String
+  toSize       Size               @relation("SizeChangeToSize", fields: [toSizeId], references: [id])
+  qty          Int
+  reason       String
+  createdById  String
+  createdBy    User               @relation("SizeChangeCreatedBy", fields: [createdById], references: [id])
+  createdAt    DateTime           @default(now())
+  /// Taken back: the pieces went back into the old bundle.
+  undoneAt     DateTime?
+  undoneById   String?
+  undoneBy     User?              @relation("SizeChangeUndoneBy", fields: [undoneById], references: [id])
+  undoReason   String?
+
+  @@index([moId])
+  @@index([moLineId])
+  @@index([eventId])
+  @@index([fromBundleId])
+  @@map("size_changes")
 }
 
 /// The transfer card: bundles handed from one step to the next.
@@ -4817,6 +4880,8 @@ model Size {
   adjustmentLines StockAdjustmentLine[] @relation("AdjustmentLineSize")
   jobWorkLines    JobWorkChallanLine[]  @relation("JobWorkLineSize")
   bundles         ProductionBundle[]    @relation("BundleSize")
+  sizeChangesFrom SizeChange[]          @relation("SizeChangeFromSize")
+  sizeChangesTo   SizeChange[]          @relation("SizeChangeToSize")
   @@unique([sizeGroupId, code])
   @@map("sizes")
   garments Garment[] @relation("GarmentSize")

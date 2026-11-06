@@ -34,6 +34,15 @@ interface Row {
   notes: string | null
   by: string | null
   document: string | null
+  /** A size change at stitching: each bundle's pieces made as another size, into a new bundle. */
+  sizeChange: SizeMove[] | null
+}
+interface SizeMove {
+  from: string
+  fromSize: string
+  to: string
+  toSize: string
+  qty: number
 }
 interface Report {
   rows: Row[]
@@ -46,8 +55,12 @@ const day = (d: string) => new Date(d).toLocaleDateString('en-IN', { day: '2-dig
 const time = (d: string) => new Date(d).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', ...IST })
 const isoDay = (d: Date) => d.toLocaleDateString('en-CA', IST)
 
+/** "20 pcs M → L (B003 → B061)" */
+const moveText = (m: SizeMove) => `${pcs(m.qty)} pcs ${m.fromSize} → ${m.toSize} (${m.from} → ${m.to})`
+
 /** What one entry was, in a few words. */
 function what(r: Row, check: boolean) {
+  if (r.type === 'SIZE_CHANGE') return r.sizeChange?.length === 1 ? `Size changed: ${moveText(r.sizeChange[0])}` : 'Size changed'
   if (r.type === 'CUT') return 'Cut'
   if (r.type === 'RECEIVE') return `Counted in${r.from ? ` from ${r.from}` : ''}`
   if (r.type === 'EXCESS') return `Counted in, more than sent${r.from ? `, from ${r.from}` : ''}`
@@ -70,8 +83,9 @@ function what(r: Row, check: boolean) {
 /**
  * One stage's report, across every job card: what came in and from where,
  * what was done or passed, what was sent on and to where, and every damaged
- * or failed piece with the reason given — dated, timed and signed. For a
- * date range, and one order if wanted; prints as it stands.
+ * or failed piece with the reason given — dated, timed and signed. A size
+ * change at stitching is a line of its own, counted in none of the figures.
+ * For a date range, and one order if wanted; prints as it stands.
  */
 export function StageReport({ operationId, name, check }: { operationId: string; name: string; check: boolean }) {
   const today = new Date()
@@ -178,6 +192,13 @@ export function StageReport({ operationId, name, check }: { operationId: string;
                       </td>
                       <td className="text-sm">
                         <span className="text-foreground font-medium">{what(r, check)}</span>
+                        {r.sizeChange && r.sizeChange.length > 1 && (
+                          <div className="text-muted-foreground text-xs">
+                            {r.sizeChange.map((m) => (
+                              <div key={m.to}>{moveText(m)}</div>
+                            ))}
+                          </div>
+                        )}
                         {r.unit && !what(r, check).includes(r.unit) && <div className="text-muted-foreground text-xs">{r.unit}</div>}
                       </td>
                       <td className="whitespace-nowrap font-mono text-xs">{r.jobCard ?? r.mo}</td>

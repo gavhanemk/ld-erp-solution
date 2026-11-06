@@ -278,7 +278,8 @@ function Sheet() {
           out: r.out ? qty(r.out) : '',
           damaged: r.damaged + r.rejected ? qty(r.damaged + r.rejected) : '',
           total: qty(r.balance),
-          sign: <span style={{ color: GREY }}>{r.sign}{r.document ? ` · ${r.document}` : ''}</span>,
+          // A size change moves pieces to or from another bundle: said here, as the paper sheet would note it.
+          sign: <span style={{ color: GREY }}>{r.sizeNote ? `${r.sizeNote} · ` : ''}{r.sign}{r.document ? ` · ${r.document}` : ''}</span>,
         },
       }))}
       signatures={[

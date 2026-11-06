@@ -192,7 +192,7 @@ export function FinishedGoodsDialog({
       lines: Array<{ id: string; soLine: { item: { id: string } } | null }>
     }
     type FlowBrief = {
-      steps: Array<{ id: string; last: boolean }>
+      steps: Array<{ id: string; last: boolean; kind: string; isQcStep: boolean; execution: string }>
       bundles: Array<{ line: { id: string } | null; size: { id: string } | null; places: Array<{ stepId: string; bucket: string; vendorId: string | null; qty: number }> }>
     }
     const mo = (await api.get<{ data: MoBrief }>(`/production/orders/${id}`)).data
@@ -204,6 +204,8 @@ export function FinishedGoodsDialog({
     const flow = (await api.get<{ data: FlowBrief }>(`/production/orders/${id}/flow`)).data
     if (!alive()) return
     const last = new Set(flow.steps.filter((s) => s.last).map((s) => s.id))
+    // A working last step on our own floor (packing) packs straight from in hand, as the server does.
+    const fromHand = new Set(flow.steps.filter((s) => s.last && s.kind !== 'CUTTING' && !s.isQcStep && s.kind !== 'QC' && s.execution === 'IN_HOUSE').map((s) => s.id))
     const itemOfLine = new Map(mo.lines.map((l) => [l.id, l.soLine?.item.id ?? '']))
     const ready = new Map<string, { sizes: Record<string, number>; total: number }>()
     const add = (key: string, sizeId: string | null, n: number) => {
@@ -217,7 +219,7 @@ export function FinishedGoodsDialog({
       if (!itemId) continue
       for (const p of b.places) {
         if (p.vendorId || p.qty <= 0) continue
-        if (p.bucket === 'DONE' && last.has(p.stepId)) add(`${itemId}|A`, b.size?.id ?? null, p.qty)
+        if ((p.bucket === 'DONE' && last.has(p.stepId)) || (p.bucket === 'WIP' && fromHand.has(p.stepId))) add(`${itemId}|A`, b.size?.id ?? null, p.qty)
         if (p.bucket === 'B_GRADE') add(`${itemId}|B`, b.size?.id ?? null, p.qty)
       }
     }

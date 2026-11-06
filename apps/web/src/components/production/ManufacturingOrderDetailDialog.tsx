@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, History, Info, Layers, Loader2, Lock, PackageCheck, Pencil, Send, X, Scissors } from 'lucide-react'
+import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, History, Info, Layers, Loader2, Lock, PackageCheck, Pencil, Ruler, Send, X, Scissors } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
@@ -10,11 +10,10 @@ import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
-import { CuttingDialog } from './CuttingDialog'
 import { StagesDialog } from './StagesDialog'
 import { MoFlowStrip, currentMoTab, type MoFlowFacts, type MoTab } from './MoFlowStrip'
 import { MoProductionPanel } from './floor/MoProductionPanel'
-import { PROGRESS, type Flow } from './floor/types'
+import { bundleShort, PROGRESS, type Flow, type SizeChangeEntry } from './floor/types'
 import { FLOOR_NOTE, LIVE_MO, moStage } from './status'
 
 interface MoDetail {
@@ -129,6 +128,24 @@ interface MaterialPlan {
 
 type Ask = Record<string, { on: boolean; qty: string; processId: string; warehouseId: string }>
 
+/**
+ * An order's sizes as GET /production/orders/:id/sizes gives them: each line's
+ * plan, what size changes at stitching moved (+ into a size, − out of it), the
+ * revised count the floor is making, and what Finished Goods In has packed;
+ * with every size change, newest first. The sales order keeps the buyer's
+ * sizes: the delivery challan decides how many of each to send.
+ */
+interface OrderSizes {
+  lines: Array<{
+    moLineId: string
+    style: string
+    color: string
+    totalQty: number
+    sizes: Array<{ sizeId: string; code: string; planned: number; changed: number; revised: number; packed: number; toPack: number }>
+  }>
+  history: SizeChangeEntry[]
+}
+
 const qty = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 3 })
 const pcs = (n: number) => n.toLocaleString('en-IN')
 
@@ -184,8 +201,9 @@ export function ManufacturingOrderDetailDialog({
   /** The reason the Close box starts with: its sales order's, when that is what ended it. */
   const [closeWith, setCloseWith] = useState('')
   const [completingShort, setCompletingShort] = useState(false)
-  const [cutting, setCutting] = useState(false)
   const [cancellingCut, setCancellingCut] = useState<{ id: string; cutOrderNumber: string } | null>(null)
+  /** Its sizes, planned → changed at stitching → packed, for an order with stages; null until read or without stages. */
+  const [sizes, setSizes] = useState<OrderSizes | null>(null)
   const [settingRoute, setSettingRoute] = useState(false)
   /** The step tab picked by hand, for this order; until then it opens on the step the order has reached. */
   const [tabPick, setTabPick] = useState<{ moId: string; tab: MoTab } | null>(null)
@@ -216,8 +234,17 @@ export function ManufacturingOrderDetailDialog({
         const data = (await api.get<{ data: MoDetail }>(`/production/orders/${id}`)).data
         setMo(data)
         setEditNote(null)
-        if (data.steps?.length) await loadFlow(id)
-        else setFlow(null)
+        if (data.steps?.length) {
+          // Its sizes alongside, quietly: a failure leaves the Sizes section out, never the window.
+          void api
+            .get<{ data: OrderSizes }>(`/production/orders/${id}/sizes`)
+            .then((res) => setSizes(res.data))
+            .catch(() => setSizes(null))
+          await loadFlow(id)
+        } else {
+          setFlow(null)
+          setSizes(null)
+        }
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Could not open that manufacturing order.')
       } finally {
@@ -262,6 +289,7 @@ export function ManufacturingOrderDetailDialog({
     setHistory(null)
     setMo(null)
     setFlow(null)
+    setSizes(null)
     setPlan(null)
     setRequiredDate('')
     setSwap(new Set())
@@ -691,6 +719,10 @@ export function ManufacturingOrderDetailDialog({
                     </div>
                   </Section>
 
+                  {!!mo.steps?.length && sizes && (sizes.history.length > 0 || sizes.lines.some((l) => l.sizes.some((z) => z.packed > 0))) && (
+                    <OrderSizesSection sizes={sizes} />
+                  )}
+
                   <div id="mo-history" className="scroll-mt-3">
                     <Section icon={History} title="History">
                       {history === null ? (
@@ -963,23 +995,13 @@ export function ManufacturingOrderDetailDialog({
                     onLoadStages={() => setSettingRoute(true)}
                     onChanged={(msg) => void refresh(msg)}
                   />
-                  {!mo.steps?.length && (mo.so?.isJobWork || !!mo.cuttingOrders?.length) && (
-                  <Section
-                    icon={Scissors}
-                    title="Cutting"
-                    actions={
-                      mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'create') ? (
-                        <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setCutting(true)} disabled={busy !== null}>
-                          <Scissors size={13} /> Record cutting
-                        </button>
-                      ) : undefined
-                    }
-                  >
-                    {!mo.cuttingOrders?.length ? (
-                      <p className="text-muted-foreground text-sm">
-                        Nothing cut yet. Record each cutting: fabric used, waste and pieces by size. Cut here, the pieces get no bundles and the order then carries on without stages; to use stages, set them up before cutting.
-                      </p>
-                    ) : (
+                  {/*
+                   * Cuttings recorded the old way, before the order had stages: listed, and each can still be
+                   * cancelled, which is how such an order can take stages. No more are recorded here (6 Nov
+                   * 2026): every order is cut on its cutting sheet once its stages are set up.
+                   */}
+                  {!mo.steps?.length && !!mo.cuttingOrders?.length && (
+                    <Section icon={Scissors} title="Cutting">
                       <div className="divide-border divide-y text-sm">
                         {mo.cuttingOrders.map((c) => (
                           <div key={c.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${c.status === 'CANCELLED' ? 'opacity-60' : ''}`}>
@@ -1003,8 +1025,8 @@ export function ManufacturingOrderDetailDialog({
                           </div>
                         ))}
                       </div>
-                    )}
-                  </Section>
+                      <p className="text-muted-foreground mt-2 text-xs">Cut before stages were set up. New cutting is recorded on the cutting sheet, once an order&apos;s stages are set up.</p>
+                    </Section>
                   )}
                 </div>
               )}
@@ -1043,16 +1065,6 @@ export function ManufacturingOrderDetailDialog({
           onClose={() => setSettingRoute(false)}
           onSaved={(msg) => {
             setSettingRoute(false)
-            void refresh(msg)
-          }}
-        />
-      )}
-      {cutting && mo && (
-        <CuttingDialog
-          moId={mo.id}
-          onClose={() => setCutting(false)}
-          onSaved={(msg) => {
-            setCutting(false)
             void refresh(msg)
           }}
         />
@@ -1101,5 +1113,114 @@ export function ManufacturingOrderDetailDialog({
       )}
     </div>,
     document.body
+  )
+}
+
+/** "+20", "−20", or a dash: the pieces a size gained or gave up to size changes. */
+const signed = (n: number) => (n > 0 ? `+${pcs(n)}` : n < 0 ? `−${pcs(-n)}` : '—')
+
+/** "20 pcs M → L (B003 → B061)": one bundle's pieces made as another size, into a new bundle. */
+const moveText = (m: SizeChangeEntry['moves'][number]) => `${pcs(m.qty)} pcs ${m.from.size} → ${m.to.size} (${bundleShort(m.from.code)} → ${bundleShort(m.to.code)})`
+
+/**
+ * The order's sizes line by line: planned, changed at stitching, revised,
+ * packed and still to pack, with each line's size changes under it. Shown on
+ * an order with stages once it has a size change or something packed.
+ */
+function OrderSizesSection({ sizes }: { sizes: OrderSizes }) {
+  const lines = sizes.lines.filter((l) => l.sizes.length > 0)
+  const many = lines.length > 1
+  const num = 'text-right text-xs tabular-nums'
+  return (
+    <Section icon={Ruler} title="Sizes">
+      <div className="space-y-4">
+        {lines.map((l) => {
+          const changes = sizes.history.filter((h) => h.moLineId === l.moLineId)
+          const sum = (k: 'planned' | 'changed' | 'revised' | 'packed' | 'toPack') => l.sizes.reduce((t, z) => t + z[k], 0)
+          const trend = (n: number) => <span className={n > 0 ? 'trend-up' : n < 0 ? 'trend-down' : 'text-muted-foreground'}>{signed(n)}</span>
+          return (
+            <div key={l.moLineId} className="space-y-2">
+              {many && (
+                <p className="text-foreground text-sm font-medium">
+                  <span className="font-mono">{l.style}</span>
+                  {l.color ? ` · ${l.color}` : ''}
+                </p>
+              )}
+              <div className="border-border max-w-2xl overflow-x-auto rounded-lg border">
+                <table className="data-table table-compact w-full min-w-[440px]">
+                  <thead>
+                    <tr className="bg-secondary">
+                      <th>Size</th>
+                      <th style={{ textAlign: 'right' }}>Planned</th>
+                      <th style={{ textAlign: 'right' }} title="Pieces made as another size at stitching: + into this size, − out of it">
+                        Changed
+                      </th>
+                      <th style={{ textAlign: 'right' }} title="Planned, with the changes: what the floor is making">
+                        Revised
+                      </th>
+                      <th style={{ textAlign: 'right' }} title="Booked in through Inventory → Finished Goods In, B-grade included">
+                        Packed
+                      </th>
+                      <th style={{ textAlign: 'right' }}>To pack</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {l.sizes.map((z) => (
+                      <tr key={z.sizeId}>
+                        <td className="text-xs font-medium">{z.code}</td>
+                        <td className={num}>{pcs(z.planned)}</td>
+                        <td className={num}>{trend(z.changed)}</td>
+                        <td className={`${num} font-semibold`}>{pcs(z.revised)}</td>
+                        <td className={num}>{z.packed ? pcs(z.packed) : '—'}</td>
+                        <td className={num}>{z.toPack ? pcs(z.toPack) : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-border bg-secondary/40 border-t">
+                      <td className="text-foreground px-3 py-2 text-xs font-semibold">Total</td>
+                      <td className={`${num} px-3 py-2 font-semibold`}>{pcs(sum('planned'))}</td>
+                      <td className={`${num} px-3 py-2`}>{trend(sum('changed'))}</td>
+                      <td className={`${num} px-3 py-2 font-semibold`}>{pcs(sum('revised'))}</td>
+                      <td className={`${num} px-3 py-2 font-semibold`}>{sum('packed') ? pcs(sum('packed')) : '—'}</td>
+                      <td className={`${num} px-3 py-2 font-semibold`}>{sum('toPack') ? pcs(sum('toPack')) : '—'}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              {changes.length > 0 && (
+                <div className="max-w-2xl">
+                  <p className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wider">Size changes</p>
+                  <ul className="divide-border divide-y">
+                    {changes.map((h) => (
+                      <li key={h.eventId} className="py-1.5">
+                        <p className="text-sm">
+                          <span className={`font-medium ${h.undone ? 'text-muted-foreground line-through' : 'text-foreground'}`}>{h.moves.map(moveText).join(', ')}</span>
+                          <span className="text-muted-foreground text-xs" title={`Recorded by ${h.by}, ${when(h.at)}`}>
+                            {' '}
+                            · at {h.step.name} · {h.personName ?? h.by} · {formatDate(h.date)}
+                          </span>
+                        </p>
+                        <p className="text-muted-foreground text-xs">{h.reason}</p>
+                        {h.undone && (
+                          <p className="warn-text text-xs">
+                            Undone by {h.undone.by ?? 'someone'} on {formatDate(h.undone.at)}
+                            {h.undone.reason ? ` — ${h.undone.reason}` : ''}
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )
+        })}
+        <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
+          <Info size={13} className="mt-px shrink-0" />
+          The sales order keeps the buyer&apos;s sizes. Finished Goods In takes the revised sizes, and the delivery challan decides how many of each to send.
+        </p>
+      </div>
+    </Section>
   )
 }

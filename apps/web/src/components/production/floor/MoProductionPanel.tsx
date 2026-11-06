@@ -46,7 +46,7 @@ export function MoProductionPanel({
   materialsIssued: boolean
   /** A requisition is raised for the order, issued or not. */
   requisitionsRaised?: boolean
-  /** Cut the old way, before it had stages (cutting numbers): it carries on without stages. */
+  /** Cut the old way, before it had stages (cutting numbers): it carries on without stages; no more cutting is recorded that way. */
   cutWithoutStages?: string[]
   /** Pieces packed on the order: once some are, it stays without stages. */
   packed?: number
@@ -216,7 +216,7 @@ export function MoProductionPanel({
             'Process forms, by job card',
             !staged ? (
               oldCut ? (
-                'None for this order while it carries on without stages: its cutting is recorded under Cutting below.'
+                'None for this order while it carries on without stages: its cuttings are listed under Cutting below, and what is packed is booked in Inventory → Finished Goods In.'
               ) : (
                 'Once the stages are loaded, each colour gets its forms: cutting sheet first, then one for each stage to the last check.'
               )

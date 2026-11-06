@@ -767,6 +767,37 @@ made on close with it.
   Materials asked → Part issued → Materials issued (every item in full) →
   In production (cutting recorded) → Packing → Completed.
 
+### Size jumps at stitching (6 Nov 2026)
+
+Pieces cut as one size are sometimes made as another: the size label is
+sewn at stitching, and a run is moved up or down a size when it measures
+large or small, or when the buyer changes the ratio. A real production step,
+not a stock correction. What the business decided:
+
+1. **Only at stitching done on our own floor.** Not at cutting, not at any
+   later stage, and not at outside units (sizes do not change there).
+2. **Anyone who records production work can do it**, with a reason. Taking
+   one back needs the right to undo floor entries, as every undo does.
+3. **Only to a size already on the order.**
+4. **Recorded when it happens** — no revised allocation is planned ahead.
+5. **The sales order is not changed.** It keeps the buyer's sizes. Finished
+   goods are booked in the sizes actually made, and the delivery challan
+   decides how many of each size go: sizes may differ from the order with no
+   note as long as the line's total is not exceeded (a note is still needed
+   past the line's total).
+6. **The order's planned sizes stay as they were.** The order shows planned,
+   changed, revised, packed and to pack, size by size, and every change: who,
+   when, why, which bundle into which.
+
+On the floor each changed bundle's pieces go into a **new bundle** of the new
+size, with its own sticker ("made from B003 (M)"); the old bundle keeps its
+history, and every piece still traces back to the lay it was cut in.
+
+The old one-step cutting on the order window (cutting without stages, no
+bundles) was removed the same day: every order is cut on its cutting sheet
+once its stages are set up. The test orders cut that way were deleted from the
+demo database.
+
 ---
 
 ## 7. HR & people

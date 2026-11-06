@@ -32,7 +32,12 @@ interface PrepSize {
   sequence: number
   ordered: number
   sent: number
+  /** What the size still wants; never below nothing. */
   pending: number
+  /** Sent beyond what the size ordered (sizes swapped within the line after a size jump). */
+  over?: number
+  /** Pieces size changes at stitching made in this size beyond its plan: the most it may go over its order by. */
+  gained?: number
   inStock: number
   /** B-grade pieces of this size in the store. */
   inStockB: number
@@ -105,6 +110,7 @@ const emptyDraft = (): SendDraft[string] => ({ sizes: {}, qty: '', overNote: '',
 
 const today = () => new Date().toISOString().slice(0, 10)
 const pcs = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 })
+const r2 = (n: number) => Math.round(n * 100) / 100
 /** The value above which goods need an e-way bill to travel. Shown, not enforced. */
 const EWAY_LIMIT = 50_000
 
@@ -146,8 +152,12 @@ function Field({
  *
  * For each line, each size shows what is still pending and what is packed in
  * the chosen store, with a box for what goes now. "Fill what can go" fills
- * every box with the smaller of the two. Sending more than pending is allowed
- * with a note; more than is in stock is not.
+ * each size with what is packed, up to what it still wants, then makes up the
+ * line's total from extra packed pieces of other sizes: pieces cut as one
+ * size are sometimes made as another at stitching (a size jump), the order
+ * keeps the buyer's sizes, and here it is decided how many of each go. Sizes
+ * may differ from the order within the line's total, with no note; more than
+ * the line still wants needs a note; more than is in stock cannot go.
  */
 export function DeliveryChallanDialog({
   open,
@@ -288,22 +298,41 @@ export function DeliveryChallanDialog({
   const setDraft = (soLineId: string, patch: Partial<SendDraft[string]>) =>
     setSend((s) => ({ ...s, [soLineId]: { ...draftOf(soLineId), ...patch } }))
 
-  /** Every box filled with what can go: the smaller of pending and in stock. */
+  /**
+   * Every box filled with what can go. Each size first takes what is packed,
+   * up to what it still wants; then, while the line still wants more, extra
+   * packed pieces of other sizes make it up (ordered M 200 / L 150, packed
+   * M 180 / L 170: all 350 go). Never more than the line still wants, nor
+   * more than is packed.
+   */
   const fillAll = () => {
     if (!prep) return
     const next: SendDraft = {}
     for (const l of prep.lines) {
-      // Good pieces only: B-grade goes when somebody decides to send it.
+      // Good pieces only: B-grade goes when somebody decides to send it. What
+      // is typed of it already counts against what the line still wants.
       const keep = draftOf(l.soLineId)
-      next[l.soLineId] = l.sizes
-        ? {
-            ...keep,
-            sizes: Object.fromEntries(
-              l.sizes.map((s) => [s.sizeId, String(Math.max(0, Math.min(s.pending, s.inStock)) || '')])
-            ),
-            qty: '',
-          }
-        : { ...keep, sizes: {}, qty: String(Math.max(0, Math.min(l.pending, l.inStock)) || '') }
+      const typedB = (sizeId?: string) =>
+        sizeId ? Number(keep.bSizes[sizeId]) || 0 : l.sizes ? l.sizes.reduce((t, s) => t + (Number(keep.bSizes[s.sizeId]) || 0), 0) : Number(keep.bQty) || 0
+      let left = Math.max(0, l.pending - typedB())
+      if (!l.sizes) {
+        next[l.soLineId] = { ...keep, sizes: {}, qty: String(Math.max(0, Math.min(left, l.inStock)) || '') }
+        continue
+      }
+      const fill: Record<string, number> = {}
+      for (const s of l.sizes) {
+        const n = Math.max(0, Math.min(s.pending - typedB(s.sizeId), s.inStock, left))
+        fill[s.sizeId] = n
+        left -= n
+      }
+      for (const s of l.sizes) {
+        if (left <= 0) break
+        // Only what a size change made in this size, less what already went over: other stock stays.
+        const n = Math.max(0, Math.min(s.inStock - fill[s.sizeId], left, (s.gained ?? 0) - (s.over ?? 0)))
+        fill[s.sizeId] += n
+        left -= n
+      }
+      next[l.soLineId] = { ...keep, sizes: Object.fromEntries(l.sizes.map((s) => [s.sizeId, fill[s.sizeId] > 0 ? String(fill[s.sizeId]) : ''])), qty: '' }
     }
     setSend(next)
   }
@@ -313,21 +342,29 @@ export function DeliveryChallanDialog({
     if (!prep) return []
     return prep.lines.map((l) => {
       const d = send[l.soLineId] ?? emptyDraft()
-      // Good and B-grade pieces of a size count together against what the order still wants.
+      // Good and B-grade pieces count together. `vsOrder`: where each size
+      // stands against what it ordered once this challan goes, sent before
+      // included (+20 more, −20 fewer).
       const sizes = (l.sizes ?? []).map((s) => {
         const nowA = Number(d.sizes[s.sizeId]) || 0
         const nowB = Number(d.bSizes[s.sizeId]) || 0
-        return { ...s, now: nowA, nowB, over: nowA + nowB > s.pending, short: nowA > s.inStock, shortB: nowB > s.inStockB }
+        return { ...s, now: nowA, nowB, vsOrder: r2(s.sent + nowA + nowB - s.ordered), short: nowA > s.inStock, shortB: nowB > s.inStockB }
       })
       const nowA = l.sizes ? sizes.reduce((t, s) => t + s.now, 0) : Number(d.qty) || 0
       const nowB = l.sizes ? sizes.reduce((t, s) => t + s.nowB, 0) : Number(d.bQty) || 0
-      const now = nowA + nowB
-      const over = l.sizes ? sizes.some((s) => s.over) : now > l.pending
+      const now = r2(nowA + nowB)
+      // A note is wanted only past the line's total, all sizes together: a
+      // size over its own order within it is a size jump, not an over-send.
+      const over = now > l.pending
+      // Sizes off the order: a size passes what it ordered, and whether the
+      // line is done with this challan (nothing left to send on it).
+      const differ = !!l.sizes && now > 0 && sizes.some((s) => s.vsOrder > 0)
+      const done = r2(l.sent + now) >= l.ordered
       const short = l.sizes ? sizes.some((s) => s.short || s.shortB) : nowA > l.inStock || nowB > l.inStockB
       const bRate = l.bGradeRate ?? l.unitPrice
       const value = nowA * l.unitPrice * (1 - l.discount / 100) + nowB * bRate * (1 - l.discount / 100)
       const showB = l.inStockB > 0 || nowB > 0
-      return { l, d, sizes, now, nowA, nowB, showB, over, short, value, gst: value * (l.gstRate / 100) }
+      return { l, d, sizes, now, nowA, nowB, showB, over, differ, done, short, value, gst: value * (l.gstRate / 100) }
     })
   }, [prep, send])
 
@@ -343,7 +380,9 @@ export function DeliveryChallanDialog({
       : pieces <= 0
         ? 'Put the pieces to send against at least one line.'
         : noNote
-          ? `${noNote.l.item.code}: more than the order still wants. Add a note saying why.`
+          ? noNote.l.pending > 0
+            ? `${noNote.l.item.code}: ${pcs(noNote.now)} pcs is more than the ${pcs(noNote.l.pending)} the order still wants. Add a note saying why.`
+            : `${noNote.l.item.code}: all the order wanted has been sent. Add a note saying why ${pcs(noNote.now)} more pcs go.`
           : null
   // Short of stock still saves as a draft; it cannot go until the stock is there.
   const dispatchBlocker = blocker ?? (short ? `Not enough of ${short.l.item.code} in this store to dispatch.` : null)
@@ -513,10 +552,11 @@ export function DeliveryChallanDialog({
               >
                 <p className="text-muted-foreground mb-2 text-xs">
                   For each size: what the order still wants, what is packed in this store, and what goes now. &quot;Fill what
-                  can go&quot; puts the smaller of the two in every box.
+                  can go&quot; fills each size up to what it still wants, then makes up the line&apos;s total from pieces made as
+                  another size at stitching. Sizes can differ from the order as long as the line&apos;s total does not go over.
                 </p>
                 <div className="space-y-3" data-grid>
-                  {rows.map(({ l, d, sizes, now, nowB, showB, over, short: lineShort }) => (
+                  {rows.map(({ l, d, sizes, now, nowB, showB, over, differ, done, short: lineShort }) => (
                     <div key={l.soLineId} data-grid-row className="border-border bg-card rounded-lg border p-3">
                       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
                         <p className="text-foreground text-sm font-medium">
@@ -549,14 +589,27 @@ export function DeliveryChallanDialog({
                               <td className="text-muted-foreground pr-4 text-xs">Pending</td>
                               {l.sizes ? (
                                 sizes.map((s) => (
-                                  <td key={s.sizeId} className="text-center text-xs tabular-nums">
+                                  <td
+                                    key={s.sizeId}
+                                    className="text-center text-xs tabular-nums"
+                                    title={s.over ? `${pcs(s.over)} already sent more than ordered` : undefined}
+                                  >
                                     {pcs(s.pending)}
                                   </td>
                                 ))
                               ) : (
                                 <td className="text-center text-xs tabular-nums">{pcs(l.pending)}</td>
                               )}
-                              <td className="text-right text-xs tabular-nums">{pcs(l.pending)}</td>
+                              <td
+                                className="text-right text-xs tabular-nums"
+                                title={
+                                  sizes.some((s) => s.over)
+                                    ? 'What the line still wants in all. Sizes already sent over their order count against it.'
+                                    : undefined
+                                }
+                              >
+                                {pcs(l.pending)}
+                              </td>
                             </tr>
                             <tr>
                               <td className="text-muted-foreground pr-4 text-xs">In stock</td>
@@ -578,12 +631,18 @@ export function DeliveryChallanDialog({
                                   <td key={s.sizeId} className="px-1 py-1">
                                     <StepInput
                                       className={`form-input h-8 w-14 px-1 text-center text-xs tabular-nums ${
-                                        s.short ? 'border-destructive/60' : s.over ? 'border-primary/60' : ''
+                                        s.short ? 'border-destructive/60' : s.vsOrder > 0 && s.now > 0 ? 'border-primary/60' : ''
                                       }`}
                                       value={d.sizes[s.sizeId] ?? ''}
                                       placeholder="0"
                                       aria-label={`${l.item.code} size ${s.code}, send now`}
-                                      title={s.short ? `Only ${pcs(s.inStock)} in this store` : s.over ? 'More than the order still wants' : undefined}
+                                      title={
+                                        s.short
+                                          ? `Only ${pcs(s.inStock)} in this store`
+                                          : s.vsOrder > 0 && s.now > 0
+                                            ? `${pcs(s.vsOrder)} more than ordered`
+                                            : undefined
+                                      }
                                       onValueChange={(v) => setDraft(l.soLineId, { sizes: { ...d.sizes, [s.sizeId]: v } })}
                                     />
                                   </td>
@@ -650,6 +709,26 @@ export function DeliveryChallanDialog({
                           </tbody>
                         </table>
                       </div>
+                      {/* Sizes swapped within the line (a size jump at stitching): said in words, no note needed. */}
+                      {differ && (
+                        <p className="text-muted-foreground mt-2 text-xs">
+                          <span className="text-foreground font-medium">
+                            {over
+                              ? 'Sizes differ from the order.'
+                              : done
+                                ? 'Sizes differ from the order: same total.'
+                                : 'Sizes differ from the order, within what it still wants.'}
+                          </span>{' '}
+                          {sizes
+                            .filter((s) => s.vsOrder !== 0)
+                            .map((s) =>
+                              s.vsOrder > 0
+                                ? `Size ${s.code}: ${pcs(s.vsOrder)} more than ordered`
+                                : `Size ${s.code}: ${pcs(-s.vsOrder)} fewer than ordered${done ? '' : ' so far'}`
+                            )
+                            .join(' · ')}
+                        </p>
+                      )}
                       {now > 0 && over && (
                         <div className="mt-2 flex flex-wrap items-center gap-2">
                           <span className="text-xs">More than the order still wants. Why?</span>

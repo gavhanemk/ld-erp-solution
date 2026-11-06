@@ -16,7 +16,32 @@ const must = (r, what) => { if (r.status >= 300) { console.log(`setup failed: ${
 
 const A = 'cmth8dkwh00hvoijj4in66tuc', FG = 'cmv4ud8bu002awgu064gsx1hs', FAB = 'cmukzhguv0009kurg1huthki3', BTN = 'cmukzhhyy000dkurgxiokhtud'
 const WH = 'cmth8dcgm00gpoijjnarcpvj3', S38 = 'cmth89v4e002moijjgegocwv0', S40 = 'cmth89vci002ooijj1otoy5u8'
+const STYLE = 'cmth8dxgc00kroijjlgedtbsv' // LD-SH-2601, the style of FG
 const DEPT = (await q(`SELECT id FROM departments LIMIT 1`))[0].id
+
+// Every order is cut on its cutting sheet once its stages are set up (6 Nov 2026). The tests' own
+// routing for LD-SH-2601 is cutting then packing, both on our floor: made once through the API,
+// switched on only while an order takes its stages, so it is never offered on real orders nor
+// shown as the style's routing. The same as in e2e-jobwork-test.mjs.
+const TEST_ROUTING = 'ZZTEST-RT-CUTPACK'
+const stagesFor = async (moId) => {
+  const op = async (code) => (await q(`SELECT id, "departmentId" FROM operations WHERE code = $1`, [code]))[0]
+  const cutOp = await op('OP-CUT'), pkgOp = await op('OP-PKG')
+  if (!cutOp || !pkgOp) { console.log('setup failed: processes OP-CUT and OP-PKG are not in the demo masters'); process.exit(1) }
+  let rt = (await q(`SELECT id, "isActive" a FROM routings WHERE code = $1`, [TEST_ROUTING]))[0]
+  if (!rt) {
+    rt = must(await call('POST', '/masters/routings', {
+      code: TEST_ROUTING, name: 'ZZTEST cut and pack (API tests)', styleId: STYLE, notes: 'Made by the API tests; switched off between runs.',
+      steps: [
+        { sequence: 1, operationId: cutOp.id, departmentId: cutOp.departmentId, execution: 'IN_HOUSE', skip: 'NEVER' },
+        { sequence: 2, operationId: pkgOp.id, departmentId: pkgOp.departmentId, execution: 'IN_HOUSE' },
+      ],
+    }), 'test routing')
+  } else if (!rt.a) must(await call('PATCH', `/masters/routings/${rt.id}`, { isActive: true }), 'test routing on')
+  const r = await call('POST', `/production/orders/${moId}/routing`, { routingId: rt.id })
+  must(await call('PATCH', `/masters/routings/${rt.id}`, { isActive: false }), 'test routing off')
+  return r
+}
 
 // Our own fabric and buttons in the store, at a cost.
 const sin = await call('POST', '/inventory/stock-in', { warehouseId: WH, source: 'OTHER', notes: 'Demo test: own stock for the cutting test', lines: [{ itemId: FAB, qty: 50, unitRate: 80 }, { itemId: BTN, qty: 200, unitRate: 1.5 }] })
@@ -53,7 +78,15 @@ const iss = await call('POST', `/inventory/requisitions/${mr.id}/issue`, {})
 check('SET', 'issued: 10 of theirs, 5 of ours, 20 buttons', iss.status === 200, err(iss))
 
 const moLine = (await q(`SELECT id FROM mo_lines WHERE "moId"=$1`, [mo.id]))[0].id
-const cut = () => call('POST', `/production/orders/${mo.id}/cutting`, { moLineId: moLine, fabricItemId: FAB, fabricUsed: 4, wastage: 0.5, sizes: [{ sizeId: S38, qty: 2 }, { sizeId: S40, qty: 2 }] })
+const sizes4 = [{ sizeId: S38, qty: 2 }, { sizeId: S40, qty: 2 }]
+// No cutting without stages any more: refused, then the order takes its stages and is cut on its cutting sheet.
+const old = await call('POST', `/production/orders/${mo.id}/cutting`, { moLineId: moLine, fabricItemId: FAB, fabricUsed: 4, wastage: 0.5, sizes: sizes4 })
+check('C0', `${mo.moNumber} has no stages yet: cutting it the old way is refused`, old.status === 409 && old.body?.code === 'NEEDS_STAGES', err(old))
+const staged = await stagesFor(mo.id)
+check('SET', 'its materials issued, the order takes its stages: cutting, then packing', staged.status === 200, err(staged))
+const issue = must(await call('POST', `/production/orders/${mo.id}/cutting-issues`, { moLineId: moLine, cutterName: 'ZZTEST Cutter', fabricItemId: FAB, fabricGiven: 4.5, planned: sizes4 }), 'issue to the cutting contractor')
+// What comes back cut from the contractor is received against the issue: that is where the fabric is booked.
+const cut = () => call('POST', `/production/cutting/${issue.id}/receive`, { fabricUsed: 4, wastage: 0.5, sizes: sizes4 })
 const c1 = await cut()
 check('T24', 'fabric that is partly ours and partly theirs cannot be cut into one owner\'s panels', c1.status === 409 && c1.body?.code === 'MIXED_OWNERS', err(c1))
 

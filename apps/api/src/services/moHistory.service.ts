@@ -112,6 +112,16 @@ function describe(action: string, beforeRaw: unknown, afterRaw: unknown): { what
       : { what: 'Taken off hold', changes: a.resumedBecause ? [String(a.resumedBecause)] : [] }
   }
   if (a && 'tagGarments' in a) return { what: a.tagGarments ? 'Garment tags switched on' : 'Garment tags switched off', changes: [] }
+  // A size jump at stitching, and its undo.
+  if (a && ('sizeChange' in a || 'sizeChangeUndone' in a)) {
+    const undone = 'sizeChangeUndone' in a
+    const c = asObj(undone ? a.sizeChangeUndone : a.sizeChange) ?? {}
+    const short = (code: unknown) => String(code).split('-').pop()
+    const moves = ((c.moves ?? []) as Snap[]).map((m) =>
+      undone ? `${pcs(m.qty)} back to ${m.fromSize} (${short(m.to)} → ${short(m.from)})` : `${pcs(m.qty)} ${m.fromSize} → ${m.toSize} (${short(m.from)} → ${short(m.to)})`,
+    )
+    return { what: `${undone ? 'Size change undone' : 'Sizes changed'}${c.step ? ` at ${c.step}` : ''}`, changes: [...moves, ...(c.reason ? [String(c.reason)] : [])] }
+  }
   if (a && Array.isArray(a.route)) {
     const route = (a.route as string[]).join(' → ') || 'none'
     if (b && Array.isArray(b.route)) {
