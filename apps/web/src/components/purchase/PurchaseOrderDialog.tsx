@@ -3930,7 +3930,8 @@ export function PurchaseOrderDialog({
                       {totals.chargeRows.length > 0 && (
                         <p className="text-muted-foreground text-[11px]">
                           Charges as on the supplier&apos;s bill, GST included — no GST is added on top.
-                          Type an amount in ₹, or a % of the goods value before GST.
+                          Type the amount in ₹, or switch ₹ to % and type any percentage (5, 7.5, 10…)
+                          of the goods value before GST.
                         </p>
                       )}
                       {totals.chargeRows.map((c) => (
