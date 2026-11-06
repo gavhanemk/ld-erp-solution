@@ -2232,7 +2232,7 @@ model PurchaseOrderLine {
   hsnCode     String?
   qty         Decimal       @db.Decimal(10, 3)
   unitRate    Decimal       @default(0) @db.Decimal(10, 2)
-  discount    Decimal       @default(0) @db.Decimal(5, 2)
+  discount    Decimal       @default(0) @db.Decimal(9, 6)
   gstRate     Decimal       @default(0) @db.Decimal(5, 2)
   amount      Decimal       @default(0) @db.Decimal(12, 2)
   receivedQty Decimal       @default(0) @db.Decimal(10, 3)

@@ -2,11 +2,12 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { PackType, Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
+import { priceDocument, type GstSplit, type TaxByRate } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { postWithin } from '../services/accounts/posting.service'
-import { applyRoundOff, nextDocumentNumber } from '../lib/docNumber'
+import { nextDocumentNumber } from '../lib/docNumber'
 import { priceNote, notedQtyByGrnLine, syncBillAdjustments } from '../services/purchaseNote.service'
 import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
@@ -82,15 +83,20 @@ const lineSchema = z.object({
 })
 
 /**
- * One charge on the order — transport, freight, dyeing.
+ * One charge on the order — transport, freight, dyeing, packing, Other Charges.
  *
- * Only the kind and the amount come from the browser. The GST rate is read
- * from the charge type on the server and frozen onto the row, so a rate the
- * form was holding from an hour ago cannot change what the order is taxed at.
+ * The amount is the final figure on the supplier's bill, GST included. A
+ * `gstRate` is still accepted so an older form is not refused, but it is not
+ * used: every charge is taken at 0% — see `resolveCharges`.
  */
 const chargeSchema = z.object({
   chargeTypeId: z.string().min(1, 'Pick a charge'),
   amount: z.number().min(0, 'A charge cannot be negative'),
+  gstRate: z
+    .number()
+    .min(0, 'A GST rate cannot be negative')
+    .max(100, 'A GST rate cannot be more than 100%')
+    .optional(),
 })
 
 const createSchema = z.object({
@@ -158,8 +164,15 @@ const createSchema = z.object({
   remark: z.string().max(1000).optional().nullable(),
   discountAmount: z.number().min(0).optional(),
   charges: z.array(chargeSchema).max(20).optional(),
-  // Carries no GST of its own and is added after tax, which is how the mill's
-  // old system treated it.
+  /*
+   * The old untaxed "Other charges" box. It carries no GST of its own and is
+   * added after tax, which is how the mill's old system treated it.
+   *
+   * Still accepted, so an order saved before "Other Charges" became a charge
+   * type keeps its figure when it is edited, but nothing new should send it:
+   * other charges now go in as the "Other Charges" charge, with a GST rate
+   * like any other charge.
+   */
   otherCharges: z.number().min(0).optional(),
   notes: z.string().max(1000).optional().nullable(),
   terms: z.string().max(4000).optional().nullable(),
@@ -283,20 +296,22 @@ const poReceivingInclude = {
  * The supplier's state against ours decides whether they should bill us
  * CGST+SGST or IGST. Getting it wrong on the order means the bill that comes
  * back will not reconcile against it.
+ *
+ * The place of supply on a purchase is always our own state — the mill's
+ * state code, or the first two digits of its GSTIN — even when the supplier is
+ * told to ship straight to one of our customers. That is a "bill-to/ship-to"
+ * supply: the goods are delivered to a third person on our direction, and
+ * IGST Act s.10(1)(b) puts the place of supply at the principal place of
+ * business of the person who directed it, which is us. So a supplier in our
+ * own state bills us CGST+SGST wherever the lorry goes, and one outside it
+ * bills IGST. This used to take the customer's state instead, which would
+ * have priced a same-state supplier's drop-ship to Gujarat as IGST and left
+ * the order disagreeing with the supplier's bill.
+ *
+ * Where the goods go is still recorded on the order — the delivery address and
+ * the customer — it just no longer changes the tax.
  */
-async function purchaseTaxContext(
-  tx: Prisma.TransactionClient,
-  supplierId: string,
-  /**
-   * Where the goods actually land, when that is not our own address.
-   *
-   * Goods are taxed where they are delivered. Ask a supplier in Maharashtra to
-   * ship straight to a customer in Gujarat and their bill is IGST, even though
-   * we are in Maharashtra with them. Comparing the supplier against *us* would
-   * call that CGST+SGST and the credit would be refused.
-   */
-  destinationStateCode?: string | null
-) {
+async function purchaseTaxContext(tx: Prisma.TransactionClient, supplierId: string) {
   const [company, supplier] = await Promise.all([
     tx.company.findFirst({ select: { stateCode: true, gstin: true } }),
     tx.supplier.findUnique({
@@ -320,9 +335,9 @@ async function purchaseTaxContext(
   // order carries no tax, so this must not be treated as an error.
   const theirState = supplier.stateCode || supplier.gstin?.slice(0, 2) || null
 
-  // Our own address unless the order says otherwise. Warehouses carry no state
-  // of their own, so only a customer delivery can move it.
-  const placeOfSupply = destinationStateCode || ourState
+  // Always our own state on a purchase — see above. A delivery to a customer
+  // does not move it.
+  const placeOfSupply = ourState
 
   return {
     ourState,
@@ -333,15 +348,6 @@ async function purchaseTaxContext(
   }
 }
 
-/**
- * The state the goods are going to, when they are going to a customer.
- *
- * Shipping beats billing, because that is where the goods physically land, and
- * the GSTIN is the last resort — its first two digits are the state code. If
- * none of the three is known the order is refused rather than guessed at: a
- * wrong split means the credit cannot be claimed, and that surfaces months
- * later as somebody else's problem.
- */
 /**
  * The supplier's billing address, as one block of text, for the order to keep.
  *
@@ -413,6 +419,15 @@ async function shippingAddressFor(
   return warehouse.address ?? null
 }
 
+/**
+ * Where the goods are going, when they are going to a customer — the address
+ * the order keeps and prints.
+ *
+ * Shipping beats billing, because that is where the goods physically land, and
+ * the GSTIN is the last resort — its first two digits are the state code. It
+ * no longer decides the tax on the order: a purchase's place of supply is
+ * always our own state, see `purchaseTaxContext`.
+ */
 async function customerDeliveryState(tx: Prisma.TransactionClient, customerId: string) {
   const customer = await tx.customer.findUnique({
     where: { id: customerId },
@@ -432,19 +447,15 @@ async function customerDeliveryState(tx: Prisma.TransactionClient, customerId: s
   })
   if (!customer) throw new AppError('Customer not found', 404, 'NOT_FOUND')
 
+  // Kept for reference only. A customer with no state code is no longer
+  // refused: the order's tax is worked out from our own state, so a missing
+  // code on the customer cannot stop the order being priced.
   const stateCode =
     customer.shippingStateCode ||
     customer.billingStateCode ||
     customer.shippingGstin?.slice(0, 2) ||
-    customer.gstin?.slice(0, 2)
-
-  if (!stateCode) {
-    throw new AppError(
-      `No GST state code on ${customer.name}. Add one on the customer, or the tax on this order cannot be worked out.`,
-      409,
-      'NO_PLACE_OF_SUPPLY'
-    )
-  }
+    customer.gstin?.slice(0, 2) ||
+    null
 
   // Frozen onto the order, because a customer moves and an order already with
   // a supplier must still say where it was sent.
@@ -461,111 +472,149 @@ async function customerDeliveryState(tx: Prisma.TransactionClient, customerId: s
 }
 
 /**
- * `charges` arrive with their GST rate already read off the charge type — see
- * `resolveCharges`. They are taxed like a line but are not discountable: the
- * mill's discount is negotiated on the goods, not on the transporter's bill.
+ * How GST is split on a purchase: none at all from a supplier with no GSTIN,
+ * otherwise CGST+SGST within our state and IGST across states.
  *
- * `otherCharges` carries no GST and is added after tax, which is how the old
- * system treated it and how the printed sheet reads.
+ * Reverse charge is the one exception, and only on a bill: an unregistered
+ * supplier's bill under reverse charge still has GST worked out — we pay it to
+ * the government ourselves — so it is split like a registered supplier's.
+ */
+function purchaseSplit(
+  tax: { isIntraState: boolean; supplierIsUnregistered: boolean },
+  reverseCharge = false
+): GstSplit {
+  if (tax.supplierIsUnregistered && !reverseCharge) return 'NONE'
+  return tax.isIntraState ? 'CGST_SGST' : 'IGST'
+}
+
+/**
+ * A line discount, to the six decimals the column keeps.
+ *
+ * A discount typed in rupees reaches here as a percentage of the line, often a
+ * long one. It is priced at exactly what is stored, so the order re-priced
+ * from its own saved figures later comes to the same total.
+ */
+const pct6 = (n: number | undefined) => Math.round((n ?? 0) * 1e6) / 1e6
+
+/**
+ * A bill line discount, to the two decimals the bill's column keeps.
+ *
+ * An order line discount can carry six decimals, and the bill form copies it
+ * across as it is. The bill must be priced at the figure it saves, or the next
+ * edit of the bill — even just its notes — prices it again from the shorter
+ * figure and moves its tax and total by a few paise.
+ */
+const pct2 = (n: number | null | undefined) => Math.round((n ?? 0) * 100) / 100
+
+/**
+ * The order-level discount actually taken.
+ *
+ * Only an ORDER_LEVEL order has one: an item-level order discounts each line,
+ * and a NONE order has no discount at all — sending whatever was left in the
+ * box on either would take a discount nobody meant. An order raised before the
+ * form asked holds the database's own default ("STANDARD") and keeps whatever
+ * discount it was saved with.
+ */
+function orderDiscountOf(poType: string | null | undefined, discountAmount: number) {
+  return poType === 'ITEM_LEVEL' || poType === 'NONE' ? 0 : discountAmount
+}
+
+/**
+ * Prices a purchase order with the one shared calculation (`priceDocument`),
+ * the same one the order form runs as the buyer types and the bill runs when
+ * it arrives — so the screen, the saved order and the bill cannot come to
+ * different figures.
+ *
+ * `charges` arrive with the GST rate chosen on the order — see
+ * `resolveCharges`. They are taxed at that rate on their own, never folded
+ * into the goods, and are not discountable: the mill's discount is negotiated
+ * on the goods, not on the transporter's bill.
+ *
+ * `otherCharges` is the old untaxed box. It carries no GST and is added after
+ * tax, which is how the old system treated it; only orders saved before
+ * "Other Charges" became a charge type have one.
+ *
+ * What comes back keeps the meaning the order's columns have always had: a
+ * line's amount is its value after its own discount, before the order
+ * discount and before tax; `subtotal` is those added up; `taxable` is the
+ * goods alone after every discount; the GST figures cover goods and charges.
  */
 function priceOrder(
   lines: z.infer<typeof lineSchema>[],
-  discountAmount: number,
-  isIntraState: boolean,
-  chargeTax: boolean,
+  orderDiscount: number,
+  split: GstSplit,
   charges: { chargeTypeId: string; amount: number; gstRate: number }[] = [],
   otherCharges = 0
 ) {
-  const lineTotals = lines.map((l) => l.qty * l.unitRate * (1 - (l.discount ?? 0) / 100))
-  const subtotal = round2(lineTotals.reduce((s, n) => s + n, 0))
-
-  const discount = round2(Math.min(discountAmount, subtotal))
-  const taxable = round2(subtotal - discount)
-  const factor = subtotal > 0 ? taxable / subtotal : 1
-
-  let cgst = 0
-  let sgst = 0
-  let igst = 0
-
-  const split = (tax: number) => {
-    if (isIntraState) {
-      cgst += tax / 2
-      sgst += tax / 2
-    } else {
-      igst += tax
-    }
-  }
-
-  if (chargeTax) {
-    lines.forEach((line, i) => {
-      split(lineTotals[i] * factor * ((line.gstRate ?? 0) / 100))
-    })
-  }
-
-  // Each charge's own tax, kept per charge so the row can be compared against
-  // the same row on the bill when it arrives.
-  const chargeRows = charges.map((c) => {
-    const tax = chargeTax ? round2(c.amount * (c.gstRate / 100)) : 0
-    split(tax)
-    return {
-      chargeTypeId: c.chargeTypeId,
-      amount: round2(c.amount),
-      gstRate: c.gstRate,
-      cgst: isIntraState ? round2(tax / 2) : 0,
-      sgst: isIntraState ? round2(tax / 2) : 0,
-      igst: isIntraState ? 0 : round2(tax),
-    }
+  const priced = priceDocument({
+    lines: lines.map((l) => ({
+      qty: l.qty,
+      rate: l.unitRate,
+      discountPct: pct6(l.discount),
+      gstRate: l.gstRate ?? 0,
+    })),
+    orderDiscount,
+    charges: charges.map((c) => ({ key: c.chargeTypeId, amount: c.amount, gstRate: c.gstRate })),
+    untaxedExtra: otherCharges,
+    split,
   })
 
-  const chargeTotal = round2(chargeRows.reduce((t, c) => t + c.amount, 0))
-
-  cgst = round2(cgst)
-  sgst = round2(sgst)
-  igst = round2(igst)
-
-  const { rounded, roundOff } = applyRoundOff(
-    taxable + chargeTotal + cgst + sgst + igst + round2(otherCharges)
-  )
+  // Each charge's own tax, kept per charge so the row can be compared against
+  // the same row on the bill when it arrives. The rate stored is the one
+  // applied: 0 from a supplier with no GSTIN, as on the lines.
+  const chargeRows = priced.charges.map((c) => ({
+    chargeTypeId: c.key,
+    amount: c.amount,
+    gstRate: c.gstRate,
+    cgst: c.cgst,
+    sgst: c.sgst,
+    igst: c.igst,
+  }))
 
   return {
-    lineTotals,
-    subtotal,
-    discount,
-    taxable,
+    lineTotals: priced.lines.map((l) => round2(l.gross - l.discount)),
+    subtotal: round2(priced.gross - priced.lineDiscount),
+    discount: priced.orderDiscount,
+    taxable: priced.goodsTaxable,
     chargeRows,
-    chargeTotal,
-    otherCharges: round2(otherCharges),
-    cgst,
-    sgst,
-    igst,
-    roundOff,
-    total: rounded,
+    chargeTotal: priced.chargeTotal,
+    otherCharges: priced.untaxedExtra,
+    cgst: priced.cgst,
+    sgst: priced.sgst,
+    igst: priced.igst,
+    roundOff: priced.roundOff,
+    total: priced.total,
   }
 }
 
 /**
- * Reads each charge's GST rate off the charge type, and refuses a kind of
- * charge the mill does not use on purchases.
+ * Checks each charge is one the mill uses on purchases.
  *
- * The rate is not taken from the browser on purpose: it is the difference
- * between an order taxed at 12% and one taxed at 18%, and the form could be
- * holding a rate that was corrected in the master since it loaded.
+ * Every charge is taken at 0% GST, whatever rate is sent. Freight, transport
+ * and the rest are typed as the final figure on the supplier's bill with any
+ * GST already inside it, so they are added to the total as they are — GST on
+ * top would charge it twice.
+ *
+ * The same charge sent twice is added together into one row rather than
+ * refused at the database's unique index with a message nobody could act on.
  */
-async function resolveCharges(
-  tx: Prisma.TransactionClient,
-  charges: z.infer<typeof chargeSchema>[]
-) {
-  const wanted = charges.filter((c) => c.amount > 0)
+async function resolveCharges(tx: Prisma.TransactionClient, charges: z.infer<typeof chargeSchema>[]) {
+  const merged = new Map<string, { chargeTypeId: string; amount: number }>()
+  for (const c of charges) {
+    const seen = merged.get(c.chargeTypeId)
+    if (seen) seen.amount = round2(seen.amount + c.amount)
+    else merged.set(c.chargeTypeId, { chargeTypeId: c.chargeTypeId, amount: c.amount })
+  }
+  const wanted = [...merged.values()].filter((c) => c.amount > 0)
   if (!wanted.length) return []
 
   const types = await tx.chargeType.findMany({
     where: { id: { in: wanted.map((c) => c.chargeTypeId) }, applyOnPurchase: true, isActive: true },
-    select: { id: true, defaultGstRate: true },
+    select: { id: true },
   })
-  const rateById = new Map(types.map((t) => [t.id, Number(t.defaultGstRate)]))
+  const known = new Set(types.map((t) => t.id))
 
-  const unknown = wanted.find((c) => !rateById.has(c.chargeTypeId))
-  if (unknown) {
+  if (wanted.some((c) => !known.has(c.chargeTypeId))) {
     throw new AppError(
       'One of those charges is not a charge the mill uses on purchases.',
       400,
@@ -573,11 +622,7 @@ async function resolveCharges(
     )
   }
 
-  return wanted.map((c) => ({
-    chargeTypeId: c.chargeTypeId,
-    amount: c.amount,
-    gstRate: rateById.get(c.chargeTypeId)!,
-  }))
+  return wanted.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: 0 }))
 }
 
 // ── Purchase orders ─────────────────────────────────────────────────────────
@@ -945,6 +990,39 @@ router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, r
   if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
   const header = await getPrintHeader('PO')
+  const taxMode = poTaxMode(po)
+
+  /*
+   * The GST by rate — goods and charges at each rate, and the tax on each —
+   * for the "where does the GST come from" box on the sheet.
+   *
+   * Worked out by pricing the order again from what it stored, with the same
+   * calculation that priced it. An order saved before charges carried their
+   * own rate, or before the calculation was shared, can come out a paisa or a
+   * rupee away from what it stored; then the box is left off (null) rather
+   * than printing a breakdown that does not add up to the order's own total.
+   */
+  const repriced = priceDocument({
+    lines: po.lines.map((l) => ({
+      qty: Number(l.qty),
+      rate: Number(l.unitRate),
+      discountPct: Number(l.discount),
+      gstRate: Number(l.gstRate),
+    })),
+    orderDiscount: Number(po.discountAmount),
+    charges: po.charges.map((c) => ({
+      key: c.chargeTypeId,
+      amount: Number(c.amount),
+      gstRate: Number(c.gstRate),
+    })),
+    untaxedExtra: Number(po.otherCharges),
+    split: taxMode,
+  })
+  const storedTax = round2(Number(po.cgst) + Number(po.sgst) + Number(po.igst))
+  const reproduces =
+    Math.abs(repriced.total - Number(po.totalAmount)) < 0.005 &&
+    Math.abs(repriced.tax - storedTax) < 0.005
+  const taxByRate: TaxByRate[] | null = reproduces ? repriced.byRate : null
 
   res.json({
     success: true,
@@ -955,10 +1033,61 @@ router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, r
       // Which tax columns to print. A purchase from an unregistered supplier
       // carries no GST at all, and showing empty columns invites the question
       // of whether something was forgotten.
-      taxMode: poTaxMode(po),
+      taxMode,
+      taxByRate,
     },
   })
 })
+
+/**
+ * The order's charges not yet billed — what a bill raised from this order
+ * starts with, so freight agreed on the order is not typed in twice or
+ * forgotten.
+ *
+ * Each charge on the order less what live bills of this order already carry
+ * for the same charge type. A cancelled bill claims nothing. Only what is
+ * still to bill comes back, at the GST rate chosen on the order.
+ */
+router.get(
+  '/orders/:id/unbilled-charges',
+  requirePermission(MODULE, 'view'),
+  async (req, res) => {
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        deletedAt: true,
+        charges: {
+          select: {
+            chargeTypeId: true,
+            amount: true,
+            gstRate: true,
+            chargeType: { select: { name: true } },
+          },
+        },
+      },
+    })
+    if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+
+    const billed = await prisma.purchaseInvoiceCharge.groupBy({
+      by: ['chargeTypeId'],
+      where: { bill: { poId: po.id, status: { not: 'CANCELLED' } } },
+      _sum: { amount: true },
+    })
+    const billedByType = new Map(billed.map((b) => [b.chargeTypeId, Number(b._sum.amount ?? 0)]))
+
+    const data = po.charges
+      .map((c) => ({
+        chargeTypeId: c.chargeTypeId,
+        name: c.chargeType.name,
+        amount: round2(Number(c.amount) - (billedByType.get(c.chargeTypeId) ?? 0)),
+        gstRate: Number(c.gstRate),
+      }))
+      .filter((c) => c.amount > 0)
+
+    res.json({ success: true, data })
+  }
+)
 
 /**
  * A purchase order line raised from a requisition's shortage has to point at
@@ -1132,13 +1261,13 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
     // A back-dated order belongs to its own financial year's series.
     const poNumber = await nextDocumentNumber(tx, 'PO', data.poDate ?? new Date())
 
-    // Where the goods land decides the tax, so this has to be settled before
-    // anything is priced.
+    // Where the goods land is kept on the order for the delivery address. It
+    // does not change the tax — see `purchaseTaxContext`.
     const destination = data.deliveryCustomerId
       ? await customerDeliveryState(tx, data.deliveryCustomerId)
       : null
 
-    const tax = await purchaseTaxContext(tx, data.supplierId, destination?.stateCode)
+    const tax = await purchaseTaxContext(tx, data.supplierId)
 
     // HSN is copied onto the line now, so an order already sent to a supplier
     // does not change if the item master is corrected next week.
@@ -1157,9 +1286,8 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
 
     const priced = priceOrder(
       data.lines,
-      data.discountAmount ?? 0,
-      tax.isIntraState,
-      !tax.supplierIsUnregistered,
+      orderDiscountOf(data.poType ?? 'ITEM_LEVEL', data.discountAmount ?? 0),
+      purchaseSplit(tax),
       charges,
       data.otherCharges ?? 0
     )
@@ -1215,7 +1343,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
             hsnCode: hsnById.get(l.itemId) ?? null,
             qty: l.qty,
             unitRate: l.unitRate,
-            discount: l.discount ?? 0,
+            discount: pct6(l.discount),
             gstRate: tax.supplierIsUnregistered ? 0 : (l.gstRate ?? 0),
             amount: round2(priced.lineTotals[i]),
             pendingQty: l.qty,
@@ -1355,16 +1483,44 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
 
   const after = await prisma.$transaction(async (tx) => {
     if (data.lines) {
-      // Changing who it is delivered to changes the tax, so the destination is
-      // resolved again rather than carried over from when it was first raised.
+      // The delivery address is resolved again rather than carried over from
+      // when the order was first raised, as a customer may have been picked or
+      // changed. It does not change the tax — see `purchaseTaxContext`.
       const customerId =
         data.deliveryCustomerId !== undefined ? data.deliveryCustomerId : before.deliveryCustomerId
       const destination = customerId ? await customerDeliveryState(tx, customerId) : null
-      const tax = await purchaseTaxContext(
-        tx,
-        data.supplierId ?? before.supplierId,
-        destination?.stateCode
-      )
+      const tax = await purchaseTaxContext(tx, data.supplierId ?? before.supplierId)
+
+      /*
+       * Each line keeps the enquiry line it came off. The lines are rebuilt
+       * wholesale below, and before this was carried through an edit dropped
+       * the link — so the enquiry stopped counting what this order places
+       * against it the first time anybody corrected a rate. Checked against the
+       * order's own enquiry, as when it was raised, so an edit cannot point a
+       * line at somebody else's enquiry.
+       */
+      const linkedEnquiryLines = [
+        ...new Set(data.lines.map((l) => l.enquiryLineId).filter((id): id is string => Boolean(id))),
+      ]
+      if (linkedEnquiryLines.length) {
+        if (!before.enquiryId) {
+          throw new AppError(
+            'A line cannot come off an enquiry unless the order says which enquiry',
+            400,
+            'ENQUIRY_LINE_WITHOUT_ENQUIRY'
+          )
+        }
+        const found = await tx.purchaseEnquiryLine.count({
+          where: { id: { in: linkedEnquiryLines }, enquiryId: before.enquiryId },
+        })
+        if (found !== linkedEnquiryLines.length) {
+          throw new AppError(
+            "One of those lines points at an enquiry line that is not on this order's enquiry",
+            400,
+            'ENQUIRY_WRONG_LINE'
+          )
+        }
+      }
       const items = await tx.item.findMany({
         where: { id: { in: data.lines.map((l) => l.itemId) } },
         select: { id: true, hsnCode: true },
@@ -1390,9 +1546,11 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
 
       const priced = priceOrder(
         data.lines,
-        data.discountAmount ?? Number(before.discountAmount),
-        tax.isIntraState,
-        !tax.supplierIsUnregistered,
+        orderDiscountOf(
+          data.poType ?? before.poType,
+          data.discountAmount ?? Number(before.discountAmount)
+        ),
+        purchaseSplit(tax),
         charges,
         data.otherCharges ?? Number(before.otherCharges)
       )
@@ -1413,10 +1571,11 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
           styleNo: l.styleNo?.trim() || null,
           styleId: l.styleId || null,
           mrLineId: l.mrLineId || null,
+          enquiryLineId: l.enquiryLineId || null,
           hsnCode: hsnById.get(l.itemId) ?? null,
           qty: l.qty,
           unitRate: l.unitRate,
-          discount: l.discount ?? 0,
+          discount: pct6(l.discount),
           gstRate: tax.supplierIsUnregistered ? 0 : (l.gstRate ?? 0),
           amount: round2(priced.lineTotals[i]),
           pendingQty: l.qty,
@@ -1456,6 +1615,12 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       include: poInclude,
     })
   })
+
+  // The quantities placed against the enquiry may have moved with the lines,
+  // and its status is derived from them. Outside the transaction for the same
+  // reason as on a new order: a failure to relabel the enquiry must not roll
+  // back an edit that saved correctly.
+  if (data.lines && after.enquiryId) await syncEnquiryStatus(prisma, after.enquiryId)
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -4110,79 +4275,69 @@ const billInclude = {
   },
 } satisfies Prisma.PurchaseInvoiceInclude
 
-/** One rate, split the way the two state codes say it must be split. */
-function taxSplit(taxableValue: number, gstRate: number, isIntraState: boolean) {
-  const tax = round2(taxableValue * (gstRate / 100))
-  return isIntraState
-    ? { cgst: round2(tax / 2), sgst: round2(tax / 2), igst: 0 }
-    : { cgst: 0, sgst: 0, igst: tax }
-}
-
 /**
- * Prices a bill.
+ * Prices a bill, with the one shared calculation the purchase order and the
+ * bill screen use (`priceDocument`), so an order and the bill raised from it
+ * come to the same figures for the same goods and charges.
  *
  * Differs from an order in three ways that all cost money if they are missed:
  * charges carry their own GST rate and cannot be folded into the goods value;
  * reverse charge means the tax is ours to pay rather than the supplier's, so it
  * is recorded but never added to what they are paid; and TDS is withheld from
  * the payment while still settling the bill in full.
+ *
+ * What comes back keeps the meaning the bill's columns have always had:
+ * `subtotal` is the lines after their own discounts, `discount` the bill-level
+ * discount taken, and `taxable` is everything GST is worked out on — the goods
+ * after every discount plus the charges.
  */
 function priceBill(opts: {
   lines: BillLineInput[]
-  charges: BillChargeInput[]
+  /** Each with its GST rate settled — see `resolveBillCharges`. */
+  charges: { chargeTypeId: string; amount: number; gstRate: number }[]
   discountAmount: number
-  isIntraState: boolean
-  chargeTax: boolean
+  split: GstSplit
   isReverseCharge: boolean
   tdsRate: number
   /** TDS typed by hand. Left out, it is worked out from the rate. */
   tdsAmount?: number | null
 }) {
-  const { lines, charges, isIntraState, chargeTax, isReverseCharge } = opts
-
-  const lineGross = lines.map((l) => l.qty * l.unitPrice * (1 - (l.discount ?? 0) / 100))
-  const subtotal = round2(lineGross.reduce((s, n) => s + n, 0))
-
-  // Discount comes off before tax — see the business rules.
-  const discount = round2(Math.min(opts.discountAmount, subtotal))
-  const goodsTaxable = round2(subtotal - discount)
-  const factor = subtotal > 0 ? goodsTaxable / subtotal : 1
-
-  const pricedLines = lines.map((l, i) => {
-    const taxableValue = round2(lineGross[i] * factor)
-    const gstRate = chargeTax ? (l.gstRate ?? 0) : 0
-    const split = taxSplit(taxableValue, gstRate, isIntraState)
-    return {
-      taxableValue,
-      gstRate,
-      ...split,
-      amount: round2(taxableValue + split.cgst + split.sgst + split.igst),
-    }
+  const priced = priceDocument({
+    lines: opts.lines.map((l) => ({
+      qty: l.qty,
+      rate: l.unitPrice,
+      discountPct: pct2(l.discount),
+      gstRate: l.gstRate ?? 0,
+    })),
+    // Discount comes off before tax — see the business rules.
+    orderDiscount: opts.discountAmount,
+    charges: opts.charges.map((c) => ({ key: c.chargeTypeId, amount: c.amount, gstRate: c.gstRate })),
+    split: opts.split,
+    // Under reverse charge the supplier's bill carries no tax — we pay it to
+    // the government ourselves. Recording it and then adding it to their
+    // payment would pay the tax twice.
+    reverseCharge: opts.isReverseCharge,
   })
 
-  const pricedCharges = charges.map((c) => {
-    const amount = round2(c.amount)
-    const gstRate = chargeTax ? (c.gstRate ?? 0) : 0
-    return { amount, gstRate, ...taxSplit(amount, gstRate, isIntraState) }
-  })
+  const pricedLines = priced.lines.map((l) => ({
+    taxableValue: l.taxable,
+    gstRate: l.gstRate,
+    cgst: l.cgst,
+    sgst: l.sgst,
+    igst: l.igst,
+    amount: l.amount,
+  }))
 
-  const chargeTotal = round2(pricedCharges.reduce((s, c) => s + c.amount, 0))
-  const taxable = round2(goodsTaxable + chargeTotal)
+  const pricedCharges = priced.charges.map((c) => ({
+    amount: c.amount,
+    gstRate: c.gstRate,
+    cgst: c.cgst,
+    sgst: c.sgst,
+    igst: c.igst,
+  }))
 
-  const sum = (key: 'cgst' | 'sgst' | 'igst') =>
-    round2(
-      pricedLines.reduce((s, l) => s + l[key], 0) + pricedCharges.reduce((s, c) => s + c[key], 0)
-    )
-
-  const cgst = sum('cgst')
-  const sgst = sum('sgst')
-  const igst = sum('igst')
-
-  // Under reverse charge the supplier's bill carries no tax — we pay it to the
-  // government ourselves. Recording it and then adding it to their payment
-  // would pay the tax twice.
-  const payable = isReverseCharge ? taxable : taxable + cgst + sgst + igst
-  const { rounded, roundOff } = applyRoundOff(payable)
+  const taxable = priced.taxable
+  const rounded = priced.total
 
   // TDS is worked out on the taxable value, not on the tax, and to the
   // rupee — unless it was typed by hand, which stands as typed.
@@ -4199,13 +4354,13 @@ function priceBill(opts: {
   return {
     pricedLines,
     pricedCharges,
-    subtotal,
-    discount,
+    subtotal: round2(priced.gross - priced.lineDiscount),
+    discount: priced.orderDiscount,
     taxable,
-    cgst,
-    sgst,
-    igst,
-    roundOff,
+    cgst: priced.cgst,
+    sgst: priced.sgst,
+    igst: priced.igst,
+    roundOff: priced.roundOff,
     total: rounded,
     tdsAmount,
     // The supplier is paid the total less the TDS we withhold, so the bill is
@@ -4213,6 +4368,105 @@ function priceBill(opts: {
     // stub outstanding against them forever.
     balance: round2(rounded - tdsAmount),
   }
+}
+
+/**
+ * Checks each charge on a bill.
+ *
+ * Every charge is taken at 0% GST, whatever rate is sent: it is typed as the
+ * final figure on the supplier's bill with any GST already inside it, and is
+ * added to the total as it is. Same rule as on the order (`resolveCharges`),
+ * so a bill raised from an order comes to the same figure.
+ *
+ * A charge type has to be one the mill uses on purchases and still in use. An
+ * edit may also keep a charge type already on that bill, so a bill booked
+ * before a charge was retired can still be corrected without losing it.
+ */
+async function resolveBillCharges(
+  tx: Prisma.TransactionClient,
+  charges: BillChargeInput[],
+  /** Charge types already on the bill being edited. */
+  alreadyOnBill: Set<string> = new Set()
+) {
+  if (!charges.length) return []
+
+  const types = await tx.chargeType.findMany({
+    where: { id: { in: [...new Set(charges.map((c) => c.chargeTypeId))] } },
+    select: { id: true, name: true, defaultGstRate: true, applyOnPurchase: true, isActive: true },
+  })
+  const typeById = new Map(types.map((t) => [t.id, t]))
+
+  for (const c of charges) {
+    const type = typeById.get(c.chargeTypeId)
+    if (!type) {
+      throw new AppError(
+        'One of the charges on this bill no longer exists. Pick it again from the list.',
+        400,
+        'INVALID_CHARGE'
+      )
+    }
+    if (!(type.applyOnPurchase && type.isActive) && !alreadyOnBill.has(type.id)) {
+      throw new AppError(
+        `${type.name} is not a charge the mill uses on purchases. Pick another charge, or switch it on for purchases under Masters → Charges.`,
+        400,
+        'INVALID_CHARGE'
+      )
+    }
+  }
+
+  return charges.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: 0 }))
+}
+
+/**
+ * The GST on a bill by rate, from what the bill stored — goods and charges at
+ * each rate, and the tax on each. Not priced again: the bill is the supplier's
+ * own document and prints exactly the figures it was booked at.
+ */
+function billTaxByRate(bill: {
+  lines: Array<{
+    taxableValue: Prisma.Decimal
+    gstRate: Prisma.Decimal
+    cgst: Prisma.Decimal
+    sgst: Prisma.Decimal
+    igst: Prisma.Decimal
+  }>
+  charges: Array<{
+    amount: Prisma.Decimal
+    gstRate: Prisma.Decimal
+    cgst: Prisma.Decimal
+    sgst: Prisma.Decimal
+    igst: Prisma.Decimal
+  }>
+}): TaxByRate[] {
+  const buckets = new Map<number, TaxByRate>()
+  const add = (
+    rate: number,
+    goods: number,
+    charge: number,
+    t: { cgst: Prisma.Decimal; sgst: Prisma.Decimal; igst: Prisma.Decimal }
+  ) => {
+    let b = buckets.get(rate)
+    if (!b) {
+      b = { gstRate: rate, taxable: 0, goodsTaxable: 0, chargeTaxable: 0, cgst: 0, sgst: 0, igst: 0, tax: 0 }
+      buckets.set(rate, b)
+    }
+    const cgst = Number(t.cgst)
+    const sgst = Number(t.sgst)
+    const igst = Number(t.igst)
+    b.goodsTaxable = round2(b.goodsTaxable + goods)
+    b.chargeTaxable = round2(b.chargeTaxable + charge)
+    b.taxable = round2(b.goodsTaxable + b.chargeTaxable)
+    b.cgst = round2(b.cgst + cgst)
+    b.sgst = round2(b.sgst + sgst)
+    b.igst = round2(b.igst + igst)
+    b.tax = round2(b.cgst + b.sgst + b.igst)
+  }
+  for (const l of bill.lines) add(Number(l.gstRate), Number(l.taxableValue), 0, l)
+  for (const c of bill.charges) {
+    if (Number(c.amount) === 0) continue
+    add(Number(c.gstRate), 0, Number(c.amount), c)
+  }
+  return [...buckets.values()].filter((b) => b.taxable > 0).sort((a, b) => a.gstRate - b.gstRate)
 }
 
 /**
@@ -4859,13 +5113,12 @@ async function bookBill(
   }
   const hsnById = new Map(items.map((i) => [i.id, i.hsnCode]))
 
-  const charges = data.charges ?? []
+  const charges = await resolveBillCharges(tx, data.charges ?? [])
   const priced = priceBill({
     lines: effectiveLines,
     charges,
     discountAmount: data.discountAmount ?? 0,
-    isIntraState: tax.isIntraState,
-    chargeTax: !tax.supplierIsUnregistered || (data.isReverseCharge ?? false),
+    split: purchaseSplit(tax, data.isReverseCharge ?? false),
     isReverseCharge: data.isReverseCharge ?? false,
     tdsRate: tds.tdsRate,
     tdsAmount: tds.typed,
@@ -4916,7 +5169,7 @@ async function bookBill(
           hsnCode: hsnById.get(l.itemId) ?? null,
           qty: l.qty,
           unitPrice: l.unitPrice,
-          discount: l.discount ?? 0,
+          discount: pct2(l.discount),
           taxableValue: priced.pricedLines[i].taxableValue,
           gstRate: priced.pricedLines[i].gstRate,
           cgst: priced.pricedLines[i].cgst,
@@ -5190,13 +5443,13 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
     await checkAgainstReceipts(tx, lines, supplierId, before.id)
 
     const tax = await purchaseTaxContext(tx, supplierId)
-    const charges =
-      data.charges ??
-      before.charges.map((c) => ({
-        chargeTypeId: c.chargeTypeId,
-        amount: Number(c.amount),
-        gstRate: Number(c.gstRate),
-      }))
+    const charges = data.charges
+      ? await resolveBillCharges(tx, data.charges, new Set(before.charges.map((c) => c.chargeTypeId)))
+      : before.charges.map((c) => ({
+          chargeTypeId: c.chargeTypeId,
+          amount: Number(c.amount),
+          gstRate: Number(c.gstRate),
+        }))
 
     const isReverseCharge = data.isReverseCharge ?? before.isReverseCharge
     // What the edit leaves out stays as it was: the section, whether the TDS
@@ -5226,8 +5479,7 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
       lines,
       charges,
       discountAmount: data.discountAmount ?? Number(before.discountAmount),
-      isIntraState: tax.isIntraState,
-      chargeTax: !tax.supplierIsUnregistered || isReverseCharge,
+      split: purchaseSplit(tax, isReverseCharge),
       isReverseCharge,
       tdsRate: tds.tdsRate,
       tdsAmount: tds.typed,
@@ -5282,7 +5534,7 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
             hsnCode: hsnById.get(l.itemId) ?? null,
             qty: l.qty,
             unitPrice: l.unitPrice,
-            discount: l.discount ?? 0,
+            discount: pct2(l.discount),
             taxableValue: priced.pricedLines[i].taxableValue,
             gstRate: priced.pricedLines[i].gstRate,
             cgst: priced.pricedLines[i].cgst,
@@ -5439,6 +5691,8 @@ router.get('/bills/:id/print', requirePermission(MODULE, 'view'), async (req, re
       bill,
       totalInWords: amountInWords(Number(bill.totalAmount)),
       taxMode: Number(bill.igst) > 0 ? 'IGST' : Number(bill.cgst) > 0 ? 'CGST_SGST' : 'NONE',
+      // The GST by rate, goods and charges together, from the stored rows.
+      taxByRate: billTaxByRate(bill),
     },
   })
 })

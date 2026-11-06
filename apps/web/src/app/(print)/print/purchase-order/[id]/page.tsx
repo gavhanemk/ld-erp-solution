@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar, money } from '@/components/print/PrintSheet'
+import type { TaxByRate } from '@ld-erp/shared'
 
 /**
  * The printed purchase order.
@@ -146,6 +147,14 @@ interface PrintPayload {
   }
   totalInWords: string
   taxMode: 'IGST' | 'CGST_SGST' | 'NONE'
+  /**
+   * The GST on this order rate by rate, goods and charges together, as the
+   * shared calculation works it out. Null for an order priced the old way —
+   * one whose stored figures a fresh pricing does not reproduce — because a
+   * breakdown that does not add up to the tax printed above it is worse than
+   * none. Missing altogether from an API older than this sheet.
+   */
+  taxByRate?: TaxByRate[] | null
 }
 
 /*
@@ -185,10 +194,29 @@ const A4_PX = 1122
  * row: the letterhead, the "To," block, the delivery band, the table's head,
  * the amount in words, the tax rows, the terms, the signatures, the footer.
  */
-const SHEET_CHROME = 957
+/*
+ * 967, up from the 957 measured above, since November. Style No. lost a point
+ * of width to the GST column, and at 7% its heading no longer fits on one
+ * line, so the table's head band is one 10px line taller than when the
+ * figures were measured. Added here rather than assumed away, because erring
+ * high only costs white space at the foot of the page. Re-measure the way the
+ * note above says and put the real figure in when a sheet is next proofed.
+ */
+const SHEET_CHROME = 967
 
 const LINE_ROW = 43
 const CHARGE_ROW = 23
+
+/*
+ * The GST summary under the calculation: one short line per rate, inside a
+ * thin ruled strip. Not measured on paper yet — worked out from its own
+ * styles (10px type at 1.5, the strip's padding, border and gap above) and
+ * rounded up, because erring high only costs white space at the foot of the
+ * page. Re-measure it the way the note above says if a break ever lands
+ * wrong.
+ */
+const GST_SUMMARY_CHROME = 22
+const GST_SUMMARY_ROW = 16
 
 /**
  * The most rows the first of two sheets can take.
@@ -593,6 +621,12 @@ function TotalRow({ label, value, alt }: { label: string; value: string; alt: bo
   )
 }
 
+/** A percentage for print: at most two decimals, trailing zeros dropped. */
+function pct(v: string | number | null | undefined) {
+  const n = Number(v)
+  return `${Number.isFinite(n) ? Number(n.toFixed(2)) : 0}%`
+}
+
 /* ── The line table, used on both sheets ──────────────────────────────────── */
 
 /*
@@ -627,8 +661,17 @@ function TotalRow({ label, value, alt }: { label: string; value: string; alt: bo
  * page-break numbers below were re-measured after this change, because a
  * taller row is fewer rows to a sheet.
  */
+/*
+ * GST % went on in November, when each line and each charge started carrying
+ * a rate of its own, and the room for it came from three places rather than
+ * one: the cells' side padding went from 5px to 4px (which is 24px across the
+ * row, a little over 3%), S.N gave up a point it never used — two digits are
+ * all it holds — and Item Code and Style No. a point each. Description keeps
+ * its 26%, because that is what holds the filing line to one line and so the
+ * row to its measured height.
+ */
 const COLS = [
-  { w: '4%', label: 'S.N', align: 'center' as const },
+  { w: '3%', label: 'S.N', align: 'center' as const },
   // 26% is about 173px of content, which is what the filing line underneath
   // the item name needs to stay on one line. At 21% it took two lines, the
   // name took two, and every row was four lines and 73px tall — which cost
@@ -639,13 +682,14 @@ const COLS = [
   // off a column that has something in it. Wide enough for its own heading
   // and a short colour name; widen it the day a purchase order line can
   // carry one.
-  { w: '6%', label: 'Color', align: 'left' as const },
-  // 14%, which is 88px of content. 'LBL-CARE-001' is twelve characters and
-  // came to about 80 once the figures moved off the monospace face — at 12%
-  // every code in the master broke across two lines, and a wrapped code is
-  // the one thing on this row somebody has to read exactly.
-  { w: '14%', label: 'Item Code', align: 'left' as const },
-  { w: '8%', label: 'Style No.', align: 'left' as const },
+  { w: '5%', label: 'Color', align: 'left' as const },
+  // 13%, which is about 83px of content with the 4px side padding.
+  // 'LBL-CARE-001' is twelve characters and came to about 80 once the figures
+  // moved off the monospace face — at 12% every code in the master broke
+  // across two lines, and a wrapped code is the one thing on this row
+  // somebody has to read exactly.
+  { w: '13%', label: 'Item Code', align: 'left' as const },
+  { w: '7%', label: 'Style No.', align: 'left' as const },
   { w: '5%', label: 'HSN', align: 'left' as const },
   { w: '8%', label: 'Qty', align: 'right' as const },
   { w: '5%', label: 'UOM', align: 'center' as const },
@@ -655,6 +699,12 @@ const COLS = [
   // currency is not in doubt: the rate beside it and the amount after it both
   // carry the symbol, and the amount's heading names it.
   { w: '5%', label: 'Disc', align: 'right' as const },
+  // The line's own GST rate. Printed because charges now carry rates of their
+  // own too, and a supplier checking the GST summary under the totals needs
+  // to see which goods sit at which rate. 'GST', not 'GST %': the column is
+  // about 20px wide, the longer heading broke over two lines in it, and every
+  // figure underneath already ends in a % sign.
+  { w: '4%', label: 'GST', align: 'right' as const },
   // Room for a real total: 67px of content holds ₹12,84,650.00 at 11px mono.
   { w: '11%', label: 'Amount (₹)', align: 'right' as const },
 ]
@@ -671,7 +721,7 @@ function LineTable({ lines, startIndex }: { lines: Line[]; startIndex: number })
    * every sheet.
    */
   const th: React.CSSProperties = {
-    padding: '5px',
+    padding: '5px 4px',
     fontSize: '8px',
     fontWeight: 600,
     letterSpacing: '.04em',
@@ -692,7 +742,7 @@ function LineTable({ lines, startIndex }: { lines: Line[]; startIndex: number })
    * be argued from.
    */
   const td: React.CSSProperties = {
-    padding: '5.5px 5px',
+    padding: '5.5px 4px',
     fontSize: '11px',
     color: INK,
     borderTop: `1px solid ${RULE}`,
@@ -795,9 +845,35 @@ function LineTable({ lines, startIndex }: { lines: Line[]; startIndex: number })
                 ...NUM,
                 textAlign: 'right',
                 color: Number(line.discount) > 0 ? INK : MUTED,
+                // 9.5px, a size under the GST cell beside it. The column has
+                // about 30px of room, and a discount typed as an amount comes
+                // back as a percent like "33.33%", which at 10.5px is wider
+                // than that and has nowhere to break — it ran into the GST
+                // column. At 9.5px it fits.
+                fontSize: '9.5px',
+                paddingLeft: '2px',
+                paddingRight: '3px',
               }}
             >
-              {Number(line.discount).toFixed(2)}
+              {/* A percent off the line, as the form takes it. Saved to six
+                  places so a discount typed as an amount converts back
+                  exactly, but printed to two at most — "2.5%", not
+                  "2.500000%" — because the amount column already says what
+                  it came to. */}
+              {pct(line.discount)}
+            </td>
+            <td
+              style={{
+                ...td,
+                ...NUM,
+                textAlign: 'right',
+                fontSize: '10.5px',
+                paddingLeft: '2px',
+                paddingRight: '3px',
+                color: GREY,
+              }}
+            >
+              {pct(line.gstRate)}
             </td>
             <td
               style={{
@@ -1195,10 +1271,37 @@ export default function PrintPurchaseOrder() {
    * the same rule as Other Charges except that Other Charges has a box of its
    * own and so always has an answer.
    */
+  /*
+   * A charge is the supplier's figure with any GST already inside it, so it
+   * prints by name only and is added after the tax. An order saved while
+   * charges still had GST put on top keeps its rate on the row — "@18%" — so
+   * the sheet still explains the tax it was saved with.
+   */
   const chargeLines = (sheetOrder.charges ?? []).map((c) => ({
-    label: `${c.chargeType.name} @(${Number(c.gstRate)}%)`,
+    label:
+      taxMode !== 'NONE' && Number(c.gstRate) > 0
+        ? `${c.chargeType.name} @${Number(c.gstRate)}%`
+        : c.chargeType.name,
     value: money(c.amount),
   }))
+
+  /*
+   * The GST rate by rate, goods and charges together — "GST @5% on ₹13,200 —
+   * CGST 330.00 + SGST 330.00". Only when the server could vouch for it (see
+   * the note on taxByRate) and only when the order carries GST at all.
+   */
+  /*
+   * Charges carry no GST of their own (they are the supplier's figure with any
+   * GST inside it), so they sit at 0% and are left out here: "No GST on
+   * ₹1,200" would read as freight that ought to have been taxed. Goods at 0%
+   * still show, as goods only.
+   */
+  const gstSummary =
+    taxMode !== 'NONE' && Array.isArray(data.taxByRate) && data.taxByRate.length > 0
+      ? data.taxByRate
+          .filter((b) => Number(b.gstRate) > 0 || b.goodsTaxable > 0)
+          .map((b) => (Number(b.gstRate) > 0 ? b : { ...b, taxable: b.goodsTaxable }))
+      : []
 
   /*
    * The split.
@@ -1213,7 +1316,14 @@ export default function PrintPurchaseOrder() {
    * arithmetic in this file is for.
    */
   const chargeRowCount = chargeLines.length
-  const onOneSheet = Math.floor((A4_PX - SHEET_CHROME - CHARGE_ROW * chargeRowCount) / LINE_ROW)
+  // The GST summary sits in the closing block too, so its rows come off the
+  // same budget as the charge rows.
+  const gstSummaryHeight = gstSummary.length
+    ? GST_SUMMARY_CHROME + GST_SUMMARY_ROW * gstSummary.length
+    : 0
+  const onOneSheet = Math.floor(
+    (A4_PX - SHEET_CHROME - CHARGE_ROW * chargeRowCount - gstSummaryHeight) / LINE_ROW
+  )
 
   const splits = lines.length > onOneSheet
   const firstLines = splits ? lines.slice(0, ROWS_ON_FIRST_OF_TWO) : lines
@@ -1298,28 +1408,13 @@ export default function PrintPurchaseOrder() {
    * applied to them.
    */
   const totalRows: { label: string; value: string }[] = [
-    { label: 'Total Discount', value: money(order.discountAmount) },
-    { label: 'Sub Total', value: money(order.taxableAmount) },
-
     /*
-     * One row per charge the mill puts on a purchase, named and rated the way
-     * the old sheet names them: "Transport Charges @(5%)".
-     *
-     * Every one of them, whether this order used it or not — at 0.00 when it
-     * did not, exactly as Other Charges prints. He asked for that in those
-     * words, and the reasoning is the same as for Other Charges: a row that
-     * says 0.00 has been answered, where a row that is missing has only been
-     * left out, and the supplier cannot tell which.
-     *
-     * A charge the order carries is shown even if its type has since been
-     * deactivated or taken off purchases in the master. A document prints
-     * what it holds; the master is only the source of the rows it does not.
-     *
-     * The rate is printed even when it is 0%. A charge that carries no GST is
-     * a real thing, and saying so is more use than leaving it to be wondered
-     * about.
+     * Only the discount across the whole order. Each line's own discount is
+     * already in its Disc column and taken off its Amount, so taking it off
+     * again here would leave the column not adding up to the Sub Total.
      */
-    ...chargeLines,
+    { label: 'Order Discount', value: money(order.discountAmount) },
+    { label: 'Sub Total', value: money(order.taxableAmount) },
 
     ...(taxMode === 'CGST_SGST'
       ? [
@@ -1330,12 +1425,31 @@ export default function PrintPurchaseOrder() {
     ...(taxMode === 'IGST' ? [{ label: 'IGST', value: money(order.igst) }] : []),
 
     /*
-     * Always printed, at 0.00 when there are none — as on the old sheet, and
-     * because he named it as one of the rows he wants. It is also the one row
-     * here that carries no GST of its own and is added after tax, so a reader
-     * checking the arithmetic needs to see it even when it is nothing.
+     * The charges this order carries, after the tax: each is the supplier's
+     * figure with any GST already inside it, added as it is — "Freight /
+     * Courier 1,200.00". Only the ones entered on the order, so the supplier
+     * is not left wondering which of five freight rows applied to them.
+     *
+     * A charge the order carries is shown even if its type has since been
+     * deactivated or taken off purchases in the master. A document prints
+     * what it holds; the master is only the source of the rows it does not.
      */
-    { label: 'Other Charges', value: money(order.otherCharges) },
+    ...chargeLines,
+
+    /*
+     * Always printed, at 0.00 when there are none — as on the old sheet, and
+     * because he named it as one of the rows he wants.
+     *
+     * Other Charges is a charge type like freight, and when the order carries
+     * it, it prints with the charge rows above and nothing is printed here —
+     * otherwise the sheet would show it twice. An order saved with the old
+     * box prints that figure here instead.
+     */
+    ...(Number(order.otherCharges) > 0
+      ? [{ label: 'Other Charges', value: money(order.otherCharges) }]
+      : (sheetOrder.charges ?? []).some((c) => c.chargeType.name === 'Other Charges')
+        ? []
+        : [{ label: 'Other Charges', value: money(0) }]),
 
     /*
      * Only when something actually rounded. The old sheet has no such row
@@ -1443,6 +1557,58 @@ export default function PrintPurchaseOrder() {
         </div>
         {totalsBlock}
       </div>
+
+      {/*
+       * Where the GST above comes from, one line per rate. Since charges carry
+       * their own rate, the tax rows above can be made of goods at 5% and a
+       * packing charge at 18%, and a supplier's clerk checking the sum needs
+       * to see both. One strip, the width of the sheet, so each line stays on
+       * one line — a wrapped line here would break the page budget above.
+       */}
+      {gstSummary.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            gap: '12px',
+            alignItems: 'flex-start',
+            marginTop: '5px',
+            border: `1px solid ${RULE}`,
+            padding: '3px 11px',
+          }}
+        >
+          <Eyebrow style={{ flexShrink: 0, paddingTop: '2px' }}>GST by rate</Eyebrow>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            {gstSummary.map((r) => (
+              <div
+                key={r.gstRate}
+                style={{ fontSize: '10px', lineHeight: 1.5, color: GREY, whiteSpace: 'nowrap', ...NUM }}
+              >
+                {Number(r.gstRate) > 0 ? (
+                  <>
+                    GST @{pct(r.gstRate)} on{' '}
+                    <span style={{ color: NAVY, fontWeight: 600 }}>₹{money(r.taxable)}</span> —{' '}
+                    {taxMode === 'IGST' ? (
+                      <>
+                        IGST <span style={{ color: NAVY, fontWeight: 600 }}>{money(r.igst)}</span>
+                      </>
+                    ) : (
+                      <>
+                        CGST <span style={{ color: NAVY, fontWeight: 600 }}>{money(r.cgst)}</span> +
+                        SGST <span style={{ color: NAVY, fontWeight: 600 }}>{money(r.sgst)}</span>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    No GST on{' '}
+                    <span style={{ color: NAVY, fontWeight: 600 }}>₹{money(r.taxable)}</span>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {termLines.length > 0 && (
         <Panel

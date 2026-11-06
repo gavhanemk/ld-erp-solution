@@ -4,6 +4,7 @@ import { Fragment, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
+import type { TaxByRate } from '@ld-erp/shared'
 
 /**
  * The printed purchase bill.
@@ -116,10 +117,24 @@ interface PrintData {
     po: { poNumber: string } | null
     createdBy: { name: string } | null
     lines: BillLine[]
-    charges: Array<{ id: string; amount: string; gstRate: string; chargeType: { name: string } }>
+    charges: Array<{
+      id: string
+      amount: string
+      gstRate: string
+      cgst: string
+      sgst: string
+      igst: string
+      chargeType: { name: string }
+    }>
   }
   totalInWords: string
   taxMode: 'IGST' | 'CGST_SGST' | 'NONE'
+  /**
+   * The bill's GST rate by rate, goods and charges together, built by the
+   * server from the stored lines and charges. Missing from an older API, and
+   * then the sheet works the charges' share out for itself.
+   */
+  taxByRate?: TaxByRate[] | null
 }
 
 /** An address written down the page, skipping whatever is not on file. */
@@ -177,7 +192,7 @@ export default function PurchaseBillPrintPage() {
     )
   }
 
-  const { company, template, bill, taxMode } = data
+  const { company, template, bill, taxMode, taxByRate } = data
   const companyName = company.legalName || company.name || ''
 
   const receipts = [
@@ -191,13 +206,24 @@ export default function PurchaseBillPrintPage() {
    * would print a rate that applies to neither half. Amounts are summed from
    * the lines rather than recalculated, so this block and the totals above it
    * cannot disagree.
+   *
+   * Charges are the supplier's figure with any GST already inside it and
+   * carry no GST of their own, so they are not in this table. Only a bill
+   * saved while charges still had GST put on top lists them, after the goods,
+   * one row per rate — their tax is inside the totals, and the table has to
+   * add up to it.
    */
-  const hsnRows = (() => {
+  type SummaryRow = {
+    hsn: string
+    rate: number
+    taxable: number
+    cgst: number
+    sgst: number
+    igst: number
+  }
+  const hsnRows = ((): SummaryRow[] => {
     if (taxMode === 'NONE') return []
-    const groups = new Map<
-      string,
-      { hsn: string; rate: number; taxable: number; cgst: number; sgst: number; igst: number }
-    >()
+    const groups = new Map<string, SummaryRow>()
     for (const l of bill.lines) {
       const hsn = l.hsnCode || '—'
       const rate = Number(l.gstRate)
@@ -209,8 +235,64 @@ export default function PurchaseBillPrintPage() {
       g.igst += Number(l.igst)
       groups.set(key, g)
     }
-    return [...groups.values()].sort((a, b) => a.hsn.localeCompare(b.hsn) || a.rate - b.rate)
+    const goods = [...groups.values()].sort((a, b) => a.hsn.localeCompare(b.hsn) || a.rate - b.rate)
+    return [...goods, ...chargeSummaryRows(goods)]
   })()
+
+  /*
+   * The charges' rows, one per GST rate, named after the charges at that rate.
+   *
+   * When the server sends the bill's tax by rate, the charges' share of it is
+   * what is left at each rate once the goods' own tax is taken off — so the
+   * summary's total is the server's figure to the paisa. From an older server
+   * the sheet adds up the tax each charge row was saved with, the same way the
+   * goods' rows are summed from their lines — never worked out again from
+   * amount and rate, because an old bill or a different rounding would then
+   * print a summary that disagrees with the tax in the totals above it.
+   */
+  function chargeSummaryRows(goods: SummaryRow[]): SummaryRow[] {
+    const live = bill.charges.filter((c) => Number(c.amount) > 0 && Number(c.gstRate) > 0)
+    if (!live.length) return []
+    const namesAt = (rate: number) =>
+      live
+        .filter((c) => Number(c.gstRate) === rate)
+        .map((c) => c.chargeType.name)
+        .join(', ') || 'Charges'
+    const round2 = (n: number) => Math.round(n * 100) / 100
+
+    if (Array.isArray(taxByRate) && taxByRate.length > 0) {
+      return taxByRate
+        .filter((r) => Number(r.chargeTaxable) > 0 && Number(r.gstRate) > 0)
+        .map((r) => {
+          const rate = Number(r.gstRate)
+          const goodsAt = goods.filter((g) => g.rate === rate)
+          const less = (key: 'cgst' | 'sgst' | 'igst') =>
+            round2(Number(r[key]) - goodsAt.reduce((s, g) => s + g[key], 0))
+          return {
+            hsn: namesAt(rate),
+            rate,
+            taxable: Number(r.chargeTaxable),
+            cgst: less('cgst'),
+            sgst: less('sgst'),
+            igst: less('igst'),
+          }
+        })
+        .sort((a, b) => a.rate - b.rate)
+    }
+
+    const byRate = new Map<number, SummaryRow>()
+    for (const c of live) {
+      const rate = Number(c.gstRate)
+      const amount = Number(c.amount)
+      const g = byRate.get(rate) ?? { hsn: namesAt(rate), rate, taxable: 0, cgst: 0, sgst: 0, igst: 0 }
+      g.taxable = round2(g.taxable + amount)
+      g.cgst = round2(g.cgst + Number(c.cgst))
+      g.sgst = round2(g.sgst + Number(c.sgst))
+      g.igst = round2(g.igst + Number(c.igst))
+      byRate.set(rate, g)
+    }
+    return [...byRate.values()].sort((a, b) => a.rate - b.rate)
+  }
 
   const hsnTotal = hsnRows.reduce(
     (t, g) => ({
@@ -305,7 +387,18 @@ export default function PurchaseBillPrintPage() {
    * space has to fit in what the larger type left over. Verified by PDF page
    * count at 1, 2 and 5 lines; it is the only test that counts.
    */
-  const fillerRows = Math.max(0, 5 - usedRows)
+  /*
+   * The charges' rows in the HSN summary come out of the same five. Each GST
+   * rate the charges sit at adds a summary row of about the height of a ruled
+   * one, and the five were measured before the summary carried any charges —
+   * so without this a short bill with charges at a rate of their own could be
+   * pushed onto a second sheet by its own blank lines.
+   */
+  const chargeSummaryRowCount =
+    taxMode === 'NONE'
+      ? 0
+      : new Set(bill.charges.filter((c) => Number(c.amount) > 0 && Number(c.gstRate) > 0).map((c) => Number(c.gstRate))).size
+  const fillerRows = Math.max(0, 5 - usedRows - chargeSummaryRowCount)
 
   const taxCols = taxMode === 'IGST' ? ['IGST'] : taxMode === 'NONE' ? [] : ['SGST', 'CGST']
 

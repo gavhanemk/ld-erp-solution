@@ -148,22 +148,40 @@ const billBase = z.object({
 
 type BillIn = z.infer<typeof billBase>
 
+/**
+ * The calendar day a date falls on in India, as `yyyy-mm-dd` — so two dates
+ * are compared as days, whatever time of day either carries. A form sends
+ * plain dates, but a date sent with a time ("now") must not make the same day
+ * look later than itself.
+ */
+const indianDay = (d: Date) => new Date(d.getTime() + 330 * 60_000).toISOString().slice(0, 10)
+const shownDay = (day: string) => day.split('-').reverse().join('-')
+
 const checkBill = (data: BillIn, ctx: z.RefinementCtx) => {
-  // A bill dated before the supplier's own invoice would be booking a document
-  // that did not exist yet, and it puts the two in different GST periods.
-  if (data.supplierInvoiceDate && data.billDate && data.supplierInvoiceDate > data.billDate) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['supplierInvoiceDate'],
-      message: 'The supplier’s invoice date cannot be after the date you are booking it',
-    })
+  // A supplier's bill dated after the day it is entered would be entering a
+  // document that did not exist yet, and it puts the two in different GST
+  // periods. The same day is fine — a bill entered the day it is dated.
+  if (data.supplierInvoiceDate && data.billDate) {
+    const theirs = indianDay(data.supplierInvoiceDate)
+    const entered = indianDay(data.billDate)
+    if (theirs > entered) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['supplierInvoiceDate'],
+        message: `Bill date ${shownDay(theirs)} is after the ERP entry date ${shownDay(entered)}. Check the date printed on the supplier's bill — it cannot be later than the day you enter it.`,
+      })
+    }
   }
 
-  if (data.dueDate && data.billDate && data.dueDate < data.billDate) {
+  // Payment falls due counted from the supplier's bill date, so it is checked
+  // against that date — not the entry date. A bill entered late can already
+  // be overdue on the day it is entered, and that is not a mistake.
+  const dueFrom = data.supplierInvoiceDate ?? data.billDate
+  if (data.dueDate && dueFrom && indianDay(data.dueDate) < indianDay(dueFrom)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['dueDate'],
-      message: 'The due date cannot be before the bill date',
+      message: 'The payment due date cannot be before the bill date',
     })
   }
 

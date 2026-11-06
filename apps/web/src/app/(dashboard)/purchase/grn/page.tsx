@@ -351,6 +351,14 @@ export default function GoodsReceiptPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  /*
+   * The receipt just saved, offered straight on to its bill: the supplier's
+   * invoice usually comes with the goods, and the bill form opens with this
+   * receipt's supplier, order, lines, bill no. and bill date already in.
+   * Tied to the message it was saved with, so another message later does not
+   * carry the button along.
+   */
+  const [billNow, setBillNow] = useState<{ grnId: string; message: string } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
 
   const [search, setSearch] = useState('')
@@ -1260,8 +1268,16 @@ export default function GoodsReceiptPage() {
         </div>
       )}
       {message && (
-        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
           <p className="text-sm text-emerald-400">{message}</p>
+          {billNow?.message === message && (
+            <Link
+              href={`/purchase/bills?fromGrn=${billNow.grnId}`}
+              className="btn-primary h-8 whitespace-nowrap px-3 text-xs"
+            >
+              Book the bill now
+            </Link>
+          )}
         </div>
       )}
 
@@ -2541,6 +2557,7 @@ export default function GoodsReceiptPage() {
           onSaved={(msg, stickers) => {
             setDialog(null)
             setMessage(msg)
+            setBillNow(stickers?.type === 'GRN' ? { grnId: stickers.id, message: msg } : null)
             if (stickers) setInward(stickers)
             void load()
             // The order this came from may now be fully received, or may have

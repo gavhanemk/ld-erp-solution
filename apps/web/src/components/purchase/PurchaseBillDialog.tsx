@@ -33,6 +33,8 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
 import { StepInput } from '@/components/ui/StepInput'
 import { ExpenseTdsPanel, type TdsChoice } from '@/components/purchase/ExpenseTdsPanel'
+import { TaxBreakdown } from '@/components/purchase/TaxBreakdown'
+import { priceDocument, type GstSplit } from '@ld-erp/shared'
 import {
   CashPaymentSection,
   cashPaymentMissing,
@@ -350,14 +352,30 @@ const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 /**
- * The longest a bill to a registered small supplier may be left unpaid.
- *
- * Section 15 of the MSMED Act. Forty-five days is a ceiling, not a term —
- * shorter can be agreed and usually has been, longer cannot be — so it is
- * used as the fallback when the master carries no terms, and as a cap over
- * whatever it does carry.
+ * The payment terms a bill starts on: 45 days from the date on the supplier's
+ * bill. The mill's own rule, for every supplier — the Terms box beside the
+ * due date changes it for one bill.
  */
-const MSME_DAYS = 45
+const DEFAULT_TERM_DAYS = 45
+
+/**
+ * Today on this computer's calendar, as `yyyy-mm-dd`. Not `toISOString`,
+ * which is UTC: before 5:30 in the morning in India that is still yesterday,
+ * and a bill dated today then looked later than the day it was entered.
+ */
+const todayLocal = () => {
+  const d = new Date()
+  const two = (n: number) => String(n).padStart(2, '0')
+  return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate())
+}
+
+/** Whole days from one `yyyy-mm-dd` date to another; null if either is missing. */
+const daysBetween = (from: string, to: string) => {
+  const a = new Date(from + 'T00:00:00').getTime()
+  const b = new Date(to + 'T00:00:00').getTime()
+  if (Number.isNaN(a) || Number.isNaN(b)) return null
+  return Math.round((b - a) / 86_400_000)
+}
 
 /**
  * A date this many days later, in the `yyyy-mm-dd` a date input wants.
@@ -444,8 +462,10 @@ export function PurchaseBillDialog({
   const [poId, setPoId] = useState<string | null>(null)
   const [supplierInvoiceNo, setSupplierInvoiceNo] = useState('')
   const [supplierInvoiceDate, setSupplierInvoiceDate] = useState('')
-  const [billDate, setBillDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [billDate, setBillDate] = useState(() => todayLocal())
   const [dueDate, setDueDate] = useState('')
+  /** Payment terms in days, counted from the date on the supplier's bill. */
+  const [termDays, setTermDays] = useState(String(DEFAULT_TERM_DAYS))
   const [discountAmount, setDiscountAmount] = useState('')
   const [isReverseCharge, setIsReverseCharge] = useState(false)
   /*
@@ -465,6 +485,15 @@ export function PurchaseBillDialog({
   const [rateVarianceReason, setRateVarianceReason] = useState('')
   const [lines, setLines] = useState<BillLine[]>([emptyLine()])
   const [charges, setCharges] = useState<BillCharge[]>([])
+  /**
+   * Which order's charges were carried onto the bill, so they can be checked.
+   *
+   * Kept as the order rather than as a sentence because the wording has to
+   * change if a receipt from a second order joins the bill later: the
+   * carried charges then sit on a bill with no single order, and the next
+   * bill for the first order would be offered the same charges again.
+   */
+  const [chargeNote, setChargeNote] = useState<{ poId: string; poNumber: string } | null>(null)
   /** Which of our places booked it — "Location" on the old expense form. */
   const [warehouseId, setWarehouseId] = useState('')
   const [warehouses, setWarehouses] = useState<Array<{ id: string; name: string }>>([])
@@ -492,7 +521,7 @@ export function PurchaseBillDialog({
   const [payNow, setPayNow] = useState(false)
   /** How it was paid, when it was paid now. */
   const [payment, setPayment] = useState<CashPayment>(() =>
-    emptyCashPayment(new Date().toISOString().slice(0, 10))
+    emptyCashPayment(todayLocal())
   )
   /** The service order being billed, by number, for the title. */
   const [serviceOrderNo, setServiceOrderNo] = useState<string | null>(null)
@@ -534,10 +563,17 @@ export function PurchaseBillDialog({
     setPoId(record?.poId ?? null)
     setSupplierInvoiceNo(record?.supplierInvoiceNo ?? '')
     setSupplierInvoiceDate(record?.supplierInvoiceDate?.slice(0, 10) ?? '')
-    setBillDate((record?.billDate ?? new Date().toISOString()).slice(0, 10))
+    setBillDate(record?.billDate?.slice(0, 10) ?? todayLocal())
+    // An existing bill keeps the due date it was saved with, and its terms
+    // read back as the days between its bill date and that due date.
     setDueDate(record?.dueDate?.slice(0, 10) ?? '')
-    // An existing bill's date is somebody's decision, already taken.
-    dueTyped.current = Boolean(record?.dueDate)
+    {
+      const saved = daysBetween(
+        record?.supplierInvoiceDate?.slice(0, 10) ?? '',
+        record?.dueDate?.slice(0, 10) ?? ''
+      )
+      setTermDays(String(saved !== null && saved >= 0 ? saved : DEFAULT_TERM_DAYS))
+    }
     setDiscountAmount(num(record?.discountAmount) > 0 ? String(record?.discountAmount) : '')
     setIsReverseCharge(record?.isReverseCharge ?? false)
     setTdsSection(record?.tdsSection ?? '')
@@ -550,7 +586,7 @@ export function PurchaseBillDialog({
     // A saved bill's section was somebody's choice; a new one follows the supplier.
     tdsChosen.current = Boolean(record)
     setYearSoFar(null)
-    setPayment(emptyCashPayment((record?.billDate ?? new Date().toISOString()).slice(0, 10)))
+    setPayment(emptyCashPayment(record?.billDate?.slice(0, 10) ?? todayLocal()))
     setServiceOrderNo(null)
     setPayNow(Boolean(cash) && !record)
     setRateVarianceReason('')
@@ -575,13 +611,16 @@ export function PurchaseBillDialog({
           }))
         : [freshLine()]
     )
+    // Charges are the supplier's figure with any GST inside it, so none is
+    // added on top — a bill saved when it was reopens at 0% like the rest.
     setCharges(
       record?.charges?.map((c) => ({
         chargeTypeId: c.chargeTypeId,
         amount: String(c.amount),
-        gstRate: String(c.gstRate ?? ''),
+        gstRate: '0',
       })) ?? []
     )
+    setChargeNote(null)
     setError(null)
   }, [open, record])
 
@@ -612,17 +651,6 @@ export function PurchaseBillDialog({
     supplierIdRef.current = supplierId
   }, [supplierId])
 
-  /**
-   * Whether the due date on screen is one somebody typed.
-   *
-   * The date fills itself in from the supplier's terms, and re-fills whenever
-   * the supplier or their bill date changes — but the moment a clerk types one
-   * of their own, that is the answer and nothing may overwrite it. An extension
-   * agreed on the phone is exactly the kind of thing that gets typed here and
-   * would have been silently reverted by the next keystroke in the date beside
-   * it.
-   */
-  const dueTyped = useRef(false)
 
   const autoPulled = useRef<string | null>(null)
   useEffect(() => {
@@ -890,7 +918,6 @@ export function PurchaseBillDialog({
   }, [open])
 
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
-  const chargeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
   const supplier = suppliers.find((s) => s.id === supplierId)
   /*
    * Who the supplier box offers. An expense bill lists only service, transport
@@ -903,43 +930,41 @@ export function PurchaseBillDialog({
       )
     : suppliers
 
-  /**
-   * How long this supplier gives us, in days.
+  /*
+   * The payment due date: the date on the supplier's bill plus the terms
+   * (45 days unless changed). Only ever from their bill date — never from
+   * "ERP entry date", which is our date, not theirs. With no bill date there is no
+   * due date to work out, and the box is left for the clerk.
    *
-   * Their own agreed terms where the master holds them — every supplier on the
-   * mill's list has them, and they run from 15 to 45 — and ${MSME_DAYS} where
-   * it does not. Capped at ${MSME_DAYS} for a registered small supplier
-   * whatever the master says, because that is the law's ceiling and a longer
-   * term agreed with them is not enforceable anyway.
-   *
-   * Filling the legal maximum for everybody would have been the simpler rule
-   * and the wrong one: Ambika Stitching Unit is on 15 days, and a bill quietly
-   * dated 45 would be a month late by the time anybody looked — with interest
-   * running on it, since they are an MSME.
+   * Worked out when the bill date or the terms change, not on every render, so
+   * a saved bill reopens on the due date it was saved with.
    */
-  const termDays = useMemo(() => {
-    const agreed = Number(supplier?.creditDays ?? 0)
-    const base = agreed > 0 ? agreed : MSME_DAYS
-    return supplier?.isMsme ? Math.min(base, MSME_DAYS) : base
-  }, [supplier])
+  const dueFor = (invoiceDate: string, days: string) =>
+    invoiceDate && days.trim() !== '' ? addDays(invoiceDate, num(days)) : ''
+
+  /** Their bill date changed: the due date follows it, at the same terms. */
+  const changeInvoiceDate = (date: string) => {
+    setSupplierInvoiceDate(date)
+    setDueDate(dueFor(date, termDays))
+  }
+
+  /** The terms changed: the due date moves with them. */
+  const changeTermDays = (days: string) => {
+    setTermDays(days)
+    if (supplierInvoiceDate) setDueDate(dueFor(supplierInvoiceDate, days))
+  }
 
   /*
-   * Counted from the date on their bill, which is what the terms in the master
-   * say ("30 days from bill date") and what the supplier will count from when
-   * he rings about it. Until that box is filled in, from the day we are
-   * booking it — a due date that is roughly right beats an empty box, and it
-   * corrects itself the moment their date is typed.
+   * A due date typed by hand — an extension agreed on the phone, say. The
+   * terms box follows it (19 Dec on a 4 Nov bill reads 45 days), so a later
+   * change to the bill date keeps the same agreed gap rather than dropping
+   * back to 45.
    */
-  const dueFrom = supplierInvoiceDate || billDate
-
-  useEffect(() => {
-    if (!open || dueTyped.current) return
-    // The terms come off the supplier, so there is nothing to work out until
-    // there is one. A date guessed before then would visibly correct itself
-    // the moment one is picked, which reads as the form changing its mind.
-    if (!supplierId || !dueFrom) return
-    setDueDate(addDays(dueFrom, termDays))
-  }, [open, supplierId, dueFrom, termDays])
+  const changeDueDate = (date: string) => {
+    setDueDate(date)
+    const days = supplierInvoiceDate && date ? daysBetween(supplierInvoiceDate, date) : null
+    if (days !== null && days >= 0) setTermDays(String(days))
+  }
 
   /*
    * The TDS section follows the bill until somebody picks one: the supplier's
@@ -986,6 +1011,8 @@ export function PurchaseBillDialog({
    * order line so the order counts the work as done. Once per opening.
    */
   const pulledOrder = useRef<string | null>(null)
+  /** Each order's number by its id, for the note when its charges are carried over. */
+  const poNumbers = useRef<Map<string, string>>(new Map())
   useEffect(() => {
     if (!open) {
       pulledOrder.current = null
@@ -999,6 +1026,7 @@ export function PurchaseBillDialog({
         const po = res.data
         setServiceOrderNo(po.poNumber)
         setSupplierId(po.supplierId)
+        poNumbers.current.set(po.id, po.poNumber)
         setPoId(po.id)
         if (po.deliveryWarehouseId) setWarehouseId(po.deliveryWarehouseId)
         const left = po.lines.filter((l) => !l.shortClosed && Number(l.pendingQty) > 0)
@@ -1025,6 +1053,85 @@ export function PurchaseBillDialog({
       }
     })()
   }, [open, record, fromServiceOrder])
+
+  /*
+   * The order's charges, carried onto its bill.
+   *
+   * Freight, packing or dyeing agreed on the purchase order is normally on
+   * the supplier's bill too, at the GST rate the order gave it, so a new bill
+   * against an order starts with whatever of those charges no earlier bill
+   * has claimed yet. Only when the bill has no charges of its own, once per
+   * order each time the form is opened — taking a carried charge off is not
+   * undone by the next receipt — and never on an expense bill with no order.
+   * The figures are a starting point: the note asks for them to be checked
+   * against the paper bill, which is what is actually being booked.
+   */
+  const chargesPulledFor = useRef<Set<string>>(new Set())
+  const chargesRef = useRef(charges)
+  useEffect(() => {
+    chargesRef.current = charges
+  }, [charges])
+  useEffect(() => {
+    if (!open) {
+      chargesPulledFor.current = new Set()
+      /*
+       * The form stays loaded while it is shut, so the order of the last bill
+       * would otherwise still be here when it next opens — and this effect
+       * runs before the opening reset gets to clear it. That stale run would
+       * either mark the order as done (so its charges are not carried the
+       * second time) or fetch them onto an unrelated new bill.
+       */
+      setPoId(null)
+      return
+    }
+    if (record || !poId || chargesPulledFor.current.has(poId)) return
+    chargesPulledFor.current.add(poId)
+    const hasCharges = () => chargesRef.current.some((c) => c.chargeTypeId || num(c.amount) > 0)
+    if (hasCharges()) return
+    const forPo = poId
+    // Turned off if the form is shut, or the bill's order changes, before
+    // the answer comes back — its charges then belong to nothing on screen.
+    let live = true
+    let done = false
+    void api
+      .get<{
+        success: boolean
+        data: Array<{
+          chargeTypeId: string
+          name: string
+          amount: number | string
+          gstRate: number | string
+        }>
+      }>(`/purchase/orders/${forPo}/unbilled-charges`)
+      .then((res) => {
+        done = true
+        if (!live) return
+        const rows = res.data.filter((c) => num(c.amount) > 0)
+        // Somebody may have typed a charge in while this was on its way.
+        if (!rows.length || hasCharges()) return
+        setCharges(
+          rows.map((c) => ({
+            chargeTypeId: c.chargeTypeId,
+            amount: String(c.amount),
+            gstRate: '0',
+          }))
+        )
+        setChargeNote({
+          poId: forPo,
+          poNumber: poNumbers.current.get(forPo) ?? 'the purchase order',
+        })
+      })
+      // Quietly: the charges can still be added by hand.
+      .catch(() => {
+        done = true
+      })
+    return () => {
+      live = false
+      // An answer that never landed has not carried anything, so the order
+      // may be tried again if it comes back.
+      if (!done) chargesPulledFor.current.delete(forPo)
+    }
+  }, [open, record, poId])
 
   /**
    * The receipts already gathered onto this bill, in order, without repeats.
@@ -1172,7 +1279,7 @@ export function PurchaseBillDialog({
     setSupplierInvoiceNo(no)
     // Picking a number the gate caught brings its date, into an empty box only.
     const date = dateForBillNo(no)
-    if (date && !supplierInvoiceDate) setSupplierInvoiceDate(date)
+    if (date && !supplierInvoiceDate) changeInvoiceDate(date)
   }
 
   /*
@@ -1377,32 +1484,49 @@ export function PurchaseBillDialog({
       : tdsChoice.rate
     : 0
 
-  /** Mirrors priceBill on the API, so the screen and the saved bill agree. */
+  /*
+   * The bill's figures, from the one calculation the server prices it with.
+   *
+   * priceDocument() is shared with the purchase order and with the API, so
+   * the screen, the saved bill and the print cannot disagree by a rupee: the
+   * order discount is spread over the lines by value, every line and every
+   * charge is taxed at its own rate, CGST and SGST are each worked out at
+   * half the rate, and the total is rounded to the rupee once, at the end.
+   *
+   * Before a supplier is picked the tax is previewed as CGST + SGST (it adds
+   * up the same either way); an unregistered supplier with no reverse charge
+   * bills no GST at all. Under reverse charge the GST is worked out but left
+   * out of what the supplier is paid — it is ours to pay to the government.
+   */
+  const priceSplit: GstSplit = taxMode ?? 'CGST_SGST'
+  const priced = useMemo(
+    () =>
+      priceDocument({
+        lines: lines.map((l) => ({
+          qty: num(l.qty),
+          rate: num(l.unitPrice),
+          discountPct: num(l.discount),
+          gstRate: num(l.gstRate),
+        })),
+        orderDiscount: num(discountAmount),
+        // As on the supplier's bill, GST included: nothing is taxed on top.
+        charges: charges.map((c, i) => ({
+          key: c.chargeTypeId || `row-${i}`,
+          amount: num(c.amount),
+          gstRate: 0,
+        })),
+        split: priceSplit,
+        reverseCharge: isReverseCharge,
+      }),
+    [lines, charges, discountAmount, priceSplit, isReverseCharge]
+  )
+
+  /** The figures the form shows, with TDS and what is left to pay on top. */
   const totals = useMemo(() => {
-    const lineGross = lines.map((l) => num(l.qty) * num(l.unitPrice) * (1 - num(l.discount) / 100))
-    const subtotal = lineGross.reduce((s, n) => s + n, 0)
-    const discount = Math.min(num(discountAmount), subtotal)
-    const goodsTaxable = subtotal - discount
-    const factor = subtotal > 0 ? goodsTaxable / subtotal : 1
-
-    const chargeTotal = charges.reduce((s, c) => s + num(c.amount), 0)
-    const taxable = goodsTaxable + chargeTotal
-
-    const taxable0 = taxMode === 'NONE' ? 0 : 1
-    const lineTax = lines.reduce(
-      (s, l, i) => s + lineGross[i] * factor * (num(l.gstRate) / 100) * taxable0,
-      0
-    )
-    const chargeTax = charges.reduce(
-      (s, c) => s + num(c.amount) * (num(c.gstRate) / 100) * taxable0,
-      0
-    )
-    const tax = lineTax + chargeTax
-
-    // Under reverse charge the supplier bills no tax; we owe it to the
-    // government, so it must not swell what they are paid.
-    const payable = isReverseCharge ? taxable : taxable + tax
-    const total = Math.round(payable)
+    // Each line's own value after its own discount, as the line shows it.
+    const lineGross = priced.lines.map((l) => l.gross - l.discount)
+    const subtotal = priced.gross - priced.lineDiscount
+    const taxable = priced.taxable
     // On the value before GST and to the rupee, as the server books it: from
     // the section's rate on the bill's date, or as typed with Auto off. An
     // older bill with no section keeps the rate it was booked at.
@@ -1415,27 +1539,20 @@ export function PurchaseBillDialog({
     return {
       lineGross,
       subtotal,
-      discount,
+      discount: priced.orderDiscount,
       taxable,
-      chargeTotal,
-      tax,
-      roundOff: total - payable,
-      total,
+      goodsTaxable: priced.goodsTaxable,
+      chargeTotal: priced.chargeTotal,
+      tax: priced.tax,
+      cgst: priced.cgst,
+      sgst: priced.sgst,
+      igst: priced.igst,
+      roundOff: priced.roundOff,
+      total: priced.total,
       tds,
-      balance: total - tds,
+      balance: priced.total - tds,
     }
-  }, [
-    lines,
-    charges,
-    discountAmount,
-    taxMode,
-    isReverseCharge,
-    tdsRate,
-    tdsChoice,
-    tdsAuto,
-    tdsTyped,
-    tdsRateInUse,
-  ])
+  }, [priced, tdsRate, tdsChoice, tdsAuto, tdsTyped, tdsRateInUse])
 
   if (!open) return null
 
@@ -1578,6 +1695,7 @@ export function PurchaseBillDialog({
        * receipt, and the receipt still carries its order, so nothing is lost
        * — it is only the shortcut at the top that goes.
        */
+      poNumbers.current.set(d.po.id, d.po.poNumber)
       setPoId((prev) => (!prev || prev === d.po.id ? d.po.id : ''))
 
       const pulled = fresh.map((l) => ({
@@ -1676,7 +1794,7 @@ export function PurchaseBillDialog({
         .map((c) => ({
           chargeTypeId: c.chargeTypeId,
           amount: num(c.amount),
-          gstRate: num(c.gstRate),
+          gstRate: 0,
         })),
     }
 
@@ -2288,10 +2406,12 @@ export function PurchaseBillDialog({
                   )}
                 </div>
 
-                <div>
+                <div className="xl:col-span-2">
                   {/* The bill is booked with their invoice on the desk, so this is
                 the document's own number rather than an afterthought. It is
-                also what stops the same invoice being booked twice. */}
+                also what stops the same invoice being booked twice. Two
+                columns wide on a big screen: bill numbers like
+                "BPF/INV/2210" were cut off once the Terms box joined the row. */}
                   <label className="form-label" htmlFor="bill-supplier-no">
                     Bill no.<span className="ml-0.5 text-red-400">*</span>{' '}
                     <span className="text-muted-foreground">(theirs)</span>
@@ -2323,7 +2443,7 @@ export function PurchaseBillDialog({
                     type="date"
                     className="form-input"
                     value={supplierInvoiceDate}
-                    onChange={(e) => setSupplierInvoiceDate(e.target.value)}
+                    onChange={(e) => changeInvoiceDate(e.target.value)}
                   />
                   {!supplierInvoiceDate && (
                     <span className="text-muted-foreground mt-1 block text-xs">
@@ -2332,16 +2452,35 @@ export function PurchaseBillDialog({
                   )}
                 </div>
 
+                {/* Our date: the day the bill is entered in the ERP, today
+                  unless changed. Was "Booked on", which people mixed up with
+                  the supplier's own bill date beside it. */}
                 <div>
                   <label className="form-label" htmlFor="bill-date">
-                    Booked on
+                    ERP entry date
                   </label>
                   <input
                     id="bill-date"
                     type="date"
                     className="form-input"
+                    title="The day this bill is entered in the ERP — not the date on the supplier's bill"
                     value={billDate}
                     onChange={(e) => setBillDate(e.target.value)}
+                  />
+                </div>
+
+                {/* The payment terms, in days from their bill date — 45 to
+                  start with. Changing it moves the due date beside it. */}
+                <div>
+                  <label className="form-label" htmlFor="bill-terms">
+                    Terms (days)
+                  </label>
+                  <StepInput
+                    id="bill-terms"
+                    className="form-input text-right"
+                    placeholder={String(DEFAULT_TERM_DAYS)}
+                    value={termDays}
+                    onValueChange={changeTermDays}
                   />
                 </div>
 
@@ -2354,17 +2493,8 @@ export function PurchaseBillDialog({
                     type="date"
                     className="form-input"
                     value={dueDate}
-                    onChange={(e) => {
-                      // Theirs from here on. See `dueTyped`.
-                      dueTyped.current = true
-                      setDueDate(e.target.value)
-                    }}
+                    onChange={(e) => changeDueDate(e.target.value)}
                   />
-                  {/* The line under this box said which term the date was
-                    worked out from and, for a small supplier, that 45 days is
-                    the legal ceiling. Taken off on request. The date is still
-                    worked out the same way — see `termDays` — it simply no
-                    longer explains itself here. */}
                 </div>
 
                 {expenseMode && (
@@ -2929,37 +3059,24 @@ export function PurchaseBillDialog({
                     {chargeTypes.length > 0 && (
                       <div className="space-y-1.5">
                         {charges.length > 0 && (
-                          <div className="text-muted-foreground grid grid-cols-[minmax(0,22rem)_7rem_4.5rem_1.75rem] gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
+                          <div className="text-muted-foreground grid grid-cols-[minmax(0,22rem)_7rem_1.75rem] gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
                             <span>Charge</span>
                             <span className="text-right">Amount (₹)</span>
-                            <span className="text-right">GST %</span>
                             <span />
                           </div>
                         )}
                         {charges.map((c, i) => (
                           <div
                             key={i}
-                            className="grid grid-cols-[minmax(0,22rem)_7rem_4.5rem_1.75rem] items-center gap-1.5"
+                            className="grid grid-cols-[minmax(0,22rem)_7rem_1.75rem] items-center gap-1.5"
                           >
                             <SmartSelect
                               className="form-input h-8 min-w-0 text-xs"
                               value={c.chargeTypeId}
                               onChange={(e) => {
-                                const ct = chargeById.get(e.target.value)
+                                const id = e.target.value
                                 setCharges((p) =>
-                                  p.map((x, y) =>
-                                    y === i
-                                      ? {
-                                          ...x,
-                                          chargeTypeId: e.target.value,
-                                          gstRate:
-                                            x.gstRate ||
-                                            (ct?.defaultGstRate != null
-                                              ? String(ct.defaultGstRate)
-                                              : ''),
-                                        }
-                                      : x
-                                  )
+                                  p.map((x, y) => (y === i ? { ...x, chargeTypeId: id } : x))
                                 )
                               }}
                               aria-label={`Charge ${i + 1} type`}
@@ -2981,18 +3098,6 @@ export function PurchaseBillDialog({
                               }
                               aria-label={`Charge ${i + 1} amount`}
                             />
-                            <StepInput
-                              className="form-input h-8 text-right text-xs"
-                              decimals
-                              max={100}
-                              placeholder="0"
-                              disabled={taxMode === 'NONE'}
-                              value={taxMode === 'NONE' ? '' : String(c.gstRate)}
-                              onValueChange={(v) =>
-                                setCharges((p) => p.map((x, y) => (y === i ? { ...x, gstRate: v } : x)))
-                              }
-                              aria-label={`Charge ${i + 1} GST rate`}
-                            />
                             <button
                               type="button"
                               onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
@@ -3003,15 +3108,38 @@ export function PurchaseBillDialog({
                             </button>
                           </div>
                         ))}
+                        {chargeNote && charges.length > 0 && (
+                          <p className="text-muted-foreground flex items-center gap-1 text-xs">
+                            <Info size={12} className="shrink-0" />
+                            {/*
+                             * Once a receipt from another order joins, the bill
+                             * no longer names one order, and the carried charges
+                             * still count as unbilled on the first one — so the
+                             * note turns into a warning rather than staying calm.
+                             */}
+                            {poId === chargeNote.poId
+                              ? `Charges from ${chargeNote.poNumber} added — check them against the supplier's bill`
+                              : `These charges came from ${chargeNote.poNumber}; this bill now covers more than one order — check them against the supplier's bill`}
+                          </p>
+                        )}
                         <button
                           type="button"
                           onClick={() =>
-                            setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
+                            setCharges((p) => [
+                              ...p,
+                              { chargeTypeId: '', amount: '', gstRate: '0' },
+                            ])
                           }
                           className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
                         >
                           <Plus size={12} /> Add a charge — freight, transport, packing
                         </button>
+                        {charges.length > 0 && (
+                          <p className="text-muted-foreground text-xs">
+                            Type each charge as it is on the supplier&apos;s bill, GST included — no GST
+                            is added on top.
+                          </p>
+                        )}
                       </div>
                     )}
                   </div>
@@ -3062,15 +3190,17 @@ export function PurchaseBillDialog({
                 <div className="space-y-1.5 text-sm">
                   <Row label={expenseMode ? 'Subtotal' : 'Goods subtotal'} value={totals.subtotal} />
                   {totals.discount > 0 && <Row label="Less discount" value={-totals.discount} />}
-                  {totals.chargeTotal > 0 && <Row label="Add charges" value={totals.chargeTotal} />}
-                  <Row label="Taxable value" value={totals.taxable} />
+                  <Row label="Taxable value" value={totals.goodsTaxable} />
+                  {/* Where the GST on the goods comes from, rate by rate. An
+                    unregistered supplier's line is said just below. */}
+                  {taxMode !== 'NONE' && <TaxBreakdown result={priced} split={taxMode} />}
                   {taxMode === 'CGST_SGST' && (
                     <>
-                      <Row label="CGST" value={totals.tax / 2} />
-                      <Row label="SGST" value={totals.tax / 2} />
+                      <Row label="CGST" value={totals.cgst} />
+                      <Row label="SGST" value={totals.sgst} />
                     </>
                   )}
-                  {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
+                  {taxMode === 'IGST' && <Row label="IGST" value={totals.igst} />}
                   {taxMode === 'NONE' && (
                     <p className="text-muted-foreground text-xs">No GST — the supplier is not registered.</p>
                   )}
@@ -3087,6 +3217,11 @@ export function PurchaseBillDialog({
                       Reverse charge: the ₹{inr(totals.tax)} of GST is ours to pay, not part of what
                       the supplier is paid.
                     </p>
+                  )}
+                  {/* After the tax: the supplier's charges are their final
+                    figure with any GST already in it, added as they are. */}
+                  {totals.chargeTotal > 0 && (
+                    <Row label="Add charges (GST included)" value={totals.chargeTotal} />
                   )}
                   <Row label="Rounding" value={totals.roundOff} />
                   <div className="border-border flex items-center justify-between border-t pt-2">

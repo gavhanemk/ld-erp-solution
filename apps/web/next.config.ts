@@ -1,6 +1,9 @@
 import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
+  // The shared package is TypeScript source (one purchase pricing calculation
+  // used here and by the API), so Next compiles it like its own code.
+  transpilePackages: ['@ld-erp/shared'],
   // typedRoutes rejects any href whose page does not exist yet. Most modules
   // are still being built, and the sidebar already links to all of them, so it
   // would fail every build until the last screen lands. Turn it back on once

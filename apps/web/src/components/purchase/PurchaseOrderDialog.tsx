@@ -27,7 +27,6 @@ import {
   Pencil,
   MapPinned,
   Check,
-  Percent,
   ClipboardList,
   ChevronUp,
   ChevronDown,
@@ -44,6 +43,8 @@ import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } f
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { priceDocument } from '@ld-erp/shared'
+import { TaxBreakdown } from '@/components/purchase/TaxBreakdown'
 
 /**
  * Raising a purchase order.
@@ -295,6 +296,9 @@ interface Option {
   billingAddress?: string | null
   billingCity?: string | null
   billingPincode?: string | null
+  /** On an item: the style it is a garment of, as the item master sends it. */
+  styleId?: string | null
+  style?: { id: string; code: string; name: string } | null
 }
 
 interface Attachment {
@@ -388,8 +392,10 @@ const COL = {
   remove: 'w-16',
   item: 'w-64',
   category: 'w-40',
-  style: 'w-24',
-  description: 'w-36',
+  // Wide enough for a whole style code (LD-SH-2601) now that it fills in
+  // from the item; at w-24 its last digit was cut off.
+  style: 'w-28',
+  description: 'w-32',
   qty: 'w-20',
   rate: 'w-24',
   // Wide enough for the figure and the % / rupees switch beside it. At w-28
@@ -438,83 +444,15 @@ function NotBuiltNote({ children }: { children: React.ReactNode }) {
   )
 }
 
-/** The percentage helper's key for the Other charges box, which has no id. */
-const OTHER_PCT = '__other'
-
 /**
- * Works a charge out as a share of the order, so nobody reaches for a phone.
+ * Whether a charge type is the "Other Charges" one.
  *
- * Every charge on a purchase is typed in by hand, and that is deliberate: it
- * is how the mill's old system worked, because what a transporter asks for is
- * a figure agreed on a call, not a formula. But it is very often a round
- * percentage of the goods, and working 5% of 4,241.60 out by hand forty times
- * a week is precisely where a wrong figure comes from.
- *
- * So this neither prefills a box nor calculates anything on its own. It opens
- * when it is asked for, shows the whole working — the percentage, what it is
- * a percentage of, and what that comes to — and writes the figure into the box
- * only when Use is pressed. What gets saved is still a plain amount; the
- * percentage is stored nowhere, because the supplier agreed to a number and an
- * order that quietly recalculated itself later would stop matching their copy.
+ * Matched by name, ignoring case and spaces, because it is an ordinary row in
+ * Masters → Charges put there by a migration — it has no flag of its own, and
+ * "Other charges" or "OTHER CHARGES" typed by hand is the same charge.
  */
-function PercentOfGross({
-  name,
-  base,
-  value,
-  onChange,
-  onUse,
-}: {
-  name: string
-  base: number
-  value: string
-  onChange: (next: string) => void
-  onUse: (amount: number) => void
-}) {
-  const pct = num(value)
-  const worked = base * (pct / 100)
-  const ready = base > 0 && pct > 0
-
-  return (
-    <div className="border-border bg-secondary/40 mt-1.5 rounded-lg border px-2.5 py-2">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-xs">
-        <input
-          type="number"
-          step="any"
-          min={0}
-          max={100}
-          autoFocus
-          className="form-input h-7 w-16 text-right"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          aria-label={`Percentage to work ${name} out at`}
-        />
-        {/* Says what it is a percentage of, in figures. A helper that showed
-          only its answer would be one more number to take on trust. */}
-        <span className="text-muted-foreground">% of gross total ₹{inr(base)}</span>
-        {/* The answer and the button wrap together and stay right, so on a
-          phone Use does not end up stranded alone on the left. */}
-        <span className="ml-auto flex items-center gap-2">
-          <span className="text-foreground whitespace-nowrap font-semibold tabular-nums">
-            ₹{inr(worked)}
-          </span>
-          <button
-            type="button"
-            className="btn-primary h-7 shrink-0 px-2.5 text-xs disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
-            disabled={!ready}
-            onClick={() => onUse(Number(worked.toFixed(2)))}
-          >
-            Use
-          </button>
-        </span>
-      </div>
-      {base <= 0 && (
-        <p className="text-muted-foreground mt-1.5 text-xs">
-          Nothing to take a percentage of yet — put an item on the order first.
-        </p>
-      )}
-    </div>
-  )
-}
+const isOtherChargesType = (t: { name: string }) =>
+  t.name.replace(/\s+/g, '').toLowerCase() === 'othercharges'
 
 function Row({ label, value }: { label: string; value: number }) {
   return (
@@ -630,16 +568,75 @@ export function PurchaseOrderDialog({
    * the form does not decide which charges exist, Masters → Charges does.
    */
   const [charges, setCharges] = useState<Record<string, string>>({})
-  const [otherCharges, setOtherCharges] = useState('')
-
   /**
-   * Which charge's percentage helper is open, and what has been typed into it.
+   * The charges added to this order, in the order they were added.
    *
-   * Kept out of `charges` on purpose. This is scratch working, not part of the
-   * order: it is thrown away when the form closes and none of it is sent.
+   * The totals used to show a box for every purchase charge in the master,
+   * whether the order had it or not — so a near-duplicate entry in the master
+   * ("Freight / Courier" and "Freight / Courier Charges") showed twice on
+   * every order. Now a charge appears only once somebody adds it.
    */
-  const [pctOpen, setPctOpen] = useState<string | null>(null)
-  const [pctOf, setPctOf] = useState<Record<string, string>>({})
+  const [shownCharges, setShownCharges] = useState<string[]>([])
+  /**
+   * Whether each charge's box holds rupees or a percentage, keyed by charge
+   * type id. Rupees unless switched.
+   *
+   * A percentage is of the goods value before GST — "freight 10%" on ₹12,000
+   * of fabric is ₹1,200 — and follows the goods while the form is open. What
+   * is saved is the rupee figure it came to: the order records an amount, so
+   * it reopens in rupees.
+   */
+  const [chargeUnit, setChargeUnit] = useState<Record<string, '%' | 'INR'>>({})
+  /**
+   * The old "Other charges" box of an order saved before Other Charges became
+   * a charge type. '' when there is none.
+   *
+   * Moved onto the "Other Charges" charge row as soon as the charge master has
+   * loaded (see the effect below). Both are the supplier's figure with any GST
+   * already in it, so the move changes nothing in the total. Only when that
+   * type cannot be found does the figure stay here.
+   */
+  const [legacyOther, setLegacyOther] = useState('')
+
+  /** Takes a charge off the order: its row, its amount and its ₹/% go. */
+  const removeCharge = (id: string) => {
+    setShownCharges((prev) => prev.filter((x) => x !== id))
+    setCharges((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setChargeUnit((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+  }
+
+  /*
+   * A saved order whose charges had GST added on top, the way orders were
+   * priced before charges were taken as the supplier's GST-included figure.
+   * Said beside the charges, because saving it again drops that GST and the
+   * total comes down by it.
+   */
+  const chargesTaxedBefore = (record?.charges ?? []).some(
+    (c) => Number(c.amount) > 0 && Number(c.gstRate ?? 0) > 0
+  )
+
+  /*
+   * Charges already on a saved order whose type has since been retired in the
+   * master. The server only takes live purchase charges, so they cannot be
+   * saved again — said here rather than dropped without a word.
+   */
+  const retiredCharges = useMemo(
+    () =>
+      chargeTypes.length === 0
+        ? []
+        : (record?.charges ?? []).filter(
+            (c) => Number(c.amount) > 0 && !chargeTypes.some((t) => t.id === c.chargeTypeId)
+          ),
+    [record, chargeTypes]
+  )
   /*
    * What each item on the form has been bought at before, keyed by item.
    *
@@ -839,9 +836,11 @@ export function PurchaseOrderDialog({
     setCharges(
       Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(c.amount)]))
     )
-    setOtherCharges(num(record?.otherCharges) > 0 ? String(record?.otherCharges) : '')
-    setPctOpen(null)
-    setPctOf({})
+    setChargeUnit({})
+    setShownCharges(
+      (record?.charges ?? []).filter((c) => Number(c.amount) > 0).map((c) => c.chargeTypeId)
+    )
+    setLegacyOther(num(record?.otherCharges) > 0 ? String(Number(record?.otherCharges)) : '')
     setAttachments([])
     setPendingFiles([])
     setCarriedFiles([])
@@ -1205,17 +1204,22 @@ export function PurchaseOrderDialog({
       .join(', ') ||
     null
 
-  // Where the goods land. Our own address unless the order says a customer,
-  // and it is this — not our state — that the supplier's state is compared
-  // against, because goods are taxed where they are delivered.
+  // Where the supply is taxed: always our own state.
+  //
+  // This form used to take the delivery customer's state when goods were sent
+  // straight to a customer, and a customer across the border turned CGST +
+  // SGST into IGST. That is not how a purchase works. When the supplier ships
+  // to somebody else on our say-so, the supply is still made to us — we are
+  // the buyer billed — and its place is our own state (IGST Act s.10(1)(b),
+  // the "bill-to / ship-to" rule). So the customer only changes where the
+  // goods go, never the tax on the supplier's bill.
   //
   // Read exactly as the server reads it, so the split shown here is the one
   // that is saved: a state code left blank falls back to the GSTIN's first two
   // digits, for the supplier and for us alike.
-  const placeOfSupply =
-    customerStateCode || company?.stateCode || company?.gstin?.slice(0, 2) || null
+  const placeOfSupply = company?.stateCode || company?.gstin?.slice(0, 2) || null
 
-  const taxMode = !supplier
+  const taxMode: 'CGST_SGST' | 'IGST' | 'NONE' | null = !supplier
     ? null
     : !supplier.gstin
       ? 'NONE'
@@ -1235,89 +1239,142 @@ export function PurchaseOrderDialog({
   const lineDiscountOf = (l: PoLine) => {
     if (poType !== 'ITEM_LEVEL') return 0
     const typed = num(l.discount)
-    if ((l.discountUnit ?? '%') === '%') return Math.min(typed, 100)
+    // Kept to 6 decimals, the same as the saved order keeps it (the server
+    // cuts it there too). Rounding once here means the totals on screen and
+    // the figure sent both use the stored percent, so on a very large line a
+    // ₹ discount cannot show a paisa different from what the order saves.
+    const six = (n: number) => Math.round(n * 1e6) / 1e6
+    if ((l.discountUnit ?? '%') === '%') return six(Math.min(typed, 100))
     // Rupees. Capped at the line's own value, so a discount cannot take a line
     // below nothing.
     const gross = num(l.qty) * num(l.unitRate)
-    return gross > 0 ? Math.min((typed / gross) * 100, 100) : 0
+    return gross > 0 ? six(Math.min((typed / gross) * 100, 100)) : 0
   }
   const orderDiscount = poType === 'ORDER_LEVEL' ? num(discountAmount) : 0
 
+  /** The "Other Charges" charge type, when Masters → Charges has one. */
+  const otherChargeType = chargeTypes.find(isOtherChargesType) ?? null
+
+  /** Puts a charge on the order. */
+  const addCharge = (id: string) => {
+    if (!chargeTypes.some((x) => x.id === id)) return
+    setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
+  }
+
+  /*
+   * An order saved with the old "Other charges" box, reopened.
+   *
+   * The figure is moved onto the "Other Charges" charge row and the box it
+   * came from is sent back as 0. Both are the supplier's figure taken as it
+   * is, so the total does not move. Until the charge master has loaded, or
+   * when it has no "Other Charges" row at all, nothing moves.
+   */
+  useEffect(() => {
+    if (!open || !legacyOther || !otherChargeType) return
+    const id = otherChargeType.id
+    const amount = num(legacyOther)
+    setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
+    setCharges((prev) => ({ ...prev, [id]: String(Number((num(prev[id]) + amount).toFixed(2))) }))
+    setLegacyOther('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, legacyOther, otherChargeType?.id])
+
+  /*
+   * Every figure on the form, from the one calculation.
+   *
+   * priceDocument() is the same sum the server runs when the order is saved
+   * and the bill runs when it is booked, so what is shown here is what is
+   * stored, to the paisa. It is given only rows that have an item — a blank
+   * row is not part of the order — the order discount where the dropdown
+   * allows one, and the charges.
+   *
+   * Every charge goes in at 0% GST. Freight, transport and the rest are typed
+   * as the final figure on the supplier's bill, with any GST already inside
+   * it, so they are added to the total as they are and nothing is taxed on top.
+   *
+   * While no supplier is chosen there is no telling CGST + SGST from IGST, so
+   * the tax is previewed as CGST + SGST and the panel says so. The tax itself
+   * comes to the same either way; only the split waits for the supplier.
+   */
   const totals = useMemo(() => {
-    const lineGross = lines.map((l) => num(l.qty) * num(l.unitRate))
-    const lineAmounts = lines.map((l, i) => lineGross[i] * (1 - lineDiscountOf(l) / 100))
-    const subtotal = lineAmounts.reduce((sum, n) => sum + n, 0)
+    const shown = shownCharges
+      .map((id) => chargeTypes.find((t) => t.id === id))
+      .filter((t): t is ChargeTypeOption => Boolean(t))
 
-    const discount = Math.min(orderDiscount, subtotal)
-    const taxable = subtotal - discount
-    const factor = subtotal > 0 ? taxable / subtotal : 1
-
-    const lineTax =
-      taxMode === 'NONE'
-        ? 0
-        : lines.reduce((sum, l, i) => sum + lineAmounts[i] * factor * (num(l.gstRate) / 100), 0)
+    const goods = {
+      lines: activeLines.map((l) => ({
+        qty: num(l.qty),
+        rate: num(l.unitRate),
+        discountPct: lineDiscountOf(l),
+        gstRate: num(l.gstRate),
+      })),
+      orderDiscount,
+      split: taxMode ?? ('CGST_SGST' as const),
+    }
 
     /*
-     * Each charge is taxed at its own rate and is not discountable — the
-     * mill's discount is negotiated on the goods, not on the transporter's
-     * bill. Kept as rows so each one can be shown with its own GST.
+     * What a charge typed as a percentage is a percentage of: the goods after
+     * every discount, before GST — the Gross total row. Charges never change
+     * it, so it is read from the goods alone. Rounded to the paisa.
      */
-    const chargeRows = chargeTypes
-      .map((t) => ({
-        chargeTypeId: t.id,
-        name: t.name,
-        gstRate: num(t.defaultGstRate),
-        percentOfValue: num(t.percentOfValue),
-        amount: num(charges[t.id]),
-      }))
-      .map((c) => ({ ...c, tax: taxMode === 'NONE' ? 0 : c.amount * (c.gstRate / 100) }))
+    const chargeBase = priceDocument(goods).goodsTaxable
+    const chargeAmountOf = (id: string) =>
+      chargeUnit[id] === '%'
+        ? Math.round(chargeBase * num(charges[id])) / 100
+        : num(charges[id])
 
-    const chargeTotal = chargeRows.reduce((sum, c) => sum + c.amount, 0)
-    const chargeTax = chargeRows.reduce((sum, c) => sum + c.tax, 0)
-    const tax = lineTax + chargeTax
+    const result = priceDocument({
+      ...goods,
+      charges: shown.map((t) => ({ key: t.id, amount: chargeAmountOf(t.id), gstRate: 0 })),
+      untaxedExtra: num(legacyOther),
+    })
 
-    // No GST of its own, and added after tax — the way the old system had it.
-    const other = num(otherCharges)
+    // Each row's own amount — what it comes to after its own discount, before
+    // the order discount and tax — as the Amount column has always shown it.
+    // A row without an item is not priced, so it reads 0.
+    let k = 0
+    const lineAmounts = lines.map((l) => {
+      if (!l.itemId) return 0
+      const p = result.lines[k++]
+      return p ? Math.round((p.gross - p.discount) * 100) / 100 : 0
+    })
 
-    const beforeRound = taxable + chargeTotal + tax + other
-    const total = Math.round(beforeRound)
+    /*
+     * The charges on this order, one row each, as typed. Not discountable —
+     * the mill's discount is negotiated on the goods, not on the
+     * transporter's bill.
+     */
+    const chargeRows = shown.map((t, i) => ({
+      chargeTypeId: t.id,
+      name: t.name,
+      unit: chargeUnit[t.id] ?? ('INR' as const),
+      amount: result.charges[i]?.amount ?? 0,
+    }))
 
     /*
      * "Total discount" is every discount on the order added up, and "Gross
-     * total" is what is left after them. Two rows that only make sense read in
-     * that order, which is why the old form put them that way round.
+     * total" is what is left of the goods after them. Two rows that only make
+     * sense read in that order, which is why the old form put them that way
+     * round.
      */
-    const totalDiscount =
-      lines.reduce((sum, l, i) => sum + lineGross[i] * (lineDiscountOf(l) / 100), 0) + discount
-
     return {
+      result,
       lineAmounts,
-      subtotal,
-      discount,
-      totalDiscount,
-      grossTotal: taxable,
-      taxable,
       chargeRows,
-      chargeTotal,
-      other,
-      tax,
-      roundOff: total - beforeRound,
-      total,
+      totalDiscount: result.totalDiscount,
+      grossTotal: result.goodsTaxable,
+      taxable: result.taxable,
+      chargeTotal: result.chargeTotal,
+      untaxedExtra: result.untaxedExtra,
+      cgst: result.cgst,
+      sgst: result.sgst,
+      igst: result.igst,
+      tax: result.tax,
+      roundOff: result.roundOff,
+      total: result.total,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines, discountAmount, taxMode, poType, chargeTypes, charges, otherCharges])
-
-  /**
-   * What a charge's percentage box opens on.
-   *
-   * Whatever was last typed for this charge while the form has been open;
-   * failing that the share the charge master carries; failing that the rate
-   * printed on the row, because that is the number in front of the buyer and
-   * the one they mean when they say "five percent". A starting point only —
-   * it is typed over freely and nothing is applied until Use is pressed.
-   */
-  const pctFor = (c: { chargeTypeId: string; gstRate: number; percentOfValue: number }) =>
-    pctOf[c.chargeTypeId] ?? String(c.percentOfValue > 0 ? c.percentOfValue : c.gstRate)
+  }, [lines, discountAmount, taxMode, poType, chargeTypes, shownCharges, charges, chargeUnit, legacyOther])
 
   /** One row's own figures, worked out for the row it is shown in. */
   const priceOf = (l: PoLine) => {
@@ -1394,6 +1451,45 @@ export function PurchaseOrderDialog({
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
 
   /**
+   * Whether an item is filed under a category choice: the category itself or
+   * one of its sub-categories, or — with a sub-category picked — that one.
+   */
+  const itemFits = (itemId: string, categoryId: string, subcategoryId: string) => {
+    const item = itemId ? itemById.get(itemId) : undefined
+    if (!item) return true
+    if (subcategoryId) return item.categoryId === subcategoryId
+    if (!categoryId) return true
+    const filed = categories.find((c) => c.id === item.categoryId)
+    return item.categoryId === categoryId || filed?.parentId === categoryId
+  }
+
+  /**
+   * Picks a row's category, or its sub-category under the same category.
+   *
+   * An item that is not filed under the new choice goes, with what came with
+   * it — its code, its GST rate and a style it filled in. Left in place it
+   * read "Buttons & Fasteners" beside Cotton Oxford: a row contradicting
+   * itself, and an order that would go out with the wrong thing on it. What
+   * was typed by hand (quantity, rate, description) stays.
+   */
+  const chooseCategory = (index: number, categoryId: string, subcategoryId = '') => {
+    const line = lines[index]
+    if (itemFits(line.itemId, categoryId, subcategoryId)) {
+      setLine(index, { categoryId, subcategoryId })
+      return
+    }
+    const itemStyle = itemById.get(line.itemId)?.style?.code ?? ''
+    setLine(index, {
+      categoryId,
+      subcategoryId,
+      itemId: '',
+      codeText: '',
+      gstRate: '',
+      ...(itemStyle && line.styleNo === itemStyle ? { styleNo: '', styleId: '' } : {}),
+    })
+  }
+
+  /**
    * Puts an item on one row.
    *
    * The master's rate and GST are offered rather than imposed: the rate on
@@ -1433,9 +1529,28 @@ export function PurchaseOrderDialog({
     const cat = categories.find((c) => c.id === item?.categoryId)
     const line = lines[index]
 
+    /*
+     * The style comes with the item when the item is a style's garment —
+     * "Formal Shirt LD-SH-2601 — Sky Blue" is style LD-SH-2601. Only into an
+     * empty box, or one still holding the previous item's own style, so a
+     * style somebody typed by hand is never overwritten; changing to an item
+     * with no style clears a style the last item brought.
+     */
+    const previousStyle = itemById.get(line.itemId)?.style?.code ?? ''
+    const styleBoxIsOurs =
+      !String(line.styleNo ?? '').trim() || (previousStyle !== '' && line.styleNo === previousStyle)
+    const styleFill = !styleBoxIsOurs
+      ? {}
+      : item?.style
+        ? { styleNo: item.style.code, styleId: item.style.id }
+        : previousStyle
+          ? { styleNo: '', styleId: '' }
+          : {}
+
     setLine(index, {
       itemId,
       codeText: item?.code ?? '',
+      ...styleFill,
       ...(cat
         ? cat.parentId
           ? { categoryId: cat.parentId, subcategoryId: cat.id }
@@ -1848,13 +1963,15 @@ export function PurchaseOrderDialog({
     // Only an order-level order has one. Sending whatever is in the box on an
     // item-level order would take the discount twice.
     discountAmount: poType === 'ORDER_LEVEL' ? num(discountAmount) : 0,
-    // Only the kind and the amount. The GST rate is read off the charge type
-    // on the server, so a rate corrected in the master since this form loaded
-    // cannot be overridden from the browser.
+    // The kind and the amount, GST included, as on the supplier's bill. No GST
+    // goes on top of a charge, so none is sent; the server takes it at 0%.
     charges: totals.chargeRows
       .filter((c) => c.amount > 0)
-      .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount })),
-    otherCharges: num(otherCharges),
+      .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: 0 })),
+    // 0 on every new order, and on an old one once its figure has moved onto
+    // the "Other Charges" row. Only an old order whose charge master has no
+    // such row still sends its figure here, so saving it loses nothing.
+    otherCharges: num(legacyOther),
     notes: notes.trim() || null,
     terms: terms.trim() || null,
     /*
@@ -1872,6 +1989,8 @@ export function PurchaseOrderDialog({
       qty: num(l.qty),
       unitRate: num(l.unitRate),
       // A percentage whichever unit it was typed in — see `lineDiscountOf`.
+      // Sent unrounded: the column keeps six decimals, so ₹100 off a line of
+      // ₹333.33 is stored as the percentage that gives back exactly ₹100.
       discount: lineDiscountOf(l),
       gstRate: num(l.gstRate),
     })),
@@ -2680,8 +2799,9 @@ export function PurchaseOrderDialog({
                                 onChange={(e) =>
                                   // Clearing the subcategory with it: the one
                                   // chosen a moment ago belongs to the category
-                                  // just replaced.
-                                  setLine(i, { categoryId: e.target.value, subcategoryId: '' })
+                                  // just replaced. An item from another
+                                  // category goes too — see chooseCategory.
+                                  chooseCategory(i, e.target.value)
                                 }
                                 aria-label={`Row ${i + 1} category`}
                               >
@@ -2702,7 +2822,7 @@ export function PurchaseOrderDialog({
                                 className={cell}
                                 value={view.subcategoryId}
                                 disabled={subs.length === 0}
-                                onChange={(e) => setLine(i, { subcategoryId: e.target.value })}
+                                onChange={(e) => chooseCategory(i, view.categoryId, e.target.value)}
                                 aria-label={`Row ${i + 1} subcategory`}
                               >
                                 {/* Short, because this box is half the width of
@@ -3027,9 +3147,7 @@ export function PurchaseOrderDialog({
                           <SmartSelect
                             className={cell}
                             value={view.categoryId}
-                            onChange={(e) =>
-                              setLine(i, { categoryId: e.target.value, subcategoryId: '' })
-                            }
+                            onChange={(e) => chooseCategory(i, e.target.value)}
                             aria-label={`Row ${i + 1} category`}
                           >
                             <option value="">All categories</option>
@@ -3046,7 +3164,7 @@ export function PurchaseOrderDialog({
                             className={cell}
                             value={view.subcategoryId}
                             disabled={subs.length === 0}
-                            onChange={(e) => setLine(i, { subcategoryId: e.target.value })}
+                            onChange={(e) => chooseCategory(i, view.categoryId, e.target.value)}
                             aria-label={`Row ${i + 1} subcategory`}
                           >
                             <option value="">{subs.length === 0 ? 'None' : 'All'}</option>
@@ -3515,17 +3633,21 @@ export function PurchaseOrderDialog({
                               <p className="text-muted-foreground text-xs">
                                 {customerAddress || 'No address on this customer.'}
                               </p>
-                              {/* The tax follows the goods, so a customer in another
-                                state changes what the supplier may charge. Said
-                                here rather than discovered on their bill. */}
+                              {/* Said because it used to work the other way. The
+                                supplier still bills us, so the tax follows our
+                                own state wherever the goods are sent — a
+                                customer in another state does not turn it into
+                                IGST (IGST Act s.10(1)(b), bill-to / ship-to). */}
                               {customerStateCode && (
                                 <p className="text-muted-foreground mt-1 text-xs">
-                                  Delivered in state {customerStateCode} —{' '}
-                                  {supplier
-                                    ? taxMode === 'CGST_SGST'
-                                      ? 'same state as the supplier, so CGST + SGST'
-                                      : 'a different state from the supplier, so IGST'
-                                    : 'choose a supplier to see the tax split'}
+                                  Delivered in state {customerStateCode}. The supplier
+                                  still bills us, so the GST follows our own state,
+                                  not the customer&apos;s
+                                  {supplier && taxMode === 'CGST_SGST'
+                                    ? ' — CGST + SGST on this order.'
+                                    : supplier && taxMode === 'IGST'
+                                      ? ' — IGST on this order, as the supplier is in another state.'
+                                      : '.'}
                                 </p>
                               )}
                             </div>
@@ -3728,11 +3850,13 @@ export function PurchaseOrderDialog({
 
               {/* The calculation, beside the delivery box as the old ERP had it.
 
-                Every row it had, in its order: the discount, the gross, one
-                row per charge the mill uses on purchases, the tax split, other
-                charges, and what the order comes to. The charge rows are read
-                from the charge master rather than written into this form, so
-                adding one there adds a row here. */}
+                In its order: the discount, the gross, one row per charge on
+                this order with its own GST %, what GST is worked out on, where
+                the GST comes from rate by rate, the tax split, and what the
+                order comes to. Every figure is read from priceDocument(), the
+                same sum the server saves and the bill books. The charges
+                offered are read from the charge master rather than written
+                into this form, so adding one there offers it here. */}
               <Section icon={Calculator} title="Totals">
                 <div className="space-y-1.5 text-sm">
                   {/* Where the discount sits follows the dropdown at the top of
@@ -3762,10 +3886,32 @@ export function PurchaseOrderDialog({
 
                   <Row label="Gross total" value={totals.grossTotal} />
 
-                  {/* One row per charge the mill uses on purchases, taken from
-                    the charge master rather than written into this form. Add a
-                    charge there and a row appears here; change its GST rate
-                    there and this follows. */}
+                  {/* The GST on the goods, one line per rate, so the tax rows
+                    below can be traced back to what made them. It also says
+                    so when the supplier is not registered. */}
+                  <TaxBreakdown result={totals.result} split={taxMode} />
+
+                  {/* SGST + CGST within the state, IGST across a state line —
+                    never both, and never two halves of a tax the supplier
+                    cannot charge. Until a supplier is chosen the tax is
+                    previewed as SGST + CGST; the note under the grand total
+                    says the split is still to come. */}
+                  {(taxMode === 'CGST_SGST' || taxMode === null) && (
+                    <>
+                      <Row label="SGST" value={totals.sgst} />
+                      <Row label="CGST" value={totals.cgst} />
+                    </>
+                  )}
+                  {taxMode === 'IGST' && <Row label="IGST" value={totals.igst} />}
+
+                  <Row label="Total tax" value={totals.tax} />
+
+                  {/* The supplier's charges, after the tax and outside it.
+                    Each is typed as the final figure on their bill — freight
+                    ₹1,200 is ₹1,200, any GST already inside it — and added to
+                    the grand total as it is. Only the charges this order
+                    carries; "+ Add a charge" offers the purchase charges from
+                    Masters → Charges that are not on it yet. */}
                   {chargeTypes.length === 0 ? (
                     <p className="text-muted-foreground py-1 text-xs">
                       No purchase charges are set up yet — add them under{' '}
@@ -3781,165 +3927,159 @@ export function PurchaseOrderDialog({
                     </p>
                   ) : (
                     <div className="space-y-1.5 pt-0.5">
-                      {totals.chargeRows.map((c) => {
-                        const helperOpen = pctOpen === c.chargeTypeId
-                        return (
-                          <div key={c.chargeTypeId}>
-                            {/* `flex-wrap`, with the name given a floor it
-                              will not shrink under — a name like "Dyeing
-                              Charges (Processing)" broke mid-word onto a
-                              second line while the button and the box sat
-                              centred beside whichever half of it fit, which
-                              read as broken rather than as a long name. Past
-                              that floor the whole button-and-box group wraps
-                              to its own line under the name instead, which
-                              is the same shape every field on this form
-                              already takes on a phone. */}
-                            <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-                              <span className="text-muted-foreground min-w-[9rem] flex-1">
-                                {c.name}
-                              </span>
-                              {/* The amount box stays where the other boxes are
-                                and the helper button goes to its left, so the
-                                right edge of every figure on this panel still
-                                lines up down one column. */}
-                              <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => setPctOpen(helperOpen ? null : c.chargeTypeId)}
-                                  className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${
-                                    helperOpen
-                                      ? 'border-primary/30 bg-primary/10 text-primary'
-                                      : 'btn-ghost border-border'
-                                  }`}
-                                  title={`Work ${c.name} out as a percentage of the gross total`}
-                                  aria-expanded={helperOpen}
-                                  aria-label={`Work out ${c.name} as a percentage`}
-                                >
-                                  <Percent size={14} />
-                                </button>
-                                <input
-                                  type="number"
-                                  step="any"
-                                  min={0}
-                                  className="form-input h-8 w-28 text-right"
-                                  placeholder="0.00"
-                                  value={charges[c.chargeTypeId] ?? ''}
-                                  onChange={(e) =>
-                                    setCharges((prev) => ({
-                                      ...prev,
-                                      [c.chargeTypeId]: e.target.value,
-                                    }))
-                                  }
-                                  aria-label={`${c.name} amount`}
-                                />
-                              </div>
-                            </div>
-
-                            {helperOpen && (
-                              <PercentOfGross
-                                name={c.name}
-                                base={totals.grossTotal}
-                                value={pctFor(c)}
-                                onChange={(next) =>
-                                  setPctOf((prev) => ({ ...prev, [c.chargeTypeId]: next }))
+                      {totals.chargeRows.length > 0 && (
+                        <p className="text-muted-foreground text-[11px]">
+                          Charges as on the supplier&apos;s bill, GST included — no GST is added on top.
+                          Type the amount in ₹, or press % next to the box and type any percentage (5,
+                          7.5, 10…) of the goods value before GST.
+                        </p>
+                      )}
+                      {totals.chargeRows.map((c) => (
+                        <div key={c.chargeTypeId}>
+                          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                            {/* The name keeps a floor it will not shrink under,
+                              so a long one wraps the boxes onto their own line
+                              rather than breaking mid-word beside them. */}
+                            <span className="text-muted-foreground min-w-[9rem] flex-1">{c.name}</span>
+                            <div className="ml-auto flex shrink-0 items-center gap-1">
+                              <StepInput
+                                decimals
+                                max={c.unit === '%' ? 100 : undefined}
+                                className="form-input h-8 w-28 text-right"
+                                placeholder="0.00"
+                                value={charges[c.chargeTypeId] ?? ''}
+                                onValueChange={(v) =>
+                                  setCharges((prev) => ({ ...prev, [c.chargeTypeId]: v }))
                                 }
-                                onUse={(amount) => {
-                                  setCharges((prev) => ({
-                                    ...prev,
-                                    [c.chargeTypeId]: String(amount),
-                                  }))
-                                  setPctOpen(null)
-                                }}
+                                aria-label={`${c.name} ${c.unit === '%' ? 'percent' : 'amount'}`}
                               />
-                            )}
+                              {/* Rupees or percent, as two buttons side by side
+                                rather than a dropdown — a dropdown showing "₹"
+                                was read as a label, and "10" typed into the
+                                box went in as ₹10. Both are always in sight
+                                and the one in use is lit.
+
+                                Pressing % keeps the number already typed as
+                                the percentage (10 becomes 10%), unless it is
+                                over 100 — a rupee figure like 1,200 is not a
+                                percentage, and the box starts empty instead.
+                                Pressing ₹ keeps what the % came to, so the
+                                figure can be rounded off by hand. */}
+                              <div
+                                role="group"
+                                aria-label={`${c.name} in rupees or percent`}
+                                className="border-border flex h-8 shrink-0 overflow-hidden rounded-lg border"
+                              >
+                                {(['INR', '%'] as const).map((unit) => (
+                                  <button
+                                    key={unit}
+                                    type="button"
+                                    aria-pressed={c.unit === unit}
+                                    title={
+                                      unit === '%'
+                                        ? `Type ${c.name} as a % of the goods value`
+                                        : `Type ${c.name} as an amount in ₹`
+                                    }
+                                    onClick={() => {
+                                      if (unit === c.unit) return
+                                      const typed = charges[c.chargeTypeId] ?? ''
+                                      setCharges((prev) => ({
+                                        ...prev,
+                                        [c.chargeTypeId]:
+                                          unit === '%'
+                                            ? num(typed) > 0 && num(typed) <= 100
+                                              ? typed
+                                              : ''
+                                            : c.amount
+                                              ? String(c.amount)
+                                              : '',
+                                      }))
+                                      setChargeUnit((prev) => ({ ...prev, [c.chargeTypeId]: unit }))
+                                    }}
+                                    className={`w-8 text-sm font-semibold transition-colors ${
+                                      c.unit === unit
+                                        ? 'bg-primary/15 text-primary'
+                                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                                    }`}
+                                  >
+                                    {unit === '%' ? '%' : '₹'}
+                                  </button>
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => removeCharge(c.chargeTypeId)}
+                                className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                                title={`Take ${c.name} off this order`}
+                                aria-label={`Remove ${c.name}`}
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
                           </div>
-                        )
-                      })}
-                    </div>
-                  )}
-
-                  {taxMode === 'CGST_SGST' && (
-                    <>
-                      <Row label="SGST" value={totals.tax / 2} />
-                      <Row label="CGST" value={totals.tax / 2} />
-                    </>
-                  )}
-                  {/* Not SGST + CGST when the goods cross a state line. The
-                    split follows the place of supply, and showing two halves
-                    of a tax the supplier cannot charge would misstate the
-                    order, so this row says what it really is. */}
-                  {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
-                  {taxMode === 'NONE' && (
-                    <p className="text-muted-foreground py-1 text-xs">
-                      No GST — this supplier is not registered.
-                    </p>
-                  )}
-                  {taxMode === null && (
-                    <>
-                      <Row label="SGST" value={0} />
-                      <Row label="CGST" value={0} />
-                    </>
-                  )}
-
-                  <Row label="Total tax" value={totals.tax} />
-
-                  {/* Carries no GST of its own and is added after tax, which is
-                    how the mill's old system had it. */}
-                  <div>
-                    <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-                      <label
-                        htmlFor="po-other-charges"
-                        className="text-muted-foreground min-w-[9rem] flex-1"
-                      >
-                        Other charges
-                      </label>
-                      <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                        {/* No rate of its own, so this helper opens empty. It
-                          is here because the sum is the same one — a
-                          percentage of the goods — and a helper on every box
-                          but this one is the sort of gap that sends somebody
-                          back to their phone. */}
-                        <button
-                          type="button"
-                          onClick={() => setPctOpen(pctOpen === OTHER_PCT ? null : OTHER_PCT)}
-                          className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${
-                            pctOpen === OTHER_PCT
-                              ? 'border-primary/30 bg-primary/10 text-primary'
-                              : 'btn-ghost border-border'
-                          }`}
-                          title="Work other charges out as a percentage of the gross total"
-                          aria-expanded={pctOpen === OTHER_PCT}
-                          aria-label="Work out other charges as a percentage"
+                          {/* The working, in figures, so a percentage is never
+                            one more number to take on trust. */}
+                          {c.unit === '%' && (
+                            <p className="text-muted-foreground mt-0.5 text-right text-[11px] tabular-nums">
+                              {totals.grossTotal > 0 ? (
+                                <>
+                                  {num(charges[c.chargeTypeId])}% of goods ₹{inr(totals.grossTotal)} ={' '}
+                                  <span className="text-foreground font-medium">₹{inr(c.amount)}</span>
+                                </>
+                              ) : (
+                                'Add the goods first — the % is worked out on their value.'
+                              )}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                      {chargeTypes.some((t) => !shownCharges.includes(t.id)) && (
+                        <SmartSelect
+                          className="form-input h-8 w-full text-xs"
+                          value=""
+                          onChange={(e) => {
+                            if (e.target.value) addCharge(e.target.value)
+                          }}
+                          aria-label="Add a charge"
                         >
-                          <Percent size={14} />
-                        </button>
-                        <input
-                          id="po-other-charges"
-                          type="number"
-                          step="any"
-                          min={0}
-                          className="form-input h-8 w-28 text-right"
-                          placeholder="0.00"
-                          value={otherCharges}
-                          onChange={(e) => setOtherCharges(e.target.value)}
-                        />
-                      </div>
+                          <option value="">+ Add a charge — freight, transport, dyeing…</option>
+                          {chargeTypes
+                            .filter((t) => !shownCharges.includes(t.id))
+                            .map((t) => (
+                              <option key={t.id} value={t.id}>
+                                {t.name}
+                              </option>
+                            ))}
+                        </SmartSelect>
+                      )}
+                      {/* Only an order saved while charges still had GST added
+                        on top. Saving it again takes that GST off. */}
+                      {chargesTaxedBefore && (
+                        <p className="warn-text text-xs">
+                          This order was saved with GST added on its charges. Charges are now taken as
+                          the supplier&apos;s figure with GST included, so the total comes down by that
+                          GST when you save.
+                        </p>
+                      )}
+                      {retiredCharges.length > 0 && (
+                        <p className="warn-text text-xs">
+                          {retiredCharges
+                            .map((c) => `${c.chargeType?.name ?? 'A charge'} (₹${Number(c.amount)})`)
+                            .join(', ')}{' '}
+                          {retiredCharges.length === 1 ? 'is' : 'are'} no longer a purchase charge in
+                          the master, so {retiredCharges.length === 1 ? 'it is' : 'they are'} left off
+                          when you save. Add it again under another charge if it still applies.
+                        </p>
+                      )}
                     </div>
+                  )}
 
-                    {pctOpen === OTHER_PCT && (
-                      <PercentOfGross
-                        name="other charges"
-                        base={totals.grossTotal}
-                        value={pctOf[OTHER_PCT] ?? ''}
-                        onChange={(next) => setPctOf((prev) => ({ ...prev, [OTHER_PCT]: next }))}
-                        onUse={(amount) => {
-                          setOtherCharges(String(amount))
-                          setPctOpen(null)
-                        }}
-                      />
-                    )}
-                  </div>
+                  {/* Only an old order whose charge master has no "Other
+                    Charges" row to move the figure onto. Added as it is, like
+                    any other charge. */}
+                  {totals.untaxedExtra > 0 && (
+                    <Row label="Other charges" value={totals.untaxedExtra} />
+                  )}
 
                   {/* Shown whenever the total was rounded, and only then.
                     The grand total is taken to the nearest rupee, which is how
@@ -3960,7 +4100,7 @@ export function PurchaseOrderDialog({
 
                   {taxMode === null && (
                     <p className="text-muted-foreground pt-1 text-xs">
-                      Choose a supplier to see whether the tax splits into SGST + CGST or is IGST.
+                      Pick the supplier to see whether this is CGST + SGST or IGST.
                     </p>
                   )}
                 </div>
