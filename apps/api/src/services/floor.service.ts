@@ -1127,9 +1127,27 @@ export async function changeSizes(tx: Tx, moId: string, d: z.infer<typeof sizeCh
   const ids = [...new Set(lines.map((l) => l.bundleId))]
   const bundles = await tx.productionBundle.findMany({
     where: { id: { in: ids }, moId },
-    select: { id: true, code: true, moLineId: true, sizeId: true, cuttingOrderId: true, size: { select: { code: true } } },
+    select: {
+      id: true,
+      code: true,
+      moLineId: true,
+      sizeId: true,
+      cuttingOrderId: true,
+      size: { select: { code: true } },
+      parent: { select: { code: true, size: { select: { code: true } } } },
+    },
   })
   if (bundles.length !== ids.length) throw new AppError('One of those bundles is not on this order.', 400, 'BAD_BUNDLE')
+  // Pieces change size once, from the size they were cut in. A bundle made by an earlier size change
+  // holds pieces already made as another size: a mistake there is undone, not changed again.
+  const again = bundles.find((b) => b.parent)
+  if (again) {
+    throw new AppError(
+      `${again.code} was made from ${again.parent!.code} (cut as ${again.parent!.size?.code ?? 'another size'}) by an earlier size change, so its pieces are already made as ${again.size?.code}. To correct it, undo that change.`,
+      409,
+      'ALREADY_CHANGED',
+    )
+  }
   if (new Set(bundles.map((b) => b.moLineId)).size > 1) throw new AppError('Change one job card’s sizes at a time: these bundles are of different colours.', 400, 'ONE_JOB_CARD')
   const byId = new Map(bundles.map((b) => [b.id, b]))
   const moLineId = bundles[0].moLineId

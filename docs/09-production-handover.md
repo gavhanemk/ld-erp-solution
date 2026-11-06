@@ -246,7 +246,12 @@ Anyone with `production:create` may change sizes, with a reason; the undo
 still where the change put them. Not at outside units, not at any other step,
 and never by editing a bundle's `sizeId` in place — every entry keeps the size
 its bundle had when it was written, so that would split one bundle's history
-across two sizes.
+across two sizes. Pieces change size once: a bundle made by a size change is
+refused (`ALREADY_CHANGED`) and corrected by undoing its change. The window
+(`SizeChangeDialog`) works per cut size — what was cut, what is here, what
+earlier changes took, what this change takes, what is left — and ends on the
+final sizes against planned; its Save is never greyed out, it names what is
+missing and scrolls to it.
 
 ---
 

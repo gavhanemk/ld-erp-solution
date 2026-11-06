@@ -788,6 +788,10 @@ not a stock correction. What the business decided:
 6. **The order's planned sizes stay as they were.** The order shows planned,
    changed, revised, packed and to pack, size by size, and every change: who,
    when, why, which bundle into which.
+7. **Pieces change size once**, from the size they were cut in (added 6 Nov
+   2026). A size changed by mistake is undone, not changed again, so no piece
+   goes round in a circle or is counted twice. Several sizes can change in one
+   save, including a swap both ways (38 → 40 and 40 → 38).
 
 On the floor each changed bundle's pieces go into a **new bundle** of the new
 size, with its own sticker ("made from B003 (M)"); the old bundle keeps its

@@ -5,8 +5,9 @@
 // the sales order are never edited; finished goods are taken in the revised
 // sizes; a change can be undone while its pieces have not moved on.
 //
-// Covers: no change; one size to another; several in one save and in two
-// saves; pieces from several bundles and lays; from pieces in hand and done;
+// Covers: no change; one size to another; two sizes swapped both ways in one
+// save; several in one save and in two saves; pieces from several bundles and
+// lays; pieces changing size only once; from pieces in hand and done;
 // part of the order packed before the change; part of a bundle gone on before
 // the change; finished goods by revised size; reconciliation; duplicates; two
 // saves in a row; undo, undo refused, cancelling a receipt; and every refusal.
@@ -330,6 +331,54 @@ async function main() {
         check('12. the undone bundle is not listed on the job card; totals as before', !jc.bundles.some((b) => b.id === c0) && totalsOf(jc) === totals0)
         await refuses('12. a size change is undone only once', () => undoSizeChange(tx, s0.eventId, 'twice over', user.id), 'ALREADY_UNDONE')
 
+        // ═══ The floor's swap, in one save: 20 of size 1 made as size 2 and 25 of size 2 made as
+        // size 1 (38 → 40 20 pcs, 40 → 38 25 pcs), from five bundles. Tried, then rolled back. ═══
+        await tx.$executeRawUnsafe('SAVEPOINT swap')
+        {
+          const noSwap = await lastNo()
+          const sw = await changeSizes(
+            tx,
+            mo.id,
+            input([[A1, S2, 10], [A2, S2, 10], [A5, S1, 10], [A6, S1, 10], [A7, S1, 5]], 'Size 1 measured as size 2, and size 2 as size 1'),
+            user.id,
+          )
+          const made = await tx.productionBundle.findMany({ where: { id: { in: sw.bundleIds } }, orderBy: { bundleNo: 'asc' } })
+          const os = (await orderSizes(tx, mo.id)).find((l) => l.moLineId === lineA.id)!
+          const rev = (z: { id: string }) => os.sizes.find((s) => s.sizeId === z.id)!.revised
+          const swapCard = await card()
+          check(
+            'swap: one save takes 20 of size 1 to size 2 and 25 of size 2 to size 1, into 5 new bundles',
+            (await tx.sizeChange.count({ where: { eventId: sw.eventId } })) === 5 &&
+              made.length === 5 &&
+              made.every((b, i) => b.bundleNo === noSwap + 1 + i && b.splitAtStepId === STI) &&
+              made.filter((b) => b.sizeId === S2.id).length === 2 &&
+              made.filter((b) => b.sizeId === S1.id).length === 3,
+            made.map((b) => `${b.code} ${b.qty}`).join(', '),
+          )
+          const kept = await Promise.all([A1, A2, A5, A6, A7].map((b) => held(STI, b.id, 'WIP')))
+          const took = await Promise.all(made.map((b) => held(STI, b.id, 'WIP')))
+          check(
+            'swap: each old bundle holds what it kept, each new bundle what it took',
+            kept.join('/') === '15/15/15/15/20' && took.every((q, i) => q === made[i].qty) && took.reduce((s, q) => s + q, 0) === 45,
+            `kept ${kept.join('/')}; took ${took.join('/')}`,
+          )
+          check(
+            'swap: size 1 = 100 − 20 + 25 = 105, size 2 = 100 − 25 + 20 = 95, size 3 untouched; still 300 in all',
+            rev(S1) === 105 && rev(S2) === 95 && rev(S3) === 100,
+            `${rev(S1)}/${rev(S2)}/${rev(S3)}`,
+          )
+          check(
+            'swap: stitching shows both ways (size 1 in 25, out 20; size 2 in 20, out 25); the job card totals do not move',
+            sizeFig(swapCard, S1.id, STI).sizeIn === 25 &&
+              sizeFig(swapCard, S1.id, STI).sizeOut === 20 &&
+              sizeFig(swapCard, S2.id, STI).sizeIn === 20 &&
+              sizeFig(swapCard, S2.id, STI).sizeOut === 25 &&
+              totalsOf(swapCard) === totals0,
+          )
+        }
+        await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT swap')
+        await checkRevised('swap rolled back: every size is back to its planned count')
+
         // ═══ 2. One size to another: 20 of B001 (size 1) made as size 2 ═══
         const no1 = await lastNo()
         const k1 = `k-size-1-${stamp}`
@@ -490,15 +539,8 @@ async function main() {
             (await held(STI, A6.id, 'WIP')) === 25,
         )
 
-        // A new bundle made as another size again: tried, then rolled back.
-        await tx.$executeRawUnsafe('SAVEPOINT again')
-        const g = await changeSizes(tx, mo.id, input([[C1, S3, 2]], 'Made as size 3 after all'), user.id)
-        const G = await tx.productionBundle.findUniqueOrThrow({ where: { id: g.bundleIds[0] } })
-        await sendOn(STI, [{ bundleId: G.id, qty: 2 }])
-        const againOk = G.parentId === C1.id && G.sizeId === S3.id && G.splitAtStepId === STI && (await held(FIN, G.id, 'WIP')) === 2 && (await held(STI, C1.id, 'WIP')) === 18
-        const undoFirst = await refuses(`a new bundle that gave pieces on cannot have its own change undone (${C1.code} holds 18 of 20)`, () => undoSizeChange(tx, s1.eventId, 'Wrong size after all', user.id), 'NOT_ENOUGH_PIECES')
-        await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT again')
-        check('a new bundle can itself be made as another size, and goes on (tried, then rolled back)', againOk && !!undoFirst)
+        // Pieces change size once: a new bundle's pieces were already made as another size.
+        await refuses(`refused: a new bundle's pieces change size only once (${C1.code}, made from ${A1.code})`, () => changeSizes(tx, mo.id, input([[C1, S3, 2]], 'Made as size 3 after all'), user.id), 'ALREADY_CHANGED')
 
         // The blue card is counted in now.
         const blueLines = await tx.processTransferLine.findMany({ where: { transferId: toStiBlue.id } })
