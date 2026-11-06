@@ -358,6 +358,17 @@ const inr = (v: number) =>
  */
 const DEFAULT_TERM_DAYS = 45
 
+/**
+ * Today on this computer's calendar, as `yyyy-mm-dd`. Not `toISOString`,
+ * which is UTC: before 5:30 in the morning in India that is still yesterday,
+ * and a bill dated today then looked later than the day it was entered.
+ */
+const todayLocal = () => {
+  const d = new Date()
+  const two = (n: number) => String(n).padStart(2, '0')
+  return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate())
+}
+
 /** Whole days from one `yyyy-mm-dd` date to another; null if either is missing. */
 const daysBetween = (from: string, to: string) => {
   const a = new Date(from + 'T00:00:00').getTime()
@@ -451,7 +462,7 @@ export function PurchaseBillDialog({
   const [poId, setPoId] = useState<string | null>(null)
   const [supplierInvoiceNo, setSupplierInvoiceNo] = useState('')
   const [supplierInvoiceDate, setSupplierInvoiceDate] = useState('')
-  const [billDate, setBillDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [billDate, setBillDate] = useState(() => todayLocal())
   const [dueDate, setDueDate] = useState('')
   /** Payment terms in days, counted from the date on the supplier's bill. */
   const [termDays, setTermDays] = useState(String(DEFAULT_TERM_DAYS))
@@ -510,7 +521,7 @@ export function PurchaseBillDialog({
   const [payNow, setPayNow] = useState(false)
   /** How it was paid, when it was paid now. */
   const [payment, setPayment] = useState<CashPayment>(() =>
-    emptyCashPayment(new Date().toISOString().slice(0, 10))
+    emptyCashPayment(todayLocal())
   )
   /** The service order being billed, by number, for the title. */
   const [serviceOrderNo, setServiceOrderNo] = useState<string | null>(null)
@@ -552,7 +563,7 @@ export function PurchaseBillDialog({
     setPoId(record?.poId ?? null)
     setSupplierInvoiceNo(record?.supplierInvoiceNo ?? '')
     setSupplierInvoiceDate(record?.supplierInvoiceDate?.slice(0, 10) ?? '')
-    setBillDate((record?.billDate ?? new Date().toISOString()).slice(0, 10))
+    setBillDate(record?.billDate?.slice(0, 10) ?? todayLocal())
     // An existing bill keeps the due date it was saved with, and its terms
     // read back as the days between its bill date and that due date.
     setDueDate(record?.dueDate?.slice(0, 10) ?? '')
@@ -575,7 +586,7 @@ export function PurchaseBillDialog({
     // A saved bill's section was somebody's choice; a new one follows the supplier.
     tdsChosen.current = Boolean(record)
     setYearSoFar(null)
-    setPayment(emptyCashPayment((record?.billDate ?? new Date().toISOString()).slice(0, 10)))
+    setPayment(emptyCashPayment(record?.billDate?.slice(0, 10) ?? todayLocal()))
     setServiceOrderNo(null)
     setPayNow(Boolean(cash) && !record)
     setRateVarianceReason('')
@@ -922,7 +933,7 @@ export function PurchaseBillDialog({
   /*
    * The payment due date: the date on the supplier's bill plus the terms
    * (45 days unless changed). Only ever from their bill date — never from
-   * "Booked on", which is our date, not theirs. With no bill date there is no
+   * "Entry date", which is our date, not theirs. With no bill date there is no
    * due date to work out, and the box is left for the clerk.
    *
    * Worked out when the bill date or the terms change, not on every render, so
@@ -2441,14 +2452,18 @@ export function PurchaseBillDialog({
                   )}
                 </div>
 
+                {/* Our date: the day the bill is entered in the ERP, today
+                  unless changed. Was "Booked on", which people mixed up with
+                  the supplier's own bill date beside it. */}
                 <div>
                   <label className="form-label" htmlFor="bill-date">
-                    Booked on
+                    Entry date
                   </label>
                   <input
                     id="bill-date"
                     type="date"
                     className="form-input"
+                    title="The day this bill is entered in the ERP — not the date on the supplier's bill"
                     value={billDate}
                     onChange={(e) => setBillDate(e.target.value)}
                   />
