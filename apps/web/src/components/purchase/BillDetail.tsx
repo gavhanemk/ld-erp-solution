@@ -465,7 +465,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
                 label="Our reference"
                 value={<span className="font-mono">{bill.billNumber}</span>}
               />
-              <Field label="Entry date" value={formatDate(bill.billDate)} />
+              <Field label="ERP entry date" value={formatDate(bill.billDate)} />
               <Field
                 label="Payment due"
                 value={

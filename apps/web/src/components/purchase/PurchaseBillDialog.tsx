@@ -933,7 +933,7 @@ export function PurchaseBillDialog({
   /*
    * The payment due date: the date on the supplier's bill plus the terms
    * (45 days unless changed). Only ever from their bill date — never from
-   * "Entry date", which is our date, not theirs. With no bill date there is no
+   * "ERP entry date", which is our date, not theirs. With no bill date there is no
    * due date to work out, and the box is left for the clerk.
    *
    * Worked out when the bill date or the terms change, not on every render, so
@@ -2457,7 +2457,7 @@ export function PurchaseBillDialog({
                   the supplier's own bill date beside it. */}
                 <div>
                   <label className="form-label" htmlFor="bill-date">
-                    Entry date
+                    ERP entry date
                   </label>
                   <input
                     id="bill-date"

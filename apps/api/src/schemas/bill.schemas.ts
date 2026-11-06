@@ -168,7 +168,7 @@ const checkBill = (data: BillIn, ctx: z.RefinementCtx) => {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['supplierInvoiceDate'],
-        message: `Bill date ${shownDay(theirs)} is after the entry date ${shownDay(entered)}. Check the date printed on the supplier's bill — it cannot be later than the day you enter it.`,
+        message: `Bill date ${shownDay(theirs)} is after the ERP entry date ${shownDay(entered)}. Check the date printed on the supplier's bill — it cannot be later than the day you enter it.`,
       })
     }
   }
