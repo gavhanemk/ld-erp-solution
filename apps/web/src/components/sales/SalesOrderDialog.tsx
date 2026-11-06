@@ -109,6 +109,16 @@ interface ChargeTypeOption {
   applyOnSale: boolean
 }
 
+/** A line's BOM price, as GET /sales/quotations/bom-price gives it (null: no BOM with a price or cost). */
+interface BomPrice {
+  version: string
+  status: string
+  color: string | null
+  cost: number | null
+  price: number | null
+  marginPercent: number | null
+}
+
 /** One line as it is being typed: strings, because that is what boxes hold. */
 interface LineDraft {
   key: string
@@ -131,6 +141,12 @@ interface LineDraft {
   /** Pieces, for a line with no size run. */
   qty: string
   unitPrice: string
+  /**
+   * The rate is to come from the item's BOM ('pending', until its price is
+   * read) or did ('filled'). Typing a rate clears it, so a typed rate is never
+   * replaced.
+   */
+  bomRate?: 'pending' | 'filled'
   discount: string
   /** Typed only for an item that is not one colour of a style. */
   color: string
@@ -411,6 +427,12 @@ export function SalesOrderDialog({
   const [context, setContext] = useState<CustomerContext | null>(null)
   const [contextLoading, setContextLoading] = useState(false)
   const [lastRates, setLastRates] = useState<LastRates>({})
+  /** Each line's BOM price, by item, style and colour; read once each. */
+  const [bomPrices, setBomPrices] = useState<Record<string, BomPrice | null>>({})
+  const bomAsked = useRef(new Set<string>())
+  /** The order type the last time it was looked at, so a change to job work can be seen. */
+  const wasJobWork = useRef(false)
+  const bomKey = (l: LineDraft) => `${l.itemId}|${l.styleCode.trim().toLowerCase()}|${l.color.trim().toLowerCase()}`
 
   const [saving, setSaving] = useState<'draft' | 'confirm' | 'amend' | null>(null)
   /** Set when confirming needs a reason to release a credit hold: what to show. */
@@ -492,6 +514,8 @@ export function SalesOrderDialog({
     setBillingTouched(false)
     setContext(null)
     setLastRates({})
+    setBomPrices({})
+    bomAsked.current.clear()
     setAmendReason('')
     setFromQuote(null)
     setLoadingLists(true)
@@ -807,7 +831,18 @@ export function SalesOrderDialog({
       styleCode: (item?.styleId ? styleById.get(item.styleId)?.code : null) ?? line.styleCode,
       ...defaultsFrom(item, line),
       ...(line.itemId !== itemId && !sameRun ? { sizes: {}, qty: '', sizeGroupId: '' } : {}),
+      ...rateFromBom(line, itemId),
     })
+  }
+
+  /**
+   * A new item on a line takes its rate from its BOM's selling price, when
+   * the line has no rate typed (or its rate came from the last item's BOM).
+   */
+  const rateFromBom = (line: LineDraft, itemId: string): Partial<LineDraft> => {
+    if (line.itemId === itemId) return {}
+    if (line.bomRate === 'filled') return { unitPrice: '', bomRate: 'pending' }
+    return line.unitPrice.trim() === '' || Number(line.unitPrice) === 0 ? { bomRate: 'pending' } : {}
   }
 
   /** A narrower box keeps the item only if the item still fits it. */
@@ -840,6 +875,7 @@ export function SalesOrderDialog({
         ...filingOf(item),
         ...defaultsFrom(item, line),
         ...(line.itemId !== item.id ? { sizes: {}, qty: '', sizeGroupId: '' } : {}),
+        ...rateFromBom(line, item.id),
       })
       return
     }
@@ -1052,9 +1088,92 @@ export function SalesOrderDialog({
     }
   }
 
+  // Each line's BOM price, read once per item, style and colour.
+  useEffect(() => {
+    for (const l of lines) {
+      if (!l.itemId) continue
+      const k = bomKey(l)
+      if (bomAsked.current.has(k)) continue
+      bomAsked.current.add(k)
+      const q = new URLSearchParams({ itemId: l.itemId })
+      if (l.styleCode.trim()) q.set('styleCode', l.styleCode.trim())
+      if (l.color.trim()) q.set('color', l.color.trim())
+      api
+        .get<{ data: BomPrice | null }>(`/sales/quotations/bom-price?${q.toString()}`)
+        .then((r) => setBomPrices((m) => ({ ...m, [k]: r.data })))
+        .catch(() => setBomPrices((m) => ({ ...m, [k]: null })))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lines])
+
+  // A rate waiting on its BOM: the BOM's selling price once read, on an own
+  // order. A job-work order bills a job charge, not the garment's price, so
+  // there the price is only offered beside the box, and the line waits: made
+  // an own order again, it fills in.
+  useEffect(() => {
+    setLines((ls) => {
+      let changed = false
+      const next = ls.map((l) => {
+        if (l.bomRate !== 'pending') return l
+        const k = bomKey(l)
+        if (!(k in bomPrices)) return l
+        const b = bomPrices[k]
+        if (!b || b.price == null) {
+          changed = true
+          return { ...l, bomRate: undefined }
+        }
+        if (isJobWork) return l
+        changed = true
+        return { ...l, unitPrice: String(b.price), bomRate: 'filled' as const }
+      })
+      return changed ? next : ls
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bomPrices, lines, isJobWork])
+
+  // Made a job-work order: a rate that came from a BOM is the garment's price,
+  // not a job charge, so it is taken out (still offered beside the box).
+  useEffect(() => {
+    if (wasJobWork.current === isJobWork) return
+    wasJobWork.current = isJobWork
+    if (!isJobWork) return
+    setLines((ls) =>
+      ls.some((l) => l.bomRate === 'filled') ? ls.map((l) => (l.bomRate === 'filled' ? { ...l, unitPrice: '', bomRate: 'pending' as const } : l)) : ls,
+    )
+  }, [isJobWork])
+
   if (!open || !mounted) return null
 
   const rateLabel = isJobWork ? 'Job charge' : 'Rate'
+
+  /** Under the rate: the BOM's selling price, and a press to use it when the rate differs. */
+  const bomHint = (line: LineDraft) => {
+    if (!line.itemId) return null
+    const b = bomPrices[bomKey(line)]
+    if (!b || b.price == null) return null
+    if (Math.abs(Number(line.unitPrice || 0) - b.price) < 0.005) {
+      return (
+        <span className="text-primary mt-0.5 block text-right text-[10px] leading-tight" title={`The selling price on its BOM, v${b.version}`}>
+          From BOM
+        </span>
+      )
+    }
+    const price = b.price
+    return (
+      <button
+        type="button"
+        className="text-primary mt-0.5 block w-full whitespace-nowrap text-right text-[10px] leading-tight hover:underline"
+        onClick={() => setLine(line.key, { unitPrice: String(price), bomRate: 'filled' })}
+        title={
+          isJobWork
+            ? 'The BOM price is for the whole garment, our fabric and trims included; a job charge is usually less. Use it only if it is what this customer pays.'
+            : `The selling price on its BOM, v${b.version}`
+        }
+      >
+        Use BOM ₹{price.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+      </button>
+    )
+  }
   const taxMode = taxModeWords(context)
   const cell = 'form-input h-8 px-2 text-xs'
 
@@ -1253,7 +1372,7 @@ export function SalesOrderDialog({
           value={line.unitPrice}
           placeholder="0.00"
           aria-label={`Row ${i + 1} ${rateLabel}`}
-          onValueChange={(v) => setLine(line.key, { unitPrice: v })}
+          onValueChange={(v) => setLine(line.key, { unitPrice: v, bomRate: undefined })}
         />
       ),
       discount: (
@@ -1759,6 +1878,7 @@ export function SalesOrderDialog({
                               <td className={COL.rate}>
                                 {f.rate}
                                 {lastRateHint(p.line.itemId)}
+                                {bomHint(p.line)}
                               </td>
                               <td className={COL.discount}>{f.discount}</td>
                               <td className={COL.tax}>
@@ -1911,6 +2031,7 @@ export function SalesOrderDialog({
                           <Mini label={`${rateLabel} ₹/pc`}>
                             {f.rate}
                             {lastRateHint(p.line.itemId)}
+                            {bomHint(p.line)}
                           </Mini>
                           <Mini label="Disc %">{f.discount}</Mini>
                         </div>

@@ -6,6 +6,7 @@ import { TopBar } from '@/components/layout/TopBar'
 import { cn } from '@/lib/utils'
 import { loadAppSettings } from '@/lib/appSettings'
 import { KeyboardLayer } from '@/components/keyboard/KeyboardLayer'
+import { TableScrollLayer } from '@/components/tables/TableScrollLayer'
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -97,6 +98,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </main>
       </div>
       <KeyboardLayer />
+      <TableScrollLayer />
     </div>
   )
 }

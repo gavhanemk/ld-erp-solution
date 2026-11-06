@@ -724,6 +724,84 @@ Rules added in the same check:
 - A quotation becomes one order. One past its valid-until date has its
   price agreed again (the date moved) before it becomes an order.
 
+### Calling off an order: cancellation at any stage (5 Nov 2026)
+
+A customer can cancel after the MO is raised, material is asked for or
+issued, or production has started. Nothing closes an order by itself.
+
+1. **Nothing asked for, made or sent** (no MO, no requisition in use, no
+   challan, no invoice): **Cancel order** cancels it at once, with a reason.
+2. **Anything more: Request cancellation**, at any stage, with the
+   customer's reason (anyone who edits orders). The order's manufacturing
+   orders go **on hold**. Until the request is decided nothing more is
+   issued, requisitioned, cut, moved between stages, packed or dispatched
+   for it, its MOs are not released or resumed, and the order is not edited
+   or short-closed. Floor returns still go on.
+3. **The cancellation window** shows everything it touches, as it stands:
+   pieces ordered, sent, cut, on the floor (by stage, at outside units, on
+   the way), packed and in the store; each material asked for, issued, used
+   in cutting, returned and still with production; requisitions; purchase
+   orders and enquiries raised for them; a job-work customer's material.
+4. **Unused material goes back only on a floor return** (Return on its
+   requisition), into stock when the store receives it. Nothing is put back
+   on paper.
+5. **Approve cancellation** (someone who approves orders): open requisitions
+   close and the stock held for the order is freed, its MOs close, and the
+   order is **cancelled**, or **short-closed at what was sent** when goods
+   already went out. A job-work customer's material must be accounted for,
+   or a manager who approves stock records an exception. Purchase orders
+   already placed are listed, not cancelled: Purchase cancels the balance
+   with the supplier or keeps it for stock.
+6. **Withdraw request**: the customer changed their mind; the holds come off
+   and work carries on.
+
+Every issue, cutting, transfer, receipt, challan and return stays on record,
+linked to the order. Short-close remains for ending an order at what was
+sent (production came out short; the buyer takes less); its MOs nothing was
+made on close with it.
+
+- A manufacturing order left open after its sales order closed shows
+  **Sales order closed** on its list and window and is closed in one step;
+  nothing more is asked of the store for it.
+- A manufacturing order's status follows the work: Materials not asked →
+  Materials asked → Part issued → Materials issued (every item in full) →
+  In production (cutting recorded) → Packing → Completed.
+
+### Size jumps at stitching (6 Nov 2026)
+
+Pieces cut as one size are sometimes made as another: the size label is
+sewn at stitching, and a run is moved up or down a size when it measures
+large or small, or when the buyer changes the ratio. A real production step,
+not a stock correction. What the business decided:
+
+1. **Only at stitching done on our own floor.** Not at cutting, not at any
+   later stage, and not at outside units (sizes do not change there).
+2. **Anyone who records production work can do it**, with a reason. Taking
+   one back needs the right to undo floor entries, as every undo does.
+3. **Only to a size already on the order.**
+4. **Recorded when it happens** — no revised allocation is planned ahead.
+5. **The sales order is not changed.** It keeps the buyer's sizes. Finished
+   goods are booked in the sizes actually made, and the delivery challan
+   decides how many of each size go: sizes may differ from the order with no
+   note as long as the line's total is not exceeded (a note is still needed
+   past the line's total).
+6. **The order's planned sizes stay as they were.** The order shows planned,
+   changed, revised, packed and to pack, size by size, and every change: who,
+   when, why, which bundle into which.
+7. **Pieces change size once**, from the size they were cut in (added 6 Nov
+   2026). A size changed by mistake is undone, not changed again, so no piece
+   goes round in a circle or is counted twice. Several sizes can change in one
+   save, including a swap both ways (38 → 40 and 40 → 38).
+
+On the floor each changed bundle's pieces go into a **new bundle** of the new
+size, with its own sticker ("made from B003 (M)"); the old bundle keeps its
+history, and every piece still traces back to the lay it was cut in.
+
+The old one-step cutting on the order window (cutting without stages, no
+bundles) was removed the same day: every order is cut on its cutting sheet
+once its stages are set up. The test orders cut that way were deleted from the
+demo database.
+
 ---
 
 ## 7. HR & people

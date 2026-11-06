@@ -40,6 +40,7 @@ import { formatCurrency, formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { OPEN_ORDER_STATUSES, SALES_ORDER_STATUS, salesOrderStatus } from '@/components/sales/status'
 import { SalesOrderDialog } from '@/components/sales/SalesOrderDialog'
+import { CancellationDialog } from '@/components/sales/CancellationDialog'
 import { SalesOrderDetailDialog } from '@/components/sales/SalesOrderDetailDialog'
 import { OrderLinesView, type OrderLineView } from '@/components/sales/OrderLinesView'
 import {
@@ -84,6 +85,10 @@ interface SalesOrderRow {
   pieces: number
   dispatched: number
   pending: number
+  /** Material issued, cutting or packing on one of its manufacturing orders: short-closed then, not cancelled. */
+  workStarted?: boolean
+  /** A cancellation asked for: waiting for approval while the order is open. */
+  cancelRequestedAt?: string | null
 }
 
 interface Brief {
@@ -231,6 +236,8 @@ export default function SalesOrdersPage() {
   })
   // The order open in the detail, and an action waiting on its reason.
   const [viewId, setViewId] = useState<string | null>(null)
+  /** The cancellation window for one order: what calling it off touches. */
+  const [cancelling, setCancelling] = useState<string | null>(null)
   const [asking, setAsking] = useState<{ action: ReasonAction; order: SalesOrderRow; description?: string } | null>(
     null
   )
@@ -443,10 +450,9 @@ export default function SalesOrdersPage() {
    * Written once and shared by the table and the phone cards; who may do what
    * is decided in orderActions, which the detail uses too.
    *
-   * On the list, cancel is offered only while nothing can have started (a
-   * draft, or a confirmed order with nothing sent), and short-close only once
-   * the order is in production or part sent. The detail, which can see the
-   * production orders, offers both exactly.
+   * Cancel while nothing has been made or sent (manufacturing orders with
+   * nothing issued, cut or packed close with it), short-close once something
+   * has: the API says whether work has started on its manufacturing orders.
    */
   const rowActions = (o: SalesOrderRow): RowAction[] => {
     const items: RowAction[] = [
@@ -476,6 +482,12 @@ export default function SalesOrdersPage() {
         onClick: () => void confirm(o),
       })
     }
+    // Its cancellation is waiting for approval: nothing more is made, sent or changed until it is decided.
+    const pending = !!o.cancelRequestedAt && OPEN_ORDER_STATUSES.includes(o.status)
+    if (pending) {
+      items.push({ key: 'cancel', label: 'Review cancellation', icon: <Ban size={15} />, danger: true, onClick: () => setCancelling(o.id) })
+      return items
+    }
     if (OPEN_ORDER_STATUSES.includes(o.status) && can('production', 'create')) {
       items.push({ key: 'make', label: 'Plan production', icon: <Factory size={15} />, href: `/production/orders?make=${o.id}` })
     }
@@ -490,7 +502,7 @@ export default function SalesOrdersPage() {
         onClick: () => setDialog({ open: true, orderId: o.id, amend: true }),
       })
     }
-    if (orderCan.shortClose(o) && (o.status !== 'CONFIRMED' || o.dispatched > 0)) {
+    if (orderCan.shortClose(o) && (o.workStarted || o.dispatched > 0)) {
       items.push({
         key: 'short-close',
         label: 'Short-close',
@@ -498,7 +510,7 @@ export default function SalesOrdersPage() {
         onClick: () => setAsking({ action: 'short-close', order: o }),
       })
     }
-    if (orderCan.cancel(o) && o.dispatched === 0) {
+    if (o.status === 'DRAFT' && orderCan.cancel(o)) {
       items.push({
         key: 'cancel',
         label: 'Cancel order',
@@ -506,6 +518,9 @@ export default function SalesOrdersPage() {
         danger: true,
         onClick: () => setAsking({ action: 'cancel', order: o }),
       })
+    } else if (OPEN_ORDER_STATUSES.includes(o.status) && can('sales', 'edit')) {
+      // At any stage: the window shows what it touches before anything changes.
+      items.push({ key: 'cancel', label: 'Cancel order…', icon: <Ban size={15} />, danger: true, onClick: () => setCancelling(o.id) })
     }
     return items
   }
@@ -1012,6 +1027,14 @@ export default function SalesOrdersPage() {
         </div>
       </div>
 
+      <CancellationDialog
+        orderId={cancelling}
+        onClose={() => setCancelling(null)}
+        onChanged={(msg) => {
+          setMessage(msg)
+          void load()
+        }}
+      />
       <SalesOrderDetailDialog
         orderId={viewId}
         onClose={() => setViewId(null)}

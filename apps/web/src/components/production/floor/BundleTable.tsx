@@ -3,7 +3,7 @@
 import { Fragment, useState } from 'react'
 import { ChevronDown, ChevronRight, Undo2 } from 'lucide-react'
 import { formatDate } from '@/lib/utils'
-import { pcs, type FlowBundle, type FlowStep } from './types'
+import { bundleShort, pcs, type FlowBundle, type FlowStep } from './types'
 import type { SheetRow } from './StageSheet'
 
 /** A tagged piece, as the sheet lists it. */
@@ -29,6 +29,7 @@ const STATUS = (s: string) =>
     'To decide': 'badge-danger',
     'Done, ready to send': 'badge-info',
     'Ready for finished goods': 'badge-info',
+    'Made as another size': 'badge-neutral',
     Done: 'badge-success',
   })[s] ?? 'badge-neutral'
 
@@ -40,6 +41,7 @@ const said = (r: SheetRow, check: boolean, last: boolean) =>
     r.out ? `${last ? 'Into finished goods' : 'Out'} ${pcs(r.out)}` : '',
     r.damaged + r.rejected ? `${check ? 'Failed / damaged' : 'Damaged'} ${pcs(r.damaged + r.rejected)}` : '',
     r.rework ? `Rework ${pcs(r.rework)}` : '',
+    r.sizeIn || r.sizeOut ? (r.sizeNote ?? 'Size changed') : '',
   ]
     .filter(Boolean)
     .join(' · ')
@@ -55,6 +57,7 @@ export function BundleTable({
   rows,
   step,
   pieces,
+  madeAs = () => 0,
   canUndo,
   onUndo,
   onPiece,
@@ -63,6 +66,8 @@ export function BundleTable({
   rows: SheetRow[]
   step: FlowStep
   pieces: SheetPiece[]
+  /** Pieces of a bundle made as another size at stitching, now in bundles of their own. */
+  madeAs?: (bundleId: string) => number
   canUndo: (r: SheetRow) => boolean
   onUndo: (r: SheetRow) => void
   onPiece: (code: string) => void
@@ -82,6 +87,7 @@ export function BundleTable({
     const rework = at('REWORK', false)
     const damaged = at('DAMAGED') + at('REJECTED')
     const waiting = at('DONE')
+    const moved = madeAs(b.id)
     const status = !mine.length && !transit
       ? 'Not here yet'
       : transit
@@ -98,7 +104,9 @@ export function BundleTable({
                   ? last
                     ? 'Ready for finished goods'
                     : 'Done, ready to send'
-                  : 'Done'
+                  : moved && !mine.some((r) => r.processed || r.out)
+                    ? 'Made as another size'
+                    : 'Done'
     const sum = (k: 'in' | 'processed' | 'out' | 'damaged' | 'rejected' | 'rework') => mine.reduce((s, r) => s + r[k], 0)
     const latest = mine[mine.length - 1]
     return {
@@ -112,6 +120,7 @@ export function BundleTable({
       reworked: sum('rework'),
       here: hand + unit + waiting + rework + damaged,
       latest,
+      moved,
     }
   })
 
@@ -155,7 +164,15 @@ export function BundleTable({
                       {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     </button>
                   </td>
-                  <td className="whitespace-nowrap font-mono text-xs">{l.b.code}</td>
+                  <td className="whitespace-nowrap font-mono text-xs">
+                    {l.b.code}
+                    {l.b.parent && (
+                      <span className="text-muted-foreground block font-sans text-[11px]" title="Made from that bundle by a size change at stitching">
+                        from {bundleShort(l.b.parent.code)}
+                        {l.b.parent.size ? ` (${l.b.parent.size})` : ''}
+                      </span>
+                    )}
+                  </td>
                   <td className="text-sm font-semibold">{l.b.size?.code ?? '—'}</td>
                   <td className="text-right tabular-nums">{pcs(l.b.qty)}</td>
                   <td className="text-right tabular-nums">{l.in ? pcs(l.in) : <span className="text-muted-foreground">—</span>}</td>
@@ -230,7 +247,9 @@ export function BundleTable({
                             </div>
                           ) : (
                             <p className="text-muted-foreground px-3 py-2 text-xs">
-                              Each piece gets its own tag when it goes into finished goods. Until then the {pcs(l.b.qty)} pieces are tracked as this bundle.
+                              {l.moved >= l.b.qty
+                                ? `All ${pcs(l.moved)} pieces were made as another size; they are tracked as the new bundle${l.moved === 1 ? '' : 's'} now.`
+                                : `Each piece gets its own tag when it goes into finished goods. Until then the ${pcs(l.b.qty - l.moved)} pieces are tracked as this bundle${l.moved ? ` (${pcs(l.moved)} made as another size)` : ''}.`}
                             </p>
                           )}
                         </div>

@@ -26,11 +26,14 @@ export function FilterMenu({
   choices,
   selected,
   onChange,
+  small = false,
 }: {
   label: string
   choices: FilterChoice[] | undefined
   selected: string[]
   onChange: (next: string[]) => void
+  /** The height of a toolbar's other boxes (32px) rather than a form's (40px). */
+  small?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -116,7 +119,7 @@ export function FilterMenu({
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className={`flex h-10 items-center gap-1.5 rounded-lg border px-3 text-sm transition-colors ${
+        className={`flex items-center gap-1.5 rounded-lg border transition-colors ${small ? 'h-8 px-2.5 text-xs' : 'h-10 px-3 text-sm'} ${
           selected.length
             ? 'border-primary/50 bg-primary/10 text-foreground'
             : 'border-border bg-secondary text-muted-foreground hover:text-foreground'

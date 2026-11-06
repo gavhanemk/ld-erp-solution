@@ -8,6 +8,10 @@ type Db = PrismaClient | Prisma.TransactionClient
  * from where, what was done, what was sent on and to where, what was damaged
  * or failed and why, with the date, the time and who. Undone entries, and the
  * entries that undid them, are left out: together they changed nothing.
+ *
+ * A size change at stitching (pieces of a bundle made as another size, moved
+ * into a new bundle) is shown as its own entry with each bundle's move, but
+ * counts as nothing received, done or sent: the pieces stay where they were.
  */
 
 export interface StageReportQuery {
@@ -66,13 +70,30 @@ export async function stageReport(db: Db, q: StageReportQuery) {
   })
   const cardOf = new Map(cards.map((c) => [c.moLineId, c.jobCardNumber]))
 
+  // Each size change's moves, bundle by bundle: "20 pcs M → L (B003 → B061)".
+  const changeIds = [...new Set(entries.filter((e) => e.event.type === 'SIZE_CHANGE').map((e) => e.event.id))]
+  const changes = changeIds.length
+    ? await db.sizeChange.findMany({
+        where: { eventId: { in: changeIds } },
+        orderBy: { toBundle: { bundleNo: 'asc' } },
+        select: { eventId: true, qty: true, fromBundle: { select: { bundleNo: true } }, toBundle: { select: { bundleNo: true } }, fromSize: { select: { code: true } }, toSize: { select: { code: true } } },
+      })
+    : []
+  const bNo = (n: number) => `B${String(n).padStart(3, '0')}`
+  const movesOf = new Map<string, Array<{ from: string; fromSize: string; to: string; toSize: string; qty: number }>>()
+  for (const c of changes) {
+    movesOf.set(c.eventId, [...(movesOf.get(c.eventId) ?? []), { from: bNo(c.fromBundle.bundleNo), fromSize: c.fromSize.code, to: bNo(c.toBundle.bundleNo), toSize: c.toSize.code, qty: c.qty }])
+  }
+
   const byEvent = new Map<string, typeof entries>()
   for (const e of entries) byEvent.set(e.event.id, [...(byEvent.get(e.event.id) ?? []), e])
 
   const rows = [...byEvent.values()].map((list) => {
     const ev = list[0].event
     const t = ev.transfer
-    const into = (bucket: string) => sumIf(list, (e) => e.qty > 0 && e.bucket === bucket)
+    // A size change only hands pieces to a new bundle where they lie: nothing came in or went anywhere.
+    const sizeChange = ev.type === 'SIZE_CHANGE' ? (movesOf.get(ev.id) ?? []) : null
+    const into = (bucket: string) => (sizeChange ? 0 : sumIf(list, (e) => e.qty > 0 && e.bucket === bucket))
     const counted = ['RECEIVE', 'EXCESS', 'SETTLE'].includes(ev.type) ? into('WIP') : 0
     // Given to an outside unit for this stage: the pieces go straight into its hands.
     const toUnit = ev.type === 'DISPATCH' ? sumIf(list, (e) => e.qty > 0 && e.bucket === 'WIP' && !!e.vendorId) : 0
@@ -107,11 +128,16 @@ export async function stageReport(db: Db, q: StageReportQuery) {
       notes: ev.notes,
       by: ev.personName ?? ev.createdBy?.name ?? null,
       document: t?.transferNumber ?? ev.fgReceipt?.fgrNumber ?? ev.cuttingOrder?.cutOrderNumber ?? ev.theirChallanNo ?? null,
+      /** A size change's moves, bundle by bundle; null for every other entry. */
+      sizeChange,
     }
     return row
   })
-  // An entry that moved nothing worth showing here — a split's book-keeping — is left out.
-  const shown = rows.filter((r) => r.received || r.cut || r.done || r.sentOn || r.packed || r.onTheWay || r.damaged || r.failed || r.rework || r.bGrade || r.scrapped || r.short)
+  // An entry that moved nothing worth showing here — a split's book-keeping — is left out. A size
+  // change is shown, with its moves, though it counts in none of the figures.
+  const shown = rows.filter(
+    (r) => r.sizeChange?.length || r.received || r.cut || r.done || r.sentOn || r.packed || r.onTheWay || r.damaged || r.failed || r.rework || r.bGrade || r.scrapped || r.short,
+  )
   const total = (k: 'received' | 'cut' | 'done' | 'sentOn' | 'packed' | 'damaged' | 'failed' | 'rework' | 'bGrade' | 'scrapped' | 'short') => shown.reduce((s, r) => s + r[k], 0)
   return {
     rows: shown,

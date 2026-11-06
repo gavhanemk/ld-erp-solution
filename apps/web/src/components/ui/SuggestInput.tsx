@@ -89,9 +89,14 @@ export function SuggestInput({
     } else if (show && e.key === 'ArrowUp') {
       e.preventDefault()
       setActive((a) => (a <= 0 ? matches.length - 1 : a - 1))
-    } else if (show && e.key === 'Enter' && active >= 0) {
-      e.preventDefault()
-      pick(matches[active])
+    } else if (show && e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      // The highlighted suggestion, if one is, then on to the next box like
+      // any other box: the list is marked shut now, so the form's own Enter
+      // (the next box, the next line) takes the key rather than waiting on it.
+      if (active >= 0) pick(matches[active])
+      else setOpen(false)
+      setActive(-1)
+      e.currentTarget.setAttribute('aria-expanded', 'false')
     } else if (show && e.key === 'Escape') {
       // Closes the list only; the form around it stays open.
       e.preventDefault()

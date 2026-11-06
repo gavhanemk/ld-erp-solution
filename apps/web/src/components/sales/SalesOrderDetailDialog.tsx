@@ -25,6 +25,7 @@ import { useEscape } from '@/lib/useEscape'
 import { Section } from '@/components/purchase/Section'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { MaterialExceptionDialog } from './MaterialExceptionDialog'
+import { CancellationDialog } from './CancellationDialog'
 import { OrderLinesView, type OrderLineView } from './OrderLinesView'
 import { OrderReconciliation } from './OrderReconciliation'
 import { OPEN_ORDER_STATUSES, salesOrderStatus } from './status'
@@ -88,9 +89,14 @@ export interface OrderDetailFull {
   creditReleasedBy: Person | null
   cancelledBy: Person | null
   shortClosedBy: Person | null
+  /** A cancellation asked for: waiting for approval while the order is open; kept after it. */
+  cancelRequestedAt?: string | null
+  cancelRequestReason?: string | null
+  cancelRequestedBy?: Person | null
   revisions: Array<{ id: string; version: number; reason: string; changedAt: string; changedBy: Person }>
   lines: OrderLineView[]
-  manufacturingOrders: Array<{ id: string; moNumber: string; status: string; totalPackedQty: string | number | null }>
+  /** workStarted: what has been done on it (material issued, cut, packed); null when nothing has. */
+  manufacturingOrders: Array<{ id: string; moNumber: string; status: string; totalPackedQty: string | number | null; workStarted?: string | null }>
   materialRequisitions: Array<{ id: string; mrNumber: string; status: string; closedAt: string | null }>
   /** The customer's material received against it (job work). */
   customerMaterial?: Array<{ id: string; grnNumber: string; status: string; receiptDate: string }>
@@ -158,6 +164,8 @@ export function SalesOrderDetailDialog({
   /** The server's figures when confirming needs a reason to release a credit hold. */
   const [holdNote, setHoldNote] = useState<string | null>(null)
   const [revision, setRevision] = useState<Revision | 'loading' | null>(null)
+  /** The cancellation window: what calling it off touches, asked for, approved or withdrawn. */
+  const [cancelling, setCancelling] = useState(false)
 
   const load = useCallback(async (id: string) => {
     setError(null)
@@ -178,7 +186,7 @@ export function SalesOrderDetailDialog({
 
   // Escape closes this window only — not the ones behind it.
   useEscape(() => {
-    if (!asking && !revision && !exception) onClose()
+    if (!asking && !revision && !exception && !cancelling) onClose()
   }, Boolean(orderId))
   useEffect(() => {
     if (!orderId) return
@@ -276,9 +284,13 @@ export function SalesOrderDetailDialog({
       ? { label: 'All sent · to close', cls: 'badge-warning' }
       : salesOrderStatus(o)
     : null
+  // Something made or sent: material issued, cutting or packing on a manufacturing order, or goods out.
+  // A manufacturing order released with none of that has made nothing, and closes if the order is cancelled.
   const started = o
-    ? o.manufacturingOrders.some((m) => m.status !== 'CLOSED') || o.deliveryChallans.length > 0 || dispatched > 0
+    ? o.manufacturingOrders.some((m) => m.status !== 'CLOSED' && !!m.workStarted) || o.deliveryChallans.length > 0 || dispatched > 0
     : false
+  /** Its cancellation is waiting for approval: nothing more is made, sent or changed for it. */
+  const pending = !!o?.cancelRequestedAt && OPEN_ORDER_STATUSES.includes(o.status)
   const late =
     o && o.deliveryDate && OPEN_ORDER_STATUSES.includes(o.status) && new Date(o.deliveryDate) < new Date(new Date().toDateString())
   const rejected = o?.status === 'CANCELLED' && !o.approvedAt && !!o.sentForApprovalAt
@@ -355,6 +367,15 @@ export function SalesOrderDetailDialog({
           text: `Amended to version ${r.version + 1} by ${r.changedBy.name}: ${r.reason}`,
           version: r.version,
         })),
+        ...(o.cancelRequestedAt
+          ? [
+              {
+                at: o.cancelRequestedAt,
+                text: `Cancellation asked for${o.cancelRequestedBy ? ` by ${o.cancelRequestedBy.name}` : ''}: ${o.cancelRequestReason ?? ''}`,
+                version: null,
+              },
+            ]
+          : []),
         ...(o.cancelledAt
           ? [
               {
@@ -485,30 +506,36 @@ export function SalesOrderDetailDialog({
                   {busy ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Confirm order
                 </button>
               )}
-              {o && OPEN_ORDER_STATUSES.includes(o.status) && can('production', 'create') && (
+              {o && !pending && OPEN_ORDER_STATUSES.includes(o.status) && can('production', 'create') && (
                 <a className="btn-secondary" href={`/production/orders?make=${o.id}`} title="Raise a manufacturing order for what is still to make">
                   <Factory size={15} /> Plan production
                 </a>
               )}
-              {o && orderCan.dispatch(o) && dispatched < pieces && (
+              {o && !pending && orderCan.dispatch(o) && dispatched < pieces && (
                 <a className="btn-primary" href={dispatchHref(o.id)} title="Raise a delivery challan for what is still to send">
                   <Truck size={15} /> Dispatch
                 </a>
               )}
-              {o && orderCan.amend(o) && (
+              {o && !pending && orderCan.amend(o) && (
                 <button className="btn-secondary" onClick={() => onAmend(o.id)} disabled={busy}>
                   <FilePenLine size={15} /> Amend
                 </button>
               )}
-              {o && orderCan.shortClose(o) && started && (
+              {o && !pending && orderCan.shortClose(o) && started && (
                 <button className="btn-secondary" onClick={() => setAsking('short-close')} disabled={busy}>
                   {/* Everything sent: what is left is closing it, once its material is accounted for. */}
                   <Scissors size={15} /> {dispatched >= pieces ? 'Close order' : 'Short-close'}
                 </button>
               )}
-              {o && orderCan.cancel(o) && !started && (
+              {o && o.status === 'DRAFT' && orderCan.cancel(o) && (
                 <button className="btn-ghost text-destructive" onClick={() => setAsking('cancel')} disabled={busy}>
                   <Ban size={15} /> Cancel order
+                </button>
+              )}
+              {/* At any stage of an open order: the window shows what it touches before anything changes. */}
+              {o && OPEN_ORDER_STATUSES.includes(o.status) && can('sales', 'edit') && (
+                <button className={pending ? 'btn-danger' : 'btn-ghost text-destructive'} onClick={() => setCancelling(true)} disabled={busy}>
+                  <Ban size={15} /> {pending ? 'Review cancellation' : 'Cancel order'}
                 </button>
               )}
               <button onClick={onClose} className="btn-ghost p-2" aria-label="Close">
@@ -528,6 +555,22 @@ export function SalesOrderDetailDialog({
               <div className="border-primary/40 bg-primary/5 flex items-start gap-3 rounded-lg border p-3">
                 <CheckCircle2 size={16} className="text-primary mt-0.5 shrink-0" />
                 <p className="text-primary text-sm">{message}</p>
+              </div>
+            )}
+            {o && pending && (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-500/40 bg-red-500/10 p-3">
+                <div className="flex min-w-0 items-start gap-3">
+                  <Ban size={16} className="mt-0.5 shrink-0 text-red-500" />
+                  <p className="text-foreground text-sm">
+                    <b>Cancellation asked for</b> on {formatDate(o.cancelRequestedAt!)}
+                    {o.cancelRequestedBy ? ` by ${o.cancelRequestedBy.name}` : ''}
+                    {o.cancelRequestReason ? `: ${o.cancelRequestReason}` : ''}. Its production is on hold, and nothing is sent or changed, until it
+                    is approved or withdrawn.
+                  </p>
+                </div>
+                <button type="button" className="btn-secondary h-8 shrink-0 px-3 text-xs" onClick={() => setCancelling(true)}>
+                  Review cancellation
+                </button>
               </div>
             )}
 
@@ -732,6 +775,15 @@ export function SalesOrderDetailDialog({
           onConfirm={(reason) => void runReason(asking, reason)}
         />
       )}
+      <CancellationDialog
+        orderId={cancelling && o ? o.id : null}
+        onClose={() => setCancelling(false)}
+        onChanged={(msg) => {
+          setMessage(msg)
+          onChanged(msg)
+          void load(orderId)
+        }}
+      />
       {exception && o && (
         <MaterialExceptionDialog
           order={o}

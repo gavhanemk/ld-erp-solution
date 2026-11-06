@@ -31,6 +31,9 @@ import {
 } from '../services/salesOrder.service'
 import { priceSalesCharges } from '../services/salesCharges'
 import { winQuote } from '../services/quotation.service'
+import { workStarted } from '../services/manufacturing.service'
+import { closeMo } from './production.routes'
+import { assertNotCancelling, CANCELLABLE, cancellationImpact, requestCancellation, withdrawCancellation } from '../services/orderCancel.service'
 
 const router = Router()
 const MODULE = 'sales'
@@ -439,6 +442,14 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req: AuthRequest
     prisma.salesOrder.count({ where }),
   ])
 
+  // Work started on one of their manufacturing orders (material issued, cut,
+  // packed): such an order is short-closed, never cancelled.
+  const mos = orders.length
+    ? await prisma.manufacturingOrder.findMany({ where: { soId: { in: orders.map((o) => o.id) }, status: { not: 'CLOSED' } }, select: { id: true, soId: true } })
+    : []
+  const started = await workStarted(prisma, mos.map((m) => m.id))
+  const startedFor = new Set(mos.filter((m) => started.has(m.id)).map((m) => m.soId))
+
   // Pieces, not lines, are what the list reads: how many were ordered, how
   // many have gone, and how many are still to go.
   const data = orders.map(({ lines, ...o }) => ({
@@ -446,6 +457,7 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req: AuthRequest
     pieces: lines.reduce((s, l) => s + Number(l.totalQty), 0),
     dispatched: lines.reduce((s, l) => s + Number(l.deliveredQty), 0),
     pending: lines.reduce((s, l) => s + Number(l.pendingQty), 0),
+    workStarted: startedFor.has(o.id),
   }))
 
   res.json({
@@ -468,6 +480,7 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
       creditReleasedBy: { select: { id: true, name: true } },
       cancelledBy: { select: { id: true, name: true } },
       shortClosedBy: { select: { id: true, name: true } },
+      cancelRequestedBy: { select: { id: true, name: true } },
       materialExceptionBy: { select: { id: true, name: true } },
       // The list of earlier versions; each one's full snapshot is fetched on
       // its own when somebody opens it.
@@ -508,7 +521,12 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
     },
   })
   if (!order) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
-  res.json({ success: true, data: order })
+  // What has been done on each manufacturing order (material issued, cut, packed); null for one nothing was made on.
+  const started = await workStarted(prisma, order.manufacturingOrders.map((m) => m.id))
+  res.json({
+    success: true,
+    data: { ...order, manufacturingOrders: order.manufacturingOrders.map((m) => ({ ...m, workStarted: started.get(m.id) ?? null })) },
+  })
 })
 
 /**
@@ -1102,6 +1120,7 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
   const data = amendSalesOrderSchema.parse(req.body)
 
   const { before, after } = await prisma.$transaction(async (tx) => {
+    await assertNotCancelling(tx, req.params.id, 'the order is not changed')
     const before = await tx.salesOrder.findUnique({
       where: { id: req.params.id },
       include: {
@@ -1184,17 +1203,21 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       }
     }
 
-    // Each size keeps what was already sent in it. A size cannot drop below
-    // that, nor come off a line while any of it has gone.
+    // Each size keeps what was already sent in it: a size cannot be lowered
+    // below that, nor come off a line while any of it has gone. Dispatch may
+    // send a size over its order within the line's total (sizes made as other
+    // sizes at stitching), so a size left as it was stands even then.
     data.lines.forEach((l, i) => {
       if (!l.id) return
       const old = oldLines.get(l.id)!
       const wanted = new Map((l.sizes ?? []).map((s) => [s.sizeId, s.qty]))
       for (const os of old.sizes) {
         const sent = Number(os.deliveredQty)
-        if (sent > 0 && (wanted.get(os.sizeId) ?? 0) < sent) {
+        const want = wanted.get(os.sizeId) ?? 0
+        if (sent > 0 && want < sent && want < Number(os.qty)) {
+          const floor = Math.min(sent, Number(os.qty))
           throw new AppError(
-            `Line ${i + 1}: ${sent} pieces of ${old.item.code} in size ${os.size.code} have already been sent, so that size cannot go below ${sent}`,
+            `Line ${i + 1}: ${sent} pieces of ${old.item.code} in size ${os.size.code} have already been sent, so that size cannot go below ${floor}`,
             409,
             'BELOW_DELIVERED',
           )
@@ -1326,10 +1349,14 @@ router.get('/orders/:id/revisions/:version', requirePermission(MODULE, 'view'), 
 /**
  * POST /api/sales/orders/:id/cancel
  *
- * Calls an order off before anything has been made or sent against it. After
- * that the way out is short-closing. A draft is cancelled by whoever can edit
- * orders; a confirmed one, which the customer has been promised, only by
- * someone who can approve them.
+ * Calls an order off before anything has been asked for, made or sent against
+ * it: no manufacturing order, no requisition in use, no challan, no invoice. A
+ * draft is cancelled by whoever can edit orders; a confirmed one, which the
+ * customer has been promised, only by someone who can approve them.
+ *
+ * With any of those, the order is called off by asking for its cancellation
+ * (below): its manufacturing orders go on hold, all it touches is laid out,
+ * and an approver decides.
  */
 router.post('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const { reason, materialException } = reasonBody.parse(req.body)
@@ -1341,48 +1368,46 @@ router.post('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req:
       manufacturingOrders: { where: { status: { not: 'CLOSED' } }, select: { moNumber: true } },
       deliveryChallans: { where: { status: { not: 'CANCELLED' } }, select: { dcNumber: true } },
       invoices: { where: { status: { not: 'CANCELLED' } }, select: { invoiceNumber: true } },
+      // Requisitions still asking, or with something issued on them.
       materialRequisitions: {
-        where: { closedAt: null, status: { in: ['PENDING', 'APPROVED'] } },
+        where: { status: { not: 'REJECTED' }, OR: [{ closedAt: null }, { lines: { some: { issuedQty: { gt: 0 } } } }] },
         select: { mrNumber: true },
       },
     },
   })
   if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
-  if (before.status !== 'DRAFT' && before.status !== 'CONFIRMED') {
+  if (before.cancelRequestedAt && CANCELLABLE.includes(before.status)) {
+    throw new AppError(`A cancellation of ${before.soNumber} is already waiting: approve or withdraw it in its cancellation window.`, 409, 'CANCEL_REQUESTED')
+  }
+  if (before.status !== 'DRAFT' && before.status !== 'CONFIRMED' && before.status !== 'IN_PRODUCTION') {
     throw new AppError(
       before.status === 'CANCELLED'
         ? `${before.soNumber} is already cancelled`
         : before.status === 'COMPLETED'
           ? `${before.soNumber} is completed and cannot be cancelled. A return goes through a credit note.`
-          : `Work has started on ${before.soNumber}. Short-close it instead, at what has been sent.`,
+          : `Goods have gone out against ${before.soNumber}. Ask for its cancellation instead: once approved it is short-closed at what was sent.`,
       409,
-      'CANNOT_CANCEL',
+      before.status === 'CANCELLED' || before.status === 'COMPLETED' ? 'CANNOT_CANCEL' : 'NEEDS_REQUEST',
     )
   }
-  if (before.status === 'CONFIRMED' && !userCan(req.user, MODULE, 'approve')) {
+  if (before.status !== 'DRAFT' && !userCan(req.user, MODULE, 'approve')) {
     throw new AppError(
       `${before.soNumber} has been confirmed to the customer, so only someone who approves orders can cancel it`,
       403,
       'FORBIDDEN',
     )
   }
-  const started = [
+  const inUse = [
     ...before.manufacturingOrders.map((m) => m.moNumber),
+    ...before.materialRequisitions.map((m) => m.mrNumber),
     ...before.deliveryChallans.map((d) => d.dcNumber),
     ...before.invoices.map((i) => i.invoiceNumber),
   ]
-  if (started.length) {
+  if (inUse.length) {
     throw new AppError(
-      `${before.soNumber} already has ${started.join(', ')} against it. Short-close it instead.`,
+      `${before.soNumber} already has ${inUse.join(', ')} against it. Ask for its cancellation instead: its manufacturing orders go on hold, and an approver sees all it touches before it is cancelled.`,
       409,
-      'CANNOT_CANCEL',
-    )
-  }
-  if (before.materialRequisitions.length) {
-    throw new AppError(
-      `Requisition ${before.materialRequisitions.map((m) => m.mrNumber).join(', ')} is still open for ${before.soNumber}. Close or reject it in Inventory first, so no material is held for an order that is not coming.`,
-      409,
-      'OPEN_REQUISITION',
+      'NEEDS_REQUEST',
     )
   }
 
@@ -1407,28 +1432,161 @@ router.post('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req:
 })
 
 /**
+ * GET /api/sales/orders/:id/cancellation
+ *
+ * What cancelling the order touches, as it stands: its manufacturing orders
+ * and their pieces, material issued, used and still out, its requisitions,
+ * purchase raised for them, finished goods, a job-work customer's material;
+ * what approving does, and what to see to first.
+ */
+router.get('/orders/:id/cancellation', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await cancellationImpact(prisma, req.params.id) })
+})
+
+/**
+ * POST /api/sales/orders/:id/cancellation/request
+ *
+ * The customer is calling the order off, at whatever stage it is. Its
+ * manufacturing orders go on hold: nothing more is issued, cut, moved, packed
+ * or sent for it, and the order is not changed, until someone who approves
+ * orders approves the cancellation or it is withdrawn.
+ */
+router.post('/orders/:id/cancellation/request', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { reason } = reasonBody.pick({ reason: true }).parse(req.body)
+  const { before, after, held } = await prisma.$transaction((tx) => requestCancellation(tx, req.params.id, reason, req.user!.id), { timeout: 30_000 })
+  await writeAuditLog(req, { module: 'sales', action: 'UPDATE', entityType: 'SalesOrder', entityId: after.id, before, after })
+  for (const mo of held) {
+    await writeAuditLog(req, { module: 'production', action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: mo.id, after: { heldAt: new Date(), holdReason: mo.reason } })
+  }
+  const names = held.map((m) => m.moNumber)
+  res.json({
+    success: true,
+    message: `Cancellation of ${after.soNumber} asked for${names.length ? `; ${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} on hold` : ''}. Nothing more is issued, moved, packed or sent for it until it is approved or withdrawn.`,
+    data: after,
+  })
+})
+
+/** POST /api/sales/orders/:id/cancellation/withdraw — the customer changed their mind; work carries on. */
+router.post('/orders/:id/cancellation/withdraw', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { before, after, resumed } = await prisma.$transaction((tx) => withdrawCancellation(tx, req.params.id), { timeout: 30_000 })
+  await writeAuditLog(req, { module: 'sales', action: 'UPDATE', entityType: 'SalesOrder', entityId: after.id, before, after })
+  for (const mo of resumed) {
+    await writeAuditLog(req, { module: 'production', action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: mo.id, after: { heldAt: null, resumedBecause: `Cancellation of ${after.soNumber} withdrawn` } })
+  }
+  const names = resumed.map((m) => m.moNumber)
+  res.json({
+    success: true,
+    message: `The cancellation of ${after.soNumber} is withdrawn${names.length ? `; ${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} off hold again` : ''}.`,
+    data: after,
+  })
+})
+
+/**
+ * POST /api/sales/orders/:id/cancellation/approve
+ *
+ * By someone who approves orders. Its requisitions still asking close and the
+ * stock held for the order is freed; its manufacturing orders close; and the
+ * order is cancelled, or, when goods already went out, short-closed at what
+ * was sent. A job-work order's customer material must be accounted for, or a
+ * manager makes an exception. Nothing recorded is undone or deleted: material
+ * still on the floor goes back on a floor return when the store has it.
+ */
+router.post('/orders/:id/cancellation/approve', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { materialException } = reasonBody.pick({ materialException: true }).parse(req.body ?? {})
+  const userId = req.user!.id
+  const { before, after, exception, closedMos, closedMrs, released, sent } = await prisma.$transaction(
+    async (tx) => {
+      const before = await tx.salesOrder.findUnique({
+        where: { id: req.params.id },
+        include: {
+          lines: { select: { deliveredQty: true } },
+          manufacturingOrders: { where: { status: { notIn: ['CLOSED', 'COMPLETED'] } }, select: { id: true, moNumber: true } },
+          _count: { select: { deliveryChallans: { where: { status: { not: 'CANCELLED' } } } } },
+        },
+      })
+      if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+      if (!before.cancelRequestedAt || !CANCELLABLE.includes(before.status)) {
+        throw new AppError(`No cancellation of ${before.soNumber} is waiting for approval.`, 409, 'NOT_REQUESTED')
+      }
+      const reason = before.cancelRequestReason ?? 'Cancelled'
+      // Nothing sent: cancelled. Goods already out: short-closed at what was sent.
+      const sent = before._count.deliveryChallans > 0 || before.lines.some((l) => Number(l.deliveredQty) > 0)
+      const exception = await materialClosure(tx, req, before, sent ? 'short-closed' : 'cancelled', materialException)
+      const now = new Date()
+      const why = `${before.soNumber} cancelled: ${reason}`
+      // Requisitions still asking close: nothing more is issued. What was issued stays issued.
+      const openMrs = await tx.materialRequisition.findMany({
+        where: { OR: [{ soId: before.id }, { mo: { soId: before.id } }], closedAt: null, issuedAt: null, status: { not: 'REJECTED' } },
+        select: { id: true, mrNumber: true },
+      })
+      if (openMrs.length) {
+        await tx.materialRequisition.updateMany({ where: { id: { in: openMrs.map((m) => m.id) } }, data: { closedAt: now, closedById: userId, closeReason: why } })
+      }
+      const released = await tx.stockReservation.updateMany({
+        where: { status: 'ACTIVE', OR: [{ soId: before.id }, { mr: { soId: before.id } }, { mr: { mo: { soId: before.id } } }] },
+        data: { status: 'RELEASED', qty: 0, releasedAt: now, releasedById: userId, releaseReason: why },
+      })
+      const closedMos = []
+      for (const m of before.manufacturingOrders) closedMos.push(await closeMo(tx, m.id, userId, why))
+      if (sent) await tx.salesOrderLine.updateMany({ where: { soId: before.id }, data: { pendingQty: 0 } })
+      const after = await tx.salesOrder.update({
+        where: { id: before.id },
+        data: sent
+          ? { status: 'COMPLETED', shortClosedById: userId, shortClosedAt: now, shortCloseReason: reason, ...exception }
+          : { status: 'CANCELLED', cancelledById: userId, cancelledAt: now, cancelReason: reason, ...exception },
+      })
+      return { before, after, exception, closedMos, closedMrs: openMrs, released: released.count, sent }
+    },
+    { timeout: 60_000 },
+  )
+  await writeAuditLog(req, { module: 'sales', action: 'APPROVE', entityType: 'SalesOrder', entityId: after.id, before, after })
+  for (const m of closedMos) {
+    await writeAuditLog(req, { module: 'production', action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: m.after.id, before: m.before, after: m.after })
+  }
+  for (const m of closedMrs) {
+    await writeAuditLog(req, { module: 'inventory', action: 'UPDATE', entityType: 'MaterialRequisition', entityId: m.id, after: { closed: true, closeReason: `${after.soNumber} cancelled` } })
+  }
+  if (exception.materialExceptionReason) {
+    await writeAuditLog(req, { module: 'sales', action: 'APPROVE', entityType: 'SalesOrderMaterialException', entityId: after.id, after: { soNumber: after.soNumber, act: sent ? 'short-closed' : 'cancelled', reason: exception.materialExceptionReason, unaccounted: exception.materialExceptionSnapshot } })
+  }
+  const mos = closedMos.map((m) => m.after.moNumber)
+  const mrs = closedMrs.map((m) => m.mrNumber)
+  res.json({
+    success: true,
+    message:
+      `${after.soNumber} ${sent ? 'short-closed at what was sent' : 'cancelled'}` +
+      (mos.length ? `; ${mos.join(', ')} closed` : '') +
+      (mrs.length ? `; ${mrs.join(', ')} closed, nothing more issued` : '') +
+      (released ? `; ${released} stock hold${released === 1 ? '' : 's'} freed` : '') +
+      (exception.materialExceptionReason ? '; the material exception is recorded with it' : '') +
+      '. Everything already issued, made and sent stays on record.',
+    data: after,
+  })
+})
+
+/**
  * POST /api/sales/orders/:id/short-close
  *
  * Ends an order at what has been made and sent, the rest no longer wanted —
  * the buyer called off the balance, or production came out a few short.
  * Every line's pending pieces go to nothing; what was sent stays. Only for an
  * order something has happened to: one with nothing made or sent is
- * cancelled instead.
+ * cancelled instead. Made means work on a manufacturing order — material
+ * issued to it, cutting, packing — not just one released.
+ *
+ * Its manufacturing orders nothing was made on close with it. One with work
+ * on the floor stays open, to finish or close in Production.
  */
 router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
   const { reason, materialException } = reasonBody.parse(req.body)
 
-  const { before, after, released, exception } = await prisma.$transaction(async (tx) => {
+  const { before, after, released, exception, closedMos, stillOpen } = await prisma.$transaction(async (tx) => {
     const before = await tx.salesOrder.findUnique({
       where: { id: req.params.id },
       include: {
         lines: { select: { deliveredQty: true } },
-        _count: {
-          select: {
-            manufacturingOrders: { where: { status: { notIn: ['DRAFT', 'CLOSED'] } } },
-            deliveryChallans: { where: { status: { not: 'CANCELLED' } } },
-          },
-        },
+        manufacturingOrders: { where: { status: { not: 'CLOSED' } }, select: { id: true, moNumber: true, status: true } },
+        _count: { select: { deliveryChallans: { where: { status: { not: 'CANCELLED' } } } } },
       },
     })
     if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
@@ -1441,13 +1599,15 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
         'CANNOT_SHORT_CLOSE',
       )
     }
-    const anythingDone =
-      before._count.manufacturingOrders > 0 ||
-      before._count.deliveryChallans > 0 ||
-      before.lines.some((l) => Number(l.deliveredQty) > 0)
+    await assertNotCancelling(tx, before.id, 'it is not short-closed')
+    const made = await workStarted(tx, before.manufacturingOrders.map((m) => m.id))
+    const anythingDone = made.size > 0 || before._count.deliveryChallans > 0 || before.lines.some((l) => Number(l.deliveredQty) > 0)
     if (!anythingDone) {
+      const untouched = before.manufacturingOrders.map((m) => m.moNumber)
       throw new AppError(
-        `Nothing has been made or sent against ${before.soNumber} yet. Cancel it instead.`,
+        untouched.length
+          ? `Nothing has been made or sent against ${before.soNumber} yet: nothing was issued, cut or packed on ${untouched.join(', ')}. Cancel it instead; ${untouched.length === 1 ? 'that order closes' : 'those orders close'} with it.`
+          : `Nothing has been made or sent against ${before.soNumber} yet. Cancel it instead.`,
         409,
         'NOTHING_STARTED',
       )
@@ -1473,8 +1633,14 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
       where: { status: 'ACTIVE', OR: [{ soId: before.id }, { mr: { soId: before.id } }, { mr: { mo: { soId: before.id } } }] },
       data: { status: 'RELEASED', qty: 0, releasedAt: new Date(), releasedById: req.user!.id, releaseReason: `${before.soNumber} short-closed: ${reason}` },
     })
-    return { before, after, released: released.count, exception }
-  })
+    // Its manufacturing orders nothing was made on close with it; those with work on the floor stay open.
+    const closedMos = []
+    for (const m of before.manufacturingOrders) {
+      if (!made.has(m.id) && m.status !== 'COMPLETED') closedMos.push(await closeMo(tx, m.id, req.user!.id, `${before.soNumber} short-closed: ${reason}`))
+    }
+    const stillOpen = before.manufacturingOrders.filter((m) => made.has(m.id) && m.status !== 'COMPLETED').map((m) => m.moNumber)
+    return { before, after, released: released.count, exception, closedMos, stillOpen }
+  }, { timeout: 30_000 })
 
   await writeAuditLog(req, {
     module: 'sales',
@@ -1484,12 +1650,20 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
     before,
     after,
   })
+  for (const m of closedMos) {
+    await writeAuditLog(req, { module: 'production', action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: m.after.id, before: m.before, after: m.after })
+  }
   if (exception.materialExceptionReason) {
     await writeAuditLog(req, { module: 'sales', action: 'APPROVE', entityType: 'SalesOrderMaterialException', entityId: before.id, after: { soNumber: before.soNumber, act: 'short-closed', reason: exception.materialExceptionReason, unaccounted: exception.materialExceptionSnapshot } })
   }
+  const closedNames = closedMos.map((m) => m.after.moNumber)
   res.json({
     success: true,
-    message: `${before.soNumber} short-closed at what was sent${released ? `; ${released} material hold${released === 1 ? '' : 's'} for it released` : ''}${exception.materialExceptionReason ? '; the material exception is recorded with it' : ''}`,
+    message:
+      `${before.soNumber} short-closed at what was sent${released ? `; ${released} material hold${released === 1 ? '' : 's'} for it released` : ''}` +
+      (closedNames.length ? `; ${closedNames.join(', ')} closed with it, nothing having been made on ${closedNames.length === 1 ? 'it' : 'them'}` : '') +
+      (stillOpen.length ? `; ${stillOpen.join(', ')} still ${stillOpen.length === 1 ? 'has' : 'have'} work on the floor: finish or close ${stillOpen.length === 1 ? 'it' : 'them'} in Production` : '') +
+      (exception.materialExceptionReason ? '; the material exception is recorded with it' : ''),
     data: after,
   })
 })

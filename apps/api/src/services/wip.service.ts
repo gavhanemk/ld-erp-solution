@@ -126,12 +126,19 @@ export async function postEvent(tx: Db, e: EventInput) {
     if (!Number.isInteger(m.qty)) throw new AppError('Pieces are whole numbers.', 400, 'NOT_WHOLE')
   }
   // Pieces move, they do not appear: every bundle's moves net to nothing,
-  // except where a cutting makes them, a split hands them to a new bundle, or
-  // an undo takes back what a cutting made.
+  // except where a cutting makes them, a split (or a size change) hands them
+  // to a new bundle, or an undo takes back what a cutting made.
+  const splits = e.type === 'SPLIT' || e.type === 'SIZE_CHANGE'
   if (e.type === 'CUT') {
     if (moves.some((m) => m.qty < 0)) throw new AppError('A cutting only adds pieces.', 500, 'UNBALANCED')
-  } else if (e.type === 'SPLIT') {
-    if (moves.reduce((s, m) => s + m.qty, 0) !== 0) throw new AppError('A split must keep every piece.', 500, 'UNBALANCED')
+  } else if (splits) {
+    // A split hands pieces over where they lie: every place keeps its count.
+    const place = new Map<string, number>()
+    for (const m of moves) {
+      const k = `${m.stepId}|${m.vendorId ?? ''}|${m.bucket}|${m.reworkStepId ?? ''}`
+      place.set(k, (place.get(k) ?? 0) + m.qty)
+    }
+    if ([...place.values()].some((q) => q !== 0)) throw new AppError('A split must keep every piece where it is.', 500, 'UNBALANCED')
   } else if (e.type !== 'REVERSAL') {
     const net = new Map<string, number>()
     for (const m of moves) net.set(m.bundleId, (net.get(m.bundleId) ?? 0) + m.qty)
@@ -141,11 +148,24 @@ export async function postEvent(tx: Db, e: EventInput) {
   const bundleIds = [...new Set(moves.map((m) => m.bundleId))]
   const bundles = await tx.productionBundle.findMany({
     where: { id: { in: bundleIds } },
-    select: { id: true, code: true, moId: true, moLineId: true, sizeId: true },
+    select: { id: true, code: true, moId: true, moLineId: true, sizeId: true, parentId: true },
   })
   const bundleById = new Map(bundles.map((b) => [b.id, b]))
   for (const id of bundleIds) {
     if (bundleById.get(id)?.moId !== e.moId) throw new AppError('One of those bundles is not on this order.', 400, 'BAD_BUNDLE')
+  }
+  if (splits) {
+    // Pieces go only to new bundles made from the ones giving them, on the
+    // same colour line; a size change makes them another size.
+    if (new Set(bundles.map((b) => b.moLineId)).size > 1) throw new AppError('A split stays on one colour line.', 500, 'UNBALANCED')
+    const giving = new Set(moves.filter((m) => m.qty < 0).map((m) => m.bundleId))
+    const taking = [...new Set(moves.filter((m) => m.qty > 0).map((m) => m.bundleId))]
+    for (const id of taking) {
+      const b = bundleById.get(id)!
+      if (giving.has(id) || !b.parentId || !giving.has(b.parentId)) throw new AppError('A split hands pieces only to a new bundle made from the one giving them.', 500, 'UNBALANCED')
+      if (e.type === 'SIZE_CHANGE' && b.sizeId === bundleById.get(b.parentId)!.sizeId) throw new AppError('A size change makes the pieces another size.', 500, 'UNBALANCED')
+    }
+    if (await tx.wipEntry.count({ where: { bundleId: { in: taking } } })) throw new AppError('A split hands pieces only to a new bundle.', 500, 'UNBALANCED')
   }
 
   const outs = moves.filter((m) => m.qty < 0)

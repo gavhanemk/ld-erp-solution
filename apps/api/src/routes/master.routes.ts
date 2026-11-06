@@ -4,7 +4,7 @@ import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
 import { nextStyleCode } from '../lib/masterCode'
-import { createRouting, deleteRouting, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
+import { createRouting, deleteRouting, bomFabrics, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
 import { styleOrderStages } from '../services/styleOrders.service'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import * as categoryImport from '../services/categoryImport.service'
@@ -1024,8 +1024,21 @@ router.use(
           .map((o) => ({ id: o!.id, name: o!.name })),
       }))
     },
+    // One name, one person: "Ramesh" and "ramesh " are the same contractor on every pick list.
+    uniqueFields: ['name'],
     // Every process named must be one in the Routing Masters.
-    beforeSave: async (data) => {
+    beforeSave: async (raw, before) => {
+      const data = typeof raw.name === 'string' ? { ...raw, name: raw.name.trim().replace(/\s+/g, ' ') } : raw
+      // Also against names saved with stray spaces before they were tidied ("Ramesh ").
+      if (typeof data.name === 'string') {
+        const key = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase()
+        const others = await prisma.contractor.findMany({ where: before?.id ? { NOT: { id: before.id as string } } : {}, select: { name: true, code: true, isActive: true } })
+        const clash = others.find((c) => key(c.name) === key(data.name as string))
+        if (clash && !(before && key(String(before.name ?? '')) === key(data.name))) {
+          const inactive = clash.isActive === false ? ', inactive — edit it to bring it back' : ''
+          throw new ZodError([{ code: 'custom', path: ['name'], message: `${clash.name.trim()} (${clash.code}) already exists${inactive}. If it is a different one, add something to tell them apart, such as the town.` }])
+        }
+      }
       const ids = data.operationIds as string[] | undefined
       if (ids?.length) {
         const unique = [...new Set(ids)]
@@ -2195,6 +2208,11 @@ router.get('/routings/fabrics', requirePermission(MODULE, 'view'), async (_req, 
   res.json({ success: true, data: await fabricStock(prisma) })
 })
 
+/** Which fabrics each style's BOMs use, for the routing form to narrow Style and Fabric by. */
+router.get('/routings/bom-fabrics', requirePermission(MODULE, 'view'), async (_req, res) => {
+  res.json({ success: true, data: await bomFabrics(prisma) })
+})
+
 /** A style's orders one by one, each with where it is on its own route — for the style's routing page. */
 router.get('/style-orders/:styleId', requirePermission(MODULE, 'view'), async (req, res) => {
   res.json({ success: true, data: await styleOrderStages(prisma, req.params.styleId) })
@@ -2341,7 +2359,8 @@ const bomInclude = {
   },
 }
 
-const BOM_SORT_FIELDS = ['createdAt', 'version', 'color', 'totalCost', 'status']
+// 'style': by style code, then colour, newest first — a style's BOMs together, as the list shows them.
+const BOM_SORT_FIELDS = ['createdAt', 'version', 'color', 'totalCost', 'status', 'style']
 const BOM_STATUSES = ['DRAFT', 'APPROVED', 'OBSOLETE']
 
 /**
@@ -2833,10 +2852,106 @@ async function assertVersionFree(
   if (clash) throw versionClash(styleCode, color, version, typed)
 }
 
+/** The BOM list's dropdown filters, each a comma list in the query. */
+const BOM_FACETS = ['styles', 'colours', 'brands', 'items', 'priced'] as const
+type BomFacet = (typeof BOM_FACETS)[number]
+
+const listOf = (v: unknown) =>
+  typeof v === 'string' && v.trim() ? v.split(',').map((x) => x.trim()).filter(Boolean) : []
+
+/**
+ * What the BOM list's search, status and dropdowns ask for, as a where. `skip`
+ * leaves one dropdown out, so its own counts say what each of its choices
+ * would show with the others as they are.
+ */
+function bomListWhere(query: Record<string, unknown>, skip?: BomFacet): Record<string, unknown> {
+  const and: Record<string, unknown>[] = []
+  if (query.active === 'true') and.push({ isActive: true })
+  else if (query.active === 'false') and.push({ isActive: false })
+  if (typeof query.styleId === 'string' && query.styleId) and.push({ styleId: query.styleId })
+  if (typeof query.color === 'string' && query.color) and.push({ color: query.color })
+
+  // One status, or several with commas ("DRAFT,APPROVED": the ones in use and on the way).
+  if (typeof query.status === 'string' && query.status) {
+    const statuses = query.status.toUpperCase().split(',').map((x) => x.trim()).filter(Boolean)
+    const wrong = statuses.find((x) => !BOM_STATUSES.includes(x))
+    if (wrong || !statuses.length) {
+      throw new AppError(`'${query.status}' is not a BOM status. Use one of: ${BOM_STATUSES.join(', ')}.`, 400, 'INVALID_STATUS')
+    }
+    and.push({ status: statuses.length === 1 ? statuses[0] : { in: statuses } })
+  }
+
+  const q = typeof query.q === 'string' ? query.q.trim() : ''
+  if (q) {
+    and.push({
+      OR: [
+        { version: { contains: q, mode: 'insensitive' } },
+        { color: { contains: q, mode: 'insensitive' } },
+        { style: { name: { contains: q, mode: 'insensitive' } } },
+        { style: { code: { contains: q, mode: 'insensitive' } } },
+      ],
+    })
+  }
+
+  const styles = skip === 'styles' ? [] : listOf(query.styles)
+  if (styles.length) and.push({ styleId: { in: styles } })
+  const colours = skip === 'colours' ? [] : listOf(query.colours)
+  if (colours.length) {
+    // "none" is a BOM made before BOMs were per colour.
+    const named = colours.filter((c) => c !== 'none')
+    and.push({ OR: [...(named.length ? [{ color: { in: named } }] : []), ...(colours.includes('none') ? [{ color: null }] : [])] })
+  }
+  const brands = skip === 'brands' ? [] : listOf(query.brands)
+  if (brands.length) and.push({ style: { brandId: { in: brands } } })
+  const items = skip === 'items' ? [] : listOf(query.items)
+  if (items.length) and.push({ lines: { some: { componentItemId: { in: items } } } })
+  const priced = skip === 'priced' ? [] : listOf(query.priced)
+  if (priced.length === 1) and.push({ sellingPrice: priced[0] === 'yes' ? { not: null } : null })
+
+  return and.length ? { AND: and } : {}
+}
+
+/**
+ * The BOM list's dropdowns: every style, colour, brand and component item the
+ * BOMs on show carry, and priced or not, each with how many BOMs it would
+ * leave given the search, the status and the other dropdowns.
+ */
+router.get('/bom/facets', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
+  const query = req.query as Record<string, unknown>
+  const pick = {
+    id: true,
+    styleId: true,
+    color: true,
+    sellingPrice: true,
+    style: { select: { code: true, name: true, brand: { select: { id: true, name: true } } } },
+    lines: { select: { componentItemId: true, componentItem: { select: { code: true, name: true } } } },
+  } as const
+  type Row = Awaited<ReturnType<typeof prisma.bOM.findMany<{ select: typeof pick }>>>[number]
+  const tally = async (facet: BomFacet, keys: (r: Row) => Array<{ value: string; label: string }>) => {
+    const rows = await prisma.bOM.findMany({ where: bomListWhere(query, facet), select: pick })
+    const by = new Map<string, { value: string; label: string; count: number }>()
+    for (const r of rows) {
+      for (const k of new Map(keys(r).map((x) => [x.value, x])).values()) {
+        const cur = by.get(k.value) ?? { ...k, count: 0 }
+        cur.count += 1
+        by.set(k.value, cur)
+      }
+    }
+    return [...by.values()].sort((a, b) => a.label.localeCompare(b.label))
+  }
+  const [styles, colours, brands, items, priced] = await Promise.all([
+    tally('styles', (r) => [{ value: r.styleId, label: `${r.style.code} — ${r.style.name}` }]),
+    tally('colours', (r) => [{ value: r.color ?? 'none', label: r.color ?? 'Colour not set' }]),
+    tally('brands', (r) => (r.style.brand ? [{ value: r.style.brand.id, label: r.style.brand.name }] : [])),
+    tally('items', (r) => r.lines.map((l) => ({ value: l.componentItemId, label: `${l.componentItem.code} — ${l.componentItem.name}` }))),
+    tally('priced', (r) => [r.sellingPrice != null ? { value: 'yes', label: 'Priced' } : { value: 'no', label: 'Not priced yet' }]),
+  ])
+  res.json({ success: true, data: { styles, colours, brands, items, priced } })
+})
+
 router.get('/bom', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
-  const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
 
   const sortField = typeof req.query.sort === 'string' ? req.query.sort : 'createdAt'
   if (!BOM_SORT_FIELDS.includes(sortField)) {
@@ -2848,38 +2963,16 @@ router.get('/bom', requirePermission(MODULE, 'view'), async (req: AuthRequest, r
   }
   const sortOrder = req.query.order === 'asc' ? 'asc' : 'desc'
 
-  const where: Record<string, unknown> = {}
-  if (req.query.active === 'true') where.isActive = true
-  else if (req.query.active === 'false') where.isActive = false
-  if (typeof req.query.styleId === 'string' && req.query.styleId) where.styleId = req.query.styleId
-  if (typeof req.query.color === 'string' && req.query.color) where.color = req.query.color
-
-  if (typeof req.query.status === 'string' && req.query.status) {
-    const status = req.query.status.toUpperCase()
-    if (!BOM_STATUSES.includes(status)) {
-      throw new AppError(
-        `'${req.query.status}' is not a BOM status. Use one of: ${BOM_STATUSES.join(', ')}.`,
-        400,
-        'INVALID_STATUS',
-      )
-    }
-    where.status = status
-  }
-
-  if (q) {
-    where.OR = [
-      { version: { contains: q, mode: 'insensitive' } },
-      { color: { contains: q, mode: 'insensitive' } },
-      { style: { name: { contains: q, mode: 'insensitive' } } },
-      { style: { code: { contains: q, mode: 'insensitive' } } },
-    ]
-  }
+  const where = bomListWhere(req.query as Record<string, unknown>)
 
   const [rows, total] = await Promise.all([
     prisma.bOM.findMany({
       where,
       include: bomInclude,
-      orderBy: { [sortField]: sortOrder },
+      orderBy:
+        sortField === 'style'
+          ? [{ style: { code: sortOrder } }, { color: 'asc' }, { createdAt: 'desc' }]
+          : { [sortField]: sortOrder },
       skip: (page - 1) * limit,
       take: limit,
     }),

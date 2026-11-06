@@ -9,10 +9,12 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
 import { ensureJobCards } from '../services/jobCard.service'
-import { attachLateBoms, materialPlan, orderForPlanning, PLANNABLE_ORDER_STATUSES } from '../services/manufacturing.service'
+import { attachLateBoms, materialPlan, MO_STAGES, moStages, orderForPlanning, PLANNABLE_ORDER_STATUSES, stageWhere, workStarted, type MoStage } from '../services/manufacturing.service'
 import { cancelCutting, createCutting, cuttingPrep, cuttingSchema } from '../services/cutting.service'
 import { applyRouting, routingProblem, stylesOfMo } from '../services/route.service'
 import floorRoutes from './productionFloor.routes'
+import { assertNotCancelling } from '../services/orderCancel.service'
+import { moChanges, moHistory } from '../services/moHistory.service'
 
 /**
  * Manufacturing orders: what the factory is to make for a sales order.
@@ -83,6 +85,7 @@ const reasonSchema = z.object({ reason: z.string().trim().min(5, 'Say why, in a 
  * order line carries. Lines with nothing to make are left off.
  */
 async function shapeLines(tx: Prisma.TransactionClient, soId: string, input: z.infer<typeof moBodySchema>, exceptMoId?: string) {
+  await assertNotCancelling(tx, soId, 'nothing more is planned for it')
   const { so, lines } = await orderForPlanning(tx, soId, exceptMoId)
   if (!(PLANNABLE_ORDER_STATUSES as readonly string[]).includes(so.status)) {
     throw new AppError(
@@ -148,6 +151,11 @@ const moInclude = {
       deliveryDate: true,
       customerPORef: true,
       customer: { select: { id: true, name: true } },
+      // Short-closed or cancelled: when and why, for an order still open under it.
+      shortClosedAt: true,
+      shortCloseReason: true,
+      cancelledAt: true,
+      cancelReason: true,
     },
   },
   lines: {
@@ -207,7 +215,7 @@ const moInclude = {
   closedBy: { select: { id: true, name: true } },
 } satisfies Prisma.ManufacturingOrderInclude
 
-// GET /api/production/orders — filters: q, status, soId, brandId, open=1, page, limit.
+// GET /api/production/orders — filters: q, status, stage (see moStages), soId, brandId, open=1, page, limit.
 router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
@@ -233,16 +241,22 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       ],
     })
   }
-  const where: Prisma.ManufacturingOrderWhereInput = and.length ? { AND: and } : {}
   // Lines planned before their BOM was approved pick it up, so "without a BOM" is true.
   await attachLateBoms(prisma)
+  // Where the work stands: the list's Status filter.
+  const stage = text(req.query.stage)
+  if (stage) {
+    if (!(MO_STAGES as readonly string[]).includes(stage)) throw new AppError(`Unknown stage '${stage}'`, 400, 'BAD_STAGE')
+    and.push(await stageWhere(prisma, stage as MoStage, { AND: [...and] }))
+  }
+  const where: Prisma.ManufacturingOrderWhereInput = and.length ? { AND: and } : {}
 
   const [orders, total] = await Promise.all([
     prisma.manufacturingOrder.findMany({
       where,
       include: {
         brand: { select: { id: true, name: true, type: true } },
-        so: { select: { id: true, soNumber: true, deliveryDate: true, customer: { select: { name: true } } } },
+        so: { select: { id: true, soNumber: true, status: true, shortClosedAt: true, deliveryDate: true, customer: { select: { name: true } } } },
         lines: { select: { color: true, bomId: true, style: { select: { code: true } } } },
         routing: { select: { code: true } },
         _count: { select: { materialRequisitions: true, steps: true } },
@@ -253,6 +267,32 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
     }),
     prisma.manufacturingOrder.count({ where }),
   ])
+  // Which of them work has started on (material issued, cutting recorded, packed): not to be edited.
+  const ids = orders.map((o) => o.id)
+  const [issuedTo, cutOn, packedOn] = ids.length
+    ? await Promise.all([
+        prisma.materialRequisition.findMany({ where: { moId: { in: ids }, lines: { some: { issuedQty: { gt: 0 } } } }, select: { moId: true }, distinct: ['moId'] }),
+        prisma.cuttingOrder.findMany({ where: { moId: { in: ids }, status: { not: 'CANCELLED' } }, select: { moId: true }, distinct: ['moId'] }),
+        prisma.manufacturingOrder.findMany({ where: { id: { in: ids }, fgReceipts: { some: { cancelledAt: null } } }, select: { id: true } }),
+      ])
+    : [[], [], []]
+  const issued = new Set(issuedTo.map((m) => m.moId))
+  const cut = new Set(cutOn.map((c) => c.moId))
+  const packed = new Set(packedOn.map((m) => m.id))
+  /** Why a row's plan can no longer be changed, in a few words; null while it can. */
+  const blockOf = (mo: (typeof orders)[number]) =>
+    mo.status === 'COMPLETED' || mo.status === 'CLOSED'
+      ? `${mo.moNumber} is ${mo.status.toLowerCase()}`
+      : mo.so && !(PLANNABLE_ORDER_STATUSES as readonly string[]).includes(mo.so.status)
+        ? `${mo.so.soNumber} is ${mo.so.shortClosedAt ? 'short-closed' : mo.so.status.toLowerCase().replace(/_/g, ' ')}, so nothing more is planned for it`
+        : issued.has(mo.id)
+          ? 'The store has issued material to it'
+          : cut.has(mo.id)
+            ? 'Cutting is recorded on it'
+            : packed.has(mo.id)
+              ? 'Pieces of it are packed'
+              : null
+  const stages = await moStages(prisma, orders.map((o) => ({ ...o, soStatus: o.so?.status ?? null })))
 
   res.json({
     success: true,
@@ -260,6 +300,13 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       id: mo.id,
       moNumber: mo.moNumber,
       status: mo.status,
+      // Where the work stands (materials asked, issued, in production, packing): its status says only "released".
+      stage: stages.get(mo.id)?.stage ?? mo.status,
+      materialItems: stages.get(mo.id)?.materialItems ?? null,
+      materialItemsInFull: stages.get(mo.id)?.materialItemsInFull ?? null,
+      // Its plan can still be changed (nothing issued to it, cut or packed; it and its order open), and if not, why.
+      editable: blockOf(mo) === null,
+      editBlock: blockOf(mo),
       brand: mo.brand,
       soId: mo.so?.id ?? null,
       customer: mo.so?.customer.name ?? null,
@@ -336,7 +383,13 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
   await attachLateBoms(prisma, req.params.id)
   const order = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, include: moInclude })
   if (!order) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
-  res.json({ success: true, data: order })
+  const [editBlock, stages] = await Promise.all([moEditBlock(prisma, order), moStages(prisma, [{ ...order, soStatus: order.so?.status ?? null }])])
+  res.json({ success: true, data: { ...order, editBlock, stage: stages.get(order.id)?.stage ?? order.status } })
+})
+
+/** GET /api/production/orders/:id/history — who changed what on it, and when, newest first. */
+router.get('/orders/:id/history', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await moHistory(prisma, req.params.id) })
 })
 
 /** Raises a manufacturing order inside the caller's transaction. Exported for the checks that roll it back. */
@@ -375,14 +428,45 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
   })
 })
 
-/** PATCH /api/production/orders/:id — a draft changed: dates, notes, pieces. */
+/**
+ * Why a manufacturing order can no longer be changed, or null when it can.
+ *
+ * Its plan stays open, released or not and with requisitions raised or not,
+ * until work has really started on it: material issued from the store to
+ * it, cutting recorded, pieces packed, or the order finished. After that the
+ * floor is working to the plan as it stands.
+ */
+export async function moEditBlock(db: Prisma.TransactionClient | typeof prisma, mo: { id: string; moNumber: string; status: string }) {
+  if (mo.status === 'COMPLETED' || mo.status === 'CLOSED') return `${mo.moNumber} is ${mo.status.toLowerCase()}, so it can no longer be changed.`
+  const order = await db.manufacturingOrder.findUnique({ where: { id: mo.id }, select: { so: { select: { soNumber: true, status: true, shortClosedAt: true } } } })
+  if (order?.so && !(PLANNABLE_ORDER_STATUSES as readonly string[]).includes(order.so.status)) {
+    const word = order.so.shortClosedAt ? 'short-closed' : order.so.status.toLowerCase().replace(/_/g, ' ')
+    return `${order.so.soNumber} is ${word}, so nothing more is planned for it and ${mo.moNumber} can no longer be changed.`
+  }
+  const issued = await db.materialRequisition.findFirst({
+    where: { moId: mo.id, lines: { some: { issuedQty: { gt: 0 } } } },
+    select: { mrNumber: true },
+  })
+  if (issued) return `The store has issued material to ${mo.moNumber} (${issued.mrNumber}), so its plan can no longer be changed.`
+  const cut = await db.cuttingOrder.findFirst({ where: { moId: mo.id, status: { not: 'CANCELLED' } }, select: { cutOrderNumber: true } })
+  if (cut) return `Cutting is recorded on ${mo.moNumber} (${cut.cutOrderNumber}), so its plan can no longer be changed.`
+  const packed = await db.manufacturingOrder.count({ where: { id: mo.id, fgReceipts: { some: { cancelledAt: null } } } })
+  if (packed) return `Pieces of ${mo.moNumber} are packed, so its plan can no longer be changed.`
+  return null
+}
+
+/**
+ * PATCH /api/production/orders/:id — the plan changed: dates, notes, pieces,
+ * routing. A draft, or a released order nothing has been issued to yet.
+ */
 router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = moBodySchema.parse(req.body)
   const { before, after } = await prisma.$transaction(
     async (tx) => {
       const before = await tx.manufacturingOrder.findUnique({ where: { id: req.params.id }, include: moInclude })
       if (!before) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
-      if (before.status !== 'DRAFT') throw new AppError(`${before.moNumber} has been released, so its plan can no longer be changed`, 409, 'NOT_DRAFT')
+      const block = await moEditBlock(tx, before)
+      if (block) throw new AppError(block, 409, 'MO_STARTED')
       if (!before.soId) throw new AppError(`${before.moNumber} is not for a sales order`, 409, 'NO_ORDER')
       const { total, create } = await shapeLines(tx, before.soId, data, before.id)
       await tx.mOLine.deleteMany({ where: { moId: before.id } })
@@ -414,7 +498,18 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     { timeout: 30_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: after.id, before, after })
-  res.json({ success: true, message: `${after.moNumber} saved`, data: after })
+  const waiting = await prisma.materialRequisition.findMany({
+    where: { moId: after.id, closedAt: null, status: { in: ['PENDING', 'APPROVED'] } },
+    select: { mrNumber: true },
+  })
+  const note = waiting.length
+    ? ` ${waiting.map((m) => m.mrNumber).join(', ')} ${waiting.length === 1 ? 'was' : 'were'} raised for the plan before: check ${waiting.length === 1 ? 'it' : 'them'} against Materials, which shows what is still to ask for.`
+    : ''
+  const changes = moChanges(before, after)
+  const said = changes.length
+    ? `: ${changes.slice(0, 4).join('; ')}${changes.length > 4 ? `; and ${changes.length - 4} more (see History)` : ''}`
+    : ', nothing changed'
+  res.json({ success: true, message: `${after.moNumber} saved${said}.${note}`, data: after })
 })
 
 /** Releases a draft inside the caller's transaction. */
@@ -422,6 +517,7 @@ export async function releaseMo(tx: Prisma.TransactionClient, id: string) {
   const mo = await tx.manufacturingOrder.findUnique({ where: { id }, select: { id: true, moNumber: true, status: true, soId: true } })
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   if (mo.status !== 'DRAFT') throw new AppError(`${mo.moNumber} is already ${mo.status.toLowerCase()}`, 409, 'NOT_DRAFT')
+  await assertNotCancelling(tx, mo.soId, `${mo.moNumber} is not released`)
   if (mo.soId) {
     const so = await tx.salesOrder.findUniqueOrThrow({ where: { id: mo.soId }, select: { soNumber: true, status: true } })
     if (!(PLANNABLE_ORDER_STATUSES as readonly string[]).includes(so.status)) {
@@ -522,18 +618,43 @@ router.post('/orders/:id/complete-short', requirePermission(MODULE, 'edit'), asy
 })
 
 /**
- * GET  /api/production/orders/:id/cutting — what the cutting form needs: the
+ * GET  /api/production/orders/:id/cutting — what the cutting sheet needs: the
  *      fabric issued to the order and how much is accounted for, pieces by
  *      size planned and cut, earlier cuttings, panel items and stores.
- * POST /api/production/orders/:id/cutting — one cutting: fabric used, waste,
- *      pieces by size, and optionally the panels into a store.
- * POST /api/production/cutting/:id/cancel — takes it back, with a reason.
+ * POST /api/production/orders/:id/cutting — one cutting in one step: fabric
+ *      used, waste, pieces by size. Only on an order with stages, where it
+ *      ties the pieces into bundles; nothing on the screens uses it any more.
+ *      Since 6 Nov 2026 every order is cut on its cutting sheet once its
+ *      stages are set up: sizes issued to a cutting contractor, then received
+ *      back cut (productionFloor.routes: cutting-issues, cutting/:id/receive).
+ *      Orders cut the old way, without stages, keep their cuttings.
+ * POST /api/production/cutting/:id/cancel — takes it back, with a reason. An
+ *      old cutting without stages is cancelled here too, which is how such an
+ *      order can still take stages.
  */
 router.get('/orders/:id/cutting', requirePermission(MODULE, 'view'), async (req, res) => {
   res.json({ success: true, data: await prisma.$transaction((tx) => cuttingPrep(tx, req.params.id)) })
 })
 
 router.post('/orders/:id/cutting', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  // No more cutting without stages (6 Nov 2026): the pieces would get no
+  // bundles, so nothing could move them on or change their size.
+  const mo = await prisma.manufacturingOrder.findUnique({
+    where: { id: req.params.id },
+    select: { moNumber: true, totalPackedQty: true, _count: { select: { steps: true, cuttingOrders: { where: { status: { not: 'CANCELLED' }, bundles: { none: {} } } } } } },
+  })
+  if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  if (!mo._count.steps) {
+    // Cut the old way already, or packed without stages: it cannot take stages, so say what it can still do.
+    const legacy = mo._count.cuttingOrders > 0 || mo.totalPackedQty > 0
+    throw new AppError(
+      legacy
+        ? `${mo.moNumber} was cut the old way, and more cutting is no longer recorded that way: book what is packed in Inventory → Finished Goods In.${mo.totalPackedQty > 0 ? '' : ' To use stages instead, first cancel its old cuttings under Cutting on the order.'}`
+        : `Cutting is recorded on the cutting sheet once ${mo.moNumber}'s stages are set up: set up stages, then issue sizes to a cutting contractor.`,
+      409,
+      'NEEDS_STAGES',
+    )
+  }
   const data = cuttingSchema.parse(req.body)
   const cut = await prisma.$transaction((tx) => createCutting(tx, req.params.id, data, req.user!.id, { mayApprove: userCan(req.user, MODULE, 'approve') }), {
     timeout: 60_000,
@@ -679,6 +800,16 @@ export async function raiseRequisitions(tx: Prisma.TransactionClient, moId: stri
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   if (mo.status === 'DRAFT') throw new AppError(`Release ${mo.moNumber} before asking the store for its materials`, 409, 'NOT_RELEASED')
   if (mo.status === 'CLOSED' || mo.status === 'COMPLETED') throw new AppError(`${mo.moNumber} is ${mo.status.toLowerCase()}`, 409, 'NOT_OPEN')
+  await assertNotCancelling(tx, mo.soId, 'nothing more is asked of the store for it')
+  // Its sales order is over and nothing was made on it: nothing more is made for it. Work already
+  // on the floor (issued, cut, packed) can still be given what it needs to finish.
+  if (mo.soId) {
+    const order = await tx.salesOrder.findUniqueOrThrow({ where: { id: mo.soId }, select: { soNumber: true, status: true, shortClosedAt: true } })
+    if ((order.status === 'COMPLETED' || order.status === 'CANCELLED') && !(await workStarted(tx, [mo.id])).size) {
+      const word = order.status === 'CANCELLED' ? 'cancelled' : order.shortClosedAt ? 'short-closed' : 'completed'
+      throw new AppError(`${order.soNumber} is ${word} and nothing was made on ${mo.moNumber}, so nothing is asked of the store for it. Close ${mo.moNumber} instead.`, 409, 'ORDER_NOT_OPEN')
+    }
+  }
 
   // Checked against the plan, so a double click or a stale screen cannot ask
   // for the same material twice, nor a customer's cloth be drawn for anyone

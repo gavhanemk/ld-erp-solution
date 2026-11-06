@@ -90,6 +90,36 @@ export async function fabricStock(db: Db): Promise<FabricOption[]> {
     .sort((a, b) => Number(b.onHand + b.customers > 0) - Number(a.onHand + a.customers > 0) || a.name.localeCompare(b.name))
 }
 
+/**
+ * Which fabrics each style's BOMs use: one row per style and fabric, with the
+ * colours whose BOM has it. Draft and approved BOMs count, retired ones do
+ * not. The routing form narrows its Style and Fabric lists by these where a
+ * BOM exists; where none does, every style and every fabric is offered. Each
+ * fabric comes with its name too, for one that has no stock records yet and
+ * so is not among the fabrics with stock.
+ */
+export async function bomFabrics(db: Db) {
+  const lines = await db.bOMLine.findMany({
+    // Fabrics and styles still in use only: one switched off is never offered or filled in.
+    where: { componentItem: { ...fabricItemWhere, isActive: true }, bom: { isActive: true, status: { not: 'OBSOLETE' }, style: { isActive: true } } },
+    select: {
+      componentItem: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
+      bom: { select: { styleId: true, color: true } },
+    },
+  })
+  const pairs = new Map<string, { styleId: string; fabricItemId: string; colors: string[] }>()
+  const fabrics = new Map<string, { id: string; code: string; name: string; uom: string }>()
+  for (const l of lines) {
+    const it = l.componentItem
+    fabrics.set(it.id, { id: it.id, code: it.code, name: it.name, uom: it.uom?.symbol ?? '' })
+    const key = `${l.bom.styleId}|${it.id}`
+    const pair = pairs.get(key) ?? { styleId: l.bom.styleId, fabricItemId: it.id, colors: [] }
+    if (l.bom.color && !pair.colors.includes(l.bom.color)) pair.colors.push(l.bom.color)
+    pairs.set(key, pair)
+  }
+  return { pairs: [...pairs.values()], fabrics: [...fabrics.values()] }
+}
+
 /** The item picked as the fabric is one, and still in use — unless the routing has it already. */
 async function assertFabric(db: Db, itemId: string, current?: string | null) {
   const item = await db.item.findUnique({ where: { id: itemId }, select: { id: true, name: true, isActive: true } })

@@ -34,7 +34,17 @@ export interface GarmentStory {
   orderDate: string | null
   deliveryDate: string | null
   receipt: { fgrNumber: string; receiptDate: string; cancelledAt: string | null }
-  bundle: { code: string; bundleNo: number; qty: number; cutOrder: string | null; cutDate: string | null; lot: string | null; jobCard: string | null } | null
+  bundle: {
+    code: string
+    bundleNo: number
+    qty: number
+    cutOrder: string | null
+    cutDate: string | null
+    lot: string | null
+    jobCard: string | null
+    /** Made from another bundle when its pieces were made as this size at stitching: cut as M, made as L. */
+    madeFrom?: { code: string; size: string; step: string } | null
+  } | null
   challan: { dcNumber: string; dcDate: string; status: string; dispatchedAt: string | null; deliveredAt: string | null; vehicle: string | null; transporter: string | null; lr: string | null; invoice: string | null } | null
   where: string
   milestones: Array<{ key: string; label: string; at: string | null }>
@@ -115,6 +125,11 @@ export function GarmentTrace({ g, open }: { g: GarmentStory; open: (t: Target) =
         <div className="grid grid-cols-2 gap-x-6 gap-y-3 border-t border-border p-4 sm:grid-cols-3 lg:grid-cols-6">
           <Fact label="Size">
             <span className="text-2xl font-bold">{g.size || '—'}</span>
+            {g.bundle?.madeFrom && (
+              <div className="text-xs text-muted-foreground">
+                Cut as {g.bundle.madeFrom.size}, made as {g.size || 'this size'} at {g.bundle.madeFrom.step}
+              </div>
+            )}
           </Fact>
           <Fact label="Colour">{g.color || '—'}</Fact>
           <Fact label="Grade">{g.grade || 'A'}</Fact>
@@ -145,6 +160,7 @@ export function GarmentTrace({ g, open }: { g: GarmentStory; open: (t: Target) =
                 <div className="text-xs text-muted-foreground">
                   {g.bundle.qty} pieces{g.bundle.cutOrder ? ` · ${g.bundle.cutOrder}` : ''}
                 </div>
+                {g.bundle.madeFrom && <div className="text-xs text-muted-foreground">Made from {g.bundle.madeFrom.code.split('-').pop()}</div>}
               </>
             ) : (
               '—'

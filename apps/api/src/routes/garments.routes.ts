@@ -42,6 +42,7 @@ const EVENT_LABEL: Record<string, string> = {
   VENDOR_RETURN: 'Back from the unit',
   PACK: 'Into finished goods',
   SPLIT: 'Bundle split',
+  SIZE_CHANGE: 'Size changed',
   REVERSAL: 'Reversed',
 }
 const BUCKET_LABEL: Record<string, string> = {
@@ -322,10 +323,59 @@ function labelWhere(query: Record<string, unknown>): Prisma.GarmentWhereInput {
   }
 }
 
+/**
+ * A bundle and the bundles it was made from, nearest first. A size change at
+ * stitching makes a new bundle from an old one; the new bundle's pieces were
+ * cut, laid and brought to stitching in the old one, so its history is the
+ * old bundle's up to the step and the moment it was made (`upTo`), then its
+ * own. A bundle made from one that was itself made from another goes back to
+ * the bundle that was cut.
+ */
+type Lineage = Array<{ id: string; code: string; upTo: { seq: number; at: Date } | null }>
+
+async function lineagesOf(bundleIds: string[]): Promise<Map<string, Lineage>> {
+  const info = new Map<string, { id: string; code: string; parentId: string | null; seq: number | null; at: Date }>()
+  let want = [...new Set(bundleIds)]
+  // Up the chain to the bundle that was cut; a bundle already read is not read again, so it ends.
+  for (let depth = 0; want.length && depth < 500; depth++) {
+    const rows = await prisma.productionBundle.findMany({
+      where: { id: { in: want } },
+      select: { id: true, code: true, parentId: true, createdAt: true, splitAtStep: { select: { sequence: true } }, sizeChangeIn: { select: { event: { select: { createdAt: true } } } } },
+    })
+    for (const b of rows) info.set(b.id, { id: b.id, code: b.code, parentId: b.parentId, seq: b.splitAtStep?.sequence ?? null, at: b.sizeChangeIn?.event.createdAt ?? b.createdAt })
+    want = [...new Set(rows.map((b) => b.parentId).filter((p): p is string => !!p && !info.has(p)))]
+  }
+  const out = new Map<string, Lineage>()
+  for (const id of new Set(bundleIds)) {
+    const chain: Lineage = []
+    let upTo = null as Lineage[number]['upTo']
+    for (let b = info.get(id); b && chain.length < 500 && !chain.some((c) => c.id === b!.id); b = b.parentId ? info.get(b.parentId) : undefined) {
+      chain.push({ id: b.id, code: b.code, upTo })
+      if (!b.parentId) break
+      // The one it came from counts up to where and when this one was made,
+      // and never past where a later one in the chain was made.
+      const seq = b.seq ?? Number.MAX_SAFE_INTEGER
+      const was: Lineage[number]['upTo'] = upTo
+      upTo = { seq: Math.min(seq, was?.seq ?? seq), at: was && was.at < b.at ? was.at : b.at }
+    }
+    out.set(id, chain)
+  }
+  return out
+}
+
+/** Whether an entry of a bundle in the lineage is part of this piece's history. */
+const withinLineage = (upTo: Lineage[number]['upTo'] | undefined, e: { step: { sequence: number }; event: { createdAt: Date } }) =>
+  upTo === null || (upTo !== undefined && e.step.sequence <= upTo.seq && e.event.createdAt <= upTo.at)
+
+/** MO-2627-0001-B003 → B003. */
+const shortBundle = (code: string) => code.split('-').pop() ?? code
+
 type Journey = {
   cut: { date: Date; ref: string | null; by: string | null } | null
   steps: Array<{ name: string; check: boolean; outside: boolean; done: boolean; date: Date | null; by: string | null; challan: string | null }>
   packed: { date: Date; ref: string | null; store: string | null } | null
+  /** Made as another size at stitching, oldest first: cut as M, made as L. */
+  sizeChanges: Array<{ from: string; fromSize: string; to: string; toSize: string; qty: number; step: string; date: Date; reason: string }>
 }
 
 /**
@@ -333,28 +383,33 @@ type Journey = {
  * whom and on which challan; every stage in route order, done or not, who
  * did or checked it — the outside unit and its job-work challan for one done
  * outside — and when it was packed into finished goods. One read for all the
- * bundles of a print run: 300 shirts are 16 bundles.
+ * bundles of a print run: 300 shirts are 16 bundles. A bundle made by a size
+ * change carries the bundle it came from up to the step it was made at.
  */
 async function journeysOf(bundleIds: string[], moIds: string[]): Promise<Map<string, Journey>> {
   const out = new Map<string, Journey>()
   if (!bundleIds.length) return out
-  const [steps, entries] = await Promise.all([
+  const lineages = await lineagesOf(bundleIds)
+  const allIds = [...new Set([...bundleIds, ...[...lineages.values()].flatMap((l) => l.map((b) => b.id))])]
+  const [steps, entries, changes] = await Promise.all([
     prisma.mOStep.findMany({
       where: { moId: { in: moIds }, skippedAt: null },
       orderBy: { sequence: 'asc' },
       select: { id: true, moId: true, name: true, kind: true, isQcStep: true, execution: true },
     }),
     prisma.wipEntry.findMany({
-      where: { bundleId: { in: bundleIds }, qty: { gt: 0 }, event: { reversedAt: null, type: { not: 'REVERSAL' } } },
+      where: { bundleId: { in: allIds }, qty: { gt: 0 }, event: { reversedAt: null, type: { not: 'REVERSAL' } } },
       orderBy: { createdAt: 'asc' },
       select: {
         bundleId: true,
         stepId: true,
         bucket: true,
+        step: { select: { sequence: true } },
         event: {
           select: {
             type: true,
             eventDate: true,
+            createdAt: true,
             personName: true,
             vendor: { select: { name: true } },
             transfer: { select: { transferNumber: true } },
@@ -364,12 +419,30 @@ async function journeysOf(bundleIds: string[], moIds: string[]): Promise<Map<str
         },
       },
     }),
+    // The size changes that made a bundle of the chain, still standing.
+    prisma.sizeChange.findMany({
+      where: { toBundleId: { in: allIds }, undoneAt: null },
+      select: {
+        toBundleId: true,
+        qty: true,
+        reason: true,
+        step: { select: { name: true } },
+        event: { select: { eventDate: true } },
+        fromBundle: { select: { code: true } },
+        toBundle: { select: { code: true } },
+        fromSize: { select: { code: true } },
+        toSize: { select: { code: true } },
+      },
+    }),
   ])
   const stepsOf = new Map<string, typeof steps>()
   for (const s of steps) stepsOf.set(s.moId, [...(stepsOf.get(s.moId) ?? []), s])
+  const madeBy = new Map(changes.map((c) => [c.toBundleId, c]))
   const bundles = await prisma.productionBundle.findMany({ where: { id: { in: bundleIds } }, select: { id: true, moId: true } })
   for (const b of bundles) {
-    const mine = entries.filter((e) => e.bundleId === b.id)
+    const chain = lineages.get(b.id) ?? [{ id: b.id, code: '', upTo: null }]
+    const upToOf = new Map(chain.map((x) => [x.id, x.upTo]))
+    const mine = entries.filter((e) => upToOf.has(e.bundleId) && withinLineage(upToOf.get(e.bundleId), e))
     const cutE = mine.find((e) => e.event.type === 'CUT')?.event
     const packE = mine.find((e) => e.event.type === 'PACK')?.event
     out.set(b.id, {
@@ -393,6 +466,11 @@ async function journeysOf(bundleIds: string[], moIds: string[]): Promise<Map<str
         }
       }),
       packed: packE?.fgReceipt ? { date: packE.fgReceipt.receiptDate, ref: packE.fgReceipt.fgrNumber, store: packE.fgReceipt.warehouse?.name ?? null } : null,
+      sizeChanges: chain
+        .map((x) => madeBy.get(x.id))
+        .filter((c): c is NonNullable<typeof c> => !!c)
+        .reverse()
+        .map((c) => ({ from: c.fromBundle.code, fromSize: c.fromSize.code, to: c.toBundle.code, toSize: c.toSize.code, qty: c.qty, step: c.step.name, date: c.event.eventDate, reason: c.reason })),
     })
   }
   return out
@@ -829,6 +907,9 @@ export async function garmentDetail(id: string) {
           qty: true,
           cuttingOrder: { select: { cutOrderNumber: true, cutDate: true, lotNo: true } },
           moLine: { select: { jobCard: { select: { jobCardNumber: true, lotNo: true } } } },
+          // Made from another bundle by a size change at stitching.
+          parentId: true,
+          sizeChangeIn: { select: { step: { select: { name: true } }, fromBundle: { select: { code: true } }, fromSize: { select: { code: true } } } },
         },
       },
       events: { orderBy: { createdAt: 'asc' }, include: { createdBy: { select: { name: true } } } },
@@ -836,29 +917,62 @@ export async function garmentDetail(id: string) {
   })
   if (!g) throw new AppError('That garment does not exist', 404, 'NOT_FOUND')
 
-  // The bundle's journey through the floor: every event that moved its pieces.
-  const entries = g.bundleId
-    ? await prisma.wipEntry.findMany({
-        where: { bundleId: g.bundleId },
-        select: {
-          qty: true,
-          bucket: true,
-          step: { select: { name: true, sequence: true, isQcStep: true, kind: true } },
-          event: {
-            select: {
-              id: true,
-              type: true,
-              eventDate: true,
-              personName: true,
-              reversedAt: true,
-              vendor: { select: { name: true } },
-              transfer: { select: { transferNumber: true } },
-              fgReceipt: { select: { fgrNumber: true } },
-              createdBy: { select: { name: true } },
+  // The bundle's journey through the floor: every event that moved its pieces
+  // — and, for a bundle made by a size change, the bundle it came from up to
+  // the step and the moment it was made.
+  const lineage: Lineage =
+    g.bundleId && g.bundle
+      ? g.bundle.parentId
+        ? ((await lineagesOf([g.bundleId])).get(g.bundleId) ?? [])
+        : [{ id: g.bundleId, code: g.bundle.code, upTo: null }]
+      : []
+  const upToOf = new Map(lineage.map((b) => [b.id, b.upTo]))
+  const codeOf = new Map(lineage.map((b) => [b.id, b.code]))
+  const entries = lineage.length
+    ? (
+        await prisma.wipEntry.findMany({
+          where: { bundleId: { in: lineage.map((b) => b.id) } },
+          select: {
+            qty: true,
+            bucket: true,
+            bundleId: true,
+            step: { select: { name: true, sequence: true, isQcStep: true, kind: true } },
+            event: {
+              select: {
+                id: true,
+                type: true,
+                eventDate: true,
+                createdAt: true,
+                personName: true,
+                reversedAt: true,
+                vendor: { select: { name: true } },
+                transfer: { select: { transferNumber: true } },
+                fgReceipt: { select: { fgrNumber: true } },
+                createdBy: { select: { name: true } },
+              },
             },
           },
+          orderBy: { createdAt: 'asc' },
+        })
+      ).filter((e) => withinLineage(upToOf.get(e.bundleId), e))
+    : []
+  // The size changes among them, each bundle's pieces from one size to another.
+  const sizeEvents = [...new Set(entries.filter((e) => e.event.type === 'SIZE_CHANGE').map((e) => e.event.id))]
+  const sizeRows = sizeEvents.length
+    ? await prisma.sizeChange.findMany({
+        where: { eventId: { in: sizeEvents } },
+        orderBy: { toBundle: { bundleNo: 'asc' } },
+        select: {
+          eventId: true,
+          fromBundleId: true,
+          toBundleId: true,
+          qty: true,
+          reason: true,
+          fromBundle: { select: { code: true } },
+          toBundle: { select: { code: true } },
+          fromSize: { select: { code: true } },
+          toSize: { select: { code: true } },
         },
-        orderBy: { createdAt: 'asc' },
       })
     : []
   const byEvent = new Map<
@@ -884,6 +998,13 @@ export async function garmentDetail(id: string) {
       /** Who did it on our side. */
       person: string | null
       reversed: boolean
+      /** The bundle whose pieces these were: the piece's own, or the one it was made from. */
+      bundle: string | null
+      /**
+       * A size change: the pieces this piece's bundle was made from (`made`),
+       * or pieces of its bundle made as another size and moved out of it.
+       */
+      sizeChange: { made: boolean; qty: number; reason: string; moves: Array<{ from: string; fromSize: string; to: string; toSize: string; qty: number }> } | null
     }
   >()
   for (const e of entries) {
@@ -902,6 +1023,8 @@ export async function garmentDetail(id: string) {
       vendor: e.event.vendor?.name ?? null,
       person: e.event.personName ?? e.event.createdBy?.name ?? null,
       reversed: Boolean(e.event.reversedAt),
+      bundle: codeOf.get(e.bundleId) ?? null,
+      sizeChange: null,
     }
     if (e.qty < 0 && !ev.from) ev.from = e.step.name
     if (e.qty > 0) {
@@ -913,10 +1036,34 @@ export async function garmentDetail(id: string) {
     if (e.qty > 0) {
       ev.changes.push(`${e.qty} ${BUCKET_LABEL[e.bucket] ?? e.bucket.toLowerCase()}`)
       ev.step = e.step.name
+      ev.bundle = codeOf.get(e.bundleId) ?? ev.bundle
       // A check's result, not every move through a check stage.
       ev.check = (e.step.isQcStep || e.step.kind === 'QC') && ['PROCESS', 'DECIDE', 'REWORK_DONE'].includes(e.event.type)
     }
     byEvent.set(e.event.id, ev)
+  }
+  // A size change in words: "Made as L instead of M" when it made this
+  // piece's bundle (or one it came from); "20 pcs made as L" when it took
+  // pieces out of this piece's bundle into another.
+  for (const [eventId, ev] of byEvent) {
+    if (ev.kind !== 'SIZE_CHANGE') continue
+    const rows = sizeRows.filter((r) => r.eventId === eventId)
+    const made = rows.find((r) => codeOf.has(r.toBundleId))
+    const moves = (made ? [made] : rows.filter((r) => codeOf.has(r.fromBundleId) && !codeOf.has(r.toBundleId))).map((r) => ({
+      from: r.fromBundle.code,
+      fromSize: r.fromSize.code,
+      to: r.toBundle.code,
+      toSize: r.toSize.code,
+      qty: r.qty,
+    }))
+    if (!moves.length) continue
+    const qty = moves.reduce((t, m) => t + m.qty, 0)
+    const sizes = [...new Set(moves.map((m) => m.toSize))]
+    ev.sizeChange = { made: Boolean(made), qty, reason: rows[0]?.reason ?? '', moves }
+    ev.qty = qty
+    ev.type = made ? `Made as ${moves[0].toSize} instead of ${moves[0].fromSize}` : `${qty} ${qty === 1 ? 'pc' : 'pcs'} made as ${sizes.join(', ')}`
+    ev.changes = moves.map((m) => `${m.qty} ${m.fromSize} → ${m.toSize} (${shortBundle(m.from)} → ${shortBundle(m.to)})`)
+    ev.bundle = made ? made.toBundle.code : moves[0].from
   }
 
   return {
@@ -950,6 +1097,10 @@ export async function garmentDetail(id: string) {
           cutDate: g.bundle.cuttingOrder?.cutDate ?? null,
           lot: g.bundle.cuttingOrder?.lotNo ?? g.bundle.moLine?.jobCard?.lotNo ?? null,
           jobCard: g.bundle.moLine?.jobCard?.jobCardNumber ?? null,
+          /** Made from another bundle when its pieces were made as this size at stitching: cut as M, made as L. */
+          madeFrom: g.bundle.sizeChangeIn
+            ? { code: g.bundle.sizeChangeIn.fromBundle.code, size: g.bundle.sizeChangeIn.fromSize.code, step: g.bundle.sizeChangeIn.step.name }
+            : null,
         }
       : null,
     production: [...byEvent.values()].filter((e) => e.changes.length),

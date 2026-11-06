@@ -6,9 +6,10 @@ import { api, ApiError, can } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { StepInput } from '@/components/ui/StepInput'
+import { oldCutNote } from '../MoFlowStrip'
 import { SheetView } from './SheetView'
 import { useJobCard } from './useFlow'
-import { pcs, refNo, stageOf } from './types'
+import { pcs, refNo, revisedQty, stageOf } from './types'
 
 /**
  * One job card: a colour (or design) of a manufacturing order, as the floor
@@ -133,8 +134,11 @@ export function JobCardView({ jobCardId, onClose, onChanged }: { jobCardId: stri
                 note from the manufacturing order. Change any of them for this card.
               </p>
               {(d.line?.sizes.length ?? 0) > 0 && (
+                // After a size change at stitching each changed size shows what is being made, with its plan beside it.
                 <p className="text-muted-foreground mt-1 text-xs tabular-nums">
-                  Count by size: {d.line!.sizes.map((z) => `${z.code} ${pcs(z.qty)}`).join(' · ')} — {pcs(d.line!.totalQty)} pcs
+                  Count by size:{' '}
+                  {d.line!.sizes.map((z) => (z.changed ? `${z.code} ${pcs(revisedQty(z))} (${pcs(z.qty)} planned)` : `${z.code} ${pcs(z.qty)}`)).join(' · ')} —{' '}
+                  {pcs(d.line!.totalQty)} pcs{d.line!.sizes.some((z) => z.changed) ? ', after size changes at stitching' : ''}
                 </p>
               )}
             </Section>
@@ -142,7 +146,9 @@ export function JobCardView({ jobCardId, onClose, onChanged }: { jobCardId: stri
             <Section icon={Route} title="Process forms">
               {!d.steps.length ? (
                 <p className="text-muted-foreground text-sm">
-                  No stages yet. Once {d.mo.moNumber}&apos;s materials are issued, load its stages on the manufacturing order: a form follows for each.
+                  {d.cutWithoutStages?.length
+                    ? `No stages on ${d.mo.moNumber}. ${oldCutNote(d.cutWithoutStages, d.mo.totalPackedQty, 'on the manufacturing order')}`
+                    : `No stages yet. Once ${d.mo.moNumber}’s materials are issued, load its stages on the manufacturing order: a form follows for each.`}
                 </p>
               ) : (
                 <div className="border-border overflow-x-auto rounded-lg border">

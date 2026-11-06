@@ -4,7 +4,7 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState }
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import {
   Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer, FileText,
-  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock, Undo2, ThumbsUp, Layers, Factory } from 'lucide-react'
+  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock, Undo2, ThumbsUp, Factory } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { ProcessDialog, type ProcessTab } from '@/components/inventory/ProcessDialog'
@@ -341,6 +341,8 @@ function RequisitionsScreen() {
   const [saved, setSaved] = useState(0)
   const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
   const [returning, setReturning] = useState<Requisition | null>(null)
+  // ?return=<id>: from a sales order's cancellation, to record its unused material coming back.
+  const returnAsked = params.get('return')
   /** Stock that just went out: its labels, and the packages it came from. */
   const [outward, setOutward] = useState<OutwardRef | null>(null)
   /** Several requisitions taken through one step together. */
@@ -385,6 +387,16 @@ function RequisitionsScreen() {
   useEffect(() => {
     void load()
   }, [load])
+
+  // Opened to record a return: once the requisitions are in, its return window opens, and the link is spent.
+  useEffect(() => {
+    if (!returnAsked || !rows.length) return
+    const mr = rows.find((r) => r.id === returnAsked)
+    if (mr) setReturning(mr)
+    const next = new URLSearchParams(params.toString())
+    next.delete('return')
+    router.replace(next.toString() ? `${pathname}?${next}` : pathname)
+  }, [returnAsked, rows, params, pathname, router])
 
   useEffect(() => {
     setPage(1)
@@ -981,7 +993,7 @@ function RequisitionsScreen() {
   const inGroup = (mr: Requisition) => (orderKey(mr) ? 'border-l-2 border-l-primary/40' : '')
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {/* The title, the two tabs beside it, and the buttons on the right: one line, as on Job Work. */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-4">
@@ -1058,12 +1070,13 @@ function RequisitionsScreen() {
 
       {view === 'list' && (
       <>
-      {/* Each tile is a filter: click to show only those, click again to show all. */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      {/* Each tile is a filter: click to show only those, click again to show all. One short row, so the table starts high. */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <KpiTile
           icon={Hourglass}
           tone={TONE.amber}
           label="Waiting for approval"
+          compact
           value={String(figures.approval)}
           valueClass={figures.approval ? 'text-amber-500' : 'text-foreground'}
           sub={
@@ -1080,6 +1093,7 @@ function RequisitionsScreen() {
           icon={PackageCheck}
           tone={TONE.teal}
           label="To be issued"
+          compact
           value={String(figures.handover)}
           sub={
             isSet('stage', ['arrived', 'handover', 'split', 'partly'])
@@ -1095,6 +1109,7 @@ function RequisitionsScreen() {
           icon={ShoppingCart}
           tone={TONE.sky}
           label="Waiting for purchase"
+          compact
           value={String(figures.purchase)}
           sub={
             isSet('stage', ['purchase'])
@@ -1110,6 +1125,7 @@ function RequisitionsScreen() {
           icon={AlarmClock}
           tone={TONE.rose}
           label="Past the needed-by date"
+          compact
           value={String(figures.late)}
           valueClass={figures.late ? 'text-rose-500' : 'text-foreground'}
           sub={
@@ -1124,17 +1140,19 @@ function RequisitionsScreen() {
         />
       </div>
 
-      {/* Raised so an open dropdown lies over the table below. */}
-      <div className="glass-card relative z-30 space-y-2 px-4 py-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex h-10 min-w-[200px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
-            <Search size={14} className="text-muted-foreground" />
+      {/* The list, its toolbar on top: search, period and filters on the left; what can be done to
+          several at once, and how many, on the right. Not clipped, so an open filter lies over the rows. */}
+      <div className="glass-card p-0">
+        <div className="border-border relative z-30 flex flex-wrap items-center gap-2 border-b px-3 py-2">
+          <div className="flex h-8 w-full items-center gap-2 rounded-lg border border-border bg-secondary px-2.5 sm:w-64">
+            <Search size={14} className="shrink-0 text-muted-foreground" />
             <input
-              className="flex-1 border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
-              placeholder="Search requisition, department, customer, item..."
+              className="min-w-0 flex-1 border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+              placeholder="Search MR, MO, order, item..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search requisitions"
+              title="Search by requisition, MO, sales order, customer, department or item"
               data-hotkey="search"
             />
             {search && (
@@ -1144,7 +1162,7 @@ function RequisitionsScreen() {
             )}
           </div>
           <SmartSelect
-            className="h-10 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-sm text-foreground outline-none"
+            className="h-8 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-xs text-foreground outline-none"
             value={preset}
             onChange={(e) => pickPreset(e.target.value)}
             aria-label="Period"
@@ -1156,10 +1174,8 @@ function RequisitionsScreen() {
             ))}
           </SmartSelect>
           {FILTERS.filter((f) => ['stage', 'department', 'need'].includes(f.key)).map((f) => (
-            <FilterMenu key={f.key} label={f.label} choices={choicesFor(f.key)} selected={picked[f.key] ?? []} onChange={(next) => setFilter(f.key, next)} />
+            <FilterMenu key={f.key} small label={f.label} choices={choicesFor(f.key)} selected={picked[f.key] ?? []} onChange={(next) => setFilter(f.key, next)} />
           ))}
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
           {chips.map((c) => (
             <button
               key={`${c.key}-${c.value}`}
@@ -1175,36 +1191,28 @@ function RequisitionsScreen() {
               Clear all
             </button>
           )}
-          <span className="ml-auto text-xs text-muted-foreground">
-            {narrowed ? `${shown.length} of ${rows.length}` : rows.length} {rows.length === 1 ? 'requisition' : 'requisitions'}
-          </span>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            {together.approve.length > 0 && (
+              <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setBulk('approve')} title="Several at once, from the list shown">
+                <ThumbsUp size={13} /> Approve {together.approve.length}
+              </button>
+            )}
+            {together.indent.length > 0 && (
+              <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setBulk('indent')} title="Several at once, from the list shown">
+                <ShoppingCart size={13} /> Short items to indent ({together.indent.length})
+              </button>
+            )}
+            {together.issue.length > 0 && (
+              <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setBulk('issue')} title="Several at once, from the list shown">
+                <PackageCheck size={13} /> Issue in stock ({together.issue.length})
+              </button>
+            )}
+            <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
+              {narrowed ? `${shown.length} of ${rows.length}` : rows.length} {rows.length === 1 ? 'requisition' : 'requisitions'}
+            </span>
+          </div>
         </div>
-      </div>
-
-      {(together.approve.length > 0 || together.indent.length > 0 || together.issue.length > 0) && (
-        <div className="glass-card flex flex-wrap items-center gap-2 px-4 py-2.5">
-          <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
-            <Layers size={14} /> Several at once, from the list shown:
-          </span>
-          {together.approve.length > 0 && (
-            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setBulk('approve')}>
-              <ThumbsUp size={13} /> Approve {together.approve.length}
-            </button>
-          )}
-          {together.indent.length > 0 && (
-            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setBulk('indent')}>
-              <ShoppingCart size={13} /> Put short items on the indent ({together.indent.length})
-            </button>
-          )}
-          {together.issue.length > 0 && (
-            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setBulk('issue')}>
-              <PackageCheck size={13} /> Issue what is in stock ({together.issue.length})
-            </button>
-          )}
-        </div>
-      )}
-
-      <div className="glass-card overflow-hidden p-0">
+        <div className="overflow-hidden rounded-b-xl">
         {loading && rows.length === 0 ? (
           <p className="px-4 py-8 text-sm text-muted-foreground">Loading...</p>
         ) : shown.length === 0 ? (
@@ -1418,6 +1426,7 @@ function RequisitionsScreen() {
             <Pagination page={page} pages={pages} onPageChange={setPage} />
           </div>
         )}
+        </div>
       </div>
       </>
       )}

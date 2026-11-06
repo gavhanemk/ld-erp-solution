@@ -1,8 +1,9 @@
 'use client'
 
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  X,
+  ClipboardCheck,
+  CheckCircle2,
   Loader2,
   AlertCircle,
   Plus,
@@ -28,8 +29,14 @@ import {
 } from 'lucide-react'
 import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { cn, formatDate, formatRupees } from '@/lib/utils'
+import { fetchEveryPage } from '@/lib/export'
 import { SmartSelect } from '@/components/ui/SmartSelect'
-import { useEscape } from '@/lib/useEscape'
+import { FormFrame } from '@/components/ui/FormFrame'
+import { Section } from '@/components/purchase/Section'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { itemFormFields } from '@/components/masters/itemFormFields'
+import { processFormFields } from '@/components/masters/processFormFields'
+import { BomReviewDialog } from '@/components/masters/BomReviewDialog'
 
 export interface BomLineSize {
   id?: string
@@ -135,7 +142,14 @@ interface ItemOption {
   type?: string
   standardRate?: string | number | null
   uom?: { symbol: string } | null
-  category?: { name: string } | null
+  category?: { id?: string; name: string; parentId?: string | null; parent?: { id: string; name: string } | null } | null
+}
+
+/** An item's main category and sub-category: a category with a parent is a sub-category. */
+const placeOf = (it: ItemOption | undefined) => {
+  const c = it?.category
+  if (!c?.id) return { main: '', sub: '' }
+  return c.parentId || c.parent ? { main: c.parent?.id ?? c.parentId ?? '', sub: c.id } : { main: c.id, sub: '' }
 }
 
 interface StyleOption {
@@ -143,6 +157,13 @@ interface StyleOption {
   code: string
   name: string
   colors: string[]
+}
+
+/** A process from Routing Masters: what a labour row is paid for, and the department that does it. */
+interface ProcessOption {
+  id: string
+  name: string
+  departmentId: string | null
 }
 
 interface DepartmentOption {
@@ -176,7 +197,10 @@ interface Props {
    * else always starts on the materials.
    */
   startStep?: 1 | 2 | 3
-  /** Opened over another dialog (a quotation), so it has to sit above that one. */
+  /**
+   * Opened over another dialog (a quotation). The form frame already sits
+   * above the one behind it; kept so the caller's prop still type-checks.
+   */
   stacked?: boolean
 }
 
@@ -206,6 +230,12 @@ const nothingCarried: CarriedOver = { component: null, wastagePercent: 0, notes:
 interface EditLine {
   /** A stable React key, so a line added mid-list does not take over the next line's inputs. */
   rowKey: number
+  /**
+   * The category and sub-category the item is picked from. On screen only, to
+   * narrow the item list: the BOM saves the item, and the item has its own.
+   */
+  categoryId: string
+  subCategoryId: string
   componentItemId: string
   /**
    * The department that draws it from the store. Nothing reads it yet; it is
@@ -233,6 +263,8 @@ let nextRowKey = 0
 
 const emptyLine = (): EditLine => ({
   rowKey: nextRowKey++,
+  categoryId: '',
+  subCategoryId: '',
   componentItemId: '',
   departmentId: '',
   qtyPerUnit: '',
@@ -250,6 +282,31 @@ const emptyCostRow = (kind: EditCostRow['kind']): EditCostRow => ({
 })
 
 const round = (n: number, dp: number) => Number(n.toFixed(dp))
+
+/** The materials as they would be saved: what tells a change from none. */
+const materialsKey = (ls: EditLine[]) =>
+  JSON.stringify(
+    ls
+      .filter((l) => l.componentItemId && l.qtyPerUnit.trim() !== '')
+      .map((l) => [
+        l.componentItemId,
+        l.departmentId || '',
+        Number(l.qtyPerUnit),
+        l.unitCost.trim() === '' ? null : Number(l.unitCost),
+        l.carried.wastagePercent,
+        l.carried.component ?? '',
+        l.carried.notes ?? '',
+        l.carried.sizes,
+      ]),
+  )
+
+/** The labour and overheads as they would be saved. */
+const costingKey = (rows: EditCostRow[]) =>
+  JSON.stringify(
+    rows
+      .filter((r) => r.name.trim() !== '' || r.value.trim() !== '')
+      .map((r) => [r.kind, r.name.trim(), r.departmentId || '', r.kind === 'LABOUR' ? 'PER_PIECE' : r.basis, Number(r.value)]),
+  )
 
 /**
  * The same sums the server does, so the figure on screen is the figure that
@@ -288,10 +345,10 @@ const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
 
 type Step = 1 | 2 | 3
 
-const STEPS: Array<{ id: Step; label: string }> = [
-  { id: 1, label: 'Materials' },
-  { id: 2, label: 'Costing' },
-  { id: 3, label: 'Pricing' },
+const STEPS: Array<{ id: Step; label: string; hint: string }> = [
+  { id: 1, label: 'Materials', hint: 'What goes into one piece' },
+  { id: 2, label: 'Costing', hint: 'Labour and overheads' },
+  { id: 3, label: 'Pricing', hint: 'Selling price' },
 ]
 
 /**
@@ -307,12 +364,23 @@ const STEPS: Array<{ id: Step; label: string }> = [
  * a fact about how the garment is made, price is a commercial call that moves
  * with each buyer.
  */
-export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, stacked = false }: Props) {
+export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }: Props) {
   const canCost = can('masters', 'approve')
 
   const [styles, setStyles] = useState<StyleOption[]>([])
   const [items, setItems] = useState<ItemOption[]>([])
+  /**
+   * A new item being made from a component line's dropdown, in the Items
+   * master's own form over this one. Saved, it is in Masters → Items like any
+   * other, and goes into that line.
+   */
+  const [addingItem, setAddingItem] = useState<{ rowKey: number; typed: string } | null>(null)
+  const mayAddItem = can('masters', 'create')
   const [departments, setDepartments] = useState<DepartmentOption[]>([])
+  /** The processes in Routing Masters, in floor order: the labour rows' Work. */
+  const [processes, setProcesses] = useState<ProcessOption[]>([])
+  /** A new process being added from a labour row, in the Routing Masters form over this one. */
+  const [addingProcess, setAddingProcess] = useState<{ rowKey: number; typed: string } | null>(null)
   const [routings, setRoutings] = useState<RoutingOption[]>([])
   const [gstRate, setGstRate] = useState<number | null>(null)
 
@@ -320,6 +388,11 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
   // edited, and becomes the new BOM once the first step has saved one.
   const [current, setCurrent] = useState<Bom | null>(null)
   const [step, setStep] = useState<Step>(1)
+  /** The top of the window's body: each step opens there, not where the last one was scrolled to. */
+  const topRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    topRef.current?.scrollIntoView({ block: 'start' })
+  }, [step])
 
   const [styleId, setStyleId] = useState('')
   const [color, setColor] = useState('')
@@ -343,7 +416,22 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
 
   const isEdit = Boolean(current)
-  const frozen = Boolean(current && current.status !== 'DRAFT')
+  /** Retired: kept for the record, changed no more. */
+  const frozen = Boolean(current && current.status === 'OBSOLETE')
+  /**
+   * Approved and in use: open to change, but a change to its materials or
+   * costing is saved as a new version (a draft), so orders and MOs made from
+   * this one keep it. Its price and notes change on this one.
+   */
+  const revising = current?.status === 'APPROVED'
+  /** The materials, costing and notes as opened, to tell a change from none. */
+  const [baseline, setBaseline] = useState<{ materials: string; costing: string; notes: string } | null>(null)
+  /** The version a new draft was made from, while it waits for approval. */
+  const [revisedFrom, setRevisedFrom] = useState<string | null>(null)
+  /** Saved as a draft: Review and approve now, or later. */
+  const [savedDraft, setSavedDraft] = useState<Bom | null>(null)
+  const [reviewing, setReviewing] = useState<string | null>(null)
+  const mayApprove = can('masters', 'approve')
 
   useEffect(() => {
     if (!open) return
@@ -354,33 +442,38 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
     setColor(record?.color ?? '')
     setNotes(record?.notes ?? '')
     setAddedKey(null)
-    setLines(
-      record?.lines?.length
-        ? record.lines.map((l) => ({
-            rowKey: nextRowKey++,
-            componentItemId: l.componentItemId,
-            departmentId: l.departmentId ?? '',
-            qtyPerUnit: String(l.qtyPerUnit),
-            unitCost: l.unitCost != null ? String(l.unitCost) : '',
-            carried: {
-              component: l.component ?? null,
-              wastagePercent: Number(l.wastagePercent ?? 0),
-              notes: l.notes ?? null,
-              sizes: (l.sizes ?? []).map((s) => ({ sizeId: s.sizeId, qtyPerUnit: Number(s.qtyPerUnit) })),
-            },
-          }))
-        : [emptyLine()],
-    )
-    setCostRows(
-      (record?.costLines ?? []).map((c) => ({
-        rowKey: nextRowKey++,
-        kind: c.kind,
-        name: c.name,
-        departmentId: c.departmentId ?? '',
-        basis: c.basis,
-        value: plain(c.value),
-      })),
-    )
+    const startLines: EditLine[] = record?.lines?.length
+      ? record.lines.map((l) => ({
+          rowKey: nextRowKey++,
+          // Filled from the item once the item list is in.
+          categoryId: '',
+          subCategoryId: '',
+          componentItemId: l.componentItemId,
+          departmentId: l.departmentId ?? '',
+          qtyPerUnit: String(l.qtyPerUnit),
+          unitCost: l.unitCost != null ? String(l.unitCost) : '',
+          carried: {
+            component: l.component ?? null,
+            wastagePercent: Number(l.wastagePercent ?? 0),
+            notes: l.notes ?? null,
+            sizes: (l.sizes ?? []).map((s) => ({ sizeId: s.sizeId, qtyPerUnit: Number(s.qtyPerUnit) })),
+          },
+        }))
+      : [emptyLine()]
+    const startRows: EditCostRow[] = (record?.costLines ?? []).map((c) => ({
+      rowKey: nextRowKey++,
+      kind: c.kind,
+      name: c.name,
+      departmentId: c.departmentId ?? '',
+      basis: c.basis,
+      value: plain(c.value),
+    }))
+    setLines(startLines)
+    setCostRows(startRows)
+    setBaseline({ materials: materialsKey(startLines), costing: costingKey(startRows), notes: record?.notes ?? '' })
+    setRevisedFrom(null)
+    setSavedDraft(null)
+    setReviewing(null)
     setMargin(plain(record?.marginPercent))
     setPrice(plain(record?.sellingPrice))
     setPriceSource('margin')
@@ -392,13 +485,17 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
 
     void Promise.all([
       masterResource<StyleOption>('styles').list({ limit: 200, active: true }),
-      masterResource<ItemOption>('items').list({ limit: 200, active: true }),
+      fetchEveryPage<ItemOption>((page) => `/masters/items?limit=200&active=true&page=${page}`).then((r) => ({ data: r.rows })),
       masterResource<DepartmentOption>('departments').list({ limit: 200, active: true }),
+      masterResource<ProcessOption>('operations')
+        .list({ limit: 300, active: true, sort: 'sortOrder', order: 'asc' })
+        .catch(() => ({ data: [] as ProcessOption[] })),
     ])
-      .then(([s, i, d]) => {
+      .then(([s, i, d, o]) => {
         setStyles((s as Paginated<StyleOption>).data)
         setItems((i as Paginated<ItemOption>).data)
         setDepartments((d as Paginated<DepartmentOption>).data)
+        setProcesses((o as Paginated<ProcessOption>).data)
       })
       .catch(() => setError('Could not load styles, items and departments.'))
 
@@ -435,7 +532,6 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
   }, [open, step, styleId, frozen])
 
   // Escape closes this window only — not the ones behind it.
-  useEscape(onClose, open)
   useEffect(() => {
     if (!open) return
     const prev = document.body.style.overflow
@@ -468,6 +564,54 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
     () => [...itemsById.values()].sort((a, b) => a.code.localeCompare(b.code)),
     [itemsById],
   )
+
+  /** The main categories that have items, by name. */
+  const mainCategories = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const it of items) {
+      const c = it.category
+      if (!c?.id) continue
+      if (c.parent) m.set(c.parent.id, c.parent.name)
+      else if (!c.parentId) m.set(c.id, c.name)
+    }
+    return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+  }, [items])
+
+  /** A main category's sub-categories that have items. */
+  const subCategoriesOf = (mainId: string) => {
+    const m = new Map<string, string>()
+    for (const it of items) {
+      const c = it.category
+      if (c?.id && (c.parent?.id ?? c.parentId) === mainId) m.set(c.id, c.name)
+    }
+    return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+  }
+
+  /** Whether an item sits in a category and sub-category (blank means any). */
+  const fits = (itemId: string, mainId: string, subId: string) => {
+    const at = placeOf(itemsById.get(itemId))
+    return (!mainId || at.main === mainId) && (!subId || at.sub === subId)
+  }
+
+  /** The items a line offers: those in its category and sub-category, and always the one it holds. */
+  const itemsFor = (l: EditLine) => itemOptions.filter((i) => i.id === l.componentItemId || fits(i.id, l.categoryId, l.subCategoryId))
+
+  // A BOM opened for editing: each line's category and sub-category from its
+  // item, once the items are in.
+  useEffect(() => {
+    if (!items.length) return
+    setLines((ls) => {
+      let changed = false
+      const next = ls.map((l) => {
+        if (!l.componentItemId || l.categoryId) return l
+        const at = placeOf(itemsById.get(l.componentItemId))
+        if (!at.main) return l
+        changed = true
+        return { ...l, categoryId: at.main, subCategoryId: at.sub }
+      })
+      return changed ? next : ls
+    })
+  }, [items, itemsById])
 
   const style = styles.find((s) => s.id === styleId) ?? record?.style
   const styleColours = style?.colors ?? []
@@ -654,6 +798,37 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
     }
   }
 
+  /** The next free version for this style and colour: 1.0 becomes 1.1, past any already taken. */
+  const nextVersion = async (b: Bom) => {
+    const q = new URLSearchParams({ styleId: b.styleId, limit: '200' })
+    if (b.color) q.set('color', b.color)
+    const all = await api.get<Paginated<Bom>>(`/masters/bom?${q.toString()}`)
+    const taken = new Set(all.data.filter((x) => (x.color ?? null) === (b.color ?? null)).map((x) => x.version))
+    let major = 1
+    let minor = 0
+    for (const v of [b.version, ...taken]) {
+      const m = /^(\d+)\.(\d+)$/.exec(v)
+      if (m && (Number(m[1]) > major || (Number(m[1]) === major && Number(m[2]) > minor))) {
+        major = Number(m[1])
+        minor = Number(m[2])
+      }
+    }
+    let next = `${major}.${minor + 1}`
+    while (taken.has(next)) {
+      minor += 1
+      next = `${major}.${minor + 1}`
+    }
+    return next
+  }
+
+  /** A copy of the approved BOM as the next version, a draft: what the change is saved into. */
+  const reviseFrom = async (b: Bom) => {
+    const res = await api.post<SaveResponse>(`/masters/bom/${b.id}/copy`, { version: await nextVersion(b) })
+    setCurrent(res.data)
+    setRevisedFrom(b.version)
+    return { draft: res.data, from: b.version }
+  }
+
   const saveMaterials = (then: 'close' | 'next') => {
     // An approved BOM's components are locked, and the server refuses a save
     // that sends them at all — so only the note goes, which it does allow.
@@ -713,9 +888,45 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
       return
     }
 
+    // An approved BOM: materials as they were are not saved again (a changed
+    // note goes on this version); changed ones go into a new version.
+    if (revising) {
+      if (materialsKey(lines) === baseline?.materials) {
+        void run(async () => {
+          if (notes !== (baseline?.notes ?? '')) {
+            const res = await api.patch<SaveResponse>(`/masters/bom/${current!.id}`, { notes })
+            setCurrent(res.data)
+            onSaved(res.message)
+          }
+          if (then === 'close') {
+            onClose()
+            return
+          }
+          setNotice(null)
+          setStep(2)
+        })
+        return
+      }
+      void run(async () => {
+        const { draft, from } = await reviseFrom(current!)
+        const res = await api.patch<SaveResponse>(`/masters/bom/${draft.id}`, { notes, lines: payloadLines })
+        setCurrent(res.data)
+        onSaved(res.message)
+        if (then === 'close') {
+          setSavedDraft(res.data)
+          return
+        }
+        setNotice(
+          `Saved as v${res.data.version}, a new draft. v${from} stays in use until v${res.data.version} is approved.${res.message ? ` ${res.message}` : ''}`,
+        )
+        setStep(2)
+      })
+      return
+    }
+
     // Version, routing, base size and whether it is offered are not sent. A new
     // BOM starts at version 1.0 with none of the others; an edit keeps whatever
-    // it had. Later versions come from Copy on the BOM list.
+    // it had. Later versions come from editing an approved one, or Copy.
     void run(async () => {
       const res = isEdit
         ? await api.patch<SaveResponse>(`/masters/bom/${current!.id}`, { notes, lines: payloadLines })
@@ -728,7 +939,8 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
       setCurrent(res.data)
       onSaved(res.message)
       if (then === 'close') {
-        onClose()
+        // Saved as a draft: approve it now, or later.
+        setSavedDraft(res.data)
         return
       }
       // A rate warning ("one component has no rate yet") is worth keeping in
@@ -767,6 +979,26 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
       value: Number(r.value),
     }))
 
+    if (revising) {
+      if (costingKey(costRows) === baseline?.costing) {
+        setNotice(null)
+        setStep(3)
+        return
+      }
+      void run(async () => {
+        const { draft, from } = await reviseFrom(current!)
+        const res = await api.patch<SaveResponse>(`/masters/bom/${draft.id}`, { costLines: payload })
+        setCurrent(res.data)
+        onSaved(res.message)
+        setMargin(plain(res.data.marginPercent))
+        setPrice(plain(res.data.sellingPrice))
+        setPriceSource('margin')
+        setNotice(`Saved as v${res.data.version}, a new draft. v${from} stays in use until v${res.data.version} is approved.`)
+        setStep(3)
+      })
+      return
+    }
+
     void run(async () => {
       const res = await api.patch<SaveResponse>(`/masters/bom/${current!.id}`, { costLines: payload })
       setCurrent(res.data)
@@ -799,12 +1031,12 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
       )
       setCurrent(res.data)
       onSaved(res.message)
-      onClose()
+      if (res.data.status === 'DRAFT') setSavedDraft(res.data)
+      else onClose()
     })
   }
 
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault()
+  const submit = () => {
     if (step === 1) {
       // An approver looking at an approved BOM just moves on: nothing on this
       // step can change except the notes, which have their own button.
@@ -825,34 +1057,16 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
 
   /** Header cells: one style, so every column label sits on the same line. */
   const th = 'px-2 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground'
-  /**
-   * Fields sit on a tinted panel, so they take the card colour to stand out
-   * from it — white on grey in the light theme, an inset well in the dark.
-   */
-  const field = 'form-input bg-card'
-  /** The quiet panel each part of the form sits in. */
-  const panel = 'rounded-xl border border-border bg-secondary/60 p-4'
+  /** Fields as on every other form. */
+  const field = 'form-input'
   /** Row buttons are icon-only and square; switched off, they fade rather than keep their colour. */
   const rowBtn = 'p-2 disabled:pointer-events-none disabled:opacity-40'
   /** A figure worked out, not typed: a box that looks like a field but takes no cursor. */
   const readout =
     'flex items-center justify-end gap-2 rounded-lg border border-border bg-secondary/60 px-3 py-2.5'
 
-  /** The header of each panel: an icon tile, a title, and what the panel is for. */
-  const panelHead = (Icon: LucideIcon, heading: React.ReactNode, sub: React.ReactNode, action?: React.ReactNode) => (
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="flex min-w-0 items-start gap-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <Icon size={16} />
-        </div>
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-foreground">{heading}</h3>
-          <p className="text-xs text-muted-foreground">{sub}</p>
-        </div>
-      </div>
-      {action}
-    </div>
-  )
+  /** What a section is for, in a line under its title bar. */
+  const hint = (text: React.ReactNode) => <p className="mb-3 text-xs text-muted-foreground">{text}</p>
 
   /** The row buttons shared by the material and costing tables. */
   const rowButtons = (onAdd: () => void, onRemove: () => void, label: string) => (
@@ -897,7 +1111,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
 
   const materialsStep = (
     <>
-      <section className={panel} aria-label="BOM details">
+      <Section icon={Shirt} title="Style and colour">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label className="form-label" htmlFor="bom-style">
@@ -962,18 +1176,23 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
             Style and colour are fixed once a BOM is made. To cost another colour, copy this BOM.
           </p>
         )}
-      </section>
+      </Section>
 
-      <section className={cn(panel, 'space-y-3')}>
-        {panelHead(
-          Layers,
+      <Section
+        icon={Layers}
+        title={filledLines > 0 ? `Components (${filledLines})` : 'Components'}
+        actions={
+          frozen ? undefined : (
+            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => addLineAfter(lines.length - 1)}>
+              <Plus size={14} /> Add item
+            </button>
+          )
+        }
+      >
+        {hint(
           <>
-            Components
-            {filledLines > 0 && <span className="ml-1.5 font-normal text-muted-foreground">({filledLines})</span>}
-          </>,
-          <>
-            Everything one piece uses. A blank rate uses the item&apos;s standard rate, shown as
-            &ldquo;std&rdquo; in the box; an amber outline marks what a line still needs.
+            Everything one piece uses. A blank rate uses the item&apos;s standard rate, shown as &ldquo;std&rdquo; in the box; an amber
+            outline marks what a line still needs.
           </>,
         )}
 
@@ -983,10 +1202,12 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
           type and row dividers, tighter cells.
         */}
         <div className="overflow-x-auto rounded-lg border border-border bg-card">
-          <table className="w-full min-w-[860px] table-fixed text-sm">
+          <table className="w-full min-w-[1140px] table-fixed text-sm">
             <colgroup>
+              <col className="w-36" />
+              <col className="w-36" />
               <col />
-              <col className="w-40" />
+              <col className="w-36" />
               {/* Wide enough for 1.7325 beside its unit and the number spinner. */}
               <col className="w-36" />
               <col className="w-32" />
@@ -995,7 +1216,10 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
             </colgroup>
             <thead className="bg-secondary/60">
               <tr className="border-b border-border">
-                <th className={cn(th, 'pl-3 text-left')}>Item</th>
+                <th className={cn(th, 'pl-3 text-left')}>Category</th>
+                <th className={cn(th, 'text-left')}>Sub-category</th>
+                {/* Over the item box, past its icon (8px cell padding + 40px icon + 8px gap). */}
+                <th className={cn(th, 'pl-14 text-left')}>Item</th>
                 <th className={cn(th, 'text-left')} title="The department that takes this item from the store">
                   Process
                 </th>
@@ -1019,6 +1243,57 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
                 return (
                   <tr key={line.rowKey} className="border-b border-border/50">
                     <td className="py-2 pl-3 pr-2 align-middle">
+                      <SmartSelect
+                        className={cn(field, 'min-w-0')}
+                        value={line.categoryId}
+                        disabled={frozen}
+                        aria-label={`Line ${index + 1} category`}
+                        autoFocus={line.rowKey === addedKey}
+                        onChange={(e) => {
+                          const categoryId = e.target.value
+                          // Another category: its own sub-categories, and an item that is not in it goes.
+                          const keep = !!line.componentItemId && fits(line.componentItemId, categoryId, '')
+                          setLine(index, {
+                            categoryId,
+                            subCategoryId: keep ? placeOf(itemsById.get(line.componentItemId)).sub : '',
+                            ...(keep ? {} : { componentItemId: '', carried: nothingCarried }),
+                          })
+                        }}
+                      >
+                        <option value="">All categories</option>
+                        {mainCategories.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </SmartSelect>
+                    </td>
+                    <td className="px-2 py-2 align-middle">
+                      {(() => {
+                        const subs = line.categoryId ? subCategoriesOf(line.categoryId) : []
+                        return (
+                          <SmartSelect
+                            className={cn(field, 'min-w-0')}
+                            value={line.subCategoryId}
+                            disabled={frozen || subs.length === 0}
+                            aria-label={`Line ${index + 1} sub-category`}
+                            onChange={(e) => {
+                              const subCategoryId = e.target.value
+                              const keep = !!line.componentItemId && fits(line.componentItemId, line.categoryId, subCategoryId)
+                              setLine(index, { subCategoryId, ...(keep ? {} : { componentItemId: '', carried: nothingCarried }) })
+                            }}
+                          >
+                            <option value="">{!line.categoryId ? 'Pick a category' : subs.length ? 'All sub-categories' : 'None under it'}</option>
+                            {subs.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </SmartSelect>
+                        )
+                      })()}
+                    </td>
+                    <td className="px-2 py-2 align-middle">
                       <div className="flex items-stretch gap-2">
                         <span
                           aria-hidden="true"
@@ -1037,19 +1312,23 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
                           disabled={frozen}
                           title={item?.name}
                           aria-label={`Line ${index + 1} item`}
-                          autoFocus={line.rowKey === addedKey}
-                          onChange={(e) =>
+                          createNoun="item"
+                          onCreate={mayAddItem && !frozen ? (typed) => setAddingItem({ rowKey: line.rowKey, typed }) : undefined}
+                          onChange={(e) => {
+                            const at = placeOf(itemsById.get(e.target.value))
                             setLine(index, {
                               componentItemId: e.target.value,
+                              // The item's own category and sub-category, so the boxes say where it is.
+                              ...(at.main ? { categoryId: at.main, subCategoryId: at.sub } : {}),
                               // A different item is a different line: what the old
                               // one carried (its part, wastage, sizes) was about
                               // that item, not this one.
                               carried: nothingCarried,
                             })
-                          }
+                          }}
                         >
                           <option value="">Select item...</option>
-                          {itemOptions.map((i) => (
+                          {itemsFor(line).map((i) => (
                             <option key={i.id} value={i.id}>
                               {i.code} — {i.name}
                             </option>
@@ -1167,7 +1446,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
 
             <tfoot>
               <tr className="bg-primary/5">
-                <td colSpan={4} className="py-3 pl-3 pr-2">
+                <td colSpan={6} className="py-3 pl-3 pr-2">
                   <div className="flex items-center justify-between gap-3">
                     <Layers size={16} className="shrink-0 text-primary" />
                     <span className="text-right text-sm font-medium text-primary">
@@ -1184,22 +1463,19 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
             </tfoot>
           </table>
         </div>
-      </section>
+      </Section>
 
-      <section className={panel}>
-        <label className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground" htmlFor="bom-notes">
-          <FileText size={16} className="text-primary" />
-          Notes
-        </label>
+      <Section icon={FileText} title="Notes">
         <textarea
           id="bom-notes"
+          aria-label="Notes"
           rows={2}
           className={field}
           placeholder="Anything the cutting floor or the store should know about this BOM"
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
         />
-      </section>
+      </Section>
     </>
   )
 
@@ -1260,15 +1536,45 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
             {rows.map((row) => (
               <tr key={row.rowKey} className="border-b border-border/50">
                 <td className="py-2 pl-3 pr-2 align-middle">
-                  <input
-                    className={field}
-                    value={row.name}
-                    disabled={frozen}
-                    autoFocus={row.rowKey === addedKey}
-                    placeholder={kind === 'LABOUR' ? 'e.g. Stitching' : 'e.g. Factory overhead'}
-                    aria-label={`${kind === 'LABOUR' ? 'Labour' : 'Overhead'} name`}
-                    onChange={(e) => setCostRow(row.rowKey, { name: e.target.value })}
-                  />
+                  {kind === 'LABOUR' ? (
+                    (() => {
+                      // A name typed before Work was a process still shows, so the row reads as it was saved.
+                      const known = processes.some((o) => o.name.toLowerCase() === row.name.trim().toLowerCase())
+                      return (
+                        <SmartSelect
+                          className={field}
+                          value={known ? (processes.find((o) => o.name.toLowerCase() === row.name.trim().toLowerCase())?.name ?? row.name) : row.name}
+                          disabled={frozen}
+                          autoFocus={row.rowKey === addedKey}
+                          aria-label="Labour work"
+                          createNoun="process"
+                          onCreate={!frozen && can('masters', 'create') ? (typed) => setAddingProcess({ rowKey: row.rowKey, typed }) : undefined}
+                          onChange={(e) => {
+                            const op = processes.find((o) => o.name === e.target.value)
+                            setCostRow(row.rowKey, { name: e.target.value, ...(op?.departmentId ? { departmentId: op.departmentId } : {}) })
+                          }}
+                        >
+                          <option value="">Pick the work…</option>
+                          {row.name.trim() && !known && <option value={row.name}>{row.name} (not in Routing Masters)</option>}
+                          {processes.map((o) => (
+                            <option key={o.id} value={o.name}>
+                              {o.name}
+                            </option>
+                          ))}
+                        </SmartSelect>
+                      )
+                    })()
+                  ) : (
+                    <input
+                      className={field}
+                      value={row.name}
+                      disabled={frozen}
+                      autoFocus={row.rowKey === addedKey}
+                      placeholder="e.g. Factory overhead"
+                      aria-label="Overhead name"
+                      onChange={(e) => setCostRow(row.rowKey, { name: e.target.value })}
+                    />
+                  )}
                 </td>
                 <td className="px-2 py-2 align-middle">
                   {kind === 'LABOUR' ? (
@@ -1394,33 +1700,20 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
 
   const costingStep = (
     <>
-      <section className={cn(panel, 'space-y-3')}>
-        {panelHead(
-          Users,
-          'Labour',
-          'What one piece pays the people who make it, in rupees — in-house lines and outside job workers alike.',
-          fillAction,
-        )}
+      <Section icon={Users} title="Labour" actions={fillAction}>
+        {hint('What one piece pays the people who make it, in rupees — in-house lines and outside job workers alike.')}
         {costTable('LABOUR')}
-      </section>
+      </Section>
 
-      <section className={cn(panel, 'space-y-3')}>
-        {panelHead(
-          Factory,
-          'Overheads',
-          'Everything else one piece has to carry — power, rent, transport. Type rupees, or a percentage of material and labour together.',
-        )}
+      <Section icon={Factory} title="Overheads">
+        {hint('Everything else one piece has to carry — power, rent, transport. Type rupees, or a percentage of material and labour together.')}
         {costTable('OVERHEAD')}
-      </section>
+      </Section>
 
-      <section className={cn(panel, 'space-y-3')}>
-        {panelHead(
-          IndianRupee,
-          'Cost of one piece',
-          'Material from the first step, with the labour and overheads above.',
-        )}
+      <Section icon={IndianRupee} title="Cost of one piece">
+        {hint('Material from the first step, with the labour and overheads above.')}
         {buildUp(material, labourCost, overheadCost, liveCost)}
-      </section>
+      </Section>
     </>
   )
 
@@ -1437,20 +1730,18 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
       </div>
     ) : (
       <>
-        <section className={cn(panel, 'space-y-3')}>
-          {panelHead(Layers, 'Cost of one piece', 'As saved on the costing step.')}
+        <Section icon={Layers} title="Cost of one piece">
+          {hint('As saved on the costing step.')}
           {buildUp(
             Number(current?.totalCost ?? 0),
             Number(current?.labourCost ?? 0),
             Number(current?.overheadCost ?? 0),
             cost,
           )}
-        </section>
+        </Section>
 
-        <section className={cn(panel, 'space-y-4')}>
-          {panelHead(
-            IndianRupee,
-            'Selling price',
+        <Section icon={IndianRupee} title="Selling price">
+          {hint(
             'Type a margin and the price is worked out, or type the price and the margin is worked back. The margin is a share of the selling price — at 20%, the price is the cost ÷ 0.80. Prices are before GST, rounded up to the rupee.',
           )}
 
@@ -1524,10 +1815,10 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
           )}
 
           <div className="space-y-1 text-xs text-muted-foreground">
-            {frozen && (
+            {revising && (
               <p>
-                The cost is locked because this BOM is approved. The price stays open, and every
-                change is kept in the log.
+                The cost stays as approved; to change it, go back and change the materials or labour, which makes a new version.
+                The price changes on this version, and every change is kept in the log.
               </p>
             )}
             {current?.pricedBy && (
@@ -1537,7 +1828,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
               </p>
             )}
           </div>
-        </section>
+        </Section>
       </>
     )
 
@@ -1568,180 +1859,242 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, s
         : 'Save price'
   const primaryMoves = primaryLabel === 'Next' || primaryLabel === 'Save and continue'
 
+  const primaryButton = (
+    <button type="button" className="btn-primary" onClick={submit} disabled={saving || (step === 3 && cost <= 0)}>
+      {saving ? <Loader2 size={15} className="animate-spin" /> : primaryMoves ? null : <Save size={15} />}
+      {primaryLabel}
+      {!saving && primaryMoves && <ArrowRight size={15} />}
+    </button>
+  )
+
+  /** What step 1 still lacks, said in the footer. */
+  const stillNeeds =
+    step === 1 && !frozen
+      ? [missingQty > 0 && `${missingQty} line${missingQty === 1 ? ' needs' : 's need'} a quantity`, missingProcess > 0 && `${missingProcess} without a process`]
+          .filter(Boolean)
+          .join(' · ')
+      : ''
+
   return (
-    <div className={cn('fixed inset-0 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8', stacked ? 'z-[60]' : 'z-50')}>
-      {/*
-        Solid rather than see-through glass: the form's panels are tinted, and
-        over a dimmed page the glass turned the whole body the same grey.
-      */}
-      <div className="glass-card w-full max-w-7xl my-auto bg-card" role="dialog" aria-modal="true" aria-label={title}>
-        <form onSubmit={submit}>
-          {/* The header stays in view while a long component list scrolls. */}
-          <div className="sticky top-0 z-10 flex items-center justify-between gap-4 rounded-t-xl border-b border-border bg-card px-6 py-4">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                <Box size={18} />
-              </div>
-              <div className="min-w-0">
-                <h2 className="text-lg font-semibold text-foreground">{title}</h2>
-                <p className="mt-0.5 truncate text-sm text-muted-foreground">
-                  {summary || 'Pick a style and colour, then list what goes into one piece.'}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {statusBadge && <span className={statusBadge.cls}>{statusBadge.label}</span>}
-              <button type="button" onClick={onClose} className="btn-ghost p-2" aria-label="Close">
-                <X size={18} />
-              </button>
-            </div>
+    // The form frame every data-entry form sits in: it stops at the sidebar, so
+    // the menu stays usable, and opened over a quotation it sits above it.
+    <FormFrame
+      icon={Box}
+      title={title}
+      subtitle={
+        <>
+          {statusBadge && <span className={cn(statusBadge.cls, 'mr-2 align-middle')}>{statusBadge.label}</span>}
+          {summary || 'Pick a style and colour, then list what goes into one piece.'}
+        </>
+      }
+      // The whole width beside the sidebar, as the order forms: the component lines need it.
+      width="max-w-none"
+      primary={primaryButton}
+      error={error}
+      busy={saving}
+      onClose={onClose}
+      footerNote={stillNeeds ? <span className="text-accent">{stillNeeds}</span> : undefined}
+      footer={
+        <>
+          <div className="mr-2 text-right">
+            <p className="text-xs text-muted-foreground">{footerFigure.label}</p>
+            <p className="font-mono text-sm font-bold text-foreground">{footerFigure.amount !== null ? formatRupees(footerFigure.amount) : '—'}</p>
           </div>
-
-          <div className="space-y-4 px-6 py-5">
-            {/* Where the person is. Not clickable: each step saves on the way out. */}
-            {canCost && (
-              <ol className="flex flex-wrap items-center gap-2" aria-label="Steps">
-                {STEPS.map((s, i) => {
-                  const done = step > s.id
-                  const active = step === s.id
-                  return (
-                    <Fragment key={s.id}>
-                      {i > 0 && <li aria-hidden="true" className="h-px w-8 bg-border" />}
-                      <li
-                        aria-current={active ? 'step' : undefined}
-                        className={cn(
-                          'flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm',
-                          active
-                            ? 'bg-primary/10 font-semibold text-primary'
-                            : done
-                              ? 'text-foreground'
-                              : 'text-muted-foreground',
-                        )}
-                      >
-                        <span
-                          className={cn(
-                            'flex h-6 w-6 items-center justify-center rounded-full border text-xs',
-                            active
-                              ? 'border-primary bg-primary text-primary-foreground'
-                              : done
-                                ? 'border-primary/40 bg-primary/10 text-primary'
-                                : 'border-border',
-                          )}
-                        >
-                          {done ? <Check size={13} /> : s.id}
-                        </span>
-                        {s.label}
-                      </li>
-                    </Fragment>
-                  )
-                })}
-              </ol>
-            )}
-
-            {frozen && step !== 3 && (
-              <div className="flex items-start gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
-                <AlertCircle size={16} className="mt-0.5 shrink-0 text-accent" />
-                <p className="text-sm text-foreground">
-                  This BOM is approved, so its components and costing cannot be changed — only the
-                  notes{canCost ? ' and the price' : ''}. Copy it to a new version, or to another
-                  colour, from the BOM list instead.
-                </p>
-              </div>
-            )}
-
-            {notice && (
-              <div className="flex items-start gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
-                <AlertCircle size={16} className="mt-0.5 shrink-0 text-accent" />
-                <p className="text-sm text-foreground">{notice}</p>
-              </div>
-            )}
-
-            {step === 1 && materialsStep}
-            {step === 2 && costingStep}
-            {step === 3 && pricingStep}
-          </div>
-
-          {/* The footer stays in view too, so the total and Save are never scrolled away. */}
-          <div className="sticky bottom-0 z-10 space-y-3 rounded-b-xl border-t border-border bg-card px-6 py-4">
-            {error && (
-              <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
-                <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
-                <p className="text-sm text-red-400">{error}</p>
-              </div>
-            )}
-
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-xs text-accent">
-                {step === 1 &&
-                  !frozen &&
-                  [
-                    missingQty > 0 &&
-                      `${missingQty} line${missingQty === 1 ? ' needs' : 's need'} a quantity`,
-                    missingProcess > 0 && `${missingProcess} without a process`,
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
-              </p>
-
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="mr-2 text-right">
-                  <p className="text-xs text-muted-foreground">{footerFigure.label}</p>
-                  <p className="font-mono text-sm font-bold text-foreground">
-                    {footerFigure.amount !== null ? formatRupees(footerFigure.amount) : '—'}
-                  </p>
-                </div>
-
-                {step === 1 ? (
-                  <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
-                    Cancel
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setError(null)
-                      setStep((step - 1) as Step)
-                    }}
-                    className="btn-secondary"
-                    disabled={saving}
-                  >
-                    <ArrowLeft size={15} />
-                    Back
-                  </button>
-                )}
-
-                {/* An approver on an approved BOM can still correct its notes. */}
-                {step === 1 && canCost && frozen && (
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    disabled={saving}
-                    onClick={() => saveMaterials('close')}
-                  >
-                    <Save size={15} />
-                    Save notes
-                  </button>
-                )}
-
-                <button
-                  type="submit"
-                  className="btn-primary"
-                  disabled={saving || (step === 3 && cost <= 0)}
-                >
-                  {saving ? (
-                    <Loader2 size={15} className="animate-spin" />
-                  ) : primaryMoves ? null : (
-                    <Save size={15} />
+          {step === 1 ? (
+            <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
+              Cancel
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setError(null)
+                setStep((step - 1) as Step)
+              }}
+              className="btn-secondary"
+              disabled={saving}
+            >
+              <ArrowLeft size={15} />
+              Back
+            </button>
+          )}
+          {/* An approver on an approved BOM can still correct its notes. */}
+          {step === 1 && canCost && frozen && (
+            <button type="button" className="btn-secondary" disabled={saving} onClick={() => saveMaterials('close')}>
+              <Save size={15} />
+              Save notes
+            </button>
+          )}
+        </>
+      }
+    >
+      <div ref={topRef} className="-mt-3 h-0" aria-hidden="true" />
+      {/* Where the person is, as the MO window's steps. Not clickable: each step saves on the way out. */}
+      {canCost && (
+        <ol className="grid grid-cols-3 gap-1.5" aria-label="Steps">
+          {STEPS.map((s) => {
+            const done = step > s.id
+            const active = step === s.id
+            return (
+              <li
+                key={s.id}
+                aria-current={active ? 'step' : undefined}
+                className={cn('flex items-center gap-2.5 rounded-lg border bg-card px-3 py-2', active ? 'border-primary ring-1 ring-primary' : 'border-border')}
+              >
+                <span
+                  className={cn(
+                    'flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold',
+                    done ? 'bg-primary text-primary-foreground' : active ? 'border-2 border-primary text-primary' : 'bg-secondary text-muted-foreground',
                   )}
-                  {primaryLabel}
-                  {!saving && primaryMoves && <ArrowRight size={15} />}
-                </button>
-              </div>
-            </div>
+                >
+                  {done ? <Check size={14} /> : s.id}
+                </span>
+                <span className="min-w-0">
+                  <span className={cn('block truncate text-sm font-semibold', active ? 'text-primary' : 'text-foreground')}>{s.label}</span>
+                  <span className="block truncate text-[11px] text-muted-foreground">{s.hint}</span>
+                </span>
+              </li>
+            )
+          })}
+        </ol>
+      )}
+
+      {frozen && step !== 3 && (
+        <div className="flex items-start gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-accent" />
+          <p className="text-sm text-foreground">
+            This BOM is retired, so it is kept as it was. Copy it to a new version, or to another colour, from the BOM list to use it again.
+          </p>
+        </div>
+      )}
+
+      {revising && step !== 3 && (
+        <div className="flex items-start gap-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-primary" />
+          <p className="text-sm text-foreground">
+            <b>This BOM is approved and in use.</b> Change its materials or costing and the change is saved as a new version, a draft:
+            v{current?.version} stays in use until the new version is approved, and orders and MOs already made keep v{current?.version}.
+            {canCost ? ' Its price and notes change on this version.' : ' Its notes change on this version.'}
+          </p>
+        </div>
+      )}
+
+      {notice && (
+        <div className="flex items-start gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-accent" />
+          <p className="text-sm text-foreground">{notice}</p>
+        </div>
+      )}
+
+      {step === 1 && materialsStep}
+      {step === 2 && costingStep}
+      {step === 3 && pricingStep}
+
+      {savedDraft && !reviewing && (
+        <FormFrame
+          icon={CheckCircle2}
+          title="Saved as a draft"
+          subtitle={`${savedDraft.style?.code ?? style?.code ?? ''}${savedDraft.color ? ` · ${savedDraft.color}` : ''} · v${savedDraft.version}`}
+          width="max-w-lg"
+          primaryInHeader={false}
+          onClose={onClose}
+          primary={
+            mayApprove ? (
+              <button type="button" className="btn-primary" onClick={() => setReviewing(savedDraft.id)}>
+                <ClipboardCheck size={15} /> Review and approve now
+              </button>
+            ) : (
+              <button type="button" className="btn-primary" onClick={onClose}>
+                OK
+              </button>
+            )
+          }
+          footer={
+            mayApprove ? (
+              <button type="button" className="btn-secondary" onClick={onClose}>
+                Later
+              </button>
+            ) : undefined
+          }
+        >
+          <div className="space-y-2 px-1 py-1">
+            <p className="text-sm text-foreground">
+              Orders and MOs use only an approved BOM, so this one is <b>not in use yet</b>.
+              {revisedFrom ? ` Until it is approved, v${revisedFrom} stays in use.` : ''}
+            </p>
+            <p className="text-sm text-muted-foreground">
+              {mayApprove
+                ? 'Review it now and approve it, or approve it later from Bill of Materials → Drafts.'
+                : 'Someone who may approve masters approves it, from Bill of Materials → Drafts.'}
+            </p>
           </div>
-        </form>
-      </div>
-    </div>
+        </FormFrame>
+      )}
+      {reviewing && (
+        <BomReviewDialog
+          bomId={reviewing}
+          onClose={onClose}
+          onEdit={() => {
+            setReviewing(null)
+            setSavedDraft(null)
+          }}
+          onApproved={(message) => {
+            onSaved(message)
+            onClose()
+          }}
+        />
+      )}
+      {addingProcess && (
+        <MasterFormDialog<ProcessOption & Record<string, unknown>>
+          open
+          stacked
+          onClose={() => setAddingProcess(null)}
+          onSaved={() => {}}
+          onCreated={(row) => {
+            setProcesses((list) => [...list.filter((o) => o.id !== row.id), row])
+            setCostRow(addingProcess.rowKey, { name: row.name, ...(row.departmentId ? { departmentId: row.departmentId } : {}) })
+          }}
+          resource="operations"
+          fields={processFormFields}
+          initialValues={{ ...(addingProcess.typed ? { name: addingProcess.typed } : {}), isActive: true }}
+          title="Process"
+          columns={3}
+        />
+      )}
+      {addingItem && (
+        <MasterFormDialog<ItemOption & Record<string, unknown>>
+          open
+          stacked
+          onClose={() => setAddingItem(null)}
+          onSaved={() => {}}
+          onCreated={(row) => {
+            setItems((list) => [...list.filter((i) => i.id !== row.id), row])
+            const at = placeOf(row)
+            setLines((ls) =>
+              ls.map((l) =>
+                l.rowKey === addingItem.rowKey
+                  ? { ...l, componentItemId: row.id, ...(at.main ? { categoryId: at.main, subCategoryId: at.sub } : {}), carried: nothingCarried }
+                  : l,
+              ),
+            )
+          }}
+          resource="items"
+          fields={itemFormFields}
+          initialValues={(() => {
+            const line = lines.find((l) => l.rowKey === addingItem.rowKey)
+            return {
+              ...(addingItem.typed ? { name: addingItem.typed } : {}),
+              ...(line?.categoryId ? { mainCategoryId: line.categoryId } : {}),
+              ...(line?.subCategoryId ? { subCategoryId: line.subCategoryId } : {}),
+              isActive: true,
+            }
+          })()}
+          title="Item"
+          columns={4}
+          wide
+        />
+      )}
+    </FormFrame>
   )
 }
 

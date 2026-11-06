@@ -281,6 +281,8 @@ export function InwardStickers({
       error={error}
       width="max-w-2xl"
       primary={printButton}
+      // Nothing to print: its one Close sits at the bottom only.
+      primaryInHeader={plan.targets.length > 0}
       footer={
         plan.targets.length ? (
           <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>

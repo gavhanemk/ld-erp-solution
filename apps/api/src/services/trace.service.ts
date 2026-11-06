@@ -2,6 +2,7 @@ import { prisma, type Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { normaliseGarmentCode } from './garment.service'
 import { stepFigures, type FigureStep } from './floor.service'
+import { netSizeChanges, sizeChangeHistory } from './sizeChanges.service'
 import type { garmentDetail } from '../routes/garments.routes'
 
 /*
@@ -32,6 +33,10 @@ export interface Step {
 
 const byTime = (a: Step, b: Step) => a.at.getTime() - b.at.getTime()
 const n = (v: unknown) => Number(v ?? 0)
+/** MO-2627-0001-B003 → B003. */
+const shortBundle = (code: string) => code.split('-').pop() ?? code
+/** "1 pc", "20 pcs". */
+const pcsOf = (v: number) => `${v} ${v === 1 ? 'pc' : 'pcs'}`
 const day = (d: Date) => d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
 
 // ── Search ──────────────────────────────────────────────────────────────────
@@ -225,15 +230,20 @@ function assemble(
   // The bundle it was sewn in, through the floor. Read as a chain of
   // handovers — cut, sent from cutting to fusing, from fusing to stitching —
   // with anything that went wrong on the way. Counting in and working on a
-  // bundle are kept as details, for "Every step".
-  const inBundle = detail.bundle ? ` · bundle ${detail.bundle.code}` : ''
+  // bundle are kept as details, for "Every step". A piece of a bundle made by
+  // a size change shows the bundle it came from up to then, named as such.
+  const own = detail.bundle?.code ?? null
   for (const e of detail.production) {
     const at = new Date(e.date)
     const base = { at, ref: e.ref, by: e.by, undone: e.reversed, minor: e.reversed }
     const pcs = `${e.qty} ${e.qty === 1 ? 'pc' : 'pcs'}`
+    const bundle = e.bundle ?? own
+    const inBundle = bundle ? ` · bundle ${bundle}` : ''
+    // Only said where it is not the piece's own bundle: the one it was made from.
+    const earlier = e.bundle && e.bundle !== own ? ` · bundle ${e.bundle}` : ''
     switch (e.kind) {
       case 'CUT':
-        steps.push({ ...base, phase: 'cutting', title: 'Cut', detail: detail.bundle ? `${pcs} in bundle ${detail.bundle.code}` : pcs })
+        steps.push({ ...base, phase: 'cutting', title: 'Cut', detail: bundle ? `${pcs} in bundle ${bundle}` : pcs })
         break
       case 'DISPATCH': {
         // Work given to an outside unit names the unit: that is where the pieces are.
@@ -243,20 +253,44 @@ function assemble(
           by: e.person,
           phase: 'production',
           title: e.from && e.from !== e.step ? `Sent from ${e.from} to ${to}` : `Sent to ${to}`,
-          detail: pcs,
+          detail: `${pcs}${earlier}`,
         })
         break
       }
       case 'VENDOR_RETURN':
-        steps.push({ ...base, by: e.person, phase: 'production', title: `Back from ${e.vendor ?? 'the outside unit'}`, detail: `${pcs} into ${e.step}` })
+        steps.push({ ...base, by: e.person, phase: 'production', title: `Back from ${e.vendor ?? 'the outside unit'}`, detail: `${pcs} into ${e.step}${earlier}` })
         break
+      case 'SIZE_CHANGE': {
+        // Pieces made as another size at stitching: the piece's own bundle
+        // was made from another (a step of its journey), or gave some of its
+        // pieces to a new bundle (a detail).
+        const sc = e.sizeChange
+        if (!sc) {
+          steps.push({ ...base, by: e.person, phase: 'production', title: `Size changed at ${e.step}`, detail: e.changes.join(', '), minor: true })
+          break
+        }
+        const bundles = sc.moves.map((m) => `${shortBundle(m.from)} → ${shortBundle(m.to)}`).join(', ')
+        const m = sc.moves[0]
+        steps.push({
+          ...base,
+          by: e.person,
+          phase: 'production',
+          title: sc.made
+            ? `Made as ${m.toSize} instead of ${m.fromSize} at ${e.step} (${bundles})`
+            : `${pcs} of this bundle made as ${[...new Set(sc.moves.map((x) => x.toSize))].join(', ')} at ${e.step} (${bundles})`,
+          detail: sc.reason || null,
+          ref: null,
+          minor: e.reversed || !sc.made,
+        })
+        break
+      }
       case 'PACK':
         steps.push({ ...base, phase: 'store', title: 'Packed into finished goods', detail: `${pcs}${inBundle}`, minor: true })
         break
       case 'SHORT':
       case 'EXCESS':
       case 'SETTLE':
-        steps.push({ ...base, phase: 'production', title: `${e.type} at ${e.step}`, detail: e.changes.join(', ') })
+        steps.push({ ...base, phase: 'production', title: `${e.type} at ${e.step}`, detail: `${e.changes.join(', ')}${earlier}` })
         break
       case 'PROCESS':
       case 'DECIDE':
@@ -269,7 +303,7 @@ function assemble(
           phase: e.check ? 'qc' : 'production',
           title: e.check ? (trouble ? `Problem found at ${e.step}` : `Passed ${e.step}`) : e.kind === 'REWORK_DONE' ? `Rework done at ${e.step}` : `Worked at ${e.step}`,
           // At a check, "done" means passed.
-          detail: (e.check ? e.changes.map((c) => c.replace(/ done$/, ' passed')) : e.changes).join(', '),
+          detail: `${(e.check ? e.changes.map((c) => c.replace(/ done$/, ' passed')) : e.changes).join(', ')}${earlier}`,
           minor: e.reversed || !trouble,
         })
         break
@@ -452,7 +486,7 @@ const moSelect = {
   totalCutQty: true,
   totalPackedQty: true,
   createdBy: { select: { name: true } },
-  lines: { select: { color: true, totalQty: true, style: { select: { id: true, code: true, name: true } } } },
+  lines: { select: { id: true, color: true, totalQty: true, style: { select: { id: true, code: true, name: true } } } },
   steps: { orderBy: { sequence: 'asc' as const }, select: { id: true, sequence: true, kind: true, isQcStep: true, skippedAt: true, name: true, execution: true } },
 } as const
 
@@ -460,12 +494,15 @@ const moSelect = {
  * The order item by item: each line of each manufacturing order — one style
  * in one colour — with how far it has got (ordered, cut, into finished goods,
  * in the store, despatched), where its pieces are on the floor now, and the
- * same size by size. The whole-order figures add these up.
+ * same size by size. The whole-order figures add these up. Size by size, a
+ * size change at stitching moves pieces from one size of the line to another:
+ * each size shows what it gained or gave and the revised count, which is what
+ * finished goods follow (the sales order keeps the buyer's sizes).
  */
 async function itemsOf(mos: Array<{ id: string; moNumber: string; steps: FigureStep[] }>) {
   const moIds = mos.map((m) => m.id)
   if (!moIds.length) return []
-  const [lines, cuts, garments, fg] = await Promise.all([
+  const [lines, cuts, garments, fg, changedBy] = await Promise.all([
     prisma.mOLine.findMany({
       where: { moId: { in: moIds } },
       orderBy: { id: 'asc' },
@@ -485,7 +522,9 @@ async function itemsOf(mos: Array<{ id: string; moNumber: string; steps: FigureS
       where: { receipt: { moId: { in: moIds }, cancelledAt: null } },
       select: { itemId: true, sizeId: true, qty: true, receipt: { select: { moId: true } } },
     }),
+    Promise.all(moIds.map(async (moId) => [moId, await netSizeChanges(prisma, { moId })] as const)),
   ])
+  const changedOf = new Map(changedBy)
   // The finished-goods item each line makes: its style in its colour.
   const items = lines.length
     ? await prisma.item.findMany({
@@ -537,14 +576,20 @@ async function itemsOf(mos: Array<{ id: string; moNumber: string; steps: FigureS
         nowAt,
         sizes: [...l.sizes]
           .sort((a, b) => a.size.sequence - b.size.sequence)
-          .map((z) => ({
-            code: z.size.code,
-            ordered: z.qty,
-            cut: cutBy.get(z.size.id) ?? 0,
-            intoFg: myFg.filter((r) => r.sizeId === z.size.id).reduce((t, r) => t + n(r.qty), 0),
-            inStore: g('IN_STOCK', z.size.id) + g('PACKED', z.size.id),
-            despatched: g('DISPATCHED', z.size.id),
-          })),
+          .map((z) => {
+            // Made as this size (+) or as another (−) at stitching, changes not undone.
+            const changed = changedOf.get(l.moId)?.(l.id, z.size.id) ?? 0
+            return {
+              code: z.size.code,
+              ordered: z.qty,
+              cut: cutBy.get(z.size.id) ?? 0,
+              changed,
+              revised: Math.max(0, z.qty + changed),
+              intoFg: myFg.filter((r) => r.sizeId === z.size.id).reduce((t, r) => t + n(r.qty), 0),
+              inStore: g('IN_STOCK', z.size.id) + g('PACKED', z.size.id),
+              despatched: g('DISPATCHED', z.size.id),
+            }
+          }),
       }
     }),
   )
@@ -587,7 +632,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
   }
   const moIds = mos.map((m) => m.id)
 
-  const [stages, pieces, materials, cuts, transfers, qcEvents, receipts, challans, items] = await Promise.all([
+  const [stages, pieces, materials, cuts, transfers, qcEvents, receipts, challans, items, sizeChanges] = await Promise.all([
     Promise.all(
       mos.map(async (m) => ({
         moId: m.id,
@@ -667,6 +712,8 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
         })
       : Promise.resolve([]),
     itemsOf(mos),
+    // Size jumps at stitching: pieces of a bundle made as another size of the line.
+    Promise.all(mos.map(async (m) => ({ mo: m, history: await sizeChangeHistory(prisma, { moId: m.id }) }))),
   ])
 
   const steps: Step[] = []
@@ -742,6 +789,49 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
       undone: Boolean(e.reversedAt),
       minor: !trouble || Boolean(e.reversedAt),
     })
+  }
+  // Size changes at stitching: "20 pcs made as L instead of M at Stitching",
+  // why, and the bundles; greyed once undone, with the undo as a detail. The
+  // sales order keeps its sizes; finished goods come in as the pieces were made.
+  const manyLines = mos.reduce((t, m) => t + m.lines.length, 0) > 1
+  for (const { mo: m, history } of sizeChanges) {
+    for (const h of history) {
+      const groups = new Map<string, { from: string; to: string; qty: number }>()
+      for (const x of h.moves) {
+        const k = `${x.from.size}|${x.to.size}`
+        const gr = groups.get(k) ?? { from: x.from.size, to: x.to.size, qty: 0 }
+        gr.qty += x.qty
+        groups.set(k, gr)
+      }
+      const list = [...groups.values()]
+      const total = list.reduce((t, x) => t + x.qty, 0)
+      const one = list.length === 1 ? list[0] : null
+      const line = manyLines ? m.lines.find((l) => l.id === h.moLineId) : null
+      const where = [mos.length > 1 ? m.moNumber : null, line ? `${line.style.code} ${line.color}` : null]
+      const bundles = h.moves.map((x) => `${shortBundle(x.from.code)} → ${shortBundle(x.to.code)}`).join(', ')
+      steps.push({
+        at: h.date,
+        phase: 'production',
+        title: one
+          ? `${pcsOf(one.qty)} made as ${one.to} instead of ${one.from} at ${h.step.name}`
+          : `${pcsOf(total)} made as other sizes at ${h.step.name}: ${list.map((x) => `${x.qty} ${x.from} → ${x.to}`).join(', ')}`,
+        detail: [...where, h.reason].filter(Boolean).join(' · '),
+        ref: bundles,
+        by: h.personName ?? h.by,
+        undone: Boolean(h.undone),
+      })
+      if (h.undone) {
+        steps.push({
+          at: h.undone.at,
+          phase: 'production',
+          title: one ? `Size change undone: ${pcsOf(one.qty)} back to ${one.from} at ${h.step.name}` : `Size change undone at ${h.step.name}: ${pcsOf(total)} back to the sizes they were cut as`,
+          detail: [...where, h.undone.reason].filter(Boolean).join(' · ') || null,
+          ref: bundles,
+          by: h.undone.by,
+          minor: true,
+        })
+      }
+    }
   }
   for (const r of receipts) {
     const pcs = r.lines.reduce((s, l) => s + n(l.qty), 0)

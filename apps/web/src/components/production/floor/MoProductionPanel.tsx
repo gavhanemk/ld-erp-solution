@@ -6,6 +6,7 @@ import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { oldCutNote } from '../MoFlowStrip'
 import { StagesDialog } from '../StagesDialog'
 import { JobCardView } from './JobCardView'
 import { SheetView } from './SheetView'
@@ -34,6 +35,8 @@ export function MoProductionPanel({
   flow,
   materialsIssued,
   requisitionsRaised = false,
+  cutWithoutStages = [],
+  packed = 0,
   onLoadStages,
   onChanged,
 }: {
@@ -43,6 +46,10 @@ export function MoProductionPanel({
   materialsIssued: boolean
   /** A requisition is raised for the order, issued or not. */
   requisitionsRaised?: boolean
+  /** Cut the old way, before it had stages (cutting numbers): it carries on without stages; no more cutting is recorded that way. */
+  cutWithoutStages?: string[]
+  /** Pieces packed on the order: once some are, it stays without stages. */
+  packed?: number
   onLoadStages: () => void
   onChanged: (message: string) => void
 }) {
@@ -52,6 +59,9 @@ export function MoProductionPanel({
   const [error, setError] = useState<string | null>(null)
   const live = !['DRAFT', 'CLOSED'].includes(mo.status)
   const staged = mo.steps.length > 0
+  /** Stages may still be loaded on it: the server refuses a completed order too. */
+  const mayStage = live && mo.status !== 'COMPLETED'
+  const oldCut = mayStage && cutWithoutStages.length > 0
 
   const loadCards = useCallback(async () => {
     try {
@@ -164,8 +174,16 @@ export function MoProductionPanel({
               </div>
             ) : (
               <div className="space-y-1.5">
-                <p>The stages come from the style&apos;s routing in Masters → Routings, in its order.</p>
-                {live && can('production', 'edit') &&
+                {oldCut ? (
+                  // The server refuses stages for it (CUT_WITHOUT_ROUTE), so no button that looks as if it works.
+                  <div className="border-border bg-secondary/40 flex items-start gap-1.5 rounded-lg border border-dashed px-2.5 py-2">
+                    <Lock size={13} className="mt-px shrink-0" />
+                    <span>{oldCutNote(cutWithoutStages, packed, 'under Cutting below')}</span>
+                  </div>
+                ) : (
+                  <p>The stages come from the style&apos;s routing in Masters → Routings, in its order.</p>
+                )}
+                {mayStage && can('production', 'edit') && !oldCut &&
                   (materialsIssued ? (
                     <button type="button" className="btn-primary h-7 px-2.5 text-xs" onClick={onLoadStages}>
                       <Route size={13} /> Set up stages
@@ -197,7 +215,11 @@ export function MoProductionPanel({
             false,
             'Process forms, by job card',
             !staged ? (
-              'Once the stages are loaded, each colour gets its forms: cutting sheet first, then one for each stage to the last check.'
+              oldCut ? (
+                'None for this order while it carries on without stages: its cuttings are listed under Cutting below, and what is packed is booked in Inventory → Finished Goods In.'
+              ) : (
+                'Once the stages are loaded, each colour gets its forms: cutting sheet first, then one for each stage to the last check.'
+              )
             ) : !cards.length ? (
               'No job cards yet.'
             ) : (

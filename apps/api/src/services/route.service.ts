@@ -70,12 +70,14 @@ export interface Destination<T> {
  *
  * Counted in pieces, bundle by bundle: a bundle of 10 with 6 sent on can
  * still send 4. A bundle split off another carries on from what its parent
- * had been through. Empty when the step is the last one.
+ * had been through up to the step where it was made (a size change at
+ * stitching); past that step it goes its own way. Empty when the step is the
+ * last one.
  */
 export function destinationsFrom<T extends RouteStep>(
   steps: T[],
   fromId: string,
-  bundles: Array<{ id: string; qty: number; parentId?: string | null }>,
+  bundles: Array<{ id: string; qty: number; parentId?: string | null; splitAtStepId?: string | null }>,
   sent: SentLine[],
 ): Destination<T>[] {
   const live = ordered(steps).filter((s) => !s.skippedAt)
@@ -84,12 +86,18 @@ export function destinationsFrom<T extends RouteStep>(
   const lastId = live[live.length - 1]?.id
   const parentOf = new Map(bundles.map((b) => [b.id, b.parentId ?? null]))
   const qtyOf = new Map(bundles.map((b) => [b.id, b.qty]))
+  const seqOf = new Map(steps.map((s) => [s.id, s.sequence]))
+  const madeAt = new Map(bundles.map((b) => [b.id, b.splitAtStepId ? (seqOf.get(b.splitAtStepId) ?? null) : null]))
   const direct = new Map<string, number>()
   for (const l of sent) direct.set(`${l.bundleId}|${l.toStepId}`, (direct.get(`${l.bundleId}|${l.toStepId}`) ?? 0) + l.qty)
   const through = (bundleId: string, stepId: string, depth = 0): number => {
     const own = direct.get(`${bundleId}|${stepId}`) ?? 0
     const parent = parentOf.get(bundleId)
-    if (own > 0 || !parent || depth > 5) return own
+    // Bounded by the bundles there are: a chain can be no longer, and a loop cannot run on.
+    if (own > 0 || !parent || depth > bundles.length) return own
+    // Past the step where it was made, its parent's transfers are not its own.
+    const at = madeAt.get(bundleId)
+    if (at != null && (seqOf.get(stepId) ?? Infinity) > at) return own
     return Math.min(qtyOf.get(bundleId) ?? 0, through(parent, stepId, depth + 1))
   }
 

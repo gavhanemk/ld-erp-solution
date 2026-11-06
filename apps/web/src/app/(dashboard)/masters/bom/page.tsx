@@ -25,7 +25,13 @@ import { cn, formatDate, formatRupees } from '@/lib/utils'
 import { useAppSettings } from '@/lib/appSettings'
 import { useEscape } from '@/lib/useEscape'
 import { BomFormDialog, type Bom } from '@/components/masters/BomFormDialog'
+import { BomDetail } from '@/components/masters/BomDetail'
+import { BomReviewDialog } from '@/components/masters/BomReviewDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { KpiTile, TONE } from '@/components/dashboard/DashKit'
+import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { ScrollableTable } from '@/components/tables/ScrollableTable'
+import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 
 /** The six status colours are fixed; a BOM uses three of them. */
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -33,6 +39,28 @@ const STATUS: Record<string, { label: string; cls: string }> = {
   APPROVED: { label: 'Approved', cls: 'badge-success' },
   OBSOLETE: { label: 'Obsolete', cls: 'badge-neutral' },
 }
+
+/** What a status means for using the BOM, beside its badge. */
+const MEANS: Record<string, string> = {
+  APPROVED: 'In use',
+  DRAFT: 'Not in use yet',
+  OBSOLETE: 'Replaced',
+}
+
+/** What the list shows: what is in use and on the way, one status, or everything. */
+type View = 'live' | 'APPROVED' | 'DRAFT' | 'OBSOLETE' | 'all'
+const VIEW_STATUS: Record<View, string> = { live: 'DRAFT,APPROVED', APPROVED: 'APPROVED', DRAFT: 'DRAFT', OBSOLETE: 'OBSOLETE', all: '' }
+
+/** The dropdowns over the list: the main things a BOM is about. */
+type Facet = 'styles' | 'colours' | 'brands' | 'items' | 'priced'
+const FACETS: Array<{ key: Facet; label: string }> = [
+  { key: 'styles', label: 'Style' },
+  { key: 'colours', label: 'Colour' },
+  { key: 'brands', label: 'Brand' },
+  { key: 'items', label: 'Item used' },
+  { key: 'priced', label: 'Price' },
+]
+const NO_PICKS: Record<Facet, string[]> = { styles: [], colours: [], brands: [], items: [], priced: [] }
 
 const num = (v: unknown) => Number(v ?? 0)
 
@@ -71,14 +99,21 @@ export default function BomPage() {
 
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
-  const [activeOnly, setActiveOnly] = useState(true)
-  const [status, setStatus] = useState('')
+  // Retired BOMs are kept for the record, out of the way until asked for.
+  const [view, setView] = useState<View>('live')
   const [page, setPage] = useState(1)
+  /** What each dropdown has picked, and what each offers (with how many BOMs a choice leaves). */
+  const [picked, setPicked] = useState<Record<Facet, string[]>>(NO_PICKS)
+  const [facets, setFacets] = useState<Record<Facet, FilterChoice[]> | null>(null)
+  /** How many BOMs are approved, drafts and retired, over the whole list. */
+  const [counts, setCounts] = useState<{ APPROVED: number; DRAFT: number; OBSOLETE: number } | null>(null)
 
   const [expanded, setExpanded] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<Bom | null>(null)
   const [copying, setCopying] = useState<Bom | null>(null)
+  /** A draft being looked over before it is approved. */
+  const [reviewing, setReviewing] = useState<Bom | null>(null)
 
   // The same 350ms the master screens use, so typing does not fire a request
   // per keystroke.
@@ -89,20 +124,33 @@ export default function BomPage() {
 
   useEffect(() => {
     setPage(1)
-  }, [debounced, activeOnly, status])
+  }, [debounced, view, picked])
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const params = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
+      // A style's BOMs together, colour by colour, newest first.
+      const params = new URLSearchParams({ page: String(page), limit: String(rowsPerPage), sort: 'style', order: 'asc' })
       if (debounced) params.set('q', debounced)
-      if (activeOnly) params.set('active', 'true')
-      if (status) params.set('status', status)
+      if (VIEW_STATUS[view]) params.set('status', VIEW_STATUS[view])
+      for (const f of FACETS) if (picked[f.key].length) params.set(f.key, picked[f.key].join(','))
+      // The dropdowns' choices for the same search, status and picks.
+      const facetParams = new URLSearchParams(params)
+      for (const k of ['page', 'limit', 'sort', 'order']) facetParams.delete(k)
 
-      const res = await api.get<Paginated<Bom>>(`/masters/bom?${params.toString()}`)
+      const count = (st: string) => api.get<Paginated<Bom>>(`/masters/bom?status=${st}&limit=1`).then((r) => r.pagination.total)
+      const [res, approved, draft, retired, choices] = await Promise.all([
+        api.get<Paginated<Bom>>(`/masters/bom?${params.toString()}`),
+        count('APPROVED'),
+        count('DRAFT'),
+        count('OBSOLETE'),
+        api.get<{ data: Record<Facet, FilterChoice[]> }>(`/masters/bom/facets?${facetParams.toString()}`).then((r) => r.data),
+      ])
+      setFacets(choices)
       setBoms(res.data)
       setPagination(res.pagination)
+      setCounts({ APPROVED: approved, DRAFT: draft, OBSOLETE: retired })
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?',
@@ -111,7 +159,7 @@ export default function BomPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, rowsPerPage, debounced, activeOnly, status])
+  }, [page, rowsPerPage, debounced, view, picked])
 
   useEffect(() => {
     void load()
@@ -132,15 +180,8 @@ export default function BomPage() {
     }
   }
 
-  const approve = (bom: Bom) => {
-    if (
-      !confirm(
-        `Approve ${bomLabel(bom)}?\n\nIt becomes the one approved BOM for this colour, and any BOM approved for it before is retired. The components and rates are locked after this — to change them, copy it to a new version.`,
-      )
-    )
-      return
-    void act(() => api.patch(`/masters/bom/${bom.id}/approve`, {}))
-  }
+  // Approving goes through the review: what it changes, and the whole BOM, first.
+  const approve = (bom: Bom) => setReviewing(bom)
 
   const copy = (bom: Bom) => setCopying(bom)
 
@@ -156,6 +197,29 @@ export default function BomPage() {
   }
 
   const empty = !error && boms && boms.length === 0
+  const canCost = can('masters', 'approve')
+  const COLS = canCost ? 9 : 7
+  /** The picks as chips under the dropdowns, each with its own ×. */
+  const chips = FACETS.flatMap((f) =>
+    picked[f.key].map((v) => ({ key: f.key, value: v, text: `${f.label}: ${facets?.[f.key]?.find((c) => c.value === v)?.label ?? '…'}` })),
+  )
+  const narrowed = chips.length > 0 || !!debounced
+  const clearAll = () => {
+    setPicked(NO_PICKS)
+    setSearch('')
+  }
+  /** A tile filters the list to its BOMs; pressed again, back to what is in use. */
+  const pick = (v: View) => setView((cur) => (cur === v ? 'live' : v))
+
+  // The page's BOMs under their style, each style where its first BOM falls.
+  const styleOf = (b: Bom) => b.styleId ?? b.style?.code ?? b.id
+  const rows = boms ?? []
+  const perStyle = new Map<string, Bom[]>()
+  for (const b of rows) {
+    const k = styleOf(b)
+    if (!perStyle.has(k)) perStyle.set(k, [])
+    perStyle.get(k)!.push(b)
+  }
 
   return (
     <div className="space-y-6">
@@ -163,9 +227,7 @@ export default function BomPage() {
         <div>
           <h1 className="page-title">Bill of Materials</h1>
           <p className="page-subtitle">
-            {loading && !boms
-              ? 'Loading...'
-              : `${pagination.total} BOM${pagination.total === 1 ? '' : 's'}`}
+            What goes into one piece of each style and colour, and what it costs. The approved BOM is the one orders use.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -189,53 +251,100 @@ export default function BomPage() {
         </div>
       </div>
 
-      <div className="glass-card p-4 flex flex-wrap items-center gap-3">
-        <div className="flex-1 min-w-60 flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <KpiTile
+          icon={CheckCircle2}
+          tone={TONE.emerald}
+          label="Approved"
+          value={counts ? String(counts.APPROVED) : '…'}
+          sub={view === 'APPROVED' ? 'showing only these · click to show all' : 'in use: orders and MOs take these'}
+          onClick={() => pick('APPROVED')}
+          active={view === 'APPROVED'}
+        />
+        <KpiTile
+          icon={PencilLine}
+          tone={TONE.amber}
+          label="Drafts"
+          value={counts ? String(counts.DRAFT) : '…'}
+          valueClass={counts?.DRAFT ? 'text-amber-500' : 'text-foreground'}
+          sub={view === 'DRAFT' ? 'showing only these · click to show all' : 'to check and approve'}
+          onClick={() => pick('DRAFT')}
+          active={view === 'DRAFT'}
+        />
+        <KpiTile
+          icon={Archive}
+          tone={TONE.sky}
+          label="Retired"
+          value={counts ? String(counts.OBSOLETE) : '…'}
+          sub={view === 'OBSOLETE' ? 'showing only these · click to show all' : 'replaced or no longer offered · kept for the record'}
+          onClick={() => pick('OBSOLETE')}
+          active={view === 'OBSOLETE'}
+        />
+      </div>
+
+      <div className="glass-card relative z-20 flex flex-wrap items-center gap-3 p-4">
+        <div className="flex min-w-60 flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3 py-2">
           <Search size={15} className="text-muted-foreground" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by style name, code or version..."
-            className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground flex-1 focus:outline-none"
+            placeholder="Search style code, style name, colour or version..."
+            className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
             aria-label="Search BOMs"
             data-hotkey="search"
           />
         </div>
-        <SmartSelect
-          className="form-input w-auto"
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          aria-label="Filter by status"
-        >
-          <option value="">Any status</option>
-          <option value="DRAFT">Draft</option>
-          <option value="APPROVED">Approved</option>
-          <option value="OBSOLETE">Obsolete</option>
+        <SmartSelect className="form-input w-auto" value={view} onChange={(e) => setView(e.target.value as View)} aria-label="Show">
+          <option value="live">In use and drafts</option>
+          <option value="APPROVED">Approved only</option>
+          <option value="DRAFT">Drafts only</option>
+          <option value="OBSOLETE">Retired only</option>
+          <option value="all">All, retired too</option>
         </SmartSelect>
-        <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={activeOnly}
-            onChange={(e) => setActiveOnly(e.target.checked)}
-            className="accent-teal-500"
+        {FACETS.map((f) => (
+          <FilterMenu
+            key={f.key}
+            label={f.label}
+            choices={facets?.[f.key]}
+            selected={picked[f.key]}
+            onChange={(next) => setPicked((p) => ({ ...p, [f.key]: next }))}
           />
-          Active only
-        </label>
+        ))}
+        <div className="flex w-full flex-wrap items-center gap-1.5">
+          {chips.map((c) => (
+            <button
+              key={`${c.key}-${c.value}`}
+              type="button"
+              onClick={() => setPicked((p) => ({ ...p, [c.key]: p[c.key].filter((v) => v !== c.value) }))}
+              className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-foreground"
+            >
+              {c.text} <X size={11} />
+            </button>
+          ))}
+          {narrowed && (
+            <button type="button" onClick={clearAll} className="text-xs text-teal-500 hover:underline">
+              Clear all
+            </button>
+          )}
+          <span className="ml-auto text-xs text-muted-foreground">
+            {loading && !boms ? 'Loading…' : `${pagination.total} ${pagination.total === 1 ? 'BOM' : 'BOMs'}`}
+          </span>
+        </div>
       </div>
 
       {notice && (
-        <div className="glass-card p-4 flex items-start gap-3 border-amber-500/40">
-          <AlertCircle size={18} className="text-amber-400 mt-0.5 shrink-0" />
+        <div className="glass-card flex items-start gap-3 border-amber-500/40 p-4">
+          <AlertCircle size={18} className="mt-0.5 shrink-0 text-amber-400" />
           <p className="text-sm text-foreground">{notice}</p>
         </div>
       )}
 
       {error && (
-        <div className="glass-card p-4 flex items-start gap-3 border-red-500/40">
-          <AlertCircle size={18} className="text-red-400 mt-0.5 shrink-0" />
+        <div className="glass-card flex items-start gap-3 border-red-500/40 p-4">
+          <AlertCircle size={18} className="mt-0.5 shrink-0 text-red-400" />
           <div>
             <p className="text-sm font-semibold text-red-400">Could not load bills of materials</p>
-            <p className="text-xs text-muted-foreground mt-1">{error}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{error}</p>
           </div>
         </div>
       )}
@@ -244,37 +353,95 @@ export default function BomPage() {
 
       {empty && (
         <div className="glass-card p-10 text-center">
-          <Layers size={22} className="text-muted-foreground mx-auto mb-3" />
-          <p className="text-sm text-foreground font-medium">
-            {debounced || status ? 'Nothing matches that' : 'No bills of materials yet'}
+          <Layers size={22} className="mx-auto mb-3 text-muted-foreground" />
+          <p className="text-sm font-medium text-foreground">
+            {narrowed || view !== 'live' ? 'Nothing matches that' : 'No bills of materials yet'}
           </p>
-          <p className="text-xs text-muted-foreground mt-1">
-            {debounced || status
-              ? 'Try the style code, or clear the filters.'
+          <p className="mt-1 text-xs text-muted-foreground">
+            {narrowed || view !== 'live'
+              ? 'Try fewer filters, or show all.'
               : 'Pick a style and list what goes into one piece — fabric, trims, buttons, packing. The cost per garment comes out of it.'}
           </p>
         </div>
       )}
 
-      <div className="space-y-3">
-        {(boms ?? []).map((bom, i) => (
-          <BomRow
-            key={bom.id}
-            bom={bom}
-            first={i === 0}
-            open={expanded === bom.id}
-            busy={busy}
-            onToggle={() => setExpanded(expanded === bom.id ? null : bom.id)}
-            onEdit={() => {
-              setEditing(bom)
-              setDialogOpen(true)
-            }}
-            onApprove={() => approve(bom)}
-            onCopy={() => copy(bom)}
-            onRetire={() => retire(bom)}
-          />
-        ))}
-      </div>
+      {rows.length > 0 && (
+        <div className={cn('glass-card list-scope overflow-hidden p-0 transition-opacity', loading && 'opacity-60')}>
+          <ScrollableTable>
+            <table className="data-table table-compact min-w-full">
+              <thead>
+                <tr className="bg-secondary">
+                  <th style={{ width: 44 }} />
+                  <th className="whitespace-nowrap">Colour · version</th>
+                  <th className="whitespace-nowrap">Status</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                    Components
+                  </th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                    Material / pc
+                  </th>
+                  {canCost && (
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                      Cost / pc
+                    </th>
+                  )}
+                  {canCost && (
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                      Selling price
+                    </th>
+                  )}
+                  <th className="whitespace-nowrap">Approved</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((bom, i) => {
+                  const k = styleOf(bom)
+                  const head = i === 0 || styleOf(rows[i - 1]) !== k
+                  const mine = perStyle.get(k) ?? []
+                  const colours = [...new Set(mine.map((b) => b.color).filter(Boolean))]
+                  return (
+                    <Fragment key={bom.id}>
+                      {head && (
+                        <tr className="border-t border-t-border bg-secondary/60">
+                          <td colSpan={COLS} className="!p-0">
+                            <div className="sticky left-0 flex w-[100cqw] flex-wrap items-center gap-x-2.5 gap-y-1 px-4 py-2">
+                              <Layers size={15} className="shrink-0 text-primary" />
+                              <span className="font-mono text-sm font-semibold text-primary">{bom.style?.code}</span>
+                              <span className="text-sm font-medium text-foreground">{bom.style?.name}</span>
+                              {bom.style?.brandType === 'VHAGAR' && <span className="vhagar-accent text-xs font-bold">VHAGAR</span>}
+                              <span className="rounded-full border border-border bg-card px-2 py-0.5 text-[11px] text-muted-foreground tabular-nums">
+                                {mine.length} {mine.length === 1 ? 'BOM' : 'BOMs'}
+                                {colours.length > 0 ? ` · ${colours.length} ${colours.length === 1 ? 'colour' : 'colours'}` : ''}
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      <BomLine
+                        bom={bom}
+                        first={i === 0}
+                        cols={COLS}
+                        canCost={canCost}
+                        open={expanded === bom.id}
+                        busy={busy}
+                        onToggle={() => setExpanded(expanded === bom.id ? null : bom.id)}
+                        onEdit={() => {
+                          setEditing(bom)
+                          setDialogOpen(true)
+                        }}
+                        onApprove={() => approve(bom)}
+                        onCopy={() => copy(bom)}
+                        onRetire={() => retire(bom)}
+                      />
+                    </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
+          </ScrollableTable>
+        </div>
+      )}
 
       {pagination.pages > 1 && (
         <div className="glass-card p-4 flex items-center justify-between">
@@ -312,6 +479,23 @@ export default function BomPage() {
         record={editing}
       />
 
+      {reviewing && (
+        <BomReviewDialog
+          bomId={reviewing.id}
+          onClose={() => setReviewing(null)}
+          onEdit={() => {
+            setEditing(reviewing)
+            setReviewing(null)
+            setDialogOpen(true)
+          }}
+          onApproved={(message) => {
+            setReviewing(null)
+            setNotice(message)
+            void load()
+          }}
+        />
+      )}
+
       <CopyBomDialog
         source={copying}
         onClose={() => setCopying(null)}
@@ -324,10 +508,13 @@ export default function BomPage() {
   )
 }
 
-interface RowProps {
+interface LineProps {
   bom: Bom
   open: boolean
   busy: boolean
+  canCost: boolean
+  /** Columns in the table, for the detail row under a line. */
+  cols: number
   onToggle: () => void
   onEdit: () => void
   onApprove: () => void
@@ -337,516 +524,116 @@ interface RowProps {
   first?: boolean
 }
 
-function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire, first }: RowProps) {
+/**
+ * One BOM as a line of the table: its colour and version, what its status
+ * means, its figures, who approved it, and what can be done to it. Opened,
+ * the full detail sits under it.
+ */
+function BomLine({ bom, open, busy, canCost, cols, onToggle, onEdit, onApprove, onCopy, onRetire, first }: LineProps) {
   const status = STATUS[bom.status] ?? STATUS.DRAFT
-  // Labour, overhead, cost and price reach only those who may approve masters;
-  // the API leaves them out for everyone else, who see material alone.
-  const canCost = can('masters', 'approve')
   const material = num(bom.totalCost)
-  const labour = num(bom.labourCost)
-  const overhead = num(bom.overheadCost)
-  const cost = bom.costPerPiece != null ? num(bom.costPerPiece) : material + labour + overhead
+  const cost = bom.costPerPiece != null ? num(bom.costPerPiece) : material + num(bom.labourCost) + num(bom.overheadCost)
   const price = bom.sellingPrice != null ? num(bom.sellingPrice) : null
-  const lines = bom.lines ?? []
-  const costLines = bom.costLines ?? []
+  const n = bom.lines?.length ?? 0
+  const mayApprove = bom.status === 'DRAFT' && can('masters', 'approve')
 
-  // What the status means for this BOM, in words. A badge saying "Approved"
-  // does not tell anyone what approving did, or what to do next.
-  const who = `${bom.style?.code ?? 'this style'}${bom.color ? ` in ${bom.color}` : ''}`
-  const note =
-    bom.status === 'APPROVED'
-      ? {
-          icon: CheckCircle2,
-          iconClass: 'text-emerald-400',
-          title: `Approved — this is the BOM to use for ${who}`,
-          body: 'Only one BOM per style and colour can be approved at a time. It is locked, so its costing stays fixed: to change it, copy it to a new version and approve that.',
-        }
-      : bom.status === 'OBSOLETE'
-        ? {
-            icon: Archive,
-            iconClass: 'text-muted-foreground',
-            title: 'Retired — kept for the record',
-            body: `A newer BOM replaced it, or it was taken out of use. It is no longer the BOM for ${who}.`,
-          }
-        : {
-            icon: PencilLine,
-            iconClass: 'text-primary',
-            title: 'Draft — not in use yet',
-            body: `Check the components and the costing, then approve it. Approving makes it the BOM for ${who} and retires any BOM approved for it before.`,
-          }
-
-  const sizeTotals = useMemo(() => {
-    // A per-size cost only means something when at least one component varies.
-    const ids = new Set<string>()
-    for (const line of bom.lines ?? []) {
-      for (const s of line.sizes ?? []) ids.add(s.sizeId)
-    }
-    if (ids.size === 0) return []
-
-    const rows = new Map<string, { label: string; sequence: number; cost: number }>()
-    for (const line of bom.lines ?? []) {
-      const base = num(line.totalCost)
-      for (const id of ids) {
-        const own = (line.sizes ?? []).find((s) => s.sizeId === id)
-        const label = own?.size?.label ?? own?.size?.code ?? ''
-        const seq = own?.size?.sequence ?? 0
-        const prev = rows.get(id) ?? { label, sequence: seq, cost: 0 }
-        rows.set(id, {
-          label: own ? label : prev.label,
-          sequence: own ? seq : prev.sequence,
-          // A size with no row of its own consumes what the line consumes.
-          cost: prev.cost + (own ? num(own.totalCost) : base),
-        })
-      }
-    }
-    return [...rows.values()].sort((a, b) => a.sequence - b.sequence)
-  }, [bom.lines])
+  const actions: RowAction[] = [
+    { key: 'edit', label: bom.status === 'APPROVED' ? 'Edit (a change makes a new version)' : 'Edit', icon: <Pencil size={14} />, onClick: onEdit },
+    ...(mayApprove ? [{ key: 'approve', label: 'Approve', icon: <CheckCircle2 size={14} />, onClick: onApprove }] : []),
+    { key: 'copy', label: 'Copy to a new version or colour', icon: <Copy size={14} />, onClick: onCopy },
+    ...(bom.status !== 'OBSOLETE' || bom.isActive
+      ? [{ key: 'retire', label: 'Stop offering', icon: <Ban size={14} />, onClick: onRetire, danger: true }]
+      : []),
+  ]
 
   return (
-    <div className="glass-card overflow-hidden" data-row tabIndex={first ? 0 : -1}>
-      <div className="flex flex-wrap items-center gap-3 p-4">
-        <button
-          onClick={onToggle}
-          className="btn-ghost p-1"
-          aria-label={open ? 'Collapse' : 'Expand'}
-          data-row-open
-        >
-          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </button>
-
-        <div className="flex-1 min-w-48">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-xs text-teal-400">{bom.style?.code}</span>
-            <span className="text-sm font-medium text-foreground truncate">{bom.style?.name}</span>
-            {bom.color ? (
-              <span className="text-sm text-foreground">· {bom.color}</span>
-            ) : (
-              (bom.style?.colors?.length ?? 0) > 0 && (
+    <>
+      <tr data-row tabIndex={first ? 0 : -1} className={cn(bom.status === 'OBSOLETE' && 'opacity-70')}>
+        <td>
+          <button
+            onClick={onToggle}
+            className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary transition-colors hover:bg-primary/20"
+            aria-label={`${open ? 'Hide' : 'Show'} the components and costing of ${bomLabel(bom)}`}
+            aria-expanded={open}
+            title={open ? 'Hide details' : 'Show components and costing'}
+            data-row-open
+          >
+            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        </td>
+        <td className="whitespace-nowrap">
+          <div className="text-sm font-medium text-foreground">
+            {bom.color ?? (
+              (bom.style?.colors?.length ?? 0) > 0 ? (
                 // Made before BOMs were per colour. Copying it to each colour is
                 // how it gets one, so it is flagged rather than left to look normal.
                 <span className="badge-warning">Colour not set</span>
+              ) : (
+                <span className="text-muted-foreground">All colours</span>
               )
             )}
-            <span className="badge-neutral">v{bom.version}</span>
-            <span className={status.cls}>{status.label}</span>
-            {!bom.isActive && <span className="badge-danger">Not offered</span>}
           </div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {bom.lines?.length ?? 0} component
-            {bom.lines?.length === 1 ? '' : 's'}
+          <div className="font-mono text-[11px] text-muted-foreground">
+            v{bom.version}
             {bom.baseSize && ` · sized on ${bom.baseSize.label}`}
-            {bom.style?.brandType === 'VHAGAR' && (
-              <span className="vhagar-accent font-bold ml-2">VHAGAR</span>
-            )}
-          </p>
-        </div>
-
-        {canCost ? (
-          <div className="flex items-center gap-5 text-right">
-            <div>
-              <p className="font-mono text-sm font-bold text-foreground">{formatRupees(cost)}</p>
-              <p className="text-xs text-muted-foreground">cost per piece</p>
-            </div>
-            <div>
-              <p className={cn('font-mono text-sm font-bold', price !== null ? 'text-primary' : 'text-muted-foreground')}>
-                {price !== null ? formatRupees(price) : '—'}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {price !== null && bom.marginPercent != null ? `price · ${percent(bom.marginPercent)} margin` : 'not priced'}
-              </p>
-            </div>
           </div>
-        ) : (
-          <div className="text-right">
-            <p className="font-mono text-sm font-bold text-foreground">{formatRupees(material)}</p>
-            <p className="text-xs text-muted-foreground">material per piece</p>
-          </div>
-        )}
-
-        <div className="flex items-center gap-1">
-          <button className="btn-ghost p-1.5" onClick={onEdit} disabled={busy} title="Edit">
-            <Pencil size={14} />
-          </button>
-          {bom.status === 'DRAFT' && (
-            <button
-              className="btn-ghost p-1.5 text-emerald-400"
-              onClick={onApprove}
-              disabled={busy}
-              title="Approve BOM"
-            >
-              <CheckCircle2 size={14} />
-            </button>
-          )}
-          <button
-            className="btn-ghost p-1.5"
-            onClick={onCopy}
-            disabled={busy}
-            title="Copy to a new version or another colour"
-          >
-            <Copy size={14} />
-          </button>
-          <button
-            className="btn-ghost p-1.5 text-red-400"
-            onClick={onRetire}
-            disabled={busy}
-            title="Stop offering this BOM"
-          >
-            <Ban size={14} />
-          </button>
-        </div>
-      </div>
-
-      {open && (
-        <div className="space-y-6 border-t border-border px-4 py-4">
-          {/* What this BOM's status means, said once, in words, before any numbers. */}
-          <div className="flex items-start gap-3 rounded-lg border border-border bg-secondary/40 px-4 py-3">
-            <note.icon size={16} className={cn('mt-0.5 shrink-0', note.iconClass)} />
-            <div className="space-y-0.5">
-              <p className="text-sm font-semibold text-foreground">{note.title}</p>
-              <p className="text-xs text-muted-foreground">{note.body}</p>
-              {bom.approvedBy && (
-                <p className="text-xs text-muted-foreground">
-                  Approved by <span className="text-foreground">{bom.approvedBy.name}</span>
-                  {bom.approvedAt && ` on ${formatDate(bom.approvedAt)}`}
-                </p>
-              )}
-            </div>
-          </div>
-
-          {/* The answer first, as the sum it is. The tables below show where each part comes from. */}
-          <section className="space-y-2">
-            <h3 className={sectionTitle}>
-              Cost of one piece{bom.baseSize && ` · size ${bom.baseSize.label}`}
-            </h3>
-            {canCost ? (
+        </td>
+        <td className="whitespace-nowrap">
+          <span className={status.cls}>{status.label}</span>
+          {!bom.isActive && <span className="badge-danger ml-1.5">Not offered</span>}
+          <div className="mt-0.5 text-[11px] text-muted-foreground">{MEANS[bom.status] ?? ''}</div>
+        </td>
+        <td className="whitespace-nowrap text-right tabular-nums">{n}</td>
+        <td className="whitespace-nowrap text-right font-mono text-sm">{formatRupees(material)}</td>
+        {canCost && <td className="whitespace-nowrap text-right font-mono text-sm font-semibold text-foreground">{formatRupees(cost)}</td>}
+        {canCost && (
+          <td className="whitespace-nowrap text-right">
+            {price !== null ? (
               <>
-                <div className="flex flex-col gap-2 md:flex-row md:items-stretch">
-                  <CostBox
-                    label="Material"
-                    amount={material}
-                    note={`${lines.length} component${lines.length === 1 ? '' : 's'}${
-                      cost > 0 ? ` · ${Math.round((material / cost) * 100)}% of the cost` : ''
-                    }`}
-                  />
-                  <span className="flex items-center justify-center text-muted-foreground" aria-hidden>
-                    <Plus size={16} />
-                  </span>
-                  <CostBox
-                    label="Labour"
-                    amount={labour}
-                    note={
-                      cost > 0 && labour > 0
-                        ? `${Math.round((labour / cost) * 100)}% of the cost`
-                        : 'None entered'
-                    }
-                  />
-                  <span className="flex items-center justify-center text-muted-foreground" aria-hidden>
-                    <Plus size={16} />
-                  </span>
-                  <CostBox
-                    label="Overhead"
-                    amount={overhead}
-                    note={
-                      cost > 0 && overhead > 0
-                        ? `${Math.round((overhead / cost) * 100)}% of the cost`
-                        : 'None entered'
-                    }
-                  />
-                  <span className="flex items-center justify-center text-muted-foreground" aria-hidden>
-                    <Equal size={16} />
-                  </span>
-                  <CostBox label="Cost per piece" amount={cost} note="to make one piece" strong />
-                </div>
-
-                {/* The price, and what it leaves, under the cost it is worked from. */}
-                <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border px-4 py-3">
-                  <div>
-                    <p className="text-xs font-medium text-muted-foreground">Selling price</p>
-                    <p className={cn('mt-1 font-mono text-lg font-bold', price !== null ? 'text-primary' : 'text-muted-foreground')}>
-                      {price !== null ? formatRupees(price) : '—'}
-                    </p>
-                  </div>
-                  {price !== null ? (
-                    <p className="text-xs text-muted-foreground">
-                      {bom.marginPercent != null && `${percent(bom.marginPercent)} margin · `}
-                      profit {formatRupees(price - cost)} a piece · before GST
-                      {bom.pricedBy &&
-                        ` · priced by ${bom.pricedBy.name}${bom.pricedAt ? ` on ${formatDate(bom.pricedAt)}` : ''}`}
-                    </p>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      Not priced yet. Edit this BOM and set a margin on its last step.
-                    </p>
-                  )}
-                </div>
+                <div className="font-mono text-sm font-semibold text-primary">{formatRupees(price)}</div>
+                {bom.marginPercent != null && <div className="text-[11px] text-muted-foreground">{percent(bom.marginPercent)} margin</div>}
               </>
             ) : (
-              <div className="flex flex-col gap-2 md:flex-row md:items-stretch">
-                <CostBox
-                  label="Material"
-                  amount={material}
-                  note={`${lines.length} component${lines.length === 1 ? '' : 's'}`}
-                  strong
-                />
-              </div>
+              <span className="text-xs text-muted-foreground">Not priced</span>
             )}
-
-            {sizeTotals.length > 0 && (
-              <div className="overflow-x-auto rounded-lg border border-border">
-                <table className="w-full text-sm">
-                  <thead className="bg-secondary/60">
-                    <tr className="border-b border-border">
-                      <th className={cn(th, 'text-left')}>Total by size</th>
-                      {sizeTotals.map((s) => (
-                        <th key={s.label} className={cn(th, 'text-right')}>
-                          {s.label}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      {/* Material only: a percentage overhead would need working
-                          out again for every size, and these rows are older data. */}
-                      <td className={cn(td, 'text-xs text-muted-foreground')}>Material</td>
-                      {sizeTotals.map((s) => (
-                        <td key={s.label} className={cn(td, 'text-right font-mono text-foreground')}>
-                          {formatRupees(s.cost)}
-                        </td>
-                      ))}
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+          </td>
+        )}
+        <td className="whitespace-nowrap text-xs">
+          {bom.approvedBy ? (
+            <>
+              <div className="text-foreground">{bom.approvedBy.name}</div>
+              {bom.approvedAt && <div className="text-muted-foreground">{formatDate(bom.approvedAt)}</div>}
+            </>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </td>
+        <td className="whitespace-nowrap text-right">
+          <div className="flex justify-end gap-1.5">
+            {mayApprove ? (
+              <button className="btn-primary h-7 px-2.5 text-xs" onClick={onApprove} disabled={busy} title="Review it, then approve">
+                <CheckCircle2 size={13} /> Review & approve
+              </button>
+            ) : (
+              <button className="btn-secondary h-7 px-2.5 text-xs" onClick={onEdit} disabled={busy}>
+                <Pencil size={13} /> Edit
+              </button>
             )}
-          </section>
-
-          <section className="space-y-2">
-            <div>
-              <h3 className={sectionTitle}>Material — components ({lines.length})</h3>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                What goes into one piece. The material cost is the total of the Cost column.
-              </p>
+            <ActionMenu label={`Actions for ${bomLabel(bom)}`} items={actions} />
+          </div>
+        </td>
+      </tr>
+      {open && (
+        <tr>
+          <td colSpan={cols} className="!p-0 bg-secondary/30">
+            {/* Sized to the visible list, not the scrolling table. */}
+            <div className="sticky left-0 w-[100cqw]">
+              <BomDetail bom={bom} />
             </div>
-
-            <div className="overflow-x-auto rounded-lg border border-border">
-              <table className="w-full min-w-[980px] table-fixed text-sm">
-                <colgroup>
-                  <col className="w-10" />
-                  <col />
-                  <col className="w-24" />
-                  <col className="w-32" />
-                  <col className="w-24" />
-                  <col className="w-24" />
-                  <col className="w-24" />
-                  <col className="w-16" />
-                  <col className="w-24" />
-                  <col className="w-28" />
-                </colgroup>
-                <thead className="bg-secondary/60">
-                  <tr className="border-b border-border">
-                    <th className={cn(th, 'text-center')}>#</th>
-                    <th className={cn(th, 'text-left')}>Component</th>
-                    <th className={cn(th, 'text-left')}>Part</th>
-                    <th className={cn(th, 'text-left')} title="The department that draws it from the store">
-                      Used by
-                    </th>
-                    <th className={cn(th, 'text-right')}>Qty / pc</th>
-                    <th className={cn(th, 'text-right')}>Wastage</th>
-                    <th className={cn(th, 'text-right')} title="Quantity with the wastage added">
-                      Effective
-                    </th>
-                    <th className={cn(th, 'text-left')}>Unit</th>
-                    <th className={cn(th, 'text-right')}>Rate</th>
-                    <th className={cn(th, 'text-right')}>Cost</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {lines.map((line, index) => {
-                    const bySize = line.sizes ?? []
-                    return (
-                      <Fragment key={line.id ?? index}>
-                        {/* A line with size quantities keeps its divider below the size row instead. */}
-                        <tr className={cn(bySize.length === 0 && 'border-b border-border/50')}>
-                          <td className={cn(td, 'text-center font-mono text-xs text-muted-foreground')}>
-                            {index + 1}
-                          </td>
-                          <td className={td}>
-                            <div className="flex min-w-0 items-baseline gap-2">
-                              <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                                {line.componentItem?.code}
-                              </span>
-                              <span className="truncate text-foreground" title={line.componentItem?.name}>
-                                {line.componentItem?.name}
-                              </span>
-                            </div>
-                          </td>
-                          <td className={cn(td, 'truncate text-xs text-muted-foreground')}>
-                            {line.component || '—'}
-                          </td>
-                          <td className={cn(td, 'truncate text-xs')}>
-                            {line.department ? (
-                              <span className="text-foreground">{line.department.name}</span>
-                            ) : (
-                              <span className="text-accent">Not set</span>
-                            )}
-                          </td>
-                          <td className={cn(td, 'text-right font-mono')}>{qty(line.qtyPerUnit)}</td>
-                          <td className={cn(td, 'text-right font-mono text-muted-foreground')}>
-                            {percent(line.wastagePercent)}
-                          </td>
-                          <td className={cn(td, 'text-right font-mono font-medium')}>{qty(line.effectiveQty)}</td>
-                          <td className={cn(td, 'text-xs text-muted-foreground')}>
-                            {line.componentItem?.uom?.symbol ?? '—'}
-                          </td>
-                          <td className={cn(td, 'text-right font-mono text-muted-foreground')}>
-                            {formatRupees(line.unitCost)}
-                          </td>
-                          <td className={cn(td, 'text-right font-mono font-semibold text-foreground')}>
-                            {formatRupees(line.totalCost)}
-                          </td>
-                        </tr>
-
-                        {bySize.length > 0 && (
-                          <tr className="border-b border-border/50">
-                            <td />
-                            <td colSpan={9} className="px-3 pb-2.5">
-                              <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                                <span>Effective by size:</span>
-                                {bySize.map((s) => (
-                                  <span key={s.id ?? s.sizeId} className="font-mono">
-                                    {s.size?.label ?? s.size?.code}{' '}
-                                    <span className="text-foreground">{qty(s.effectiveQty)}</span>
-                                  </span>
-                                ))}
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </Fragment>
-                    )
-                  })}
-                </tbody>
-
-                <tfoot>
-                  <tr className="bg-secondary/40">
-                    <td colSpan={9} className={cn(td, 'text-right font-semibold text-foreground')}>
-                      Material for one piece
-                    </td>
-                    <td className={cn(td, 'text-right font-mono font-bold text-foreground')}>
-                      {formatRupees(material)}
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          </section>
-
-          {canCost && (
-            <section className="space-y-2">
-              <div>
-                <h3 className={sectionTitle}>Labour and overheads ({costLines.length})</h3>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  What one piece costs beyond its material. A percentage overhead is worked out on
-                  material and labour together.
-                </p>
-              </div>
-
-              {costLines.length === 0 ? (
-                <p className="rounded-lg border border-border px-4 py-3 text-xs text-muted-foreground">
-                  {bom.status === 'DRAFT'
-                    ? 'No labour or overheads entered yet. Edit this BOM to add them on its costing step.'
-                    : 'No labour or overheads were entered before this BOM was approved.'}
-                </p>
-              ) : (
-                <div className="overflow-x-auto rounded-lg border border-border">
-                  <table className="w-full min-w-[640px] table-fixed text-sm">
-                    <colgroup>
-                      <col />
-                      <col className="w-28" />
-                      <col className="w-48" />
-                      <col className="w-48" />
-                      <col className="w-28" />
-                    </colgroup>
-                    <thead className="bg-secondary/60">
-                      <tr className="border-b border-border">
-                        <th className={cn(th, 'text-left')}>Cost</th>
-                        <th className={cn(th, 'text-left')}>Type</th>
-                        <th className={cn(th, 'text-left')}>Department</th>
-                        <th className={cn(th, 'text-right')}>Charged as</th>
-                        <th className={cn(th, 'text-right')}>Per piece</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {costLines.map((c, i) => (
-                        <tr key={c.id ?? i} className="border-b border-border/50">
-                          <td className={cn(td, 'truncate text-foreground')} title={c.name}>
-                            {c.name}
-                          </td>
-                          <td className={cn(td, 'text-xs text-muted-foreground')}>
-                            {c.kind === 'LABOUR' ? 'Labour' : 'Overhead'}
-                          </td>
-                          <td className={cn(td, 'truncate text-xs text-muted-foreground')}>
-                            {c.department?.name ?? '—'}
-                          </td>
-                          <td className={cn(td, 'text-right text-xs text-muted-foreground')}>
-                            {c.basis === 'PERCENT'
-                              ? `${percent(c.value)} of material + labour`
-                              : 'Rupees per piece'}
-                          </td>
-                          <td className={cn(td, 'text-right font-mono font-semibold text-foreground')}>
-                            {formatRupees(c.amount)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot>
-                      <tr className="bg-secondary/40">
-                        <td colSpan={4} className={cn(td, 'text-right font-semibold text-foreground')}>
-                          Labour and overheads for one piece
-                        </td>
-                        <td className={cn(td, 'text-right font-mono font-bold text-foreground')}>
-                          {formatRupees(labour + overhead)}
-                        </td>
-                      </tr>
-                    </tfoot>
-                  </table>
-                </div>
-              )}
-            </section>
-          )}
-
-          {bom.notes && (
-            <section className="space-y-1">
-              <h3 className={sectionTitle}>Notes</h3>
-              <p className="whitespace-pre-line text-sm text-foreground">{bom.notes}</p>
-            </section>
-          )}
-        </div>
+          </td>
+        </tr>
       )}
-    </div>
-  )
-}
-
-interface CostBoxProps {
-  label: string
-  /** null when this part is not costed at all — a different fact from ₹0.00. */
-  amount: number | null
-  note: string
-  strong?: boolean
-}
-
-/** One term of the "material + labour = total" sum at the top of an expanded BOM. */
-function CostBox({ label, amount, note, strong }: CostBoxProps) {
-  return (
-    <div className={cn('flex-1 rounded-lg border border-border px-4 py-3', strong && 'bg-secondary/40')}>
-      <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      <p className={cn('mt-1 font-mono text-lg font-bold', strong ? 'text-primary' : 'text-foreground')}>
-        {amount === null ? '—' : formatRupees(amount)}
-      </p>
-      <p className="mt-0.5 text-xs text-muted-foreground">{note}</p>
-    </div>
+    </>
   )
 }
 

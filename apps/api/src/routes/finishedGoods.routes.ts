@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { AuthRequest, requirePermission } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
+import { assertNotCancelling } from '../services/orderCancel.service'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { assertStockUnused, recordMovement } from '../services/stock.service'
@@ -285,6 +286,8 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
   // garment on the receipt has to be on it. On a job-work order the
   // garments are made from the customer's fabric, so they are the
   // customer's stock at no value of ours — counted, tagged as theirs.
+  // Its order's cancellation is waiting: nothing more is packed for it.
+  await assertNotCancelling(tx, data.soId, 'nothing more is packed for it')
   let jobWorkFor: string | null = null
   if (data.soId) {
     const so = await tx.salesOrder.findUnique({

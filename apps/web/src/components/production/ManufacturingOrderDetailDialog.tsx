@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, Info, Layers, Loader2, PackageCheck, Pencil, Send, X, Scissors } from 'lucide-react'
+import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, History, Info, Layers, Loader2, Lock, PackageCheck, Pencil, Ruler, Send, X, Scissors } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
@@ -10,17 +10,18 @@ import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
-import { CuttingDialog } from './CuttingDialog'
 import { StagesDialog } from './StagesDialog'
 import { MoFlowStrip, currentMoTab, type MoFlowFacts, type MoTab } from './MoFlowStrip'
 import { MoProductionPanel } from './floor/MoProductionPanel'
-import { PROGRESS, type Flow } from './floor/types'
-import { LIVE_MO, moStatus } from './status'
+import { bundleShort, PROGRESS, type Flow, type SizeChangeEntry } from './floor/types'
+import { FLOOR_NOTE, LIVE_MO, moStage } from './status'
 
 interface MoDetail {
   id: string
   moNumber: string
   status: string
+  /** Where the work stands: materials not asked, asked, issued, in production, packing… (MO_STAGE). */
+  stage?: string
   plannedStartDate: string | null
   plannedEndDate: string | null
   totalPlannedQty: number
@@ -32,7 +33,19 @@ interface MoDetail {
   createdBy: { name: string } | null
   closedBy: { name: string } | null
   brand: { name: string }
-  so: { id: string; soNumber: string; status: string; isJobWork: boolean; deliveryDate: string | null; customerPORef: string | null; customer: { name: string } } | null
+  so: {
+    id: string
+    soNumber: string
+    status: string
+    isJobWork: boolean
+    deliveryDate: string | null
+    customerPORef: string | null
+    customer: { name: string }
+    shortClosedAt?: string | null
+    shortCloseReason?: string | null
+    cancelledAt?: string | null
+    cancelReason?: string | null
+  } | null
   lines: Array<{
     id: string
     color: string
@@ -45,7 +58,11 @@ interface MoDetail {
   routing: { id: string; code: string; name: string; version: number } | null
   steps: Array<{ id: string; sequence: number; name: string; kind: string; execution: string; isQcStep: boolean; skippedAt: string | null; department: { name: string } }>
   progress: string | null
+  /** Why its plan can no longer be changed (material issued, cut, packed, finished); null while it can. */
+  editBlock?: string | null
   heldAt: string | null
+  /** Why it is on hold: a floor hold, or its sales order's cancellation waiting for approval. */
+  holdReason?: string | null
   totalStitchedQty?: number
   totalFinishedQty?: number
   materialRequisitions: Array<{
@@ -111,6 +128,24 @@ interface MaterialPlan {
 
 type Ask = Record<string, { on: boolean; qty: string; processId: string; warehouseId: string }>
 
+/**
+ * An order's sizes as GET /production/orders/:id/sizes gives them: each line's
+ * plan, what size changes at stitching moved (+ into a size, − out of it), the
+ * revised count the floor is making, and what Finished Goods In has packed;
+ * with every size change, newest first. The sales order keeps the buyer's
+ * sizes: the delivery challan decides how many of each to send.
+ */
+interface OrderSizes {
+  lines: Array<{
+    moLineId: string
+    style: string
+    color: string
+    totalQty: number
+    sizes: Array<{ sizeId: string; code: string; planned: number; changed: number; revised: number; packed: number; toPack: number }>
+  }>
+  history: SizeChangeEntry[]
+}
+
 const qty = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 3 })
 const pcs = (n: number) => n.toLocaleString('en-IN')
 
@@ -125,20 +160,37 @@ const pcs = (n: number) => n.toLocaleString('en-IN')
  * per department, where it is approved, issued from stock or passed to
  * Purchase in the ordinary way.
  */
+/** One entry of its history: who did what to it, and when. */
+interface HistoryEntry {
+  id: string
+  at: string
+  by: string | null
+  what: string
+  changes: string[]
+}
+
+const when = (iso: string) =>
+  new Date(iso).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+
 export function ManufacturingOrderDetailDialog({
   moId,
   onClose,
   onEdit,
   onChanged,
+  notice = null,
 }: {
   moId: string | null
   onClose: () => void
   onEdit: (id: string) => void
   onChanged: (message: string) => void
+  /** A save just made in the order's form: confirmed at the top as the window opens. */
+  notice?: string | null
 }) {
   const [mounted, setMounted] = useState(false)
   useEffect(() => setMounted(true), [])
   const [mo, setMo] = useState<MoDetail | null>(null)
+  /** Who changed what on it, and when: the audit trail, newest first. */
+  const [history, setHistory] = useState<HistoryEntry[] | null>(null)
   const [plan, setPlan] = useState<MaterialPlan | null>(null)
   const [ask, setAsk] = useState<Ask>({})
   const [requiredDate, setRequiredDate] = useState('')
@@ -146,15 +198,20 @@ export function ManufacturingOrderDetailDialog({
   const [loadingPlan, setLoadingPlan] = useState(false)
   const [busy, setBusy] = useState<'release' | 'raise' | 'close' | 'short' | null>(null)
   const [closing, setClosing] = useState(false)
+  /** The reason the Close box starts with: its sales order's, when that is what ended it. */
+  const [closeWith, setCloseWith] = useState('')
   const [completingShort, setCompletingShort] = useState(false)
-  const [cutting, setCutting] = useState(false)
   const [cancellingCut, setCancellingCut] = useState<{ id: string; cutOrderNumber: string } | null>(null)
+  /** Its sizes, planned → changed at stitching → packed, for an order with stages; null until read or without stages. */
+  const [sizes, setSizes] = useState<OrderSizes | null>(null)
   const [settingRoute, setSettingRoute] = useState(false)
   /** The step tab picked by hand, for this order; until then it opens on the step the order has reached. */
   const [tabPick, setTabPick] = useState<{ moId: string; tab: MoTab } | null>(null)
   const [flow, setFlow] = useState<Flow | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  /** Why Edit did nothing, once it was pressed on an order that can no longer be changed. */
+  const [editNote, setEditNote] = useState<string | null>(null)
 
   /** The floor picture, for an order with a route. */
   const loadFlow = useCallback(async (id: string) => {
@@ -168,11 +225,26 @@ export function ManufacturingOrderDetailDialog({
   const load = useCallback(
     async (id: string) => {
       setLoading(true)
+      // Its history alongside: a quiet failure leaves it empty, never the window.
+      void api
+        .get<{ data: HistoryEntry[] }>(`/production/orders/${id}/history`)
+        .then((res) => setHistory(res.data))
+        .catch(() => setHistory([]))
       try {
         const data = (await api.get<{ data: MoDetail }>(`/production/orders/${id}`)).data
         setMo(data)
-        if (data.steps?.length) await loadFlow(id)
-        else setFlow(null)
+        setEditNote(null)
+        if (data.steps?.length) {
+          // Its sizes alongside, quietly: a failure leaves the Sizes section out, never the window.
+          void api
+            .get<{ data: OrderSizes }>(`/production/orders/${id}/sizes`)
+            .then((res) => setSizes(res.data))
+            .catch(() => setSizes(null))
+          await loadFlow(id)
+        } else {
+          setFlow(null)
+          setSizes(null)
+        }
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Could not open that manufacturing order.')
       } finally {
@@ -212,9 +284,12 @@ export function ManufacturingOrderDetailDialog({
   useEffect(() => {
     if (!moId) return
     setError(null)
-    setMessage(null)
+    // Opened straight after a save in the form: that save is confirmed here, where the person now is.
+    setMessage(notice)
+    setHistory(null)
     setMo(null)
     setFlow(null)
+    setSizes(null)
     setPlan(null)
     setRequiredDate('')
     setSwap(new Set())
@@ -357,7 +432,7 @@ export function ManufacturingOrderDetailDialog({
   }
 
   if (!moId || !mounted) return null
-  const s = mo ? moStatus(mo.status) : null
+  const s = mo ? moStage(mo.stage, mo.status) : null
   const share = mo && mo.totalPlannedQty > 0 ? Math.min(100, Math.round((mo.totalPackedQty / mo.totalPlannedQty) * 100)) : 0
   const setRow = (key: string, patch: Partial<Ask[string]>) => setAsk((a) => ({ ...a, [key]: { ...a[key], ...patch } }))
   /*
@@ -388,21 +463,40 @@ export function ManufacturingOrderDetailDialog({
     } else raiseRef.current?.focus()
   }
 
+  /**
+   * Cuttings recorded the old way, before the order had stages: not cancelled and without bundles,
+   * as the server counts them when it refuses to load stages (CUT_WITHOUT_ROUTE).
+   */
+  const moOpen = !!mo && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED'
+  const cutWithoutStages = mo && moOpen && !mo.steps?.length ? (mo.cuttingOrders ?? []).filter((c) => c.status !== 'CANCELLED' && !c._count?.bundles).map((c) => c.cutOrderNumber) : []
+  /** Requisitions still asking the store: not rejected, and not closed with nothing issued. */
+  const raised = !!mo?.materialRequisitions.some((m) => m.status !== 'REJECTED' && (!m.closedAt || !!m.issuedAt))
   const facts: MoFlowFacts | null = mo
     ? {
         hasSalesOrder: !!mo.so,
         status: mo.status,
-        requisitionsRaised: mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED'),
+        requisitionsRaised: raised,
         materialsIssued: mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0),
         materialItems: plan?.rows.filter((r) => r.required > 0).length ?? 0,
         materialItemsIssued: plan?.rows.filter((r) => r.required > 0 && r.issued >= r.required - 0.0005).length ?? 0,
         stagesSetUp: !!mo.steps?.length,
         cutStarted: !!mo.cuttingOrders?.length || (mo.totalCutQty ?? 0) > 0,
+        cutWithoutStages: cutWithoutStages,
         planned: mo.totalPlannedQty,
         packed: mo.totalPackedQty,
+        orderClosed: mo.stage === 'ORDER_CLOSED',
       }
     : null
   const tab: MoTab = mo && tabPick?.moId === mo.id ? tabPick.tab : facts ? currentMoTab(facts) : 'order'
+  /** Its sales order is over (short-closed, cancelled or completed) while this order is still open: when, and why. */
+  const soOver =
+    mo?.so && (mo.so.status === 'COMPLETED' || mo.so.status === 'CANCELLED') && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED'
+      ? mo.so.status === 'CANCELLED'
+        ? { word: 'cancelled', when: mo.so.cancelledAt ?? null, why: mo.so.cancelReason ?? null }
+        : mo.so.shortClosedAt
+          ? { word: 'short-closed', when: mo.so.shortClosedAt, why: mo.so.shortCloseReason ?? null }
+          : { word: 'completed', when: null, why: null }
+      : null
   const pickTab = (t: MoTab) => mo && setTabPick({ moId: mo.id, tab: t })
 
   return createPortal(
@@ -418,8 +512,12 @@ export function ManufacturingOrderDetailDialog({
                 <h2 id="mo-detail-title" className="text-foreground font-mono text-xl font-semibold tracking-tight">
                   {mo?.moNumber ?? 'Manufacturing order'}
                 </h2>
-                {s && <span className={s.cls}>{s.label}</span>}
-                {mo?.steps?.length && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' ? (
+                {s && (
+                  <span className={s.cls} title={s.hint}>
+                    {s.label}
+                  </span>
+                )}
+                {mo?.steps?.length && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.progress && FLOOR_NOTE.has(mo.progress) ? (
                   <span className={(PROGRESS[mo.progress ?? 'NOT_STARTED'] ?? PROGRESS.NOT_STARTED).cls}>{(PROGRESS[mo.progress ?? 'NOT_STARTED'] ?? PROGRESS.NOT_STARTED).label}</span>
                 ) : null}
                 {mo?.heldAt && <span className="badge-warning">On hold</span>}
@@ -433,15 +531,27 @@ export function ManufacturingOrderDetailDialog({
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {mo && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
+              // Always pressable: an order that can no longer be changed shows a lock, and pressing
+              // it says what is in the way, rather than a button that silently does nothing.
+              <button
+                className="btn-secondary"
+                onClick={() => (mo.editBlock ? setEditNote(mo.editBlock) : onEdit(mo.id))}
+                disabled={busy !== null}
+                aria-disabled={!!mo.editBlock}
+                title={
+                  mo.editBlock
+                    ? `Cannot be edited: ${mo.editBlock}`
+                    : 'Change the plan: pieces, sizes, dates, routing. Open until the store issues material to it.'
+                }
+              >
+                {mo.editBlock ? <Lock size={15} /> : <Pencil size={15} />} {mo.status === 'DRAFT' ? 'Edit draft' : 'Edit'}
+              </button>
+            )}
             {mo?.status === 'DRAFT' && can('production', 'edit') && (
-              <>
-                <button className="btn-secondary" onClick={() => onEdit(mo.id)} disabled={busy !== null}>
-                  <Pencil size={15} /> Edit draft
-                </button>
-                <button className="btn-primary" onClick={() => void releaseIt()} disabled={busy !== null}>
-                  {busy === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Release
-                </button>
-              </>
+              <button className="btn-primary" onClick={() => void releaseIt()} disabled={busy !== null}>
+                {busy === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Release
+              </button>
             )}
             {mo && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && mo.totalPackedQty > 0 && mo.totalPackedQty < mo.totalPlannedQty && can('production', 'edit') && (
               <button className="btn-secondary" onClick={() => setCompletingShort(true)} disabled={busy !== null} title="Some pieces will not be made: finish with what is packed">
@@ -449,17 +559,26 @@ export function ManufacturingOrderDetailDialog({
               </button>
             )}
             {mo && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
-              <button className="btn-ghost text-destructive" onClick={() => setClosing(true)} disabled={busy !== null}>
-                <Ban size={15} /> Close
+              <button
+                className="btn-ghost text-destructive"
+                onClick={() => {
+                  setCloseWith('')
+                  setClosing(true)
+                }}
+                disabled={busy !== null}
+                title="Call this manufacturing order off. Nothing is deleted: it stays on file as Closed, with your reason."
+              >
+                <Ban size={15} /> Cancel MO
               </button>
             )}
-            <button onClick={onClose} className="btn-ghost p-2" aria-label="Close" disabled={busy !== null}>
+            <span className="bg-border mx-1 hidden h-6 w-px sm:block" aria-hidden />
+            <button onClick={onClose} className="btn-ghost p-2" aria-label="Close this window" title="Close this window" disabled={busy !== null}>
               <X size={18} />
             </button>
           </div>
         </div>
 
-        {mo && facts && <MoFlowStrip facts={facts} tab={tab} onTab={pickTab} onSetUpStages={() => setSettingRoute(true)} />}
+        {mo && facts && <MoFlowStrip facts={facts} tab={tab} onTab={pickTab} onSetUpStages={moOpen && can('production', 'edit') ? () => setSettingRoute(true) : undefined} />}
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
           {error && (
             <div className="border-destructive/40 bg-destructive/5 flex items-start gap-3 rounded-lg border p-3">
@@ -468,8 +587,73 @@ export function ManufacturingOrderDetailDialog({
             </div>
           )}
           {message && (
-            <div className="border-primary/40 bg-primary/5 rounded-lg border p-3">
-              <p className="text-primary text-sm">{message}</p>
+            <div className="border-primary/40 bg-primary/5 flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3">
+              <p className="text-primary flex min-w-0 items-start gap-2 text-sm">
+                <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
+                <span>{message}</span>
+              </p>
+              {history && history.length > 0 && (
+                <button
+                  type="button"
+                  className="btn-secondary h-8 shrink-0 px-3 text-xs"
+                  onClick={() => {
+                    pickTab('order')
+                    setTimeout(() => document.getElementById('mo-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60)
+                  }}
+                >
+                  <History size={13} /> See history
+                </button>
+              )}
+            </div>
+          )}
+          {mo?.heldAt && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+              <Lock size={16} className="mt-0.5 shrink-0 text-amber-600" />
+              <p className="text-foreground text-sm">
+                <b>On hold</b>
+                {mo.holdReason ? `: ${mo.holdReason}` : ''}. Nothing is issued, cut, moved or packed for it{' '}
+                {mo.holdReason?.startsWith('Cancellation requested for')
+                  ? 'until the cancellation is approved or withdrawn, on its sales order.'
+                  : 'until it is resumed.'}
+              </p>
+            </div>
+          )}
+          {mo?.so && soOver && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+              <div className="flex min-w-0 items-start gap-3">
+                <Ban size={16} className="mt-0.5 shrink-0 text-amber-600" />
+                <p className="text-foreground text-sm">
+                  <b>
+                    {mo.so.soNumber} is {soOver.word}
+                  </b>
+                  {soOver.when ? ` on ${formatDate(soOver.when)}` : ''}
+                  {soOver.why ? ` (${soOver.why})` : ''}, so nothing more is made for it.{' '}
+                  {mo.stage === 'ORDER_CLOSED'
+                    ? 'Nothing was issued, cut or packed on this order, so cancel it.'
+                    : 'Finish what is already on the floor, or cancel this order.'}
+                </p>
+              </div>
+              {can('production', 'edit') && (
+                <button
+                  type="button"
+                  className="btn-secondary h-8 shrink-0 px-3 text-xs"
+                  onClick={() => {
+                    setCloseWith(`${mo.so!.soNumber} ${soOver.word}${soOver.why ? `: ${soOver.why}` : ''}`)
+                    setClosing(true)
+                  }}
+                  disabled={busy !== null}
+                >
+                  <Ban size={13} /> Cancel this MO
+                </button>
+              )}
+            </div>
+          )}
+          {editNote && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+              <Lock size={16} className="mt-0.5 shrink-0 text-amber-600" />
+              <p className="text-foreground text-sm">
+                <b>This order cannot be edited.</b> {editNote}
+              </p>
             </div>
           )}
           {loading && !mo ? (
@@ -535,6 +719,48 @@ export function ManufacturingOrderDetailDialog({
                     </div>
                   </Section>
 
+                  {!!mo.steps?.length && sizes && (sizes.history.length > 0 || sizes.lines.some((l) => l.sizes.some((z) => z.packed > 0))) && (
+                    <OrderSizesSection sizes={sizes} />
+                  )}
+
+                  <div id="mo-history" className="scroll-mt-3">
+                    <Section icon={History} title="History">
+                      {history === null ? (
+                        <div className="space-y-2">
+                          {Array.from({ length: 3 }).map((_, i) => (
+                            <div key={i} className="skeleton h-9 w-full rounded-lg" />
+                          ))}
+                        </div>
+                      ) : history.length === 0 ? (
+                        <p className="text-muted-foreground text-sm">Nothing recorded for it yet.</p>
+                      ) : (
+                        <ol className="border-border relative space-y-3 border-l pl-4">
+                          {history.map((h, i) => (
+                            <li key={h.id} className="relative">
+                              <span
+                                className={`absolute -left-[21px] top-1.5 h-2.5 w-2.5 rounded-full border-2 border-card ${i === 0 ? 'bg-primary' : 'bg-muted-foreground/50'}`}
+                                aria-hidden
+                              />
+                              <p className="text-sm">
+                                <span className="text-foreground font-semibold">{h.what}</span>
+                                <span className="text-muted-foreground">
+                                  {' '}
+                                  · {h.by ?? 'Someone'} · {when(h.at)}
+                                </span>
+                              </p>
+                              {h.changes.length > 0 && (
+                                <ul className="text-muted-foreground mt-0.5 space-y-0.5 text-xs">
+                                  {h.changes.map((c, j) => (
+                                    <li key={j}>{c}</li>
+                                  ))}
+                                </ul>
+                              )}
+                            </li>
+                          ))}
+                        </ol>
+                      )}
+                    </Section>
+                  </div>
                 </div>
               )}
               {tab === 'materials' && (
@@ -544,7 +770,7 @@ export function ManufacturingOrderDetailDialog({
                     icon={ClipboardList}
                     title="Materials from the BOM"
                     actions={
-                      plan && live && mayRaise ? (
+                      plan && live && mayRaise && mo?.stage !== 'ORDER_CLOSED' ? (
                         <div className="flex flex-wrap items-center gap-2">
                           <label className="text-muted-foreground flex items-center gap-1.5 text-xs">
                             Needed by
@@ -763,25 +989,19 @@ export function ManufacturingOrderDetailDialog({
                     mo={{ id: mo.id, moNumber: mo.moNumber, status: mo.status, heldAt: mo.heldAt, progress: mo.progress, steps: mo.steps ?? [] }}
                     flow={flow}
                     materialsIssued={mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0)}
-                    requisitionsRaised={mo.materialRequisitions.some((m) => m.status !== 'CANCELLED' && m.status !== 'REJECTED')}
+                    requisitionsRaised={raised}
+                    cutWithoutStages={cutWithoutStages}
+                    packed={mo.totalPackedQty}
                     onLoadStages={() => setSettingRoute(true)}
                     onChanged={(msg) => void refresh(msg)}
                   />
-                  {!mo.steps?.length && (mo.so?.isJobWork || !!mo.cuttingOrders?.length) && (
-                  <Section
-                    icon={Scissors}
-                    title="Cutting"
-                    actions={
-                      mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'create') ? (
-                        <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setCutting(true)} disabled={busy !== null}>
-                          <Scissors size={13} /> Record cutting
-                        </button>
-                      ) : undefined
-                    }
-                  >
-                    {!mo.cuttingOrders?.length ? (
-                      <p className="text-muted-foreground text-sm">Nothing cut yet. Record each cutting: fabric used, waste and pieces by size.</p>
-                    ) : (
+                  {/*
+                   * Cuttings recorded the old way, before the order had stages: listed, and each can still be
+                   * cancelled, which is how such an order can take stages. No more are recorded here (6 Nov
+                   * 2026): every order is cut on its cutting sheet once its stages are set up.
+                   */}
+                  {!mo.steps?.length && !!mo.cuttingOrders?.length && (
+                    <Section icon={Scissors} title="Cutting">
                       <div className="divide-border divide-y text-sm">
                         {mo.cuttingOrders.map((c) => (
                           <div key={c.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${c.status === 'CANCELLED' ? 'opacity-60' : ''}`}>
@@ -805,8 +1025,8 @@ export function ManufacturingOrderDetailDialog({
                           </div>
                         ))}
                       </div>
-                    )}
-                  </Section>
+                      <p className="text-muted-foreground mt-2 text-xs">Cut before stages were set up. New cutting is recorded on the cutting sheet, once an order&apos;s stages are set up.</p>
+                    </Section>
                   )}
                 </div>
               )}
@@ -849,16 +1069,6 @@ export function ManufacturingOrderDetailDialog({
           }}
         />
       )}
-      {cutting && mo && (
-        <CuttingDialog
-          moId={mo.id}
-          onClose={() => setCutting(false)}
-          onSaved={(msg) => {
-            setCutting(false)
-            void refresh(msg)
-          }}
-        />
-      )}
       {cancellingCut && mo && (
         <ReasonDialog
           title={`Cancel ${cancellingCut.cutOrderNumber}?`}
@@ -889,10 +1099,12 @@ export function ManufacturingOrderDetailDialog({
       )}
       {closing && mo && (
         <ReasonDialog
-          title={`Close ${mo.moNumber}?`}
-          description="It stays on file as closed, with your reason, and its pieces can be planned again. Requisitions already raised stay open in Inventory for the store to close."
-          confirmLabel="Close it"
+          title={`Cancel ${mo.moNumber}?`}
+          description="Nothing is deleted: it stays on file as Closed, with your reason, and its pieces can be planned again. Its requisitions the store has issued nothing on close with it, and any stock held for them is free again. What was already issued, cut or packed stays as it is."
+          confirmLabel="Cancel the MO"
+          cancelLabel="Keep it"
           placeholder="Buyer changed the fabric"
+          initialReason={closeWith}
           danger
           busy={busy === 'close'}
           onCancel={() => setClosing(false)}
@@ -901,5 +1113,114 @@ export function ManufacturingOrderDetailDialog({
       )}
     </div>,
     document.body
+  )
+}
+
+/** "+20", "−20", or a dash: the pieces a size gained or gave up to size changes. */
+const signed = (n: number) => (n > 0 ? `+${pcs(n)}` : n < 0 ? `−${pcs(-n)}` : '—')
+
+/** "20 pcs M → L (B003 → B061)": one bundle's pieces made as another size, into a new bundle. */
+const moveText = (m: SizeChangeEntry['moves'][number]) => `${pcs(m.qty)} pcs ${m.from.size} → ${m.to.size} (${bundleShort(m.from.code)} → ${bundleShort(m.to.code)})`
+
+/**
+ * The order's sizes line by line: planned, changed at stitching, revised,
+ * packed and still to pack, with each line's size changes under it. Shown on
+ * an order with stages once it has a size change or something packed.
+ */
+function OrderSizesSection({ sizes }: { sizes: OrderSizes }) {
+  const lines = sizes.lines.filter((l) => l.sizes.length > 0)
+  const many = lines.length > 1
+  const num = 'text-right text-xs tabular-nums'
+  return (
+    <Section icon={Ruler} title="Sizes">
+      <div className="space-y-4">
+        {lines.map((l) => {
+          const changes = sizes.history.filter((h) => h.moLineId === l.moLineId)
+          const sum = (k: 'planned' | 'changed' | 'revised' | 'packed' | 'toPack') => l.sizes.reduce((t, z) => t + z[k], 0)
+          const trend = (n: number) => <span className={n > 0 ? 'trend-up' : n < 0 ? 'trend-down' : 'text-muted-foreground'}>{signed(n)}</span>
+          return (
+            <div key={l.moLineId} className="space-y-2">
+              {many && (
+                <p className="text-foreground text-sm font-medium">
+                  <span className="font-mono">{l.style}</span>
+                  {l.color ? ` · ${l.color}` : ''}
+                </p>
+              )}
+              <div className="border-border max-w-2xl overflow-x-auto rounded-lg border">
+                <table className="data-table table-compact w-full min-w-[440px]">
+                  <thead>
+                    <tr className="bg-secondary">
+                      <th>Size</th>
+                      <th style={{ textAlign: 'right' }}>Planned</th>
+                      <th style={{ textAlign: 'right' }} title="Pieces made as another size at stitching: + into this size, − out of it">
+                        Changed
+                      </th>
+                      <th style={{ textAlign: 'right' }} title="Planned, with the changes: what the floor is making">
+                        Revised
+                      </th>
+                      <th style={{ textAlign: 'right' }} title="Booked in through Inventory → Finished Goods In, B-grade included">
+                        Packed
+                      </th>
+                      <th style={{ textAlign: 'right' }}>To pack</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {l.sizes.map((z) => (
+                      <tr key={z.sizeId}>
+                        <td className="text-xs font-medium">{z.code}</td>
+                        <td className={num}>{pcs(z.planned)}</td>
+                        <td className={num}>{trend(z.changed)}</td>
+                        <td className={`${num} font-semibold`}>{pcs(z.revised)}</td>
+                        <td className={num}>{z.packed ? pcs(z.packed) : '—'}</td>
+                        <td className={num}>{z.toPack ? pcs(z.toPack) : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-border bg-secondary/40 border-t">
+                      <td className="text-foreground px-3 py-2 text-xs font-semibold">Total</td>
+                      <td className={`${num} px-3 py-2 font-semibold`}>{pcs(sum('planned'))}</td>
+                      <td className={`${num} px-3 py-2`}>{trend(sum('changed'))}</td>
+                      <td className={`${num} px-3 py-2 font-semibold`}>{pcs(sum('revised'))}</td>
+                      <td className={`${num} px-3 py-2 font-semibold`}>{sum('packed') ? pcs(sum('packed')) : '—'}</td>
+                      <td className={`${num} px-3 py-2 font-semibold`}>{sum('toPack') ? pcs(sum('toPack')) : '—'}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              {changes.length > 0 && (
+                <div className="max-w-2xl">
+                  <p className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wider">Size changes</p>
+                  <ul className="divide-border divide-y">
+                    {changes.map((h) => (
+                      <li key={h.eventId} className="py-1.5">
+                        <p className="text-sm">
+                          <span className={`font-medium ${h.undone ? 'text-muted-foreground line-through' : 'text-foreground'}`}>{h.moves.map(moveText).join(', ')}</span>
+                          <span className="text-muted-foreground text-xs" title={`Recorded by ${h.by}, ${when(h.at)}`}>
+                            {' '}
+                            · at {h.step.name} · {h.personName ?? h.by} · {formatDate(h.date)}
+                          </span>
+                        </p>
+                        <p className="text-muted-foreground text-xs">{h.reason}</p>
+                        {h.undone && (
+                          <p className="warn-text text-xs">
+                            Undone by {h.undone.by ?? 'someone'} on {formatDate(h.undone.at)}
+                            {h.undone.reason ? ` — ${h.undone.reason}` : ''}
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )
+        })}
+        <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
+          <Info size={13} className="mt-px shrink-0" />
+          The sales order keeps the buyer&apos;s sizes. Finished Goods In takes the revised sizes, and the delivery challan decides how many of each to send.
+        </p>
+      </div>
+    </Section>
   )
 }

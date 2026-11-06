@@ -19,17 +19,21 @@ export function ReasonDialog({
   title,
   description,
   confirmLabel = 'Confirm',
+  cancelLabel = 'Cancel',
   danger = false,
   minLength = 5,
   placeholder = 'One line is enough',
   busy = false,
   requireReason = true,
+  initialReason = '',
   onConfirm,
   onCancel,
 }: {
   title: string
   description: React.ReactNode
   confirmLabel?: string
+  /** The button that backs out: "Keep it" where the action itself is a cancel. */
+  cancelLabel?: string
   /** Red rather than teal, for an action that cannot be undone. */
   danger?: boolean
   minLength?: number
@@ -37,10 +41,12 @@ export function ReasonDialog({
   busy?: boolean
   /** False turns this into a plain yes/no confirm — no audit trail needs the reason. */
   requireReason?: boolean
+  /** A reason to start from, for the person to keep or change. */
+  initialReason?: string
   onConfirm: (reason: string) => void
   onCancel: () => void
 }) {
-  const [reason, setReason] = useState('')
+  const [reason, setReason] = useState(initialReason)
   const tooShort = requireReason && reason.trim().length < minLength
   // Escape cancels this box only — not the windows behind it.
   useEscape(onCancel)
@@ -91,7 +97,7 @@ export function ReasonDialog({
 
         <div className="mt-5 flex justify-end gap-2">
           <button type="button" className="btn-secondary" onClick={onCancel} disabled={busy}>
-            Cancel
+            {cancelLabel}
           </button>
           <button
             type="button"

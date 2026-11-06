@@ -313,6 +313,8 @@ export function ManufacturingOrderDialog({
   if (!open || !mounted) return null
   const o = plan?.order
   const busy = saving !== null || loading
+  /** Already on the floor: its plan is changed in place, not saved as a draft or released again. */
+  const released = !!saved && saved.status !== 'DRAFT'
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
@@ -327,14 +329,26 @@ export function ManufacturingOrderDialog({
                 Manufacturing Order
               </h2>
               <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
-                {saved ? `${saved.moNumber} — a draft can be changed until it is released` : o ? `Making ${o.soNumber} for ${o.customer.name}` : 'What the factory is to make for a sales order'}
+                {saved
+                  ? released
+                    ? `${saved.moNumber} — released; its plan can be changed until the store issues material to it`
+                    : `${saved.moNumber} — a draft can be changed until it is released`
+                  : o
+                    ? `Making ${o.soNumber} for ${o.customer.name}`
+                    : 'What the factory is to make for a sales order'}
               </p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save(true)} disabled={busy || !!releaseBlocker || !plan} title={releaseBlocker ?? undefined}>
-              {saving === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Save &amp; release
-            </button>
+            {released ? (
+              <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save(false)} disabled={busy || !!blocker || !plan}>
+                {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} Save changes
+              </button>
+            ) : (
+              <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save(true)} disabled={busy || !!releaseBlocker || !plan} title={releaseBlocker ?? undefined}>
+                {saving === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Save &amp; release
+              </button>
+            )}
             <button onClick={onClose} className="btn-ghost p-2" aria-label="Close" disabled={saving !== null}>
               <X size={18} />
             </button>
@@ -529,22 +543,38 @@ export function ManufacturingOrderDialog({
           <button type="button" onClick={onClose} className="btn-secondary hidden sm:inline-flex" disabled={saving !== null}>
             Cancel
           </button>
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={() => void save(false)}
-            disabled={busy || !!blocker || !plan}
-            data-hotkey="save"
-            aria-keyshortcuts="Control+S Meta+S"
-            title="Save as draft (Ctrl+S)"
-          >
-            {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-            <span className="sm:hidden">Draft</span>
-            <span className="hidden sm:inline">Save as draft</span>
-          </button>
-          <button type="button" className="btn-primary" onClick={() => void save(true)} disabled={busy || !!releaseBlocker || !plan} title={releaseBlocker ?? undefined}>
-            {saving === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Save &amp; release
-          </button>
+          {released ? (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void save(false)}
+              disabled={busy || !!blocker || !plan}
+              data-hotkey="save"
+              aria-keyshortcuts="Control+S Meta+S"
+              title="Save the changes (Ctrl+S)"
+            >
+              {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} Save changes
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => void save(false)}
+                disabled={busy || !!blocker || !plan}
+                data-hotkey="save"
+                aria-keyshortcuts="Control+S Meta+S"
+                title="Save as draft (Ctrl+S)"
+              >
+                {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+                <span className="sm:hidden">Draft</span>
+                <span className="hidden sm:inline">Save as draft</span>
+              </button>
+              <button type="button" className="btn-primary" onClick={() => void save(true)} disabled={busy || !!releaseBlocker || !plan} title={releaseBlocker ?? undefined}>
+                {saving === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Save &amp; release
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>,

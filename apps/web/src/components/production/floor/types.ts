@@ -25,6 +25,9 @@ export interface StepFigures {
   short: number
   bGradeNow: number
   yetToCome: number
+  /** Size by size only: pieces made as this size here (in) or as another size (out) by a size change at stitching. */
+  sizeIn?: number
+  sizeOut?: number
 }
 
 export interface FlowStep {
@@ -45,6 +48,8 @@ export interface FlowStep {
   department: { id: string; name: string }
   workstationId: string | null
   workstation: { id: string; name: string; type: string; supplier: { id: string; name: string } | null } | null
+  /** Who normally does it, from the routing. */
+  contractor?: { id: string; name: string } | null
   next: { id: string; name: string; execution: 'IN_HOUSE' | 'OUTSOURCED' } | null
   last: boolean
   lastActivity: string | null
@@ -70,6 +75,11 @@ export interface FlowBundle {
   cutting: string
   lotNo: string | null
   cancelled: boolean
+  /** Made from this bundle by a size change at stitching (its pieces were cut there, as another size). */
+  parent?: { id: string; code: string; size: string | null } | null
+  madeAtStepId?: string | null
+  /** Its size change was taken back. */
+  undone?: boolean
   places: Place[]
 }
 
@@ -175,7 +185,8 @@ export interface Flow {
     color: string
     totalQty: number
     item: { id: string; code: string; name: string } | null
-    sizes: Array<{ id: string; code: string; sequence: number; qty: number }>
+    /** qty is the planned count; changed is what size changes at stitching moved into (+) or out of (−) the size. */
+    sizes: Array<{ id: string; code: string; sequence: number; qty: number; changed?: number }>
   }>
   steps: FlowStep[]
   bundles: FlowBundle[]
@@ -253,9 +264,37 @@ export interface JobCardDetail extends Flow {
   /** Each stage's figures, size by size. */
   sizeFigures: Record<string, StepFigures[]>
   cuttings: JobCardCutting[]
+  /** Cut the old way before the order had stages (cutting numbers): it carries on without them. */
+  cutWithoutStages?: string[]
+  /** Size changes made on this job card at stitching, newest first. */
+  sizeChanges?: SizeChangeEntry[]
   log: LogEntry[]
   materials: { issued: boolean; requisitions: Array<{ id: string; mrNumber: string; status: string; department: string; issued: boolean; closed: boolean }> }
 }
+
+/** One save of a size change: pieces of bundles made as other sizes at a stitching step. */
+export interface SizeChangeEntry {
+  eventId: string
+  moLineId: string
+  at: string
+  date: string
+  by: string
+  personName: string | null
+  step: { id: string; name: string }
+  reason: string
+  undone: { at: string; by: string | null; reason: string | null } | null
+  moves: Array<{
+    from: { bundleId: string; code: string; bundleNo: number; size: string; sizeId: string }
+    to: { bundleId: string; code: string; bundleNo: number; size: string; sizeId: string }
+    qty: number
+  }>
+}
+
+/** A size's count after size changes at stitching: what was planned, plus what moved into it, less what moved out. */
+export const revisedQty = (z: { qty: number; changed?: number }) => Math.max(0, z.qty + (z.changed ?? 0))
+
+/** The bundle's own number from its code: "B003" from "MO-2627-0042-B003". */
+export const bundleShort = (code: string) => code.split('-').pop() ?? code
 
 /** The reference the floor's papers carry: order no. / project ID / design no. */
 export const refNo = (c: Pick<JobCardHeader, 'orderNo' | 'projectId' | 'designNo' | 'jobCardNumber'>) =>

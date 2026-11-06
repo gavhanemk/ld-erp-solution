@@ -22,14 +22,30 @@ export interface MoFlowFacts {
   materialItemsIssued: number
   stagesSetUp: boolean
   cutStarted: boolean
+  /** Cut the old way, from the order's own Cutting, before it had stages: those cutting numbers. */
+  cutWithoutStages?: string[]
   planned: number
   packed: number
+  /** Its sales order is over and nothing was made on it: all that is left is closing it. */
+  orderClosed?: boolean
 }
 
 export type MoTab = 'order' | 'materials' | 'stages' | 'packed'
 
 const isFinished = (f: MoFlowFacts) =>
   f.status === 'COMPLETED' || f.status === 'CLOSED' || (f.planned > 0 && f.packed >= f.planned)
+
+/**
+ * An order cut the old way, from its own Cutting, before it had stages: the server refuses
+ * stages for it (CUT_WITHOUT_ROUTE). No more cutting is recorded that way (6 Nov 2026), so it
+ * carries on as it is. Said the same on the strip, the Stages tab and the job card; `where`
+ * says where its cuttings can be cancelled from.
+ */
+export function oldCutNote(cuts: string[], packed: number, where = 'under Cutting on the Stages tab') {
+  return `Cut the old way (${cuts.join(', ')}) before stages were set up, so this order carries on without stages: book what is packed in Inventory → Finished Goods In. ${
+    packed > 0 ? 'Some of it is already packed, so it stays without stages.' : `To use stages instead, first cancel ${cuts.length === 1 ? 'that cutting' : 'those cuttings'} ${where}.`
+  }`
+}
 
 /** Materials ticked only when every one is issued in full. */
 const allIssued = (f: MoFlowFacts) => f.materialItems > 0 && f.materialItemsIssued >= f.materialItems
@@ -81,7 +97,8 @@ export function MoFlowStrip({
   facts: MoFlowFacts
   tab: MoTab
   onTab: (t: MoTab) => void
-  onSetUpStages: () => void
+  /** Left out when this person may not load stages: the strip then points at the Stages tab. */
+  onSetUpStages?: () => void
 }) {
   const f = facts
   const steps = stepsOf(f)
@@ -94,7 +111,9 @@ export function MoFlowStrip({
     )
 
   let next: { text: string; action?: ReactNode }
-  if (f.status === 'DRAFT') {
+  if (f.orderClosed) {
+    next = { text: 'Its sales order is closed and nothing was made on this order, so nothing more is asked or made: cancel it with "Cancel this MO" below.' }
+  } else if (f.status === 'DRAFT') {
     next = {
       text: 'Check the colours and quantities, then press Release at the top.',
       action: go('order', 'Order'),
@@ -106,17 +125,24 @@ export function MoFlowStrip({
         : 'Ask the store for the fabric and trims: tick them on Materials and press "Raise requisitions".',
       action: go('materials', 'Materials'),
     }
-  } else if (!f.stagesSetUp) {
-    next = {
-      text: allIssued(f)
-        ? 'Press "Set up stages". It brings in this style’s routing — cutting, stitching, QC and the rest, with their lines and contractors.'
-        : 'Press "Set up stages" to bring in this style’s routing. The rest of the materials can be asked for on the Materials tab.',
-      action: (
-        <button type="button" className="btn-primary h-8 px-3 text-xs" onClick={onSetUpStages}>
-          <Route size={13} /> Set up stages
-        </button>
-      ),
-    }
+  } else if (f.status === 'CLOSED') {
+    next = { text: 'This order is closed: nothing more is issued, cut or packed on it.' }
+  } else if (!f.stagesSetUp && !isFinished(f) && f.cutWithoutStages?.length) {
+    // The server refuses stages for it (CUT_WITHOUT_ROUTE): its pieces have no bundles to move.
+    next = { text: oldCutNote(f.cutWithoutStages, f.packed), action: go('stages', 'Cutting') }
+  } else if (!f.stagesSetUp && !isFinished(f)) {
+    next = onSetUpStages
+      ? {
+          text: allIssued(f)
+            ? 'Press "Set up stages". It brings in this style’s routing — cutting, stitching, QC and the rest, with their lines and contractors.'
+            : 'Press "Set up stages" to bring in this style’s routing. The rest of the materials can be asked for on the Materials tab.',
+          action: (
+            <button type="button" className="btn-primary h-8 px-3 text-xs" onClick={onSetUpStages}>
+              <Route size={13} /> Set up stages
+            </button>
+          ),
+        }
+      : { text: 'Its stages are not set up yet: someone in production loads them from the style’s routing on the Stages tab.', action: go('stages', 'Stages') }
   } else if (!isFinished(f)) {
     next = {
       text: f.cutStarted

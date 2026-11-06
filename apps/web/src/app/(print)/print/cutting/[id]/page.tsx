@@ -9,6 +9,8 @@ interface Payload {
   company: Record<string, string | null>
   template: { title: string; footerNote: string | null }
   waitingAtCutting: number
+  /** Bundles made later from this lay's, as another size at stitching: not cut here, so only named under the list. */
+  madeAsOtherSize: Array<{ id: string; bundleNo: number; size: string; qty: number; fromBundleNo: number; fromSize: string; step: string }>
   cutting: {
     cutOrderNumber: string
     cutDate: string
@@ -37,8 +39,9 @@ interface Payload {
  * The cutting document: what the cutting room was given and what it cut, for
  * one lay of one line of the order. Order, fabric and the lay above; the
  * pieces by size — on the order, planned for this lay, actually cut — and the
- * bundles tied from them below. Signed by whoever prepared it, the cutting
- * master, and whoever issued the fabric.
+ * bundles tied from them below (any made from them later as another size at
+ * stitching are named under the list, not as cut). Signed by whoever
+ * prepared it, the cutting master, and whoever issued the fabric.
  */
 export default function PrintCutting() {
   const { id } = useParams<{ id: string }>()
@@ -62,6 +65,8 @@ export default function PrintCutting() {
   const uom = c.fabricItem?.uom?.symbol ?? ''
   const planned = c.plannedBreakup ?? {}
   const cut = c.sizeBreakup ?? {}
+  const bNo = (n: number) => `B${String(n).padStart(3, '0')}`
+  const later = data.madeAsOtherSize ?? []
 
   // Sizes run across the page, as on the floor's own sheet.
   const columns: SheetColumn[] = [
@@ -146,11 +151,17 @@ export default function PrintCutting() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0', padding: '6px 10px' }}>
               {c.bundles.map((b) => (
                 <div key={b.id} style={{ fontSize: '9.5px', color: INK, lineHeight: 1.7, ...CODE }}>
-                  <span style={{ color: NAVY, fontWeight: 700 }}>B{String(b.bundleNo).padStart(3, '0')}</span> {b.size ? `${b.size.code} · ` : ''}
+                  <span style={{ color: NAVY, fontWeight: 700 }}>{bNo(b.bundleNo)}</span> {b.size ? `${b.size.code} · ` : ''}
                   {b.qty} pcs
                 </div>
               ))}
             </div>
+            {later.length ? (
+              <div style={{ borderTop: `1px solid ${RULE}`, padding: '5px 10px', fontSize: '9px', color: GREY, lineHeight: 1.6 }}>
+                Later made as another size at {[...new Set(later.map((l) => l.step))].join(', ')}:{' '}
+                {later.map((l) => `${bNo(l.bundleNo)} (${l.size}, ${qty(l.qty)} pcs from ${bNo(l.fromBundleNo)})`).join(', ')}
+              </div>
+            ) : null}
           </div>
         ) : c.notes ? (
           <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '8px', fontSize: '10px', color: GREY }}>{c.notes}</div>

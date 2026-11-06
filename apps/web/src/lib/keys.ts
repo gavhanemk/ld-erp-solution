@@ -121,6 +121,40 @@ export function topDialog(): HTMLElement | null {
 }
 
 /**
+ * The boxes a person types or picks in, in order: what Enter steps through.
+ * Buttons (a line's Remove, Copy or Add) are left out, so Enter never lands
+ * on one; ticks and radio buttons too, as Space works those.
+ */
+export function boxesIn(scope: ParentNode): HTMLElement[] {
+  return tabbables(scope).filter((c) => c.matches('input, select, textarea, [role="combobox"]') && !c.matches('[type="checkbox"], [type="radio"]'))
+}
+
+/**
+ * Enter's "go on": focus to the next box after `from` in its dialog (or
+ * form, or page), its text selected ready to type over. After the last box,
+ * a word that the form is saved with Ctrl+S, never a save by itself.
+ */
+export function focusNextBox(from: HTMLElement) {
+  const scope = (from.closest('[role="dialog"]') as HTMLElement | null) ?? (from.closest('form') as HTMLElement | null) ?? document.body
+  const list = boxesIn(scope)
+  // A tick has no place in the list: go on from where it sits among the boxes.
+  let i = list.indexOf(from)
+  if (i < 0) {
+    const all = tabbables(scope)
+    const at = all.indexOf(from)
+    i = list.findIndex((b) => all.indexOf(b) > at) - 1
+    if (i < -1) i = list.length - 1
+  }
+  const next = list[i + 1]
+  if (next) {
+    next.focus()
+    if (next instanceof HTMLInputElement && typeof next.select === 'function' && isTyping(next)) next.select()
+  } else if (scope !== document.body) {
+    window.dispatchEvent(new CustomEvent('ld:note', { detail: `Last box. Press ${keyLabel('mod+s')}, or the save button, to save.` }))
+  }
+}
+
+/**
  * Moves focus to the next (or previous) field after `from`, inside the dialog
  * it is in, or the page: what happens after a dropdown choice is made from the
  * keyboard, so the next field is ready to type in.

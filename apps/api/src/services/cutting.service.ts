@@ -296,6 +296,9 @@ export const cutterIssueSchema = z.object({
 export async function canonicalCutter(db: Db, typed: string) {
   const clean = typed.trim().replace(/\s+/g, ' ')
   if (!clean) return clean
+  // Spelt as in the Contractors master when they are in it.
+  const listed = await db.contractor.findFirst({ where: { name: { equals: clean, mode: 'insensitive' } }, select: { name: true } })
+  if (listed) return listed.name
   const first = await db.cuttingOrder.findFirst({
     where: { cutterName: { equals: clean, mode: 'insensitive' } },
     select: { cutterName: true },
@@ -304,18 +307,38 @@ export async function canonicalCutter(db: Db, typed: string) {
   return first?.cutterName ?? clean
 }
 
-/** Every cutting contractor named on any order, latest first, for the pick list. */
+/**
+ * Every cutting contractor for the pick list: those named on any order, latest
+ * first, and the active ones in the Contractors master who take on cutting —
+ * so one added under Routing Masters, or from a routing, is offered at once.
+ */
 export async function cuttingContractors(db: Db) {
-  const rows = await db.cuttingOrder.groupBy({
-    by: ['cutterName'],
-    where: { cutterName: { not: null } },
-    _count: { _all: true },
-    _max: { cutDate: true },
-  })
-  return rows
+  const [rows, cutOps] = await Promise.all([
+    db.cuttingOrder.groupBy({
+      by: ['cutterName'],
+      where: { cutterName: { not: null } },
+      _count: { _all: true },
+      _max: { cutDate: true },
+    }),
+    db.operation.findMany({ where: { kind: 'CUTTING' }, select: { id: true } }),
+  ])
+  const listed = cutOps.length
+    ? await db.contractor.findMany({ where: { isActive: true, operationIds: { hasSome: cutOps.map((o) => o.id) } }, select: { name: true }, orderBy: { name: 'asc' } })
+    : []
+  const used = rows
     .filter((r) => r.cutterName?.trim())
-    .map((r) => ({ name: r.cutterName as string, cuts: r._count._all, lastCut: r._max.cutDate }))
+    .map((r) => ({ name: r.cutterName as string, cuts: r._count._all, lastCut: r._max.cutDate, inMaster: false }))
     .sort((a, b) => (b.lastCut?.getTime() ?? 0) - (a.lastCut?.getTime() ?? 0))
+  const key = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase()
+  const inMaster = new Set(listed.map((c) => key(c.name)))
+  for (const u of used) u.inMaster = inMaster.has(key(u.name))
+  const seen = new Set(used.map((u) => key(u.name)))
+  return [...used, ...listed.filter((c) => !seen.has(key(c.name))).map((c) => ({ name: c.name, cuts: 0, lastCut: null, inMaster: true }))]
+}
+
+/** The active contractors in the Contractors master who take on a process, for a "Done by" pick list. */
+export async function contractorsFor(db: Db, operationId: string) {
+  return db.contractor.findMany({ where: { isActive: true, operationIds: { has: operationId } }, select: { id: true, name: true }, orderBy: { name: 'asc' } })
 }
 
 export async function issueToCutter(tx: Db, moId: string, d: z.infer<typeof cutterIssueSchema>, userId: string, opts: { mayApprove?: boolean } = {}) {

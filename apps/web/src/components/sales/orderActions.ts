@@ -27,9 +27,12 @@ export const orderCan = {
   /**
    * Before anything is made or sent. A draft is called off by whoever edits
    * orders; a confirmed one has been promised, so by someone who approves.
+   * In production too, while nothing is made on its manufacturing orders
+   * (nothing issued, cut or packed): they close with it.
    */
   cancel: (o: OrderLike) =>
-    (o.status === 'DRAFT' && can('sales', 'edit')) || (o.status === 'CONFIRMED' && can('sales', 'approve')),
+    (o.status === 'DRAFT' && can('sales', 'edit')) ||
+    ((o.status === 'CONFIRMED' || o.status === 'IN_PRODUCTION') && can('sales', 'approve')),
   /** Once work has started: ends the order at what was sent. */
   shortClose: (o: OrderLike) => OPEN_ORDER_STATUSES.includes(o.status) && can('sales', 'approve'),
   /** Confirmed and not finished: goods go out on a delivery challan. */
@@ -49,7 +52,7 @@ export const REASON_ACTIONS: Record<
   cancel: {
     title: (n) => `Cancel ${n}?`,
     description:
-      'The order is called off and stays on file as cancelled, with your reason. Only before anything has been made or sent against it.',
+      'The order is called off and stays on file as cancelled, with your reason. Only before anything has been made or sent against it; its manufacturing orders, nothing having been made on them, close with it.',
     confirmLabel: 'Cancel order',
     placeholder: 'Buyer withdrew the PO',
   },
@@ -63,7 +66,7 @@ export const REASON_ACTIONS: Record<
   'short-close': {
     title: (n) => `Short-close ${n}?`,
     description:
-      'The order ends at what has been sent: every line’s remaining pieces are dropped, and what was sent stays. Use it when the buyer no longer wants the balance, or production came out short.',
+      'The order ends at what has been sent: every line’s remaining pieces are dropped, and what was sent stays. Use it when the buyer no longer wants the balance, or production came out short. Its manufacturing orders nothing was made on close with it.',
     confirmLabel: 'Short-close',
     placeholder: 'Buyer agreed to take 960 of 1,000',
   },

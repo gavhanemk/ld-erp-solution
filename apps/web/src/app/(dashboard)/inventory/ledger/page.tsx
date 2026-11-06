@@ -580,29 +580,75 @@ function LedgerScreen() {
   // dropdown lies over whatever is below it.
   const filterBar = (
     <div className="space-y-2 px-4 py-3">
-      <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Quick views">
-        {VIEWS.map((v) => {
-          const on = viewOn(v)
-          return (
-            <button
-              key={v.key}
-              type="button"
-              onClick={() => pickView(v)}
-              aria-pressed={on}
-              className={`rounded-full border px-3 py-1 text-xs transition-colors ${
-                on ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-secondary text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {v.label}
-            </button>
-          )
-        })}
+      {/* Whose material on the left; when, on the right: the dates, and the period that fills them in. */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Quick views">
+          {VIEWS.map((v) => {
+            const on = viewOn(v)
+            return (
+              <button
+                key={v.key}
+                type="button"
+                onClick={() => pickView(v)}
+                aria-pressed={on}
+                className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                  on ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-secondary text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {v.label}
+              </button>
+            )
+          })}
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <div className="flex h-8 items-center gap-1 rounded-lg border border-border bg-secondary px-2">
+            <CalendarDays size={14} className="shrink-0 text-muted-foreground" />
+            <input
+              type="date"
+              className="w-[100px] bg-transparent text-xs text-foreground outline-none"
+              value={from}
+              max={to || undefined}
+              onChange={(e) => {
+                setFrom(e.target.value)
+                setPreset('custom')
+              }}
+              aria-label="From"
+              title="From"
+            />
+            <span className="text-[11px] text-muted-foreground">to</span>
+            <input
+              type="date"
+              className="w-[100px] bg-transparent text-xs text-foreground outline-none"
+              value={to}
+              min={from || undefined}
+              onChange={(e) => {
+                setTo(e.target.value)
+                setPreset('custom')
+              }}
+              aria-label="To"
+              title="To"
+            />
+          </div>
+          <SmartSelect
+            className="h-8 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-xs text-foreground outline-none"
+            value={preset}
+            onChange={(e) => pickPreset(e.target.value)}
+            aria-label="Period"
+          >
+            {PRESETS.map((p) => (
+              <option key={p.key} value={p.key}>
+                {p.label}
+              </option>
+            ))}
+          </SmartSelect>
+        </div>
       </div>
+      {/* The search, with the room it needs, then the dropdowns. */}
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex h-10 min-w-[160px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
-          <Search size={14} className="text-muted-foreground" />
+        <div className="flex h-10 w-full min-w-0 items-center gap-2 rounded-lg border border-border bg-secondary px-3 sm:w-auto sm:min-w-[28rem] sm:flex-1">
+          <Search size={14} className="shrink-0 text-muted-foreground" />
           <input
-            className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
+            className="min-w-0 flex-1 text-ellipsis border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
             placeholder="Search item, document no., supplier, customer, job worker..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -615,47 +661,6 @@ function LedgerScreen() {
             </button>
           )}
         </div>
-        {/* The dates, always to hand; the period beside them fills both in at once. */}
-        <div className="flex h-10 items-center gap-1 rounded-lg border border-border bg-secondary px-2">
-          <CalendarDays size={14} className="shrink-0 text-muted-foreground" />
-          <input
-            type="date"
-            className="w-[118px] bg-transparent text-sm text-foreground outline-none"
-            value={from}
-            max={to || undefined}
-            onChange={(e) => {
-              setFrom(e.target.value)
-              setPreset('custom')
-            }}
-            aria-label="From"
-            title="From"
-          />
-          <span className="text-xs text-muted-foreground">to</span>
-          <input
-            type="date"
-            className="w-[118px] bg-transparent text-sm text-foreground outline-none"
-            value={to}
-            min={from || undefined}
-            onChange={(e) => {
-              setTo(e.target.value)
-              setPreset('custom')
-            }}
-            aria-label="To"
-            title="To"
-          />
-        </div>
-        <SmartSelect
-          className="h-10 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-sm text-foreground outline-none"
-          value={preset}
-          onChange={(e) => pickPreset(e.target.value)}
-          aria-label="Period"
-        >
-          {PRESETS.map((p) => (
-            <option key={p.key} value={p.key}>
-              {p.label}
-            </option>
-          ))}
-        </SmartSelect>
         {FILTERS.filter((f) => f.menu !== false).map((f) => (
           <FilterMenu
             key={f.key}

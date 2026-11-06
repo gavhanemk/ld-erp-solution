@@ -13,8 +13,13 @@ interface Payload {
     id: string
     code: string
     bundleNo: number
+    /** Pieces tied into it when it was made. */
     qty: number
+    /** Pieces it holds now, anywhere on the floor (not packed or written off). */
+    now: number
     size: { code: string } | null
+    /** The bundle it was made from, by a size change at stitching. */
+    parent: { code: string; bundleNo: number; size: { code: string } | null } | null
     moLine: { color: string; style: { code: string; name: string } }
     cuttingOrder: { cutOrderNumber: string; cutDate: string; lotNo: string | null }
   }>
@@ -35,6 +40,7 @@ function Barcode({ text, height }: { text: string; height: string }) {
 }
 
 const day = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+const bNo = (n: number) => `B${String(n).padStart(3, '0')}`
 
 function Sticker({ b, data, layout }: { b: Payload['bundles'][number]; data: Payload; layout: Layout }) {
   const big = layout === 'roll'
@@ -42,14 +48,29 @@ function Sticker({ b, data, layout }: { b: Payload['bundles'][number]; data: Pay
     <div className="sticker">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '2mm' }}>
         <span style={{ fontSize: big ? '7.5pt' : '6pt', color: '#333', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{data.company}</span>
-        <span style={{ fontSize: big ? '15pt' : '12pt', fontWeight: 800, letterSpacing: '.02em' }}>B{String(b.bundleNo).padStart(3, '0')}</span>
+        <span style={{ fontSize: big ? '15pt' : '12pt', fontWeight: 800, letterSpacing: '.02em' }}>{bNo(b.bundleNo)}</span>
       </div>
       <Barcode text={b.code} height={big ? '13mm' : '8.5mm'} />
       <div style={{ fontSize: big ? '7.5pt' : '6pt', textAlign: 'center', fontFamily: 'ui-monospace, monospace', letterSpacing: '.04em' }}>{b.code}</div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: '.6mm' }}>
-        <span style={{ fontSize: big ? '16pt' : '12pt', fontWeight: 800 }}>{b.size ? `Size ${b.size.code}` : 'No size'}</span>
-        <span style={{ fontSize: big ? '14pt' : '11pt', fontWeight: 800 }}>{b.qty} pcs</span>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '2mm', marginTop: '.6mm' }}>
+        <span style={{ fontSize: big ? '16pt' : '12pt', fontWeight: 800, whiteSpace: 'nowrap' }}>{b.size ? `Size ${b.size.code}` : 'No size'}</span>
+        {/* What it holds now; beside it what was cut (or moved into it), when that is different. */}
+        <span style={{ whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: big ? '14pt' : '11pt', fontWeight: 800 }}>{b.now} pcs</span>
+          {b.now !== b.qty && (
+            <span style={{ fontSize: big ? '8pt' : '6.5pt', fontWeight: 600 }}>
+              {' '}
+              now · {b.qty} {b.parent ? 'made' : 'cut'}
+            </span>
+          )}
+        </span>
       </div>
+      {b.parent && (
+        <div style={{ fontSize: big ? '8pt' : '6.5pt', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          Made from {bNo(b.parent.bundleNo)}
+          {b.parent.size ? ` (${b.parent.size.code})` : ''}
+        </div>
+      )}
       <div style={{ fontSize: big ? '8pt' : '6.5pt', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {b.moLine.style.code} · {b.moLine.color}
       </div>
@@ -66,8 +87,10 @@ function Sticker({ b, data, layout }: { b: Payload['bundles'][number]; data: Pay
  * The bundle stickers: one per bundle (or two), each with its number as a
  * barcode — scanned or typed at every desk the bundle passes — and what is in
  * it: size, pieces, style and colour, the order and the cutting it came from.
- * On an A4 sticker sheet of 24 (3 × 8, 70 × 37 mm) or on a label printer,
- * one 75 × 50 mm label a page.
+ * Pieces are what it holds now, with what was cut beside them when that has
+ * changed; a bundle made at stitching as another size names the bundle and
+ * size it was made from. On an A4 sticker sheet of 24 (3 × 8, 70 × 37 mm)
+ * or on a label printer, one 75 × 50 mm label a page.
  */
 function Stickers() {
   const params = useSearchParams()

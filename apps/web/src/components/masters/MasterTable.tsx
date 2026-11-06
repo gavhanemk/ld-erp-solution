@@ -368,6 +368,16 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
     void load()
   }, [load, refreshKey])
 
+  // Back on this tab after adding one somewhere else (a contractor from a
+  // routing, in another tab): the list catches up without a reload.
+  useEffect(() => {
+    const back = () => {
+      if (document.visibilityState === 'visible') void load()
+    }
+    document.addEventListener('visibilitychange', back)
+    return () => document.removeEventListener('visibilitychange', back)
+  }, [load])
+
   /**
    * Masters are referenced by transactions forever, so the API deactivates
    * rather than deletes. The wording here has to match that or it reads as
