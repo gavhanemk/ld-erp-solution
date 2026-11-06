@@ -3930,8 +3930,8 @@ export function PurchaseOrderDialog({
                       {totals.chargeRows.length > 0 && (
                         <p className="text-muted-foreground text-[11px]">
                           Charges as on the supplier&apos;s bill, GST included — no GST is added on top.
-                          Type the amount in ₹, or switch ₹ to % and type any percentage (5, 7.5, 10…)
-                          of the goods value before GST.
+                          Type the amount in ₹, or press % next to the box and type any percentage (5,
+                          7.5, 10…) of the goods value before GST.
                         </p>
                       )}
                       {totals.chargeRows.map((c) => (
@@ -3953,28 +3953,59 @@ export function PurchaseOrderDialog({
                                 }
                                 aria-label={`${c.name} ${c.unit === '%' ? 'percent' : 'amount'}`}
                               />
-                              {/* Rupees or percent, the same switch as the
-                                Discount column. Going to % starts the box
-                                empty — a rupee figure is not a percentage.
-                                Going back to ₹ keeps what the % came to, so
-                                the figure can be rounded off by hand. */}
-                              <SmartSelect
-                                className="form-input h-8 w-14 shrink-0 px-1"
-                                value={c.unit}
-                                onChange={(e) => {
-                                  const unit = e.target.value as '%' | 'INR'
-                                  if (unit === c.unit) return
-                                  setCharges((prev) => ({
-                                    ...prev,
-                                    [c.chargeTypeId]: unit === '%' ? '' : c.amount ? String(c.amount) : '',
-                                  }))
-                                  setChargeUnit((prev) => ({ ...prev, [c.chargeTypeId]: unit }))
-                                }}
+                              {/* Rupees or percent, as two buttons side by side
+                                rather than a dropdown — a dropdown showing "₹"
+                                was read as a label, and "10" typed into the
+                                box went in as ₹10. Both are always in sight
+                                and the one in use is lit.
+
+                                Pressing % keeps the number already typed as
+                                the percentage (10 becomes 10%), unless it is
+                                over 100 — a rupee figure like 1,200 is not a
+                                percentage, and the box starts empty instead.
+                                Pressing ₹ keeps what the % came to, so the
+                                figure can be rounded off by hand. */}
+                              <div
+                                role="group"
                                 aria-label={`${c.name} in rupees or percent`}
+                                className="border-border flex h-8 shrink-0 overflow-hidden rounded-lg border"
                               >
-                                <option value="INR">₹</option>
-                                <option value="%">%</option>
-                              </SmartSelect>
+                                {(['INR', '%'] as const).map((unit) => (
+                                  <button
+                                    key={unit}
+                                    type="button"
+                                    aria-pressed={c.unit === unit}
+                                    title={
+                                      unit === '%'
+                                        ? `Type ${c.name} as a % of the goods value`
+                                        : `Type ${c.name} as an amount in ₹`
+                                    }
+                                    onClick={() => {
+                                      if (unit === c.unit) return
+                                      const typed = charges[c.chargeTypeId] ?? ''
+                                      setCharges((prev) => ({
+                                        ...prev,
+                                        [c.chargeTypeId]:
+                                          unit === '%'
+                                            ? num(typed) > 0 && num(typed) <= 100
+                                              ? typed
+                                              : ''
+                                            : c.amount
+                                              ? String(c.amount)
+                                              : '',
+                                      }))
+                                      setChargeUnit((prev) => ({ ...prev, [c.chargeTypeId]: unit }))
+                                    }}
+                                    className={`w-8 text-sm font-semibold transition-colors ${
+                                      c.unit === unit
+                                        ? 'bg-primary/15 text-primary'
+                                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                                    }`}
+                                  >
+                                    {unit === '%' ? '%' : '₹'}
+                                  </button>
+                                ))}
+                              </div>
                               <button
                                 type="button"
                                 onClick={() => removeCharge(c.chargeTypeId)}
