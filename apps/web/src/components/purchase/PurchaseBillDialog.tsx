@@ -352,14 +352,19 @@ const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 /**
- * The longest a bill to a registered small supplier may be left unpaid.
- *
- * Section 15 of the MSMED Act. Forty-five days is a ceiling, not a term —
- * shorter can be agreed and usually has been, longer cannot be — so it is
- * used as the fallback when the master carries no terms, and as a cap over
- * whatever it does carry.
+ * The payment terms a bill starts on: 45 days from the date on the supplier's
+ * bill. The mill's own rule, for every supplier — the Terms box beside the
+ * due date changes it for one bill.
  */
-const MSME_DAYS = 45
+const DEFAULT_TERM_DAYS = 45
+
+/** Whole days from one `yyyy-mm-dd` date to another; null if either is missing. */
+const daysBetween = (from: string, to: string) => {
+  const a = new Date(from + 'T00:00:00').getTime()
+  const b = new Date(to + 'T00:00:00').getTime()
+  if (Number.isNaN(a) || Number.isNaN(b)) return null
+  return Math.round((b - a) / 86_400_000)
+}
 
 /**
  * A date this many days later, in the `yyyy-mm-dd` a date input wants.
@@ -448,6 +453,8 @@ export function PurchaseBillDialog({
   const [supplierInvoiceDate, setSupplierInvoiceDate] = useState('')
   const [billDate, setBillDate] = useState(() => new Date().toISOString().slice(0, 10))
   const [dueDate, setDueDate] = useState('')
+  /** Payment terms in days, counted from the date on the supplier's bill. */
+  const [termDays, setTermDays] = useState(String(DEFAULT_TERM_DAYS))
   const [discountAmount, setDiscountAmount] = useState('')
   const [isReverseCharge, setIsReverseCharge] = useState(false)
   /*
@@ -546,9 +553,16 @@ export function PurchaseBillDialog({
     setSupplierInvoiceNo(record?.supplierInvoiceNo ?? '')
     setSupplierInvoiceDate(record?.supplierInvoiceDate?.slice(0, 10) ?? '')
     setBillDate((record?.billDate ?? new Date().toISOString()).slice(0, 10))
+    // An existing bill keeps the due date it was saved with, and its terms
+    // read back as the days between its bill date and that due date.
     setDueDate(record?.dueDate?.slice(0, 10) ?? '')
-    // An existing bill's date is somebody's decision, already taken.
-    dueTyped.current = Boolean(record?.dueDate)
+    {
+      const saved = daysBetween(
+        record?.supplierInvoiceDate?.slice(0, 10) ?? '',
+        record?.dueDate?.slice(0, 10) ?? ''
+      )
+      setTermDays(String(saved !== null && saved >= 0 ? saved : DEFAULT_TERM_DAYS))
+    }
     setDiscountAmount(num(record?.discountAmount) > 0 ? String(record?.discountAmount) : '')
     setIsReverseCharge(record?.isReverseCharge ?? false)
     setTdsSection(record?.tdsSection ?? '')
@@ -626,17 +640,6 @@ export function PurchaseBillDialog({
     supplierIdRef.current = supplierId
   }, [supplierId])
 
-  /**
-   * Whether the due date on screen is one somebody typed.
-   *
-   * The date fills itself in from the supplier's terms, and re-fills whenever
-   * the supplier or their bill date changes — but the moment a clerk types one
-   * of their own, that is the answer and nothing may overwrite it. An extension
-   * agreed on the phone is exactly the kind of thing that gets typed here and
-   * would have been silently reverted by the next keystroke in the date beside
-   * it.
-   */
-  const dueTyped = useRef(false)
 
   const autoPulled = useRef<string | null>(null)
   useEffect(() => {
@@ -916,43 +919,41 @@ export function PurchaseBillDialog({
       )
     : suppliers
 
-  /**
-   * How long this supplier gives us, in days.
+  /*
+   * The payment due date: the date on the supplier's bill plus the terms
+   * (45 days unless changed). Only ever from their bill date — never from
+   * "Booked on", which is our date, not theirs. With no bill date there is no
+   * due date to work out, and the box is left for the clerk.
    *
-   * Their own agreed terms where the master holds them — every supplier on the
-   * mill's list has them, and they run from 15 to 45 — and ${MSME_DAYS} where
-   * it does not. Capped at ${MSME_DAYS} for a registered small supplier
-   * whatever the master says, because that is the law's ceiling and a longer
-   * term agreed with them is not enforceable anyway.
-   *
-   * Filling the legal maximum for everybody would have been the simpler rule
-   * and the wrong one: Ambika Stitching Unit is on 15 days, and a bill quietly
-   * dated 45 would be a month late by the time anybody looked — with interest
-   * running on it, since they are an MSME.
+   * Worked out when the bill date or the terms change, not on every render, so
+   * a saved bill reopens on the due date it was saved with.
    */
-  const termDays = useMemo(() => {
-    const agreed = Number(supplier?.creditDays ?? 0)
-    const base = agreed > 0 ? agreed : MSME_DAYS
-    return supplier?.isMsme ? Math.min(base, MSME_DAYS) : base
-  }, [supplier])
+  const dueFor = (invoiceDate: string, days: string) =>
+    invoiceDate && days.trim() !== '' ? addDays(invoiceDate, num(days)) : ''
+
+  /** Their bill date changed: the due date follows it, at the same terms. */
+  const changeInvoiceDate = (date: string) => {
+    setSupplierInvoiceDate(date)
+    setDueDate(dueFor(date, termDays))
+  }
+
+  /** The terms changed: the due date moves with them. */
+  const changeTermDays = (days: string) => {
+    setTermDays(days)
+    if (supplierInvoiceDate) setDueDate(dueFor(supplierInvoiceDate, days))
+  }
 
   /*
-   * Counted from the date on their bill, which is what the terms in the master
-   * say ("30 days from bill date") and what the supplier will count from when
-   * he rings about it. Until that box is filled in, from the day we are
-   * booking it — a due date that is roughly right beats an empty box, and it
-   * corrects itself the moment their date is typed.
+   * A due date typed by hand — an extension agreed on the phone, say. The
+   * terms box follows it (19 Dec on a 4 Nov bill reads 45 days), so a later
+   * change to the bill date keeps the same agreed gap rather than dropping
+   * back to 45.
    */
-  const dueFrom = supplierInvoiceDate || billDate
-
-  useEffect(() => {
-    if (!open || dueTyped.current) return
-    // The terms come off the supplier, so there is nothing to work out until
-    // there is one. A date guessed before then would visibly correct itself
-    // the moment one is picked, which reads as the form changing its mind.
-    if (!supplierId || !dueFrom) return
-    setDueDate(addDays(dueFrom, termDays))
-  }, [open, supplierId, dueFrom, termDays])
+  const changeDueDate = (date: string) => {
+    setDueDate(date)
+    const days = supplierInvoiceDate && date ? daysBetween(supplierInvoiceDate, date) : null
+    if (days !== null && days >= 0) setTermDays(String(days))
+  }
 
   /*
    * The TDS section follows the bill until somebody picks one: the supplier's
@@ -1267,7 +1268,7 @@ export function PurchaseBillDialog({
     setSupplierInvoiceNo(no)
     // Picking a number the gate caught brings its date, into an empty box only.
     const date = dateForBillNo(no)
-    if (date && !supplierInvoiceDate) setSupplierInvoiceDate(date)
+    if (date && !supplierInvoiceDate) changeInvoiceDate(date)
   }
 
   /*
@@ -2394,10 +2395,12 @@ export function PurchaseBillDialog({
                   )}
                 </div>
 
-                <div>
+                <div className="xl:col-span-2">
                   {/* The bill is booked with their invoice on the desk, so this is
                 the document's own number rather than an afterthought. It is
-                also what stops the same invoice being booked twice. */}
+                also what stops the same invoice being booked twice. Two
+                columns wide on a big screen: bill numbers like
+                "BPF/INV/2210" were cut off once the Terms box joined the row. */}
                   <label className="form-label" htmlFor="bill-supplier-no">
                     Bill no.<span className="ml-0.5 text-red-400">*</span>{' '}
                     <span className="text-muted-foreground">(theirs)</span>
@@ -2429,7 +2432,7 @@ export function PurchaseBillDialog({
                     type="date"
                     className="form-input"
                     value={supplierInvoiceDate}
-                    onChange={(e) => setSupplierInvoiceDate(e.target.value)}
+                    onChange={(e) => changeInvoiceDate(e.target.value)}
                   />
                   {!supplierInvoiceDate && (
                     <span className="text-muted-foreground mt-1 block text-xs">
@@ -2451,6 +2454,21 @@ export function PurchaseBillDialog({
                   />
                 </div>
 
+                {/* The payment terms, in days from their bill date — 45 to
+                  start with. Changing it moves the due date beside it. */}
+                <div>
+                  <label className="form-label" htmlFor="bill-terms">
+                    Terms (days)
+                  </label>
+                  <StepInput
+                    id="bill-terms"
+                    className="form-input text-right"
+                    placeholder={String(DEFAULT_TERM_DAYS)}
+                    value={termDays}
+                    onValueChange={changeTermDays}
+                  />
+                </div>
+
                 <div>
                   <label className="form-label" htmlFor="bill-due">
                     Payment due
@@ -2460,17 +2478,8 @@ export function PurchaseBillDialog({
                     type="date"
                     className="form-input"
                     value={dueDate}
-                    onChange={(e) => {
-                      // Theirs from here on. See `dueTyped`.
-                      dueTyped.current = true
-                      setDueDate(e.target.value)
-                    }}
+                    onChange={(e) => changeDueDate(e.target.value)}
                   />
-                  {/* The line under this box said which term the date was
-                    worked out from and, for a small supplier, that 45 days is
-                    the legal ceiling. Taken off on request. The date is still
-                    worked out the same way — see `termDays` — it simply no
-                    longer explains itself here. */}
                 </div>
 
                 {expenseMode && (
