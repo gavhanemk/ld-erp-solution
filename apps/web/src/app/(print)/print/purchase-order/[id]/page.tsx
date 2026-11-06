@@ -1272,14 +1272,16 @@ export default function PrintPurchaseOrder() {
    * own and so always has an answer.
    */
   /*
-   * Since November each charge carries the GST rate chosen for it on the
-   * order, and only that rate applies to it, so the rate printed here is the
-   * one its tax was worked out at. Left off when the order carries no GST at
-   * all: "@5%" beside a charge on an order with no tax would read as tax that
-   * was not charged.
+   * A charge is the supplier's figure with any GST already inside it, so it
+   * prints by name only and is added after the tax. An order saved while
+   * charges still had GST put on top keeps its rate on the row — "@18%" — so
+   * the sheet still explains the tax it was saved with.
    */
   const chargeLines = (sheetOrder.charges ?? []).map((c) => ({
-    label: taxMode === 'NONE' ? c.chargeType.name : `${c.chargeType.name} @${Number(c.gstRate)}%`,
+    label:
+      taxMode !== 'NONE' && Number(c.gstRate) > 0
+        ? `${c.chargeType.name} @${Number(c.gstRate)}%`
+        : c.chargeType.name,
     value: money(c.amount),
   }))
 
@@ -1288,9 +1290,17 @@ export default function PrintPurchaseOrder() {
    * CGST 330.00 + SGST 330.00". Only when the server could vouch for it (see
    * the note on taxByRate) and only when the order carries GST at all.
    */
+  /*
+   * Charges carry no GST of their own (they are the supplier's figure with any
+   * GST inside it), so they sit at 0% and are left out here: "No GST on
+   * ₹1,200" would read as freight that ought to have been taxed. Goods at 0%
+   * still show, as goods only.
+   */
   const gstSummary =
     taxMode !== 'NONE' && Array.isArray(data.taxByRate) && data.taxByRate.length > 0
       ? data.taxByRate
+          .filter((b) => Number(b.gstRate) > 0 || b.goodsTaxable > 0)
+          .map((b) => (Number(b.gstRate) > 0 ? b : { ...b, taxable: b.goodsTaxable }))
       : []
 
   /*
@@ -1406,26 +1416,6 @@ export default function PrintPurchaseOrder() {
     { label: 'Order Discount', value: money(order.discountAmount) },
     { label: 'Sub Total', value: money(order.taxableAmount) },
 
-    /*
-     * One row per charge the mill puts on a purchase, named and rated the way
-     * the old sheet names them: "Transport Charges @(5%)".
-     *
-     * Every one of them, whether this order used it or not — at 0.00 when it
-     * did not, exactly as Other Charges prints. He asked for that in those
-     * words, and the reasoning is the same as for Other Charges: a row that
-     * says 0.00 has been answered, where a row that is missing has only been
-     * left out, and the supplier cannot tell which.
-     *
-     * A charge the order carries is shown even if its type has since been
-     * deactivated or taken off purchases in the master. A document prints
-     * what it holds; the master is only the source of the rows it does not.
-     *
-     * The rate is printed even when it is 0%. A charge that carries no GST is
-     * a real thing, and saying so is more use than leaving it to be wondered
-     * about.
-     */
-    ...chargeLines,
-
     ...(taxMode === 'CGST_SGST'
       ? [
           { label: 'SGST', value: money(order.sgst) },
@@ -1435,21 +1425,28 @@ export default function PrintPurchaseOrder() {
     ...(taxMode === 'IGST' ? [{ label: 'IGST', value: money(order.igst) }] : []),
 
     /*
+     * The charges this order carries, after the tax: each is the supplier's
+     * figure with any GST already inside it, added as it is — "Freight /
+     * Courier 1,200.00". Only the ones entered on the order, so the supplier
+     * is not left wondering which of five freight rows applied to them.
+     *
+     * A charge the order carries is shown even if its type has since been
+     * deactivated or taken off purchases in the master. A document prints
+     * what it holds; the master is only the source of the rows it does not.
+     */
+    ...chargeLines,
+
+    /*
      * Always printed, at 0.00 when there are none — as on the old sheet, and
      * because he named it as one of the rows he wants.
      *
-     * Since November, Other Charges is a charge type like freight, taxed at
-     * the rate chosen for it, and so prints with the charge rows above. This
-     * row is now only for two cases. An order saved the old way still has an
-     * untaxed amount in the old box, added after tax, and prints it here as
-     * "Other Charges (no GST)" so it cannot be mistaken for the taxed one. An
-     * order with no Other Charges at all keeps the 0.00 row he asked for. An
-     * order that carries the Other Charges charge type prints nothing here —
-     * otherwise the sheet would show "Other Charges @18%" and then a second
-     * "Other Charges 0.00" beneath the tax.
+     * Other Charges is a charge type like freight, and when the order carries
+     * it, it prints with the charge rows above and nothing is printed here —
+     * otherwise the sheet would show it twice. An order saved with the old
+     * box prints that figure here instead.
      */
     ...(Number(order.otherCharges) > 0
-      ? [{ label: 'Other Charges (no GST)', value: money(order.otherCharges) }]
+      ? [{ label: 'Other Charges', value: money(order.otherCharges) }]
       : (sheetOrder.charges ?? []).some((c) => c.chargeType.name === 'Other Charges')
         ? []
         : [{ label: 'Other Charges', value: money(0) }]),

@@ -2,16 +2,15 @@
 
 import { useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import { GST_RATE_CHOICES, type GstSplit, type PriceResult } from '@ld-erp/shared'
-import { SmartSelect } from '@/components/ui/SmartSelect'
+import type { GstSplit, PriceResult } from '@ld-erp/shared'
 
 /**
  * Where the GST on a purchase order or bill comes from.
  *
- * One row per GST rate on the document: what is taxed at that rate (goods and
- * charges, shown apart) and the tax on it, split into CGST + SGST or IGST.
- * Adding ₹1,200 of freight at 5% then reads as "GST @5% on ₹13,200 — goods
- * ₹12,000, charges ₹1,200", not as SGST quietly moving from 300 to 330.
+ * One row per GST rate on the goods: what is taxed at that rate and the tax on
+ * it, split into CGST + SGST or IGST — "GST @5% on ₹12,000 = ₹600". Charges
+ * carry no GST of their own (they are the supplier's figure with any GST
+ * already in it), so they do not appear here.
  *
  * Every figure is read from the one calculation (priceDocument), so the rows
  * always add up to the totals beside them.
@@ -83,43 +82,3 @@ export function TaxBreakdown({
   )
 }
 
-/**
- * The GST % on one charge, chosen on the document.
- *
- * Offers the standard GST rates, and always keeps the rate already on the
- * charge — an order saved at a rate no longer on the list still shows it.
- */
-export function ChargeGstSelect({
-  value,
-  onChange,
-  label,
-  disabled,
-}: {
-  value: string
-  onChange: (rate: string) => void
-  /** The charge's name, for screen readers. */
-  label: string
-  disabled?: boolean
-}) {
-  const current = Number(value)
-  const choices: number[] = [...GST_RATE_CHOICES]
-  if (value !== '' && Number.isFinite(current) && !choices.includes(current)) choices.push(current)
-  choices.sort((a, b) => a - b)
-
-  return (
-    <SmartSelect
-      className="form-input h-8 w-[7rem] shrink-0 text-right text-xs"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      disabled={disabled}
-      aria-label={`GST on ${label}`}
-      title={`GST on ${label}`}
-    >
-      {choices.map((r) => (
-        <option key={r} value={String(r)}>
-          {`${r}% GST`}
-        </option>
-      ))}
-    </SmartSelect>
-  )
-}

@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { PackType, Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
-import { defaultChargeGstRate, priceDocument, type GstSplit, type TaxByRate } from '@ld-erp/shared'
+import { priceDocument, type GstSplit, type TaxByRate } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -85,12 +85,9 @@ const lineSchema = z.object({
 /**
  * One charge on the order — transport, freight, dyeing, packing, Other Charges.
  *
- * The kind, the amount and the GST rate all come from the order. The rate is
- * the buyer's to choose because the supplier's own invoice decides it: a
- * charge billed with the goods normally takes the goods' rate (CGST Act
- * s.15(2)(c)), a transporter's own bill may not. The charge master's rate is
- * only a starting point, and only for a charge sent without a rate — a form
- * from before charges carried one — see `resolveCharges`.
+ * The amount is the final figure on the supplier's bill, GST included. A
+ * `gstRate` is still accepted so an older form is not refused, but it is not
+ * used: every charge is taken at 0% — see `resolveCharges`.
  */
 const chargeSchema = z.object({
   chargeTypeId: z.string().min(1, 'Pick a charge'),
@@ -591,47 +588,33 @@ function priceOrder(
 }
 
 /**
- * Checks each charge is one the mill uses on purchases, and settles the GST
- * rate it is taxed at.
+ * Checks each charge is one the mill uses on purchases.
  *
- * The rate is the one chosen on the order. A charge sent without one — a form
- * or a phone from before charges carried their own rate — keeps the rate this
- * order already holds for that charge, and failing that starts where a new
- * charge on the form starts: the goods' rate when the lines share one, the
- * charge master's own rate only when there are no goods
- * (`defaultChargeGstRate`).
+ * Every charge is taken at 0% GST, whatever rate is sent. Freight, transport
+ * and the rest are typed as the final figure on the supplier's bill with any
+ * GST already inside it, so they are added to the total as they are — GST on
+ * top would charge it twice.
  *
  * The same charge sent twice is added together into one row rather than
  * refused at the database's unique index with a message nobody could act on.
  */
-async function resolveCharges(
-  tx: Prisma.TransactionClient,
-  charges: z.infer<typeof chargeSchema>[],
-  lineRates: number[],
-  /** The rates this order already carries, by charge type, on an edit. */
-  storedRates?: Map<string, number>
-) {
-  const merged = new Map<string, { chargeTypeId: string; amount: number; gstRate?: number }>()
+async function resolveCharges(tx: Prisma.TransactionClient, charges: z.infer<typeof chargeSchema>[]) {
+  const merged = new Map<string, { chargeTypeId: string; amount: number }>()
   for (const c of charges) {
     const seen = merged.get(c.chargeTypeId)
-    if (seen) {
-      seen.amount = round2(seen.amount + c.amount)
-      if (seen.gstRate === undefined) seen.gstRate = c.gstRate
-    } else {
-      merged.set(c.chargeTypeId, { chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: c.gstRate })
-    }
+    if (seen) seen.amount = round2(seen.amount + c.amount)
+    else merged.set(c.chargeTypeId, { chargeTypeId: c.chargeTypeId, amount: c.amount })
   }
   const wanted = [...merged.values()].filter((c) => c.amount > 0)
   if (!wanted.length) return []
 
   const types = await tx.chargeType.findMany({
     where: { id: { in: wanted.map((c) => c.chargeTypeId) }, applyOnPurchase: true, isActive: true },
-    select: { id: true, defaultGstRate: true },
+    select: { id: true },
   })
-  const masterRateById = new Map(types.map((t) => [t.id, Number(t.defaultGstRate)]))
+  const known = new Set(types.map((t) => t.id))
 
-  const unknown = wanted.find((c) => !masterRateById.has(c.chargeTypeId))
-  if (unknown) {
+  if (wanted.some((c) => !known.has(c.chargeTypeId))) {
     throw new AppError(
       'One of those charges is not a charge the mill uses on purchases.',
       400,
@@ -639,14 +622,7 @@ async function resolveCharges(
     )
   }
 
-  return wanted.map((c) => ({
-    chargeTypeId: c.chargeTypeId,
-    amount: c.amount,
-    gstRate:
-      c.gstRate ??
-      storedRates?.get(c.chargeTypeId) ??
-      defaultChargeGstRate(lineRates, masterRateById.get(c.chargeTypeId)!),
-  }))
+  return wanted.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: 0 }))
 }
 
 // ── Purchase orders ─────────────────────────────────────────────────────────
@@ -1306,11 +1282,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
 
     await assertIndentLines(tx, data.lines)
 
-    const charges = await resolveCharges(
-      tx,
-      data.charges ?? [],
-      data.lines.map((l) => l.gstRate ?? 0)
-    )
+    const charges = await resolveCharges(tx, data.charges ?? [])
 
     const priced = priceOrder(
       data.lines,
@@ -1563,12 +1535,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
        */
       const charges =
         data.charges !== undefined
-          ? await resolveCharges(
-              tx,
-              data.charges,
-              data.lines.map((l) => l.gstRate ?? 0),
-              new Map(before.charges.map((c) => [c.chargeTypeId, Number(c.gstRate)]))
-            )
+          ? await resolveCharges(tx, data.charges)
           : before.charges.map((c) => ({
               chargeTypeId: c.chargeTypeId,
               amount: Number(c.amount),
@@ -4404,14 +4371,12 @@ function priceBill(opts: {
 }
 
 /**
- * Checks each charge on a bill and settles the GST rate it is taxed at.
+ * Checks each charge on a bill.
  *
- * The rate is the one on the bill — the supplier's invoice says what it
- * charged. A charge sent without one starts where a new charge on the form
- * starts: the goods' rate when the lines share one, the charge master's own
- * rate only when there are no goods (`defaultChargeGstRate`). Never 0 by
- * default: a freight line quietly taxed at nothing understates the input
- * credit and the total the supplier is owed.
+ * Every charge is taken at 0% GST, whatever rate is sent: it is typed as the
+ * final figure on the supplier's bill with any GST already inside it, and is
+ * added to the total as it is. Same rule as on the order (`resolveCharges`),
+ * so a bill raised from an order comes to the same figure.
  *
  * A charge type has to be one the mill uses on purchases and still in use. An
  * edit may also keep a charge type already on that bill, so a bill booked
@@ -4420,7 +4385,6 @@ function priceBill(opts: {
 async function resolveBillCharges(
   tx: Prisma.TransactionClient,
   charges: BillChargeInput[],
-  lineRates: number[],
   /** Charge types already on the bill being edited. */
   alreadyOnBill: Set<string> = new Set()
 ) {
@@ -4450,13 +4414,7 @@ async function resolveBillCharges(
     }
   }
 
-  return charges.map((c) => ({
-    chargeTypeId: c.chargeTypeId,
-    amount: c.amount,
-    gstRate:
-      c.gstRate ??
-      defaultChargeGstRate(lineRates, Number(typeById.get(c.chargeTypeId)!.defaultGstRate)),
-  }))
+  return charges.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: 0 }))
 }
 
 /**
@@ -5155,11 +5113,7 @@ async function bookBill(
   }
   const hsnById = new Map(items.map((i) => [i.id, i.hsnCode]))
 
-  const charges = await resolveBillCharges(
-    tx,
-    data.charges ?? [],
-    effectiveLines.map((l) => l.gstRate ?? 0)
-  )
+  const charges = await resolveBillCharges(tx, data.charges ?? [])
   const priced = priceBill({
     lines: effectiveLines,
     charges,
@@ -5490,12 +5444,7 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
 
     const tax = await purchaseTaxContext(tx, supplierId)
     const charges = data.charges
-      ? await resolveBillCharges(
-          tx,
-          data.charges,
-          lines.map((l) => l.gstRate ?? 0),
-          new Set(before.charges.map((c) => c.chargeTypeId))
-        )
+      ? await resolveBillCharges(tx, data.charges, new Set(before.charges.map((c) => c.chargeTypeId)))
       : before.charges.map((c) => ({
           chargeTypeId: c.chargeTypeId,
           amount: Number(c.amount),

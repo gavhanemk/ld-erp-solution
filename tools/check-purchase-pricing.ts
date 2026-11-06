@@ -5,7 +5,7 @@
  *     npx tsx tools/check-purchase-pricing.ts
  */
 import assert from 'node:assert/strict'
-import { defaultChargeGstRate, priceDocument } from '../packages/shared/src/index'
+import { priceDocument } from '../packages/shared/src/index'
 
 let passed = 0
 function check(name: string, fn: () => void) {
@@ -25,17 +25,26 @@ check('1. one item at 5%, no charges (the user’s ₹12,600)', () => {
   assert.equal(r.total, 12600)
 })
 
-check('2a. freight ₹1,200 at the goods’ 5%: ₹13,860', () => {
+check('2. freight ₹1,200 as on the supplier’s bill, GST included: ₹13,800 (how orders and bills send it)', () => {
+  const r = priceDocument({ lines: [fabric], charges: [{ key: 'freight', amount: 1200, gstRate: 0 }], split: 'CGST_SGST' })
+  assert.equal(r.goodsTaxable, 12000)
+  assert.equal(r.goodsTax, 600)
+  assert.equal(r.chargeTax, 0)
+  assert.equal(r.cgst, 300)
+  assert.equal(r.sgst, 300)
+  assert.equal(r.total, 13800)
+  // Only the goods' rate carries tax; the freight sits apart at 0%.
+  assert.deepEqual(r.byRate.filter((b) => b.tax > 0).map((b) => [b.gstRate, b.taxable, b.tax]), [[5, 12000, 600]])
+})
+
+check('2a. a charge saved before at the goods’ 5% still prices as it was: ₹13,860', () => {
   const r = priceDocument({ lines: [fabric], charges: [{ key: 'freight', amount: 1200, gstRate: 5 }], split: 'CGST_SGST' })
   assert.equal(r.taxable, 13200)
   assert.equal(r.chargeTax, 60)
-  assert.equal(r.cgst, 330)
-  assert.equal(r.sgst, 330)
   assert.equal(r.total, 13860)
-  assert.deepEqual(r.byRate.map((b) => [b.gstRate, b.goodsTaxable, b.chargeTaxable, b.tax]), [[5, 12000, 1200, 660]])
 })
 
-check('2b. freight ₹1,200 chosen at 18%: ₹14,016, shown as two rates', () => {
+check('2b. a charge saved before at 18% still prices as it was: ₹14,016', () => {
   const r = priceDocument({ lines: [fabric], charges: [{ key: 'freight', amount: 1200, gstRate: 18 }], split: 'CGST_SGST' })
   assert.equal(r.goodsTax, 600)
   assert.equal(r.chargeTax, 216)
@@ -145,11 +154,10 @@ check('an old order’s untaxed extra is added after tax', () => {
   assert.equal(r.total, 12650)
 })
 
-check('default charge rate: goods’ rate, highest when mixed, master when no goods', () => {
-  assert.equal(defaultChargeGstRate([5, 5], 18), 5)
-  assert.equal(defaultChargeGstRate([5, 18], 18), 18)
-  assert.equal(defaultChargeGstRate([], 18), 18)
-  assert.equal(defaultChargeGstRate([0], 18), 0)
+check('IGST supplier, freight GST included: ₹13,800 with one IGST line', () => {
+  const r = priceDocument({ lines: [fabric], charges: [{ key: 'freight', amount: 1200, gstRate: 0 }], split: 'IGST' })
+  assert.deepEqual([r.cgst, r.sgst, r.igst], [0, 0, 600])
+  assert.equal(r.total, 13800)
 })
 
 console.log(`\n${passed} checks passed`)

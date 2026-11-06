@@ -113,19 +113,14 @@ export type Action = typeof ACTIONS[number]
 // an invoice. Kept in this one file on purpose: the API loads this package
 // from source at run time, and a single file needs no import resolution.
 //
-// Charges carry the GST rate the user chose for them on the document. A
-// charge billed by the goods supplier with the goods (freight, transport,
-// packing, dyeing of its own goods) is normally part of the value of the goods
-// under CGST Act s.15(2)(c) and takes the goods' rate — which is why
-// defaultChargeGstRate() offers that rate first — but the figure is the
-// user's to set, as the supplier's own invoice decides it.
+// Each charge carries a GST rate. Purchase orders and bills send every charge
+// at 0%: freight, transport and the rest are typed as the final figure on the
+// supplier's bill, GST already inside it, and are added to the total as they
+// are. A rate above 0 is still priced correctly, for documents saved before.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** How GST is split: within the state, across states, or none at all. */
 export type GstSplit = 'CGST_SGST' | 'IGST' | 'NONE'
-
-/** The GST rates offered for a charge. A rate already saved is always kept. */
-export const GST_RATE_CHOICES = [0, 5, 12, 18, 28, 40] as const
 
 export interface PriceLineInput {
   qty: number
@@ -370,17 +365,4 @@ export function priceDocument(input: PriceInput): PriceResult {
     roundOff: toRupees(total - beforeRound),
     total: toRupees(total),
   }
-}
-
-/**
- * The GST rate a new charge starts on: the goods' rate when every line shares
- * one (a charge billed with the goods is part of their value, CGST Act
- * s.15(2)(c)); the highest line rate when they differ, so the order is never
- * under-taxed; the charge master's own rate only when there are no goods.
- * Always a starting point — the user can change it.
- */
-export function defaultChargeGstRate(lineRates: number[], masterRate: number): number {
-  const rates = [...new Set(lineRates.filter((r) => Number.isFinite(r) && r > 0))]
-  if (rates.length === 0) return lineRates.length ? 0 : masterRate
-  return Math.max(...rates)
 }

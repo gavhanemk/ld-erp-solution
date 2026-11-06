@@ -27,7 +27,6 @@ import {
   Pencil,
   MapPinned,
   Check,
-  Percent,
   ClipboardList,
   ChevronUp,
   ChevronDown,
@@ -44,8 +43,8 @@ import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } f
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
-import { priceDocument, defaultChargeGstRate } from '@ld-erp/shared'
-import { ChargeGstSelect, TaxBreakdown } from '@/components/purchase/TaxBreakdown'
+import { priceDocument } from '@ld-erp/shared'
+import { TaxBreakdown } from '@/components/purchase/TaxBreakdown'
 
 /**
  * Raising a purchase order.
@@ -455,81 +454,6 @@ function NotBuiltNote({ children }: { children: React.ReactNode }) {
 const isOtherChargesType = (t: { name: string }) =>
   t.name.replace(/\s+/g, '').toLowerCase() === 'othercharges'
 
-/**
- * Works a charge out as a share of the order, so nobody reaches for a phone.
- *
- * Every charge on a purchase is typed in by hand, and that is deliberate: it
- * is how the mill's old system worked, because what a transporter asks for is
- * a figure agreed on a call, not a formula. But it is very often a round
- * percentage of the goods, and working 5% of 4,241.60 out by hand forty times
- * a week is precisely where a wrong figure comes from.
- *
- * So this neither prefills a box nor calculates anything on its own. It opens
- * when it is asked for, shows the whole working — the percentage, what it is
- * a percentage of, and what that comes to — and writes the figure into the box
- * only when Use is pressed. What gets saved is still a plain amount; the
- * percentage is stored nowhere, because the supplier agreed to a number and an
- * order that quietly recalculated itself later would stop matching their copy.
- */
-function PercentOfGross({
-  name,
-  base,
-  value,
-  onChange,
-  onUse,
-}: {
-  name: string
-  base: number
-  value: string
-  onChange: (next: string) => void
-  onUse: (amount: number) => void
-}) {
-  const pct = num(value)
-  const worked = base * (pct / 100)
-  const ready = base > 0 && pct > 0
-
-  return (
-    <div className="border-border bg-secondary/40 mt-1.5 rounded-lg border px-2.5 py-2">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-xs">
-        <input
-          type="number"
-          step="any"
-          min={0}
-          max={100}
-          autoFocus
-          className="form-input h-7 w-16 text-right"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          aria-label={`Percentage to work ${name} out at`}
-        />
-        {/* Says what it is a percentage of, in figures. A helper that showed
-          only its answer would be one more number to take on trust. */}
-        <span className="text-muted-foreground">% of gross total ₹{inr(base)}</span>
-        {/* The answer and the button wrap together and stay right, so on a
-          phone Use does not end up stranded alone on the left. */}
-        <span className="ml-auto flex items-center gap-2">
-          <span className="text-foreground whitespace-nowrap font-semibold tabular-nums">
-            ₹{inr(worked)}
-          </span>
-          <button
-            type="button"
-            className="btn-primary h-7 shrink-0 px-2.5 text-xs disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
-            disabled={!ready}
-            onClick={() => onUse(Number(worked.toFixed(2)))}
-          >
-            Use
-          </button>
-        </span>
-      </div>
-      {base <= 0 && (
-        <p className="text-muted-foreground mt-1.5 text-xs">
-          Nothing to take a percentage of yet — put an item on the order first.
-        </p>
-      )}
-    </div>
-  )
-}
-
 function Row({ label, value }: { label: string; value: number }) {
   return (
     <div className="flex items-center justify-between">
@@ -654,38 +578,17 @@ export function PurchaseOrderDialog({
    */
   const [shownCharges, setShownCharges] = useState<string[]>([])
   /**
-   * The GST % chosen for each charge on this order, keyed by charge type id.
+   * The old "Other charges" box of an order saved before Other Charges became
+   * a charge type. '' when there is none.
    *
-   * Chosen on the order, not read off the master: freight billed by the
-   * supplier with the goods is taxed at the goods' rate, so the same charge
-   * can be 5% on one order and 12% on the next. A charge starts on the rate
-   * defaultChargeGstRate() offers when it is added and keeps whatever is
-   * picked after that — it does not move by itself when a line's rate does.
-   */
-  const [chargeGst, setChargeGst] = useState<Record<string, string>>({})
-  /**
-   * The untaxed "Other charges" figure of an order saved before charges
-   * carried their own GST. '' when there is none.
-   *
-   * Such an order is moved onto the "Other Charges" charge type as soon as the
-   * charge master has loaded (see the effect below), and from then on it is
-   * taxed like any other charge. Only when that type cannot be found does the
-   * figure stay here, priced as before: added after tax, with no GST.
+   * Moved onto the "Other Charges" charge row as soon as the charge master has
+   * loaded (see the effect below). Both are the supplier's figure with any GST
+   * already in it, so the move changes nothing in the total. Only when that
+   * type cannot be found does the figure stay here.
    */
   const [legacyOther, setLegacyOther] = useState('')
-  /** True once a saved "Other charges" figure has been moved onto its charge row. */
-  const [otherMoved, setOtherMoved] = useState(false)
 
-  /**
-   * Which charge's percentage helper is open, and what has been typed into it.
-   *
-   * Kept out of `charges` on purpose. This is scratch working, not part of the
-   * order: it is thrown away when the form closes and none of it is sent.
-   */
-  const [pctOpen, setPctOpen] = useState<string | null>(null)
-  const [pctOf, setPctOf] = useState<Record<string, string>>({})
-
-  /** Takes a charge off the order: its row, its amount and its helper go. */
+  /** Takes a charge off the order: its row and its amount go. */
   const removeCharge = (id: string) => {
     setShownCharges((prev) => prev.filter((x) => x !== id))
     setCharges((prev) => {
@@ -693,18 +596,17 @@ export function PurchaseOrderDialog({
       delete next[id]
       return next
     })
-    setChargeGst((prev) => {
-      const next = { ...prev }
-      delete next[id]
-      return next
-    })
-    setPctOpen((open) => (open === id ? null : open))
-    // Taking off the row that a saved "Other charges" figure was moved onto
-    // also takes away the note asking to check its GST %. Without this the
-    // note would come back if the row were added again by hand, when there is
-    // nothing moved left to check.
-    if (chargeTypes.find(isOtherChargesType)?.id === id) setOtherMoved(false)
   }
+
+  /*
+   * A saved order whose charges had GST added on top, the way orders were
+   * priced before charges were taken as the supplier's GST-included figure.
+   * Said beside the charges, because saving it again drops that GST and the
+   * total comes down by it.
+   */
+  const chargesTaxedBefore = (record?.charges ?? []).some(
+    (c) => Number(c.amount) > 0 && Number(c.gstRate ?? 0) > 0
+  )
 
   /*
    * Charges already on a saved order whose type has since been retired in the
@@ -922,16 +824,7 @@ export function PurchaseOrderDialog({
     setShownCharges(
       (record?.charges ?? []).filter((c) => Number(c.amount) > 0).map((c) => c.chargeTypeId)
     )
-    // Each charge reopens at the GST % it was saved with, not today's default.
-    setChargeGst(
-      Object.fromEntries(
-        (record?.charges ?? []).map((c) => [c.chargeTypeId, String(Number(c.gstRate ?? 0))])
-      )
-    )
     setLegacyOther(num(record?.otherCharges) > 0 ? String(Number(record?.otherCharges)) : '')
-    setOtherMoved(false)
-    setPctOpen(null)
-    setPctOf({})
     setAttachments([])
     setPendingFiles([])
     setCarriedFiles([])
@@ -1346,44 +1239,19 @@ export function PurchaseOrderDialog({
   /** The "Other Charges" charge type, when Masters → Charges has one. */
   const otherChargeType = chargeTypes.find(isOtherChargesType) ?? null
 
-  /**
-   * The GST % a charge starts on when it is added to this order.
-   *
-   * The goods' rate when the lines share one, because a charge the supplier
-   * bills with the goods is part of their value; the charge master's own rate
-   * only while there are no goods yet. See defaultChargeGstRate(). Only rows
-   * with an item are read — a blank row has no rate worth following — and of
-   * those only the ones whose GST % has been filled in. A row picked from an
-   * enquiry with no rate quoted yet would otherwise count as 0% and start the
-   * charge at nothing instead of at the charge master's rate.
-   */
-  const startingGstFor = (t: ChargeTypeOption) =>
-    defaultChargeGstRate(
-      activeLines
-        .filter((l) => l.gstRate !== '' && l.gstRate != null)
-        .map((l) => num(l.gstRate)),
-      num(t.defaultGstRate)
-    )
-  /** The GST % on a charge as it stands: the one chosen, else where it starts. */
-  const chargeGstOf = (t: ChargeTypeOption) => chargeGst[t.id] ?? String(startingGstFor(t))
-
-  /** Puts a charge on the order, at the GST % it starts on. */
+  /** Puts a charge on the order. */
   const addCharge = (id: string) => {
-    const t = chargeTypes.find((x) => x.id === id)
-    if (!t) return
+    if (!chargeTypes.some((x) => x.id === id)) return
     setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
-    setChargeGst((prev) => (prev[id] !== undefined ? prev : { ...prev, [id]: String(startingGstFor(t)) }))
   }
 
   /*
-   * An order saved with the old untaxed "Other charges" box, reopened.
+   * An order saved with the old "Other charges" box, reopened.
    *
-   * The figure is moved onto the "Other Charges" charge row at the GST % that
-   * row would start on, and the box it came from is sent back as 0 — so once
-   * this order is saved again its other charges are taxed like any other
-   * charge. The buyer is told, beside the row, to check the rate. Until the
-   * charge master has loaded, or when it has no "Other Charges" row at all,
-   * nothing moves and the figure is priced the old way.
+   * The figure is moved onto the "Other Charges" charge row and the box it
+   * came from is sent back as 0. Both are the supplier's figure taken as it
+   * is, so the total does not move. Until the charge master has loaded, or
+   * when it has no "Other Charges" row at all, nothing moves.
    */
   useEffect(() => {
     if (!open || !legacyOther || !otherChargeType) return
@@ -1391,11 +1259,7 @@ export function PurchaseOrderDialog({
     const amount = num(legacyOther)
     setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
     setCharges((prev) => ({ ...prev, [id]: String(Number((num(prev[id]) + amount).toFixed(2))) }))
-    setChargeGst((prev) =>
-      prev[id] !== undefined ? prev : { ...prev, [id]: String(startingGstFor(otherChargeType)) }
-    )
     setLegacyOther('')
-    setOtherMoved(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, legacyOther, otherChargeType?.id])
 
@@ -1406,8 +1270,11 @@ export function PurchaseOrderDialog({
    * and the bill runs when it is booked, so what is shown here is what is
    * stored, to the paisa. It is given only rows that have an item — a blank
    * row is not part of the order — the order discount where the dropdown
-   * allows one, each charge at the GST % chosen for it, and the old untaxed
-   * "Other charges" figure only on an order that still has one.
+   * allows one, and the charges.
+   *
+   * Every charge goes in at 0% GST. Freight, transport and the rest are typed
+   * as the final figure on the supplier's bill, with any GST already inside
+   * it, so they are added to the total as they are and nothing is taxed on top.
    *
    * While no supplier is chosen there is no telling CGST + SGST from IGST, so
    * the tax is previewed as CGST + SGST and the panel says so. The tax itself
@@ -1426,7 +1293,7 @@ export function PurchaseOrderDialog({
         gstRate: num(l.gstRate),
       })),
       orderDiscount,
-      charges: shown.map((t) => ({ key: t.id, amount: num(charges[t.id]), gstRate: num(chargeGstOf(t)) })),
+      charges: shown.map((t) => ({ key: t.id, amount: num(charges[t.id]), gstRate: 0 })),
       untaxedExtra: num(legacyOther),
       split: taxMode ?? 'CGST_SGST',
     })
@@ -1442,17 +1309,14 @@ export function PurchaseOrderDialog({
     })
 
     /*
-     * The charges on this order, one row each, with the GST % chosen for each
-     * and the tax it carries. Not discountable — the mill's discount is
-     * negotiated on the goods, not on the transporter's bill.
+     * The charges on this order, one row each, as typed. Not discountable —
+     * the mill's discount is negotiated on the goods, not on the
+     * transporter's bill.
      */
     const chargeRows = shown.map((t, i) => ({
       chargeTypeId: t.id,
       name: t.name,
-      gstRate: num(chargeGstOf(t)),
-      percentOfValue: num(t.percentOfValue),
       amount: result.charges[i]?.amount ?? 0,
-      tax: result.charges[i]?.tax ?? 0,
     }))
 
     /*
@@ -1478,19 +1342,7 @@ export function PurchaseOrderDialog({
       total: result.total,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines, discountAmount, taxMode, poType, chargeTypes, shownCharges, charges, chargeGst, legacyOther])
-
-  /**
-   * What a charge's percentage box opens on.
-   *
-   * Whatever was last typed for this charge while the form has been open;
-   * failing that the share the charge master carries; failing that the rate
-   * printed on the row, because that is the number in front of the buyer and
-   * the one they mean when they say "five percent". A starting point only —
-   * it is typed over freely and nothing is applied until Use is pressed.
-   */
-  const pctFor = (c: { chargeTypeId: string; gstRate: number; percentOfValue: number }) =>
-    pctOf[c.chargeTypeId] ?? String(c.percentOfValue > 0 ? c.percentOfValue : c.gstRate)
+  }, [lines, discountAmount, taxMode, poType, chargeTypes, shownCharges, charges, legacyOther])
 
   /** One row's own figures, worked out for the row it is shown in. */
   const priceOf = (l: PoLine) => {
@@ -2079,15 +1931,14 @@ export function PurchaseOrderDialog({
     // Only an order-level order has one. Sending whatever is in the box on an
     // item-level order would take the discount twice.
     discountAmount: poType === 'ORDER_LEVEL' ? num(discountAmount) : 0,
-    // The kind, the amount and the GST % chosen for it on this order. The
-    // server prices the order again with the same calculation, so the rate
-    // sent is the rate the figures on the screen were worked out at.
+    // The kind and the amount, GST included, as on the supplier's bill. No GST
+    // goes on top of a charge, so none is sent; the server takes it at 0%.
     charges: totals.chargeRows
       .filter((c) => c.amount > 0)
-      .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: c.gstRate })),
+      .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: 0 })),
     // 0 on every new order, and on an old one once its figure has moved onto
     // the "Other Charges" row. Only an old order whose charge master has no
-    // such row still sends its untaxed figure, so saving it loses nothing.
+    // such row still sends its figure here, so saving it loses nothing.
     otherCharges: num(legacyOther),
     notes: notes.trim() || null,
     terms: terms.trim() || null,
@@ -4003,183 +3854,9 @@ export function PurchaseOrderDialog({
 
                   <Row label="Gross total" value={totals.grossTotal} />
 
-                  {/* Only the charges this order carries. "+ Add a charge" offers
-                    the purchase charges from Masters → Charges that are not on
-                    it yet — "Other Charges" among them, taxed like the rest.
-                    Each row has its own GST % beside its amount, chosen on
-                    this order: it starts on the goods' rate and the buyer sets
-                    it to whatever the supplier's bill charges. An order with
-                    no charges shows no charge rows at all. */}
-                  {chargeTypes.length === 0 ? (
-                    <p className="text-muted-foreground py-1 text-xs">
-                      No purchase charges are set up yet — add them under{' '}
-                      <a
-                        href="/masters/charges"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary underline"
-                      >
-                        Masters → Charges
-                      </a>
-                      .
-                    </p>
-                  ) : (
-                    <div className="space-y-1.5 pt-0.5">
-                      {totals.chargeRows.map((c) => {
-                        const helperOpen = pctOpen === c.chargeTypeId
-                        return (
-                          <div key={c.chargeTypeId}>
-                            {/* `flex-wrap`, with the name given a floor it
-                              will not shrink under — a name like "Dyeing
-                              Charges (Processing)" broke mid-word onto a
-                              second line while the button and the box sat
-                              centred beside whichever half of it fit, which
-                              read as broken rather than as a long name. Past
-                              that floor the whole button-and-box group wraps
-                              to its own line under the name instead, which
-                              is the same shape every field on this form
-                              already takes on a phone. */}
-                            <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-                              <span className="text-muted-foreground min-w-[9rem] flex-1">
-                                {c.name}
-                                {/* The charge's own GST, under its name, so it
-                                  is never folded unseen into the tax rows. */}
-                                {c.tax > 0 && (
-                                  <span className="block text-[11px] tabular-nums">
-                                    + ₹{inr(c.tax)} GST
-                                  </span>
-                                )}
-                              </span>
-                              {/* The amount box stays where the other boxes are
-                                and the helper button goes to its left, so the
-                                right edge of every figure on this panel still
-                                lines up down one column. The GST % sits right
-                                after the amount it applies to. */}
-                              <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => setPctOpen(helperOpen ? null : c.chargeTypeId)}
-                                  className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${
-                                    helperOpen
-                                      ? 'border-primary/30 bg-primary/10 text-primary'
-                                      : 'btn-ghost border-border'
-                                  }`}
-                                  title={`Work ${c.name} out as a percentage of the gross total`}
-                                  aria-expanded={helperOpen}
-                                  aria-label={`Work out ${c.name} as a percentage`}
-                                >
-                                  <Percent size={14} />
-                                </button>
-                                <input
-                                  type="number"
-                                  step="any"
-                                  min={0}
-                                  className="form-input h-8 w-28 text-right"
-                                  placeholder="0.00"
-                                  value={charges[c.chargeTypeId] ?? ''}
-                                  onChange={(e) =>
-                                    setCharges((prev) => ({
-                                      ...prev,
-                                      [c.chargeTypeId]: e.target.value,
-                                    }))
-                                  }
-                                  aria-label={`${c.name} amount`}
-                                />
-                                <ChargeGstSelect
-                                  value={chargeGst[c.chargeTypeId] ?? String(c.gstRate)}
-                                  onChange={(rate) =>
-                                    setChargeGst((prev) => ({ ...prev, [c.chargeTypeId]: rate }))
-                                  }
-                                  label={c.name}
-                                  disabled={taxMode === 'NONE'}
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => removeCharge(c.chargeTypeId)}
-                                  className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
-                                  title={`Take ${c.name} off this order`}
-                                  aria-label={`Remove ${c.name}`}
-                                >
-                                  <X size={14} />
-                                </button>
-                              </div>
-                            </div>
-
-                            {/* Only on an old order whose untaxed "Other
-                              charges" figure has just been moved onto this
-                              row: the rate it now carries was picked by the
-                              form, not by anyone reading the supplier's bill. */}
-                            {otherMoved && otherChargeType?.id === c.chargeTypeId && (
-                              <p className="warn-text mt-1 text-xs">
-                                Other charges are now taxed like any other charge — check its GST %.
-                              </p>
-                            )}
-
-                            {helperOpen && (
-                              <PercentOfGross
-                                name={c.name}
-                                base={totals.grossTotal}
-                                value={pctFor(c)}
-                                onChange={(next) =>
-                                  setPctOf((prev) => ({ ...prev, [c.chargeTypeId]: next }))
-                                }
-                                onUse={(amount) => {
-                                  setCharges((prev) => ({
-                                    ...prev,
-                                    [c.chargeTypeId]: String(amount),
-                                  }))
-                                  setPctOpen(null)
-                                }}
-                              />
-                            )}
-                          </div>
-                        )
-                      })}
-                      {chargeTypes.some((t) => !shownCharges.includes(t.id)) && (
-                        <SmartSelect
-                          className="form-input h-8 w-full text-xs"
-                          value=""
-                          onChange={(e) => {
-                            if (e.target.value) addCharge(e.target.value)
-                          }}
-                          aria-label="Add a charge"
-                        >
-                          <option value="">+ Add a charge — freight, transport, dyeing…</option>
-                          {/* Names only: the GST % is chosen on the row once
-                            the charge is added, so the master's rate here
-                            would only be a figure that may not apply. */}
-                          {chargeTypes
-                            .filter((t) => !shownCharges.includes(t.id))
-                            .map((t) => (
-                              <option key={t.id} value={t.id}>
-                                {t.name}
-                              </option>
-                            ))}
-                        </SmartSelect>
-                      )}
-                      {retiredCharges.length > 0 && (
-                        <p className="warn-text text-xs">
-                          {retiredCharges
-                            .map((c) => `${c.chargeType?.name ?? 'A charge'} (₹${Number(c.amount)})`)
-                            .join(', ')}{' '}
-                          {retiredCharges.length === 1 ? 'is' : 'are'} no longer a purchase charge in
-                          the master, so {retiredCharges.length === 1 ? 'it is' : 'they are'} left off
-                          when you save. Add it again under another charge if it still applies.
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  {/* What GST is worked out on: the goods after discounts and
-                    the charges together. Shown only when there are charges —
-                    without them it is the gross total again, one row up. */}
-                  {totals.chargeTotal > 0 && (
-                    <Row label="Taxable value (goods + charges)" value={totals.taxable} />
-                  )}
-
-                  {/* One line per GST rate, goods and charges shown apart, so
-                    the tax rows below can be traced back to what made them.
-                    It also says so when the supplier is not registered. */}
+                  {/* The GST on the goods, one line per rate, so the tax rows
+                    below can be traced back to what made them. It also says
+                    so when the supplier is not registered. */}
                   <TaxBreakdown result={totals.result} split={taxMode} />
 
                   {/* SGST + CGST within the state, IGST across a state line —
@@ -4197,12 +3874,115 @@ export function PurchaseOrderDialog({
 
                   <Row label="Total tax" value={totals.tax} />
 
-                  {/* Only an old order, saved before other charges carried GST,
-                    whose charge master has no "Other Charges" row to move the
-                    figure onto. Priced as it was then: no GST, added after
-                    tax, so the order still adds up to what was agreed. */}
+                  {/* The supplier's charges, after the tax and outside it.
+                    Each is typed as the final figure on their bill — freight
+                    ₹1,200 is ₹1,200, any GST already inside it — and added to
+                    the grand total as it is. Only the charges this order
+                    carries; "+ Add a charge" offers the purchase charges from
+                    Masters → Charges that are not on it yet. */}
+                  {chargeTypes.length === 0 ? (
+                    <p className="text-muted-foreground py-1 text-xs">
+                      No purchase charges are set up yet — add them under{' '}
+                      <a
+                        href="/masters/charges"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-primary underline"
+                      >
+                        Masters → Charges
+                      </a>
+                      .
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5 pt-0.5">
+                      {totals.chargeRows.length > 0 && (
+                        <p className="text-muted-foreground text-[11px]">
+                          Charges as on the supplier&apos;s bill, GST included — no GST is added on top.
+                        </p>
+                      )}
+                      {totals.chargeRows.map((c) => (
+                        <div
+                          key={c.chargeTypeId}
+                          className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1"
+                        >
+                          {/* The name keeps a floor it will not shrink under,
+                            so a long one wraps the box onto its own line
+                            rather than breaking mid-word beside it. */}
+                          <span className="text-muted-foreground min-w-[9rem] flex-1">{c.name}</span>
+                          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                            <input
+                              type="number"
+                              step="any"
+                              min={0}
+                              className="form-input h-8 w-28 text-right"
+                              placeholder="0.00"
+                              value={charges[c.chargeTypeId] ?? ''}
+                              onChange={(e) =>
+                                setCharges((prev) => ({
+                                  ...prev,
+                                  [c.chargeTypeId]: e.target.value,
+                                }))
+                              }
+                              aria-label={`${c.name} amount`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => removeCharge(c.chargeTypeId)}
+                              className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                              title={`Take ${c.name} off this order`}
+                              aria-label={`Remove ${c.name}`}
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      {chargeTypes.some((t) => !shownCharges.includes(t.id)) && (
+                        <SmartSelect
+                          className="form-input h-8 w-full text-xs"
+                          value=""
+                          onChange={(e) => {
+                            if (e.target.value) addCharge(e.target.value)
+                          }}
+                          aria-label="Add a charge"
+                        >
+                          <option value="">+ Add a charge — freight, transport, dyeing…</option>
+                          {chargeTypes
+                            .filter((t) => !shownCharges.includes(t.id))
+                            .map((t) => (
+                              <option key={t.id} value={t.id}>
+                                {t.name}
+                              </option>
+                            ))}
+                        </SmartSelect>
+                      )}
+                      {/* Only an order saved while charges still had GST added
+                        on top. Saving it again takes that GST off. */}
+                      {chargesTaxedBefore && (
+                        <p className="warn-text text-xs">
+                          This order was saved with GST added on its charges. Charges are now taken as
+                          the supplier&apos;s figure with GST included, so the total comes down by that
+                          GST when you save.
+                        </p>
+                      )}
+                      {retiredCharges.length > 0 && (
+                        <p className="warn-text text-xs">
+                          {retiredCharges
+                            .map((c) => `${c.chargeType?.name ?? 'A charge'} (₹${Number(c.amount)})`)
+                            .join(', ')}{' '}
+                          {retiredCharges.length === 1 ? 'is' : 'are'} no longer a purchase charge in
+                          the master, so {retiredCharges.length === 1 ? 'it is' : 'they are'} left off
+                          when you save. Add it again under another charge if it still applies.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Only an old order whose charge master has no "Other
+                    Charges" row to move the figure onto. Added as it is, like
+                    any other charge. */}
                   {totals.untaxedExtra > 0 && (
-                    <Row label="Other charges (no GST, saved before)" value={totals.untaxedExtra} />
+                    <Row label="Other charges" value={totals.untaxedExtra} />
                   )}
 
                   {/* Shown whenever the total was rounded, and only then.

@@ -33,8 +33,8 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
 import { StepInput } from '@/components/ui/StepInput'
 import { ExpenseTdsPanel, type TdsChoice } from '@/components/purchase/ExpenseTdsPanel'
-import { TaxBreakdown, ChargeGstSelect } from '@/components/purchase/TaxBreakdown'
-import { priceDocument, defaultChargeGstRate, type GstSplit } from '@ld-erp/shared'
+import { TaxBreakdown } from '@/components/purchase/TaxBreakdown'
+import { priceDocument, type GstSplit } from '@ld-erp/shared'
 import {
   CashPaymentSection,
   cashPaymentMissing,
@@ -586,11 +586,13 @@ export function PurchaseBillDialog({
           }))
         : [freshLine()]
     )
+    // Charges are the supplier's figure with any GST inside it, so none is
+    // added on top — a bill saved when it was reopens at 0% like the rest.
     setCharges(
       record?.charges?.map((c) => ({
         chargeTypeId: c.chargeTypeId,
         amount: String(c.amount),
-        gstRate: String(c.gstRate ?? ''),
+        gstRate: '0',
       })) ?? []
     )
     setChargeNote(null)
@@ -902,7 +904,6 @@ export function PurchaseBillDialog({
   }, [open])
 
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
-  const chargeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
   const supplier = suppliers.find((s) => s.id === supplierId)
   /*
    * Who the supplier box offers. An expense bill lists only service, transport
@@ -1100,7 +1101,7 @@ export function PurchaseBillDialog({
           rows.map((c) => ({
             chargeTypeId: c.chargeTypeId,
             amount: String(c.amount),
-            gstRate: String(c.gstRate),
+            gstRate: '0',
           }))
         )
         setChargeNote({
@@ -1496,10 +1497,11 @@ export function PurchaseBillDialog({
           gstRate: num(l.gstRate),
         })),
         orderDiscount: num(discountAmount),
+        // As on the supplier's bill, GST included: nothing is taxed on top.
         charges: charges.map((c, i) => ({
           key: c.chargeTypeId || `row-${i}`,
           amount: num(c.amount),
-          gstRate: num(c.gstRate),
+          gstRate: 0,
         })),
         split: priceSplit,
         reverseCharge: isReverseCharge,
@@ -1527,6 +1529,7 @@ export function PurchaseBillDialog({
       subtotal,
       discount: priced.orderDiscount,
       taxable,
+      goodsTaxable: priced.goodsTaxable,
       chargeTotal: priced.chargeTotal,
       tax: priced.tax,
       cgst: priced.cgst,
@@ -1538,21 +1541,6 @@ export function PurchaseBillDialog({
       balance: priced.total - tds,
     }
   }, [priced, tdsRate, tdsChoice, tdsAuto, tdsTyped, tdsRateInUse])
-
-  /**
-   * The GST % a charge starts on when its type is picked: the goods' rate
-   * when the lines share one — freight or packing billed with the goods is
-   * part of their value — else the highest line rate, and the charge
-   * master's own rate only when there are no goods yet. Only a starting
-   * point: the supplier's own bill decides it, and the box can be changed.
-   */
-  const chargeStartRate = (chargeTypeId: string) =>
-    String(
-      defaultChargeGstRate(
-        lines.filter((l) => l.itemId).map((l) => num(l.gstRate)),
-        num(chargeById.get(chargeTypeId)?.defaultGstRate)
-      )
-    )
 
   if (!open) return null
 
@@ -1794,7 +1782,7 @@ export function PurchaseBillDialog({
         .map((c) => ({
           chargeTypeId: c.chargeTypeId,
           amount: num(c.amount),
-          gstRate: num(c.gstRate),
+          gstRate: 0,
         })),
     }
 
@@ -3047,30 +3035,24 @@ export function PurchaseBillDialog({
                     {chargeTypes.length > 0 && (
                       <div className="space-y-1.5">
                         {charges.length > 0 && (
-                          <div className="text-muted-foreground grid grid-cols-[minmax(0,22rem)_7rem_5.5rem_1.75rem] gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
+                          <div className="text-muted-foreground grid grid-cols-[minmax(0,22rem)_7rem_1.75rem] gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
                             <span>Charge</span>
                             <span className="text-right">Amount (₹)</span>
-                            <span className="text-right">GST %</span>
                             <span />
                           </div>
                         )}
                         {charges.map((c, i) => (
                           <div
                             key={i}
-                            className="grid grid-cols-[minmax(0,22rem)_7rem_5.5rem_1.75rem] items-center gap-1.5"
+                            className="grid grid-cols-[minmax(0,22rem)_7rem_1.75rem] items-center gap-1.5"
                           >
                             <SmartSelect
                               className="form-input h-8 min-w-0 text-xs"
                               value={c.chargeTypeId}
                               onChange={(e) => {
-                                // A new type starts on its own rate — the old
-                                // type's rate is never left behind on it.
                                 const id = e.target.value
-                                const rate = chargeStartRate(id)
                                 setCharges((p) =>
-                                  p.map((x, y) =>
-                                    y === i ? { ...x, chargeTypeId: id, gstRate: rate } : x
-                                  )
+                                  p.map((x, y) => (y === i ? { ...x, chargeTypeId: id } : x))
                                 )
                               }}
                               aria-label={`Charge ${i + 1} type`}
@@ -3091,18 +3073,6 @@ export function PurchaseBillDialog({
                                 setCharges((p) => p.map((x, y) => (y === i ? { ...x, amount: v } : x)))
                               }
                               aria-label={`Charge ${i + 1} amount`}
-                            />
-                            {/* Its own GST rate, chosen here, taxed apart from
-                              the goods. An unregistered supplier's bill has
-                              none, so the box shows 0% and is locked — the
-                              rate kept on the row is left as it was. */}
-                            <ChargeGstSelect
-                              value={taxMode === 'NONE' ? '0' : String(c.gstRate === '' ? 0 : c.gstRate)}
-                              onChange={(v) =>
-                                setCharges((p) => p.map((x, y) => (y === i ? { ...x, gstRate: v } : x)))
-                              }
-                              label={chargeById.get(c.chargeTypeId)?.name ?? `charge ${i + 1}`}
-                              disabled={taxMode === 'NONE'}
                             />
                             <button
                               type="button"
@@ -3133,13 +3103,19 @@ export function PurchaseBillDialog({
                           onClick={() =>
                             setCharges((p) => [
                               ...p,
-                              { chargeTypeId: '', amount: '', gstRate: chargeStartRate('') },
+                              { chargeTypeId: '', amount: '', gstRate: '0' },
                             ])
                           }
                           className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
                         >
                           <Plus size={12} /> Add a charge — freight, transport, packing
                         </button>
+                        {charges.length > 0 && (
+                          <p className="text-muted-foreground text-xs">
+                            Type each charge as it is on the supplier&apos;s bill, GST included — no GST
+                            is added on top.
+                          </p>
+                        )}
                       </div>
                     )}
                   </div>
@@ -3190,11 +3166,9 @@ export function PurchaseBillDialog({
                 <div className="space-y-1.5 text-sm">
                   <Row label={expenseMode ? 'Subtotal' : 'Goods subtotal'} value={totals.subtotal} />
                   {totals.discount > 0 && <Row label="Less discount" value={-totals.discount} />}
-                  {totals.chargeTotal > 0 && <Row label="Add charges" value={totals.chargeTotal} />}
-                  <Row label="Taxable value" value={totals.taxable} />
-                  {/* Where the GST comes from, rate by rate — goods and charges
-                    apart — so a charge taxed at its own rate is plain to see.
-                    An unregistered supplier's line is said just below. */}
+                  <Row label="Taxable value" value={totals.goodsTaxable} />
+                  {/* Where the GST on the goods comes from, rate by rate. An
+                    unregistered supplier's line is said just below. */}
                   {taxMode !== 'NONE' && <TaxBreakdown result={priced} split={taxMode} />}
                   {taxMode === 'CGST_SGST' && (
                     <>
@@ -3219,6 +3193,11 @@ export function PurchaseBillDialog({
                       Reverse charge: the ₹{inr(totals.tax)} of GST is ours to pay, not part of what
                       the supplier is paid.
                     </p>
+                  )}
+                  {/* After the tax: the supplier's charges are their final
+                    figure with any GST already in it, added as they are. */}
+                  {totals.chargeTotal > 0 && (
+                    <Row label="Add charges (GST included)" value={totals.chargeTotal} />
                   )}
                   <Row label="Rounding" value={totals.roundOff} />
                   <div className="border-border flex items-center justify-between border-t pt-2">

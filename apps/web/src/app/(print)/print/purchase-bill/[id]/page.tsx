@@ -207,11 +207,11 @@ export default function PurchaseBillPrintPage() {
    * the lines rather than recalculated, so this block and the totals above it
    * cannot disagree.
    *
-   * The charges come after the goods, one row per GST rate. Freight, packing
-   * and the rest are taxed — each at the rate chosen for it on the bill — and
-   * their tax is inside the CGST/SGST/IGST in the totals; a summary that left
-   * them out did not add up to the tax the bill charges, which is the one
-   * thing a summary is there to show.
+   * Charges are the supplier's figure with any GST already inside it and
+   * carry no GST of their own, so they are not in this table. Only a bill
+   * saved while charges still had GST put on top lists them, after the goods,
+   * one row per rate — their tax is inside the totals, and the table has to
+   * add up to it.
    */
   type SummaryRow = {
     hsn: string
@@ -251,7 +251,7 @@ export default function PurchaseBillPrintPage() {
    * print a summary that disagrees with the tax in the totals above it.
    */
   function chargeSummaryRows(goods: SummaryRow[]): SummaryRow[] {
-    const live = bill.charges.filter((c) => Number(c.amount) > 0)
+    const live = bill.charges.filter((c) => Number(c.amount) > 0 && Number(c.gstRate) > 0)
     if (!live.length) return []
     const namesAt = (rate: number) =>
       live
@@ -262,7 +262,7 @@ export default function PurchaseBillPrintPage() {
 
     if (Array.isArray(taxByRate) && taxByRate.length > 0) {
       return taxByRate
-        .filter((r) => Number(r.chargeTaxable) > 0)
+        .filter((r) => Number(r.chargeTaxable) > 0 && Number(r.gstRate) > 0)
         .map((r) => {
           const rate = Number(r.gstRate)
           const goodsAt = goods.filter((g) => g.rate === rate)
@@ -397,7 +397,7 @@ export default function PurchaseBillPrintPage() {
   const chargeSummaryRowCount =
     taxMode === 'NONE'
       ? 0
-      : new Set(bill.charges.filter((c) => Number(c.amount) > 0).map((c) => Number(c.gstRate))).size
+      : new Set(bill.charges.filter((c) => Number(c.amount) > 0 && Number(c.gstRate) > 0).map((c) => Number(c.gstRate))).size
   const fillerRows = Math.max(0, 5 - usedRows - chargeSummaryRowCount)
 
   const taxCols = taxMode === 'IGST' ? ['IGST'] : taxMode === 'NONE' ? [] : ['SGST', 'CGST']
