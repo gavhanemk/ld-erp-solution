@@ -578,6 +578,16 @@ export function PurchaseOrderDialog({
    */
   const [shownCharges, setShownCharges] = useState<string[]>([])
   /**
+   * Whether each charge's box holds rupees or a percentage, keyed by charge
+   * type id. Rupees unless switched.
+   *
+   * A percentage is of the goods value before GST — "freight 10%" on ₹12,000
+   * of fabric is ₹1,200 — and follows the goods while the form is open. What
+   * is saved is the rupee figure it came to: the order records an amount, so
+   * it reopens in rupees.
+   */
+  const [chargeUnit, setChargeUnit] = useState<Record<string, '%' | 'INR'>>({})
+  /**
    * The old "Other charges" box of an order saved before Other Charges became
    * a charge type. '' when there is none.
    *
@@ -588,10 +598,15 @@ export function PurchaseOrderDialog({
    */
   const [legacyOther, setLegacyOther] = useState('')
 
-  /** Takes a charge off the order: its row and its amount go. */
+  /** Takes a charge off the order: its row, its amount and its ₹/% go. */
   const removeCharge = (id: string) => {
     setShownCharges((prev) => prev.filter((x) => x !== id))
     setCharges((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setChargeUnit((prev) => {
       const next = { ...prev }
       delete next[id]
       return next
@@ -821,6 +836,7 @@ export function PurchaseOrderDialog({
     setCharges(
       Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(c.amount)]))
     )
+    setChargeUnit({})
     setShownCharges(
       (record?.charges ?? []).filter((c) => Number(c.amount) > 0).map((c) => c.chargeTypeId)
     )
@@ -1285,7 +1301,7 @@ export function PurchaseOrderDialog({
       .map((id) => chargeTypes.find((t) => t.id === id))
       .filter((t): t is ChargeTypeOption => Boolean(t))
 
-    const result = priceDocument({
+    const goods = {
       lines: activeLines.map((l) => ({
         qty: num(l.qty),
         rate: num(l.unitRate),
@@ -1293,9 +1309,24 @@ export function PurchaseOrderDialog({
         gstRate: num(l.gstRate),
       })),
       orderDiscount,
-      charges: shown.map((t) => ({ key: t.id, amount: num(charges[t.id]), gstRate: 0 })),
+      split: taxMode ?? ('CGST_SGST' as const),
+    }
+
+    /*
+     * What a charge typed as a percentage is a percentage of: the goods after
+     * every discount, before GST — the Gross total row. Charges never change
+     * it, so it is read from the goods alone. Rounded to the paisa.
+     */
+    const chargeBase = priceDocument(goods).goodsTaxable
+    const chargeAmountOf = (id: string) =>
+      chargeUnit[id] === '%'
+        ? Math.round(chargeBase * num(charges[id])) / 100
+        : num(charges[id])
+
+    const result = priceDocument({
+      ...goods,
+      charges: shown.map((t) => ({ key: t.id, amount: chargeAmountOf(t.id), gstRate: 0 })),
       untaxedExtra: num(legacyOther),
-      split: taxMode ?? 'CGST_SGST',
     })
 
     // Each row's own amount — what it comes to after its own discount, before
@@ -1316,6 +1347,7 @@ export function PurchaseOrderDialog({
     const chargeRows = shown.map((t, i) => ({
       chargeTypeId: t.id,
       name: t.name,
+      unit: chargeUnit[t.id] ?? ('INR' as const),
       amount: result.charges[i]?.amount ?? 0,
     }))
 
@@ -1342,7 +1374,7 @@ export function PurchaseOrderDialog({
       total: result.total,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines, discountAmount, taxMode, poType, chargeTypes, shownCharges, charges, legacyOther])
+  }, [lines, discountAmount, taxMode, poType, chargeTypes, shownCharges, charges, chargeUnit, legacyOther])
 
   /** One row's own figures, worked out for the row it is shown in. */
   const priceOf = (l: PoLine) => {
@@ -3898,43 +3930,75 @@ export function PurchaseOrderDialog({
                       {totals.chargeRows.length > 0 && (
                         <p className="text-muted-foreground text-[11px]">
                           Charges as on the supplier&apos;s bill, GST included — no GST is added on top.
+                          Type an amount in ₹, or a % of the goods value before GST.
                         </p>
                       )}
                       {totals.chargeRows.map((c) => (
-                        <div
-                          key={c.chargeTypeId}
-                          className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1"
-                        >
-                          {/* The name keeps a floor it will not shrink under,
-                            so a long one wraps the box onto its own line
-                            rather than breaking mid-word beside it. */}
-                          <span className="text-muted-foreground min-w-[9rem] flex-1">{c.name}</span>
-                          <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                            <input
-                              type="number"
-                              step="any"
-                              min={0}
-                              className="form-input h-8 w-28 text-right"
-                              placeholder="0.00"
-                              value={charges[c.chargeTypeId] ?? ''}
-                              onChange={(e) =>
-                                setCharges((prev) => ({
-                                  ...prev,
-                                  [c.chargeTypeId]: e.target.value,
-                                }))
-                              }
-                              aria-label={`${c.name} amount`}
-                            />
-                            <button
-                              type="button"
-                              onClick={() => removeCharge(c.chargeTypeId)}
-                              className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
-                              title={`Take ${c.name} off this order`}
-                              aria-label={`Remove ${c.name}`}
-                            >
-                              <X size={14} />
-                            </button>
+                        <div key={c.chargeTypeId}>
+                          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                            {/* The name keeps a floor it will not shrink under,
+                              so a long one wraps the boxes onto their own line
+                              rather than breaking mid-word beside them. */}
+                            <span className="text-muted-foreground min-w-[9rem] flex-1">{c.name}</span>
+                            <div className="ml-auto flex shrink-0 items-center gap-1">
+                              <StepInput
+                                decimals
+                                max={c.unit === '%' ? 100 : undefined}
+                                className="form-input h-8 w-28 text-right"
+                                placeholder="0.00"
+                                value={charges[c.chargeTypeId] ?? ''}
+                                onValueChange={(v) =>
+                                  setCharges((prev) => ({ ...prev, [c.chargeTypeId]: v }))
+                                }
+                                aria-label={`${c.name} ${c.unit === '%' ? 'percent' : 'amount'}`}
+                              />
+                              {/* Rupees or percent, the same switch as the
+                                Discount column. Going to % starts the box
+                                empty — a rupee figure is not a percentage.
+                                Going back to ₹ keeps what the % came to, so
+                                the figure can be rounded off by hand. */}
+                              <SmartSelect
+                                className="form-input h-8 w-14 shrink-0 px-1"
+                                value={c.unit}
+                                onChange={(e) => {
+                                  const unit = e.target.value as '%' | 'INR'
+                                  if (unit === c.unit) return
+                                  setCharges((prev) => ({
+                                    ...prev,
+                                    [c.chargeTypeId]: unit === '%' ? '' : c.amount ? String(c.amount) : '',
+                                  }))
+                                  setChargeUnit((prev) => ({ ...prev, [c.chargeTypeId]: unit }))
+                                }}
+                                aria-label={`${c.name} in rupees or percent`}
+                              >
+                                <option value="INR">₹</option>
+                                <option value="%">%</option>
+                              </SmartSelect>
+                              <button
+                                type="button"
+                                onClick={() => removeCharge(c.chargeTypeId)}
+                                className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                                title={`Take ${c.name} off this order`}
+                                aria-label={`Remove ${c.name}`}
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
                           </div>
+                          {/* The working, in figures, so a percentage is never
+                            one more number to take on trust. */}
+                          {c.unit === '%' && (
+                            <p className="text-muted-foreground mt-0.5 text-right text-[11px] tabular-nums">
+                              {totals.grossTotal > 0 ? (
+                                <>
+                                  {num(charges[c.chargeTypeId])}% of goods ₹{inr(totals.grossTotal)} ={' '}
+                                  <span className="text-foreground font-medium">₹{inr(c.amount)}</span>
+                                </>
+                              ) : (
+                                'Add the goods first — the % is worked out on their value.'
+                              )}
+                            </p>
+                          )}
                         </div>
                       ))}
                       {chargeTypes.some((t) => !shownCharges.includes(t.id)) && (
