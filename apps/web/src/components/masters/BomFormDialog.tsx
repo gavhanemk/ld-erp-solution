@@ -1083,6 +1083,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
         disabled={frozen}
         title={`Add a ${label} below this one`}
         aria-label={`Add a ${label} below this one`}
+        data-grid-add="row"
         onClick={onAdd}
       >
         <Plus size={15} />
@@ -1093,6 +1094,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
         disabled={frozen}
         title={`Remove this ${label}`}
         aria-label={`Remove this ${label}`}
+        data-grid-remove
         onClick={onRemove}
       >
         <Trash2 size={15} />
@@ -1189,7 +1191,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
         title={filledLines > 0 ? `Components (${filledLines})` : 'Components'}
         actions={
           frozen ? undefined : (
-            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => addLineAfter(lines.length - 1)}>
+            <button type="button" className="btn-secondary h-8 px-3 text-xs" data-grid-add onClick={() => addLineAfter(lines.length - 1)}>
               <Plus size={14} /> Add item
             </button>
           )
@@ -1240,14 +1242,14 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
               </tr>
             </thead>
 
-            <tbody>
+            <tbody data-grid>
               {lines.map((line, index) => {
                 const p = priced[index]
                 const item = itemsById.get(line.componentItemId)
                 const Icon = itemIcon(item)
 
                 return (
-                  <tr key={line.rowKey} className="border-b border-border/50">
+                  <tr key={line.rowKey} data-grid-row className="border-b border-border/50">
                     <td className="py-2 pl-3 pr-2 align-middle">
                       <SmartSelect
                         className={cn(field, 'min-w-0')}
@@ -1866,7 +1868,14 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
   const primaryMoves = primaryLabel === 'Next' || primaryLabel === 'Save and continue'
 
   const primaryButton = (
-    <button type="button" className="btn-primary" onClick={submit} disabled={saving || (step === 3 && cost <= 0)}>
+    <button
+      type="button"
+      className="btn-primary"
+      onClick={submit}
+      disabled={saving || (step === 3 && cost <= 0)}
+      data-hotkey="save"
+      aria-keyshortcuts="Control+S Meta+S"
+    >
       {saving ? <Loader2 size={15} className="animate-spin" /> : primaryMoves ? null : <Save size={15} />}
       {primaryLabel}
       {!saving && primaryMoves && <ArrowRight size={15} />}

@@ -469,7 +469,7 @@ export function VoucherDialog({
             </div>
           )}
           <div className="flex shrink-0 items-center gap-2">
-            <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save()} disabled={saving || loading}>
+            <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save()} disabled={saving || loading} data-hotkey="save" aria-keyshortcuts="Control+S Meta+S">
               {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} {altering ? 'Save changes' : `Save ${meta.label.toLowerCase()}`}
             </button>
             <button onClick={onClose} className="btn-ghost p-2" aria-label="Close" disabled={saving}>
@@ -806,7 +806,7 @@ export function VoucherDialog({
         </div>
 
         <div className="border-border flex shrink-0 items-center justify-end gap-2 border-t px-5 py-3 md:hidden">
-          <button type="button" className="btn-primary w-full" onClick={() => void save()} disabled={saving || loading}>
+          <button type="button" className="btn-primary w-full" onClick={() => void save()} disabled={saving || loading} data-hotkey="save" aria-keyshortcuts="Control+S Meta+S">
             {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} {altering ? 'Save changes' : `Save ${meta.label.toLowerCase()}`}
           </button>
         </div>
