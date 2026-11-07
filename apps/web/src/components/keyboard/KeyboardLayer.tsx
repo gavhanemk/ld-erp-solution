@@ -553,17 +553,40 @@ export function KeyboardLayer() {
         }, 80)
         return
       }
-      // Alt+↑ / Alt+↓: the same box on the line above or below (↑ ↓ alone still step a number).
-      if (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      // The same box on another line: the same table column, not the same
+      // position among the boxes that happen to be usable. A line with
+      // nothing picked yet has its sub-category greyed out and skipped from
+      // that count, so a line with one picked — one box further along —
+      // throws every later column off by one. A real row (most grids)
+      // carries its own column; a card row (a phone) falls back to position
+      // among its boxes.
+      const sameColumn = (other: HTMLElement) => {
+        const td = el.closest('td')
+        if (row instanceof HTMLTableRowElement && other instanceof HTMLTableRowElement && td) {
+          const sameTd = other.cells[td.cellIndex] as HTMLElement | undefined
+          const found = sameTd ? cells(other).find((c) => sameTd.contains(c)) : undefined
+          if (found) return found
+        }
+        return cells(other)[Math.max(0, cells(row).indexOf(el))]
+      }
+      const toRow = (dir: 1 | -1) => {
         const peers = rows.filter((r) => kindOf(r) === kindOf(row))
-        const at = peers.indexOf(row)
-        const other = peers[at + (e.key === 'ArrowDown' ? 1 : -1)]
+        const other = peers[peers.indexOf(row) + dir]
         if (!other) return
         e.preventDefault()
-        const col = cells(row).indexOf(el)
-        const target = cells(other)[Math.max(0, col)]
+        const target = sameColumn(other)
         target?.focus()
         if (target instanceof HTMLInputElement && isTyping(target)) target.select()
+      }
+      // Alt+↑ / Alt+↓: the same box on the line above or below (↑ ↓ alone still step a number).
+      if (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        toRow(e.key === 'ArrowDown' ? 1 : -1)
+        return
+      }
+      // Shift+Enter: the same box on the line above — the one case Enter on its
+      // own never reaches, since Enter alone always moves forward.
+      if (e.key === 'Enter' && e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && el instanceof HTMLInputElement && isTyping(el)) {
+        toRow(-1)
         return
       }
       // Enter in a box: the next box, then the next line; after the last box of

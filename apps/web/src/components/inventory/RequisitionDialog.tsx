@@ -300,7 +300,7 @@ export function RequisitionDialog({
   }
 
   const raise = (
-    <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving}>
+    <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving} data-hotkey="save" aria-keyshortcuts="Control+S Meta+S">
       {saving ? <Loader2 size={15} className="animate-spin" /> : <ClipboardList size={15} />}
       Raise requisition
     </button>
