@@ -296,7 +296,7 @@ await check('a purchase order with two item lines, made and saved as a draft by 
     await wait(800)
     await row.getByLabel(/quantity/i).focus()
     await type('10')
-    await key('Enter') // on to the rate
+    await key('Tab') // across to the rate, in the same row — Enter now goes down a column instead
     await type('5')
   }
   await fill(0)
@@ -308,6 +308,47 @@ await check('a purchase order with two item lines, made and saved as a draft by 
   await page.locator('[aria-labelledby="po-dialog-title"]').waitFor({ state: 'detached', timeout: 10000 })
   const after = (await api('/purchase/orders?status=DRAFT&limit=1')).pagination?.total ?? null
   return lines === 2 && after !== null && draftsBefore !== null && after === draftsBefore + 1 ? true : `lines ${lines}, drafts ${draftsBefore} → ${after}`
+})
+
+// ─── Enter goes down a column, Shift+Enter back up ──────────────────────────
+// Filled in, never saved (Escape at the end): this only checks navigation.
+await open('/purchase/orders')
+await check('in a line-item grid, Enter goes to the same box one line down, Shift+Enter one line up', async () => {
+  await key('Alt+n')
+  await page.locator('[aria-labelledby="po-dialog-title"]').waitFor({ timeout: 8000 })
+  await wait(1500)
+  await key('Alt+a') // a second line, so there is somewhere for Enter to go down to
+  await wait(500)
+  const rows = page.locator('tbody[data-grid] > [data-grid-row]')
+  await rows.nth(0).getByLabel(/quantity/i).focus()
+  await type('3')
+  await key('Enter')
+  await wait(250)
+  const down = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('tbody[data-grid] > [data-grid-row]')]
+    return { row: rows.indexOf(document.activeElement?.closest('[data-grid-row]')), label: document.activeElement?.getAttribute('aria-label') }
+  })
+  await key('Shift+Enter')
+  await wait(250)
+  const up = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('tbody[data-grid] > [data-grid-row]')]
+    return { row: rows.indexOf(document.activeElement?.closest('[data-grid-row]')), label: document.activeElement?.getAttribute('aria-label') }
+  })
+  // Past the last line: Enter makes a new one, and lands in its same box.
+  await rows.nth(1).getByLabel(/quantity/i).focus()
+  const before = await rows.count()
+  await key('Enter')
+  await wait(500)
+  const after = await rows.count()
+  const landedNewRow = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('tbody[data-grid] > [data-grid-row]')]
+    return { row: rows.indexOf(document.activeElement?.closest('[data-grid-row]')), label: document.activeElement?.getAttribute('aria-label') }
+  })
+  await key('Escape')
+  await wait(400)
+  if (await page.locator('[aria-labelledby="po-dialog-title"]').count()) await key('Escape')
+  const ok = down.row === 1 && /quantity/i.test(down.label ?? '') && up.row === 0 && /quantity/i.test(up.label ?? '') && after === before + 1 && landedNewRow.row === 2 && /quantity/i.test(landedNewRow.label ?? '')
+  return ok ? true : `down ${JSON.stringify(down)}, up ${JSON.stringify(up)}, rows ${before}→${after}, landed ${JSON.stringify(landedNewRow)}`
 })
 
 // ─── Copy a line ─────────────────────────────────────────────────────────────
