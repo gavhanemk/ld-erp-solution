@@ -500,8 +500,9 @@ export function KeyboardLayer() {
       const addButton = () =>
         [...grid.querySelectorAll<HTMLButtonElement>('[data-grid-add]:not([data-grid-add="row"])')].find(usable) ??
         [...(grid.closest('[role="dialog"]') ?? document).querySelectorAll<HTMLButtonElement>('[data-grid-add]:not([data-grid-add="row"])')].find(usable)
-      // Press an add, then put focus in the first box of the row it made.
-      const addAndGo = (add: HTMLButtonElement) => {
+      // Press an add, then put focus in the row it made — its first box, or
+      // (typing a column of numbers down past the last row) the same column.
+      const addAndGo = (add: HTMLButtonElement, pick: (fresh: HTMLElement) => HTMLElement | undefined = (r) => cells(r)[0]) => {
         const before = new Set(rows)
         add.click()
         let n = 0
@@ -510,7 +511,7 @@ export function KeyboardLayer() {
           const fresh = now.find((r) => !before.has(r))
           if (fresh || ++n > 20) {
             clearInterval(t)
-            if (fresh) cells(fresh)[0]?.focus()
+            if (fresh) pick(fresh)?.focus()
           }
         }, 50)
       }
@@ -569,42 +570,39 @@ export function KeyboardLayer() {
         }
         return cells(other)[Math.max(0, cells(row).indexOf(el))]
       }
+      // Down past the last line: a new line, the same column ready to type
+      // in — so typing a column of rates down the grid keeps going rather
+      // than stopping at the bottom. Up past the first line does nothing:
+      // there is no line to make before it.
       const toRow = (dir: 1 | -1) => {
         const peers = rows.filter((r) => kindOf(r) === kindOf(row))
         const other = peers[peers.indexOf(row) + dir]
-        if (!other) return
+        if (other) {
+          e.preventDefault()
+          const target = sameColumn(other)
+          target?.focus()
+          if (target instanceof HTMLInputElement && isTyping(target)) target.select()
+          return
+        }
+        if (dir !== 1) return
+        const add = addButton()
+        if (!add) return
         e.preventDefault()
-        const target = sameColumn(other)
-        target?.focus()
-        if (target instanceof HTMLInputElement && isTyping(target)) target.select()
+        addAndGo(add, (fresh) => sameColumn(fresh))
       }
       // Alt+↑ / Alt+↓: the same box on the line above or below (↑ ↓ alone still step a number).
       if (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
         toRow(e.key === 'ArrowDown' ? 1 : -1)
         return
       }
-      // Shift+Enter: the same box on the line above — the one case Enter on its
-      // own never reaches, since Enter alone always moves forward.
-      if (e.key === 'Enter' && e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && el instanceof HTMLInputElement && isTyping(el)) {
-        toRow(-1)
-        return
-      }
-      // Enter in a box: the next box, then the next line; after the last box of
-      // the last line, a new line if the form has an Add button. Never saves.
-      if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && el instanceof HTMLInputElement && isTyping(el)) {
+      // Enter in a box of the grid: the same box one line down, typing a
+      // column of numbers straight down rather than across the row — Tab
+      // still moves across. Shift+Enter goes the other way, up.
+      if (e.key === 'Enter' && !e.altKey && !e.ctrlKey && !e.metaKey && el instanceof HTMLInputElement && isTyping(el)) {
         // A list open under the box (a suggestion picker) takes Enter itself.
         if (el.getAttribute('aria-expanded') === 'true') return
         e.preventDefault()
-        const all = rows.flatMap(cells)
-        const i = all.indexOf(el)
-        const next = all[i + 1]
-        if (next) {
-          next.focus()
-          if (next instanceof HTMLInputElement && isTyping(next)) next.select()
-          return
-        }
-        const add = addButton()
-        if (add) addAndGo(add)
+        toRow(e.shiftKey ? -1 : 1)
       }
     }
     // After the screen's own handlers, so a box that uses a key itself (a
