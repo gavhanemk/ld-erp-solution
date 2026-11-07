@@ -34,7 +34,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
-import { itemFormFields } from '@/components/masters/itemFormFields'
+import { itemFormFields, ITEM_TYPE_LABEL } from '@/components/masters/itemFormFields'
 import { processFormFields } from '@/components/masters/processFormFields'
 import { BomReviewDialog } from '@/components/masters/BomReviewDialog'
 
@@ -144,6 +144,12 @@ interface ItemOption {
   uom?: { symbol: string } | null
   category?: { id?: string; name: string; parentId?: string | null; parent?: { id: string; name: string } | null } | null
 }
+
+// A BOM says what goes into one piece, so it offers everything except a
+// finished good itself — a finished good is what a BOM produces, not a
+// component of another one. Kept as the Items master's own type list, less
+// FINISHED_GOOD, so a new item type lands here on its own.
+const COMPONENT_TYPES = Object.keys(ITEM_TYPE_LABEL).filter((t) => t !== 'FINISHED_GOOD').join(',')
 
 /** An item's main category and sub-category: a category with a parent is a sub-category. */
 const placeOf = (it: ItemOption | undefined) => {
@@ -485,7 +491,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
 
     void Promise.all([
       masterResource<StyleOption>('styles').list({ limit: 200, active: true }),
-      fetchEveryPage<ItemOption>((page) => `/masters/items?limit=200&active=true&page=${page}`).then((r) => ({ data: r.rows })),
+      fetchEveryPage<ItemOption>((page) => `/masters/items?limit=200&active=true&type=${COMPONENT_TYPES}&page=${page}`).then((r) => ({ data: r.rows })),
       masterResource<DepartmentOption>('departments').list({ limit: 200, active: true }),
       masterResource<ProcessOption>('operations')
         .list({ limit: 300, active: true, sort: 'sortOrder', order: 'asc' })
