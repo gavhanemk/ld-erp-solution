@@ -261,9 +261,12 @@ export function RoutingFormDialog({
   const [overKey, setOverKey] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** Save was pressed with something missing: each missing box is marked from then on. */
+  const [tried, setTried] = useState(false)
 
   useEffect(() => {
     if (!open) return
+    setTried(false)
     const from = record ?? preset?.from ?? null
     setName(record?.name ?? (preset?.from ? preset.from.name : ''))
     setFabricItemId(from?.fabricItemId ?? '')
@@ -505,8 +508,36 @@ export function RoutingFormDialog({
   const noCheck = rows.length > 0 && !rows.some((r, i) => r.isQcStep || kinds[i] === 'QC')
   const offRoute = rows.filter((r) => opById.get(r.operationId)?.inactive)
 
+  // What is missing, box by box, once Save has been pressed: a red edge and a line under each.
+  const missing = {
+    name: tried && !name.trim(),
+    style: tried && applies === 'STYLE' && !styleId,
+    category: tried && applies === 'CATEGORY' && !category.trim(),
+  }
+  /** A step's process box is wrong: none picked, the first step is not cutting, or cutting comes twice. */
+  const stepProblem = (r: Row, i: number) =>
+    !tried
+      ? null
+      : !r.operationId
+        ? 'Pick a process, or take this step off.'
+        : i === 0 && kinds[0] !== 'CUTTING'
+          ? 'The first step is cutting.'
+          : i > 0 && kinds[i] === 'CUTTING'
+            ? 'Cutting is done once, as the first step.'
+            : null
+  const bad = (on: boolean | string | null) => (on ? 'border-red-500/70 ring-1 ring-red-500/30' : '')
+
   const save = async () => {
-    if (blocker) return
+    if (blocker) {
+      // Not a silent grey button: mark what is missing, and take the eye to the first of it.
+      setTried(true)
+      setTimeout(() => {
+        const first = document.querySelector<HTMLElement>('[data-routing-missing="true"]')
+        first?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        first?.querySelector<HTMLElement>('input, button, textarea, [tabindex]')?.focus({ preventScroll: true })
+      }, 0)
+      return
+    }
     setSaving(true)
     setError(null)
     // No code: the API makes one from the style.
@@ -578,7 +609,13 @@ export function RoutingFormDialog({
       }
       width="max-w-7xl"
       primary={
-        <button type="button" className="btn-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none" onClick={() => void save()} disabled={saving || !!blocker}>
+        <button
+          type="button"
+          className="btn-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+          onClick={() => void save()}
+          disabled={saving}
+          title={blocker ?? undefined}
+        >
           {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} {isEdit ? 'Save routing' : 'Create routing'}
         </button>
       }
@@ -600,9 +637,19 @@ export function RoutingFormDialog({
 
       <Section icon={Route} title="What it is for">
         <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-6">
-          <label className="block lg:col-span-2">
-            <span className="form-label">Name</span>
-            <input className="form-input" value={name} placeholder="e.g. Shirt with washing" onChange={(e) => setName(e.target.value)} />
+          <label className="block lg:col-span-2" data-routing-missing={missing.name}>
+            <span className="form-label">
+              Name <Req />
+            </span>
+            <input
+              className={cn('form-input', bad(missing.name))}
+              value={name}
+              placeholder="e.g. Shirt with washing"
+              onChange={(e) => setName(e.target.value)}
+              aria-invalid={missing.name || undefined}
+              aria-required
+            />
+            {missing.name && <Missing>Give the routing a name.</Missing>}
           </label>
           <div className="lg:col-span-2">
             <span className="form-label">Used for</span>
@@ -623,10 +670,12 @@ export function RoutingFormDialog({
           </div>
           <div className="lg:col-span-2">
             {applies === 'STYLE' && (
-              <label className="block">
-                <span className="form-label">Style</span>
+              <label className="block" data-routing-missing={missing.style}>
+                <span className="form-label">
+                  Style <Req />
+                </span>
                 <SmartSelect
-                  className="form-input"
+                  className={cn('form-input', bad(missing.style))}
                   value={styleId}
                   onChange={(e) => pickStyle(e.target.value)}
                   onCreate={mayAdd ? (typed) => setAdding({ kind: 'style', typed }) : undefined}
@@ -643,6 +692,7 @@ export function RoutingFormDialog({
                     </option>
                   ))}
                 </SmartSelect>
+                {missing.style && <Missing>Pick the style it is for.</Missing>}
               </label>
             )}
             {applies === 'STYLE' && fabricItemId && filled !== 'fabric' && (
@@ -659,9 +709,11 @@ export function RoutingFormDialog({
               </p>
             )}
             {applies === 'CATEGORY' && (
-              <label className="block">
-                <span className="form-label">Category</span>
-                <SmartSelect className="form-input" value={category} onChange={(e) => setCategory(e.target.value)}>
+              <label className="block" data-routing-missing={missing.category}>
+                <span className="form-label">
+                  Category <Req />
+                </span>
+                <SmartSelect className={cn('form-input', bad(missing.category))} value={category} onChange={(e) => setCategory(e.target.value)}>
                   <option value="">Pick the category…</option>
                   {categories.map((c) => (
                     <option key={c} value={c}>
@@ -669,6 +721,7 @@ export function RoutingFormDialog({
                     </option>
                   ))}
                 </SmartSelect>
+                {missing.category && <Missing>Pick the category of styles it is for.</Missing>}
               </label>
             )}
             {applies === 'ANY' && <p className="text-muted-foreground pt-6 text-xs">Followed by any style that has no routing of its own and none for its category.</p>}
@@ -780,7 +833,9 @@ export function RoutingFormDialog({
         {/* The headings, on a wide screen; on a narrow one each box carries its own. */}
         <div className={cn('text-muted-foreground hidden gap-2 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide lg:grid', COLS)}>
           <span>Step</span>
-          <span>Process</span>
+          <span>
+            Process <Req />
+          </span>
           <span>Done at</span>
           <span>Line or unit</span>
           <span>Contractor</span>
@@ -794,6 +849,7 @@ export function RoutingFormDialog({
             const o = opById.get(r.operationId)
             const isCut = o?.kind === 'CUTTING'
             const isOpen = openKey === r.key
+            const wrong = stepProblem(r, i)
             const extras = (r.isQcStep || o?.kind === 'QC' ? 1 : 0) + (r.instructions.trim() ? 1 : 0)
             return (
               <li
@@ -835,10 +891,12 @@ export function RoutingFormDialog({
                     </button>
                     <span className="text-primary font-mono text-sm font-semibold">{i + 1}</span>
                   </div>
-                  <label className="col-span-2 block min-w-0 sm:col-span-4 lg:col-span-1">
-                    <span className="form-label lg:sr-only">Process</span>
+                  <label className="col-span-2 block min-w-0 sm:col-span-4 lg:col-span-1" data-routing-missing={!!wrong}>
+                    <span className="form-label lg:sr-only">
+                      Process <Req />
+                    </span>
                     <SmartSelect
-                      className="form-input h-9"
+                      className={cn('form-input h-9', bad(wrong))}
                       value={r.operationId}
                       onChange={(e) => pick(r.key, e.target.value)}
                       aria-label={`Step ${i + 1} process`}
@@ -852,6 +910,7 @@ export function RoutingFormDialog({
                         </option>
                       ))}
                     </SmartSelect>
+                    {wrong && <Missing>{wrong}</Missing>}
                   </label>
                   <label className="block min-w-0">
                     <span className="form-label lg:sr-only">Done at</span>
@@ -1162,4 +1221,18 @@ export function RoutingFormDialog({
       )}
     </FormFrame>
   )
+}
+
+/** The red star beside a box that must be filled. */
+function Req() {
+  return (
+    <span className="text-red-400" aria-hidden>
+      *
+    </span>
+  )
+}
+
+/** What is missing in a box, under it, once Save has been pressed. */
+function Missing({ children }: { children: React.ReactNode }) {
+  return <span className="mt-1 block text-[11px] font-medium text-red-500">{children}</span>
 }
