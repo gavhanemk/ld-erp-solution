@@ -24,6 +24,8 @@ import { createQuote, quoteSchema } from '../apps/api/src/routes/quotation.route
 import { findHsn, gstRateFor, loadHsnIndex } from '../apps/api/src/lib/hsn'
 import { chargesStillToBill, createInvoice, invoiceSchema, loadBillable } from '../apps/api/src/routes/invoice.routes'
 import { gstr1 } from '../apps/api/src/services/accounts/gst.service'
+import { postDocument } from '../apps/api/src/services/accounts/posting.service'
+import { chargeRowOf } from '../apps/api/src/services/salesCharges'
 
 let pass = 0
 let fail = 0
@@ -197,6 +199,31 @@ async function main() {
           'GSTR-1: the invoice at 5% on ₹3,03,542.86 (the goods + the transport without its GST; the packing outside), GST ₹15,177.14',
           !!doc && Math.abs(taxable - 303542.86) < 0.01 && Math.abs(gst - 15177.14) < 0.01 && (doc?.rates ?? []).every((r) => r.rate === 5),
           doc ? doc.rates : `not in B2B/B2CL (customer GSTIN ${customer.gstin ?? 'none'})`,
+        )
+
+        // ── The live site's present code, between the migration and the deploy ──
+        // It saves a charge with only the columns it knows. The migration lets it
+        // (the new columns have a default or may be empty), and the new code reads
+        // that row as what it was: GST added on top, its value its amount.
+        const oldType = await tx.chargeType.findFirstOrThrow({ where: { id: { notIn: [transport.id, packing.id] } }, select: { id: true } })
+        const oldRowId = `zzcheck_${stamp}`
+        await tx.$executeRaw`INSERT INTO sales_invoice_charges (id, "invoiceId", "chargeTypeId", amount, "gstRate", cgst, sgst, igst) VALUES (${oldRowId}, ${inv.id}, ${oldType.id}, 500, 5, 12.5, 12.5, 0)`
+        const oldRow = await tx.salesInvoiceCharge.findUniqueOrThrow({ where: { id: oldRowId }, include: { chargeType: { select: { name: true } } } })
+        check(
+          'a charge saved the old way after the migration: GST added on top, value = its ₹500',
+          oldRow.taxTreatment === 'EXCLUSIVE' && oldRow.netAmount === null && chargeRowOf(oldRow).netAmount === 500,
+          { treatment: oldRow.taxTreatment, net: oldRow.netAmount },
+        )
+        // The invoice as the old code would have totalled it with that charge, posted again.
+        await tx.salesInvoice.update({ where: { id: inv.id }, data: { totalAmount: 319545, balanceAmount: 319545, cgst: 7601.07, sgst: 7601.07 } })
+        await postDocument(tx, 'SALES_INVOICE', inv.id, userId)
+        const v2 = await tx.voucher.findUniqueOrThrow({ where: { sourceType_sourceId: { sourceType: 'SALES_INVOICE', sourceId: inv.id } }, include: { lines: { include: { ledger: { select: { systemKey: true } } } } } })
+        const d2 = Math.round(v2.lines.reduce((t, l) => t + N(l.debit), 0) * 100) / 100
+        const c2 = Math.round(v2.lines.reduce((t, l) => t + N(l.credit), 0) * 100) / 100
+        check(
+          'books: posted with it, the old-way charge credited its ₹500 and the entry still balances',
+          d2 === c2 && d2 === 319545 && N(v2.lines.find((l) => l.ledger.systemKey === `SALES_CHARGE:${oldType.id}`)?.credit) === 500,
+          { debit: d2, credit: c2 },
         )
 
         // ── A charge type switched to GST added on top decides when the form sends nothing ──

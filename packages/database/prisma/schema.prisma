@@ -5059,8 +5059,11 @@ model SalesInvoiceCharge {
   /// The charge without its GST: what its income ledger is credited with
   /// and, unless NON_TAXABLE, what its GST is worked out on. The amount
   /// itself when GST is added on top or there is none; the amount less the
-  /// GST inside it when the amount typed includes GST.
-  netAmount    Decimal            @db.Decimal(12, 2)
+  /// GST inside it when the amount typed includes GST. Empty on a charge
+  /// saved by the code before charges had a treatment: its amount, as
+  /// GST was always added on top then. Optional so this column can go
+  /// onto the live database ahead of the code that fills it.
+  netAmount    Decimal?           @db.Decimal(12, 2)
   gstRate      Decimal      @default(0) @db.Decimal(5, 2)
   cgst         Decimal      @default(0) @db.Decimal(12, 2)
   sgst         Decimal      @default(0) @db.Decimal(12, 2)
@@ -5113,8 +5116,11 @@ model SalesOrderCharge {
   /// The charge without its GST: what its income ledger is credited with
   /// and, unless NON_TAXABLE, what its GST is worked out on. The amount
   /// itself when GST is added on top or there is none; the amount less the
-  /// GST inside it when the amount typed includes GST.
-  netAmount    Decimal            @db.Decimal(12, 2)
+  /// GST inside it when the amount typed includes GST. Empty on a charge
+  /// saved by the code before charges had a treatment: its amount, as
+  /// GST was always added on top then. Optional so this column can go
+  /// onto the live database ahead of the code that fills it.
+  netAmount    Decimal?           @db.Decimal(12, 2)
   gstRate      Decimal    @default(0) @db.Decimal(5, 2)
   cgst         Decimal    @default(0) @db.Decimal(12, 2)
   sgst         Decimal    @default(0) @db.Decimal(12, 2)

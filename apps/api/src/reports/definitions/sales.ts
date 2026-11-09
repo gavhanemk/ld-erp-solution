@@ -639,7 +639,7 @@ export const outwardHsnSummary: ReportDefinition = {
       }),
       tx.salesInvoiceCharge.findMany({
         where: { invoice: billed, amount: { gt: 0 } },
-        select: { invoiceId: true, netAmount: true, taxTreatment: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } },
+        select: { invoiceId: true, amount: true, netAmount: true, taxTreatment: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } },
       }),
     ])
     const m = new Map<string, { hsnCode: string; rate: number; qty: number; taxable: number; cgst: number; sgst: number; igst: number; credited: number }>()

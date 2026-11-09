@@ -179,7 +179,9 @@ export function foldChargesIntoHsn(lines: GoodsLine[], charges: ChargeRow[]) {
 export function chargeRowOf(c: {
   chargeType: { name: string }
   gstRate: Prisma.Decimal | number
-  netAmount: Prisma.Decimal | number
+  amount: Prisma.Decimal | number
+  /** Empty on a charge saved before charges had a treatment: GST was added on top, so its amount. */
+  netAmount: Prisma.Decimal | number | null
   taxTreatment: ChargeTaxTreatment
   cgst: Prisma.Decimal | number
   sgst: Prisma.Decimal | number
@@ -188,7 +190,7 @@ export function chargeRowOf(c: {
   return {
     name: c.chargeType.name,
     gstRate: Number(c.gstRate),
-    netAmount: Number(c.netAmount),
+    netAmount: Number(c.netAmount ?? c.amount),
     treatment: c.taxTreatment,
     cgst: Number(c.cgst),
     sgst: Number(c.sgst),

@@ -19,6 +19,11 @@
 -- at INCLUSIVE for every charge type (a charge is typed as the final figure,
 -- as purchase charges already are) and can be changed under Masters → Charges
 -- or on the document's row.
+--
+-- Safe to run before the code that uses it is deployed: every new column
+-- has a default or may be empty. A charge the older code saves after this
+-- gets EXCLUSIVE and an empty netAmount, which the new code reads as its
+-- amount — what that charge was.
 
 -- CreateEnum
 CREATE TYPE "ChargeTaxTreatment" AS ENUM ('INCLUSIVE', 'EXCLUSIVE', 'NON_TAXABLE');
@@ -34,13 +39,11 @@ ADD COLUMN "taxTreatment" "ChargeTaxTreatment" NOT NULL DEFAULT 'INCLUSIVE';
 ALTER TABLE "sales_invoice_charges" ADD COLUMN "netAmount" DECIMAL(12,2),
 ADD COLUMN "taxTreatment" "ChargeTaxTreatment" NOT NULL DEFAULT 'EXCLUSIVE';
 UPDATE "sales_invoice_charges" SET "netAmount" = "amount";
-ALTER TABLE "sales_invoice_charges" ALTER COLUMN "netAmount" SET NOT NULL;
 
 -- Order charges already saved: the same.
 ALTER TABLE "sales_order_charges" ADD COLUMN "netAmount" DECIMAL(12,2),
 ADD COLUMN "taxTreatment" "ChargeTaxTreatment" NOT NULL DEFAULT 'EXCLUSIVE';
 UPDATE "sales_order_charges" SET "netAmount" = "amount";
-ALTER TABLE "sales_order_charges" ALTER COLUMN "netAmount" SET NOT NULL;
 
 -- CreateTable: a quotation's charges, priced as the order's will be.
 CREATE TABLE "sales_quotation_charges" (
