@@ -986,8 +986,8 @@ export const routingStepSchema = z.object({
   isQcStep: z.boolean().default(false),
   /** Done on our floor, or given to an outside unit. */
   execution: z.enum(['IN_HOUSE', 'OUTSOURCED']).default('IN_HOUSE'),
-  /** Who may leave it out of an order's route. */
-  skip: z.enum(['OPTIONAL', 'WITH_APPROVAL', 'NEVER']).default('WITH_APPROVAL'),
+  /** Who may leave it out of an order's route. Never, unless marked otherwise (9 Nov 2026). */
+  skip: z.enum(['OPTIONAL', 'WITH_APPROVAL', 'NEVER']).default('NEVER'),
   instructions: optionalText,
 })
 

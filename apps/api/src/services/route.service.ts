@@ -282,7 +282,7 @@ export const routeStepSchema = z.object({
   execution: z.enum(['IN_HOUSE', 'OUTSOURCED']).default('IN_HOUSE'),
   workstationId: z.string().optional().nullable(),
   isQcStep: z.boolean().default(false),
-  skip: z.enum(['OPTIONAL', 'WITH_APPROVAL', 'NEVER']).default('WITH_APPROVAL'),
+  skip: z.enum(['OPTIONAL', 'WITH_APPROVAL', 'NEVER']).default('NEVER'),
   ratePerPiece: z.number().min(0).max(100_000).optional().nullable(),
   instructions: z.string().trim().max(1000).optional().nullable(),
 })

@@ -161,11 +161,17 @@ interface Row {
   instructions: string
 }
 
+/**
+ * Two choices since 9 Nov 2026: a step is never left out, or it can be — by a
+ * production manager, with a reason. "Anyone can skip" (OPTIONAL) is no longer
+ * offered; a step saved with it opens as "Can be skipped" (see rowsOf).
+ */
 const SKIPS: Array<{ value: Skip; label: string; help: string }> = [
   { value: 'NEVER', label: 'Never skipped', help: 'Every piece goes through it' },
-  { value: 'WITH_APPROVAL', label: 'Manager can skip', help: 'Only a production manager can leave it out, with a reason' },
-  { value: 'OPTIONAL', label: 'Anyone can skip', help: 'Anyone recording production can leave it out, with a reason' },
+  { value: 'WITH_APPROVAL', label: 'Can be skipped', help: 'A production manager can leave it out of an order, with a reason' },
 ]
+/** A step's rule as the form offers it: never left out, or one that can be (by a manager). */
+const skipOf = (s: Skip | null | undefined): Skip => (s && s !== 'NEVER' ? 'WITH_APPROVAL' : 'NEVER')
 
 const APPLIES: Array<{ value: Applies; label: string }> = [
   { value: 'STYLE', label: 'One style' },
@@ -177,7 +183,7 @@ const APPLIES: Array<{ value: Applies; label: string }> = [
 const COLS = 'lg:grid-cols-[2.75rem_minmax(9rem,1fr)_8rem_minmax(10rem,1.3fr)_minmax(10rem,1.2fr)_6rem_10rem_6.5rem]'
 
 let seq = 0
-const blank = (): Row => ({ key: `n${++seq}`, operationId: '', workstationId: '', contractorId: '', execution: 'IN_HOUSE', skip: 'WITH_APPROVAL', isQcStep: false, smv: '', ratePerPiece: '', instructions: '' })
+const blank = (): Row => ({ key: `n${++seq}`, operationId: '', workstationId: '', contractorId: '', execution: 'IN_HOUSE', skip: 'NEVER', isQcStep: false, smv: '', ratePerPiece: '', instructions: '' })
 const num = (v: string | number | null | undefined) => (v == null || v === '' ? '' : String(Number(v)))
 const figure = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 })
 const rowsOf = (steps: RoutingStep[] | undefined): Row[] =>
@@ -190,7 +196,7 @@ const rowsOf = (steps: RoutingStep[] | undefined): Row[] =>
           workstationId: s.workstationId ?? '',
           contractorId: s.contractorId ?? '',
           execution: s.execution ?? 'IN_HOUSE',
-          skip: s.skip ?? 'WITH_APPROVAL',
+          skip: skipOf(s.skip),
           isQcStep: s.isQcStep,
           smv: num(s.smv),
           ratePerPiece: num(s.ratePerPiece),
@@ -425,7 +431,8 @@ export function RoutingFormDialog({
       contractorId: '',
       execution: o?.defaultExecution ?? 'IN_HOUSE',
       isQcStep: o?.kind === 'QC',
-      skip: o?.kind === 'CUTTING' ? 'NEVER' : 'WITH_APPROVAL',
+      // Every step starts as one nobody leaves out; it is marked "Can be skipped" by hand.
+      skip: 'NEVER',
       ratePerPiece: o?.defaultExecution === 'OUTSOURCED' ? num(o?.jobWorkRate) : '',
       smv: num(o?.smv),
       instructions: o?.instructions ?? '',
@@ -778,7 +785,7 @@ export function RoutingFormDialog({
           <span>Line or unit</span>
           <span>Contractor</span>
           <span className="text-right">Minutes / pc</span>
-          <span>If skipped</span>
+          <span>Skipping</span>
           <span className="sr-only">Move, details, remove</span>
         </div>
 
@@ -910,7 +917,7 @@ export function RoutingFormDialog({
                     />
                   </label>
                   <label className="col-span-2 block min-w-0 sm:col-span-2 lg:col-span-1">
-                    <span className="form-label lg:sr-only">If skipped</span>
+                    <span className="form-label lg:sr-only">Skipping</span>
                     <SmartSelect
                       className="form-input h-9"
                       value={isCut ? 'NEVER' : r.skip}

@@ -750,7 +750,7 @@ function RoutingDetail({ routing: r, orders }: { routing: StyleRouting; orders: 
                 <span className="text-muted-foreground tabular-nums">{s.sequence}.</span> {s.name}
                 {s.isQcStep && <span className="text-primary"> (check)</span>}
                 {s.execution === 'OUTSOURCED' && <span className="text-muted-foreground"> (outside unit)</span>}
-                {s.skip === 'OPTIONAL' && <span className="text-muted-foreground"> (optional)</span>}
+                {s.skip !== 'NEVER' && <span className="text-muted-foreground"> (can be skipped)</span>}
               </span>
             </li>
           ))}
