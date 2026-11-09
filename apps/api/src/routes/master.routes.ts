@@ -6,6 +6,7 @@ import { crudRouter, type DeleteUse } from '../lib/crud'
 import { nextStyleCode } from '../lib/masterCode'
 import { createRouting, deleteRouting, bomFabrics, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
 import { styleOrderStages } from '../services/styleOrders.service'
+import { routingsByStyle } from '../services/routingOverview.service'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import * as categoryImport from '../services/categoryImport.service'
 import * as styleImport from '../services/styleImport.service'
@@ -2211,6 +2212,19 @@ router.get('/routings/fabrics', requirePermission(MODULE, 'view'), async (_req, 
 /** Which fabrics each style's BOMs use, for the routing form to narrow Style and Fabric by. */
 router.get('/routings/bom-fabrics', requirePermission(MODULE, 'view'), async (_req, res) => {
   res.json({ success: true, data: await bomFabrics(prisma) })
+})
+
+/**
+ * Style by style: the routings that serve each style, the one a new order
+ * takes, and the orders given each — for the Routings list. Read only.
+ */
+router.get('/routings/by-style', requirePermission(MODULE, 'view'), async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25))
+  const q = typeof req.query.q === 'string' ? req.query.q : undefined
+  const show = typeof req.query.show === 'string' ? req.query.show : undefined
+  const { rows, counts, total } = await routingsByStyle(prisma, { q, show, page, limit })
+  res.json({ success: true, data: rows, counts, pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 } })
 })
 
 /** A style's orders one by one, each with where it is on its own route — for the style's routing page. */
