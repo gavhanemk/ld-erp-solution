@@ -10,6 +10,7 @@ import {
   ChevronRight,
   ExternalLink,
   Factory,
+  History,
   Lock,
   Pencil,
   Plus,
@@ -30,6 +31,7 @@ import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { Pagination } from '@/components/tables/Pagination'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { DeletedRoutings } from './DeletedRoutings'
 
 /**
  * Masters → Routings, style by style: four small counts on top (each
@@ -226,6 +228,8 @@ export function RoutingsByStyle({
   const [show, setShow] = useState<Show>('ALL')
   /** The row opened, by its key. */
   const [expanded, setExpanded] = useState<string | null>(null)
+  /** The window of deleted routings, to bring one back. */
+  const [binOpen, setBinOpen] = useState(false)
   const latest = useRef(0)
 
   useEffect(() => {
@@ -359,6 +363,9 @@ export function RoutingsByStyle({
             </button>
           )}
           <span className="text-muted-foreground ml-auto pl-2 text-xs tabular-nums">{loading && !groups ? 'Loading…' : plural(total, 'style')}</span>
+          <button type="button" className="btn-ghost h-9 px-2.5 text-xs" onClick={() => setBinOpen(true)} title="Routings deleted, to bring one back">
+            <History size={14} /> Deleted routings
+          </button>
         </div>
 
         {loading && !groups ? (
@@ -504,6 +511,14 @@ export function RoutingsByStyle({
           </>
         )}
       </div>
+      <DeletedRoutings
+        open={binOpen}
+        onClose={() => setBinOpen(false)}
+        onRestored={(m) => {
+          onMessage(m)
+          void load()
+        }}
+      />
     </div>
   )
 }

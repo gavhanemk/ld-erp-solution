@@ -7,6 +7,7 @@ import { nextStyleCode } from '../lib/masterCode'
 import { createRouting, deleteRouting, bomFabrics, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
 import { styleOrderStages } from '../services/styleOrders.service'
 import { routingsByStyle } from '../services/routingOverview.service'
+import { deletedRoutings, restoreRouting } from '../services/routingRestore.service'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import * as categoryImport from '../services/categoryImport.service'
 import * as styleImport from '../services/styleImport.service'
@@ -2227,6 +2228,11 @@ router.get('/routings/by-style', requirePermission(MODULE, 'view'), async (req, 
   res.json({ success: true, data: rows, counts, pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 } })
 })
 
+/** Routings deleted and not brought back, from their copies in the audit log. */
+router.get('/routings/deleted', requirePermission(MODULE, 'view'), async (_req, res) => {
+  res.json({ success: true, data: await deletedRoutings(prisma) })
+})
+
 /** A style's orders one by one, each with where it is on its own route — for the style's routing page. */
 router.get('/style-orders/:styleId', requirePermission(MODULE, 'view'), async (req, res) => {
   res.json({ success: true, data: await styleOrderStages(prisma, req.params.styleId) })
@@ -2239,6 +2245,12 @@ router.get('/routings/:id', requirePermission(MODULE, 'view'), async (req, res) 
 })
 
 const ROUTING_TX = { timeout: 20_000, maxWait: 10_000 }
+
+/** Brings a deleted routing back as it was, from its copy in the audit log. */
+router.post('/routings/deleted/:auditId/restore', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { routing, message } = await prisma.$transaction((tx) => restoreRouting(tx, req.params.auditId, req.user!.id), ROUTING_TX)
+  res.status(201).json({ success: true, message, data: routing })
+})
 
 router.post('/routings', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createRoutingSchema.parse(req.body)
