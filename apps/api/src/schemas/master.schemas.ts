@@ -950,6 +950,20 @@ export const createChargeTypeSchema = z.object({
    * rate instead — which is at least the number printed on the row.
    */
   percentOfValue: z.number().min(0).max(100).default(0),
+  /*
+   * How a sales document takes this charge unless its row says otherwise:
+   * the figure typed already includes GST (the GST inside it is worked out
+   * and reported, nothing is added on top), GST is added on top, or there is
+   * no GST at all (outside the taxable value). Inclusive and no-GST both leave
+   * the figure as typed, but only an inclusive charge carries GST to report.
+   */
+  taxTreatment: z.enum(['INCLUSIVE', 'EXCLUSIVE', 'NON_TAXABLE']).default('INCLUSIVE'),
+  /*
+   * On a sale, taxed at the goods' rate: billed with the goods it is part of
+   * what they are sold for (CGST Act s.15(2)(c)). Off: a supply of its own,
+   * at the GST rate above.
+   */
+  followsGoodsRate: z.boolean().default(true),
   applyOnSale: z.boolean().default(true),
   applyOnPurchase: z.boolean().default(false),
   isActive,

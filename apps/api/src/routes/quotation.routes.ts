@@ -9,6 +9,7 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
 import { createSalesOrderSchema, prepareOrder } from './sales.routes'
+import { saleChargeSchema } from '../services/salesCharges'
 
 /**
  * Quotations: a price offered before the customer orders.
@@ -17,7 +18,8 @@ import { createSalesOrderSchema, prepareOrder } from './sales.routes'
  * first step for a new buyer or a new style, and whenever price or terms
  * change (the business's answer of 9 Oct 2026). Priced exactly as an order
  * is, by the same function, so the GST and totals agree with the order it
- * becomes. Each line keeps the BOM's cost per piece as it stood when quoted,
+ * becomes — charges too (transport, packing: GST included in the figure,
+ * added on top, or none, as each row says), which the order takes over. Each line keeps the BOM's cost per piece as it stood when quoted,
  * so the margin can be read back later.
  *
  * Draft → Sent → Won (a sales order was made from it) or Lost, with why. A
@@ -58,6 +60,8 @@ export const quoteSchema = z
     salesperson: z.string().trim().max(120).optional().nullable(),
     placeOfSupplyCode: z.string().optional().nullable(),
     discountAmount: z.number().min(0).optional(),
+    /** Transport, freight, packing: from Masters → Charges, priced as the order will price them. */
+    charges: z.array(saleChargeSchema).max(20).optional(),
     terms: z.string().max(2000).optional().nullable(),
     notes: z.string().max(1000).optional().nullable(),
     /** Mark it sent on saving, rather than keep it as a draft. */
@@ -67,6 +71,11 @@ export const quoteSchema = z
   .superRefine((d, ctx) => {
     if (d.quoteDate && d.validUntil && d.validUntil < d.quoteDate) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['validUntil'], message: 'It cannot expire before it is made' })
+    }
+    // One row per kind of charge, as on an order.
+    const ids = (d.charges ?? []).map((c) => c.chargeTypeId)
+    if (new Set(ids).size !== ids.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['charges'], message: 'The same charge appears twice. Put it on one row.' })
     }
   })
 
@@ -118,9 +127,9 @@ async function bomPrice(db: Prisma.TransactionClient | typeof prisma, itemId: st
   }
 }
 
-/** Prices a quotation the way an order is priced, and adds each line's BOM cost. */
+/** Prices a quotation the way an order is priced, charges and all, and adds each line's BOM cost. */
 async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput) {
-  const { header, lines } = await prepareOrder(
+  const { header, lines, charges } = await prepareOrder(
     tx,
     createSalesOrderSchema.parse({
       customerId: data.customerId,
@@ -128,6 +137,7 @@ async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput) {
       isJobWork: data.isJobWork,
       placeOfSupplyCode: data.placeOfSupplyCode || null,
       discountAmount: data.discountAmount,
+      charges: data.charges,
       lines: data.lines.map((l) => ({
         itemId: l.itemId,
         styleCode: l.styleCode ?? null,
@@ -177,6 +187,7 @@ async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput) {
       bomCost: costs[i]?.cost ?? null,
       sortOrder: i,
     })),
+    charges,
   }
 }
 
@@ -188,6 +199,7 @@ const quoteInclude = {
     orderBy: { sortOrder: 'asc' },
     include: { item: { select: { id: true, code: true, name: true, color: true, hsnCode: true, uom: { select: { symbol: true } } } } },
   },
+  charges: { include: { chargeType: { select: { id: true, name: true } } }, orderBy: { sortOrder: 'asc' } },
   orders: { select: { id: true, soNumber: true, status: true } },
 } satisfies Prisma.SalesQuotationInclude
 
@@ -357,7 +369,7 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
 
 /** Saves a quotation inside the caller's transaction. Exported for the checks that roll it back. */
 export async function createQuote(tx: Prisma.TransactionClient, data: QuoteInput, userId: string) {
-  const { header, lines } = await priceQuote(tx, data)
+  const { header, lines, charges } = await priceQuote(tx, data)
   const quoteDate = data.quoteDate ?? new Date()
   // Priced and checked first: a refused quotation takes no number.
   const quoteNumber = await nextDocumentNumber(tx, 'QT', quoteDate)
@@ -370,6 +382,7 @@ export async function createQuote(tx: Prisma.TransactionClient, data: QuoteInput
       sentAt: data.send ? new Date() : null,
       createdById: userId,
       lines: { create: lines },
+      charges: { create: charges },
     },
     include: quoteInclude,
   })
@@ -392,8 +405,9 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
       if (before.status === 'WON' || before.status === 'LOST') {
         throw new AppError(`${before.quoteNumber} is ${before.status.toLowerCase()}, so it can no longer change. Copy it into a new one.`, 409, 'DECIDED')
       }
-      const { header, lines } = await priceQuote(tx, data)
+      const { header, lines, charges } = await priceQuote(tx, data)
       await tx.salesQuotationLine.deleteMany({ where: { quoteId: before.id } })
+      await tx.salesQuotationCharge.deleteMany({ where: { quoteId: before.id } })
       const sending = data.send && before.status === 'DRAFT'
       const after = await tx.salesQuotation.update({
         where: { id: before.id },
@@ -402,6 +416,7 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
           quoteDate: data.quoteDate ?? before.quoteDate,
           ...(sending ? { status: 'SENT', sentAt: new Date() } : {}),
           lines: { create: lines },
+          charges: { create: charges },
         },
         include: quoteInclude,
       })

@@ -23,6 +23,7 @@ import { api, ApiError, can } from '@/lib/api'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
 import { Section } from '@/components/purchase/Section'
+import { saleChargeRow } from '@/components/print/saleChargeRow'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { MaterialExceptionDialog } from './MaterialExceptionDialog'
 import { CancellationDialog } from './CancellationDialog'
@@ -54,7 +55,14 @@ export interface OrderDetailFull {
   notes: string | null
   terms: string | null
   otherCharges: string | number
-  charges: Array<{ id: string; amount: string | number; gstRate: string | number; chargeType: { name: string } }>
+  charges: Array<{
+    id: string
+    amount: string | number
+    netAmount?: string | number | null
+    taxTreatment?: 'INCLUSIVE' | 'EXCLUSIVE' | 'NON_TAXABLE' | null
+    gstRate: string | number
+    chargeType: { name: string }
+  }>
   subtotal: string | number
   discountAmount: string | number
   taxableAmount: string | number
@@ -729,7 +737,8 @@ export function SalesOrderDetailDialog({
                           ['Value', money(o.subtotal)],
                           ...(Number(o.discountAmount) > 0 ? [['Discount', `− ${money(o.discountAmount)}`]] : []),
                           ['Value before GST', money(o.taxableAmount)],
-                          ...(o.charges ?? []).map((c) => [`${c.chargeType.name} @ ${Number(c.gstRate)}%`, money(c.amount)]),
+                          // Each charge at its value without GST, as the print shows it; its GST is in the rows below.
+                          ...(o.charges ?? []).map(saleChargeRow),
                           ...(intra
                             ? [
                                 ['CGST', money(o.cgst)],

@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
+import type { ChargeTaxTreatment } from '@ld-erp/shared'
+import { saleChargeRow } from '@/components/print/saleChargeRow'
 import { StoreSheet, Fact, Eyebrow, qty, money, longDate, CODE, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
 
 interface Payload {
@@ -46,6 +48,8 @@ interface Payload {
       amount: string
       item: { code: string; name: string; color: string | null; hsnCode: string | null }
     }>
+    /** Transport, packing: the order made from this quotation carries them as they are. */
+    charges?: Array<{ id: string; amount: string; netAmount?: string | null; taxTreatment?: ChargeTaxTreatment | null; gstRate: string; chargeType: { name: string } }>
   }
 }
 
@@ -109,7 +113,9 @@ export default function PrintQuotation() {
   const totals: Array<[string, string]> = [
     ['Value', money(q.subtotal)],
     ...(Number(q.discountAmount) > 0 ? ([['Discount', `− ${money(q.discountAmount)}`]] as Array<[string, string]>) : []),
-    ['Taxable value', money(q.taxableAmount)],
+    [q.charges?.length ? 'Taxable value of the goods' : 'Taxable value', money(q.taxableAmount)],
+    // Each charge at its value without GST; its GST is in the CGST/SGST or IGST rows.
+    ...(q.charges ?? []).map(saleChargeRow),
     ...(taxMode === 'CGST_SGST' ? ([['CGST', money(q.cgst)], ['SGST', money(q.sgst)]] as Array<[string, string]>) : taxMode === 'IGST' ? ([['IGST', money(q.igst)]] as Array<[string, string]>) : []),
     ...(Math.abs(Number(q.roundOff)) >= 0.005 ? ([['Rounding', money(q.roundOff)]] as Array<[string, string]>) : []),
   ]

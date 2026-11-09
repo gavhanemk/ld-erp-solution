@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
+import type { ChargeTaxTreatment } from '@ld-erp/shared'
+import { saleChargeRow } from '@/components/print/saleChargeRow'
 import {
   StoreSheet,
   Fact,
@@ -51,7 +53,7 @@ interface Payload {
     notes: string | null
     terms: string | null
     otherCharges: string
-    charges: Array<{ id: string; amount: string; gstRate: string; cgst: string; sgst: string; igst: string; chargeType: { name: string } }>
+    charges: Array<{ id: string; amount: string; netAmount?: string | null; taxTreatment?: ChargeTaxTreatment | null; gstRate: string; cgst: string; sgst: string; igst: string; chargeType: { name: string } }>
     subtotal: string
     discountAmount: string
     taxableAmount: string
@@ -209,7 +211,11 @@ export default function PrintSalesOrder() {
     const base = Number(l.amount) * factor
     addRate(rate, base, (base * rate) / 100)
   }
-  for (const ch of order.charges) addRate(Number(ch.gstRate), Number(ch.amount), Number(ch.cgst) + Number(ch.sgst) + Number(ch.igst))
+  // A charge's value without GST (its GST included or added); one with no GST is outside the taxable value.
+  for (const ch of order.charges) {
+    if (ch.taxTreatment === 'NON_TAXABLE') continue
+    addRate(Number(ch.gstRate), Number(ch.netAmount ?? ch.amount), Number(ch.cgst) + Number(ch.sgst) + Number(ch.igst))
+  }
   const gstSummary = [...byRate.entries()]
     .map(([rate, r]) => ({ rate, taxable: r.taxable, tax: r.tax }))
     .filter((r) => r.taxable > 0)
@@ -234,14 +240,9 @@ export default function PrintSalesOrder() {
   const totalRows: Array<[string, string]> = [
     ['Value', money(order.subtotal)],
     ...(Number(order.discountAmount) > 0 ? ([['Discount', `− ${money(order.discountAmount)}`]] as Array<[string, string]>) : []),
-    ['Taxable value', money(order.taxableAmount)],
-    ...order.charges.map(
-      (ch) =>
-        [
-          `${ch.chargeType.name} (GST ${Number(ch.gstRate)}% ${money(Number(ch.cgst) + Number(ch.sgst) + Number(ch.igst))})`,
-          money(ch.amount),
-        ] as [string, string],
-    ),
+    [order.charges.length ? 'Taxable value of the goods' : 'Taxable value', money(order.taxableAmount)],
+    // Each charge at its value without GST; its GST is in the CGST/SGST or IGST rows.
+    ...order.charges.map(saleChargeRow),
     ...(taxMode === 'CGST_SGST'
       ? ([
           ['CGST', money(order.cgst)],

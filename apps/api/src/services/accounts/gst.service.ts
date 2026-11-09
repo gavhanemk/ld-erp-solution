@@ -1,6 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import { AppError } from '../../middleware/errorHandler'
-import { chargeShares } from '../salesCharges'
+import { chargeRowOf, chargeShares, type ChargeRow } from '../salesCharges'
 import { uqcOf } from '../../reports/definitions/itc04-shared'
 import { istDay, r2 } from './books.service'
 
@@ -68,10 +68,14 @@ interface OutDoc {
   invoice?: { number: string; date: string; value: number } | null
 }
 
-/** The rate rows and HSN rows of one document, charges folded in at the goods' rate. */
+/**
+ * The rate rows and HSN rows of one document, charges folded in at the goods'
+ * rate. A charge counts at its value without GST (one typed with GST included
+ * counts its value, not its full figure); one with no GST counts nowhere here.
+ */
 function shape(
   lines: Array<{ hsnCode: string | null; gstRate: unknown; qty: unknown; taxableValue: unknown; cgst: unknown; sgst: unknown; igst: unknown; item: { name: string; uom: { symbol: string } | null } }>,
-  charges: Array<{ name: string; gstRate: number; amount: number; cgst: number; sgst: number; igst: number }>,
+  charges: ChargeRow[],
 ) {
   const rates = new Map<number, RateRow>()
   const hsn = new Map<string, HsnRow>()
@@ -87,7 +91,10 @@ function shape(
     addTo(h, g)
     hsn.set(key, h)
   })
-  for (const c of charges) addTo(rateOf(c.gstRate), { taxable: c.amount, igst: c.igst, cgst: c.cgst, sgst: c.sgst })
+  for (const c of charges) {
+    if (c.treatment === 'NON_TAXABLE') continue
+    addTo(rateOf(c.gstRate), { taxable: c.netAmount, igst: c.igst, cgst: c.cgst, sgst: c.sgst })
+  }
   for (const sh of chargeShares(goods, charges)) {
     const key = [...hsn.keys()].find((k) => k.startsWith(`${sh.hsn}|${sh.rate}|`)) ?? `${sh.hsn}|${sh.rate}|OTH`
     const h = hsn.get(key) ?? { hsn: sh.charge ? '' : sh.hsn, desc: sh.hsn, uqc: 'OTH', qty: 0, rate: sh.rate, ...zero() }
@@ -113,7 +120,7 @@ async function outward(tx: Tx, from: string, to: string, ourState: string) {
         placeOfSupplyCode: true,
         customer: { select: { name: true, gstin: true, billingStateCode: true } },
         lines: { select: lineSelect },
-        charges: { select: { amount: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } } },
+        charges: { select: { amount: true, netAmount: true, taxTreatment: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } } },
       },
     }),
     tx.creditNote.findMany({
@@ -141,7 +148,7 @@ async function outward(tx: Tx, from: string, to: string, ourState: string) {
       continue
     }
     const pos = posOf(inv.placeOfSupplyCode, inv.customer)
-    const charges = inv.charges.filter((c) => Number(c.amount) > 0).map((c) => ({ name: c.chargeType.name, gstRate: Number(c.gstRate), amount: Number(c.amount), cgst: Number(c.cgst), sgst: Number(c.sgst), igst: Number(c.igst) }))
+    const charges = inv.charges.filter((c) => Number(c.amount) > 0).map(chargeRowOf)
     docs.push({
       id: inv.id,
       number: inv.invoiceNumber,

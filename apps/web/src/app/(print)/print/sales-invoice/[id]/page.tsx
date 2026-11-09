@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
+import type { ChargeTaxTreatment } from '@ld-erp/shared'
+import { saleChargeRow } from '@/components/print/saleChargeRow'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { lineDetails } from '@/components/sales/OrderLinesView'
 import {
@@ -99,7 +101,7 @@ interface Payload {
       item: { code: string; name: string; color: string | null; uom: { symbol: string } | null }
       soLine: { styleCode: string | null; color: string | null; gender: string | null; fabric: string | null; printName: string | null } | null
     }>
-    charges: Array<{ id: string; amount: string; gstRate: string; cgst: string; sgst: string; igst: string; chargeType: { name: string } }>
+    charges: Array<{ id: string; amount: string; netAmount?: string | null; taxTreatment?: ChargeTaxTreatment | null; gstRate: string; cgst: string; sgst: string; igst: string; chargeType: { name: string } }>
     createdBy: { name: string } | null
     cancelledBy: { name: string } | null
   }
@@ -208,8 +210,9 @@ export default function PrintSalesInvoice() {
   const totalRows: Array<[string, string]> = [
     ['Value of goods', money(inv.subtotal)],
     ...(Number(inv.discountAmount) > 0 ? ([['Discount', `− ${money(inv.discountAmount)}`]] as Array<[string, string]>) : []),
-    ['Taxable value', money(inv.taxableAmount)],
-    ...inv.charges.map((ch) => [`${ch.chargeType.name} @ ${Number(ch.gstRate)}%`, money(ch.amount)] as [string, string]),
+    [inv.charges.length ? 'Taxable value of the goods' : 'Taxable value', money(inv.taxableAmount)],
+    // Each charge at its value without GST; its GST is in the CGST/SGST or IGST rows.
+    ...inv.charges.map(saleChargeRow),
     ...(taxMode === 'CGST_SGST'
       ? ([
           ['CGST', money(inv.cgst)],

@@ -5023,11 +5023,23 @@ model ChargeType {
   percentOfValue  Decimal  @default(0) @db.Decimal(5, 2)
   applyOnSale     Boolean  @default(true)
   applyOnPurchase Boolean  @default(false)
+  /// How a sales document takes this charge unless its row says otherwise:
+  /// the figure typed already includes GST (INCLUSIVE: the GST inside it
+  /// is worked out and reported, nothing is added on top), GST is added on
+  /// top (EXCLUSIVE), or there is no GST at all (NON_TAXABLE: outside the
+  /// value GST is worked out on). Every charge type started INCLUSIVE on
+  /// 9 Nov 2026: a charge is typed as the final figure, as on purchases.
+  taxTreatment     ChargeTaxTreatment @default(INCLUSIVE)
+  /// On a sale, taxed at the goods' rate: part of the value of the goods it
+  /// is billed with (CGST Act s.15(2)(c)), shared across their rates by
+  /// value. Off: a supply of its own, at defaultGstRate.
+  followsGoodsRate Boolean            @default(true)
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
 
   salesCharges         SalesInvoiceCharge[]
   salesOrderCharges    SalesOrderCharge[]
+  salesQuotationCharges SalesQuotationCharge[]
   purchaseCharges      PurchaseInvoiceCharge[]
   purchaseOrderCharges PurchaseOrderCharge[]
 
@@ -5041,6 +5053,14 @@ model SalesInvoiceCharge {
   chargeTypeId String
   chargeType   ChargeType   @relation(fields: [chargeTypeId], references: [id])
   amount       Decimal      @db.Decimal(12, 2)
+  /// How GST sits on the amount typed (see ChargeType.taxTreatment). Rows
+  /// saved before 9 Nov 2026 were all priced with GST added on top.
+  taxTreatment ChargeTaxTreatment @default(EXCLUSIVE)
+  /// The charge without its GST: what its income ledger is credited with
+  /// and, unless NON_TAXABLE, what its GST is worked out on. The amount
+  /// itself when GST is added on top or there is none; the amount less the
+  /// GST inside it when the amount typed includes GST.
+  netAmount    Decimal            @db.Decimal(12, 2)
   gstRate      Decimal      @default(0) @db.Decimal(5, 2)
   cgst         Decimal      @default(0) @db.Decimal(12, 2)
   sgst         Decimal      @default(0) @db.Decimal(12, 2)
@@ -5087,6 +5107,14 @@ model SalesOrderCharge {
   chargeTypeId String
   chargeType   ChargeType @relation(fields: [chargeTypeId], references: [id])
   amount       Decimal    @db.Decimal(12, 2)
+  /// How GST sits on the amount typed (see ChargeType.taxTreatment). Rows
+  /// saved before 9 Nov 2026 were all priced with GST added on top.
+  taxTreatment ChargeTaxTreatment @default(EXCLUSIVE)
+  /// The charge without its GST: what its income ledger is credited with
+  /// and, unless NON_TAXABLE, what its GST is worked out on. The amount
+  /// itself when GST is added on top or there is none; the amount less the
+  /// GST inside it when the amount typed includes GST.
+  netAmount    Decimal            @db.Decimal(12, 2)
   gstRate      Decimal    @default(0) @db.Decimal(5, 2)
   cgst         Decimal    @default(0) @db.Decimal(12, 2)
   sgst         Decimal    @default(0) @db.Decimal(12, 2)
@@ -5170,7 +5198,8 @@ model SalesQuotation {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
-  lines  SalesQuotationLine[]
+  lines   SalesQuotationLine[]
+  charges SalesQuotationCharge[]
   orders SalesOrder[]         @relation("SOFromQuote")
 
   @@index([customerId])
@@ -5199,6 +5228,33 @@ model SalesQuotationLine {
 
   @@index([quoteId])
   @@map("sales_quotation_lines")
+}
+
+/// A charge on a quotation (transport, packing), priced exactly as it will
+/// be on the order the quotation becomes, and carried onto that order.
+model SalesQuotationCharge {
+  id           String             @id @default(cuid())
+  quoteId      String
+  quote        SalesQuotation     @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  chargeTypeId String
+  chargeType   ChargeType         @relation(fields: [chargeTypeId], references: [id])
+  amount       Decimal            @db.Decimal(12, 2)
+  /// How GST sits on the amount typed (see ChargeType.taxTreatment).
+  taxTreatment ChargeTaxTreatment @default(EXCLUSIVE)
+  /// The charge without its GST: what its income ledger is credited with
+  /// and, unless NON_TAXABLE, what its GST is worked out on. The amount
+  /// itself when GST is added on top or there is none; the amount less the
+  /// GST inside it when the amount typed includes GST.
+  netAmount    Decimal            @db.Decimal(12, 2)
+  gstRate      Decimal            @default(0) @db.Decimal(5, 2)
+  cgst         Decimal            @default(0) @db.Decimal(12, 2)
+  sgst         Decimal            @default(0) @db.Decimal(12, 2)
+  igst         Decimal            @default(0) @db.Decimal(12, 2)
+  sortOrder    Int                @default(0)
+
+  @@unique([quoteId, chargeTypeId])
+  @@index([quoteId])
+  @@map("sales_quotation_charges")
 }
 
 /// Issued to a customer when goods come back or a bill is reduced. Without it a
@@ -5354,6 +5410,13 @@ enum PurchaseAdjustmentDoc {
 /// supplier's filing, the month, and whether they ever issued a document. The
 /// purchase office cannot answer it and must not be asked to, so this column
 /// starts at NOT_REVIEWED and only an accounts hand may move it.
+/// How GST sits on a charge billed with a sale (see ChargeType.taxTreatment).
+enum ChargeTaxTreatment {
+  INCLUSIVE
+  EXCLUSIVE
+  NON_TAXABLE
+}
+
 enum PurchaseGstTreatment {
   /// The default. Accounts has not looked at this yet.
   NOT_REVIEWED

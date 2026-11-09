@@ -1,7 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import type { ReportDefinition, ReportFilter } from '../types'
 import { byMonth, dateRangeFilters, dayRange, mean, round2, searchFilter, topWithRest } from './shared'
-import { chargeShares } from '../../services/salesCharges'
+import { chargeRowOf, chargeShares, type ChargeRow } from '../../services/salesCharges'
 
 /**
  * The Sales reports. Each is one register a person would otherwise add up by
@@ -639,7 +639,7 @@ export const outwardHsnSummary: ReportDefinition = {
       }),
       tx.salesInvoiceCharge.findMany({
         where: { invoice: billed, amount: { gt: 0 } },
-        select: { invoiceId: true, amount: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } },
+        select: { invoiceId: true, netAmount: true, taxTreatment: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } },
       }),
     ])
     const m = new Map<string, { hsnCode: string; rate: number; qty: number; taxable: number; cgst: number; sgst: number; igst: number; credited: number }>()
@@ -659,16 +659,18 @@ export const outwardHsnSummary: ReportDefinition = {
     // Charges billed on invoices (transport, packing) are taxed at the goods'
     // rate, so they count under those goods' HSN codes, invoice by invoice, as
     // the invoice prints them. One billed at a rate of its own keeps its name.
+    // Each adds its value without GST (a charge typed with GST included adds
+    // its value, not its full figure); one with no GST adds nothing here.
     const goodsOf = new Map<string, Array<{ hsnCode: string | null; gstRate: number; taxable: number; cgst: number; sgst: number; igst: number }>>()
     for (const l of lines) {
       const list = goodsOf.get(l.invoiceId) ?? []
       list.push({ hsnCode: l.hsnCode, gstRate: Number(l.gstRate), taxable: Number(l.taxableValue), cgst: Number(l.cgst), sgst: Number(l.sgst), igst: Number(l.igst) })
       goodsOf.set(l.invoiceId, list)
     }
-    const chargesOf = new Map<string, Array<{ name: string; gstRate: number; amount: number; cgst: number; sgst: number; igst: number }>>()
+    const chargesOf = new Map<string, ChargeRow[]>()
     for (const c of charges) {
       const list = chargesOf.get(c.invoiceId) ?? []
-      list.push({ name: c.chargeType.name, gstRate: Number(c.gstRate), amount: Number(c.amount), cgst: Number(c.cgst), sgst: Number(c.sgst), igst: Number(c.igst) })
+      list.push(chargeRowOf(c))
       chargesOf.set(c.invoiceId, list)
     }
     let chargeRows = 0

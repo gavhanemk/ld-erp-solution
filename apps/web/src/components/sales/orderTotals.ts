@@ -1,21 +1,17 @@
 /**
- * A sales order's figures, worked out the way the server works them out
- * (prepareOrder and the charges' pricing): the same steps in the same order,
- * rounded at the same points, so the total the form shows is the total saved.
- * Kept apart from the form so it can be checked against the server.
+ * A quotation's or a sales order's figures, from the one sales engine
+ * (priceSale in @ld-erp/shared) the server prices them with on save, so the
+ * total the form shows is the total saved — charges included, each with its
+ * GST included in the figure, added on top, or none, as its row says.
  *
- *   gross (pieces × rate) − line discounts = value; − the order's discount =
- *   taxable value of the goods, spread back across the lines for their GST;
- *   + charges, each taxed at the goods' rate (chargeShare.ts); + GST; + other
- *   charges (no GST); rounded to the rupee.
+ * This file only turns the form's lines into the engine's: a job charge's
+ * SAC rate, a garment's HSN price band, an item's own rate.
  */
-import { priceCharge, type GoodsAtRate } from './chargeShare'
+import { priceSale, type ChargeTaxTreatment, type PricedSaleCharge, type SaleLineInput } from '@ld-erp/shared'
 
 /** Job work is a service: SAC 9988, at 5% unless typed otherwise or set in the HSN master. */
 export const JOB_WORK_SAC = '9988'
 export const JOB_WORK_GST = 5
-
-const round2 = (n: number) => Math.round(n * 100) / 100
 
 /** The rate a job charge's SAC carries in the HSN master — the code, else its longest listed heading. */
 export function sacRateIn(index: Map<string, { gstRate: string | number }>, code: string | null | undefined): number {
@@ -42,97 +38,69 @@ export interface TotalsLine {
   itemRate?: number | null
 }
 
+/** A charge as the form has it: its figure, how GST sits on it, and the rate it falls back on. */
+export interface TotalsCharge {
+  key: string
+  amount: number
+  treatment: ChargeTaxTreatment
+  /** Taxed at the goods' rate (the usual case); false: at ownRate, a supply of its own. */
+  followsGoodsRate: boolean
+  /** The charge type's own rate: used when it does not follow the goods, or there are no goods yet. */
+  ownRate: number
+}
+
 export function orderTotals(a: {
   lines: TotalsLine[]
   isJobWork: boolean
   hsnIndex: Map<string, { gstRate: string | number }>
   billDiscount: number
-  /** Only charges with a type and an amount are priced; the master's rate is used only with no goods to follow. */
-  charges: Array<{ amount: number; fallbackRate: number }>
+  /** Only charges with a type and an amount are priced. */
+  charges: TotalsCharge[]
   /** Inside the state, across it, or not known yet (no customer). */
   intra: boolean | undefined
   otherCharges: number
   brokerPct: number
 }) {
-  const priced = a.lines.map((l) => {
-    const disc = Math.min(100, Math.max(0, l.disc || 0))
-    const gross = l.qty * l.rate
-    const raw = gross * (1 - disc / 100)
-    return { ...l, disc, gross, raw, amount: round2(raw) }
-  })
-  const gross = round2(priced.reduce((s, p) => s + p.gross, 0))
-  const subtotal = round2(priced.reduce((s, p) => s + p.raw, 0))
-  const lineDiscount = round2(gross - subtotal)
-  const discount = round2(Math.min(a.billDiscount || 0, subtotal))
-  const taxable = round2(subtotal - discount)
-  const factor = subtotal > 0 ? taxable / subtotal : 1
-
-  const byRate = new Map<number, { taxable: number; tax: number }>()
-  const addRate = (rate: number, base: number, tax: number) => {
-    const r = byRate.get(rate) ?? { taxable: 0, tax: 0 }
-    r.taxable += base
-    r.tax += tax
-    byRate.set(rate, r)
+  const rateOf = (l: TotalsLine): Pick<SaleLineInput, 'rate' | 'band'> => {
+    if (l.taxExempt) return { rate: 0 }
+    if (a.isJobWork) return { rate: l.jobGst !== '' ? Number(l.jobGst) || 0 : sacRateIn(a.hsnIndex, l.jobHsn) }
+    if (l.hsn) {
+      const num = (v: string | number | null) => (v == null || v === '' ? null : Number(v))
+      return { band: { gstRate: Number(l.hsn.gstRate), priceLimit: num(l.hsn.priceLimit), rateAbove: num(l.hsn.rateAbove) } }
+    }
+    return { rate: l.itemRate ?? null }
   }
-
-  let goodsTax = 0
-  const goods: GoodsAtRate[] = []
-  const lines = priced.map((p) => {
-    // Garments carry one rate up to a price per piece and another above it.
-    let gst: number | null = null
-    if (p.taxExempt) gst = 0
-    else if (a.isJobWork) gst = p.jobGst !== '' ? Number(p.jobGst) || 0 : sacRateIn(a.hsnIndex, p.jobHsn)
-    else if (p.hsn) {
-      const perPiece = p.rate * (1 - p.disc / 100) * factor
-      const { gstRate, priceLimit, rateAbove } = p.hsn
-      gst = priceLimit != null && rateAbove != null && perPiece > Number(priceLimit) ? Number(rateAbove) : Number(gstRate)
-    } else if (p.itemRate != null) gst = p.itemRate
-    const base = p.raw * factor
-    const tax = base * ((gst ?? 0) / 100)
-    goodsTax += tax
-    if (gst != null && base > 0) addRate(gst, base, tax)
-    if (gst != null) goods.push({ taxable: base, gstRate: gst })
-    return { gst, gross: p.gross, amount: p.amount }
+  const r = priceSale({
+    lines: a.lines.map((l) => ({ qty: l.qty, price: l.rate, discountPct: l.disc, ...rateOf(l) })),
+    orderDiscount: a.billDiscount,
+    charges: a.charges,
+    otherCharges: a.otherCharges,
+    intra: a.intra,
+    brokeragePct: a.brokerPct,
   })
-
-  // Each charge at the goods' rate, its shares' tax split and rounded on its own, as stored.
-  const charges = a.charges.map((c) => {
-    const amount = round2(c.amount || 0)
-    const priced = priceCharge(amount, goods, c.fallbackRate, a.intra)
-    return { amount, ...priced }
-  })
-  const priceable = charges.filter((c) => c.amount > 0)
-  const chargeTotal = round2(priceable.reduce((s, c) => s + c.amount, 0))
-  for (const c of priceable) for (const part of c.parts) addRate(part.gstRate, part.amount, part.tax)
-
-  const cgst = a.intra ? round2(goodsTax / 2 + priceable.reduce((s, c) => s + c.cgst, 0)) : 0
-  const sgst = a.intra ? round2(goodsTax / 2 + priceable.reduce((s, c) => s + c.sgst, 0)) : 0
-  const igst = a.intra === false ? round2(goodsTax + priceable.reduce((s, c) => s + c.igst, 0)) : 0
-  const taxTotal = a.intra === undefined ? round2(goodsTax + priceable.reduce((s, c) => s + c.tax, 0)) : round2(cgst + sgst + igst)
-  const other = round2(a.otherCharges || 0)
-  const beforeRounding = taxable + chargeTotal + taxTotal + other
-  const total = Math.round(beforeRounding)
-
   return {
-    lines,
-    charges,
-    gross,
-    lineDiscount,
-    subtotal,
-    discount,
-    taxable,
-    chargeTotal,
-    gstByRate: [...byRate.entries()]
-      .map(([rate, r]) => ({ rate, taxable: round2(r.taxable), tax: round2(r.tax) }))
-      .filter((r) => r.taxable > 0)
-      .sort((x, y) => x.rate - y.rate),
-    cgst,
-    sgst,
-    igst,
-    taxTotal,
-    other,
-    roundOff: round2(total - beforeRounding),
-    total,
-    brokerage: round2((taxable * (a.brokerPct || 0)) / 100),
+    lines: r.lines.map((l) => ({ gst: l.gstRate, gross: l.gross, amount: l.amount })),
+    /** Each charge priced: its GST, its value without GST, what it adds to the bill. */
+    charges: r.charges,
+    chargeByKey: new Map<string, PricedSaleCharge>(r.charges.map((c) => [c.key, c])),
+    gross: r.gross,
+    lineDiscount: r.lineDiscount,
+    subtotal: r.subtotal,
+    discount: r.discount,
+    /** The goods after every discount. */
+    taxable: r.goodsTaxable,
+    /** The charges GST is worked out on, without their GST. */
+    chargeTaxable: r.chargeTaxable,
+    /** The charges with no GST. */
+    chargeUntaxed: r.chargeUntaxed,
+    gstByRate: r.byRate,
+    cgst: r.cgst,
+    sgst: r.sgst,
+    igst: r.igst,
+    taxTotal: r.tax,
+    other: r.otherCharges,
+    roundOff: r.roundOff,
+    total: r.total,
+    brokerage: r.brokerage,
   }
 }

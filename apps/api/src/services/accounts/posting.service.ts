@@ -182,7 +182,9 @@ async function planSalesInvoice(tx: Tx, id: string): Promise<Plan | null> {
   for (const c of inv.charges) {
     // The mill's own trims billed on a job-work order are a sale of goods.
     const ledger = c.ownMaterial ? await keyedLedgerId(tx, 'SALES') : await chargeLedger(tx, 'SALES', c.chargeType)
-    L.add(ledger, -n(c.amount), cc)
+    // Its value without GST: for a charge typed with GST included, the GST
+    // inside it goes to the output GST ledgers with the rest, not here.
+    L.add(ledger, -n(c.netAmount), cc)
   }
   L.add(await keyedLedgerId(tx, 'SALES_OTHER_CHARGES'), -n(inv.otherCharges), cc)
   L.add(await keyedLedgerId(tx, 'OUTPUT_CGST'), -n(inv.cgst))

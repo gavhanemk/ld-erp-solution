@@ -6,7 +6,7 @@ import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { postWithin } from '../services/accounts/posting.service'
-import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
+import { nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { findHsn, gstRateFor, loadHsnIndex } from '../lib/hsn'
 import { closeCheck, orderReconciliation } from '../services/reconciliation.service'
 import { GST_STATES, stateName } from '../lib/gstStates'
@@ -29,7 +29,8 @@ import {
   creditPosition,
   type ConfirmOutcome,
 } from '../services/salesOrder.service'
-import { priceSalesCharges } from '../services/salesCharges'
+import { priceSale, type SaleLineInput } from '@ld-erp/shared'
+import { chargeRows, resolveSaleCharges, saleChargeSchema } from '../services/salesCharges'
 import { winQuote } from '../services/quotation.service'
 import { workStarted } from '../services/manufacturing.service'
 import { closeMo } from './production.routes'
@@ -124,18 +125,11 @@ const salesOrderBaseSchema = z.object({
   currency: z.string().length(3).optional(),
   notes: z.string().max(1000).optional().nullable(),
   terms: z.string().max(2000).optional().nullable(),
-  /** Transport, freight, packing: picked from Masters → Charges, each taxed at its own rate. */
-  charges: z
-    .array(
-      z.object({
-        chargeTypeId: z.string().min(1, 'Pick the charge'),
-        amount: z.number().min(0, 'A charge cannot be negative'),
-        /** The GST on this charge; the charge master's rate when not sent. */
-        gstRate: z.number().min(0).max(100).optional().nullable(),
-      }),
-    )
-    .max(20)
-    .optional(),
+  /**
+   * Transport, freight, packing: picked from Masters → Charges, each with GST
+   * included in the figure, added on top, or none, as its row says.
+   */
+  charges: z.array(saleChargeSchema).max(20).optional(),
   /** Added after tax and carrying none of its own. */
   otherCharges: z.number().min(0).optional(),
   /** The quotation this order was won from: it is marked won when the order is saved. */
@@ -764,67 +758,51 @@ export async function prepareOrder(
 
   const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, data.customerId, data.placeOfSupplyCode)
 
-  // Line discounts first, then a discount on the whole bill. LD prices at
-  // invoice level, so taxing before that discount would overstate the GST.
-  const lineTotals = data.lines.map((l) => l.totalQty * l.unitPrice * (1 - (l.discount ?? 0) / 100))
-  const subtotal = round2(lineTotals.reduce((s, n) => s + n, 0))
-
-  const discountAmount = round2(Math.min(data.discountAmount ?? 0, subtotal))
-  const taxableAmount = round2(subtotal - discountAmount)
-
-  // The bill-level discount is spread across the lines in proportion, so each
-  // line is taxed on what the customer is actually being charged for it.
-  const discountFactor = subtotal > 0 ? taxableAmount / subtotal : 1
-
-  // The rate comes from the item's HSN code, at the price each piece is
-  // actually sold for: ready-made garments change rate above a price per
-  // piece. An item whose code is not in the HSN master keeps its own rate.
+  // Each line's GST rate. A garment's comes from its HSN code, read at the
+  // price each piece is actually sold for (ready-made garments change rate
+  // above a price per piece), which the pricing works out once the discounts
+  // are known. An item whose code is not in the HSN master keeps its own rate.
   const hsnIndex = await loadHsnIndex(tx)
   // A job charge is a service: its own SAC and rate, not the garment's.
   const jobCode = (l: (typeof data.lines)[number]) => l.jobHsnCode?.trim() || JOB_WORK_SAC
-  const gstRates = data.lines.map((l) => {
-    if (l.taxExempt) return 0
+  const rateOf = (l: (typeof data.lines)[number]): Pick<SaleLineInput, 'rate' | 'band'> => {
+    if (l.taxExempt) return { rate: 0 }
     if (data.isJobWork) {
-      if (l.jobGstRate != null) return l.jobGstRate
+      if (l.jobGstRate != null) return { rate: l.jobGstRate }
       const sac = findHsn(hsnIndex, jobCode(l))
-      return sac ? gstRateFor(sac) : JOB_WORK_DEFAULT_GST
+      return { rate: sac ? gstRateFor(sac) : JOB_WORK_DEFAULT_GST }
     }
     const item = itemById.get(l.itemId)!
     const hsn = findHsn(hsnIndex, item.hsnCode)
     if (hsn) {
-      const perPiece = l.unitPrice * (1 - (l.discount ?? 0) / 100) * discountFactor
-      return gstRateFor(hsn, perPiece)
+      return { band: { gstRate: Number(hsn.gstRate), priceLimit: hsn.priceLimit != null ? Number(hsn.priceLimit) : null, rateAbove: hsn.rateAbove != null ? Number(hsn.rateAbove) : null } }
     }
-    if (item.taxRate) return Number(item.taxRate.rate)
+    if (item.taxRate) return { rate: Number(item.taxRate.rate) }
     throw new AppError(`${item.code} has no HSN code or GST rate. Set one on the item before ordering it.`, 400, 'NO_GST_RATE')
-  })
-
-  let cgst = 0
-  let sgst = 0
-  let igst = 0
-  data.lines.forEach((_line, i) => {
-    const tax = lineTotals[i] * discountFactor * (gstRates[i] / 100)
-    if (isIntraState) {
-      cgst += tax / 2
-      sgst += tax / 2
-    } else {
-      igst += tax
-    }
-  })
-  // Charges: each from the charge master, taxed at the goods' rate.
-  const goods = data.lines.map((_l, i) => ({ taxable: lineTotals[i] * discountFactor, gstRate: gstRates[i] }))
-  const charges = await priceSalesCharges(tx, data.charges, isIntraState, goods)
-  const chargeTotal = round2(charges.reduce((s, c) => s + c.amount, 0))
-  cgst = round2(cgst + charges.reduce((s, c) => s + c.cgst, 0))
-  sgst = round2(sgst + charges.reduce((s, c) => s + c.sgst, 0))
-  igst = round2(igst + charges.reduce((s, c) => s + c.igst, 0))
-  const otherCharges = round2(data.otherCharges ?? 0)
-
-  const { rounded, roundOff } = applyRoundOff(taxableAmount + chargeTotal + cgst + sgst + igst + otherCharges)
+  }
 
   // Brokerage falls on the order value, not on the tax.
   const brokeragePercent = data.brokeragePercent ?? (await defaultBrokerage(tx, data.customerId, data.brokerId))
-  const brokerageAmount = round2((taxableAmount * (brokeragePercent ?? 0)) / 100)
+
+  // Priced by the one sales engine the quotation and order forms run too:
+  // line discounts first, then the discount on the whole bill spread across
+  // the lines by value (LD prices at invoice level, so taxing before it would
+  // overstate the GST); each line's GST at its rate; each charge as its row
+  // says (GST included, added on top, or none); the other charges; rounded.
+  const resolvedCharges = await resolveSaleCharges(tx, data.charges)
+  const priced = priceSale({
+    lines: data.lines.map((l) => ({ qty: l.totalQty, price: l.unitPrice, discountPct: l.discount ?? 0, ...rateOf(l) })),
+    orderDiscount: data.discountAmount ?? 0,
+    charges: resolvedCharges,
+    otherCharges: data.otherCharges ?? 0,
+    intra: isIntraState,
+    brokeragePct: brokeragePercent ?? 0,
+  })
+  const charges = chargeRows(resolvedCharges, priced.charges)
+  const { subtotal, goodsTaxable: taxableAmount, cgst, sgst, igst, roundOff, otherCharges } = priced
+  const discountAmount = priced.discount
+  const rounded = priced.total
+  const brokerageAmount = priced.brokerage
 
   const header = {
     customerId: data.customerId,
@@ -873,10 +851,10 @@ export async function prepareOrder(
       totalQty: l.totalQty,
       unitPrice: l.unitPrice,
       discount: l.discount ?? 0,
-      gstRate: gstRates[i],
+      gstRate: priced.lines[i].gstRate ?? 0,
       hsnCode: data.isJobWork ? jobCode(l) : (item.hsnCode ?? null),
       bGradeRate: l.bGradeRate ?? null,
-      amount: round2(lineTotals[i]),
+      amount: priced.lines[i].amount,
       pendingQty: l.totalQty,
       sortOrder: i,
       sizes: l.sizes?.length

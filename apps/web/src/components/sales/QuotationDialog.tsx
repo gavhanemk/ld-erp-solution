@@ -14,7 +14,9 @@ import { BomFormDialog, type Bom } from '@/components/masters/BomFormDialog'
 import { BRAND_LABEL, styleFormFields } from '@/components/masters/styleFormFields'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
-import type { CustomerOption } from './CustomerPanel'
+import type { CustomerContext, CustomerOption } from './CustomerPanel'
+import { orderTotals } from './orderTotals'
+import { SaleCharges, chargeDraftsOf, chargesToPrice, chargesToSave, type SaleChargeDraft, type SaleChargeType } from './SaleCharges'
 
 interface ItemOption {
   id: string
@@ -75,6 +77,7 @@ interface SavedQuote {
   terms: string | null
   notes: string | null
   lines: Array<{ itemId: string; styleCode: string | null; color: string | null; description: string | null; qty: string | number; unitPrice: string | number; discount: string | number }>
+  charges?: Array<{ chargeTypeId: string; amount: string | number; taxTreatment?: 'INCLUSIVE' | 'EXCLUSIVE' | 'NON_TAXABLE' | null }>
 }
 
 let lineKey = 0
@@ -86,7 +89,6 @@ const inDays = (n: number) => {
   return d.toISOString().slice(0, 10)
 }
 const day = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : '')
-const round2 = (n: number) => Math.round(n * 100) / 100
 const inr = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const same = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase()
 
@@ -191,6 +193,13 @@ export function QuotationDialog({
   const [terms, setTerms] = useState('')
   const [notes, setNotes] = useState('')
   const [lines, setLines] = useState<LineDraft[]>([blank()])
+  // Transport, freight, packing: the same charges box and pricing as the order.
+  const [chargeTypes, setChargeTypes] = useState<SaleChargeType[]>([])
+  const [charges, setCharges] = useState<SaleChargeDraft[]>([])
+  // For the SAC rate of a job-work quotation's lines, as the server reads it.
+  const [hsnIndex, setHsnIndex] = useState<Map<string, { gstRate: string | number }>>(new Map())
+  // How the customer is taxed: CGST + SGST within the state, IGST across.
+  const [context, setContext] = useState<CustomerContext | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState<'draft' | 'send' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -226,19 +235,27 @@ export function QuotationDialog({
     setTerms('')
     setNotes('')
     setLines([blank()])
+    setCharges([])
     setLoading(true)
     void (async () => {
       try {
-        const [c, it, st, q] = await Promise.all([
+        const [c, it, st, q, ct, hsn] = await Promise.all([
           fetchEveryPage<CustomerOption>((p) => `/masters/customers?active=true&limit=200&page=${p}`),
           fetchEveryPage<ItemOption>((p) => `/masters/items?type=FINISHED_GOOD&active=true&limit=200&page=${p}&sort=name&order=asc`),
           api.get<{ data: StyleOption[] }>('/sales/quotations/styles'),
           quoteId ? api.get<{ data: SavedQuote }>(`/sales/quotations/${quoteId}`) : Promise.resolve(null),
+          // A failure costs the charges box, not the form.
+          fetchEveryPage<SaleChargeType>((p) => `/masters/charge-types?limit=200&page=${p}`).catch(() => ({ rows: [] as SaleChargeType[] })),
+          fetchEveryPage<{ code: string; gstRate: string | number; isActive?: boolean }>((p) => `/masters/hsn-codes?limit=200&page=${p}`).catch(() => ({
+            rows: [] as Array<{ code: string; gstRate: string | number; isActive?: boolean }>,
+          })),
         ])
         if (!alive) return
         setCustomers([...c.rows].sort((x, y) => x.name.localeCompare(y.name)))
         setItems(it.rows)
         setStyles(st.data)
+        setChargeTypes(ct.rows.filter((x) => x.isActive && x.applyOnSale).sort((x, y) => x.name.localeCompare(y.name)))
+        setHsnIndex(new Map(hsn.rows.filter((h) => h.isActive !== false).map((h) => [h.code.replace(/\s+/g, ''), h])))
         if (q) {
           const s = q.data
           setSaved(s)
@@ -251,6 +268,7 @@ export function QuotationDialog({
           setBillDiscount(Number(s.discountAmount) > 0 ? String(Number(s.discountAmount)) : '')
           setTerms(s.terms ?? '')
           setNotes(s.notes ?? '')
+          setCharges(chargeDraftsOf(s.charges))
           setLines(
             s.lines.map((l) => ({
               key: `q${++lineKey}`,
@@ -276,7 +294,29 @@ export function QuotationDialog({
     }
   }, [open, quoteId])
 
+  // The customer picked: whether the quotation is CGST + SGST or IGST, as the server will price it.
+  useEffect(() => {
+    if (!open || !customerId) {
+      setContext(null)
+      return
+    }
+    let alive = true
+    api
+      .get<{ data: CustomerContext }>(`/sales/customers/${customerId}/context`)
+      .then((res) => {
+        if (alive) setContext(res.data)
+      })
+      // Without it the GST shows as one figure; the server still splits it on save.
+      .catch(() => {
+        if (alive) setContext(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [open, customerId])
+
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
+  const chargeTypeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
 
   const styleByCode = useMemo(() => new Map(styles.map((st) => [st.code.toLowerCase(), st])), [styles])
 
@@ -367,30 +407,40 @@ export function QuotationDialog({
       const rate = Number(l.unitPrice) || 0
       const disc = Math.min(100, Number(l.discount) || 0)
       const style = l.styleCode.trim() ? (styleByCode.get(l.styleCode.trim().toLowerCase()) ?? null) : null
-      return { l, item, style, qty, rate, disc, amount: round2(qty * rate * (1 - disc / 100)), bom: style ? pickBom(style.boms, l.color) : null }
+      return { l, item, style, qty, rate, disc, bom: style ? pickBom(style.boms, l.color) : null }
     })
-    const subtotal = round2(priced.reduce((s, p) => s + p.amount, 0))
-    const discount = round2(Math.min(Number(billDiscount) || 0, subtotal))
-    const taxable = round2(subtotal - discount)
-    const factor = subtotal > 0 ? taxable / subtotal : 1
-    let tax = 0
-    const withGst = priced.map((p) => {
-      let gst: number | null = null
-      if (p.item?.hsn) {
-        const per = p.rate * (1 - p.disc / 100) * factor
-        const { gstRate, priceLimit, rateAbove } = p.item.hsn
-        gst = priceLimit != null && rateAbove != null && per > Number(priceLimit) ? Number(rateAbove) : Number(gstRate)
-      } else if (p.item?.taxRate) gst = Number(p.item.taxRate.rate)
-      tax += p.amount * factor * ((gst ?? 0) / 100)
+    // The same engine the server prices the quotation with, and the order
+    // made from it: discounts, each line's GST, each charge as its row says.
+    const t = orderTotals({
+      lines: priced.map((p) => ({
+        qty: p.qty,
+        rate: p.rate,
+        disc: p.disc,
+        taxExempt: false,
+        jobGst: '',
+        jobHsn: '',
+        hsn: p.item?.hsn ?? null,
+        itemRate: p.item?.taxRate ? Number(p.item.taxRate.rate) : null,
+      })),
+      isJobWork,
+      hsnIndex,
+      billDiscount: Number(billDiscount) || 0,
+      charges: chargesToPrice(charges, chargeTypeById),
+      intra: context?.placeOfSupply?.isIntraState,
+      otherCharges: 0,
+      brokerPct: 0,
+    })
+    const withGst = priced.map((p, i) => {
       const net = p.rate * (1 - p.disc / 100)
       const margin = p.bom?.cost != null && net > 0 ? Math.round(((net - p.bom.cost) / net) * 1000) / 10 : null
-      return { ...p, gst, margin }
+      return { ...p, amount: t.lines[i].amount, gst: p.item ? t.lines[i].gst : null, margin }
     })
-    return { lines: withGst, subtotal, discount, taxable, tax: round2(tax), total: Math.round(taxable + tax), pieces: priced.reduce((s, p) => s + p.qty, 0) }
-  }, [lines, itemById, billDiscount, styleByCode])
+    return { ...t, lines: withGst, pieces: priced.reduce((s, p) => s + p.qty, 0) }
+  }, [lines, itemById, billDiscount, styleByCode, isJobWork, hsnIndex, charges, chargeTypeById, context])
 
   const filled = totals.lines.filter((p) => p.l.itemId || p.l.styleCode.trim())
   const noItem = filled.find((p) => !p.l.itemId)
+  const chargeNoType = charges.find((c) => !chargeTypeById.get(c.chargeTypeId) && (Number(c.amount) || 0) > 0)
   const blocker = !customerId
     ? 'Choose the customer.'
     : filled.length === 0
@@ -403,7 +453,9 @@ export function QuotationDialog({
             ? 'Every line needs pieces and a rate.'
             : validUntil && validUntil < quoteDate
               ? 'It cannot expire before it is made.'
-              : null
+              : chargeNoType
+                ? 'Pick which charge the amount in the totals is for.'
+                : null
 
   const save = async (send: boolean) => {
     if (blocker) return
@@ -429,6 +481,7 @@ export function QuotationDialog({
         unitPrice: p.rate,
         discount: p.disc,
       })),
+      charges: chargesToSave(charges, chargeTypeById),
     }
     try {
       const res = saved
@@ -747,18 +800,45 @@ export function QuotationDialog({
                       <StepInput decimals className="form-input h-8 w-28 text-right tabular-nums" value={billDiscount} placeholder="0.00" onValueChange={setBillDiscount} />
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-muted-foreground">Taxable value</span>
+                      <span className="text-muted-foreground">{charges.length ? 'Taxable value of the goods' : 'Taxable value'}</span>
                       <span className="tabular-nums">{inr(totals.taxable)}</span>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">GST</span>
-                      <span className="tabular-nums">{inr(totals.tax)}</span>
-                    </div>
+                    {/* Charges from Masters → Charges, each with how GST sits on its
+                      figure — the same box the order uses, carried over to it. */}
+                    <SaleCharges types={chargeTypes} rows={charges} priced={totals.chargeByKey} onChange={setCharges} idPrefix="Quotation charge" />
+                    {totals.chargeTaxable > 0 && (
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Taxable value with the charges</span>
+                        <span className="tabular-nums">{inr(totals.taxable + totals.chargeTaxable)}</span>
+                      </div>
+                    )}
+                    {(context?.placeOfSupply
+                      ? context.placeOfSupply.isIntraState
+                        ? [
+                            ['CGST', totals.cgst],
+                            ['SGST', totals.sgst],
+                          ]
+                        : [['IGST', totals.igst]]
+                      : [['GST', totals.taxTotal]]
+                    ).map(([label, value]) => (
+                      <div key={label} className="flex justify-between">
+                        <span className="text-muted-foreground">{label}</span>
+                        <span className="tabular-nums">{inr(Number(value))}</span>
+                      </div>
+                    ))}
+                    {Math.abs(totals.roundOff) >= 0.005 && (
+                      <div className="text-muted-foreground flex justify-between text-xs">
+                        <span>Rounding</span>
+                        <span className="tabular-nums">{inr(totals.roundOff)}</span>
+                      </div>
+                    )}
                     <div className="border-primary/20 bg-primary/5 mt-2 flex items-center justify-between rounded-lg border px-3 py-2.5">
                       <span className="text-foreground font-semibold">Quoted total</span>
                       <span className="text-foreground text-lg font-semibold tabular-nums">{formatRupees(totals.total)}</span>
                     </div>
-                    <p className="text-muted-foreground text-xs">GST is split CGST + SGST or IGST by the customer&apos;s state when saved.</p>
+                    {!context?.placeOfSupply && (
+                      <p className="text-muted-foreground text-xs">GST is split CGST + SGST or IGST by the customer&apos;s state when saved.</p>
+                    )}
                   </div>
                 </Section>
               </div>
