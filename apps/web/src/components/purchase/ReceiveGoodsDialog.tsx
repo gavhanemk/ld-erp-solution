@@ -803,6 +803,15 @@ interface Store {
   isActive?: boolean
 }
 
+/**
+ * The store a delivery starts in when its order names none: the one called
+ * "Store", where the mill receives goods. Picked by name because the
+ * warehouse master has no default flag; failing that, the first store in the
+ * list, as before. The store keeper can still move any line elsewhere.
+ */
+const defaultStoreId = (stores: Store[]) =>
+  (stores.find((w) => w.name.trim().toLowerCase() === 'store') ?? stores[0])?.id ?? ''
+
 export function ReceiveGoodsDialog({
   onClose,
   onSaved,
@@ -810,8 +819,16 @@ export function ReceiveGoodsDialog({
   grnId,
 }: {
   onClose: () => void
-  /** `stickers`: a new receipt, for its sticker window. A correction has none. */
-  onSaved: (message: string, stickers?: InwardRef) => void
+  /**
+   * `stickers`: a new receipt, for its sticker window. `receipt`: a new
+   * receipt's id and number, for the quality-check prompt. A correction has
+   * neither.
+   */
+  onSaved: (
+    message: string,
+    stickers?: InwardRef,
+    receipt?: { id: string; grnNumber: string }
+  ) => void
   /**
    * The order to open on, when the screen already knows which one.
    *
@@ -1018,9 +1035,10 @@ export function ReceiveGoodsDialog({
         const detail = res.data
         setOrder(detail)
 
-        // Where the supplier was told to deliver is the sensible default, and
-        // the store keeper can move any line somewhere else.
-        const fallback = detail.deliveryWarehouse?.id ?? warehouses[0]?.id ?? ''
+        // Where the supplier was told to deliver is the sensible default —
+        // and "Store" when the order names no store (Location "Head office").
+        // The store keeper can move any line somewhere else.
+        const fallback = detail.deliveryWarehouse?.id ?? defaultStoreId(warehouses)
         setShippingWarehouseId(fallback)
 
         setEntries(
@@ -1123,7 +1141,7 @@ export function ReceiveGoodsDialog({
         }
         // A line this receipt never touched still gets a row — empty, same
         // as a fresh receipt — so it can be added without reopening later.
-        const fallback = po.deliveryWarehouse?.id ?? warehouses[0]?.id ?? ''
+        const fallback = po.deliveryWarehouse?.id ?? defaultStoreId(warehouses)
         for (const l of po.lines) {
           if (!byPoLine[l.id]) {
             byPoLine[l.id] = [{ key: makeKey(), warehouseId: fallback, received: '' }]
@@ -1457,7 +1475,8 @@ export function ReceiveGoodsDialog({
         failed.length
           ? `${base} ${failed.length === 1 ? 'A file' : `${failed.length} files`} did not attach: ${failed.join(', ')}.`
           : base,
-        editing ? undefined : { type: 'GRN', id: res.data.id }
+        editing ? undefined : { type: 'GRN', id: res.data.id },
+        editing ? undefined : { id: res.data.id, grnNumber: res.data.grnNumber }
       )
     } catch (err) {
       setError(apiErrorMessage(err))

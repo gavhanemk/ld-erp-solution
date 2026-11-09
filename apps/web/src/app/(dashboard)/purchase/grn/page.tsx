@@ -27,6 +27,7 @@ import {
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
 import { GrnQcDialog, QC_RESULT } from '@/components/purchase/GrnQcDialog'
+import { QcNowPrompt } from '@/components/purchase/QcNowPrompt'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ColumnsButton } from '@/components/tables/ColumnsButton'
@@ -391,6 +392,11 @@ export default function GoodsReceiptPage() {
   /** The receipt being corrected, or null when the form above is closed. */
   const [editGrnId, setEditGrnId] = useState<string | null>(null)
   const [qcGrnId, setQcGrnId] = useState<string | null>(null)
+  /**
+   * The receipt just saved, waiting on "Quality check it now?". Asked once
+   * the sticker window has closed, so the two never sit on top of each other.
+   */
+  const [qcPrompt, setQcPrompt] = useState<{ id: string; grnNumber: string } | null>(null)
   /** The receipt whose files are open, off the paperclip on its row. */
   const [filesFor, setFilesFor] = useState<{
     id: string
@@ -1120,15 +1126,22 @@ export default function GoodsReceiptPage() {
     switch (key) {
       case 'number':
         return (
-          <a
-            href={`/print/goods-receipt/${grn.id}`}
-            target="_blank"
-            rel="noreferrer"
-            className="font-mono text-xs text-teal-400 hover:underline"
-            title={`Open the printed sheet for ${grn.grnNumber}`}
-          >
-            {grn.grnNumber}
-          </a>
+          <span className="inline-flex flex-col items-start gap-1">
+            <a
+              href={`/print/goods-receipt/${grn.id}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-mono text-xs text-teal-400 hover:underline"
+              title={`Open the printed sheet for ${grn.grnNumber}`}
+            >
+              {grn.grnNumber}
+            </a>
+            {/* Also under the number, not only in the Status column far to
+              the right — a missed check has to be seen without scrolling. */}
+            {!grn.qc && grn.status !== 'CANCELLED' && (
+              <QcBadge grn={grn} onCheck={setQcGrnId} />
+            )}
+          </span>
         )
       case 'against':
         return (
@@ -1190,7 +1203,7 @@ export default function GoodsReceiptPage() {
         return (
           <span className="inline-flex flex-wrap items-center gap-1">
             <span className={s.cls}>{s.label}</span>
-            <QcBadge qc={grn.qc} />
+            <QcBadge grn={grn} onCheck={setQcGrnId} />
           </span>
         )
       case 'billing': {
@@ -2135,7 +2148,7 @@ export default function GoodsReceiptPage() {
                                 {grn.grnNumber}
                               </a>
                               <span className={s.cls}>{s.label}</span>
-                              <QcBadge qc={grn.qc} />
+                              <QcBadge grn={grn} onCheck={setQcGrnId} />
                               {(() => {
                                 const b = billStage(grn)
                                 return b ? <span className={b.cls}>{b.label}</span> : null
@@ -2554,10 +2567,11 @@ export default function GoodsReceiptPage() {
         <ReceiveGoodsDialog
           poId={dialog || undefined}
           onClose={() => setDialog(null)}
-          onSaved={(msg, stickers) => {
+          onSaved={(msg, stickers, receipt) => {
             setDialog(null)
             setMessage(msg)
             setBillNow(stickers?.type === 'GRN' ? { grnId: stickers.id, message: msg } : null)
+            setQcPrompt(receipt ?? null)
             if (stickers) setInward(stickers)
             void load()
             // The order this came from may now be fully received, or may have
@@ -2574,6 +2588,17 @@ export default function GoodsReceiptPage() {
             setInward(null)
             setMessage(m)
           }}
+        />
+      )}
+
+      {qcPrompt && !inward && qcGrnId === null && (
+        <QcNowPrompt
+          grnNumber={qcPrompt.grnNumber}
+          onCheck={() => {
+            setQcGrnId(qcPrompt.id)
+            setQcPrompt(null)
+          }}
+          onLater={() => setQcPrompt(null)}
         />
       )}
 
@@ -2674,9 +2699,26 @@ export default function GoodsReceiptPage() {
  * Whether a quality check stands on the receipt, and what it found — beside
  * the status, so a receipt with rejects in the reject godown is seen before
  * anybody bills or returns against it.
+ *
+ * A receipt with no check yet says "QC pending", in amber, and pressing it
+ * opens the check. The check is a separate step after the receipt, and
+ * without this a forgotten one looked exactly like a finished one.
  */
-function QcBadge({ qc }: { qc: Receipt['qc'] }) {
-  if (!qc) return null
+function QcBadge({ grn, onCheck }: { grn: Receipt; onCheck: (grnId: string) => void }) {
+  const qc = grn.qc
+  if (!qc) {
+    if (grn.status === 'CANCELLED') return null
+    return (
+      <button
+        type="button"
+        className="badge-warning cursor-pointer hover:opacity-80"
+        title={`No quality check on ${grn.grnNumber} yet — press to check it now`}
+        onClick={() => onCheck(grn.id)}
+      >
+        QC pending
+      </button>
+    )
+  }
   const r = QC_RESULT[qc.result]
   return (
     <span
