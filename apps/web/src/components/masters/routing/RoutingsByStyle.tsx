@@ -32,22 +32,20 @@ import { Pagination } from '@/components/tables/Pagination'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
- * Masters → Routings, style by style: the counts on top (each narrows the
- * list), one bar to search and narrow, and one plain table — a row for each
- * style and routing, every figure under its own heading:
+ * Masters → Routings, style by style: four small counts on top (each
+ * narrows the list), and one table grouped by style — the style named once,
+ * in a cell beside all of its rows, and a row for each of its routings:
  *
- *   Style · Routing · Status · Steps · Orders made with it · Where the work
- *   is · Last changed · Actions
+ *   Style │ Routing · Status · Steps · Orders · Where the work is · Last changed · Actions
  *
- * A style with several routings has a row for each, the style repeated in
- * grey under its first. A style with no routing has one row saying so, with
- * Make routing. A style's orders that have not been given a routing yet —
- * an order takes its steps once its materials are issued — have a row of
- * their own, naming the routing they will take.
+ * A style with no routing has one row saying so, with Make routing. A
+ * style's orders that have not been given a routing yet — an order takes its
+ * steps once its materials are issued — have a row of their own, naming the
+ * routing they will take.
  *
- * Opened, a routing's row shows its steps in order and every order made with
- * it: MO, sales order and customer, colour, pieces, the version it was given
- * and where it is.
+ * Opened (the arrow beside a routing's name), a row shows the steps in order
+ * and every order made with it: MO, sales order and customer, colour,
+ * pieces, the version it was given and where it is.
  *
  * Read from GET /masters/routings/by-style. Editing, locking, stopping and
  * deleting are the same calls the "All routings" tab makes.
@@ -104,11 +102,11 @@ interface ListResponse {
   pagination: { total: number; pages: number }
 }
 
-/** One row of the table: a style's routing, a style with none, or a style's orders not given one yet. */
+/** One row beside a style: one of its routings, the row saying it has none, or its orders not given one yet. */
 type Line =
-  | { type: 'routing'; key: string; group: StyleGroup; routing: StyleRouting; orders: StyleOrder[] }
-  | { type: 'none'; key: string; group: StyleGroup }
-  | { type: 'waiting'; key: string; group: StyleGroup; orders: StyleOrder[]; takes: StyleRouting | null }
+  | { type: 'routing'; key: string; routing: StyleRouting; orders: StyleOrder[] }
+  | { type: 'none'; key: string }
+  | { type: 'waiting'; key: string; orders: StyleOrder[]; takes: StyleRouting | null }
 
 const SHOW_LABEL: Record<Show, string> = {
   ALL: 'All styles',
@@ -130,20 +128,19 @@ const MO_STATUS: Record<string, string> = {
   CLOSED: 'Closed',
 }
 
-const COLS = 9
+/** Columns: Style, Routing, Status, Steps, Orders, Where the work is, Last changed, Actions. */
+const COLS = 8
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 const sectionTitle = 'text-xs font-semibold uppercase tracking-wide text-muted-foreground'
 
-/** The table's rows: each style's routings (the one new orders take first), then its row with none, then its waiting orders. */
-function linesOf(groups: StyleGroup[]): Line[] {
+/** A style's rows: its routings (the one new orders take first), the row saying it has none, then its waiting orders. */
+function linesOf(g: StyleGroup): Line[] {
   const out: Line[] = []
-  for (const g of groups) {
-    const routings = [...g.routings].sort((a, b) => Number(b.takesNew) - Number(a.takesNew) || Number(b.isActive) - Number(a.isActive))
-    for (const r of routings) out.push({ type: 'routing', key: `${g.style.id}:${r.id}`, group: g, routing: r, orders: g.orders.filter((o) => o.routingId === r.id) })
-    if (!routings.length) out.push({ type: 'none', key: `${g.style.id}:none`, group: g })
-    const waiting = g.orders.filter((o) => !o.routingId)
-    if (waiting.length) out.push({ type: 'waiting', key: `${g.style.id}:waiting`, group: g, orders: waiting, takes: routings.find((r) => r.takesNew) ?? null })
-  }
+  const routings = [...g.routings].sort((a, b) => Number(b.takesNew) - Number(a.takesNew) || Number(b.isActive) - Number(a.isActive))
+  for (const r of routings) out.push({ type: 'routing', key: `${g.style.id}:${r.id}`, routing: r, orders: g.orders.filter((o) => o.routingId === r.id) })
+  if (!routings.length) out.push({ type: 'none', key: `${g.style.id}:none` })
+  const waiting = g.orders.filter((o) => !o.routingId)
+  if (waiting.length) out.push({ type: 'waiting', key: `${g.style.id}:waiting`, orders: waiting, takes: routings.find((r) => r.takesNew) ?? null })
   return out
 }
 
@@ -294,216 +291,231 @@ export function RoutingsByStyle({
 
   /** A tile narrows the list to its styles; pressed again, back to all. */
   const pick = (v: Show) => setShow((cur) => (cur === v ? 'ALL' : v))
-  const tileSub = (v: Show, text: string) => (show === v ? 'showing only these · click to show all' : text)
   const narrowed = !!debounced || show !== 'ALL'
   const mayCreate = can('masters', 'create')
-  const lines = groups ? linesOf(groups) : []
+  const tiles: Array<{ key: Show; icon: React.ElementType; tone: string; label: string; sub: string; warn?: boolean }> = [
+    { key: 'OWN', icon: Route, tone: TONE.teal, label: 'Own routing', sub: 'a routing made for the style' },
+    { key: 'SHARED', icon: Share2, tone: TONE.sky, label: 'Shared routing', sub: "a category's or any style's" },
+    { key: 'NONE', icon: AlertTriangle, tone: TONE.amber, label: 'No routing', sub: 'orders have no steps to load', warn: true },
+    { key: 'ON_ORDERS', icon: Factory, tone: TONE.violet, label: 'Orders in work', sub: 'manufacturing orders running' },
+  ]
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <KpiTile
-          icon={Route}
-          tone={TONE.teal}
-          label="Own routing"
-          value={counts ? String(counts.OWN) : '…'}
-          sub={tileSub('OWN', 'styles with a routing made for them')}
-          onClick={() => pick('OWN')}
-          active={show === 'OWN'}
-        />
-        <KpiTile
-          icon={Share2}
-          tone={TONE.sky}
-          label="Shared routing"
-          value={counts ? String(counts.SHARED) : '…'}
-          sub={tileSub('SHARED', "follow a category's or any style's routing")}
-          onClick={() => pick('SHARED')}
-          active={show === 'SHARED'}
-        />
-        <KpiTile
-          icon={AlertTriangle}
-          tone={TONE.amber}
-          label="No routing"
-          value={counts ? String(counts.NONE) : '…'}
-          valueClass={counts?.NONE ? 'text-amber-500' : 'text-foreground'}
-          sub={tileSub('NONE', 'an order for these has no steps to load')}
-          onClick={() => pick('NONE')}
-          active={show === 'NONE'}
-        />
-        <KpiTile
-          icon={Factory}
-          tone={TONE.violet}
-          label="Orders in work"
-          value={counts ? String(counts.ON_ORDERS) : '…'}
-          sub={tileSub('ON_ORDERS', 'styles with manufacturing orders running')}
-          onClick={() => pick('ON_ORDERS')}
-          active={show === 'ON_ORDERS'}
-        />
+        {tiles.map((t) => (
+          <KpiTile
+            key={t.key}
+            compact
+            icon={t.icon}
+            tone={t.tone}
+            label={t.label}
+            value={counts ? String(counts[t.key]) : '…'}
+            valueClass={t.warn && counts?.[t.key] ? 'text-amber-500' : 'text-foreground'}
+            sub={show === t.key ? 'showing only these · click to show all' : t.sub}
+            onClick={() => pick(t.key)}
+            active={show === t.key}
+          />
+        ))}
       </div>
 
-      <div className="glass-card flex flex-wrap items-center gap-3 p-4">
-        <div className="border-border bg-secondary flex min-w-60 flex-1 items-center gap-2 rounded-lg border px-3 py-2">
-          <Search size={15} className="text-muted-foreground" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search style, routing name, MO or sales order number…"
-            className="text-foreground placeholder:text-muted-foreground flex-1 bg-transparent text-sm focus:outline-none"
-            aria-label="Search routings by style"
-            data-hotkey="search"
-          />
-          {search && (
-            <button type="button" onClick={() => setSearch('')} className="text-muted-foreground hover:text-foreground" aria-label="Clear the search">
-              <X size={14} />
+      <div className={cn('glass-card list-scope overflow-hidden p-0 transition-opacity', loading && groups && 'opacity-70')}>
+        {/* The list's own toolbar: search and narrow, in the same card as the table. */}
+        <div className="border-border flex flex-wrap items-center gap-2 border-b px-3 py-2.5">
+          <div className="border-border bg-secondary flex h-9 min-w-60 flex-1 items-center gap-2 rounded-lg border px-3">
+            <Search size={15} className="text-muted-foreground shrink-0" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search style, routing name, MO or sales order number…"
+              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 bg-transparent text-sm focus:outline-none"
+              aria-label="Search routings by style"
+              data-hotkey="search"
+            />
+            {search && (
+              <button type="button" onClick={() => setSearch('')} className="text-muted-foreground hover:text-foreground" aria-label="Clear the search">
+                <X size={14} />
+              </button>
+            )}
+          </div>
+          <SmartSelect className="form-input h-9 w-auto py-0 text-sm" value={show} onChange={(e) => setShow(e.target.value as Show)} aria-label="Show">
+            {(Object.keys(SHOW_LABEL) as Show[]).map((k) => (
+              <option key={k} value={k}>
+                {SHOW_LABEL[k]}
+                {counts ? ` (${counts[k]})` : ''}
+              </option>
+            ))}
+          </SmartSelect>
+          {narrowed && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearch('')
+                setShow('ALL')
+              }}
+              className="text-primary px-1 text-xs hover:underline"
+            >
+              Clear
             </button>
           )}
+          <span className="text-muted-foreground ml-auto pl-2 text-xs tabular-nums">{loading && !groups ? 'Loading…' : plural(total, 'style')}</span>
         </div>
-        <SmartSelect className="form-input w-auto" value={show} onChange={(e) => setShow(e.target.value as Show)} aria-label="Show">
-          {(Object.keys(SHOW_LABEL) as Show[]).map((k) => (
-            <option key={k} value={k}>
-              {SHOW_LABEL[k]}
-              {counts ? ` (${counts[k]})` : ''}
-            </option>
-          ))}
-        </SmartSelect>
-        {narrowed && (
-          <button
-            type="button"
-            onClick={() => {
-              setSearch('')
-              setShow('ALL')
-            }}
-            className="text-primary text-xs hover:underline"
-          >
-            Clear
-          </button>
+
+        {loading && !groups ? (
+          <div className="space-y-2 p-4">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="skeleton h-12 w-full rounded-lg" />
+            ))}
+          </div>
+        ) : !groups || groups.length === 0 ? (
+          <div className="p-10 text-center">
+            <Route size={22} className="text-muted-foreground mx-auto mb-3" />
+            <p className="text-foreground text-sm font-medium">{narrowed ? 'Nothing matches that' : 'No styles yet'}</p>
+            <p className="text-muted-foreground mt-1 text-xs">
+              {narrowed ? 'Clear the search, or show all styles.' : 'Add a style under Masters → Styles, then give it a routing here.'}
+            </p>
+          </div>
+        ) : (
+          <>
+            <ScrollableTable>
+              {/* Each column a set share of the width, so every row lines up and a wider screen spreads the room evenly; the routing's name takes what is left. */}
+              <table className="data-table table-compact w-full min-w-[1200px] table-fixed">
+                <colgroup>
+                  <col style={{ width: '17%' }} />
+                  <col />
+                  <col style={{ width: '9.5%' }} />
+                  <col style={{ width: '12%' }} />
+                  <col style={{ width: '9%' }} />
+                  <col style={{ width: '14%' }} />
+                  <col style={{ width: '10%' }} />
+                  <col style={{ width: 90 }} />
+                </colgroup>
+                <thead>
+                  <tr className="bg-secondary [&>th]:whitespace-nowrap">
+                    <th>Style</th>
+                    <th>Routing</th>
+                    <th>Status</th>
+                    <th>Steps</th>
+                    <th>Orders</th>
+                    <th>Where the work is</th>
+                    <th>Last changed</th>
+                    <th style={{ textAlign: 'right' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groups.map((g, gi) => {
+                    const lines = linesOf(g)
+                    // The style's cell runs down beside all of its rows, an opened row's details too.
+                    const span = lines.length + (lines.some((l) => l.key === expanded) ? 1 : 0)
+                    return (
+                      <Fragment key={g.style.id}>
+                        {lines.map((line, li) => {
+                          const open = expanded === line.key
+                          const toggle = () => setExpanded(open ? null : line.key)
+                          const styleCell = li === 0 ? <StyleCell group={g} rowSpan={span} /> : null
+                          const last = li === lines.length - 1 && !open
+                          const first = gi === 0 && li === 0
+                          return (
+                            <Fragment key={line.key}>
+                              {line.type === 'routing' ? (
+                                <RoutingRow
+                                  styleCell={styleCell}
+                                  styleId={g.style.id}
+                                  routing={line.routing}
+                                  orders={line.orders}
+                                  first={first}
+                                  last={last}
+                                  open={open}
+                                  busy={busy}
+                                  onToggle={toggle}
+                                  onEdit={() => void edit(line.routing.id)}
+                                  onLock={() =>
+                                    void act(
+                                      () => api.patch(`/masters/routings/${line.routing.id}`, { isLocked: !line.routing.isLocked }),
+                                      line.routing.isLocked ? 'Unlocked.' : 'Locked.',
+                                    )
+                                  }
+                                  onStop={() => {
+                                    if (confirm(`Stop offering "${line.routing.name}" on new orders? Orders that already have its steps keep them.`)) {
+                                      void act(() => api.patch(`/masters/routings/${line.routing.id}`, { isActive: false }), 'No longer offered.')
+                                    }
+                                  }}
+                                  onUseAgain={() => void act(() => api.patch(`/masters/routings/${line.routing.id}`, { isActive: true }), 'Offered again.')}
+                                  onDelete={() => {
+                                    if (confirm(`Delete "${line.routing.name}" for good? Its steps go with it. This cannot be undone.`)) {
+                                      void act(() => api.delete(`/masters/routings/${line.routing.id}`), 'Deleted.')
+                                    }
+                                  }}
+                                />
+                              ) : line.type === 'none' ? (
+                                <tr data-row tabIndex={first ? 0 : -1} className={cn(last && '!border-b-border')}>
+                                  {styleCell}
+                                  <td>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-muted-foreground text-sm">None yet</span>
+                                      {mayCreate && (
+                                        <button className="btn-primary h-7 px-2.5 text-xs" onClick={() => onNew(g.style.id)} disabled={busy}>
+                                          <Plus size={13} /> Make routing
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td>
+                                    <span className="badge-warning">No routing</span>
+                                    <div className="text-muted-foreground mt-0.5 truncate text-[11px]">needs one</div>
+                                  </td>
+                                  <td className="text-muted-foreground">—</td>
+                                  <td className="text-muted-foreground text-xs">None yet</td>
+                                  <td className="text-muted-foreground">—</td>
+                                  <td className="text-muted-foreground">—</td>
+                                  <td />
+                                </tr>
+                              ) : (
+                                <WaitingRow styleCell={styleCell} line={line} first={first} last={last} open={open} onToggle={toggle} />
+                              )}
+                              {open && line.type !== 'none' && (
+                                <tr className={cn(li === lines.length - 1 && '!border-b-border')}>
+                                  <td colSpan={COLS - 1} className="bg-secondary/30 !p-0">
+                                    {line.type === 'routing' ? (
+                                      <RoutingDetail routing={line.routing} orders={line.orders} />
+                                    ) : (
+                                      <div className="px-4 py-4">
+                                        <p className={sectionTitle}>Orders not given a routing yet</p>
+                                        <p className="text-muted-foreground mt-1 text-xs">
+                                          An order is given the steps of its style&apos;s routing{line.takes ? ` (now "${line.takes.name}")` : ''} when its materials are issued, or
+                                          from the order&apos;s own page.
+                                        </p>
+                                        <OrdersTable orders={line.orders} current={null} />
+                                      </div>
+                                    )}
+                                  </td>
+                                </tr>
+                              )}
+                            </Fragment>
+                          )
+                        })}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </ScrollableTable>
+            <Pagination page={page} pages={Math.ceil(total / rowsPerPage) || 1} onPageChange={setPage} busy={loading} />
+          </>
         )}
-        <span className="text-muted-foreground ml-auto text-xs">{loading && !groups ? 'Loading…' : plural(total, 'style')}</span>
       </div>
-
-      {loading && !groups && <div className="skeleton h-40 w-full rounded-xl" />}
-
-      {groups && groups.length === 0 && (
-        <div className="glass-card p-10 text-center">
-          <Route size={22} className="text-muted-foreground mx-auto mb-3" />
-          <p className="text-foreground text-sm font-medium">{narrowed ? 'Nothing matches that' : 'No styles yet'}</p>
-          <p className="text-muted-foreground mt-1 text-xs">
-            {narrowed ? 'Clear the search, or show all styles.' : 'Add a style under Masters → Styles, then give it a routing here.'}
-          </p>
-        </div>
-      )}
-
-      {lines.length > 0 && (
-        <div className={cn('glass-card list-scope overflow-hidden p-0 transition-opacity', loading && 'opacity-60')}>
-          <ScrollableTable>
-            {/* Fixed widths, so each column lines up row after row; the routing and where the work is share what is left. */}
-            <table className="data-table table-compact w-full min-w-[1400px] table-fixed">
-              <colgroup>
-                <col style={{ width: 44 }} />
-                <col style={{ width: 240 }} />
-                <col />
-                <col style={{ width: 140 }} />
-                <col style={{ width: 170 }} />
-                <col style={{ width: 140 }} />
-                <col />
-                <col style={{ width: 150 }} />
-                <col style={{ width: 132 }} />
-              </colgroup>
-              <thead>
-                <tr className="bg-secondary [&>th]:whitespace-nowrap">
-                  <th />
-                  <th>Style</th>
-                  <th>Routing</th>
-                  <th>Status</th>
-                  <th>Steps</th>
-                  <th>Orders</th>
-                  <th>Where the work is</th>
-                  <th>Last changed</th>
-                  <th style={{ textAlign: 'right' }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {lines.map((line, i) => {
-                  // The style's first row names it; the rows after repeat it in grey, so each row still reads on its own.
-                  const repeat = i > 0 && lines[i - 1].group.style.id === line.group.style.id
-                  const open = expanded === line.key
-                  const toggle = () => setExpanded(open ? null : line.key)
-                  return (
-                    <Fragment key={line.key}>
-                      {line.type === 'routing' ? (
-                        <RoutingRow
-                          line={line}
-                          repeat={repeat}
-                          first={i === 0}
-                          open={open}
-                          busy={busy}
-                          onToggle={toggle}
-                          onEdit={() => void edit(line.routing.id)}
-                          onLock={() =>
-                            void act(
-                              () => api.patch(`/masters/routings/${line.routing.id}`, { isLocked: !line.routing.isLocked }),
-                              line.routing.isLocked ? 'Unlocked.' : 'Locked.',
-                            )
-                          }
-                          onStop={() => {
-                            if (confirm(`Stop offering "${line.routing.name}" on new orders? Orders that already have its steps keep them.`)) {
-                              void act(() => api.patch(`/masters/routings/${line.routing.id}`, { isActive: false }), 'No longer offered.')
-                            }
-                          }}
-                          onUseAgain={() => void act(() => api.patch(`/masters/routings/${line.routing.id}`, { isActive: true }), 'Offered again.')}
-                          onDelete={() => {
-                            if (confirm(`Delete "${line.routing.name}" for good? Its steps go with it. This cannot be undone.`)) {
-                              void act(() => api.delete(`/masters/routings/${line.routing.id}`), 'Deleted.')
-                            }
-                          }}
-                        />
-                      ) : line.type === 'none' ? (
-                        <tr data-row tabIndex={i === 0 ? 0 : -1}>
-                          <td />
-                          <StyleCell group={line.group} repeat={repeat} />
-                          <td>
-                            <span className="text-muted-foreground text-sm">—</span>
-                          </td>
-                          <td className="whitespace-nowrap">
-                            <span className="badge-warning">No routing</span>
-                            <div className="text-muted-foreground mt-0.5 truncate text-[11px]">needs one</div>
-                          </td>
-                          <td className="text-muted-foreground">—</td>
-                          <td className="text-muted-foreground text-xs">None yet</td>
-                          <td className="text-muted-foreground">—</td>
-                          <td className="text-muted-foreground">—</td>
-                          <td className="whitespace-nowrap text-right">
-                            {mayCreate && (
-                              <button className="btn-primary h-7 px-2.5 text-xs" onClick={() => onNew(line.group.style.id)} disabled={busy}>
-                                <Plus size={13} /> Make routing
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      ) : (
-                        <WaitingRow line={line} repeat={repeat} first={i === 0} open={open} onToggle={toggle} />
-                      )}
-                    </Fragment>
-                  )
-                })}
-              </tbody>
-            </table>
-          </ScrollableTable>
-          <Pagination page={page} pages={Math.ceil(total / rowsPerPage) || 1} onPageChange={setPage} busy={loading} />
-        </div>
-      )}
     </div>
   )
 }
 
-/** The style a row is for: its code (opening the style's page) and category over its name. */
-function StyleCell({ group: g, repeat }: { group: StyleGroup; repeat: boolean }) {
+/** The style, once, beside all of its rows: code (opening the style's page) and category over its name. */
+function StyleCell({ group: g, rowSpan }: { group: StyleGroup; rowSpan: number }) {
   return (
-    <td>
+    <td rowSpan={rowSpan} className="border-border border-b border-r bg-secondary/40 align-top">
       <div className="flex items-baseline gap-1.5 overflow-hidden whitespace-nowrap">
         <Link
           href={`/masters/routings/style/${g.style.id}`}
-          className={cn('font-mono text-xs font-semibold hover:underline', repeat ? 'text-muted-foreground' : 'text-primary')}
+          className="text-primary font-mono text-xs font-semibold hover:underline"
           title="Open the style page: each step, and where its orders stand at each"
         >
           {g.style.code}
@@ -511,19 +523,19 @@ function StyleCell({ group: g, repeat }: { group: StyleGroup; repeat: boolean })
         {g.style.category && <span className="text-muted-foreground text-[11px]">{g.style.category}</span>}
         {g.style.brandType === 'VHAGAR' && <span className="vhagar-accent text-[11px] font-bold">VHAGAR</span>}
       </div>
-      <div className={cn('truncate text-sm', repeat ? 'text-muted-foreground' : 'text-foreground')} title={g.style.name}>
+      <div className="text-foreground line-clamp-2 text-sm font-medium" title={g.style.name}>
         {g.style.name}
       </div>
     </td>
   )
 }
 
-/** The open / close button at the start of a row. */
+/** The open / close arrow beside a row's name. */
 function Toggle({ open, label, onToggle }: { open: boolean; label: string; onToggle: () => void }) {
   return (
     <button
       onClick={onToggle}
-      className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
+      className="bg-primary/10 text-primary hover:bg-primary/20 mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors"
       aria-label={`${open ? 'Hide' : 'Show'} ${label}`}
       aria-expanded={open}
       title={open ? 'Hide details' : `Show ${label}`}
@@ -552,9 +564,14 @@ function OrdersCell({ orders }: { orders: StyleOrder[] }) {
 }
 
 interface RoutingRowProps {
-  line: Extract<Line, { type: 'routing' }>
-  repeat: boolean
+  /** The style's cell, on the style's first row only. */
+  styleCell: React.ReactNode
+  styleId: string
+  routing: StyleRouting
+  orders: StyleOrder[]
   first: boolean
+  /** The style's last row: a firmer line under it, between one style and the next. */
+  last: boolean
   open: boolean
   busy: boolean
   onToggle: () => void
@@ -565,9 +582,8 @@ interface RoutingRowProps {
   onDelete: () => void
 }
 
-/** A style's routing: whom it is for, whether new orders take it, its steps, the orders made with it, and where they are. */
-function RoutingRow({ line, repeat, first, open, busy, onToggle, onEdit, onLock, onStop, onUseAgain, onDelete }: RoutingRowProps) {
-  const { group: g, routing: r, orders } = line
+/** One of a style's routings: whom it is for, whether new orders take it, its steps, the orders made with it, and where they are. */
+function RoutingRow({ styleCell, styleId, routing: r, orders, first, last, open, busy, onToggle, onEdit, onLock, onStop, onUseAgain, onDelete }: RoutingRowProps) {
   const shared = sharedText(r)
   const status = statusOf(r, orders)
   const mayEdit = can('masters', 'edit')
@@ -579,7 +595,6 @@ function RoutingRow({ line, repeat, first, open, busy, onToggle, onEdit, onLock,
   const deleteBlock = r.isLocked ? 'Unlock it first' : orders.length ? 'Orders were made with it: stop using it instead' : r.boms ? 'A BOM points at it: stop using it instead' : null
 
   const actions: RowAction[] = [
-    { key: 'style', label: 'Open the style page', icon: <ExternalLink size={14} />, href: `/masters/routings/style/${g.style.id}` },
     ...(mayEdit
       ? [
           { key: 'edit', label: shared ? `Edit (${shared.toLowerCase()})` : 'Edit', icon: <Pencil size={14} />, onClick: onEdit },
@@ -589,139 +604,135 @@ function RoutingRow({ line, repeat, first, open, busy, onToggle, onEdit, onLock,
             : { key: 'again', label: 'Use again', icon: <RotateCcw size={14} />, onClick: onUseAgain },
         ]
       : []),
+    { key: 'style', label: 'Open the style page', icon: <ExternalLink size={14} />, href: `/masters/routings/style/${styleId}` },
     ...(mayDelete && !shared
       ? [{ key: 'delete', label: 'Delete for good', icon: <Trash2 size={14} />, onClick: onDelete, danger: true, disabled: !!deleteBlock, hint: deleteBlock ?? undefined }]
       : []),
   ]
 
   return (
-    <>
-      <tr data-row tabIndex={first ? 0 : -1} className={cn(!r.isActive && 'opacity-70')}>
-        <td>
+    <tr data-row tabIndex={first ? 0 : -1} className={cn(last && '!border-b-border')}>
+      {styleCell}
+      <td className={cn(!r.isActive && 'opacity-70')}>
+        <div className="flex items-start gap-2">
           <Toggle open={open} label={`the steps and orders of ${r.name}`} onToggle={onToggle} />
-        </td>
-        <StyleCell group={g} repeat={repeat} />
-        <td>
-          <div className="text-foreground truncate text-sm font-medium" title={r.name}>
-            {r.name}
-          </div>
-          <div className="text-muted-foreground flex items-center gap-x-1.5 overflow-hidden whitespace-nowrap text-[11px]">
-            <span className="font-mono">v{r.version}</span>
-            {r.fabric && <span>· {r.fabric}</span>}
-            {shared && <span className="text-primary">· {shared}</span>}
-          </div>
-        </td>
-        <td>
-          <span className={status.badge}>{status.label}</span>
-          <div className="text-muted-foreground mt-0.5 flex items-center gap-1 overflow-hidden whitespace-nowrap text-[11px]" title={status.sub}>
-            {r.isLocked && (
-              <span className="inline-flex items-center gap-0.5" title="Locked: nobody can change its steps">
-                <Lock size={10} /> locked ·
-              </span>
-            )}
-            {status.sub}
-          </div>
-        </td>
-        <td>
-          <div className="text-foreground text-sm tabular-nums">{plural(r.steps.length, 'step')}</div>
-          <div className="text-muted-foreground truncate text-[11px]" title={chain.join(' → ')}>
-            {preview || '—'}
-          </div>
-        </td>
-        <OrdersCell orders={orders} />
-        <td className="text-xs">
-          {where ? (
-            <span className="text-foreground line-clamp-2" title={where}>
-              {where}
-            </span>
-          ) : (
-            <span className="text-muted-foreground">—</span>
-          )}
-        </td>
-        <td className="text-xs">
-          <div className="text-foreground">{formatDate(r.updatedAt)}</div>
-          {r.updatedBy && (
-            <div className="text-muted-foreground truncate" title={`by ${r.updatedBy}`}>
-              by {r.updatedBy}
+          <div className="min-w-0">
+            <div className="text-foreground truncate text-sm font-medium" title={r.name}>
+              {r.name}
             </div>
-          )}
-        </td>
-        <td className="whitespace-nowrap text-right">
-          <div className="flex justify-end gap-1.5">
-            {mayEdit && (
-              <button className="btn-secondary h-7 w-7 p-0" onClick={onEdit} disabled={busy} title={`Edit ${r.name}`} aria-label={`Edit ${r.name}`}>
-                <Pencil size={13} />
-              </button>
-            )}
-            <ActionMenu label={`Actions for ${r.name}`} items={actions} />
-          </div>
-        </td>
-      </tr>
-      {open && (
-        <tr>
-          <td colSpan={COLS} className="bg-secondary/30 !p-0">
-            <div className="sticky left-0 w-[100cqw]">
-              <RoutingDetail routing={r} orders={orders} />
+            <div className="text-muted-foreground flex items-center gap-x-1.5 overflow-hidden whitespace-nowrap text-[11px]">
+              <span className="font-mono">v{r.version}</span>
+              {r.fabric && <span>· {r.fabric}</span>}
+              {shared && <span className="text-primary">· {shared}</span>}
             </div>
-          </td>
-        </tr>
-      )}
-    </>
+          </div>
+        </div>
+      </td>
+      <td>
+        <span className={status.badge}>{status.label}</span>
+        <div className="text-muted-foreground mt-0.5 truncate text-[11px]" title={r.isLocked ? `Locked: nobody can change its steps · ${status.sub}` : status.sub}>
+          {r.isLocked && (
+            <>
+              <Lock size={10} className="-mt-0.5 inline" /> locked ·{' '}
+            </>
+          )}
+          {status.sub}
+        </div>
+      </td>
+      <td>
+        <div className="text-foreground text-sm tabular-nums">{plural(r.steps.length, 'step')}</div>
+        <div className="text-muted-foreground truncate text-[11px]" title={chain.join(' → ')}>
+          {preview || '—'}
+        </div>
+      </td>
+      <OrdersCell orders={orders} />
+      <td className="text-xs">
+        {where ? (
+          <span className="text-foreground line-clamp-2" title={where}>
+            {where}
+          </span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        )}
+      </td>
+      <td className="text-xs">
+        <div className="text-foreground">{formatDate(r.updatedAt)}</div>
+        {r.updatedBy && (
+          <div className="text-muted-foreground truncate" title={`by ${r.updatedBy}`}>
+            by {r.updatedBy}
+          </div>
+        )}
+      </td>
+      <td className="text-right">
+        <div className="flex justify-end gap-1">
+          {mayEdit && (
+            <button className="btn-secondary h-7 w-7 shrink-0 p-0" onClick={onEdit} disabled={busy} title={`Edit ${r.name}`} aria-label={`Edit ${r.name}`}>
+              <Pencil size={13} />
+            </button>
+          )}
+          <ActionMenu compact label={`Actions for ${r.name}`} items={actions} />
+        </div>
+      </td>
+    </tr>
   )
 }
 
 /** A style's orders that have no routing yet: they take one when their steps are loaded. */
-function WaitingRow({ line, repeat, first, open, onToggle }: { line: Extract<Line, { type: 'waiting' }>; repeat: boolean; first: boolean; open: boolean; onToggle: () => void }) {
+function WaitingRow({
+  styleCell,
+  line,
+  first,
+  last,
+  open,
+  onToggle,
+}: {
+  styleCell: React.ReactNode
+  line: Extract<Line, { type: 'waiting' }>
+  first: boolean
+  last: boolean
+  open: boolean
+  onToggle: () => void
+}) {
   const running = line.orders.some((o) => o.open)
+  const numbers = moNumbers(line.orders)
+  const opens: RowAction[] = numbers.slice(0, 8).map((n) => {
+    const o = line.orders.find((x) => x.moNumber === n)!
+    return { key: n, label: `Open ${n}`, icon: <ExternalLink size={14} />, href: `/production/orders?open=${o.moId}` }
+  })
   return (
-    <>
-      <tr data-row tabIndex={first ? 0 : -1}>
-        <td>
+    <tr data-row tabIndex={first ? 0 : -1} className={cn(last && '!border-b-border')}>
+      {styleCell}
+      <td>
+        <div className="flex items-start gap-2">
           <Toggle open={open} label="the orders not given a routing yet" onToggle={onToggle} />
-        </td>
-        <StyleCell group={line.group} repeat={repeat} />
-        <td>
-          <div className="text-muted-foreground truncate text-sm italic">No routing on the order yet</div>
-          {running && line.takes && (
-            <div className="text-muted-foreground truncate text-[11px]" title={line.takes.name}>
-              will take {line.takes.name}
-            </div>
-          )}
-        </td>
-        <td>
-          {running ? <span className="badge-info">Waiting</span> : <span className="badge-neutral">Without steps</span>}
-          <div className="text-muted-foreground mt-0.5 truncate text-[11px]" title={running ? 'An order takes its steps once its materials are issued' : undefined}>
-            {running ? 'on material issue' : 'made without a routing'}
+          <div className="min-w-0">
+            <div className="text-muted-foreground truncate text-sm italic">No routing on the order yet</div>
+            {running && line.takes && (
+              <div className="text-muted-foreground truncate text-[11px]" title={line.takes.name}>
+                will take {line.takes.name}
+              </div>
+            )}
           </div>
-        </td>
-        <td className="text-muted-foreground">—</td>
-        <OrdersCell orders={line.orders} />
-        <td className="text-xs">
-          <span className="line-clamp-2">{whereSummary(line.orders) ?? <span className="text-muted-foreground">—</span>}</span>
-        </td>
-        <td className="text-muted-foreground">—</td>
-        <td className="whitespace-nowrap text-right">
-          {line.orders.length === 1 && (
-            <Link href={`/production/orders?open=${line.orders[0].moId}`} className="btn-secondary h-7 px-2.5 text-xs">
-              <ExternalLink size={13} /> Open
-            </Link>
-          )}
-        </td>
-      </tr>
-      {open && (
-        <tr>
-          <td colSpan={COLS} className="bg-secondary/30 !p-0">
-            <div className="sticky left-0 w-[100cqw] px-4 py-4">
-              <p className={sectionTitle}>Orders not given a routing yet</p>
-              <p className="text-muted-foreground mt-1 text-xs">
-                An order is given the steps of its style&apos;s routing{line.takes ? ` (now "${line.takes.name}")` : ''} when its materials are issued, or from the order&apos;s own page.
-              </p>
-              <OrdersTable orders={line.orders} current={null} />
-            </div>
-          </td>
-        </tr>
-      )}
-    </>
+        </div>
+      </td>
+      <td>
+        {running ? <span className="badge-info">Waiting</span> : <span className="badge-neutral">Without steps</span>}
+        <div className="text-muted-foreground mt-0.5 truncate text-[11px]" title={running ? 'An order takes its steps once its materials are issued' : undefined}>
+          {running ? 'on material issue' : 'made without a routing'}
+        </div>
+      </td>
+      <td className="text-muted-foreground">—</td>
+      <OrdersCell orders={line.orders} />
+      <td className="text-xs">
+        <span className="line-clamp-2">{whereSummary(line.orders) ?? <span className="text-muted-foreground">—</span>}</span>
+      </td>
+      <td className="text-muted-foreground">—</td>
+      <td className="text-right">
+        <div className="flex justify-end">
+          <ActionMenu compact label="Open the orders" items={opens} />
+        </div>
+      </td>
+    </tr>
   )
 }
 
