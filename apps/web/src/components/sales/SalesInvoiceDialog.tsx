@@ -25,7 +25,8 @@ import { fetchEveryPage } from '@/lib/export'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
-import { priceCharge } from './chargeShare'
+import { priceSaleCharge, type ChargeTaxTreatment } from '@ld-erp/shared'
+import { chargeNote } from './SaleCharges'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
@@ -81,7 +82,8 @@ interface Prepared {
     gstRate: number
     sizes: Array<{ code: string; qty: number }>
   }>
-  charges: Array<{ chargeTypeId: string; name: string; amount: number; gstRate: number }>
+  /** What of the order's charges is still to bill, each with how the order priced it. */
+  charges: Array<{ chargeTypeId: string; name: string; amount: number; gstRate: number; taxTreatment?: ChargeTaxTreatment }>
   otherCharges: number
   defaults: { invoiceDate: string; dueDate: string }
   /** India dates: today, and the year's last invoice, which a new one may not be dated before. */
@@ -96,6 +98,8 @@ interface ChargeTypeOption {
   defaultGstRate: string | number
   isActive: boolean
   applyOnSale: boolean
+  taxTreatment?: ChargeTaxTreatment
+  followsGoodsRate?: boolean
 }
 
 interface ChargeDraft {
@@ -105,6 +109,12 @@ interface ChargeDraft {
   gstRate: string
   /** Bills our own trims used on a job-work order that bills them separately. */
   ownMaterial?: boolean
+  /**
+   * How GST sits on the figure: the order's, for a charge the order
+   * carries; else the charge type's own. Not changed here, so the
+   * invoice bills a charge the way its order priced it.
+   */
+  treatment?: ChargeTaxTreatment
 }
 
 let chargeKey = 0
@@ -251,6 +261,7 @@ export function SalesInvoiceDialog({
             chargeTypeId: c.chargeTypeId,
             amount: String(c.amount),
             gstRate: String(c.gstRate),
+            treatment: c.taxTreatment,
           }))
         )
         setOtherCharges(d.otherCharges > 0 ? String(d.otherCharges) : '')
@@ -303,18 +314,26 @@ export function SalesInvoiceDialog({
       const t = split((value * l.gstRate) / 100)
       return { ...l, gross: gross[i], value, tax: t.cgst + t.sgst + t.igst, ...t }
     })
-    // Each charge at the goods' rate, a share per rate the goods carry, as the server stores it.
+    // Each charge priced by the shared sales engine, as the server stores it:
+    // at the goods' rate (a share per rate they carry) unless its type has
+    // its own, its GST included in the figure, added on top, or none.
     const goods = lines.map((l) => ({ taxable: l.value, gstRate: l.gstRate }))
     const chargeRows = charges.map((c) => {
       const type = chargeTypeById.get(c.chargeTypeId)
       const amount = Number(c.amount) || 0
-      // Our own trims are goods of their own, at their own rate; any other charge takes the goods' rate.
+      // Our own trims are goods of their own, at their own rate, GST added on top like a goods line.
       const own = c.ownMaterial ? (c.gstRate !== '' ? Number(c.gstRate) || 0 : Number(type?.defaultGstRate ?? 0)) : null
-      const p = priceCharge(amount, own != null ? [] : goods, own ?? Number(type?.defaultGstRate ?? 0), !!intra)
-      return { ...c, type, value: amount, rateText: p.rateText, cgst: p.cgst, sgst: p.sgst, igst: p.igst }
+      const treatment: ChargeTaxTreatment = own != null ? 'EXCLUSIVE' : (c.treatment ?? type?.taxTreatment ?? 'INCLUSIVE')
+      const p = priceSaleCharge(
+        { key: c.key, amount, treatment, followsGoodsRate: own == null && (type?.followsGoodsRate ?? true), ownRate: own ?? Number(type?.defaultGstRate ?? 0) },
+        goods,
+        !!intra,
+      )
+      return { ...c, type, value: amount, treatment, priced: p, rateText: p.rateText, net: p.net, cgst: p.cgst, sgst: p.sgst, igst: p.igst }
     })
     const live = chargeRows.filter((c) => c.type && c.value > 0)
-    const chargeTotal = round2(live.reduce((s, c) => s + c.value, 0))
+    // What the charges add before their GST: each one's value without GST.
+    const chargeTotal = round2(live.reduce((s, c) => s + c.net, 0))
     const sum = (k: 'cgst' | 'sgst' | 'igst') =>
       round2(lines.reduce((s, l) => s + l[k], 0) + live.reduce((s, c) => s + c[k], 0))
     const cgst = sum('cgst')
@@ -388,6 +407,7 @@ export function SalesInvoiceDialog({
             amount: c.value,
             gstRate: c.ownMaterial && c.gstRate !== '' ? Number(c.gstRate) || 0 : null,
             ownMaterial: !!c.ownMaterial,
+            taxTreatment: c.treatment,
           })),
         otherCharges: totals.other,
         notes: notes.trim() || null,
@@ -635,7 +655,8 @@ export function SalesInvoiceDialog({
                         {totals.chargeRows.map((c, i) => {
                           const taken = new Set(charges.filter((x) => x.key !== c.key).map((x) => x.chargeTypeId))
                           return (
-                            <div key={c.key} className="flex items-center gap-1.5">
+                            <div key={c.key} className="space-y-0.5">
+                            <div className="flex items-center gap-1.5">
                               {c.ownMaterial && (
                                 <span className="badge-neutral shrink-0 text-[10px]" title="Bills our own trims used on this job-work order">
                                   our trims
@@ -675,14 +696,7 @@ export function SalesInvoiceDialog({
                                   aria-label={`Charge ${i + 1} GST rate`}
                                   title="GST % on our own trims"
                                 />
-                              ) : (
-                                <span
-                                  className="text-muted-foreground w-20 shrink-0 text-right text-[11px] tabular-nums"
-                                  title="A charge billed with the goods takes the goods' GST rate"
-                                >
-                                  {c.type && c.value > 0 ? `GST ${c.rateText}` : ''}
-                                </span>
-                              )}
+                              ) : null}
                               <button
                                 type="button"
                                 onClick={() => setCharges((cs) => cs.filter((x) => x.key !== c.key))}
@@ -691,6 +705,13 @@ export function SalesInvoiceDialog({
                               >
                                 <Trash2 size={12} />
                               </button>
+                            </div>
+                            {/* What the figure does to the bill, as the order priced the charge. */}
+                            {!c.ownMaterial && c.type && c.value > 0 && (
+                              <p className="text-muted-foreground pr-7 text-right text-[11px] tabular-nums" aria-label={`Charge ${i + 1} GST`}>
+                                {chargeNote(c.priced)}
+                              </p>
+                            )}
                             </div>
                           )
                         })}

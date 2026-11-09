@@ -6,13 +6,14 @@ import { can } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { RoutingFormDialog, type Routing } from '@/components/masters/RoutingFormDialog'
 import { RoutingList } from '@/components/masters/routing/RoutingList'
-import { StyleTrackList } from '@/components/masters/routing/StyleTrackList'
+import { RoutingsByStyle } from '@/components/masters/routing/RoutingsByStyle'
 
 /**
- * Routings, by style first: every style with the routing it follows and where
- * its work stands on the floor, each opening the style's page. The routings
- * themselves, shared ones included, are on the second tab, to edit, lock,
- * stop using or delete.
+ * Routings, by style first: each style as a heading with every routing that
+ * serves it under it — which one a new order takes, and which manufacturing
+ * orders were made with each and where they are (9 Nov 2026, laid out as the
+ * BOM list is). The routings themselves, shared ones included, are on the
+ * second tab, to edit, lock, stop using or delete.
  *
  * A manufacturing order still loads the stages of the routing that fits its
  * style once its materials are issued, and keeps its own copy; editing a
@@ -24,10 +25,11 @@ export default function RoutingsPage() {
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
-  const [dialog, setDialog] = useState<{ open: boolean; record: Routing | null }>({ open: false, record: null })
+  // preset: a new routing begun from a style with none, made for that style.
+  const [dialog, setDialog] = useState<{ open: boolean; record: Routing | null; preset?: { styleId: string } | null }>({ open: false, record: null })
 
   const tabs = [
-    { key: 'styles' as const, label: 'Styles', icon: Shirt },
+    { key: 'styles' as const, label: 'By style', icon: Shirt },
     { key: 'routings' as const, label: 'All routings', icon: ListOrdered },
   ]
 
@@ -36,7 +38,7 @@ export default function RoutingsPage() {
       <div className="page-header">
         <div>
           <h1 className="page-title text-xl sm:text-2xl">Routings</h1>
-          <p className="page-subtitle hidden sm:block">Which processes each style goes through, in what order, and where its work has got to</p>
+          <p className="page-subtitle hidden sm:block">Which processes each style goes through, in what order — and which orders were made with each routing</p>
         </div>
         <div className="flex items-center gap-2">
           <button className="btn-ghost" onClick={() => setReloadKey((k) => k + 1)} aria-label="Refresh">
@@ -84,19 +86,26 @@ export default function RoutingsPage() {
       )}
 
       {tab === 'styles' ? (
-        <StyleTrackList reloadKey={reloadKey} onError={setError} />
+        <RoutingsByStyle
+          reloadKey={reloadKey}
+          onError={setError}
+          onMessage={setMessage}
+          onEdit={(record) => setDialog({ open: true, record })}
+          onNew={(styleId) => setDialog({ open: true, record: null, preset: { styleId } })}
+        />
       ) : (
         <RoutingList reloadKey={reloadKey} onEdit={(record) => setDialog({ open: true, record })} onMessage={setMessage} onError={setError} />
       )}
 
       <p className="text-muted-foreground text-xs">
-        A style&apos;s page shows where each step stands, from the production floor&apos;s records. A manufacturing order loads the stages of the routing for its style once its
-        materials are issued, and can change them for itself. Changing a routing makes a new version for orders to come; orders already running keep theirs.
+        A manufacturing order takes the steps of the routing marked &quot;New orders take this&quot; once its materials are issued, and can change them for itself.
+        Changing a routing makes a new version for orders to come; orders already running keep theirs. A style&apos;s page shows each step and where its orders stand.
       </p>
 
       <RoutingFormDialog
         open={dialog.open}
         record={dialog.record}
+        preset={dialog.preset ?? null}
         onClose={() => setDialog({ open: false, record: null })}
         onSaved={(m) => {
           setMessage(m)

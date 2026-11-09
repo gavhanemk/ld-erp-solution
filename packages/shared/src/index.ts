@@ -366,3 +366,350 @@ export function priceDocument(input: PriceInput): PriceResult {
     total: toRupees(total),
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sales pricing — one calculation for the quotation, the sales order and the
+// charges on a sales invoice, on the screen and on the server.
+//
+// The quotation form, the order form and the server each used to do their own
+// sums. Every figure now comes from priceSale() (and priceSaleCharge() for an
+// invoice's charges): the forms call it as you type, the server calls it again
+// on save and stores what it returns, and the prints show what was stored.
+// The goods are priced with the same steps and roundings the order always
+// used, so no order already saved reads differently.
+//
+// A charge billed with the goods — transport, freight, packing — is part of
+// what the goods are sold for (CGST Act s.15(2)(c)), so by default it is
+// taxed at the goods' rate, shared across their rates by value; a charge type
+// can instead be a supply of its own at its own rate. Separately, the figure
+// typed for a charge is one of three things:
+//
+//   INCLUSIVE    the final figure, GST already inside it. The GST inside is
+//                worked out (₹1,200 at 5% holds ₹57.14, value ₹1,142.86) and
+//                reported, and nothing is added on top: the charge adds
+//                exactly ₹1,200 to the bill.
+//   EXCLUSIVE    the value before GST; its GST is added on top.
+//   NON_TAXABLE  no GST at all, and outside the value GST is worked out on
+//                (an expense recovered at cost, say). Not the same as
+//                INCLUSIVE: an inclusive charge still carries GST that is
+//                reported and paid; a non-taxable one carries none.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** How GST sits on a charge billed with a sale. */
+export type ChargeTaxTreatment = 'INCLUSIVE' | 'EXCLUSIVE' | 'NON_TAXABLE'
+
+export const CHARGE_TAX_TREATMENTS: readonly ChargeTaxTreatment[] = ['INCLUSIVE', 'EXCLUSIVE', 'NON_TAXABLE']
+
+/** Each treatment as a form and a print name it. */
+export const CHARGE_TAX_TREATMENT_LABEL: Record<ChargeTaxTreatment, string> = {
+  INCLUSIVE: 'GST included',
+  EXCLUSIVE: 'GST added on top',
+  NON_TAXABLE: 'No GST',
+}
+
+const r2 = (n: number) => {
+  const v = Math.round((Number.isFinite(n) ? n : 0) * 100) / 100
+  return v === 0 ? 0 : v
+}
+
+/** The goods a charge goes with: one line's taxable value and its GST rate. */
+export interface SaleGoods {
+  taxable: number
+  gstRate: number
+}
+
+/**
+ * A charge shared across the goods' rates by their taxable value, the biggest
+ * share taking any rounding paisa. With no goods to follow, the whole of it at
+ * the fallback rate.
+ */
+export function shareSaleCharge(amount: number, goods: SaleGoods[], fallbackRate: number): Array<{ amount: number; gstRate: number }> {
+  const byRate = new Map<number, number>()
+  for (const g of goods) if (g.taxable > 0) byRate.set(g.gstRate, (byRate.get(g.gstRate) ?? 0) + g.taxable)
+  const total = [...byRate.values()].reduce((s, v) => s + v, 0)
+  if (!(total > 0)) return [{ amount, gstRate: fallbackRate }]
+  const parts = [...byRate.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+    .map(([gstRate, taxable]) => ({ gstRate, amount: r2((amount * taxable) / total) }))
+  const drift = r2(amount - parts.reduce((s, p) => s + p.amount, 0))
+  if (drift !== 0) parts[0].amount = r2(parts[0].amount + drift)
+  return parts.filter((p) => p.amount !== 0)
+}
+
+export interface SaleChargeInput {
+  /** The charge type id, or any key the caller wants back. */
+  key: string
+  /** The figure typed. */
+  amount: number
+  treatment: ChargeTaxTreatment
+  /** Taxed at the goods' rate (part of their value); false: at ownRate, a supply of its own. */
+  followsGoodsRate: boolean
+  /** The charge's own rate: used when it does not follow the goods, or there are no goods to follow. */
+  ownRate: number
+}
+
+/** One rate's share of a charge. */
+export interface SaleChargePart {
+  gstRate: number
+  /** The share of the figure typed. */
+  amount: number
+  /** The share without its GST. */
+  net: number
+  cgst: number
+  sgst: number
+  igst: number
+  tax: number
+}
+
+export interface PricedSaleCharge {
+  key: string
+  treatment: ChargeTaxTreatment
+  /** The figure typed. */
+  amount: number
+  /** Without its GST: what the income ledger takes and, unless NON_TAXABLE, what GST is worked out on. */
+  net: number
+  /** One rate, or the rate its shares come to together. */
+  gstRate: number
+  cgst: number
+  sgst: number
+  igst: number
+  tax: number
+  /** What it adds to the bill: net + tax. Exactly the figure typed when it includes GST. */
+  payable: number
+  parts: SaleChargePart[]
+  /** "5%", or "5% and 18%" when the goods carry two rates. */
+  rateText: string
+}
+
+/**
+ * GST added on top of a share: worked out on it whole and split in halves
+ * within the state, as the order has always done.
+ */
+function addedOn(amount: number, gstRate: number, intra: boolean | undefined): SaleChargePart {
+  const raw = (amount * gstRate) / 100
+  const cgst = intra ? r2(raw / 2) : 0
+  const sgst = intra ? r2(raw / 2) : 0
+  const igst = intra === false ? r2(raw) : 0
+  const tax = intra === undefined ? r2(raw) : r2(cgst + sgst + igst)
+  return { gstRate, amount, net: amount, cgst, sgst, igst, tax }
+}
+
+/**
+ * The GST inside a share that includes it: amount × rate ÷ (100 + rate).
+ * Within the state each half is worked out on its own, so CGST and SGST are
+ * always equal; any paisa that leaves stays in the value, so the value and its
+ * GST always add back to exactly the figure typed.
+ */
+function includedIn(amount: number, gstRate: number, intra: boolean | undefined): SaleChargePart {
+  if (!(gstRate > 0)) return { gstRate, amount, net: amount, cgst: 0, sgst: 0, igst: 0, tax: 0 }
+  const inside = (rate: number) => r2((amount * rate) / (100 + gstRate))
+  if (intra) {
+    const half = inside(gstRate / 2)
+    return { gstRate, amount, net: r2(amount - 2 * half), cgst: half, sgst: half, igst: 0, tax: r2(2 * half) }
+  }
+  const whole = inside(gstRate)
+  return { gstRate, amount, net: r2(amount - whole), cgst: 0, sgst: 0, igst: intra === false ? whole : 0, tax: whole }
+}
+
+/**
+ * One charge priced. `intra`: true within the state (CGST + SGST), false
+ * across states (IGST), undefined while a form has no customer yet (the tax
+ * shown whole).
+ */
+export function priceSaleCharge(c: SaleChargeInput, goods: SaleGoods[], intra: boolean | undefined): PricedSaleCharge {
+  const amount = r2(Math.max(0, Number(c.amount) || 0))
+  const ownRate = Number(c.ownRate) || 0
+  if (c.treatment === 'NON_TAXABLE' || amount === 0) {
+    return { key: c.key, treatment: c.treatment, amount, net: amount, gstRate: 0, cgst: 0, sgst: 0, igst: 0, tax: 0, payable: amount, parts: [], rateText: '' }
+  }
+  const shares = c.followsGoodsRate ? shareSaleCharge(amount, goods, ownRate) : [{ amount, gstRate: ownRate }]
+  const parts = shares.map((p) => (c.treatment === 'INCLUSIVE' ? includedIn(p.amount, p.gstRate, intra) : addedOn(p.amount, p.gstRate, intra)))
+  const sum = (k: 'net' | 'cgst' | 'sgst' | 'igst' | 'tax') => r2(parts.reduce((s, p) => s + p[k], 0))
+  const net = sum('net')
+  const tax = sum('tax')
+  return {
+    key: c.key,
+    treatment: c.treatment,
+    amount,
+    net,
+    gstRate: parts.length === 1 ? parts[0].gstRate : net > 0 ? r2((tax / net) * 100) : 0,
+    cgst: sum('cgst'),
+    sgst: sum('sgst'),
+    igst: sum('igst'),
+    tax,
+    payable: r2(net + tax),
+    parts,
+    rateText: parts.map((p) => `${p.gstRate}%`).join(' and '),
+  }
+}
+
+/** A garment's HSN rate: one rate up to a price per piece, another above it. */
+export interface SaleRateBand {
+  gstRate: number
+  priceLimit: number | null
+  rateAbove: number | null
+}
+
+export interface SaleLineInput {
+  qty: number
+  price: number
+  /** Percent off qty × price, 0 to 100. */
+  discountPct?: number
+  /** A fixed GST rate (0 for an exempt line). */
+  rate?: number | null
+  /**
+   * Or the HSN's price band, read at the price each piece is actually sold for
+   * after every discount. Neither: the rate is not known yet.
+   */
+  band?: SaleRateBand | null
+}
+
+export interface SaleInput {
+  lines: SaleLineInput[]
+  /** Rupees off the goods as a whole, after the lines' own discounts; capped at their value. */
+  orderDiscount?: number
+  charges?: SaleChargeInput[]
+  /** The "other charges" box: added after tax, carrying no GST. */
+  otherCharges?: number
+  intra: boolean | undefined
+  /** Brokerage %, on the goods' taxable value. */
+  brokeragePct?: number
+}
+
+export interface PricedSaleLine {
+  /** Null while the rate is not known. */
+  gstRate: number | null
+  /** qty × price. */
+  gross: number
+  /** After the line's own discount. */
+  amount: number
+  /** After the order's discount too: what GST is worked out on. */
+  taxable: number
+  tax: number
+}
+
+export interface SaleResult {
+  lines: PricedSaleLine[]
+  charges: PricedSaleCharge[]
+  /** Σ qty × price. */
+  gross: number
+  lineDiscount: number
+  /** After the lines' own discounts. */
+  subtotal: number
+  /** The order's discount actually taken. */
+  discount: number
+  /** The goods after every discount: the document's taxable amount. */
+  goodsTaxable: number
+  goodsTax: number
+  /** The charges GST is worked out on, without their GST. */
+  chargeTaxable: number
+  /** The charges with no GST. */
+  chargeUntaxed: number
+  /** Every charge without its GST. */
+  chargeNet: number
+  /** Everything GST is worked out on: the goods and the taxed charges. */
+  taxable: number
+  /** Where the GST comes from, lowest rate first. */
+  byRate: Array<{ rate: number; taxable: number; tax: number }>
+  cgst: number
+  sgst: number
+  igst: number
+  tax: number
+  otherCharges: number
+  beforeRound: number
+  roundOff: number
+  /** Rounded to the rupee. */
+  total: number
+  brokerage: number
+}
+
+/**
+ * A quotation or an order priced: line discounts, then the order's discount
+ * spread across the lines by value; each line's GST at its rate (a garment's
+ * at the price per piece it is sold for); the charges, each as its treatment
+ * says; the "other charges" box; rounded to the rupee.
+ */
+export function priceSale(input: SaleInput): SaleResult {
+  const intra = input.intra
+  const priced = input.lines.map((l) => {
+    const qty = Number(l.qty) || 0
+    const price = Number(l.price) || 0
+    const disc = Math.min(100, Math.max(0, Number(l.discountPct) || 0))
+    const gross = qty * price
+    return { l, price, disc, gross, raw: gross * (1 - disc / 100) }
+  })
+  const gross = r2(priced.reduce((s, p) => s + p.gross, 0))
+  const subtotal = r2(priced.reduce((s, p) => s + p.raw, 0))
+  const lineDiscount = r2(gross - subtotal)
+  const discount = r2(Math.min(Math.max(0, Number(input.orderDiscount) || 0), subtotal))
+  const goodsTaxable = r2(subtotal - discount)
+  const factor = subtotal > 0 ? goodsTaxable / subtotal : 1
+
+  const byRate = new Map<number, { taxable: number; tax: number }>()
+  const addRate = (rate: number, base: number, tax: number) => {
+    const r = byRate.get(rate) ?? { taxable: 0, tax: 0 }
+    r.taxable += base
+    r.tax += tax
+    byRate.set(rate, r)
+  }
+
+  let goodsTax = 0
+  const goods: SaleGoods[] = []
+  const lines = priced.map((p) => {
+    let rate: number | null = null
+    const band = p.l.band
+    if (band) {
+      const perPiece = p.price * (1 - p.disc / 100) * factor
+      rate = band.priceLimit != null && band.rateAbove != null && perPiece > Number(band.priceLimit) ? Number(band.rateAbove) : Number(band.gstRate)
+    } else if (p.l.rate != null) rate = Number(p.l.rate)
+    const base = p.raw * factor
+    const tax = base * ((rate ?? 0) / 100)
+    goodsTax += tax
+    if (rate != null && base > 0) addRate(rate, base, tax)
+    if (rate != null) goods.push({ taxable: base, gstRate: rate })
+    return { gstRate: rate, gross: r2(p.gross), amount: r2(p.raw), taxable: r2(base), tax: r2(tax) }
+  })
+
+  const charges = (input.charges ?? []).map((c) => priceSaleCharge(c, goods, intra))
+  for (const c of charges) for (const part of c.parts) addRate(part.gstRate, part.net, part.tax)
+  const sumOf = (xs: number[]) => xs.reduce((s, v) => s + v, 0)
+  const chargeTaxable = r2(sumOf(charges.filter((c) => c.treatment !== 'NON_TAXABLE').map((c) => c.net)))
+  const chargeUntaxed = r2(sumOf(charges.filter((c) => c.treatment === 'NON_TAXABLE').map((c) => c.net)))
+  const chargeNet = r2(chargeTaxable + chargeUntaxed)
+
+  const cgst = intra ? r2(goodsTax / 2 + sumOf(charges.map((c) => c.cgst))) : 0
+  const sgst = intra ? r2(goodsTax / 2 + sumOf(charges.map((c) => c.sgst))) : 0
+  const igst = intra === false ? r2(goodsTax + sumOf(charges.map((c) => c.igst))) : 0
+  const tax = intra === undefined ? r2(goodsTax + sumOf(charges.map((c) => c.tax))) : r2(cgst + sgst + igst)
+  const otherCharges = r2(Math.max(0, Number(input.otherCharges) || 0))
+  const beforeRound = goodsTaxable + chargeNet + tax + otherCharges
+  const total = Math.round(beforeRound)
+
+  return {
+    lines,
+    charges,
+    gross,
+    lineDiscount,
+    subtotal,
+    discount,
+    goodsTaxable,
+    goodsTax: r2(goodsTax),
+    chargeTaxable,
+    chargeUntaxed,
+    chargeNet,
+    taxable: r2(goodsTaxable + chargeTaxable),
+    byRate: [...byRate.entries()]
+      .map(([rate, r]) => ({ rate, taxable: r2(r.taxable), tax: r2(r.tax) }))
+      .filter((r) => r.taxable > 0)
+      .sort((x, y) => x.rate - y.rate),
+    cgst,
+    sgst,
+    igst,
+    tax,
+    otherCharges,
+    beforeRound: r2(beforeRound),
+    roundOff: r2(total - beforeRound),
+    total,
+    brokerage: r2((goodsTaxable * (Number(input.brokeragePct) || 0)) / 100),
+  }
+}

@@ -40,6 +40,7 @@ import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { SizeQtyGrid, type SizeOption } from './SizeQtyGrid'
 import { JOB_WORK_SAC, orderTotals, sacRateIn } from './orderTotals'
+import { SaleCharges, chargeDraftsOf, chargesToPrice, chargesToSave, type SaleChargeDraft } from './SaleCharges'
 import {
   CustomerPanel,
   billingAddressOf,
@@ -107,6 +108,10 @@ interface ChargeTypeOption {
   defaultGstRate: string | number
   isActive: boolean
   applyOnSale: boolean
+  /** How a sale takes the charge unless its row says otherwise. */
+  taxTreatment?: 'INCLUSIVE' | 'EXCLUSIVE' | 'NON_TAXABLE'
+  /** Taxed at the goods' rate; false: at defaultGstRate. */
+  followsGoodsRate?: boolean
 }
 
 /** A line's BOM price, as GET /sales/quotations/bom-price gives it (null: no BOM with a price or cost). */
@@ -162,12 +167,7 @@ interface LineDraft {
   bGradeRate: string
 }
 
-interface ChargeDraft {
-  key: string
-  chargeTypeId: string
-  amount: string
-  gstRate: string
-}
+type ChargeDraft = SaleChargeDraft
 
 /** A saved order as the detail returns it — what the form reopens from. */
 interface SavedOrder {
@@ -196,7 +196,7 @@ interface SavedOrder {
   ownMaterialBilling?: 'IN_JOB_CHARGE' | 'BILLED'
   notes: string | null
   terms: string | null
-  charges: Array<{ chargeTypeId: string; amount: string | number; gstRate: string | number }>
+  charges: Array<{ chargeTypeId: string; amount: string | number; gstRate: string | number; taxTreatment?: 'INCLUSIVE' | 'EXCLUSIVE' | 'NON_TAXABLE' }>
   lines: Array<{
     id: string
     itemId: string
@@ -248,7 +248,6 @@ const blankLine = (): LineDraft => ({
   jobGst: '',
   bGradeRate: '',
 })
-const blankCharge = (): ChargeDraft => ({ key: `c${++lineKey}`, chargeTypeId: '', amount: '', gstRate: '' })
 
 const today = () => new Date().toISOString().slice(0, 10)
 const day = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : '')
@@ -555,6 +554,7 @@ export function SalesOrderDialog({
                     terms: string | null
                     notes: string | null
                     lines: Array<{ itemId: string; styleCode: string | null; color: string | null; description: string | null; qty: string | number; unitPrice: string | number; discount: string | number }>
+                    charges?: Array<{ chargeTypeId: string; amount: string | number; taxTreatment?: 'INCLUSIVE' | 'EXCLUSIVE' | 'NON_TAXABLE' }>
                   }
                 }>(`/sales/quotations/${fromQuoteId}`)
                 .then((r) => r.data)
@@ -600,14 +600,7 @@ export function SalesOrderDialog({
           setTerms(o.terms ?? '')
           setBillDiscount(Number(o.discountAmount) > 0 ? String(Number(o.discountAmount)) : '')
           setOtherCharges(Number(o.otherCharges) > 0 ? String(Number(o.otherCharges)) : '')
-          setCharges(
-            (o.charges ?? []).map((x) => ({
-              key: `c${++lineKey}`,
-              chargeTypeId: x.chargeTypeId,
-              amount: num(x.amount),
-              gstRate: num(x.gstRate),
-            }))
-          )
+          setCharges(chargeDraftsOf(o.charges))
           setLines(
             o.lines.length
               ? o.lines.map((l) => {
@@ -667,6 +660,8 @@ export function SalesOrderDialog({
           setBillDiscount(Number(quote.discountAmount) > 0 ? String(Number(quote.discountAmount)) : '')
           setTerms(quote.terms ?? '')
           setNotes(quote.notes ?? '')
+          // Its charges as quoted: the same figures, each with its GST as it was.
+          setCharges(chargeDraftsOf(quote.charges))
           setLines(
             quote.lines.map((l) => {
               const item = itemMap.get(l.itemId)
@@ -906,11 +901,6 @@ export function SalesOrderDialog({
       const disc = Math.min(100, Math.max(0, Number(l.discount) || 0))
       return { line: l, item, run, fixed, groupId, qty, rate, disc, dropped }
     })
-    const chargeRows = charges.map((c) => {
-      const type = chargeTypeById.get(c.chargeTypeId)
-      return { ...c, type, value: Number(c.amount) || 0 }
-    })
-    const priceable = chargeRows.filter((c) => c.type && c.value > 0)
     const t = orderTotals({
       lines: priced.map((p) => ({
         qty: p.qty,
@@ -925,8 +915,8 @@ export function SalesOrderDialog({
       isJobWork,
       hsnIndex,
       billDiscount: Number(billDiscount) || 0,
-      // Charges take the goods' rate; the master's rate only with no goods to follow.
-      charges: priceable.map((c) => ({ amount: c.value, fallbackRate: Number(c.type?.defaultGstRate ?? 0) })),
+      // Each charge as its row says: GST included in the figure, added on top, or none.
+      charges: chargesToPrice(charges, chargeTypeById),
       intra: context?.placeOfSupply?.isIntraState,
       otherCharges: Number(otherCharges) || 0,
       brokerPct: Number(brokerPct) || 0,
@@ -934,11 +924,6 @@ export function SalesOrderDialog({
     return {
       ...t,
       lines: priced.map((p, i) => ({ ...p, gst: t.lines[i].gst, amount: t.lines[i].amount })),
-      // Each charge row with the GST it carries, for the row's own line.
-      chargeRows: chargeRows.map((c) => {
-        const k = priceable.indexOf(c)
-        return { ...c, tax: k >= 0 ? t.charges[k].tax : 0, rateText: k >= 0 ? t.charges[k].rateText : '' }
-      }),
       pieces: priced.reduce((s, p) => s + p.qty, 0),
     }
     // runOf reads the maps listed here.
@@ -949,7 +934,7 @@ export function SalesOrderDialog({
   const filled = totals.lines.filter((p) => p.line.itemId)
   const unfinished = filled.filter((p) => p.qty <= 0 || p.line.unitPrice.trim() === '')
   const noGst = filled.filter((p) => p.gst === null)
-  const chargeNoType = totals.chargeRows.find((c) => !c.type && c.value > 0)
+  const chargeNoType = charges.find((c) => !chargeTypeById.get(c.chargeTypeId) && (Number(c.amount) || 0) > 0)
   const blocker = !customerId
     ? 'Choose a customer to save this order.'
     : context?.placeOfSupplyProblem
@@ -1021,9 +1006,7 @@ export function SalesOrderDialog({
       discountAmount: Number(billDiscount) || 0,
       notes: notes.trim() || null,
       terms: terms.trim() || null,
-      charges: totals.chargeRows
-        .filter((c) => c.type && c.value > 0)
-        .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.value })),
+      charges: chargesToSave(charges, chargeTypeById),
       otherCharges: totals.other,
       quotationId: fromQuote?.id ?? null,
       confirm,
@@ -1202,8 +1185,6 @@ export function SalesOrderDialog({
       const copy: LineDraft = { ...ls[at], key: blankLine().key, id: undefined, sizes: { ...ls[at].sizes } }
       return [...ls.slice(0, at + 1), copy, ...ls.slice(at + 1)]
     })
-  const setCharge = (key: string, patch: Partial<ChargeDraft>) =>
-    setCharges((cs) => cs.map((c) => (c.key === key ? { ...c, ...patch } : c)))
 
   /** The boxes of one row, shared by the table and the phone cards. */
   const boxes = (p: (typeof totals.lines)[number], i: number, compact: boolean) => {
@@ -2144,74 +2125,11 @@ export function SalesOrderDialog({
                     </div>
                     <TotalRow label="Taxable value of the goods" value={inr(totals.taxable)} />
 
-                    {/* Charges picked from the charge master, as on the purchase
-                      bill: the charge, its amount, and its GST. */}
-                    {chargeTypes.length === 0 ? (
-                      <p className="text-muted-foreground py-1 text-xs">
-                        No sales charges set up yet. Add them under{' '}
-                        <a href="/masters/charges" target="_blank" rel="noreferrer" className="text-primary underline">
-                          Masters → Charges
-                        </a>{' '}
-                        with &quot;On sales&quot; ticked.
-                      </p>
-                    ) : (
-                      <div className="space-y-1.5 py-0.5">
-                        {totals.chargeRows.map((c, i) => {
-                          const taken = new Set(charges.filter((x) => x.key !== c.key).map((x) => x.chargeTypeId))
-                          return (
-                            <div key={c.key} className="flex flex-wrap items-center gap-1.5">
-                              <SmartSelect
-                                className="form-input h-8 min-w-0 flex-1 text-xs"
-                                value={c.chargeTypeId}
-                                onChange={(e) => setCharge(c.key, { chargeTypeId: e.target.value, gstRate: '' })}
-                                aria-label={`Charge ${i + 1}`}
-                              >
-                                <option value="">Charge…</option>
-                                {chargeTypes
-                                  .filter((ct) => !taken.has(ct.id))
-                                  .map((ct) => (
-                                    <option key={ct.id} value={ct.id}>
-                                      {ct.name}
-                                    </option>
-                                  ))}
-                              </SmartSelect>
-                              <StepInput
-                                decimals
-                                className="form-input h-8 w-24 shrink-0 text-right text-xs tabular-nums"
-                                placeholder="Amount"
-                                value={c.amount}
-                                onValueChange={(v) => setCharge(c.key, { amount: v })}
-                                aria-label={`Charge ${i + 1} amount`}
-                              />
-                              <button
-                                type="button"
-                                onClick={() => setCharges((cs) => cs.filter((x) => x.key !== c.key))}
-                                className="btn-ghost text-muted-foreground hover:text-destructive shrink-0 p-1"
-                                aria-label={`Remove charge ${i + 1}`}
-                              >
-                                <Trash2 size={12} />
-                              </button>
-                              {c.type && c.value > 0 && (
-                                <span className="text-muted-foreground basis-full pr-7 text-right text-[11px] tabular-nums">
-                                  GST at the goods&apos; rate, {c.rateText}: {inr(c.tax)}
-                                </span>
-                              )}
-                            </div>
-                          )
-                        })}
-                        {charges.length < chargeTypes.length && (
-                          <button
-                            type="button"
-                            onClick={() => setCharges((cs) => [...cs, blankCharge()])}
-                            className="text-muted-foreground hover:text-primary flex items-center gap-1 text-xs transition-colors"
-                          >
-                            <Plus size={12} /> Add charge
-                          </button>
-                        )}
-                      </div>
-                    )}
+                    {/* Charges from Masters → Charges, each with how GST sits on its
+                      figure — the same box the quotation uses. */}
+                    <SaleCharges types={chargeTypes} rows={charges} priced={totals.chargeByKey} onChange={setCharges} />
 
-                    {totals.chargeTotal > 0 && <TotalRow label="Taxable value with the charges" value={inr(totals.taxable + totals.chargeTotal)} />}
+                    {totals.chargeTaxable > 0 && <TotalRow label="Taxable value with the charges" value={inr(totals.taxable + totals.chargeTaxable)} />}
                     {context?.placeOfSupply ? (
                       context.placeOfSupply.isIntraState ? (
                         <>

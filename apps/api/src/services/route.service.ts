@@ -168,6 +168,7 @@ const routingSelect = {
   category: true,
   version: true,
   isActive: true,
+  updatedAt: true,
   style: { select: { code: true, name: true } },
   steps: {
     orderBy: { sequence: 'asc' as const },
@@ -203,9 +204,12 @@ export async function routingsFor(db: Db, styleIds: string[]) {
     orderBy: { code: 'asc' },
   })
   const rank = (r: { styleId: string | null; category: string | null }) => (r.styleId ? 0 : r.category?.trim() ? 1 : 2)
+  // The first that fits is the one an order is offered: the style's own, then its category's, then any
+  // style's — and of several of a kind the one changed last, as Masters → Routings marks "In use"
+  // (trackedRoutings). It was the lowest code until 9 Nov 2026, so an older routing beat a newer one.
   return routings
     .map((r) => ({ ...r, problem: routingProblem(r, styles), applies: r.styleId ? 'STYLE' : r.category?.trim() ? 'CATEGORY' : 'ANY' }))
-    .sort((a, b) => Number(!!a.problem) - Number(!!b.problem) || rank(a) - rank(b) || a.code.localeCompare(b.code))
+    .sort((a, b) => Number(!!a.problem) - Number(!!b.problem) || rank(a) - rank(b) || b.updatedAt.getTime() - a.updatedAt.getTime() || a.code.localeCompare(b.code))
 }
 
 /**
@@ -282,7 +286,7 @@ export const routeStepSchema = z.object({
   execution: z.enum(['IN_HOUSE', 'OUTSOURCED']).default('IN_HOUSE'),
   workstationId: z.string().optional().nullable(),
   isQcStep: z.boolean().default(false),
-  skip: z.enum(['OPTIONAL', 'WITH_APPROVAL', 'NEVER']).default('WITH_APPROVAL'),
+  skip: z.enum(['OPTIONAL', 'WITH_APPROVAL', 'NEVER']).default('NEVER'),
   ratePerPiece: z.number().min(0).max(100_000).optional().nullable(),
   instructions: z.string().trim().max(1000).optional().nullable(),
 })

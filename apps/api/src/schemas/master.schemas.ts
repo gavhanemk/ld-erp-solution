@@ -950,6 +950,20 @@ export const createChargeTypeSchema = z.object({
    * rate instead — which is at least the number printed on the row.
    */
   percentOfValue: z.number().min(0).max(100).default(0),
+  /*
+   * How a sales document takes this charge unless its row says otherwise:
+   * the figure typed already includes GST (the GST inside it is worked out
+   * and reported, nothing is added on top), GST is added on top, or there is
+   * no GST at all (outside the taxable value). Inclusive and no-GST both leave
+   * the figure as typed, but only an inclusive charge carries GST to report.
+   */
+  taxTreatment: z.enum(['INCLUSIVE', 'EXCLUSIVE', 'NON_TAXABLE']).default('INCLUSIVE'),
+  /*
+   * On a sale, taxed at the goods' rate: billed with the goods it is part of
+   * what they are sold for (CGST Act s.15(2)(c)). Off: a supply of its own,
+   * at the GST rate above.
+   */
+  followsGoodsRate: z.boolean().default(true),
   applyOnSale: z.boolean().default(true),
   applyOnPurchase: z.boolean().default(false),
   isActive,
@@ -972,8 +986,8 @@ export const routingStepSchema = z.object({
   isQcStep: z.boolean().default(false),
   /** Done on our floor, or given to an outside unit. */
   execution: z.enum(['IN_HOUSE', 'OUTSOURCED']).default('IN_HOUSE'),
-  /** Who may leave it out of an order's route. */
-  skip: z.enum(['OPTIONAL', 'WITH_APPROVAL', 'NEVER']).default('WITH_APPROVAL'),
+  /** Who may leave it out of an order's route. Never, unless marked otherwise (9 Nov 2026). */
+  skip: z.enum(['OPTIONAL', 'WITH_APPROVAL', 'NEVER']).default('NEVER'),
   instructions: optionalText,
 })
 

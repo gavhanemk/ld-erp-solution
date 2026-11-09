@@ -9,7 +9,7 @@ import { postWithin } from '../services/accounts/posting.service'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
-import { foldChargesIntoHsn, priceSalesCharges } from '../services/salesCharges'
+import { chargeRowOf, foldChargesIntoHsn, priceSalesCharges, saleChargeSchema } from '../services/salesCharges'
 import { orderReconciliation } from '../services/reconciliation.service'
 
 /**
@@ -83,10 +83,7 @@ function mustSee(req: AuthRequest) {
   }
 }
 
-const chargeSchema = z.object({
-  chargeTypeId: z.string().min(1, 'Pick the charge'),
-  amount: z.number().min(0, 'A charge cannot be negative'),
-  gstRate: z.number().min(0).max(100).optional().nullable(),
+const chargeSchema = saleChargeSchema.extend({
   /** This charge bills our own material used on a job-work order that bills it separately. */
   ownMaterial: z.boolean().optional(),
 })
@@ -212,12 +209,15 @@ export function chargesStillToBill(dc: Billable) {
     for (const c of inv.charges) billed.set(c.chargeTypeId, (billed.get(c.chargeTypeId) ?? 0) + Number(c.amount))
   }
   return {
+    // Billed as the order priced it: GST included in the figure, added on
+    // top, or none. What is left is counted in the figures typed.
     charges: dc.so.charges
       .map((c) => ({
         chargeTypeId: c.chargeTypeId,
         name: c.chargeType.name,
         amount: round2(Math.max(0, Number(c.amount) - (billed.get(c.chargeTypeId) ?? 0))),
         gstRate: Number(c.gstRate),
+        taxTreatment: c.taxTreatment,
       }))
       .filter((c) => c.amount > 0),
     otherCharges: round2(Math.max(0, Number(dc.so.otherCharges) - otherBilled)),
@@ -279,10 +279,14 @@ async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: In
   if (data.charges?.some((c) => c.ownMaterial && c.amount > 0) && !(order.isJobWork && order.ownMaterialBilling === 'BILLED')) {
     throw new AppError(`${order.soNumber} does not bill our own material separately, so the invoice carries no charge for it. Change the order if that was agreed with the customer.`, 400, 'OWN_MATERIAL_NOT_BILLED')
   }
-  // Each charge at the goods' rate: one row per rate the goods carry.
+  // Each charge as the order priced it (GST included, added on top, or none),
+  // at the goods' rate unless its type has its own: one row per rate. What a
+  // charge adds to the bill is its value without GST here and its GST with
+  // the rest — exactly the figure typed when that figure includes GST.
   const goods = lines.map((l) => ({ taxable: l.taxableValue, gstRate: l.gstRate }))
-  const charges = await priceSalesCharges(tx, data.charges, isIntraState, goods, { split: true })
-  const chargeTotal = round2(charges.reduce((s, c) => s + c.amount, 0))
+  const treatmentByType = new Map(order.charges.map((c) => [c.chargeTypeId, c.taxTreatment]))
+  const charges = await priceSalesCharges(tx, data.charges, isIntraState, goods, { split: true, treatmentByType })
+  const chargeTotal = round2(charges.reduce((s, c) => s + c.netAmount, 0))
   const sum = (k: 'cgst' | 'sgst' | 'igst') =>
     round2(lines.reduce((s, l) => s + l[k], 0) + charges.reduce((s, c) => s + c[k], 0))
   const cgst = sum('cgst')
@@ -620,7 +624,8 @@ router.get('/:id/print', async (req: AuthRequest, res) => {
   const taxMode = Number(invoice.igst) > 0 ? 'IGST' : Number(invoice.cgst) > 0 ? 'CGST_SGST' : 'NONE'
 
   // One row per HSN code and rate. Charges are taxed at the goods' rate, so
-  // they fold into those goods' rows; one at a rate of its own keeps its name.
+  // they fold into those goods' rows at their value without GST; one at a
+  // rate of its own keeps its name; one with no GST is left out.
   const summary = foldChargesIntoHsn(
     invoice.lines.map((l) => ({
       hsnCode: l.hsnCode,
@@ -630,14 +635,7 @@ router.get('/:id/print', async (req: AuthRequest, res) => {
       sgst: Number(l.sgst),
       igst: Number(l.igst),
     })),
-    invoice.charges.map((c) => ({
-      name: c.chargeType.name,
-      gstRate: Number(c.gstRate),
-      amount: Number(c.amount),
-      cgst: Number(c.cgst),
-      sgst: Number(c.sgst),
-      igst: Number(c.igst),
-    })),
+    invoice.charges.map(chargeRowOf),
   )
 
   res.json({
