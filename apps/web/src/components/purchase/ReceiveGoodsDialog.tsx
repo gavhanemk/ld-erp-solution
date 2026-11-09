@@ -819,8 +819,16 @@ export function ReceiveGoodsDialog({
   grnId,
 }: {
   onClose: () => void
-  /** `stickers`: a new receipt, for its sticker window. A correction has none. */
-  onSaved: (message: string, stickers?: InwardRef) => void
+  /**
+   * `stickers`: a new receipt, for its sticker window. `receipt`: a new
+   * receipt's id and number, for the quality-check prompt. A correction has
+   * neither.
+   */
+  onSaved: (
+    message: string,
+    stickers?: InwardRef,
+    receipt?: { id: string; grnNumber: string }
+  ) => void
   /**
    * The order to open on, when the screen already knows which one.
    *
@@ -1467,7 +1475,8 @@ export function ReceiveGoodsDialog({
         failed.length
           ? `${base} ${failed.length === 1 ? 'A file' : `${failed.length} files`} did not attach: ${failed.join(', ')}.`
           : base,
-        editing ? undefined : { type: 'GRN', id: res.data.id }
+        editing ? undefined : { type: 'GRN', id: res.data.id },
+        editing ? undefined : { id: res.data.id, grnNumber: res.data.grnNumber }
       )
     } catch (err) {
       setError(apiErrorMessage(err))
