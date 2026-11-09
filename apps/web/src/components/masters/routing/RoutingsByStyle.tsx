@@ -480,10 +480,10 @@ export function RoutingsByStyle({
                                       <RoutingDetail routing={line.routing} orders={line.orders} />
                                     ) : (
                                       <div className="px-4 py-4">
-                                        <p className={sectionTitle}>Orders not given a routing yet</p>
+                                        <p className={sectionTitle}>Orders whose stages are not loaded yet</p>
                                         <p className="text-muted-foreground mt-1 text-xs">
-                                          An order is given the steps of its style&apos;s routing{line.takes ? ` (now "${line.takes.name}")` : ''} when its materials are issued, or
-                                          from the order&apos;s own page.
+                                          A routing is a pattern: an order gets its own copy of the steps when someone presses Set up stages on it (open the order, Stages tab), once
+                                          the store has issued its materials. Until then it has no routing.{line.takes ? ` Set up stages offers "${line.takes.name}" first — the one marked In use — and another can be picked there.` : ''}
                                         </p>
                                         <OrdersTable orders={line.orders} current={null} />
                                       </div>
@@ -704,12 +704,12 @@ function WaitingRow({
       {styleCell}
       <td>
         <div className="flex items-start gap-2">
-          <Toggle open={open} label="the orders not given a routing yet" onToggle={onToggle} />
+          <Toggle open={open} label="the orders whose stages are not loaded yet" onToggle={onToggle} />
           <div className="min-w-0">
-            <div className="text-muted-foreground truncate text-sm italic">No routing on the order yet</div>
+            <div className="text-muted-foreground truncate text-sm italic">{running ? 'Stages not loaded on the order yet' : 'Order made without stages'}</div>
             {running && line.takes && (
-              <div className="text-muted-foreground truncate text-[11px]" title={line.takes.name}>
-                will take {line.takes.name}
+              <div className="text-muted-foreground truncate text-[11px]" title={`Set up stages on the order offers ${line.takes.name} first`}>
+                Set up stages will offer {line.takes.name}
               </div>
             )}
           </div>
@@ -717,8 +717,8 @@ function WaitingRow({
       </td>
       <td>
         {running ? <span className="badge-info">Waiting</span> : <span className="badge-neutral">Without steps</span>}
-        <div className="text-muted-foreground mt-0.5 truncate text-[11px]" title={running ? 'An order takes its steps once its materials are issued' : undefined}>
-          {running ? 'on material issue' : 'made without a routing'}
+        <div className="text-muted-foreground mt-0.5 truncate text-[11px]" title={running ? 'Open the order and press Set up stages, once the store has issued its materials' : undefined}>
+          {running ? 'press Set up stages on it' : 'made without a routing'}
         </div>
       </td>
       <td className="text-muted-foreground">—</td>
@@ -765,8 +765,8 @@ function RoutingDetail({ routing: r, orders }: { routing: StyleRouting; orders: 
         <p className={sectionTitle}>Orders made with this routing</p>
         {orders.length === 0 ? (
           <p className="text-muted-foreground mt-2 text-xs">
-            None yet. A manufacturing order for this style is given its steps once its materials are issued
-            {r.takesNew ? '' : ' — new orders take the routing marked "In use"'}.
+            None yet. An order gets a copy of these steps when Set up stages is pressed on it, once the store has issued its materials
+            {r.takesNew ? ' — this one is offered first' : ' — the routing marked "In use" is offered first, and this one can be picked instead'}.
           </p>
         ) : (
           <OrdersTable orders={orders} current={r.version} />
