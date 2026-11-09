@@ -3122,18 +3122,27 @@ export function PurchaseBillDialog({
                               : `These charges came from ${chargeNote.poNumber}; this bill now covers more than one order — check them against the supplier's bill`}
                           </p>
                         )}
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setCharges((p) => [
-                              ...p,
-                              { chargeTypeId: '', amount: '', gstRate: '0' },
-                            ])
-                          }
-                          className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
-                        >
-                          <Plus size={12} /> Add a charge — freight, transport, packing
-                        </button>
+                        {/* A real button, styled like "Add line" above, so it
+                          reads as something to press — as plain grey text it
+                          was taken for a note. What a charge is goes beside
+                          it as a hint, not inside the button. */}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCharges((p) => [
+                                ...p,
+                                { chargeTypeId: '', amount: '', gstRate: '0' },
+                              ])
+                            }
+                            className="btn-secondary text-xs"
+                          >
+                            <Plus size={14} /> Add charge
+                          </button>
+                          <span className="text-muted-foreground text-xs">
+                            Freight, transport, packing…
+                          </span>
+                        </div>
                         {charges.length > 0 && (
                           <p className="text-muted-foreground text-xs">
                             Type each charge as it is on the supplier&apos;s bill, GST included — no GST
