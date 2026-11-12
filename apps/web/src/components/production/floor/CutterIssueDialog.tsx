@@ -204,7 +204,7 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
 
       <Section icon={Scissors} title="Pieces to cut, by size">
         <div className="border-border overflow-x-auto rounded-lg border">
-          <table className="data-table w-full">
+          <table className="data-table table-totals w-full">
             <thead>
               <tr className="bg-secondary">
                 <th>Size</th>

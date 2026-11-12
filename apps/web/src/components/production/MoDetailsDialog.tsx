@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { CalendarDays, ClipboardList, Loader2, Lock, Pencil, Save, Scissors } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, can } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -13,12 +13,13 @@ import { ContractorPicker, type KnownContractor } from './floor/ContractorPicker
  * A manufacturing order's details, after its plan is fixed and until cutting
  * is complete.
  *
- * Once the store has issued material, the pieces, sizes and routing are what
- * the floor is working to and stay as they are. What was only written down —
- * the dates and note, each job card's lot no., metres, ratio and the like,
- * and a lay still with its cutting contractor (who has it, its lot, layers,
- * fabric and fabric given) — can still be put right here, until every piece
- * is cut and no lay is still out. Saved all together.
+ * Once the store has issued material, the order's pieces, sizes and routing
+ * are what the floor is working to and stay as they are. What was only written
+ * down — the dates and note, each job card's lot no., metres, ratio and the
+ * like — can still be put right here, and so can a lay still with its cutting
+ * contractor: who has it, its lot, layers, fabric, fabric given, and the
+ * pieces of each size on it, within what is left to cut. All of it until
+ * every piece is cut and no lay is still out. Saved all together.
  */
 
 interface JobCardRow {
@@ -50,6 +51,10 @@ interface IssueRow {
   fabricGiven: string | number | null
   plannedPieces: number
   notes: string | null
+  /** Its pieces by size, beside what each size is to make and has had cut. */
+  sizes: Array<{ sizeId: string; code: string; toMake: number; cut: number; qty: number }>
+  /** A colour without sizes: its totals, for a lay counted in pieces only. */
+  line: { toMake: number; cut: number } | null
 }
 
 interface Details {
@@ -91,6 +96,14 @@ export function MoDetailsDialog({
   const [order, setOrder] = useState<Form>({})
   const [cards, setCards] = useState<Record<string, Form>>({})
   const [issues, setIssues] = useState<Record<string, Form>>({})
+  /**
+   * Each lay's pieces as typed: by size, or one number for a colour without
+   * sizes (under the key ''). Sent only for a lay whose pieces were changed —
+   * one issued with a manager's allowance would otherwise be checked again.
+   */
+  const [layQty, setLayQty] = useState<Record<string, Record<string, string>>>({})
+  const [piecesTouched, setPiecesTouched] = useState<Record<string, boolean>>({})
+  const [allowExcess, setAllowExcess] = useState<Record<string, boolean>>({})
   const [everyone, setEveryone] = useState<Array<{ name: string; cuts: number; inMaster?: boolean }>>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -140,6 +153,16 @@ export function MoDetailsDialog({
             ]),
           ),
         )
+        setLayQty(
+          Object.fromEntries(
+            x.cuttingIssues.map((i) => [
+              i.id,
+              i.sizes.length ? Object.fromEntries(i.sizes.map((z) => [z.sizeId, String(z.qty)])) : { '': String(i.plannedPieces) },
+            ]),
+          ),
+        )
+        setPiecesTouched({})
+        setAllowExcess({})
       })
       .catch((err) => alive && setError(err instanceof ApiError ? err.message : 'Could not open this order’s details.'))
     api
@@ -166,25 +189,76 @@ export function MoDetailsDialog({
 
   const setCard = (id: string, k: string, v: string) => setCards((p) => ({ ...p, [id]: { ...p[id], [k]: v } }))
   const setIssue = (id: string, k: string, v: string) => setIssues((p) => ({ ...p, [id]: { ...p[id], [k]: v } }))
+  const setPieces = (id: string, sizeId: string, v: string) => {
+    setLayQty((p) => ({ ...p, [id]: { ...p[id], [sizeId]: v } }))
+    setPiecesTouched((p) => ({ ...p, [id]: true }))
+  }
+  const manager = can('production', 'approve')
+  const n = (v: string | undefined) => Number(v) || 0
+  /**
+   * What the colour's other lays still out hold of a size (key '' for a colour
+   * without sizes) — as typed here, so pieces can move from one lay to another
+   * in one save. The server checks them the same way.
+   */
+  const othersOf = (i: IssueRow, sizeId: string) =>
+    (d?.cuttingIssues ?? []).filter((j) => j.id !== i.id && j.moLineId === i.moLineId).reduce((s, j) => s + n(layQty[j.id]?.[sizeId]), 0)
+  /** What is left of a size for this lay: to make, less cut, less what the other lays hold. */
+  const leftOf = (i: IssueRow, sizeId: string, x: { toMake: number; cut: number }) => Math.max(0, x.toMake - x.cut - othersOf(i, sizeId))
+  /** What is wrong with a lay's pieces as typed, or null: too many of a size, or none at all. */
+  const piecesProblem = (i: IssueRow): string | null => {
+    if (!piecesTouched[i.id]) return null
+    const q = layQty[i.id] ?? {}
+    const excess = allowExcess[i.id] && manager
+    if (i.sizes.length) {
+      const total = i.sizes.reduce((s, z) => s + n(q[z.sizeId]), 0)
+      if (!total) return 'Enter the pieces of each size on this lay.'
+      const over = i.sizes.find((z) => n(q[z.sizeId]) > leftOf(i, z.sizeId, z))
+      if (over && !excess) return `Size ${over.code}: only ${leftOf(i, over.sizeId, over)} left to cut.`
+      return null
+    }
+    const pieces = n(q[''])
+    if (!pieces) return 'Enter the pieces on this lay.'
+    const left = i.line ? leftOf(i, '', i.line) : Infinity
+    if (pieces > left && !excess) return `Only ${left} left to cut.`
+    return null
+  }
 
   // The lays this window shows: one, when opened from a lay's Edit; else every lay still out.
   const lays = d ? (issueId ? d.cuttingIssues.filter((i) => i.id === issueId) : d.cuttingIssues) : []
   const oneLay = issueId ? (lays[0] ?? null) : null
 
-  const blocker = !d
-    ? null
-    : issueId && !oneLay
-      ? 'This lay has come back cut or been cancelled, so it can no longer be changed.'
-      : d.detailsBlock
-        ? d.detailsBlock
-        : !issueId && order.start && order.end && order.end < order.start
-          ? 'The planned finish cannot be before the planned start.'
-          : lays.some((i) => !issues[i.id]?.cutterName.trim())
-            ? 'Name the cutting contractor on every lay.'
-            : null
+  /** Why nothing here can be saved at all — not something a box can put right. */
+  const locked = !d ? null : issueId && !oneLay ? 'This lay has come back cut or been cancelled, so it can no longer be changed.' : d.detailsBlock
+
+  /**
+   * What is wrong with the boxes as filled, each shown under its own box. Save
+   * stays enabled: pressing it with any of these goes to the first one.
+   */
+  const problems: Array<{ at: string; text: string }> = !d
+    ? []
+    : [
+        ...(!issueId && order.start && order.end && order.end < order.start ? [{ at: 'mo-details-dates', text: 'The planned finish cannot be before the planned start.' }] : []),
+        ...lays.flatMap((i) => {
+          const pieces = piecesProblem(i)
+          return [
+            ...(!issues[i.id]?.cutterName.trim() ? [{ at: `lay-${i.id}-cutter`, text: 'Name the cutting contractor.' }] : []),
+            ...(pieces ? [{ at: `lay-${i.id}-pieces`, text: pieces }] : []),
+          ]
+        }),
+      ]
+  const problemAt = (at: string) => {
+    const p = problems.find((x) => x.at === at)
+    return p ? <span className="warn-text mt-1 block text-xs">{p.text}</span> : null
+  }
 
   const save = async () => {
-    if (!d || blocker) return
+    if (!d || locked) return
+    if (problems.length) {
+      const el = document.getElementById(problems[0].at)
+      el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      el?.querySelector<HTMLElement>('input, select, button')?.focus({ preventScroll: true })
+      return
+    }
     setSaving(true)
     setError(null)
     const layBody = (i: IssueRow) => {
@@ -199,6 +273,15 @@ export function MoDetailsDialog({
         fabricItemId: f.fabricItemId || null,
         fabricGiven: num(f.fabricGiven),
         notes: f.notes.trim() || null,
+        // Its pieces, only when changed: by size, or one number for a colour without sizes.
+        ...(piecesTouched[i.id]
+          ? {
+              ...(i.sizes.length
+                ? { planned: i.sizes.map((z) => ({ sizeId: z.sizeId, qty: n(layQty[i.id]?.[z.sizeId]) })) }
+                : { pieces: n(layQty[i.id]?.['']) }),
+              allowExcess: !!(allowExcess[i.id] && manager),
+            }
+          : {}),
       }
     }
     try {
@@ -257,9 +340,10 @@ export function MoDetailsDialog({
     const fabric = d.fabrics.find((x) => x.itemId === f.fabricItemId)
     return (
       <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
-        <label className="block sm:col-span-2">
+        <label className="block sm:col-span-2" id={`lay-${i.id}-cutter`}>
           <span className="form-label">Cutting contractor</span>
           <ContractorPicker value={f.cutterName} onChange={set('cutterName')} known={knownFor(i.cutterName ?? '')} resetTo={i.cutterName ?? ''} ariaLabel={`Cutting contractor for ${i.cutOrderNumber}`} />
+          {problemAt(`lay-${i.id}-cutter`)}
         </label>
         <label className="block">
           <span className="form-label">Issued on</span>
@@ -281,6 +365,96 @@ export function MoDetailsDialog({
         </label>
         {number(f.fabricGiven, set('fabricGiven'), `Fabric given${fabric?.uom ? ` (${fabric.uom})` : ''}`)}
         {text(f.notes, set('notes'), 'Note', { span: true })}
+        <div className="sm:col-span-2 lg:col-span-4">{piecesTable(i)}</div>
+      </div>
+    )
+  }
+
+  /**
+   * The lay's pieces, by size, beside what each size has left for it: to make,
+   * less cut, less what the other lays still have. "Left" here counts this
+   * lay's own pieces back in — they are the ones being changed.
+   */
+  const piecesTable = (i: IssueRow) => {
+    const q = layQty[i.id] ?? {}
+    const pcs = (v: number) => v.toLocaleString('en-IN')
+    const excess = !!(allowExcess[i.id] && manager)
+    return (
+      <div id={`lay-${i.id}-pieces`}>
+        <span className="form-label">Pieces on this lay</span>
+        {i.sizes.length ? (
+          <div className="border-border overflow-x-auto rounded-lg border">
+            <table className="data-table table-totals w-full">
+              <thead>
+                <tr className="bg-secondary">
+                  <th>Size</th>
+                  <th style={{ textAlign: 'right' }}>To make</th>
+                  <th style={{ textAlign: 'right' }}>Cut</th>
+                  <th style={{ textAlign: 'right' }}>On other lays</th>
+                  <th style={{ textAlign: 'right' }}>Left for this lay</th>
+                  <th style={{ textAlign: 'right' }}>This lay</th>
+                </tr>
+              </thead>
+              <tbody>
+                {i.sizes.map((z) => {
+                  const left = leftOf(i, z.sizeId, z)
+                  return (
+                    <tr key={z.sizeId}>
+                      <td className="text-xs font-medium">{z.code}</td>
+                      <td className="text-right text-xs tabular-nums">{pcs(z.toMake)}</td>
+                      <td className="text-right text-xs tabular-nums">{pcs(z.cut)}</td>
+                      <td className="text-right text-xs tabular-nums">{pcs(othersOf(i, z.sizeId))}</td>
+                      <td className={`text-right text-xs tabular-nums ${n(q[z.sizeId]) > left && !excess ? 'text-destructive font-semibold' : ''}`}>{pcs(left)}</td>
+                      <td className="w-28">
+                        <StepInput
+                          className="form-input h-8 text-right text-xs tabular-nums"
+                          value={q[z.sizeId] ?? ''}
+                          max={excess ? undefined : left}
+                          placeholder="0"
+                          onValueChange={(v) => setPieces(i.id, z.sizeId, v)}
+                          aria-label={`Size ${z.code} on ${i.cutOrderNumber}`}
+                        />
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+              <tfoot>
+                <tr className="bg-secondary">
+                  <td className="text-xs font-medium">Total</td>
+                  <td className="text-right text-xs tabular-nums">{pcs(i.sizes.reduce((s, z) => s + z.toMake, 0))}</td>
+                  <td className="text-right text-xs tabular-nums">{pcs(i.sizes.reduce((s, z) => s + z.cut, 0))}</td>
+                  <td className="text-right text-xs tabular-nums">{pcs(i.sizes.reduce((s, z) => s + othersOf(i, z.sizeId), 0))}</td>
+                  <td className="text-right text-xs tabular-nums">{pcs(i.sizes.reduce((s, z) => s + leftOf(i, z.sizeId, z), 0))}</td>
+                  <td className="text-right text-xs font-semibold tabular-nums">{pcs(i.sizes.reduce((s, z) => s + n(q[z.sizeId]), 0))}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-3">
+            <StepInput
+              className="form-input h-9 w-36 text-right tabular-nums"
+              value={q[''] ?? ''}
+              max={excess || !i.line ? undefined : leftOf(i, '', i.line)}
+              placeholder="0"
+              onValueChange={(v) => setPieces(i.id, '', v)}
+              aria-label={`Pieces on ${i.cutOrderNumber}`}
+            />
+            {i.line && (
+              <span className="text-muted-foreground text-xs">
+                {pcs(i.line.toMake)} to make · {pcs(i.line.cut)} cut · {pcs(othersOf(i, ''))} on other lays · {pcs(leftOf(i, '', i.line))} left for this lay
+              </span>
+            )}
+          </div>
+        )}
+        {problemAt(`lay-${i.id}-pieces`)}
+        {manager && (
+          <label className="text-muted-foreground mt-2 inline-flex items-center gap-1.5 text-xs">
+            <input type="checkbox" checked={!!allowExcess[i.id]} onChange={(e) => setAllowExcess((p) => ({ ...p, [i.id]: e.target.checked }))} />
+            Allow cutting more than the order (an allowance)
+          </label>
+        )}
       </div>
     )
   }
@@ -298,7 +472,7 @@ export function MoDetailsDialog({
       }
       width={issueId ? 'max-w-4xl' : 'max-w-5xl'}
       primary={
-        <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving || !d || !!blocker}>
+        <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving || !d || !!locked}>
           {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} {issueId ? 'Save' : 'Save details'}
         </button>
       }
@@ -308,10 +482,14 @@ export function MoDetailsDialog({
         </button>
       }
       footerNote={
-        blocker ? (
-          <span className="warn-text">{blocker}</span>
+        locked ? (
+          <span className="warn-text">{locked}</span>
+        ) : problems.length ? (
+          <span className="warn-text">
+            {problems.length === 1 ? 'One box needs putting right before saving — see the note under it.' : `${problems.length} boxes need putting right before saving — see the notes under them.`}
+          </span>
         ) : issueId ? (
-          'Changes this lay only. Its sizes and pieces stay as issued: to change those, cancel it and issue again.'
+          'Changes this lay only — its pieces too, until it comes back cut.'
         ) : (
           'Saved all together: the order, its job cards and the lays with contractors.'
         )
@@ -329,15 +507,20 @@ export function MoDetailsDialog({
           <Section icon={Scissors} title="The lay">
             {layFields(oneLay)}
           </Section>
-        ) : null
+        ) : (
+          <p className="text-muted-foreground flex items-start gap-1.5 p-2 text-sm">
+            <Lock size={14} className="mt-0.5 shrink-0" />
+            <span>{locked}</span>
+          </p>
+        )
       ) : (
         <>
           {d.planBlock && (
             <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
               <Lock size={13} className="mt-0.5 shrink-0" />
               <span>
-                Pieces, sizes and routing are fixed: {d.planBlock.replace(/, so its plan can no longer be changed\.$/, '.')} Everything below can still be
-                changed until cutting is complete.
+                The order&rsquo;s pieces, sizes and routing are fixed: {d.planBlock.replace(/, so its plan can no longer be changed\.$/, '.')} Everything below —
+                the pieces on each lay still with a contractor too — can still be changed until cutting is complete.
               </span>
             </p>
           )}
@@ -348,9 +531,10 @@ export function MoDetailsDialog({
                 <span className="form-label">Planned start</span>
                 <input type="date" className="form-input" value={order.start ?? ''} onChange={(e) => setOrder((o) => ({ ...o, start: e.target.value }))} />
               </label>
-              <label className="block">
+              <label className="block" id="mo-details-dates">
                 <span className="form-label">Planned finish</span>
                 <input type="date" className="form-input" value={order.end ?? ''} onChange={(e) => setOrder((o) => ({ ...o, end: e.target.value }))} />
+                {problemAt('mo-details-dates')}
               </label>
               {text(order.notes ?? '', (v) => setOrder((o) => ({ ...o, notes: v })), 'Note', { span: true })}
             </div>
@@ -384,7 +568,7 @@ export function MoDetailsDialog({
                 {d.cuttingIssues.map((i) => (
                   <div key={i.id} className="border-border rounded-lg border p-3">
                     <p className="text-foreground mb-2 text-sm font-semibold">
-                      {i.cutOrderNumber} <span className="text-muted-foreground font-normal">· {i.plannedPieces.toLocaleString('en-IN')} pcs, not yet received</span>
+                      {i.cutOrderNumber} <span className="text-muted-foreground font-normal">· {i.plannedPieces.toLocaleString('en-IN')} pcs issued, not yet received</span>
                     </p>
                     {layFields(i)}
                   </div>

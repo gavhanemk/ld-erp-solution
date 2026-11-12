@@ -10,7 +10,7 @@ import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
 import { ensureJobCards, jobCardSchema, updateJobCard } from '../services/jobCard.service'
 import { attachLateBoms, materialPlan, MO_STAGES, moStages, orderForPlanning, PLANNABLE_ORDER_STATUSES, stageWhere, workStarted, type MoStage } from '../services/manufacturing.service'
-import { cancelCutting, createCutting, cuttingPrep, cuttingSchema, cutterIssueDetailsSchema, updateCutterIssue } from '../services/cutting.service'
+import { breakupOf, cancelCutting, createCutting, cuttingPrep, cuttingSchema, cutterIssueDetailsSchema, piecesBeingSaved, updateCutterIssue } from '../services/cutting.service'
 import { applyRouting, routingProblem, stylesOfMo } from '../services/route.service'
 import floorRoutes from './productionFloor.routes'
 import { assertNotCancelling } from '../services/orderCancel.service'
@@ -583,20 +583,32 @@ router.get('/orders/:id/details', requirePermission(MODULE, 'view'), async (req,
       // Only the lays still out: one that has come back cut is done.
       cuttingIssues: prep.cuttings
         .filter((c) => c.status === 'IN_PROGRESS')
-        .map((c) => ({
-          id: c.id,
-          cutOrderNumber: c.cutOrderNumber,
-          moLineId: c.moLineId,
-          cutterName: c.cutterName,
-          issuedOn: c.cutDate,
-          lotNo: c.lotNo,
-          ratio: c.ratio,
-          noOfLayers: c.noOfLayers,
-          fabricItemId: c.fabricItemId,
-          fabricGiven: c.fabricIssued,
-          plannedPieces: c.plannedPieces,
-          notes: c.notes,
-        })),
+        .map((c) => {
+          const line = prep.lines.find((l) => l.id === c.moLineId)
+          const mine = breakupOf(c.plannedBreakup)
+          return {
+            id: c.id,
+            cutOrderNumber: c.cutOrderNumber,
+            moLineId: c.moLineId,
+            cutterName: c.cutterName,
+            issuedOn: c.cutDate,
+            lotNo: c.lotNo,
+            ratio: c.ratio,
+            noOfLayers: c.noOfLayers,
+            fabricItemId: c.fabricItemId,
+            fabricGiven: c.fabricIssued,
+            plannedPieces: c.plannedPieces,
+            notes: c.notes,
+            /*
+             * Its pieces by size, beside what each size is to make and has had
+             * cut. The screen takes off what the other lays here hold — every
+             * lay still out is in this list — as the server does when it checks.
+             */
+            sizes: (line?.sizes ?? []).map((z) => ({ sizeId: z.sizeId, code: z.code, toMake: z.planned, cut: z.cut, qty: Number(mine[z.sizeId] ?? 0) })),
+            // A colour without sizes: its pieces as one number, against the same totals.
+            line: line ? { toMake: line.totalQty, cut: line.cut } : null,
+          }
+        }),
       fabrics: prep.fabrics.filter((f) => f.issued > 0).map((f) => ({ itemId: f.itemId, code: f.code, name: f.name, uom: f.uom })),
     },
   })
@@ -623,7 +635,7 @@ const moDetailsSchema = z
  */
 router.patch('/orders/:id/details', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = moDetailsSchema.parse(req.body)
-  const { before, after } = await prisma.$transaction(
+  const { before, after, lays } = await prisma.$transaction(
     async (tx) => {
       const before = await tx.manufacturingOrder.findUnique({ where: { id: req.params.id }, include: moInclude })
       if (!before) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
@@ -643,13 +655,22 @@ router.patch('/orders/:id/details', requirePermission(MODULE, 'edit'), async (re
         const { id, ...fields } = card
         await updateJobCard(tx, id, fields)
       }
-      for (const issue of data.cuttingIssues ?? []) await updateCutterIssue(tx, before.id, issue)
+      const mayApprove = userCan(req.user, MODULE, 'approve')
+      // Lays saved together are each checked against what the others will hold after this save.
+      const saving = piecesBeingSaved(data.cuttingIssues ?? [])
+      const lays: Array<{ was: unknown; now: { id: string } }> = []
+      for (const issue of data.cuttingIssues ?? []) {
+        const was = await tx.cuttingOrder.findUnique({ where: { id: issue.id } })
+        lays.push({ was, now: await updateCutterIssue(tx, before.id, issue, { mayApprove, saving }) })
+      }
       const after = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: before.id }, include: moInclude })
-      return { before, after }
+      return { before, after, lays }
     },
     { timeout: 30_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: after.id, before, after })
+  // Each lay on its own too: its pieces can change here, and who changed them should show.
+  for (const l of lays) await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'CuttingOrder', entityId: l.now.id, before: l.was, after: l.now })
   const parts = [
     data.plannedStartDate !== undefined || data.plannedEndDate !== undefined || data.notes !== undefined ? 'dates and note' : null,
     data.jobCards?.length ? `${data.jobCards.length} job card${data.jobCards.length === 1 ? '' : 's'}` : null,
