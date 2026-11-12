@@ -222,6 +222,15 @@ export default function ManufacturingOrdersPage() {
     }
   }
 
+  /**
+   * A click anywhere on an order's line opens it, as its number does — but not a click on the sales
+   * order's link, the Actions menu or anything else in the line that does its own thing.
+   */
+  const openFromRow = (e: React.MouseEvent, id: string) => {
+    if ((e.target as HTMLElement).closest('a, button, input, select, textarea, [role="menu"], [role="menuitem"], [role="dialog"]')) return
+    setViewId(id)
+  }
+
   const rowActions = (mo: MoRow): RowAction[] => {
     const items: RowAction[] = [{ key: 'view', label: 'Open — materials and progress', icon: <Eye size={15} />, onClick: () => setViewId(mo.id) }]
     // Editable until the store issues material to it (or cutting or packing starts), released or not.
@@ -330,7 +339,7 @@ export default function ManufacturingOrdersPage() {
                 const s = moStage(mo.stage, mo.status)
                 const share = mo.totalPlannedQty > 0 ? Math.min(100, Math.round((mo.totalPackedQty / mo.totalPlannedQty) * 100)) : 0
                 return (
-                  <div key={mo.id} className="p-3">
+                  <div key={mo.id} className="cursor-pointer p-3" onClick={(e) => openFromRow(e, mo.id)}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -381,7 +390,7 @@ export default function ManufacturingOrdersPage() {
                     const share = mo.totalPlannedQty > 0 ? Math.min(100, Math.round((mo.totalPackedQty / mo.totalPlannedQty) * 100)) : 0
                     const late = mo.plannedEndDate && new Date(mo.plannedEndDate) < new Date(new Date().toDateString()) && !['COMPLETED', 'CLOSED'].includes(mo.status)
                     return (
-                      <tr key={mo.id} data-row tabIndex={i === 0 ? 0 : -1}>
+                      <tr key={mo.id} data-row tabIndex={i === 0 ? 0 : -1} className="cursor-pointer" onClick={(e) => openFromRow(e, mo.id)}>
                         <td className="whitespace-nowrap">
                           <button type="button" className="text-primary font-mono text-xs font-semibold hover:underline" onClick={() => setViewId(mo.id)} data-row-open>
                             {mo.moNumber}
