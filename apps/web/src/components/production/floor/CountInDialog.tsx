@@ -52,7 +52,7 @@ const HOW: Array<[How, string]> = [
 type BulkPlan =
   | { kind: 'error'; text: string }
   | { kind: 'undo'; rows: BundleRow[] }
-  | { kind: 'move'; to: string; asked: number; fit: BundleRow[]; caps: number[]; takes: number[]; took: number; kept: number; skipped: number }
+  | { kind: 'move'; to: string; asked: number; rest: boolean; fit: BundleRow[]; caps: number[]; takes: number[]; took: number; kept: number; skipped: number }
 
 /** So many pieces spread as evenly as the bundles allow, each taking no more than it holds. */
 function spread(total: number, caps: number[]) {
@@ -298,25 +298,32 @@ export function CountInDialog({
   }
   const tickedRows = changeable.filter((r) => ticked.includes(r.id))
   const tickedSizes = [...new Set(tickedRows.map((r) => r.size))]
-  const tickedPcs = tickedRows.reduce((s, r) => s + countOf(r.id), 0)
+  const tickedPcs = tickedRows.reduce((s, r) => s + r.available, 0)
+  /** Pieces of a bundle not kept in Same size — what the user meant as the other size by lowering it. */
+  const restOf = (r: BundleRow) => Math.max(0, r.available - sameOf(r.id))
 
   /**
    * What the bar would do with what it holds now — said in a sentence before Apply, and what Apply
-   * does. A bundle gives from its whole count (Same size and anything already made as another size)
-   * and keeps the rest as its own size.
+   * does. Each ticked bundle's pieces on the card are split: so many made as the new size, the rest
+   * kept as its own size (Same size), and all of them counted in. With no number, the pieces not kept
+   * in Same size are the ones made as the new size (12 Nov 2026: the user lowered Same size to 10 on
+   * five 20-piece bundles, pressed Apply, and expected the other 10 of each as XS).
    */
   const bulkPlan = ((): BulkPlan | null => {
     if (!tickedRows.length) return null
     if (!bulkTo) return { kind: 'error', text: 'Pick the size they are made as.' }
     if (bulkTo === SAME) return { kind: 'undo', rows: tickedRows.filter((r) => madeAs[r.id]?.toSizeId) }
     const asked = Number(bulkQty) || 0
-    if (bulkHow !== 'whole' && asked <= 0) return { kind: 'error', text: bulkHow === 'each' ? 'Enter how many pieces from every bundle.' : 'Enter the total pieces.' }
     const to = sizeCode(bulkTo)
     const fit = tickedRows.filter((r) => r.size !== to)
-    const caps = fit.map((r) => countOf(r.id))
-    const takes = bulkHow === 'whole' ? caps : bulkHow === 'each' ? caps.map((c) => Math.min(asked, c)) : spread(asked, caps)
+    const caps = fit.map((r) => r.available)
+    const rests = fit.map(restOf)
+    const rest = bulkHow === 'each' && asked <= 0
+    if (rest && !rests.some((x) => x > 0)) return { kind: 'error', text: 'Enter how many pieces from every bundle.' }
+    if (bulkHow === 'all' && asked <= 0) return { kind: 'error', text: 'Enter the total pieces.' }
+    const takes = rest ? rests : bulkHow === 'whole' ? caps : bulkHow === 'each' ? caps.map((c) => Math.min(asked, c)) : spread(asked, caps)
     const took = takes.reduce((s, x) => s + x, 0)
-    return { kind: 'move', to, asked, fit, caps, takes, took, kept: caps.reduce((s, x) => s + x, 0) - took, skipped: tickedRows.length - fit.length }
+    return { kind: 'move', to, asked, rest, fit, caps, takes, took, kept: caps.reduce((s, x) => s + x, 0) - took, skipped: tickedRows.length - fit.length }
   })()
   const bulkPreview = ((): { text: string; bad?: boolean } | null => {
     const p = bulkPlan
@@ -331,7 +338,18 @@ export function CountInDialog({
     if (!p.fit.length) return { text: `They are all size ${p.to} already.`, bad: true }
     const bundles = `${p.fit.length} ${p.fit.length === 1 ? 'bundle' : 'bundles'}`
     const parts: string[] = []
-    if (bulkHow === 'whole') parts.push(`All ${pcs(p.took)} pcs of the ${bundles} become size ${p.to}`)
+    if (p.rest) {
+      // No number: the pieces each bundle does not keep in Same size.
+      const given = p.takes.filter((x) => x > 0)
+      const lo = Math.min(...given)
+      const hi = Math.max(...given)
+      parts.push(
+        lo === hi
+          ? `The ${pcs(lo)} pcs not kept in Same size, from ${given.length === 1 ? 'the bundle' : `each of the ${given.length} bundles`} = ${pcs(p.took)} pcs become size ${p.to}`
+          : `The pieces not kept in Same size (${pcs(lo)} to ${pcs(hi)} a bundle, ${given.length} bundles) = ${pcs(p.took)} pcs become size ${p.to}`,
+      )
+      if (given.length < p.fit.length) parts.push(`${p.fit.length - given.length} with all their pieces in Same size left as they are`)
+    } else if (bulkHow === 'whole') parts.push(`All ${pcs(p.took)} pcs of the ${bundles} become size ${p.to}`)
     else if (bulkHow === 'each')
       parts.push(
         p.takes.some((x) => x < p.asked)
@@ -774,7 +792,8 @@ export function CountInDialog({
                           <StepInput
                             className="form-input h-8 w-20 text-right text-xs tabular-nums"
                             value={bulkQty}
-                            placeholder="0"
+                            // Left empty after lowering Same size, the pieces not kept there are the ones changed.
+                            placeholder={bulkHow === 'each' && tickedRows.some((r) => restOf(r) > 0) ? 'the rest' : '0'}
                             onValueChange={setBulkQty}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') {
