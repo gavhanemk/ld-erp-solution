@@ -78,6 +78,7 @@ export function SheetView({
             current={current}
             onPick={setCurrent}
             withCutters={d.cuttings.filter((c) => c.status === 'IN_PROGRESS').reduce((t, c) => t + c.plannedPieces, 0)}
+            fabric={d.fabric}
             label={`${d.card.jobCardNumber} route`}
           />
           {message && (

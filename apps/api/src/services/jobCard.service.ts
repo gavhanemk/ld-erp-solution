@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient, ProcessKind, WipBucket, WipEventType } from '@prisma/client'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
+import { fabricRecord } from './fabricRecord'
 import { figuresFrom, type FigureStep, type Flows } from './floor.service'
 import { flowSummary } from './floorView.service'
 import { sizeChangeHistory } from './sizeChanges.service'
@@ -281,14 +282,26 @@ const cardSelect = {
   },
 } satisfies Prisma.JobCardSelect
 
-/** Job cards with each stage's figures for their own line, and what is with cutting contractors. */
+/** The lay's fields the fabric record reads. */
+const layFabricSelect = {
+  moLineId: true,
+  status: true,
+  cutterName: true,
+  fabricIssued: true,
+  fabricUsed: true,
+  wastage: true,
+  fabricItem: { select: { uom: { select: { symbol: true } } } },
+} satisfies Prisma.CuttingOrderSelect
+
+/** Job cards with each stage's figures for their own line, what is with cutting contractors, and the fabric record of their cutting. */
 async function loadCards(db: Db, where: Prisma.JobCardWhereInput) {
   const cards = await db.jobCard.findMany({ where, orderBy: { createdAt: 'desc' }, select: cardSelect, take: 1000 })
   if (!cards.length) return []
   const lineIds = cards.map((c) => c.moLine.id)
-  const [ledger, withCutters] = await Promise.all([
+  const [ledger, withCutters, lays] = await Promise.all([
     ledgerBy(db, { moLineId: { in: lineIds } }, 'moLineId'),
     db.cuttingOrder.groupBy({ by: ['moLineId'], where: { moLineId: { in: lineIds }, status: 'IN_PROGRESS' }, _sum: { plannedPieces: true }, _count: true }),
+    db.cuttingOrder.findMany({ where: { moLineId: { in: lineIds }, status: { not: 'CANCELLED' } }, select: layFabricSelect }),
   ])
   return cards.map((c) => {
     const { held, flows } = ledger(c.moLine.id)
@@ -303,6 +316,8 @@ async function loadCards(db: Db, where: Prisma.JobCardWhereInput) {
       ...c,
       steps,
       withCutters: cutters?._sum.plannedPieces ?? 0,
+      /** Fabric given to its cutting contractors, used, wasted and left over. */
+      fabric: fabricRecord(lays.filter((l) => l.moLineId === c.moLine.id)),
       cut: cutting?.figures.completed ?? 0,
       packed: lastStep?.figures.packed ?? 0,
       /** Where its pieces are now. */
@@ -495,6 +510,7 @@ export async function boardCards(db: Db, q: BoardFilters) {
       mo: { id: c.mo.id, moNumber: c.mo.moNumber, held: !!c.mo.heldAt, due: c.mo.plannedEndDate, so: c.mo.so },
       state: c.state,
       withCutters: c.withCutters,
+      fabric: c.fabric,
       cut: c.cut,
       packed: c.packed,
       steps: c.steps.map((s) => {
@@ -753,6 +769,8 @@ export async function jobCardDetail(db: Db, id: string) {
     line,
     sizeFigures,
     cuttings,
+    /** Fabric given to its cutting contractors, used, wasted and left over. */
+    fabric: fabricRecord(cuttings),
     log: log.map((e) => ({
       eventId: e.event.id,
       type: e.eventType,

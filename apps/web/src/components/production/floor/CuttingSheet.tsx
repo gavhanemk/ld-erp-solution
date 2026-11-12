@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { AlertTriangle, Ban, Boxes, CalendarDays, PackageOpen, Pencil, Printer, Scissors, Send, Users } from 'lucide-react'
+import { AlertTriangle, Ban, Boxes, CalendarDays, PackageOpen, Pencil, Printer, Ruler, Scissors, Send, Users } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
@@ -10,9 +10,10 @@ import { SheetHeader, SizeTable } from './SheetHeader'
 import { NextSteps, type NextStep } from './NextSteps'
 import { CutterIssueDialog } from './CutterIssueDialog'
 import { CutterReceiveDialog } from './CutterReceiveDialog'
+import { LayFabricDialog } from './LayFabricDialog'
 import { SendOnDialog } from './SendOnDialog'
 import { MoDetailsDialog } from '../MoDetailsDialog'
-import { pcs, type FlowStep, type JobCardCutting, type JobCardDetail } from './types'
+import { fabricLine, fabricQty, pcs, type FlowStep, type JobCardCutting, type JobCardDetail } from './types'
 
 /**
  * The cutting sheet of one job card: what the order wants by size, what has
@@ -28,6 +29,8 @@ type Open =
   | { kind: 'cancel'; issue: JobCardCutting }
   /** A lay still with its contractor, its details put right: lot no., fabric given, layers… */
   | { kind: 'edit'; issue: JobCardCutting }
+  /** A received lay's fabric put right: given, used, waste. */
+  | { kind: 'fabric'; issue: JobCardCutting }
 
 const openWindow = (url: string) => window.open(url, '_blank', 'noopener')
 const day = (iso: string) => iso.slice(0, 10)
@@ -162,6 +165,16 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
           <p className="text-muted-foreground text-sm">Nothing issued for cutting yet. Issue sizes to a cutting contractor to start.</p>
         ) : (
           <div className="space-y-2">
+            {/* The job card's fabric, all lays together: given, used, wasted, and what is left over with whom. */}
+            {d.fabric.map((r) => (
+              <p
+                key={r.unit}
+                className={`rounded-lg border px-2.5 py-1.5 text-xs ${r.leftOver || r.overUsed || r.notRecorded ? 'warn-text border-amber-500/40 bg-amber-500/5' : 'border-border text-muted-foreground'}`}
+              >
+                <span className="text-foreground font-semibold">Fabric: </span>
+                {fabricLine(r)}
+              </p>
+            ))}
             {d.cuttings.map((c) => {
               const planned = c.plannedBreakup ?? {}
               const actual = c.sizeBreakup ?? {}
@@ -169,6 +182,10 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
                 .filter((z) => planned[z.id] || actual[z.id])
                 .map((z) => (c.status === 'COMPLETED' ? `${z.code} ${actual[z.id] ?? 0}/${planned[z.id] ?? 0}` : `${z.code} ${planned[z.id] ?? 0}`))
                 .join(' · ')
+              // A received lay's fabric: given, less used and waste — left over with the contractor, or more used than given.
+              const unit = c.fabricItem?.uom?.symbol ?? ''
+              const leftOver =
+                c.status === 'COMPLETED' && c.fabricIssued != null ? Math.round((Number(c.fabricIssued) - Number(c.fabricUsed ?? 0) - Number(c.wastage ?? 0)) * 1000) / 1000 : null
               return (
                 <div key={c.id} className={`border-border bg-card rounded-lg border p-2.5 text-sm ${c.status === 'CANCELLED' ? 'opacity-60' : ''}`}>
                   <div className="flex flex-wrap items-start justify-between gap-2">
@@ -186,8 +203,15 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
                         {c.ratio ? ` · ratio ${c.ratio}` : ''}
                         {Number(c.noOfLayers) > 0 ? ` · ${Number(c.noOfLayers)} layers` : ''}
                         {c.fabricItem ? ` · ${c.fabricItem.name}` : ''}
-                        {c.fabricIssued != null ? ` · ${Number(c.fabricIssued)} ${c.fabricItem?.uom?.symbol ?? ''} given` : ''}
+                        {c.fabricIssued != null ? ` · ${fabricQty(Number(c.fabricIssued), unit)} given` : ''}
                         {c.status === 'COMPLETED' && c.fabricUsed != null ? ` · ${Number(c.fabricUsed)} used, ${Number(c.wastage ?? 0)} waste` : ''}
+                        {leftOver ? (
+                          <span className="warn-text font-semibold">{leftOver > 0 ? ` · ${fabricQty(leftOver, unit)} left over` : ` · ${fabricQty(-leftOver, unit)} more used than given`}</span>
+                        ) : leftOver === 0 ? (
+                          ' · all accounted for'
+                        ) : c.status === 'COMPLETED' && c.fabricIssued == null && Number(c.fabricUsed ?? 0) > 0 ? (
+                          <span className="warn-text"> · fabric given not recorded</span>
+                        ) : null}
                       </p>
                       <p className="text-xs tabular-nums">
                         {c.status === 'COMPLETED' ? `Cut ${pcs(c.actualPieces)} of ${pcs(c.plannedPieces)} issued` : `${pcs(c.plannedPieces)} pcs issued`}
@@ -210,6 +234,17 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
                           onClick={() => setOpen({ kind: 'edit', issue: c })}
                         >
                           <Pencil size={13} /> Edit
+                        </button>
+                      )}
+                      {can('production', 'edit') && d.mo.status !== 'CLOSED' && c.status === 'COMPLETED' && (
+                        <button
+                          type="button"
+                          className="btn-ghost h-7 px-2 text-xs"
+                          title="Put right the fabric given, used and wasted on this lay"
+                          aria-label={`Fabric on ${c.cutOrderNumber}`}
+                          onClick={() => setOpen({ kind: 'fabric', issue: c })}
+                        >
+                          <Ruler size={13} /> Fabric
                         </button>
                       )}
                       {c._count.bundles > 0 && (
@@ -296,6 +331,7 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
 
       {open?.kind === 'issue' && <CutterIssueDialog d={d} onClose={() => setOpen(null)} onSaved={done} />}
       {open?.kind === 'edit' && <MoDetailsDialog moId={d.mo.id} issueId={open.issue.id} onClose={() => setOpen(null)} onSaved={done} />}
+      {open?.kind === 'fabric' && <LayFabricDialog lay={open.issue} onClose={() => setOpen(null)} onSaved={done} />}
       {open?.kind === 'receive' && (
         <CutterReceiveDialog
           d={d}

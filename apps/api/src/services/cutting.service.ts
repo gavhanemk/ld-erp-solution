@@ -46,6 +46,11 @@ export const cuttingSchema = z.object({
   /** The order line cut: one style in one colour. */
   moLineId: z.string().optional().nullable(),
   fabricItemId: z.string().min(1, 'Say which fabric was cut'),
+  /**
+   * The fabric given to the contractor for the lay, as received — set when it
+   * was left off at issue, or put right. Left out, the issue's stays.
+   */
+  fabricGiven: z.number().min(0, 'Fabric given cannot be negative').max(9_999_999).optional().nullable(),
   fabricUsed: z.number().min(0, 'Fabric used cannot be negative').max(9_999_999),
   wastage: z.number().min(0, 'Waste cannot be negative').max(9_999_999).optional(),
   // Part layers allowed (0.1, 2.5), kept to two decimal places like the column.
@@ -523,6 +528,55 @@ export async function updateCutterIssue(
   })
 }
 
+/** A received lay's fabric, put right: what was given, used and wasted. */
+export const layFabricSchema = z.object({
+  fabricGiven: z.number().min(0, 'Fabric given cannot be negative').max(9_999_999).nullable(),
+  fabricUsed: z.number().min(0, 'Fabric used cannot be negative').max(9_999_999),
+  wastage: z.number().min(0, 'Waste cannot be negative').max(9_999_999),
+})
+
+/**
+ * Puts right the fabric on a lay that has come back cut — given, used and
+ * wasted — so what is left over with its contractor reads true. Only the
+ * record changes: its pieces and bundles stay as they are. Used with waste
+ * still cannot come to more of the fabric than the order has had issued, and
+ * a lay whose panels went into a store keeps its used and waste, which
+ * valued them.
+ */
+export async function correctLayFabric(tx: Db, id: string, d: z.infer<typeof layFabricSchema>) {
+  const head = await tx.cuttingOrder.findUnique({ where: { id }, select: { moId: true } })
+  if (!head) throw new AppError('That cutting was not found', 404, 'NOT_FOUND')
+  await lockMo(tx, head.moId)
+  const before = await tx.cuttingOrder.findUniqueOrThrow({ where: { id } })
+  if (before.status === 'CANCELLED') throw new AppError(`${before.cutOrderNumber} is cancelled.`, 409, 'CANCELLED')
+  if (before.status !== 'COMPLETED') {
+    throw new AppError(`${before.cutOrderNumber} has not come back cut yet: change the fabric given on its Edit.`, 409, 'NOT_RECEIVED')
+  }
+  const prep = await cuttingPrep(tx, head.moId)
+  if (prep.mo.status === 'CLOSED') throw new AppError(`${prep.mo.moNumber} is closed.`, 409, 'CLOSED')
+  const wasUsed = Number(before.fabricUsed ?? 0)
+  const wasWaste = Number(before.wastage ?? 0)
+  const changesUse = round3(d.fabricUsed) !== round3(wasUsed) || round3(d.wastage) !== round3(wasWaste)
+  if (changesUse && before.panelItemId) {
+    throw new AppError(`${before.cutOrderNumber}'s panels went into the store at the value of the fabric used, so its used and waste stay as they are.`, 409, 'PANELS_IN_STORE')
+  }
+  const fabric = prep.fabrics.find((f) => f.itemId === before.fabricItemId)
+  if (changesUse && fabric) {
+    // This lay's own use is counted back in: what else is left is all it may take.
+    const room = round3(fabric.left + wasUsed + wasWaste)
+    const now = round3(d.fabricUsed + d.wastage)
+    if (now > room + 1e-9) {
+      throw new AppError(`Only ${room} ${fabric.uom ?? ''} of ${fabric.name} issued to ${prep.mo.moNumber} is free for this lay; used with waste come to ${now}.`.replace(/\s+/g, ' '), 400, 'MORE_THAN_ISSUED')
+    }
+  }
+  const after = await tx.cuttingOrder.update({
+    where: { id },
+    data: { fabricIssued: d.fabricGiven, fabricUsed: d.fabricUsed, wastage: d.wastage },
+    include: { fabricItem: { select: { uom: { select: { symbol: true } } } } },
+  })
+  return { before, after }
+}
+
 /** Records one cutting against an order, inside the caller's transaction. */
 export async function createCutting(
   tx: Db,
@@ -656,7 +710,9 @@ export async function createCutting(
       moLineId: line?.id ?? null,
       cutDate: data.cutDate ?? new Date(),
       fabricItemId: data.fabricItemId,
-      fabricIssued: issue?.fabricIssued ?? fabric.issued,
+      // What this lay's contractor was given — never the order's whole issue,
+      // which would show fabric left over that was never theirs.
+      fabricIssued: data.fabricGiven !== undefined ? data.fabricGiven : (issue?.fabricIssued ?? null),
       fabricUsed: data.fabricUsed,
       wastage,
       noOfLayers: data.noOfLayers ?? null,

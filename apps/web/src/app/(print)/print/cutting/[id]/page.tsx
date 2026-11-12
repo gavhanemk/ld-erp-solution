@@ -127,7 +127,12 @@ export default function PrintCutting() {
           title: 'The lay',
           body: (
             <>
+              <Fact label="Fabric given" value={c.fabricIssued != null ? `${qty(c.fabricIssued)} ${uom}` : null} />
               <Fact label="Metres used" value={`${qty(used)} ${uom}${Number(c.wastage ?? 0) ? ` + ${qty(c.wastage!)} waste` : ''}`} />
+              <Fact
+                label="Left over"
+                value={c.fabricIssued != null ? `${qty(Math.round((Number(c.fabricIssued) - used - Number(c.wastage ?? 0)) * 1000) / 1000)} ${uom}` : null}
+              />
               <Fact label="Average" value={average ? `${qty(Math.round(average * 1000) / 1000)} ${uom} a piece` : null} />
               <Fact label="Ratio" value={c.ratio} />
               <Fact label="Layers" value={Number(c.noOfLayers) > 0 ? String(Number(c.noOfLayers)) : null} />

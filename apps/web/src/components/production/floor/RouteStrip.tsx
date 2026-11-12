@@ -2,13 +2,18 @@
 
 import { Fragment } from 'react'
 import { ChevronRight, Truck } from 'lucide-react'
-import { pcs, type StepFigures } from './types'
+import { fabricQty, pcs, whoHas, type FabricRecord, type StepFigures } from './types'
 
 /**
  * A job card's route as a line of stages, in the route's order, each saying in
  * words where the pieces are there now: "280 here", "20 coming", "40 outside",
  * "✓ 300 done", "Left out". The same strip heads the board and every sheet,
  * so the floor always sees the whole way the pieces go and where they stand.
+ *
+ * Under that, each stage's record: at cutting the fabric — given to the
+ * contractors, used, wasted and left over with them — and the pieces cut;
+ * at every stage after it, the pieces in, passed on and wasted. Cloth is
+ * counted in metres only until it is cut; after that everything is pieces.
  */
 export interface StripStep {
   id: string
@@ -42,6 +47,42 @@ export function stripNote(s: StripStep, withCutters = 0): { lines: string[]; ton
   return { lines: ['—'], tone: 'idle' }
 }
 
+interface RecordLine {
+  text: string
+  warn?: boolean
+  /** Said in full on hover: who has the left over. */
+  title?: string
+}
+
+/**
+ * A stage's record, to account for what came to it: the fabric at cutting,
+ * and at every stage the pieces in, passed on and wasted (written off).
+ * Nothing for a stage nothing has reached yet.
+ */
+export function stepRecord(s: StripStep, fabric: FabricRecord[] = []): RecordLine[] {
+  const f = s.figures
+  if (s.skipped || !f) return []
+  const out: RecordLine[] = []
+  const passedOn = [f.sentOn ? `${pcs(f.sentOn)} on` : null, f.packed ? `${pcs(f.packed)} packed` : null].filter(Boolean).join(' · ') || '0 on'
+  if (s.kind === 'CUTTING') {
+    for (const r of fabric) {
+      if (r.given) out.push({ text: `${fabricQty(r.given, r.unit)} fabric given` })
+      if (r.used || r.waste) out.push({ text: `${fabricQty(r.used, r.unit)} used · ${fabricQty(r.waste, r.unit)} waste` })
+      if (r.withCutters) out.push({ text: `${fabricQty(r.withCutters, r.unit)} with cutters` })
+      if (r.leftOver) out.push({ text: `${fabricQty(r.leftOver, r.unit)} left over`, warn: true, title: `Left over with ${whoHas(r.leftWith, r.unit)}` })
+      if (r.overUsed) out.push({ text: `${fabricQty(r.overUsed, r.unit)} over given`, warn: true, title: `More used than given: ${whoHas(r.overBy, r.unit)}` })
+      if (r.notRecorded) out.push({ text: `given not recorded (${r.notRecorded})`, warn: true, title: `Fabric given was not recorded on ${r.notRecorded} received ${r.notRecorded === 1 ? 'lay' : 'lays'}` })
+    }
+    if (f.received || f.sentOn) out.push({ text: `${pcs(f.received)} cut · ${passedOn}` })
+    if (f.scrapped) out.push({ text: `${pcs(f.scrapped)} pcs waste`, warn: true })
+  } else if (f.received || f.sentOn || f.packed || f.scrapped) {
+    out.push({ text: `${pcs(f.received)} in · ${passedOn}` })
+    out.push({ text: `${pcs(f.scrapped)} waste`, warn: f.scrapped > 0 })
+  }
+  if (f.bGrade) out.push({ text: `${pcs(f.bGrade)} B-grade` })
+  return out
+}
+
 const BOX: Record<Tone, string> = {
   here: 'border-primary/50 bg-primary/10',
   coming: 'border-border bg-card',
@@ -64,6 +105,7 @@ export function RouteStrip({
   current,
   onPick,
   withCutters = 0,
+  fabric = [],
   label = 'Route',
 }: {
   steps: StripStep[]
@@ -73,12 +115,15 @@ export function RouteStrip({
   onPick?: (stepId: string) => void
   /** Pieces issued to cutting contractors and not yet back, shown on the cutting stage. */
   withCutters?: number
+  /** The job card's fabric record, shown on the cutting stage. */
+  fabric?: FabricRecord[]
   label?: string
 }) {
   return (
     <div className="-mx-1 flex items-stretch gap-1 overflow-x-auto px-1 pb-1" role="list" aria-label={label}>
       {steps.map((s, i) => {
         const note = stripNote(s, s.kind === 'CUTTING' ? withCutters : 0)
+        const record = stepRecord(s, s.kind === 'CUTTING' ? fabric : [])
         const on = s.id === current
         const outside = s.execution === 'OUTSOURCED'
         const body = (
@@ -92,6 +137,15 @@ export function RouteStrip({
                 {l}
               </span>
             ))}
+            {record.length > 0 && (
+              <span className="border-border/70 mt-1 block w-full border-t pt-1" aria-label={`${s.name} record`}>
+                {record.map((r) => (
+                  <span key={r.text} title={r.title} className={`block whitespace-nowrap text-[11px] leading-tight ${r.warn ? 'warn-text font-semibold' : 'text-muted-foreground'}`}>
+                    {r.text}
+                  </span>
+                ))}
+              </span>
+            )}
           </>
         )
         const cls = `flex min-w-[92px] shrink-0 flex-col items-start gap-0.5 rounded-lg border px-2.5 py-1.5 text-left ${BOX[note.tone]} ${on ? 'ring-primary ring-2' : ''}`
