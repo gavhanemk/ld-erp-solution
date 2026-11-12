@@ -413,6 +413,43 @@ export async function issueToCutter(tx: Db, moId: string, d: z.infer<typeof cutt
   })
 }
 
+/**
+ * The details of a lay still with its cutting contractor — who has it, the
+ * day it went, its lot, ratio, layers, and the fabric given — that can be put
+ * right until the cut comes back. The sizes and pieces are not here: those
+ * are changed by cancelling the issue and issuing again.
+ */
+export const cutterIssueDetailsSchema = cutterIssueSchema
+  .pick({ cutterName: true, issuedOn: true, lotNo: true, ratio: true, noOfLayers: true, fabricItemId: true, fabricGiven: true, notes: true })
+  .extend({ id: z.string().min(1) })
+
+export async function updateCutterIssue(tx: Db, moId: string, d: z.infer<typeof cutterIssueDetailsSchema>) {
+  const issue = await tx.cuttingOrder.findUnique({ where: { id: d.id }, select: { id: true, moId: true, status: true, cutOrderNumber: true } })
+  if (!issue || issue.moId !== moId) throw new AppError('That issue to a cutting contractor is not on this order', 404, 'NOT_FOUND')
+  if (issue.status !== 'IN_PROGRESS') {
+    throw new AppError(`${issue.cutOrderNumber} is ${issue.status === 'CANCELLED' ? 'cancelled' : 'already received'}, so it can no longer be changed.`, 409, 'NOT_WITH_CUTTER')
+  }
+  if (d.fabricItemId) {
+    const prep = await cuttingPrep(tx, moId)
+    if (!prep.fabrics.some((f) => f.itemId === d.fabricItemId && f.issued > 0)) {
+      throw new AppError(`That fabric has not been issued to ${prep.mo.moNumber}. Issue it on the order's requisition first.`, 400, 'FABRIC_NOT_ISSUED')
+    }
+  }
+  return tx.cuttingOrder.update({
+    where: { id: issue.id },
+    data: {
+      cutterName: await canonicalCutter(tx, d.cutterName),
+      ...(d.issuedOn ? { cutDate: d.issuedOn } : {}),
+      lotNo: d.lotNo || null,
+      ratio: d.ratio || null,
+      noOfLayers: d.noOfLayers ?? null,
+      fabricItemId: d.fabricItemId || null,
+      fabricIssued: d.fabricGiven ?? null,
+      notes: d.notes || null,
+    },
+  })
+}
+
 /** Records one cutting against an order, inside the caller's transaction. */
 export async function createCutting(
   tx: Db,

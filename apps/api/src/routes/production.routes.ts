@@ -8,9 +8,9 @@ import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
-import { ensureJobCards } from '../services/jobCard.service'
+import { ensureJobCards, jobCardSchema, updateJobCard } from '../services/jobCard.service'
 import { attachLateBoms, materialPlan, MO_STAGES, moStages, orderForPlanning, PLANNABLE_ORDER_STATUSES, stageWhere, workStarted, type MoStage } from '../services/manufacturing.service'
-import { cancelCutting, createCutting, cuttingPrep, cuttingSchema } from '../services/cutting.service'
+import { cancelCutting, createCutting, cuttingPrep, cuttingSchema, cutterIssueDetailsSchema, updateCutterIssue } from '../services/cutting.service'
 import { applyRouting, routingProblem, stylesOfMo } from '../services/route.service'
 import floorRoutes from './productionFloor.routes'
 import { assertNotCancelling } from '../services/orderCancel.service'
@@ -383,8 +383,12 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
   await attachLateBoms(prisma, req.params.id)
   const order = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, include: moInclude })
   if (!order) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
-  const [editBlock, stages] = await Promise.all([moEditBlock(prisma, order), moStages(prisma, [{ ...order, soStatus: order.so?.status ?? null }])])
-  res.json({ success: true, data: { ...order, editBlock, stage: stages.get(order.id)?.stage ?? order.status } })
+  const [editBlock, detailsBlock, stages] = await Promise.all([
+    moEditBlock(prisma, order),
+    moDetailsBlock(prisma, order),
+    moStages(prisma, [{ ...order, soStatus: order.so?.status ?? null }]),
+  ])
+  res.json({ success: true, data: { ...order, editBlock, detailsBlock, stage: stages.get(order.id)?.stage ?? order.status } })
 })
 
 /** GET /api/production/orders/:id/history — who changed what on it, and when, newest first. */
@@ -456,6 +460,28 @@ export async function moEditBlock(db: Prisma.TransactionClient | typeof prisma, 
 }
 
 /**
+ * Why a manufacturing order's details can no longer be changed, or null when
+ * they can.
+ *
+ * The details — its dates and note, each job card's lot no., metres, ratio
+ * and the like, and a lay still with its cutting contractor — stay open after
+ * material is issued and cutting has begun, until cutting is complete: every
+ * planned piece cut, and no lay still out with a contractor. Its plan (pieces,
+ * sizes, routing) closes earlier, when material is issued: see moEditBlock.
+ */
+export async function moDetailsBlock(
+  db: Prisma.TransactionClient | typeof prisma,
+  mo: { id: string; moNumber: string; status: string; totalPlannedQty: number; totalCutQty: number },
+) {
+  if (mo.status === 'COMPLETED' || mo.status === 'CLOSED') return `${mo.moNumber} is ${mo.status.toLowerCase()}, so it can no longer be changed.`
+  if (mo.totalPlannedQty > 0 && mo.totalCutQty >= mo.totalPlannedQty) {
+    const withCutters = await db.cuttingOrder.count({ where: { moId: mo.id, status: 'IN_PROGRESS' } })
+    if (!withCutters) return `Cutting is complete on ${mo.moNumber}, so its details can no longer be changed.`
+  }
+  return null
+}
+
+/**
  * PATCH /api/production/orders/:id — the plan changed: dates, notes, pieces,
  * routing. A draft, or a released order nothing has been issued to yet.
  */
@@ -510,6 +536,126 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     ? `: ${changes.slice(0, 4).join('; ')}${changes.length > 4 ? `; and ${changes.length - 4} more (see History)` : ''}`
     : ', nothing changed'
   res.json({ success: true, message: `${after.moNumber} saved${said}.${note}`, data: after })
+})
+
+/**
+ * GET /api/production/orders/:id/details — what can still be changed on an
+ * order once its plan is fixed: its dates and note, each job card's details,
+ * and the lays still with cutting contractors, with the fabric issued to it.
+ */
+router.get('/orders/:id/details', requirePermission(MODULE, 'view'), async (req, res) => {
+  const mo = await prisma.manufacturingOrder.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, moNumber: true, status: true, totalPlannedQty: true, totalCutQty: true, plannedStartDate: true, plannedEndDate: true, notes: true },
+  })
+  if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  const [planBlock, detailsBlock, jobCards, prep] = await Promise.all([
+    moEditBlock(prisma, mo),
+    moDetailsBlock(prisma, mo),
+    prisma.jobCard.findMany({
+      where: { moId: mo.id },
+      orderBy: { jobCardNumber: 'asc' },
+      select: {
+        id: true,
+        jobCardNumber: true,
+        orderNo: true,
+        projectId: true,
+        description: true,
+        fabricQuality: true,
+        designNo: true,
+        lotNo: true,
+        meters: true,
+        average: true,
+        ratio: true,
+        notes: true,
+        moLine: { select: { color: true, style: { select: { code: true } } } },
+      },
+    }),
+    cuttingPrep(prisma, mo.id),
+  ])
+  res.json({
+    success: true,
+    data: {
+      ...mo,
+      planBlock,
+      detailsBlock,
+      jobCards,
+      // Only the lays still out: one that has come back cut is done.
+      cuttingIssues: prep.cuttings
+        .filter((c) => c.status === 'IN_PROGRESS')
+        .map((c) => ({
+          id: c.id,
+          cutOrderNumber: c.cutOrderNumber,
+          moLineId: c.moLineId,
+          cutterName: c.cutterName,
+          issuedOn: c.cutDate,
+          lotNo: c.lotNo,
+          ratio: c.ratio,
+          noOfLayers: c.noOfLayers,
+          fabricItemId: c.fabricItemId,
+          fabricGiven: c.fabricIssued,
+          plannedPieces: c.plannedPieces,
+          notes: c.notes,
+        })),
+      fabrics: prep.fabrics.filter((f) => f.issued > 0).map((f) => ({ itemId: f.itemId, code: f.code, name: f.name, uom: f.uom })),
+    },
+  })
+})
+
+const moDetailsSchema = z
+  .object({
+    plannedStartDate: z.coerce.date().optional().nullable(),
+    plannedEndDate: z.coerce.date().optional().nullable(),
+    notes: z.string().max(1000).optional().nullable(),
+    jobCards: z.array(jobCardSchema.extend({ id: z.string().min(1) })).max(100).optional(),
+    cuttingIssues: z.array(cutterIssueDetailsSchema).max(100).optional(),
+  })
+  .superRefine((d, ctx) => {
+    if (d.plannedStartDate && d.plannedEndDate && d.plannedEndDate < d.plannedStartDate) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['plannedEndDate'], message: 'It cannot finish before it starts' })
+    }
+  })
+
+/**
+ * PATCH /api/production/orders/:id/details — the details changed, after the
+ * plan is fixed and until cutting is complete: dates, note, job card details,
+ * and the lays still with cutting contractors. All in one go, or none.
+ */
+router.patch('/orders/:id/details', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = moDetailsSchema.parse(req.body)
+  const { before, after } = await prisma.$transaction(
+    async (tx) => {
+      const before = await tx.manufacturingOrder.findUnique({ where: { id: req.params.id }, include: moInclude })
+      if (!before) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+      const block = await moDetailsBlock(tx, before)
+      if (block) throw new AppError(block, 409, 'CUTTING_DONE')
+      await tx.manufacturingOrder.update({
+        where: { id: before.id },
+        data: {
+          ...(data.plannedStartDate !== undefined ? { plannedStartDate: data.plannedStartDate } : {}),
+          ...(data.plannedEndDate !== undefined ? { plannedEndDate: data.plannedEndDate } : {}),
+          ...(data.notes !== undefined ? { notes: data.notes?.trim() || null } : {}),
+        },
+      })
+      for (const card of data.jobCards ?? []) {
+        const mine = await tx.jobCard.findFirst({ where: { id: card.id, moId: before.id }, select: { id: true } })
+        if (!mine) throw new AppError(`That job card is not on ${before.moNumber}`, 404, 'NOT_FOUND')
+        const { id, ...fields } = card
+        await updateJobCard(tx, id, fields)
+      }
+      for (const issue of data.cuttingIssues ?? []) await updateCutterIssue(tx, before.id, issue)
+      const after = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: before.id }, include: moInclude })
+      return { before, after }
+    },
+    { timeout: 30_000 },
+  )
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: after.id, before, after })
+  const parts = [
+    data.plannedStartDate !== undefined || data.plannedEndDate !== undefined || data.notes !== undefined ? 'dates and note' : null,
+    data.jobCards?.length ? `${data.jobCards.length} job card${data.jobCards.length === 1 ? '' : 's'}` : null,
+    data.cuttingIssues?.length ? `${data.cuttingIssues.length} lay${data.cuttingIssues.length === 1 ? '' : 's'} with cutting contractors` : null,
+  ].filter(Boolean)
+  res.json({ success: true, message: `${after.moNumber} details saved${parts.length ? `: ${parts.join(', ')}` : ''}.`, data: after })
 })
 
 /** Releases a draft inside the caller's transaction. */
