@@ -72,7 +72,21 @@ const day = (iso: string | null) => (iso ? iso.slice(0, 10) : '')
 const str = (v: string | number | null | undefined) => (v == null || v === '' ? '' : String(Number(v)))
 const num = (v: string) => (v.trim() === '' ? null : Number(v))
 
-export function MoDetailsDialog({ moId, onClose, onSaved }: { moId: string; onClose: () => void; onSaved: (message: string) => void }) {
+export function MoDetailsDialog({
+  moId,
+  issueId,
+  onClose,
+  onSaved,
+}: {
+  moId: string
+  /**
+   * One lay only — opened from its Edit on the cutting sheet: the window shows
+   * and saves just that lay, not the order and its job cards.
+   */
+  issueId?: string
+  onClose: () => void
+  onSaved: (message: string) => void
+}) {
   const [d, setD] = useState<Details | null>(null)
   const [order, setOrder] = useState<Form>({})
   const [cards, setCards] = useState<Record<string, Form>>({})
@@ -153,56 +167,67 @@ export function MoDetailsDialog({ moId, onClose, onSaved }: { moId: string; onCl
   const setCard = (id: string, k: string, v: string) => setCards((p) => ({ ...p, [id]: { ...p[id], [k]: v } }))
   const setIssue = (id: string, k: string, v: string) => setIssues((p) => ({ ...p, [id]: { ...p[id], [k]: v } }))
 
+  // The lays this window shows: one, when opened from a lay's Edit; else every lay still out.
+  const lays = d ? (issueId ? d.cuttingIssues.filter((i) => i.id === issueId) : d.cuttingIssues) : []
+  const oneLay = issueId ? (lays[0] ?? null) : null
+
   const blocker = !d
     ? null
-    : d.detailsBlock
-      ? d.detailsBlock
-      : order.start && order.end && order.end < order.start
-        ? 'The planned finish cannot be before the planned start.'
-        : Object.values(issues).some((i) => !i.cutterName.trim())
-          ? 'Name the cutting contractor on every lay.'
-          : null
+    : issueId && !oneLay
+      ? 'This lay has come back cut or been cancelled, so it can no longer be changed.'
+      : d.detailsBlock
+        ? d.detailsBlock
+        : !issueId && order.start && order.end && order.end < order.start
+          ? 'The planned finish cannot be before the planned start.'
+          : lays.some((i) => !issues[i.id]?.cutterName.trim())
+            ? 'Name the cutting contractor on every lay.'
+            : null
 
   const save = async () => {
     if (!d || blocker) return
     setSaving(true)
     setError(null)
+    const layBody = (i: IssueRow) => {
+      const f = issues[i.id]
+      return {
+        id: i.id,
+        cutterName: f.cutterName.trim(),
+        issuedOn: f.issuedOn || undefined,
+        lotNo: f.lotNo.trim() || null,
+        ratio: f.ratio.trim() || null,
+        noOfLayers: num(f.noOfLayers),
+        fabricItemId: f.fabricItemId || null,
+        fabricGiven: num(f.fabricGiven),
+        notes: f.notes.trim() || null,
+      }
+    }
     try {
-      const res = await api.patch<{ message?: string }>(`/production/orders/${d.id}/details`, {
-        plannedStartDate: order.start || null,
-        plannedEndDate: order.end || null,
-        notes: order.notes.trim() || null,
-        jobCards: d.jobCards.map((c) => {
-          const f = cards[c.id]
-          return {
-            id: c.id,
-            orderNo: f.orderNo,
-            projectId: f.projectId,
-            description: f.description,
-            fabricQuality: f.fabricQuality,
-            designNo: f.designNo,
-            lotNo: f.lotNo,
-            meters: num(f.meters),
-            average: num(f.average),
-            ratio: f.ratio,
-            notes: f.notes,
+      // One lay: only that lay is sent, so nothing else on the order is touched.
+      const body = oneLay
+        ? { cuttingIssues: [layBody(oneLay)] }
+        : {
+            plannedStartDate: order.start || null,
+            plannedEndDate: order.end || null,
+            notes: order.notes.trim() || null,
+            jobCards: d.jobCards.map((c) => {
+              const f = cards[c.id]
+              return {
+                id: c.id,
+                orderNo: f.orderNo,
+                projectId: f.projectId,
+                description: f.description,
+                fabricQuality: f.fabricQuality,
+                designNo: f.designNo,
+                lotNo: f.lotNo,
+                meters: num(f.meters),
+                average: num(f.average),
+                ratio: f.ratio,
+                notes: f.notes,
+              }
+            }),
+            cuttingIssues: d.cuttingIssues.map(layBody),
           }
-        }),
-        cuttingIssues: d.cuttingIssues.map((i) => {
-          const f = issues[i.id]
-          return {
-            id: i.id,
-            cutterName: f.cutterName.trim(),
-            issuedOn: f.issuedOn || undefined,
-            lotNo: f.lotNo.trim() || null,
-            ratio: f.ratio.trim() || null,
-            noOfLayers: num(f.noOfLayers),
-            fabricItemId: f.fabricItemId || null,
-            fabricGiven: num(f.fabricGiven),
-            notes: f.notes.trim() || null,
-          }
-        }),
-      })
+      const res = await api.patch<{ message?: string }>(`/production/orders/${d.id}/details`, body)
       onSaved(res.message ?? 'Saved.')
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save the details.')
@@ -224,15 +249,57 @@ export function MoDetailsDialog({ moId, onClose, onSaved }: { moId: string; onCl
     </label>
   )
 
+  /** One lay's boxes: contractor, issued on, lot no., ratio, layers, fabric, fabric given, note. */
+  const layFields = (i: IssueRow) => {
+    const f = issues[i.id]
+    if (!f || !d) return null
+    const set = (k: string) => (v: string) => setIssue(i.id, k, v)
+    const fabric = d.fabrics.find((x) => x.itemId === f.fabricItemId)
+    return (
+      <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
+        <label className="block sm:col-span-2">
+          <span className="form-label">Cutting contractor</span>
+          <ContractorPicker value={f.cutterName} onChange={set('cutterName')} known={knownFor(i.cutterName ?? '')} resetTo={i.cutterName ?? ''} ariaLabel={`Cutting contractor for ${i.cutOrderNumber}`} />
+        </label>
+        <label className="block">
+          <span className="form-label">Issued on</span>
+          <input type="date" className="form-input" value={f.issuedOn} onChange={(e) => set('issuedOn')(e.target.value)} />
+        </label>
+        {text(f.lotNo, set('lotNo'), 'Lot no.')}
+        {text(f.ratio, set('ratio'), 'Ratio')}
+        {number(f.noOfLayers, set('noOfLayers'), 'Layers')}
+        <label className="block">
+          <span className="form-label">Fabric</span>
+          <SmartSelect className="form-input" value={f.fabricItemId} onChange={(e) => set('fabricItemId')(e.target.value)} aria-label={`Fabric for ${i.cutOrderNumber}`}>
+            <option value="">—</option>
+            {d.fabrics.map((x) => (
+              <option key={x.itemId} value={x.itemId}>
+                {x.name}
+              </option>
+            ))}
+          </SmartSelect>
+        </label>
+        {number(f.fabricGiven, set('fabricGiven'), `Fabric given${fabric?.uom ? ` (${fabric.uom})` : ''}`)}
+        {text(f.notes, set('notes'), 'Note', { span: true })}
+      </div>
+    )
+  }
+
   return (
     <FormFrame
-      icon={Pencil}
-      title="Edit details"
-      subtitle={d ? `${d.moNumber} · open until cutting is complete` : 'Loading…'}
-      width="max-w-5xl"
+      icon={issueId ? Scissors : Pencil}
+      title={issueId ? `Edit ${oneLay?.cutOrderNumber ?? 'the lay'}` : 'Edit details'}
+      subtitle={
+        !d
+          ? 'Loading…'
+          : issueId
+            ? `${d.moNumber} · ${oneLay ? `with ${oneLay.cutterName ?? 'a contractor'} — open until it comes back cut` : 'no longer with a contractor'}`
+            : `${d.moNumber} · open until cutting is complete`
+      }
+      width={issueId ? 'max-w-4xl' : 'max-w-5xl'}
       primary={
         <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving || !d || !!blocker}>
-          {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} Save details
+          {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} {issueId ? 'Save' : 'Save details'}
         </button>
       }
       footer={
@@ -240,7 +307,15 @@ export function MoDetailsDialog({ moId, onClose, onSaved }: { moId: string; onCl
           Cancel
         </button>
       }
-      footerNote={blocker ? <span className="warn-text">{blocker}</span> : 'Saved all together: the order, its job cards and the lays with contractors.'}
+      footerNote={
+        blocker ? (
+          <span className="warn-text">{blocker}</span>
+        ) : issueId ? (
+          'Changes this lay only. Its sizes and pieces stay as issued: to change those, cancel it and issue again.'
+        ) : (
+          'Saved all together: the order, its job cards and the lays with contractors.'
+        )
+      }
       error={error}
       onClose={onClose}
       busy={saving}
@@ -249,6 +324,12 @@ export function MoDetailsDialog({ moId, onClose, onSaved }: { moId: string; onCl
         <div className="text-muted-foreground flex items-center gap-2 p-6 text-sm">
           <Loader2 size={15} className="animate-spin" /> Loading…
         </div>
+      ) : issueId ? (
+        oneLay ? (
+          <Section icon={Scissors} title="The lay">
+            {layFields(oneLay)}
+          </Section>
+        ) : null
       ) : (
         <>
           {d.planBlock && (
@@ -300,45 +381,14 @@ export function MoDetailsDialog({ moId, onClose, onSaved }: { moId: string; onCl
           {d.cuttingIssues.length > 0 && (
             <Section icon={Scissors} title="With cutting contractors">
               <div className="space-y-4">
-                {d.cuttingIssues.map((i) => {
-                  const f = issues[i.id]
-                  if (!f) return null
-                  const set = (k: string) => (v: string) => setIssue(i.id, k, v)
-                  const fabric = d.fabrics.find((x) => x.itemId === f.fabricItemId)
-                  return (
-                    <div key={i.id} className="border-border rounded-lg border p-3">
-                      <p className="text-foreground mb-2 text-sm font-semibold">
-                        {i.cutOrderNumber} <span className="text-muted-foreground font-normal">· {i.plannedPieces.toLocaleString('en-IN')} pcs, not yet received</span>
-                      </p>
-                      <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
-                        <label className="block sm:col-span-2">
-                          <span className="form-label">Cutting contractor</span>
-                          <ContractorPicker value={f.cutterName} onChange={set('cutterName')} known={knownFor(i.cutterName ?? '')} resetTo={i.cutterName ?? ''} ariaLabel={`Cutting contractor for ${i.cutOrderNumber}`} />
-                        </label>
-                        <label className="block">
-                          <span className="form-label">Issued on</span>
-                          <input type="date" className="form-input" value={f.issuedOn} onChange={(e) => set('issuedOn')(e.target.value)} />
-                        </label>
-                        {text(f.lotNo, set('lotNo'), 'Lot no.')}
-                        {text(f.ratio, set('ratio'), 'Ratio')}
-                        {number(f.noOfLayers, set('noOfLayers'), 'Layers')}
-                        <label className="block">
-                          <span className="form-label">Fabric</span>
-                          <SmartSelect className="form-input" value={f.fabricItemId} onChange={(e) => set('fabricItemId')(e.target.value)} aria-label={`Fabric for ${i.cutOrderNumber}`}>
-                            <option value="">—</option>
-                            {d.fabrics.map((x) => (
-                              <option key={x.itemId} value={x.itemId}>
-                                {x.name}
-                              </option>
-                            ))}
-                          </SmartSelect>
-                        </label>
-                        {number(f.fabricGiven, set('fabricGiven'), `Fabric given${fabric?.uom ? ` (${fabric.uom})` : ''}`)}
-                        {text(f.notes, set('notes'), 'Note', { span: true })}
-                      </div>
-                    </div>
-                  )
-                })}
+                {d.cuttingIssues.map((i) => (
+                  <div key={i.id} className="border-border rounded-lg border p-3">
+                    <p className="text-foreground mb-2 text-sm font-semibold">
+                      {i.cutOrderNumber} <span className="text-muted-foreground font-normal">· {i.plannedPieces.toLocaleString('en-IN')} pcs, not yet received</span>
+                    </p>
+                    {layFields(i)}
+                  </div>
+                ))}
               </div>
             </Section>
           )}

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { AlertTriangle, Ban, Boxes, CalendarDays, PackageOpen, Printer, Scissors, Send, Users } from 'lucide-react'
+import { AlertTriangle, Ban, Boxes, CalendarDays, PackageOpen, Pencil, Printer, Scissors, Send, Users } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
@@ -11,6 +11,7 @@ import { NextSteps, type NextStep } from './NextSteps'
 import { CutterIssueDialog } from './CutterIssueDialog'
 import { CutterReceiveDialog } from './CutterReceiveDialog'
 import { SendOnDialog } from './SendOnDialog'
+import { MoDetailsDialog } from '../MoDetailsDialog'
 import { pcs, type FlowStep, type JobCardCutting, type JobCardDetail } from './types'
 
 /**
@@ -20,7 +21,13 @@ import { pcs, type FlowStep, type JobCardCutting, type JobCardDetail } from './t
  * (cut) and out (sent to the next department), size by size.
  */
 
-type Open = { kind: 'issue' } | { kind: 'receive'; issue: JobCardCutting } | { kind: 'send' } | { kind: 'cancel'; issue: JobCardCutting }
+type Open =
+  | { kind: 'issue' }
+  | { kind: 'receive'; issue: JobCardCutting }
+  | { kind: 'send' }
+  | { kind: 'cancel'; issue: JobCardCutting }
+  /** A lay still with its contractor, its details put right: lot no., fabric given, layers… */
+  | { kind: 'edit'; issue: JobCardCutting }
 
 const openWindow = (url: string) => window.open(url, '_blank', 'noopener')
 const day = (iso: string) => iso.slice(0, 10)
@@ -97,7 +104,11 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
           {pcs(c.plannedPieces)} pcs with <span className="text-foreground font-medium">{c.cutterName ?? 'a contractor'}</span> on {c.cutOrderNumber}, issued {formatDate(c.cutDate)} — receive them when cut
         </>
       ),
-      actions: mayCreate ? [{ label: 'Receive cut', icon: PackageOpen, primary: true, onClick: () => setOpen({ kind: 'receive', issue: c }) }] : [],
+      actions: [
+        ...(mayCreate ? [{ label: 'Receive cut', icon: PackageOpen, primary: true, onClick: () => setOpen({ kind: 'receive', issue: c }) }] : []),
+        // Until it comes back cut: a lot no. or fabric given left off at issue is added here.
+        ...(can('production', 'edit') ? [{ label: 'Edit', icon: Pencil, onClick: () => setOpen({ kind: 'edit', issue: c }) }] : []),
+      ],
     })
   }
   if ((f?.waiting ?? 0) > 0 && next) {
@@ -129,7 +140,9 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
             { label: 'With contractors', of: withCutters, tone: 'muted' },
             { label: 'Actual cutting', of: (id) => fig(id)?.completed ?? 0, tone: 'primary' },
             { label: `Sent to ${next?.name ?? 'next'}`, of: (id) => fig(id)?.sentOn ?? 0 },
-            { label: 'At cutting now', of: (id) => fig(id)?.waiting ?? 0, tone: 'warn' },
+            // Cut and back from the contractor, not yet sent to the next stage. Was
+            // "At cutting now", which read as "being cut" — those are With contractors.
+            { label: 'Cut, waiting to send', of: (id) => fig(id)?.waiting ?? 0, tone: 'warn' },
           ]}
         />
       </Section>
@@ -186,6 +199,17 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
                       {mayCreate && c.status === 'IN_PROGRESS' && (
                         <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOpen({ kind: 'receive', issue: c })}>
                           <PackageOpen size={13} /> Receive cut
+                        </button>
+                      )}
+                      {can('production', 'edit') && c.status === 'IN_PROGRESS' && (
+                        <button
+                          type="button"
+                          className="btn-ghost h-7 px-2 text-xs"
+                          title="Change this lay's lot no., fabric given, layers, contractor… until it comes back cut"
+                          aria-label={`Edit ${c.cutOrderNumber}`}
+                          onClick={() => setOpen({ kind: 'edit', issue: c })}
+                        >
+                          <Pencil size={13} /> Edit
                         </button>
                       )}
                       {c._count.bundles > 0 && (
@@ -271,6 +295,7 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
       </Section>
 
       {open?.kind === 'issue' && <CutterIssueDialog d={d} onClose={() => setOpen(null)} onSaved={done} />}
+      {open?.kind === 'edit' && <MoDetailsDialog moId={d.mo.id} issueId={open.issue.id} onClose={() => setOpen(null)} onSaved={done} />}
       {open?.kind === 'receive' && (
         <CutterReceiveDialog
           d={d}
