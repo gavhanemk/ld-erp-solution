@@ -226,6 +226,40 @@ export function SizeChangeDialog({
         {tile('Order after this', `${pcs(after)} pcs`, after === planned ? 'same total as planned' : `planned ${pcs(planned)}`)}
       </div>
 
+      {/* Why, who and when — before the sizes, as the sending window has its own first. */}
+      <Section icon={ArrowLeftRight} title="Why, who and when">
+        <div id="sc-reason" className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
+          <label className="block sm:col-span-2">
+            <span className="form-label">
+              Reason <span className="text-destructive">*</span>
+            </span>
+            <input
+              ref={reasonRef}
+              className={`form-input ${tried && reasonIssue ? 'border-destructive' : ''}`}
+              value={reason}
+              maxLength={500}
+              placeholder="Why were these made as another size?"
+              onChange={(e) => setReason(e.target.value)}
+              aria-invalid={tried && !!reasonIssue}
+              aria-label="Reason"
+            />
+            {tried && reasonIssue && <span className="text-destructive mt-1 block text-xs">{reasonIssue}</span>}
+          </label>
+          <label className="block">
+            <span className="form-label">Done by</span>
+            <input className="form-input" value={personName} maxLength={120} placeholder="Line or supervisor" onChange={(e) => setPersonName(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="form-label">Date</span>
+            <input type="date" className="form-input" value={date} onChange={(e) => setDate(e.target.value)} />
+          </label>
+          <label className="block sm:col-span-2 lg:col-span-4">
+            <span className="form-label">Note</span>
+            <input className="form-input" value={notes} maxLength={1000} placeholder="Optional" onChange={(e) => setNotes(e.target.value)} />
+          </label>
+        </div>
+      </Section>
+
       <Section icon={Shirt} title={`Sizes at ${step.name}`}>
         <p id="sc-sizes" className="text-muted-foreground mb-3 text-xs">
           For pieces cut in one size and stitched as another. Under the size they were cut in, say what they were made as. Each bundle&apos;s changed pieces become
@@ -423,37 +457,6 @@ export function SizeChangeDialog({
           </div>
         )}
       </Section>
-
-      <div id="sc-reason" className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
-        <label className="block sm:col-span-2">
-          <span className="form-label">
-            Reason <span className="text-destructive">*</span>
-          </span>
-          <input
-            ref={reasonRef}
-            className={`form-input ${tried && reasonIssue ? 'border-destructive' : ''}`}
-            value={reason}
-            maxLength={500}
-            placeholder="Why were these made as another size?"
-            onChange={(e) => setReason(e.target.value)}
-            aria-invalid={tried && !!reasonIssue}
-            aria-label="Reason"
-          />
-          {tried && reasonIssue && <span className="text-destructive mt-1 block text-xs">{reasonIssue}</span>}
-        </label>
-        <label className="block">
-          <span className="form-label">Done by</span>
-          <input className="form-input" value={personName} maxLength={120} placeholder="Line or supervisor" onChange={(e) => setPersonName(e.target.value)} />
-        </label>
-        <label className="block">
-          <span className="form-label">Date</span>
-          <input type="date" className="form-input" value={date} onChange={(e) => setDate(e.target.value)} />
-        </label>
-        <label className="block sm:col-span-2 lg:col-span-4">
-          <span className="form-label">Note</span>
-          <input className="form-input" value={notes} maxLength={1000} placeholder="Optional" onChange={(e) => setNotes(e.target.value)} />
-        </label>
-      </div>
 
       <Section icon={Scale} title="Final size distribution">
         <div className="border-border overflow-x-auto rounded-lg border">

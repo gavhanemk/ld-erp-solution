@@ -135,6 +135,23 @@ export function WorkDialog({ flow, stepId, onClose, onSaved }: { flow: Flow; ste
       onClose={onClose}
       busy={saving}
     >
+      {/* Who did it, when, and a note — first, as the sending window has its own. */}
+      <Section icon={check ? ClipboardList : Hammer} title={`${check ? 'Checked' : 'Worked'} at ${step.name}`}>
+        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
+          <label className="block">
+            <span className="form-label">Done by</span>
+            <SuggestInput className="form-input" value={personName} maxLength={120} placeholder={check ? 'Checker' : 'Line, operator or contractor'} onValueChange={setPersonName} suggestions={people} aria-label="Done by" />
+          </label>
+          <label className="block">
+            <span className="form-label">On</span>
+            <input type="date" className="form-input" value={date} onChange={(e) => setDate(e.target.value)} />
+          </label>
+          <label className="block sm:col-span-2">
+            <span className="form-label">Note</span>
+            <input className="form-input" value={notes} maxLength={1000} onChange={(e) => setNotes(e.target.value)} />
+          </label>
+        </div>
+      </Section>
       <Section icon={Boxes} title="Bundles in hand">
         <BundleQtyTable
           rows={rows}
@@ -145,40 +162,31 @@ export function WorkDialog({ flow, stepId, onClose, onSaved }: { flow: Flow; ste
           fill={{ label: check ? 'All passed' : 'All done', column: 'done' }}
           empty={`Nothing is in hand at ${step.name}. Count in what has been sent here first.`}
         />
+        {/* What the rework and damaged pieces just entered need: where they are put right, and what was wrong. */}
+        {(sum('rework') > 0 || bad > 0) && (
+          <div className="mt-3 grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
+            {sum('rework') > 0 && (
+              <label className="block">
+                <span className="form-label">Rework put right by</span>
+                <SmartSelect className="form-input" value={reworkStepId} onChange={(e) => setReworkStepId(e.target.value)}>
+                  {earlier.map((s) => (
+                    <option key={s.id} value={s.id} data-sub={s.department.name}>
+                      {s.name}
+                      {s.id === step.id ? ' (here)' : ''}
+                    </option>
+                  ))}
+                </SmartSelect>
+              </label>
+            )}
+            {bad > 0 && (
+              <label className="block sm:col-span-2">
+                <span className="form-label">What was wrong{check ? ', and where it went wrong' : ''}</span>
+                <input className="form-input" value={reason} maxLength={500} placeholder={check ? 'Open side seam — stitching' : 'Needle holes on the collar'} onChange={(e) => setReason(e.target.value)} />
+              </label>
+            )}
+          </div>
+        )}
       </Section>
-      <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
-        {sum('rework') > 0 && (
-          <label className="block">
-            <span className="form-label">Rework put right by</span>
-            <SmartSelect className="form-input" value={reworkStepId} onChange={(e) => setReworkStepId(e.target.value)}>
-              {earlier.map((s) => (
-                <option key={s.id} value={s.id} data-sub={s.department.name}>
-                  {s.name}
-                  {s.id === step.id ? ' (here)' : ''}
-                </option>
-              ))}
-            </SmartSelect>
-          </label>
-        )}
-        {bad > 0 && (
-          <label className="block sm:col-span-2">
-            <span className="form-label">What was wrong{check ? ', and where it went wrong' : ''}</span>
-            <input className="form-input" value={reason} maxLength={500} placeholder={check ? 'Open side seam — stitching' : 'Needle holes on the collar'} onChange={(e) => setReason(e.target.value)} />
-          </label>
-        )}
-        <label className="block">
-          <span className="form-label">Done by</span>
-          <SuggestInput className="form-input" value={personName} maxLength={120} placeholder={check ? 'Checker' : 'Line, operator or contractor'} onValueChange={setPersonName} suggestions={people} aria-label="Done by" />
-        </label>
-        <label className="block">
-          <span className="form-label">On</span>
-          <input type="date" className="form-input" value={date} onChange={(e) => setDate(e.target.value)} />
-        </label>
-        <label className="block sm:col-span-2">
-          <span className="form-label">Note</span>
-          <input className="form-input" value={notes} maxLength={1000} onChange={(e) => setNotes(e.target.value)} />
-        </label>
-      </div>
       <p className="text-muted-foreground text-xs">
         {check
           ? 'Passed pieces can go on. Rework goes to the step you pick and comes back here to be checked again. Failed and damaged pieces wait for a decision: rework, B-grade, or written off.'

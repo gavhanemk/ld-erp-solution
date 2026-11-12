@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Loader2, PackageOpen, Receipt } from 'lucide-react'
+import { Loader2, PackageOpen, Receipt, Truck } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
@@ -120,9 +120,9 @@ export function VendorReturnDialog({ flow, jobWorkOrderId, onClose, onSaved }: {
       onClose={onClose}
       busy={saving}
     >
-      <Section icon={PackageOpen} title="Counted back, bundle by bundle">
-        <BundleQtyTable rows={rows} columns={columns} values={values} onChange={(row, col, val) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: val } }))} availableLabel="With them" fill={{ label: 'All accepted', column: 'accepted' }} empty={`${jwo.vendor.name} holds nothing of this order now.`} />
-        <div className="mt-3 grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
+      {/* Their challan, when it came and who counted it — first, as the sending window has its own. */}
+      <Section icon={Truck} title={`From ${jwo.vendor.name}`}>
+        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
           <label className="block">
             <span className="form-label">Their challan no.</span>
             <input className="form-input" value={theirChallanNo} maxLength={60} onChange={(e) => setTheirChallanNo(e.target.value)} />
@@ -135,13 +135,17 @@ export function VendorReturnDialog({ flow, jobWorkOrderId, onClose, onSaved }: {
             <span className="form-label">Counted by</span>
             <input className="form-input" value={personName} maxLength={120} onChange={(e) => setPersonName(e.target.value)} />
           </label>
-          {bad > 0 && (
-            <label className="block sm:col-span-2 lg:col-span-1">
-              <span className="form-label">What was wrong</span>
-              <input className="form-input" value={reason} maxLength={500} placeholder="Uneven wash; 4 torn in the drum" onChange={(e) => setReason(e.target.value)} />
-            </label>
-          )}
         </div>
+      </Section>
+      <Section icon={PackageOpen} title="Counted back, bundle by bundle">
+        <BundleQtyTable rows={rows} columns={columns} values={values} onChange={(row, col, val) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: val } }))} availableLabel="With them" fill={{ label: 'All accepted', column: 'accepted' }} empty={`${jwo.vendor.name} holds nothing of this order now.`} />
+        {/* Only for the failed and damaged pieces just entered. */}
+        {bad > 0 && (
+          <label className="mt-3 block">
+            <span className="form-label">What was wrong</span>
+            <input className="form-input" value={reason} maxLength={500} placeholder="Uneven wash; 4 torn in the drum" onChange={(e) => setReason(e.target.value)} />
+          </label>
+        )}
       </Section>
       <Section icon={Receipt} title="Their charge">
         <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">

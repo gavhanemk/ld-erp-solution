@@ -196,6 +196,10 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
             <span className="form-label">Fabric given{fabric?.uom ? ` (${fabric.uom})` : ''}</span>
             <StepInput decimals className="form-input text-right tabular-nums" value={fabricGiven} placeholder="0" onValueChange={setFabricGiven} aria-label="Fabric given" />
           </label>
+          <label className="block sm:col-span-2 lg:col-span-4">
+            <span className="form-label">Note</span>
+            <input className="form-input" value={notes} maxLength={1000} onChange={(e) => setNotes(e.target.value)} />
+          </label>
         </div>
         {!d.materials.issued && (
           <p className="warn-text mt-2 text-xs">Cutting starts once the store has issued the order’s materials. Raise the requisition on the manufacturing order and have it issued first.</p>
@@ -259,10 +263,6 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
             </label>
           )}
         </div>
-        <label className="mt-3 block">
-          <span className="form-label">Note</span>
-          <input className="form-input" value={notes} maxLength={1000} onChange={(e) => setNotes(e.target.value)} />
-        </label>
       </Section>
     </FormFrame>
   )

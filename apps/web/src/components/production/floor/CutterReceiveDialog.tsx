@@ -165,39 +165,9 @@ export function CutterReceiveDialog({
       onClose={onClose}
       busy={saving}
     >
-      <Section icon={Boxes} title="Pieces received, by size">
-        <div id="receive-pieces">
-          <div className="border-border overflow-x-auto rounded-lg border">
-            <table className="data-table w-full">
-              <thead>
-                <tr className="bg-secondary">
-                  <th>Size</th>
-                  <th style={{ textAlign: 'right' }}>Issued to cut</th>
-                  <th style={{ textAlign: 'right' }}>Received cut</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sizes.map((z) => (
-                  <tr key={z.id}>
-                    <td className="text-xs font-medium">{z.code}</td>
-                    <td className="text-right text-xs tabular-nums">{pcs(Number(planned[z.id] ?? 0))}</td>
-                    <td className="w-32">
-                      <StepInput
-                        className="form-input h-8 text-right text-xs tabular-nums"
-                        value={qty[z.id] ?? ''}
-                        placeholder="0"
-                        onValueChange={(v) => setQty((q) => ({ ...q, [z.id]: v }))}
-                        aria-label={`Size ${z.code} received`}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {problemAt('receive-pieces')}
-        </div>
-        <div className="mt-3 grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
+      {/* When it came back, its bundles and its fabric — first, as the issuing window has the lay first. */}
+      <Section icon={PackageOpen} title="The lay, back cut">
+        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="block">
             <span className="form-label">Received on</span>
             <input type="date" className="form-input" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -244,6 +214,39 @@ export function CutterReceiveDialog({
             <span className="form-label">Note</span>
             <input className="form-input" value={notes} maxLength={1000} onChange={(e) => setNotes(e.target.value)} aria-label="Note" />
           </label>
+        </div>
+      </Section>
+      <Section icon={Boxes} title="Pieces received, by size">
+        <div id="receive-pieces">
+          <div className="border-border overflow-x-auto rounded-lg border">
+            <table className="data-table w-full">
+              <thead>
+                <tr className="bg-secondary">
+                  <th>Size</th>
+                  <th style={{ textAlign: 'right' }}>Issued to cut</th>
+                  <th style={{ textAlign: 'right' }}>Received cut</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sizes.map((z) => (
+                  <tr key={z.id}>
+                    <td className="text-xs font-medium">{z.code}</td>
+                    <td className="text-right text-xs tabular-nums">{pcs(Number(planned[z.id] ?? 0))}</td>
+                    <td className="w-32">
+                      <StepInput
+                        className="form-input h-8 text-right text-xs tabular-nums"
+                        value={qty[z.id] ?? ''}
+                        placeholder="0"
+                        onValueChange={(v) => setQty((q) => ({ ...q, [z.id]: v }))}
+                        aria-label={`Size ${z.code} received`}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {problemAt('receive-pieces')}
         </div>
         {manager && (
           <label className="mt-2 flex items-center gap-2 text-xs">

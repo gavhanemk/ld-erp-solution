@@ -124,7 +124,7 @@ export function BundleQtyTable({
 
       {/* Wider: a table. */}
       <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
-        <table className="data-table w-full">
+        <table className="data-table table-totals w-full">
           <thead>
             <tr className="bg-secondary">
               <th>Bundle</th>

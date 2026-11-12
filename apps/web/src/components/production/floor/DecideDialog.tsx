@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Gavel, Loader2 } from 'lucide-react'
+import { Boxes, Gavel, Loader2 } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
@@ -108,51 +108,58 @@ export function DecideDialog({ flow, stepId, onClose, onSaved }: { flow: Flow; s
       onClose={onClose}
       busy={saving}
     >
-      <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
-        <label className="block">
-          <span className="form-label">The pieces</span>
-          <SmartSelect
-            className="form-input"
-            value={from}
-            onChange={(e) => {
-              const f = e.target.value as From
-              setFrom(f)
-              setValues({})
-              setTo(f === 'DONE' ? 'DAMAGED' : 'REWORK')
-            }}
-          >
-            {(['DAMAGED', 'REJECTED', 'DONE'] as From[]).map((f) => (
-              <option key={f} value={f} disabled={!held(f)} data-sub={`${pcs(held(f))} here`}>
-                {FROM_LABEL[f]}
-              </option>
-            ))}
-          </SmartSelect>
-        </label>
-        <label className="block">
-          <span className="form-label">Decision</span>
-          <SmartSelect className="form-input" value={to} onChange={(e) => setTo(e.target.value as To)}>
-            {toOptions.map((o) => (
-              <option key={o.value} value={o.value} disabled={o.manager && !manager} data-sub={o.manager ? 'A production manager' : undefined}>
-                {o.label}
-              </option>
-            ))}
-          </SmartSelect>
-        </label>
-        {to === 'REWORK' && (
+      {/* The decision and why — first, as the sending window has its own; the pieces it is for below. */}
+      <Section icon={Gavel} title="The decision">
+        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
           <label className="block">
-            <span className="form-label">Put right by</span>
-            <SmartSelect className="form-input" value={reworkStepId} onChange={(e) => setReworkStepId(e.target.value)}>
-              {earlier.map((s) => (
-                <option key={s.id} value={s.id} data-sub={s.department.name}>
-                  {s.name}
-                  {s.id === step.id ? ' (here)' : ''}
+            <span className="form-label">The pieces</span>
+            <SmartSelect
+              className="form-input"
+              value={from}
+              onChange={(e) => {
+                const f = e.target.value as From
+                setFrom(f)
+                setValues({})
+                setTo(f === 'DONE' ? 'DAMAGED' : 'REWORK')
+              }}
+            >
+              {(['DAMAGED', 'REJECTED', 'DONE'] as From[]).map((f) => (
+                <option key={f} value={f} disabled={!held(f)} data-sub={`${pcs(held(f))} here`}>
+                  {FROM_LABEL[f]}
                 </option>
               ))}
             </SmartSelect>
           </label>
-        )}
-      </div>
-      <Section icon={Gavel} title={FROM_LABEL[from]}>
+          <label className="block">
+            <span className="form-label">Decision</span>
+            <SmartSelect className="form-input" value={to} onChange={(e) => setTo(e.target.value as To)}>
+              {toOptions.map((o) => (
+                <option key={o.value} value={o.value} disabled={o.manager && !manager} data-sub={o.manager ? 'A production manager' : undefined}>
+                  {o.label}
+                </option>
+              ))}
+            </SmartSelect>
+          </label>
+          {to === 'REWORK' && (
+            <label className="block">
+              <span className="form-label">Put right by</span>
+              <SmartSelect className="form-input" value={reworkStepId} onChange={(e) => setReworkStepId(e.target.value)}>
+                {earlier.map((s) => (
+                  <option key={s.id} value={s.id} data-sub={s.department.name}>
+                    {s.name}
+                    {s.id === step.id ? ' (here)' : ''}
+                  </option>
+                ))}
+              </SmartSelect>
+            </label>
+          )}
+          <label className="block sm:col-span-3">
+            <span className="form-label">Why</span>
+            <input className="form-input" value={reason} maxLength={500} placeholder={to === 'SCRAPPED' ? 'Torn beyond repair' : to === 'B_GRADE' ? 'Small stain, sell as seconds' : 'Seam can be re-stitched'} onChange={(e) => setReason(e.target.value)} />
+          </label>
+        </div>
+      </Section>
+      <Section icon={Boxes} title={FROM_LABEL[from]}>
         <BundleQtyTable
           rows={rows}
           columns={columns}
@@ -162,10 +169,6 @@ export function DecideDialog({ flow, stepId, onClose, onSaved }: { flow: Flow; s
           fill={{ label: 'All of them', column: 'qty' }}
           empty="None here."
         />
-        <label className="mt-3 block">
-          <span className="form-label">Why</span>
-          <input className="form-input" value={reason} maxLength={500} placeholder={to === 'SCRAPPED' ? 'Torn beyond repair' : to === 'B_GRADE' ? 'Small stain, sell as seconds' : 'Seam can be re-stitched'} onChange={(e) => setReason(e.target.value)} />
-        </label>
       </Section>
     </FormFrame>
   )
