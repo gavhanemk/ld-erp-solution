@@ -39,6 +39,20 @@ import { bundleShort, newClientKey, pcs, type FlowTransfer } from './types'
 
 const SAME = '__same'
 type How = 'each' | 'all' | 'whole'
+/**
+ * How the bar takes pieces from the ticked bundles, in the floor's words (12 Nov 2026: "pcs from each
+ * bundle / pcs in all, spread evenly / whole bundles" read as unclear). A sentence under the bar says
+ * what Apply will do with the numbers as they stand.
+ */
+const HOW: Array<[How, string]> = [
+  ['each', 'From every bundle'],
+  ['all', 'Total, divided equally'],
+  ['whole', 'Full bundles'],
+]
+type BulkPlan =
+  | { kind: 'error'; text: string }
+  | { kind: 'undo'; rows: BundleRow[] }
+  | { kind: 'move'; to: string; asked: number; fit: BundleRow[]; caps: number[]; takes: number[]; took: number; kept: number; skipped: number }
 
 /** So many pieces spread as evenly as the bundles allow, each taking no more than it holds. */
 function spread(total: number, caps: number[]) {
@@ -108,6 +122,8 @@ export function CountInDialog({
   const [bulkHow, setBulkHow] = useState<How>('each')
   const [bulkQty, setBulkQty] = useState('')
   const [bulkNote, setBulkNote] = useState<{ text: string; bad?: boolean } | null>(null)
+  /** Apply was pressed with something missing: the sentence under the bar turns red. */
+  const [bulkTried, setBulkTried] = useState(false)
   /** Save was pressed with something missing: marked from then on. */
   const [tried, setTried] = useState(false)
   const offerSizes = !!sizes && sizes.length > 1 && !transfer.vendor
@@ -241,51 +257,86 @@ export function CountInDialog({
   const tickedSizes = [...new Set(tickedRows.map((r) => r.size))]
   const tickedPcs = tickedRows.reduce((s, r) => s + countOf(r.id), 0)
 
-  /** The bar: the same change on every bundle ticked, each bundle's count kept. */
-  const applyBulk = () => {
-    if (!tickedRows.length) return
-    if (!bulkTo) return setBulkNote({ text: 'Pick the size they are made as.', bad: true })
-    const nextValues = { ...values }
-    const nextMade = { ...madeAs }
-    const sameNow = (id: string) => Number(nextValues[id]?.qty) || 0
-    const madeNow = (id: string) => (nextMade[id]?.toSizeId ? Number(nextMade[id].qty) || 0 : 0)
-    if (bulkTo === SAME) {
-      let n = 0
-      for (const r of tickedRows) {
-        if (!nextMade[r.id]) continue
-        nextValues[r.id] = { ...nextValues[r.id], qty: String(sameNow(r.id) + madeNow(r.id)) }
-        delete nextMade[r.id]
-        n++
-      }
-      setValues(nextValues)
-      setMadeAs(nextMade)
-      setTicked([])
-      // An undo is a one-off: the bar goes back to asking for a size, not to undoing the next run too.
-      setBulkTo('')
-      return setBulkNote({ text: n ? `${n} ${n === 1 ? 'bundle keeps its' : 'bundles keep their'} own size again.` : 'None of those bundles had a size change.' })
-    }
+  /**
+   * What the bar would do with what it holds now — said in a sentence before Apply, and what Apply
+   * does. A bundle gives from its whole count (Same size and anything already made as another size)
+   * and keeps the rest as its own size.
+   */
+  const bulkPlan = ((): BulkPlan | null => {
+    if (!tickedRows.length) return null
+    if (!bulkTo) return { kind: 'error', text: 'Pick the size they are made as.' }
+    if (bulkTo === SAME) return { kind: 'undo', rows: tickedRows.filter((r) => madeAs[r.id]?.toSizeId) }
     const asked = Number(bulkQty) || 0
-    if (bulkHow !== 'whole' && asked <= 0) return setBulkNote({ text: 'Enter how many pieces.', bad: true })
+    if (bulkHow !== 'whole' && asked <= 0) return { kind: 'error', text: bulkHow === 'each' ? 'Enter how many pieces from every bundle.' : 'Enter the total pieces.' }
     const to = sizeCode(bulkTo)
     const fit = tickedRows.filter((r) => r.size !== to)
-    const caps = fit.map((r) => sameNow(r.id) + madeNow(r.id))
+    const caps = fit.map((r) => countOf(r.id))
     const takes = bulkHow === 'whole' ? caps : bulkHow === 'each' ? caps.map((c) => Math.min(asked, c)) : spread(asked, caps)
-    fit.forEach((r, i) => {
-      if (takes[i] <= 0) return
-      nextMade[r.id] = { toSizeId: bulkTo, qty: String(takes[i]) }
-      nextValues[r.id] = { ...nextValues[r.id], qty: String(caps[i] - takes[i]) }
-    })
+    const took = takes.reduce((s, x) => s + x, 0)
+    return { kind: 'move', to, asked, fit, caps, takes, took, kept: caps.reduce((s, x) => s + x, 0) - took, skipped: tickedRows.length - fit.length }
+  })()
+  const bulkPreview = ((): { text: string; bad?: boolean } | null => {
+    const p = bulkPlan
+    if (!p) return null
+    if (p.kind === 'error') return { text: p.text, bad: true }
+    if (p.kind === 'undo') {
+      const n = p.rows.length
+      return n
+        ? { text: `${n === tickedRows.length ? (n === 1 ? 'This bundle goes' : 'These bundles go') : `${n} of these bundles go`} back to their own size: their pieces return to Same size.` }
+        : { text: 'None of these bundles has a size change to undo.', bad: true }
+    }
+    if (!p.fit.length) return { text: `They are all size ${p.to} already.`, bad: true }
+    const bundles = `${p.fit.length} ${p.fit.length === 1 ? 'bundle' : 'bundles'}`
+    const parts: string[] = []
+    if (bulkHow === 'whole') parts.push(`All ${pcs(p.took)} pcs of the ${bundles} become size ${p.to}`)
+    else if (bulkHow === 'each')
+      parts.push(
+        p.takes.some((x) => x < p.asked)
+          ? `Up to ${pcs(p.asked)} pcs from every bundle (a bundle with fewer gives all it has) = ${pcs(p.took)} pcs become size ${p.to}`
+          : `${pcs(p.asked)} pcs from every bundle × ${bundles} = ${pcs(p.took)} pcs become size ${p.to}`,
+      )
+    else {
+      const even = p.takes.every((x) => x === p.takes[0])
+      const split = even ? `${pcs(p.takes[0])} from each` : p.takes.length <= 8 ? p.takes.map(pcs).join(' + ') : `${pcs(Math.min(...p.takes))} or ${pcs(Math.max(...p.takes))} from each`
+      parts.push(`${pcs(p.took)} pcs divided over ${bundles} (${split}) become size ${p.to}`)
+      if (p.took < p.asked) parts.push(`only ${pcs(p.took)} of the ${pcs(p.asked)}: the bundles hold no more`)
+    }
+    if (p.kept > 0) parts.push(`${pcs(p.kept)} ${tickedSizes.length === 1 ? `stay size ${tickedSizes[0]}` : 'keep their size'}`)
+    if (p.skipped) parts.push(`${p.skipped} already size ${p.to}, left as ${p.skipped === 1 ? 'it is' : 'they are'}`)
+    return { text: parts.join(' · ') }
+  })()
+
+  /** The bar: the same change on every bundle ticked, each bundle's count kept. */
+  const applyBulk = () => {
+    const p = bulkPlan
+    if (!p) return
+    if (p.kind === 'error' || (p.kind === 'undo' && !p.rows.length) || (p.kind === 'move' && !p.fit.length)) return setBulkTried(true)
+    const nextValues = { ...values }
+    const nextMade = { ...madeAs }
+    if (p.kind === 'undo') {
+      for (const r of p.rows) {
+        nextValues[r.id] = { ...nextValues[r.id], qty: String(countOf(r.id)) }
+        delete nextMade[r.id]
+      }
+      // An undo is a one-off: the bar goes back to asking for a size, not to undoing the next run too.
+      setBulkTo('')
+      setBulkNote({ text: `${p.rows.length} ${p.rows.length === 1 ? 'bundle keeps its' : 'bundles keep their'} own size again.` })
+    } else {
+      p.fit.forEach((r, i) => {
+        if (p.takes[i] <= 0) return
+        nextMade[r.id] = { toSizeId: bulkTo, qty: String(p.takes[i]) }
+        nextValues[r.id] = { ...nextValues[r.id], qty: String(p.caps[i] - p.takes[i]) }
+      })
+      const done = p.takes.filter((x) => x > 0).length
+      setBulkNote({
+        text: `Done: ${pcs(p.took)} pcs of ${done} ${done === 1 ? 'bundle' : 'bundles'} now size ${p.to}.${p.skipped ? ` ${p.skipped} already size ${p.to}, left as ${p.skipped === 1 ? 'it is' : 'they are'}.` : ''}`,
+      })
+    }
     setValues(nextValues)
     setMadeAs(nextMade)
     setTicked([])
     setLastTick(null)
-    const took = takes.reduce((s, x) => s + x, 0)
-    const done = takes.filter((x) => x > 0).length
-    const notes = [`${pcs(took)} pcs of ${done} ${done === 1 ? 'bundle' : 'bundles'} made as size ${to}.`]
-    if (fit.length < tickedRows.length) notes.push(`${tickedRows.length - fit.length} already size ${to}, left as they are.`)
-    if (bulkHow === 'each' && takes.some((x, i) => x < asked && caps[i] > 0)) notes.push('Bundles holding fewer gave all they had.')
-    if (bulkHow === 'all' && took < asked) notes.push(`Only ${pcs(took)} of the ${pcs(asked)} asked: the bundles hold no more.`)
-    setBulkNote({ text: notes.join(' ') })
+    setBulkTried(false)
   }
 
   const save = async () => {
@@ -581,51 +632,76 @@ export function CountInDialog({
         {sizing && changeable.length > 0 && (
           <div className="sticky top-0 z-20 mb-2">
             {tickedRows.length > 0 ? (
-              <div className="border-primary/50 bg-card flex flex-wrap items-center gap-2 rounded-lg border p-2 shadow-md">
-                <span className="text-foreground text-xs font-medium">
-                  {tickedRows.length} {tickedRows.length === 1 ? 'bundle' : 'bundles'} ticked · {pcs(tickedPcs)} pcs
-                  {tickedSizes.length === 1 ? ` of size ${tickedSizes[0]}` : ''}
-                </span>
-                <SmartSelect className="form-input h-8 w-36 py-0 text-xs" value={bulkTo} onChange={(e) => setBulkTo(e.target.value)} aria-label="Ticked bundles made as size">
-                  <option value="">Made as…</option>
-                  {(sizes ?? []).map((z) => (
-                    <option key={z.id} value={z.id}>
-                      Size {z.code}
-                    </option>
-                  ))}
-                  <option value={SAME}>Their own size (undo)</option>
-                </SmartSelect>
-                {bulkTo !== SAME && (
-                  <>
-                    {bulkHow !== 'whole' && (
-                      <StepInput
-                        className="form-input h-8 w-20 text-right text-xs tabular-nums"
-                        value={bulkQty}
-                        placeholder="Pcs"
-                        onValueChange={setBulkQty}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault()
-                            applyBulk()
-                          }
-                        }}
-                        aria-label="Pieces for the ticked bundles"
-                      />
-                    )}
-                    <SmartSelect className="form-input h-8 w-40 py-0 text-xs" value={bulkHow} onChange={(e) => setBulkHow(e.target.value as How)} aria-label="How the pieces are taken">
-                      <option value="each">pcs from each bundle</option>
-                      <option value="all">pcs in all, spread evenly</option>
-                      <option value="whole">whole bundles</option>
-                    </SmartSelect>
-                  </>
+              <div className="border-primary/50 bg-card space-y-2 rounded-lg border p-2.5 shadow-md">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-foreground text-xs font-semibold">
+                    {tickedRows.length} {tickedRows.length === 1 ? 'bundle' : 'bundles'} ticked
+                  </span>
+                  <span className="text-muted-foreground text-xs">
+                    · {pcs(tickedPcs)} pcs{tickedSizes.length === 1 ? ` of size ${tickedSizes[0]}` : ''}
+                  </span>
+                  <button type="button" className="btn-ghost ml-auto h-7 px-2 text-xs" onClick={() => setTicked([])}>
+                    Untick
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-muted-foreground text-xs">Made as</span>
+                  <SmartSelect className="form-input h-8 w-32 py-0 text-xs" value={bulkTo} onChange={(e) => setBulkTo(e.target.value)} aria-label="Ticked bundles made as size">
+                    <option value="">Pick a size…</option>
+                    {(sizes ?? []).map((z) => (
+                      <option key={z.id} value={z.id}>
+                        Size {z.code}
+                      </option>
+                    ))}
+                    <option value={SAME}>Their own size (undo)</option>
+                  </SmartSelect>
+                  {bulkTo !== SAME && (
+                    <>
+                      <div className="border-border bg-secondary inline-flex flex-wrap rounded-lg border p-0.5" role="radiogroup" aria-label="How many pieces">
+                        {HOW.map(([key, label]) => (
+                          <button
+                            key={key}
+                            type="button"
+                            role="radio"
+                            aria-checked={bulkHow === key}
+                            onClick={() => setBulkHow(key)}
+                            className={`rounded-md px-2.5 py-1 text-xs ${bulkHow === key ? 'bg-card text-foreground font-semibold shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      {bulkHow !== 'whole' && (
+                        <span className="flex items-center gap-1.5 text-xs">
+                          <StepInput
+                            className="form-input h-8 w-20 text-right text-xs tabular-nums"
+                            value={bulkQty}
+                            placeholder="0"
+                            onValueChange={setBulkQty}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                applyBulk()
+                              }
+                            }}
+                            aria-label={bulkHow === 'each' ? 'Pieces from every bundle' : 'Total pieces'}
+                          />
+                          <span className="text-muted-foreground">pcs</span>
+                        </span>
+                      )}
+                    </>
+                  )}
+                  <button type="button" className="btn-primary h-8 px-3 text-xs" onClick={applyBulk}>
+                    Apply to {tickedRows.length}
+                  </button>
+                </div>
+                {/* What Apply will do, with the numbers as they stand. */}
+                {bulkPreview && (
+                  <p className={`text-xs ${bulkPreview.bad ? (bulkTried ? 'text-destructive font-medium' : 'text-muted-foreground') : 'text-primary font-medium'}`} aria-live="polite">
+                    {bulkPreview.bad ? '' : '→ '}
+                    {bulkPreview.text}
+                  </p>
                 )}
-                <button type="button" className="btn-primary h-8 px-3 text-xs" onClick={applyBulk}>
-                  Apply to {tickedRows.length}
-                </button>
-                <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setTicked([])}>
-                  Untick
-                </button>
-                {bulkNote && <span className={`w-full text-[11px] ${bulkNote.bad ? 'text-destructive font-medium' : 'text-primary'}`}>{bulkNote.text}</span>}
               </div>
             ) : (
               <div className="bg-card flex flex-wrap items-center gap-1.5 text-xs">
