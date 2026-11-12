@@ -381,6 +381,17 @@ export const receiveSchema = z.object({
   receivedAt: z.coerce.date().optional(),
   notes: note,
   clientKey,
+  /**
+   * Counting in at stitching: pieces of these bundles that will be made as
+   * another size (a size jump), recorded with the count in one go — the same
+   * change as Change sizes on the sheet, made the moment they are in hand.
+   */
+  sizeChanges: z
+    .object({
+      lines: z.array(z.object({ bundleId: z.string().min(1), toSizeId: z.string().min(1, 'Pick the size they are made as'), qty: pcs })).min(1),
+      reason: reasonText,
+    })
+    .optional(),
 })
 
 /**
@@ -1077,6 +1088,26 @@ export async function unpackForReceipt(tx: Tx, fgReceiptId: string, reason: stri
 }
 
 // ─── Size changes (size jumps at stitching) ───────────────────
+
+/**
+ * A count-in with the pieces made as another size there, in one go — the Count
+ * in window at stitching. Counted in first, then the size change by the same
+ * rules as Change sizes on the sheet; inside the caller's transaction, so a
+ * size change that is refused takes the count back with it.
+ */
+export async function receiveWithSizes(tx: Tx, transferId: string, d: z.infer<typeof receiveSchema>, userId: string) {
+  const r = await receive(tx, transferId, d, userId)
+  const lines = d.sizeChanges?.lines.filter((l) => l.qty > 0) ?? []
+  if (r.duplicate || !lines.length) return { ...r, sizes: null }
+  const t = await tx.processTransfer.findUniqueOrThrow({ where: { id: transferId }, select: { moId: true, toStepId: true } })
+  const sizes = await changeSizes(
+    tx,
+    t.moId,
+    sizeChangeSchema.parse({ stepId: t.toStepId, lines, reason: d.sizeChanges!.reason, personName: d.receivedBy ?? null, eventDate: d.receivedAt, notes: d.notes ?? null }),
+    userId,
+  )
+  return { ...r, sizes }
+}
 
 export const sizeChangeSchema = z.object({
   stepId: z.string().min(1, 'Say which step'),

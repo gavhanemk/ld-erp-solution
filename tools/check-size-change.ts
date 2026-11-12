@@ -38,6 +38,7 @@ import {
   holdMo,
   receive,
   receiveSchema,
+  receiveWithSizes,
   recordWork,
   sizeChangeSchema,
   undoEvent,
@@ -541,6 +542,34 @@ async function main() {
 
         // Pieces change size once: a new bundle's pieces were already made as another size.
         await refuses(`refused: a new bundle's pieces change size only once (${C1.code}, made from ${A1.code})`, () => changeSizes(tx, mo.id, input([[C1, S3, 2]], 'Made as size 3 after all'), user.id), 'ALREADY_CHANGED')
+
+        // ═══ Count in with a size change, in one save (the Count in window at stitching) ═══
+        // Tried in a savepoint and undone, so the blue card goes on below exactly as before.
+        {
+          const lines0 = await tx.processTransferLine.findMany({ where: { transferId: toStiBlue.id } })
+          const all = lines0.map((l) => ({ lineId: l.id, qty: l.dispatchedQty }))
+          const withSizes = (qty: number) =>
+            receiveSchema.parse({ lines: all, receivedBy: 'Sunita', sizeChanges: { lines: [{ bundleId: B1.id, toSizeId: S2.id, qty }], reason: 'Counted in long, made as size 2' } })
+          await refuses(
+            `count-in with more of ${B1.code} made as another size than was counted in is refused whole`,
+            () => receiveWithSizes(tx, toStiBlue.id, withSizes(B1.qty + 5), user.id),
+            'NOT_ENOUGH_PIECES',
+          )
+          const still = await tx.processTransfer.findUniqueOrThrow({ where: { id: toStiBlue.id } })
+          check('…and nothing of it stands: the card is still on its way, nothing counted in', still.status === 'DISPATCHED' && (await held(STI, B1.id, 'WIP')) === 0)
+          await tx.$executeRawUnsafe('SAVEPOINT countin_sizes')
+          const out = await receiveWithSizes(tx, toStiBlue.id, withSizes(5), user.id)
+          const card1 = await tx.processTransfer.findUniqueOrThrow({ where: { id: toStiBlue.id } })
+          const kid = await tx.productionBundle.findFirst({ where: { parentId: B1.id } })
+          check(
+            `count-in with a size change: the card counted in, and 5 of ${B1.code} made as size ${S2.code} in a new bundle at stitching`,
+            card1.status === 'RECEIVED' && out.sizes?.moves?.length === 1 && kid?.sizeId === S2.id && (await held(STI, B1.id, 'WIP')) === B1.qty - 5 && (await held(STI, kid!.id, 'WIP')) === 5,
+            { status: card1.status, kid: kid && { size: kid.sizeId, qty: kid.qty } },
+          )
+          const change = await tx.sizeChange.findFirst({ where: { moId: mo.id, fromBundleId: B1.id }, orderBy: { createdAt: 'desc' } })
+          check('…recorded as a size change at stitching, with its reason and who counted in', !!change && change.qty === 5 && change.toSizeId === S2.id)
+          await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT countin_sizes')
+        }
 
         // The blue card is counted in now.
         const blueLines = await tx.processTransferLine.findMany({ where: { transferId: toStiBlue.id } })

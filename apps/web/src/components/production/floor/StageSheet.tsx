@@ -700,7 +700,16 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
         </div>
       </div>
 
-      {open?.kind === 'count' && <CountInDialog transfer={open.transfer} moNumber={d.mo.moNumber} onClose={() => setOpen(null)} onSaved={done} />}
+      {open?.kind === 'count' && (
+        <CountInDialog
+          transfer={open.transfer}
+          moNumber={d.mo.moNumber}
+          // Counting in at stitching on our own floor: pieces made as another size can be recorded with the count.
+          sizes={sizeStep && mayCreate && sizes.length > 1 ? sizes : null}
+          onClose={() => setOpen(null)}
+          onSaved={done}
+        />
+      )}
       {open?.kind === 'settle' && <SettleDialog transfer={open.transfer} onClose={() => setOpen(null)} onSaved={done} />}
       {open?.kind === 'work' && <WorkDialog flow={d} stepId={step.id} onClose={() => setOpen(null)} onSaved={done} />}
       {open?.kind === 'send' && (

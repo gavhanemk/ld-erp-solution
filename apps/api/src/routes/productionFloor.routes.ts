@@ -20,6 +20,7 @@ import {
   holdMo,
   receive,
   receiveSchema,
+  receiveWithSizes,
   recordWork,
   resumeMo,
   reworkDone,
@@ -471,7 +472,8 @@ router.post('/orders/:id/transfers', requirePermission(MODULE, 'create'), async 
 
 router.post('/transfers/:id/receive', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = receiveSchema.parse(req.body)
-  const out = await prisma.$transaction((tx) => receive(tx, req.params.id, data, req.user!.id), T)
+  // Counted in, and any pieces made as another size there, in one transaction.
+  const out = await prisma.$transaction((tx) => receiveWithSizes(tx, req.params.id, data, req.user!.id), T)
   const t = await prisma.processTransfer.findUniqueOrThrow({ where: { id: req.params.id }, include: transferInclude })
   if (!out.duplicate) await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ProcessTransfer', entityId: t.id, after: t })
   const got = t.lines.reduce((s, l) => s + l.receivedQty, 0)
@@ -481,7 +483,11 @@ router.post('/transfers/:id/receive', requirePermission(MODULE, 'create'), async
     success: true,
     message: out.duplicate
       ? 'That count was already saved.'
-      : `${t.transferNumber}: ${pcs(got)} counted in at ${t.toStep.name}.${excess ? ` ${pcs(excess)} more than was sent — taken off ${t.fromStep.name}.` : ''}${short ? ` ${pcs(short)} short, to be settled.` : t.status === 'PARTLY_RECEIVED' ? ' The rest is still on its way.' : ''}`,
+      : `${t.transferNumber}: ${pcs(got)} counted in at ${t.toStep.name}.${excess ? ` ${pcs(excess)} more than was sent — taken off ${t.fromStep.name}.` : ''}${short ? ` ${pcs(short)} short, to be settled.` : t.status === 'PARTLY_RECEIVED' ? ' The rest is still on its way.' : ''}${
+          out.sizes?.moves?.length
+            ? ` Sizes changed: ${sizeMoves(out.sizes.moves)}. New ${out.sizes.moves.length === 1 ? 'bundle' : 'bundles'} ${out.sizes.moves.map((m) => m.to.split('-').pop()).join(', ')}: print ${out.sizes.moves.length === 1 ? 'its sticker' : 'their stickers'}.`
+            : ''
+        }`,
     data: t,
   })
 })

@@ -33,7 +33,7 @@ import { SheetView } from './SheetView'
 import { RouteStrip, stripNote } from './RouteStrip'
 import type { TransferRow } from './TransferDetailDialog'
 import { useJobCard } from './useFlow'
-import { fabricLine, isCheck, pcs, type FabricRecord, type FlowTransfer, type StepFigures } from './types'
+import { fabricLine, isCheck, pcs, type FabricRecord, type FlowTransfer, type JobCardDetail, type StepFigures } from './types'
 
 /**
  * The board: every open job card with its route drawn as a line of stages —
@@ -92,7 +92,7 @@ export interface BoardCard {
 type Open =
   | { kind: 'sheet'; jobCardId: string; stepId: string | null }
   | { kind: 'send'; jobCardId: string; stepId: string }
-  | { kind: 'count'; transfer: TransferRow }
+  | { kind: 'count'; transfer: TransferRow; sizes?: Array<{ id: string; code: string }> | null }
   | { kind: 'settle'; transfer: TransferRow }
   | { kind: 'takeBack'; item: Passed }
 
@@ -453,7 +453,13 @@ export function BoardView({
   const withTransfer = async (id: string, kind: 'count' | 'settle') => {
     try {
       const res = await api.get<{ data: TransferRow }>(`/production/transfers/${id}`)
-      setOpen({ kind, transfer: res.data })
+      // Counting in at stitching on our own floor: the job card's sizes, so pieces made as another size can go in with the count.
+      const t = res.data
+      const atStitching = kind === 'count' && t.toStep.kind === 'STITCHING' && !t.vendor && !!t.jobCard
+      const sizes = atStitching
+        ? ((await api.get<{ data: JobCardDetail }>(`/production/job-cards/${t.jobCard!.id}`).catch(() => null))?.data.line?.sizes ?? null)
+        : null
+      setOpen(kind === 'count' ? { kind, transfer: t, sizes } : { kind, transfer: t })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not open that transfer.')
     }
@@ -569,7 +575,9 @@ export function BoardView({
           }}
         />
       )}
-      {open?.kind === 'count' && <CountInDialog transfer={open.transfer as unknown as FlowTransfer} moNumber={open.transfer.mo.moNumber} onClose={() => setOpen(null)} onSaved={saved} />}
+      {open?.kind === 'count' && (
+        <CountInDialog transfer={open.transfer as unknown as FlowTransfer} moNumber={open.transfer.mo.moNumber} sizes={open.sizes ?? null} onClose={() => setOpen(null)} onSaved={saved} />
+      )}
       {open?.kind === 'settle' && <SettleDialog transfer={open.transfer as unknown as FlowTransfer} onClose={() => setOpen(null)} onSaved={saved} />}
       {open?.kind === 'takeBack' && (
         <ReasonDialog
