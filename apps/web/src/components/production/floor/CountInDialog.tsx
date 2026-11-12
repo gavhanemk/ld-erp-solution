@@ -29,7 +29,35 @@ import { bundleShort, newClientKey, pcs, type FlowTransfer } from './types'
  * size — both are counted in. Pieces typed in Pcs come out of Same size, so a
  * bundle's count stays as it was. (The user counted a 20-piece bundle as 10 +
  * 10 made as M and expected 20 counted in, not 10.)
+ *
+ * For speed (the same change on a run of bundles was typed bundle by bundle):
+ * bundles are ticked — Shift+click for a run, or a whole size — and one bar
+ * sets them all, so many pieces from each, so many in all spread evenly, or
+ * whole bundles. For accuracy, a table of the card's sizes as cut and as made,
+ * beside the order's plan, follows every change as it is made.
  */
+
+const SAME = '__same'
+type How = 'each' | 'all' | 'whole'
+
+/** So many pieces spread as evenly as the bundles allow, each taking no more than it holds. */
+function spread(total: number, caps: number[]) {
+  const out = caps.map(() => 0)
+  let left = total
+  let open = caps.map((_, i) => i).filter((i) => caps[i] > 0)
+  while (left > 0 && open.length) {
+    const share = Math.max(1, Math.floor(left / open.length))
+    for (const i of open) {
+      if (left <= 0) break
+      const give = Math.min(share, caps[i] - out[i], left)
+      out[i] += give
+      left -= give
+    }
+    open = open.filter((i) => out[i] < caps[i])
+  }
+  return out
+}
+
 export function CountInDialog({
   transfer,
   moNumber,
@@ -39,8 +67,8 @@ export function CountInDialog({
 }: {
   transfer: FlowTransfer
   moNumber: string
-  /** The job card's sizes, when this is a count-in at stitching on our own floor; null otherwise. */
-  sizes?: Array<{ id: string; code: string }> | null
+  /** The job card's sizes (with the order's planned pieces), when this is a count-in at stitching on our own floor; null otherwise. */
+  sizes?: Array<{ id: string; code: string; qty?: number }> | null
   onClose: () => void
   onSaved: (message: string) => void
 }) {
@@ -73,6 +101,13 @@ export function CountInDialog({
   const [madeAs, setMadeAs] = useState<Record<string, { toSizeId: string; qty: string }>>({})
   const [reason, setReason] = useState('')
   const reasonRef = useRef<HTMLInputElement>(null)
+  // Several bundles at once: those ticked, the last one clicked (for Shift+click), and what the bar sets.
+  const [ticked, setTicked] = useState<string[]>([])
+  const [lastTick, setLastTick] = useState<string | null>(null)
+  const [bulkTo, setBulkTo] = useState('')
+  const [bulkHow, setBulkHow] = useState<How>('each')
+  const [bulkQty, setBulkQty] = useState('')
+  const [bulkNote, setBulkNote] = useState<{ text: string; bad?: boolean } | null>(null)
   /** Save was pressed with something missing: marked from then on. */
   const [tried, setTried] = useState(false)
   const offerSizes = !!sizes && sizes.length > 1 && !transfer.vendor
@@ -90,6 +125,7 @@ export function CountInDialog({
 
   // A bundle cut in a size, not made by an earlier change (pieces change size once), can change size here.
   const mayChange = (r: BundleRow) => !!r.size && !lineOf.get(r.id)?.bundle.parentId
+  const changeable = rows.filter(mayChange)
   const changes = sizing
     ? rows.flatMap((r) => {
         const m = madeAs[r.id]
@@ -112,7 +148,29 @@ export function CountInDialog({
       : null
   const blocker = !total && !close ? 'Enter what was counted in, or close it as short.' : sizeBlocker
 
+  // The card's sizes as cut and as made, beside the order's plan — followed as changes are made.
+  const sizeTable = (sizes ?? [])
+    .map((z) => {
+      const cut = rows.reduce((s, r) => s + (r.size === z.code ? countOf(r.id) : 0), 0)
+      const out = changes.reduce((s, c) => s + (c.row.size === z.code ? c.qty : 0), 0)
+      const into = changes.reduce((s, c) => s + (c.toSizeId === z.id ? c.qty : 0), 0)
+      return { code: z.code, cut, made: cut - out + into, plan: z.qty }
+    })
+    .filter((z) => z.cut || z.made || z.plan)
+  const cutTotal = sizeTable.reduce((s, z) => s + z.cut, 0)
+  const planTotal = sizeTable.reduce((s, z) => s + (z.plan ?? 0), 0)
+  const hasPlan = sizeTable.some((z) => z.plan != null)
+  // Only when this card holds the whole order line does each size's figure have to match the plan.
+  const wholeLine = hasPlan && planTotal > 0 && cutTotal === planTotal
+
   const setSame = (lineId: string, qty: number) => setValues((x) => ({ ...x, [lineId]: { ...x[lineId], qty: String(qty) } }))
+  /** After a size is picked on a row: to its pieces box, once the list has handed focus back. */
+  const toPieces = (lineId: string) =>
+    setTimeout(() => {
+      const box = [...document.querySelectorAll<HTMLInputElement>(`[data-size-pcs="${lineId}"] input`)].find((x) => x.offsetParent)
+      box?.focus()
+      box?.select()
+    }, 80)
   const pick = (r: BundleRow, toSizeId: string) => {
     const had = madeAs[r.id]
     if (!toSizeId) {
@@ -126,10 +184,14 @@ export function CountInDialog({
       return
     }
     // Another size for the same pieces.
-    if (had?.toSizeId) return setMadeAs((x) => ({ ...x, [r.id]: { ...x[r.id], toSizeId } }))
+    if (had?.toSizeId) {
+      setMadeAs((x) => ({ ...x, [r.id]: { ...x[r.id], toSizeId } }))
+      return toPieces(r.id)
+    }
     // The bundle's pieces not counted as the same size, if any; otherwise how many is typed, and taken from Same size.
     const rest = Math.max(0, r.available - sameOf(r.id))
     setMadeAs((x) => ({ ...x, [r.id]: { toSizeId, qty: rest ? String(rest) : '' } }))
+    toPieces(r.id)
   }
   /** Pieces made as another size come out of Same size: the bundle's count stays as it was. */
   const setMade = (lineId: string, v: string) => {
@@ -148,6 +210,82 @@ export function CountInDialog({
     })
     setSizing(false)
     setMadeAs({})
+    setTicked([])
+    setBulkNote(null)
+  }
+
+  // Ticking: one bundle, a run with Shift (from the last one clicked), every bundle, or a whole size.
+  const tick = (rowId: string, run: boolean) => {
+    setBulkNote(null)
+    const ids = changeable.map((r) => r.id)
+    const from = lastTick ? ids.indexOf(lastTick) : -1
+    const to = ids.indexOf(rowId)
+    if (run && from >= 0 && to >= 0) {
+      const runIds = ids.slice(Math.min(from, to), Math.max(from, to) + 1)
+      setTicked((t) => [...new Set([...t, ...runIds])])
+    } else {
+      setTicked((t) => (t.includes(rowId) ? t.filter((x) => x !== rowId) : [...t, rowId]))
+    }
+    setLastTick(rowId)
+  }
+  const tickAll = () => {
+    setBulkNote(null)
+    setTicked((t) => (changeable.length && changeable.every((r) => t.includes(r.id)) ? [] : changeable.map((r) => r.id)))
+  }
+  const tickSize = (code: string) => {
+    setBulkNote(null)
+    setTicked(changeable.filter((r) => r.size === code).map((r) => r.id))
+    setLastTick(null)
+  }
+  const tickedRows = changeable.filter((r) => ticked.includes(r.id))
+  const tickedSizes = [...new Set(tickedRows.map((r) => r.size))]
+  const tickedPcs = tickedRows.reduce((s, r) => s + countOf(r.id), 0)
+
+  /** The bar: the same change on every bundle ticked, each bundle's count kept. */
+  const applyBulk = () => {
+    if (!tickedRows.length) return
+    if (!bulkTo) return setBulkNote({ text: 'Pick the size they are made as.', bad: true })
+    const nextValues = { ...values }
+    const nextMade = { ...madeAs }
+    const sameNow = (id: string) => Number(nextValues[id]?.qty) || 0
+    const madeNow = (id: string) => (nextMade[id]?.toSizeId ? Number(nextMade[id].qty) || 0 : 0)
+    if (bulkTo === SAME) {
+      let n = 0
+      for (const r of tickedRows) {
+        if (!nextMade[r.id]) continue
+        nextValues[r.id] = { ...nextValues[r.id], qty: String(sameNow(r.id) + madeNow(r.id)) }
+        delete nextMade[r.id]
+        n++
+      }
+      setValues(nextValues)
+      setMadeAs(nextMade)
+      setTicked([])
+      // An undo is a one-off: the bar goes back to asking for a size, not to undoing the next run too.
+      setBulkTo('')
+      return setBulkNote({ text: n ? `${n} ${n === 1 ? 'bundle keeps its' : 'bundles keep their'} own size again.` : 'None of those bundles had a size change.' })
+    }
+    const asked = Number(bulkQty) || 0
+    if (bulkHow !== 'whole' && asked <= 0) return setBulkNote({ text: 'Enter how many pieces.', bad: true })
+    const to = sizeCode(bulkTo)
+    const fit = tickedRows.filter((r) => r.size !== to)
+    const caps = fit.map((r) => sameNow(r.id) + madeNow(r.id))
+    const takes = bulkHow === 'whole' ? caps : bulkHow === 'each' ? caps.map((c) => Math.min(asked, c)) : spread(asked, caps)
+    fit.forEach((r, i) => {
+      if (takes[i] <= 0) return
+      nextMade[r.id] = { toSizeId: bulkTo, qty: String(takes[i]) }
+      nextValues[r.id] = { ...nextValues[r.id], qty: String(caps[i] - takes[i]) }
+    })
+    setValues(nextValues)
+    setMadeAs(nextMade)
+    setTicked([])
+    setLastTick(null)
+    const took = takes.reduce((s, x) => s + x, 0)
+    const done = takes.filter((x) => x > 0).length
+    const notes = [`${pcs(took)} pcs of ${done} ${done === 1 ? 'bundle' : 'bundles'} made as size ${to}.`]
+    if (fit.length < tickedRows.length) notes.push(`${tickedRows.length - fit.length} already size ${to}, left as they are.`)
+    if (bulkHow === 'each' && takes.some((x, i) => x < asked && caps[i] > 0)) notes.push('Bundles holding fewer gave all they had.')
+    if (bulkHow === 'all' && took < asked) notes.push(`Only ${pcs(took)} of the ${pcs(asked)} asked: the bundles hold no more.`)
+    setBulkNote({ text: notes.join(' ') })
   }
 
   const save = async () => {
@@ -238,7 +376,7 @@ export function CountInDialog({
             if (!m?.toSizeId || !mayChange(r)) return <span className="text-muted-foreground block text-right text-xs">—</span>
             const wrong = tried && !!changeProblem(r.id)
             return (
-              <div data-size-change={r.id}>
+              <div data-size-change={r.id} data-size-pcs={r.id}>
                 <StepInput
                   className={`form-input h-8 text-right text-xs tabular-nums ${wrong ? 'border-destructive/60' : ''}`}
                   value={m.qty}
@@ -267,6 +405,7 @@ export function CountInDialog({
   ) : (
     `All ${pcs(pending)} counted.`
   )
+  const signed = (v: number) => (v > 0 ? `+${pcs(v)}` : v < 0 ? `−${pcs(-v)}` : '—')
 
   return (
     <FormFrame
@@ -349,9 +488,9 @@ export function CountInDialog({
         {sizing && (
           <div className="border-primary/30 bg-primary/5 mb-3 rounded-lg border p-3">
             <p className="text-foreground text-xs">
-              On a bundle whose pieces are made as another size, pick the size and enter how many. They are taken from <b>Same size</b>, so the bundle&apos;s count stays
-              as it was: Same size + made as another size = what arrived, and all of it is counted in. Each bundle&apos;s changed pieces become a new bundle with its own
-              sticker; the order&apos;s planned sizes stay as they are.
+              Tick the bundles to change — <b>Shift+click</b> ticks a run, or tick a whole size — then set the size and pieces once in the bar and <b>Apply</b>. A
+              single bundle can be set in its own row. Pieces made as another size come out of <b>Same size</b>, so every bundle&apos;s count stays as it arrived;
+              each bundle&apos;s changed pieces become a new bundle with its own sticker.
             </p>
             <label className="mt-2 block sm:max-w-lg">
               <span className="form-label">
@@ -368,8 +507,140 @@ export function CountInDialog({
               />
               {tried && reasonMissing && <span className="text-destructive mt-1 block text-[11px] font-medium">Say why, in a few words.</span>}
             </label>
+
+            {/* The card's sizes, as cut and as they will be made — and against the order's plan. */}
+            {sizeTable.length > 0 && (
+              <div className="border-border bg-card mt-3 overflow-x-auto rounded-lg border">
+                <table className="w-full text-xs tabular-nums" aria-label="Sizes on this card">
+                  <thead>
+                    <tr className="bg-secondary">
+                      <th className="text-muted-foreground px-2.5 py-1.5 text-left font-medium">Sizes on this card</th>
+                      {sizeTable.map((z) => (
+                        <th key={z.code} className="px-2.5 py-1.5 text-right font-semibold">
+                          {z.code}
+                        </th>
+                      ))}
+                      <th className="px-2.5 py-1.5 text-right font-semibold">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-border border-t">
+                      <td className="text-muted-foreground px-2.5 py-1">As cut</td>
+                      {sizeTable.map((z) => (
+                        <td key={z.code} className="px-2.5 py-1 text-right">
+                          {pcs(z.cut)}
+                        </td>
+                      ))}
+                      <td className="px-2.5 py-1 text-right">{pcs(cutTotal)}</td>
+                    </tr>
+                    <tr className="border-border border-t">
+                      <td className="text-foreground px-2.5 py-1 font-medium">As made</td>
+                      {sizeTable.map((z) => (
+                        <td
+                          key={z.code}
+                          className={`px-2.5 py-1 text-right font-semibold ${wholeLine ? (z.made === (z.plan ?? 0) ? 'text-emerald-600' : 'warn-text') : 'text-foreground'}`}
+                        >
+                          {pcs(z.made)}
+                        </td>
+                      ))}
+                      <td className="text-foreground px-2.5 py-1 text-right font-semibold">{pcs(sizeTable.reduce((s, z) => s + z.made, 0))}</td>
+                    </tr>
+                    <tr className="border-border border-t">
+                      <td className="text-muted-foreground px-2.5 py-1">Change</td>
+                      {sizeTable.map((z) => (
+                        <td key={z.code} className={`px-2.5 py-1 text-right ${z.made > z.cut ? 'text-emerald-600' : z.made < z.cut ? 'warn-text' : 'text-muted-foreground'}`}>
+                          {signed(z.made - z.cut)}
+                        </td>
+                      ))}
+                      <td className="text-muted-foreground px-2.5 py-1 text-right">—</td>
+                    </tr>
+                    {hasPlan && (
+                      <tr className="border-border border-t">
+                        <td className="text-muted-foreground px-2.5 py-1">Order plan</td>
+                        {sizeTable.map((z) => (
+                          <td key={z.code} className="text-muted-foreground px-2.5 py-1 text-right">
+                            {z.plan != null ? pcs(z.plan) : '—'}
+                          </td>
+                        ))}
+                        <td className="text-muted-foreground px-2.5 py-1 text-right">{pcs(planTotal)}</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+                <p className="text-muted-foreground border-border border-t px-2.5 py-1.5 text-[11px]">
+                  {wholeLine
+                    ? 'This card holds the whole order line: a size in green matches the order’s plan, one in amber does not yet.'
+                    : 'Pieces only move between sizes; the total stays as counted.'}
+                </p>
+              </div>
+            )}
           </div>
         )}
+
+        {/* Ticking a whole size, and the bar that sets every bundle ticked — held at the top while the table scrolls. */}
+        {sizing && changeable.length > 0 && (
+          <div className="sticky top-0 z-20 mb-2">
+            {tickedRows.length > 0 ? (
+              <div className="border-primary/50 bg-card flex flex-wrap items-center gap-2 rounded-lg border p-2 shadow-md">
+                <span className="text-foreground text-xs font-medium">
+                  {tickedRows.length} {tickedRows.length === 1 ? 'bundle' : 'bundles'} ticked · {pcs(tickedPcs)} pcs
+                  {tickedSizes.length === 1 ? ` of size ${tickedSizes[0]}` : ''}
+                </span>
+                <SmartSelect className="form-input h-8 w-36 py-0 text-xs" value={bulkTo} onChange={(e) => setBulkTo(e.target.value)} aria-label="Ticked bundles made as size">
+                  <option value="">Made as…</option>
+                  {(sizes ?? []).map((z) => (
+                    <option key={z.id} value={z.id}>
+                      Size {z.code}
+                    </option>
+                  ))}
+                  <option value={SAME}>Their own size (undo)</option>
+                </SmartSelect>
+                {bulkTo !== SAME && (
+                  <>
+                    {bulkHow !== 'whole' && (
+                      <StepInput
+                        className="form-input h-8 w-20 text-right text-xs tabular-nums"
+                        value={bulkQty}
+                        placeholder="Pcs"
+                        onValueChange={setBulkQty}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            applyBulk()
+                          }
+                        }}
+                        aria-label="Pieces for the ticked bundles"
+                      />
+                    )}
+                    <SmartSelect className="form-input h-8 w-40 py-0 text-xs" value={bulkHow} onChange={(e) => setBulkHow(e.target.value as How)} aria-label="How the pieces are taken">
+                      <option value="each">pcs from each bundle</option>
+                      <option value="all">pcs in all, spread evenly</option>
+                      <option value="whole">whole bundles</option>
+                    </SmartSelect>
+                  </>
+                )}
+                <button type="button" className="btn-primary h-8 px-3 text-xs" onClick={applyBulk}>
+                  Apply to {tickedRows.length}
+                </button>
+                <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setTicked([])}>
+                  Untick
+                </button>
+                {bulkNote && <span className={`w-full text-[11px] ${bulkNote.bad ? 'text-destructive font-medium' : 'text-primary'}`}>{bulkNote.text}</span>}
+              </div>
+            ) : (
+              <div className="bg-card flex flex-wrap items-center gap-1.5 text-xs">
+                <span className="text-muted-foreground">Tick a whole size:</span>
+                {[...new Set(changeable.map((r) => r.size as string))].map((code) => (
+                  <button key={code} type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => tickSize(code)}>
+                    {code} <span className="text-muted-foreground">({changeable.filter((r) => r.size === code).length})</span>
+                  </button>
+                ))}
+                {bulkNote && <span className={`ml-1 text-[11px] ${bulkNote.bad ? 'text-destructive font-medium' : 'text-primary'}`}>{bulkNote.text}</span>}
+              </div>
+            )}
+          </div>
+        )}
+
         <BundleQtyTable
           rows={rows}
           columns={[{ key: 'qty', label: sizing ? 'Same size' : 'Counted' }]}
@@ -391,6 +662,7 @@ export function CountInDialog({
                 }
               : undefined
           }
+          select={sizing ? { on: (id) => ticked.includes(id), can: mayChange, onTick: tick, onAll: tickAll } : undefined}
         />
         {/* Each change in a line, so nobody has to scroll the table to check them. */}
         {changes.length > 0 && (

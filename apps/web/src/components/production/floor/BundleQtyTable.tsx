@@ -38,6 +38,19 @@ export interface ExtraColumn {
   total?: React.ReactNode
   width?: string
 }
+/**
+ * Ticking bundles to act on several at once — the count-in's Change sizes. A
+ * click on a row's box (or its bundle number) ticks or unticks it; with Shift
+ * held it ticks every bundle from the last one clicked, as a list does.
+ */
+export interface RowSelect {
+  on: (rowId: string) => boolean
+  /** Rows that can be ticked; the others have no box. */
+  can: (row: BundleRow) => boolean
+  onTick: (rowId: string, run: boolean) => void
+  /** The heading's box: every row that can be ticked, or none. */
+  onAll: () => void
+}
 
 const n = (v: string | undefined) => Number(v) || 0
 
@@ -62,6 +75,7 @@ export function BundleQtyTable({
   held,
   onFill,
   onClear,
+  select,
 }: {
   rows: BundleRow[]
   columns: QtyColumn[]
@@ -83,6 +97,7 @@ export function BundleQtyTable({
   /** In place of the fill button's and Clear's own work, when the extra columns take part in it. */
   onFill?: () => void
   onClear?: () => void
+  select?: RowSelect
 }) {
   if (!rows.length) return <p className="text-muted-foreground text-sm">{empty}</p>
   const colTotal = (key: string) => rows.reduce((s, r) => s + n(values[r.id]?.[key]), 0)
@@ -99,6 +114,20 @@ export function BundleQtyTable({
     for (const r of rows) for (const c of columns) onChange(r.id, c.key, '')
   }
   const totalAvailable = rows.reduce((s, r) => s + r.available, 0)
+  const tickable = select ? rows.filter((r) => select.can(r)) : []
+  const allOn = !!select && tickable.length > 0 && tickable.every((r) => select.on(r.id))
+  const someOn = !!select && tickable.some((r) => select.on(r.id))
+  const tickBox = (r: BundleRow) =>
+    select && select.can(r) ? (
+      <input
+        type="checkbox"
+        className="accent-primary h-4 w-4 cursor-pointer"
+        checked={select.on(r.id)}
+        onChange={() => {}}
+        onClick={(e) => select.onTick(r.id, e.shiftKey)}
+        aria-label={`Tick ${r.code}`}
+      />
+    ) : null
 
   return (
     <div className="space-y-2">
@@ -123,7 +152,10 @@ export function BundleQtyTable({
           return (
             <div key={r.id} className={`rounded-lg border p-2.5 ${over ? 'border-destructive/60' : 'border-border'}`}>
               <div className="flex items-baseline justify-between gap-2">
-                <span className="font-mono text-xs">{r.code}</span>
+                <span className="flex items-center gap-2 font-mono text-xs">
+                  {tickBox(r)}
+                  {r.code}
+                </span>
                 <span className="text-muted-foreground text-xs tabular-nums">
                   {availableLabel} {pcs(r.available)}
                 </span>
@@ -162,6 +194,22 @@ export function BundleQtyTable({
         <table className="data-table table-totals w-full">
           <thead>
             <tr className="bg-secondary">
+              {select && (
+                <th className="w-8">
+                  {tickable.length > 0 && (
+                    <input
+                      type="checkbox"
+                      className="accent-primary h-4 w-4 cursor-pointer"
+                      checked={allOn}
+                      ref={(el) => {
+                        if (el) el.indeterminate = someOn && !allOn
+                      }}
+                      onChange={select.onAll}
+                      aria-label="Tick every bundle"
+                    />
+                  )}
+                </th>
+              )}
               <th>Bundle</th>
               <th>Line · size</th>
               <th style={{ textAlign: 'right' }}>{availableLabel}</th>
@@ -179,8 +227,14 @@ export function BundleQtyTable({
             {rows.map((r) => {
               const over = rowTotal(values, r.id, columns) + heldOf(r.id) > r.available
               return (
-                <tr key={r.id}>
-                  <td className="font-mono text-xs">{r.code}</td>
+                <tr key={r.id} className={select?.on(r.id) ? 'bg-primary/5' : undefined}>
+                  {select && <td className="w-8">{tickBox(r)}</td>}
+                  <td
+                    className={`font-mono text-xs ${select?.can(r) ? 'cursor-pointer select-none' : ''}`}
+                    onClick={select?.can(r) ? (e) => select.onTick(r.id, e.shiftKey) : undefined}
+                  >
+                    {r.code}
+                  </td>
                   <td className="text-muted-foreground text-xs">
                     {[r.line, r.size ? `size ${r.size}` : null].filter(Boolean).join(' · ')}
                     {r.note ? <div className="text-[11px]">{r.note}</div> : null}
@@ -209,7 +263,7 @@ export function BundleQtyTable({
           </tbody>
           <tfoot>
             <tr className="bg-secondary">
-              <td colSpan={2} className="text-xs font-medium">
+              <td colSpan={select ? 3 : 2} className="text-xs font-medium">
                 Total
               </td>
               <td className="text-right text-xs tabular-nums">{pcs(totalAvailable)}</td>
