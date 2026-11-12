@@ -85,7 +85,7 @@ const DUE: Array<[string, string]> = [
   ['month', 'Due in 30 days'],
 ]
 const pick = (f: Filters, keys: readonly (keyof Filters)[]) => Object.fromEntries(keys.filter((k) => f[k]).map((k) => [k, f[k]]))
-const selectCls = 'form-input h-8 min-w-0 px-1.5 py-0 text-[11px] sm:w-40 sm:px-3 sm:text-xs'
+const selectCls = 'form-input h-8 min-w-0 px-1.5 py-0 text-[11px] sm:w-36 sm:px-3 sm:text-xs'
 
 export function TransfersPanel({
   mode,
@@ -264,173 +264,176 @@ export function TransfersPanel({
       )}
 
       <div className="glass-card overflow-hidden p-0">
-        {/* Tabs: what needs doing first, then what is done. */}
+        {/* Tabs: what needs doing first, then what is done; how many the list holds at the right, which
+            leaves the row below to the search and its filters. */}
         {mode === 'cards' && (
-        <div className="border-border flex gap-1 overflow-x-auto border-b px-2 pt-2" role="tablist" aria-label="Transfer cards">
-          {VIEWS.filter((v) => v.key !== 'board').map((v) => {
-            const on = v.key === view
-            const n = counts?.[v.key]
-            const urgent = (v.key === 'count' || v.key === 'short') && !!n
-            return (
-              <button
-                key={v.key}
-                type="button"
-                role="tab"
-                aria-selected={on}
-                onClick={() => setView(v.key)}
-                className={`-mb-px flex shrink-0 items-center gap-2 border-b-2 px-3 py-2 text-sm ${on ? 'border-primary text-primary font-semibold' : 'text-muted-foreground hover:text-foreground border-transparent'}`}
-              >
-                {v.label}
-                {n != null && (
-                  <span
-                    className={`rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${urgent ? (v.key === 'short' ? 'bg-destructive text-white' : 'bg-primary text-primary-foreground') : 'bg-secondary text-foreground'}`}
+          <div className="border-border flex items-end gap-2 border-b px-2 pt-2">
+            <div className="flex min-w-0 gap-1 overflow-x-auto overflow-y-hidden" role="tablist" aria-label="Transfer cards">
+              {VIEWS.filter((v) => v.key !== 'board').map((v) => {
+                const on = v.key === view
+                const n = counts?.[v.key]
+                const urgent = (v.key === 'count' || v.key === 'short') && !!n
+                return (
+                  <button
+                    key={v.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={on}
+                    onClick={() => setView(v.key)}
+                    className={`-mb-px flex shrink-0 items-center gap-2 border-b-2 px-3 py-2 text-sm ${on ? 'border-primary text-primary font-semibold' : 'text-muted-foreground hover:text-foreground border-transparent'}`}
                   >
-                    {n}
-                  </span>
-                )}
-              </button>
-            )
-          })}
-        </div>
+                    {v.label}
+                    {n != null && (
+                      <span
+                        className={`rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${urgent ? (v.key === 'short' ? 'bg-destructive text-white' : 'bg-primary text-primary-foreground') : 'bg-secondary text-foreground'}`}
+                      >
+                        {n}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+            <span className="text-muted-foreground ml-auto shrink-0 pb-2.5 pr-2 text-xs tabular-nums">
+              {total} {total === 1 ? 'transfer' : 'transfers'}
+            </span>
+          </div>
         )}
 
+        {/* The search and the dropdown filters in one row (12 Nov 2026, asked for): the job cards' own
+            filters, or the transfer cards' own; customer and order go with both. Narrower screens wrap
+            them; a phone has the search, then the filters two to a line. */}
         <div className="border-border flex flex-wrap items-center gap-2 border-b px-4 py-3">
-          <div className="bg-field border-field-edge flex min-w-[200px] max-w-md flex-1 items-center gap-2 rounded-lg border px-3 py-1.5">
-            <Search size={14} className="text-muted-foreground" />
+          <div className="bg-field border-field-edge flex h-8 w-full items-center gap-2 rounded-lg border px-3 sm:w-auto sm:min-w-[12rem] sm:max-w-sm sm:flex-1">
+            <Search size={14} className="text-muted-foreground shrink-0" />
             <input
-              className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder={view === 'board' ? 'Search job card, order, style, colour or customer…' : 'Search transfer no., job card, order, bundle, department or unit…'}
+              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+              placeholder={view === 'board' ? 'Job card, order, style, colour, customer…' : 'Transfer no., job card, order, bundle, unit…'}
+              title={view === 'board' ? 'Search job card, order, style, colour or customer' : 'Search transfer no., job card, order, bundle, department or unit'}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search"
               data-hotkey="search"
             />
           </div>
-          {view !== 'board' && (
-            <span className="text-muted-foreground ml-auto text-xs">
-              {total} {total === 1 ? 'transfer' : 'transfers'}
-            </span>
-          )}
-        </div>
-
-        {/* Dropdown filters: the job cards' own, or the transfer cards' own; customer and order go with both. */}
-        <div className="border-border grid grid-cols-2 gap-2 border-b px-4 py-2.5 sm:flex sm:flex-wrap sm:items-center">
-          {view === 'board' ? (
-            <>
-              <SmartSelect className={selectCls} value={filters.stage} onChange={(e) => setFilter('stage', e.target.value)} aria-label="Filter by stage">
-                <option value="">All stages</option>
-                {choices?.stages.map((s) => (
-                  <option key={s.id} value={s.id} data-sub="Pieces there now">
-                    {s.name}
-                  </option>
-                ))}
-              </SmartSelect>
-              <SmartSelect className={selectCls} value={filters.needs} onChange={(e) => setFilter('needs', e.target.value)} aria-label="Filter by what needs doing">
-                <option value="">Anything to do</option>
-                {NEEDS.map(([v, label]) => (
-                  <option key={v} value={v}>
-                    {label}
-                  </option>
-                ))}
-              </SmartSelect>
-            </>
-          ) : (
-            <>
-              <SmartSelect className={selectCls} value={filters.fromOp} onChange={(e) => setFilter('fromOp', e.target.value)} aria-label="Filter by the stage it left">
-                <option value="">From any stage</option>
-                {choices?.stages.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    From {s.name}
-                  </option>
-                ))}
-              </SmartSelect>
-              <SmartSelect className={selectCls} value={filters.toOp} onChange={(e) => setFilter('toOp', e.target.value)} aria-label="Filter by the stage it went to">
-                <option value="">To any stage</option>
-                {choices?.stages.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    To {s.name}
-                  </option>
-                ))}
-              </SmartSelect>
-              <SmartSelect className={selectCls} value={filters.unit} onChange={(e) => setFilter('unit', e.target.value)} aria-label="Filter by outside unit">
-                <option value="">Our floor and outside</option>
-                <option value="none">Our floor only</option>
-                <option value="any">Any outside unit</option>
-                {choices?.units.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name}
-                  </option>
-                ))}
-              </SmartSelect>
-            </>
-          )}
-          <SmartSelect className={selectCls} value={filters.customerId} onChange={(e) => setFilter('customerId', e.target.value)} aria-label="Filter by customer">
-            <option value="">All customers</option>
-            {choices?.customers.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </SmartSelect>
-          <SmartSelect className={selectCls} value={filters.moId} onChange={(e) => setFilter('moId', e.target.value)} aria-label="Filter by order">
-            <option value="">All orders</option>
-            {choices?.orders
-              .filter((o) => (view === 'board' ? o.open : true) && (!filters.customerId || o.customer === choices.customers.find((c) => c.id === filters.customerId)?.name))
-              .map((o) => (
-                <option key={o.id} value={o.id} data-sub={[o.customer, o.open ? null : 'closed'].filter(Boolean).join(' · ') || undefined}>
-                  {o.moNumber}
+          <div className="grid w-full grid-cols-2 gap-2 sm:contents">
+            {view === 'board' ? (
+              <>
+                <SmartSelect className={selectCls} value={filters.stage} onChange={(e) => setFilter('stage', e.target.value)} aria-label="Filter by stage">
+                  <option value="">All stages</option>
+                  {choices?.stages.map((s) => (
+                    <option key={s.id} value={s.id} data-sub="Pieces there now">
+                      {s.name}
+                    </option>
+                  ))}
+                </SmartSelect>
+                <SmartSelect className={selectCls} value={filters.needs} onChange={(e) => setFilter('needs', e.target.value)} aria-label="Filter by what needs doing">
+                  <option value="">Anything to do</option>
+                  {NEEDS.map(([v, label]) => (
+                    <option key={v} value={v}>
+                      {label}
+                    </option>
+                  ))}
+                </SmartSelect>
+              </>
+            ) : (
+              <>
+                <SmartSelect className={selectCls} value={filters.fromOp} onChange={(e) => setFilter('fromOp', e.target.value)} aria-label="Filter by the stage it left">
+                  <option value="">From any stage</option>
+                  {choices?.stages.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      From {s.name}
+                    </option>
+                  ))}
+                </SmartSelect>
+                <SmartSelect className={selectCls} value={filters.toOp} onChange={(e) => setFilter('toOp', e.target.value)} aria-label="Filter by the stage it went to">
+                  <option value="">To any stage</option>
+                  {choices?.stages.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      To {s.name}
+                    </option>
+                  ))}
+                </SmartSelect>
+                <SmartSelect className={selectCls} value={filters.unit} onChange={(e) => setFilter('unit', e.target.value)} aria-label="Filter by outside unit">
+                  <option value="">Floor &amp; outside</option>
+                  <option value="none">Our floor only</option>
+                  <option value="any">Any outside unit</option>
+                  {choices?.units.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name}
+                    </option>
+                  ))}
+                </SmartSelect>
+              </>
+            )}
+            <SmartSelect className={selectCls} value={filters.customerId} onChange={(e) => setFilter('customerId', e.target.value)} aria-label="Filter by customer">
+              <option value="">All customers</option>
+              {choices?.customers.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
                 </option>
               ))}
-          </SmartSelect>
-          {view === 'board' ? (
-            <>
-              <SmartSelect className={selectCls} value={filters.styleId} onChange={(e) => setFilter('styleId', e.target.value)} aria-label="Filter by style">
-                <option value="">All styles</option>
-                {choices?.styles.map((s) => (
-                  <option key={s.id} value={s.id} data-sub={s.name}>
-                    {s.code}
+            </SmartSelect>
+            <SmartSelect className={selectCls} value={filters.moId} onChange={(e) => setFilter('moId', e.target.value)} aria-label="Filter by order">
+              <option value="">All orders</option>
+              {choices?.orders
+                .filter((o) => (view === 'board' ? o.open : true) && (!filters.customerId || o.customer === choices.customers.find((c) => c.id === filters.customerId)?.name))
+                .map((o) => (
+                  <option key={o.id} value={o.id} data-sub={[o.customer, o.open ? null : 'closed'].filter(Boolean).join(' · ') || undefined}>
+                    {o.moNumber}
                   </option>
                 ))}
-              </SmartSelect>
-              <SmartSelect className={selectCls} value={filters.due} onChange={(e) => setFilter('due', e.target.value)} aria-label="Filter by due date">
-                <option value="">Any due date</option>
-                {DUE.map(([v, label]) => (
-                  <option key={v} value={v}>
-                    {label}
-                  </option>
-                ))}
-              </SmartSelect>
-            </>
-          ) : (
-            <div className="col-span-2 flex items-center gap-1 sm:col-span-1">
-              <input
-                type="date"
-                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[11px] sm:w-[8rem] sm:flex-none sm:px-3 sm:text-xs"
-                value={filters.from}
-                max={filters.to || undefined}
-                onChange={(e) => setFilter('from', e.target.value)}
-                aria-label="Sent from"
-              />
-              <span className="text-muted-foreground text-xs">to</span>
-              <input
-                type="date"
-                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[11px] sm:w-[8rem] sm:flex-none sm:px-3 sm:text-xs"
-                value={filters.to}
-                min={filters.from || undefined}
-                onChange={(e) => setFilter('to', e.target.value)}
-                aria-label="Sent to"
-              />
-            </div>
-          )}
-          {anyFilter && (
-            <button
-              type="button"
-              className="btn-ghost h-8 px-2 text-xs"
-              onClick={() => setFilters((f) => ({ ...f, ...Object.fromEntries((view === 'board' ? BOARD_KEYS : CARD_KEYS).map((k) => [k, ''])) }))}
-            >
-              Clear filters
-            </button>
-          )}
+            </SmartSelect>
+            {view === 'board' ? (
+              <>
+                <SmartSelect className={selectCls} value={filters.styleId} onChange={(e) => setFilter('styleId', e.target.value)} aria-label="Filter by style">
+                  <option value="">All styles</option>
+                  {choices?.styles.map((s) => (
+                    <option key={s.id} value={s.id} data-sub={s.name}>
+                      {s.code}
+                    </option>
+                  ))}
+                </SmartSelect>
+                <SmartSelect className={selectCls} value={filters.due} onChange={(e) => setFilter('due', e.target.value)} aria-label="Filter by due date">
+                  <option value="">Any due date</option>
+                  {DUE.map(([v, label]) => (
+                    <option key={v} value={v}>
+                      {label}
+                    </option>
+                  ))}
+                </SmartSelect>
+              </>
+            ) : (
+              <div className="col-span-2 flex items-center gap-1 sm:col-span-1">
+                <input
+                  type="date"
+                  className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[11px] sm:w-[7.5rem] sm:flex-none sm:px-2 sm:text-xs"
+                  value={filters.from}
+                  max={filters.to || undefined}
+                  onChange={(e) => setFilter('from', e.target.value)}
+                  aria-label="Sent from"
+                />
+                <span className="text-muted-foreground text-xs">to</span>
+                <input
+                  type="date"
+                  className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[11px] sm:w-[7.5rem] sm:flex-none sm:px-2 sm:text-xs"
+                  value={filters.to}
+                  min={filters.from || undefined}
+                  onChange={(e) => setFilter('to', e.target.value)}
+                  aria-label="Sent to"
+                />
+              </div>
+            )}
+            {anyFilter && (
+              <button
+                type="button"
+                className="btn-ghost h-8 px-2 text-xs"
+                onClick={() => setFilters((f) => ({ ...f, ...Object.fromEntries((view === 'board' ? BOARD_KEYS : CARD_KEYS).map((k) => [k, ''])) }))}
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
         </div>
 
         {view === 'board' ? (

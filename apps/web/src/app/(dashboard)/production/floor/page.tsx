@@ -93,7 +93,7 @@ function Floor() {
           <h1 className="page-title text-xl sm:text-2xl">Production Floor</h1>
           <p className="page-subtitle hidden sm:block">Each job card from cutting to packing — where its pieces are, each department&apos;s queue, and the cards handed between them</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <button className="btn-ghost" onClick={() => setRefreshKey((k) => k + 1)} aria-label="Refresh" title="Refresh">
             <RefreshCw size={15} />
           </button>
@@ -105,7 +105,8 @@ function Floor() {
         </div>
       </div>
 
-      <div className="border-border flex gap-1 overflow-x-auto border-b" role="tablist" aria-label="Production floor">
+      {/* overflow-y-hidden: the tabs' 1px overlap on the line otherwise gives Windows a vertical scrollbar here. */}
+      <div className="border-border flex gap-1 overflow-x-auto overflow-y-hidden border-b" role="tablist" aria-label="Production floor">
         {TABS.map((t) => {
           const on = t.key === tab
           return (

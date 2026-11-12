@@ -254,6 +254,8 @@ const transferInclude = {
           id: true,
           code: true,
           bundleNo: true,
+          // Made by an earlier size change: its pieces change size no more (count-in's Change sizes).
+          parentId: true,
           size: { select: { code: true, sequence: true } },
           moLine: { select: { color: true, style: { select: { code: true, name: true } } } },
         },

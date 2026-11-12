@@ -26,6 +26,18 @@ export interface QtyColumn {
   bad?: boolean
 }
 export type QtyValues = Record<string, Record<string, string>>
+/**
+ * A column after the quantities that is not a quantity of its own — the
+ * count-in's "Made as size" and its pieces. On a phone it joins the card.
+ */
+export interface ExtraColumn {
+  key: string
+  label: string
+  cell: (row: BundleRow) => React.ReactNode
+  /** The total row's cell, if it has one. */
+  total?: React.ReactNode
+  width?: string
+}
 
 const n = (v: string | undefined) => Number(v) || 0
 
@@ -46,6 +58,7 @@ export function BundleQtyTable({
   fill,
   empty,
   allowOver = false,
+  extraColumns = [],
 }: {
   rows: BundleRow[]
   columns: QtyColumn[]
@@ -57,6 +70,7 @@ export function BundleQtyTable({
   empty: string
   /** A count can come out higher than expected: allowed, and marked rather than refused. */
   allowOver?: boolean
+  extraColumns?: ExtraColumn[]
 }) {
   if (!rows.length) return <p className="text-muted-foreground text-sm">{empty}</p>
   const colTotal = (key: string) => rows.reduce((s, r) => s + n(values[r.id]?.[key]), 0)
@@ -116,6 +130,12 @@ export function BundleQtyTable({
                     />
                   </label>
                 ))}
+                {extraColumns.map((c) => (
+                  <div key={c.key} className="block">
+                    <span className="form-label">{c.label}</span>
+                    {c.cell(r)}
+                  </div>
+                ))}
               </div>
             </div>
           )
@@ -134,6 +154,9 @@ export function BundleQtyTable({
                 <th key={c.key} style={{ textAlign: 'right' }} className={c.bad ? 'warn-text' : undefined}>
                   {c.label}
                 </th>
+              ))}
+              {extraColumns.map((c) => (
+                <th key={c.key}>{c.label}</th>
               ))}
             </tr>
           </thead>
@@ -160,6 +183,11 @@ export function BundleQtyTable({
                       />
                     </td>
                   ))}
+                  {extraColumns.map((c) => (
+                    <td key={c.key} className={c.width}>
+                      {c.cell(r)}
+                    </td>
+                  ))}
                 </tr>
               )
             })}
@@ -173,6 +201,11 @@ export function BundleQtyTable({
               {columns.map((c) => (
                 <td key={c.key} className="text-right text-xs font-semibold tabular-nums">
                   {pcs(colTotal(c.key))}
+                </td>
+              ))}
+              {extraColumns.map((c) => (
+                <td key={c.key} className="text-xs font-semibold">
+                  {c.total ?? null}
                 </td>
               ))}
             </tr>

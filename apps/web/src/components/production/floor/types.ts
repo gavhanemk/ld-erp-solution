@@ -90,7 +90,8 @@ export interface TransferLine {
   shortQty: number
   settledQty: number
   excessQty: number
-  bundle: { id: string; code: string; size: { code: string } | null }
+  /** parentId: made by an earlier size change, so its pieces change size no more. */
+  bundle: { id: string; code: string; size: { code: string } | null; parentId?: string | null }
 }
 
 export interface FlowTransfer {

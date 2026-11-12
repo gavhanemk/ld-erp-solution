@@ -115,7 +115,16 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
         jobWorkOrder: { select: { id: true, orderNumber: true } },
         lines: {
           orderBy: { bundle: { bundleNo: 'asc' } },
-          select: { id: true, dispatchedQty: true, receivedQty: true, shortQty: true, settledQty: true, excessQty: true, bundle: { select: { id: true, code: true, size: { select: { code: true } } } } },
+          select: {
+            id: true,
+            dispatchedQty: true,
+            receivedQty: true,
+            shortQty: true,
+            settledQty: true,
+            excessQty: true,
+            // parentId: made by an earlier size change, so its pieces change size no more.
+            bundle: { select: { id: true, code: true, parentId: true, size: { select: { code: true } } } },
+          },
         },
       },
     }),
