@@ -7,7 +7,7 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
-import { SuggestInput } from '@/components/ui/SuggestInput'
+import { ContractorPicker } from './ContractorPicker'
 import { pcs, type JobCardDetail } from './types'
 
 /**
@@ -87,8 +87,6 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
       ...rest.map((c) => ({ value: c.name, label: before(c) })),
     ]
   }, [d.cuttings, everyone, routed])
-  // A name nobody has used before is fine, but worth a second look for spelling.
-  const typedNew = !!cutterName.trim() && !known.some((k) => k.value.toLowerCase() === cutterName.trim().replace(/\s+/g, ' ').toLowerCase())
   const sizes = useMemo(
     () =>
       (d.line?.sizes ?? []).map((z) => {
@@ -164,8 +162,7 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
         <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="block sm:col-span-2">
             <span className="form-label">Cutting contractor</span>
-            <SuggestInput className="form-input" value={cutterName} maxLength={120} placeholder="Ramesh (cutting master)" onValueChange={setCutterName} suggestions={known} aria-label="Cutting contractor" />
-            {typedNew && known.length > 0 && <span className="form-help">A new contractor. Check the spelling: the same name written two ways counts as two people.</span>}
+            <ContractorPicker value={cutterName} onChange={setCutterName} known={known} resetTo={routed ?? ''} />
           </label>
           <label className="block">
             <span className="form-label">Issued on</span>
@@ -181,7 +178,8 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
           </label>
           <label className="block">
             <span className="form-label">Layers</span>
-            <StepInput className="form-input text-right tabular-nums" value={layers} placeholder="0" onValueChange={setLayers} aria-label="Layers" />
+            {/* Part layers are allowed — 0.1, 0.25, 2.5 — to two decimals. */}
+            <StepInput decimals className="form-input text-right tabular-nums" value={layers} placeholder="0" onValueChange={setLayers} aria-label="Layers" />
           </label>
           <label className="block">
             <span className="form-label">Fabric</span>
@@ -198,6 +196,10 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
             <span className="form-label">Fabric given{fabric?.uom ? ` (${fabric.uom})` : ''}</span>
             <StepInput decimals className="form-input text-right tabular-nums" value={fabricGiven} placeholder="0" onValueChange={setFabricGiven} aria-label="Fabric given" />
           </label>
+          <label className="block sm:col-span-2 lg:col-span-4">
+            <span className="form-label">Note</span>
+            <input className="form-input" value={notes} maxLength={1000} onChange={(e) => setNotes(e.target.value)} />
+          </label>
         </div>
         {!d.materials.issued && (
           <p className="warn-text mt-2 text-xs">Cutting starts once the store has issued the order’s materials. Raise the requisition on the manufacturing order and have it issued first.</p>
@@ -206,7 +208,7 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
 
       <Section icon={Scissors} title="Pieces to cut, by size">
         <div className="border-border overflow-x-auto rounded-lg border">
-          <table className="data-table w-full">
+          <table className="data-table table-totals w-full">
             <thead>
               <tr className="bg-secondary">
                 <th>Size</th>
@@ -261,10 +263,6 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
             </label>
           )}
         </div>
-        <label className="mt-3 block">
-          <span className="form-label">Note</span>
-          <input className="form-input" value={notes} maxLength={1000} onChange={(e) => setNotes(e.target.value)} />
-        </label>
       </Section>
     </FormFrame>
   )

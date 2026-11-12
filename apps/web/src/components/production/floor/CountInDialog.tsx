@@ -104,18 +104,9 @@ export function CountInDialog({ transfer, moNumber, onClose, onSaved }: { transf
       onClose={onClose}
       busy={saving}
     >
-      <Section icon={Boxes} title="Counted at the desk">
-        <BundleQtyTable
-          rows={rows}
-          columns={[{ key: 'qty', label: 'Counted' }]}
-          values={values}
-          onChange={(row, col, v) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: v } }))}
-          availableLabel="Sent, not counted"
-          fill={{ label: 'As sent', column: 'qty' }}
-          allowOver
-          empty="Everything on this card has been counted in."
-        />
-        <div className="mt-3 grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
+      {/* Who counted, when, and whether more is coming — first, as the sending window has its own. */}
+      <Section icon={ClipboardCheck} title={`Counting in at ${transfer.toStep.name}`}>
+        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
           <label className="block">
             <span className="form-label">Counted on</span>
             <input type="date" className="form-input" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -135,6 +126,18 @@ export function CountInDialog({ transfer, moNumber, onClose, onSaved }: { transf
             Nothing more is coming on this card. What has not been counted in is <strong>short</strong>, and waits to be settled — found later, never sent, or written off by a manager.
           </span>
         </label>
+      </Section>
+      <Section icon={Boxes} title="Counted at the desk">
+        <BundleQtyTable
+          rows={rows}
+          columns={[{ key: 'qty', label: 'Counted' }]}
+          values={values}
+          onChange={(row, col, v) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: v } }))}
+          availableLabel="Sent, not counted"
+          fill={{ label: 'As sent', column: 'qty' }}
+          allowOver
+          empty="Everything on this card has been counted in."
+        />
       </Section>
     </FormFrame>
   )

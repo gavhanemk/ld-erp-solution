@@ -11,6 +11,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { StagesDialog } from './StagesDialog'
+import { MoDetailsDialog } from './MoDetailsDialog'
 import { MoFlowStrip, currentMoTab, type MoFlowFacts, type MoTab } from './MoFlowStrip'
 import { MoProductionPanel } from './floor/MoProductionPanel'
 import { bundleShort, PROGRESS, type Flow, type SizeChangeEntry } from './floor/types'
@@ -60,6 +61,12 @@ interface MoDetail {
   progress: string | null
   /** Why its plan can no longer be changed (material issued, cut, packed, finished); null while it can. */
   editBlock?: string | null
+  /**
+   * Why its details (dates, note, job card details, lays with cutting
+   * contractors) can no longer be changed — cutting complete, or finished;
+   * null while they can, which is until cutting is complete.
+   */
+  detailsBlock?: string | null
   heldAt: string | null
   /** Why it is on hold: a floor hold, or its sales order's cancellation waiting for approval. */
   holdReason?: string | null
@@ -212,6 +219,8 @@ export function ManufacturingOrderDetailDialog({
   const [message, setMessage] = useState<string | null>(null)
   /** Why Edit did nothing, once it was pressed on an order that can no longer be changed. */
   const [editNote, setEditNote] = useState<string | null>(null)
+  /** The details window, open: Edit on an order whose plan is fixed but whose cutting is not complete. */
+  const [editingDetails, setEditingDetails] = useState(false)
 
   /** The floor picture, for an order with a route. */
   const loadFlow = useCallback(async (id: string) => {
@@ -531,23 +540,35 @@ export function ManufacturingOrderDetailDialog({
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {mo && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
-              // Always pressable: an order that can no longer be changed shows a lock, and pressing
-              // it says what is in the way, rather than a button that silently does nothing.
-              <button
-                className="btn-secondary"
-                onClick={() => (mo.editBlock ? setEditNote(mo.editBlock) : onEdit(mo.id))}
-                disabled={busy !== null}
-                aria-disabled={!!mo.editBlock}
-                title={
-                  mo.editBlock
-                    ? `Cannot be edited: ${mo.editBlock}`
-                    : 'Change the plan: pieces, sizes, dates, routing. Open until the store issues material to it.'
-                }
-              >
-                {mo.editBlock ? <Lock size={15} /> : <Pencil size={15} />} {mo.status === 'DRAFT' ? 'Edit draft' : 'Edit'}
-              </button>
-            )}
+            {mo && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (() => {
+              /*
+               * Edit opens the plan (pieces, sizes, dates, routing) until the
+               * store issues material; after that, the details (dates, note, job
+               * card details, lays with cutting contractors) until cutting is
+               * complete. Only once both are closed does it show a lock — and it
+               * stays pressable, saying what is in the way, rather than a button
+               * that silently does nothing.
+               */
+              const detailsOnly = !!mo.editBlock && !mo.detailsBlock
+              const locked = !!mo.editBlock && !!mo.detailsBlock
+              return (
+                <button
+                  className="btn-secondary"
+                  onClick={() => (locked ? setEditNote(mo.detailsBlock ?? mo.editBlock ?? null) : detailsOnly ? setEditingDetails(true) : onEdit(mo.id))}
+                  disabled={busy !== null}
+                  aria-disabled={locked}
+                  title={
+                    locked
+                      ? `Cannot be edited: ${mo.detailsBlock}`
+                      : detailsOnly
+                        ? 'Change the details: dates, note, lot no., metres, ratio, and the lays with cutting contractors. Open until cutting is complete; pieces and routing are fixed.'
+                        : 'Change the plan: pieces, sizes, dates, routing. Open until the store issues material to it.'
+                  }
+                >
+                  {locked ? <Lock size={15} /> : <Pencil size={15} />} {mo.status === 'DRAFT' ? 'Edit draft' : detailsOnly ? 'Edit details' : 'Edit'}
+                </button>
+              )
+            })()}
             {mo?.status === 'DRAFT' && can('production', 'edit') && (
               <button className="btn-primary" onClick={() => void releaseIt()} disabled={busy !== null}>
                 {busy === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Release
@@ -1057,6 +1078,16 @@ export function ManufacturingOrderDetailDialog({
           ) : null}
         </div>
       </div>
+      {editingDetails && mo && (
+        <MoDetailsDialog
+          moId={mo.id}
+          onClose={() => setEditingDetails(false)}
+          onSaved={(msg) => {
+            setEditingDetails(false)
+            void refresh(msg)
+          }}
+        />
+      )}
       {settingRoute && mo && (
         <StagesDialog
           moId={mo.id}

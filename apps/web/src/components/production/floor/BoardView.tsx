@@ -33,7 +33,7 @@ import { SheetView } from './SheetView'
 import { RouteStrip, stripNote } from './RouteStrip'
 import type { TransferRow } from './TransferDetailDialog'
 import { useJobCard } from './useFlow'
-import { isCheck, pcs, type FlowTransfer, type StepFigures } from './types'
+import { fabricLine, isCheck, pcs, type FabricRecord, type FlowTransfer, type StepFigures } from './types'
 
 /**
  * The board: every open job card with its route drawn as a line of stages —
@@ -79,6 +79,8 @@ export interface BoardCard {
   mo: { id: string; moNumber: string; held: boolean; due: string | null; so: { soNumber: string; customer: { name: string } } | null }
   state: 'NO_STAGES' | 'DONE' | 'IN_PROGRESS' | 'NOT_STARTED'
   withCutters: number
+  /** Fabric given to its cutting contractors, used, wasted and left over. */
+  fabric: FabricRecord[]
   cut: number
   packed: number
   steps: BoardStep[]
@@ -223,7 +225,7 @@ function BoardRow({ c, h }: { c: BoardCard; h: Handlers }) {
         </button>
       </div>
 
-      <RouteStrip steps={c.steps} onPick={(id) => h.sheet(id)} withCutters={c.withCutters} label={`${c.jobCardNumber} route`} />
+      <RouteStrip steps={c.steps} onPick={(id) => h.sheet(id)} withCutters={c.withCutters} fabric={c.fabric} label={`${c.jobCardNumber} route`} />
 
       <div className="border-primary/30 bg-primary/5 rounded-lg border p-2.5">
         <p className="text-primary mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide">
@@ -309,6 +311,11 @@ function RowsTable({ rows, handlers }: { rows: BoardCard[]; handlers: (c: BoardC
                   <span className="text-muted-foreground block text-[11px]">
                     cut {pcs(c.cut)} · packed {pcs(c.packed)} of {pcs(c.line.totalQty)}
                   </span>
+                  {c.fabric.map((r) => (
+                    <span key={r.unit} className={`block text-[11px] ${r.leftOver || r.overUsed || r.notRecorded ? 'warn-text' : 'text-muted-foreground'}`}>
+                      Fabric: {fabricLine(r)}
+                    </span>
+                  ))}
                 </td>
                 <td className="max-w-[360px] text-xs">
                   {first ? (

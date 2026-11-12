@@ -205,7 +205,7 @@ export interface JobCardCutting {
   cutterName: string | null
   lotNo: string | null
   ratio: string | null
-  noOfLayers: number | null
+  noOfLayers: number | string | null
   fabricIssued: string | number | null
   fabricUsed: string | number | null
   wastage: string | number | null
@@ -257,6 +257,29 @@ export interface JobCardHeader {
   so: { soNumber: string; customerPORef: string | null; reference: string | null; customer: { name: string } } | null
 }
 
+/**
+ * A job card's fabric through cutting, one unit at a time: given to the
+ * cutting contractors, used and wasted as each lay came back cut, and what is
+ * left over with them. Worked out by the server from the lays.
+ */
+export interface FabricRecord {
+  /** m, kg… or '' when the fabric has no unit. */
+  unit: string
+  given: number
+  /** Of what was given, on lays still with their contractors. */
+  withCutters: number
+  used: number
+  waste: number
+  /** On received lays: given less used and waste, still with the contractor. */
+  leftOver: number
+  /** On received lays: used and waste above what was given. */
+  overUsed: number
+  leftWith: Array<{ name: string; qty: number }>
+  overBy: Array<{ name: string; qty: number }>
+  /** Lays received with no fabric given recorded. */
+  notRecorded: number
+}
+
 /** A job card and everything its sheets show, as GET /production/job-cards/:id returns it. */
 export interface JobCardDetail extends Flow {
   card: JobCardHeader
@@ -264,6 +287,8 @@ export interface JobCardDetail extends Flow {
   /** Each stage's figures, size by size. */
   sizeFigures: Record<string, StepFigures[]>
   cuttings: JobCardCutting[]
+  /** Fabric given to its cutting contractors, used, wasted and left over. */
+  fabric: FabricRecord[]
   /** Cut the old way before the order had stages (cutting numbers): it carries on without them. */
   cutWithoutStages?: string[]
   /** Size changes made on this job card at stitching, newest first. */
@@ -295,6 +320,17 @@ export const revisedQty = (z: { qty: number; changed?: number }) => Math.max(0, 
 
 /** The bundle's own number from its code: "B003" from "MO-2627-0042-B003". */
 export const bundleShort = (code: string) => code.split('-').pop() ?? code
+
+/**
+ * The lot no. a sheet shows: the job card's own, or else the lots written on
+ * its lays (issued to cutting contractors) — a lot put on a lay's Edit shows
+ * at the top of the sheet without being typed twice.
+ */
+export function lotOf(d: Pick<JobCardDetail, 'card' | 'cuttings'>): { lot: string; fromLays: boolean } | null {
+  if (d.card.lotNo?.trim()) return { lot: d.card.lotNo.trim(), fromLays: false }
+  const lots = [...new Set(d.cuttings.filter((c) => c.status !== 'CANCELLED' && c.lotNo?.trim()).map((c) => c.lotNo!.trim()))]
+  return lots.length ? { lot: lots.join(', '), fromLays: true } : null
+}
 
 /** The reference the floor's papers carry: order no. / project ID / design no. */
 export const refNo = (c: Pick<JobCardHeader, 'orderNo' | 'projectId' | 'designNo' | 'jobCardNumber'>) =>
@@ -343,3 +379,27 @@ export const newClientKey = () =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
 
 export const pcs = (n: number) => n.toLocaleString('en-IN')
+
+/** A quantity of fabric with its unit: "7.5 m", "120 kg", or the figure alone. */
+export const fabricQty = (n: number, unit: string) => `${n.toLocaleString('en-IN', { maximumFractionDigits: 3 })}${unit ? ` ${unit}` : ''}`
+
+/** Who has the left over, or used more than given: "Ram" when it is one contractor, "Suresh 20 m, Ram 5 m" when more. */
+export const whoHas = (list: Array<{ name: string; qty: number }>, unit: string) =>
+  list.length === 1 ? list[0].name : list.map((x) => `${x.name} ${fabricQty(x.qty, unit)}`).join(', ')
+
+/**
+ * A job card's fabric in one line, as the floor reads it:
+ * "950 m given · 900 m used · 30 m waste · 20 m left over with Suresh".
+ */
+export function fabricLine(r: FabricRecord) {
+  return [
+    r.given ? `${fabricQty(r.given, r.unit)} given` : null,
+    r.withCutters ? `${fabricQty(r.withCutters, r.unit)} with cutters` : null,
+    r.used || r.waste ? `${fabricQty(r.used, r.unit)} used · ${fabricQty(r.waste, r.unit)} waste` : null,
+    r.leftOver ? `${fabricQty(r.leftOver, r.unit)} left over with ${whoHas(r.leftWith, r.unit)}` : null,
+    r.overUsed ? `${fabricQty(r.overUsed, r.unit)} more used than given (${whoHas(r.overBy, r.unit)})` : null,
+    r.notRecorded ? `fabric given not recorded on ${r.notRecorded} ${r.notRecorded === 1 ? 'lay' : 'lays'}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}

@@ -41,7 +41,7 @@ import { orderSizes, sizeChangeHistory } from '../services/sizeChanges.service'
 import { processCode } from '../services/challanNo'
 import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
-import { contractorsFor, createCutting, cuttingContractors, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
+import { contractorsFor, correctLayFabric, createCutting, cuttingContractors, cuttingSchema, cutterIssueSchema, issueToCutter, layFabricSchema } from '../services/cutting.service'
 import { boardCards, ensureJobCards, fillJobCardBlanks, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
 
 /**
@@ -833,6 +833,24 @@ router.post('/cutting/:id/receive', requirePermission(MODULE, 'create'), async (
     success: true,
     message: `${cut.cutOrderNumber}: ${pcs(cut.actualPieces)} pieces received from ${cut.cutterName ?? 'the contractor'}, tied into ${bundles} ${bundles === 1 ? 'bundle' : 'bundles'}. Print the stickers.`,
     data: { ...cut, bundles },
+  })
+})
+
+/**
+ * PATCH /cutting/:id/fabric — a received lay's fabric put right: given, used
+ * and wasted, so what is left over with the contractor reads true. Only the
+ * record changes; its pieces and bundles stay.
+ */
+router.patch('/cutting/:id/fabric', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = layFabricSchema.parse(req.body)
+  const { before, after } = await prisma.$transaction((tx) => correctLayFabric(tx, req.params.id, data), T)
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'CuttingOrder', entityId: after.id, before, after })
+  const left = after.fabricIssued == null ? null : Math.round((Number(after.fabricIssued) - Number(after.fabricUsed ?? 0) - Number(after.wastage ?? 0)) * 1000) / 1000
+  const unit = after.fabricItem?.uom?.symbol ? ` ${after.fabricItem.uom.symbol}` : ''
+  res.json({
+    success: true,
+    message: `${after.cutOrderNumber}: fabric saved${left == null ? '' : left > 0 ? ` — ${left}${unit} left over with ${after.cutterName ?? 'the contractor'}` : left < 0 ? ` — ${-left}${unit} more used than given` : ' — all of it accounted for'}.`,
+    data: after,
   })
 })
 

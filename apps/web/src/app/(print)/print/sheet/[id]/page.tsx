@@ -5,7 +5,7 @@ import { useParams, useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { StoreSheet, Fact, Eyebrow, qty, longDate, CODE, GREY, INK, MUTED, RULE, TINT, type SheetColumn } from '@/components/print/StoreSheet'
 import { sheetRows } from '@/components/production/floor/StageSheet'
-import { isCheck, refNo, type JobCardDetail } from '@/components/production/floor/types'
+import { isCheck, lotOf, refNo, type JobCardDetail } from '@/components/production/floor/types'
 
 interface Payload {
   company: Record<string, string | null>
@@ -68,7 +68,7 @@ function Sheet() {
           <Fact label="Fabric quality" value={c.fabricQuality} />
           <Fact label="Colour" value={d.line?.color ?? null} />
           <Fact label="Design no." value={c.designNo} mono />
-          <Fact label="Lot no." value={c.lotNo} />
+          <Fact label="Lot no." value={lotOf(d)?.lot ?? null} />
         </>
       ),
     },

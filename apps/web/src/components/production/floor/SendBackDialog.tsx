@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Loader2, Undo2 } from 'lucide-react'
+import { Loader2, Truck, Undo2 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
@@ -79,28 +79,28 @@ export function SendBackDialog({ flow, jobWorkOrderId, onClose, onSaved }: { flo
       onClose={onClose}
       busy={saving}
     >
-      <label className="block max-w-xs">
-        <span className="form-label">Pieces</span>
-        <SmartSelect
-          className="form-input"
-          value={from}
-          onChange={(e) => {
-            setFrom(e.target.value as 'REJECTED' | 'DAMAGED')
-            setValues({})
-          }}
-        >
-          <option value="REJECTED" disabled={!has('REJECTED')}>
-            Failed on return
-          </option>
-          <option value="DAMAGED" disabled={!has('DAMAGED')}>
-            Damaged
-          </option>
-        </SmartSelect>
-      </label>
-      <Section icon={Undo2} title="Going back">
-        <BundleQtyTable rows={rows} columns={columns} values={values} onChange={(row, col, v) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: v } }))} availableLabel="Here" fill={{ label: 'All of them', column: 'qty' }} empty="None to send back." />
-        <div className="mt-3 grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
-          <label className="block sm:col-span-2">
+      {/* Which pieces, what to put right, when and who — first, as the sending window has its own. */}
+      <Section icon={Truck} title={`To ${jwo.vendor.name}`}>
+        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
+          <label className="block">
+            <span className="form-label">Pieces</span>
+            <SmartSelect
+              className="form-input"
+              value={from}
+              onChange={(e) => {
+                setFrom(e.target.value as 'REJECTED' | 'DAMAGED')
+                setValues({})
+              }}
+            >
+              <option value="REJECTED" disabled={!has('REJECTED')}>
+                Failed on return
+              </option>
+              <option value="DAMAGED" disabled={!has('DAMAGED')}>
+                Damaged
+              </option>
+            </SmartSelect>
+          </label>
+          <label className="block sm:col-span-1 lg:col-span-3">
             <span className="form-label">To put right</span>
             <input className="form-input" value={reason} maxLength={500} placeholder="Rewash: patchy colour" onChange={(e) => setReason(e.target.value)} />
           </label>
@@ -112,11 +112,14 @@ export function SendBackDialog({ flow, jobWorkOrderId, onClose, onSaved }: { flo
             <span className="form-label">Vehicle no.</span>
             <input className="form-input" value={vehicleNo} maxLength={30} onChange={(e) => setVehicleNo(e.target.value.toUpperCase())} />
           </label>
-          <label className="block">
+          <label className="block sm:col-span-2">
             <span className="form-label">Issued by</span>
             <input className="form-input" value={issuedBy} maxLength={120} onChange={(e) => setIssuedBy(e.target.value)} />
           </label>
         </div>
+      </Section>
+      <Section icon={Undo2} title="Going back">
+        <BundleQtyTable rows={rows} columns={columns} values={values} onChange={(row, col, v) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: v } }))} availableLabel="Here" fill={{ label: 'All of them', column: 'qty' }} empty="None to send back." />
       </Section>
     </FormFrame>
   )

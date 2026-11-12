@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Loader2, Wrench } from 'lucide-react'
+import { Boxes, Loader2, Wrench } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
@@ -91,9 +91,9 @@ export function ReworkDoneDialog({ flow, stepId, onClose, onSaved }: { flow: Flo
       onClose={onClose}
       busy={saving}
     >
-      <Section icon={Wrench} title="In rework">
-        <BundleQtyTable rows={rows} columns={columns} values={values} onChange={(row, col, v) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: v } }))} availableLabel="In rework" fill={{ label: 'All of them', column: 'qty' }} empty="Nothing is in rework here." />
-        <div className="mt-3 grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
+      {/* Who put them right and when — first, as the sending window has its own. */}
+      <Section icon={Wrench} title={`Put right at ${step.name}`}>
+        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
           <label className="block">
             <span className="form-label">Put right by</span>
             <input className="form-input" value={personName} maxLength={120} placeholder="Line or operator" onChange={(e) => setPersonName(e.target.value)} />
@@ -103,6 +103,9 @@ export function ReworkDoneDialog({ flow, stepId, onClose, onSaved }: { flow: Flo
             <input type="date" className="form-input" value={date} onChange={(e) => setDate(e.target.value)} />
           </label>
         </div>
+      </Section>
+      <Section icon={Boxes} title="In rework">
+        <BundleQtyTable rows={rows} columns={columns} values={values} onChange={(row, col, v) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: v } }))} availableLabel="In rework" fill={{ label: 'All of them', column: 'qty' }} empty="Nothing is in rework here." />
       </Section>
     </FormFrame>
   )

@@ -46,9 +46,15 @@ export const cuttingSchema = z.object({
   /** The order line cut: one style in one colour. */
   moLineId: z.string().optional().nullable(),
   fabricItemId: z.string().min(1, 'Say which fabric was cut'),
+  /**
+   * The fabric given to the contractor for the lay, as received — set when it
+   * was left off at issue, or put right. Left out, the issue's stays.
+   */
+  fabricGiven: z.number().min(0, 'Fabric given cannot be negative').max(9_999_999).optional().nullable(),
   fabricUsed: z.number().min(0, 'Fabric used cannot be negative').max(9_999_999),
   wastage: z.number().min(0, 'Waste cannot be negative').max(9_999_999).optional(),
-  noOfLayers: z.number().int().min(0).max(10_000).optional().nullable(),
+  // Part layers allowed (0.1, 2.5), kept to two decimal places like the column.
+  noOfLayers: z.number().min(0, 'Layers cannot be negative').max(10_000).transform((n) => Math.round(n * 100) / 100).optional().nullable(),
   lotNo: z.string().trim().max(60).optional().nullable(),
   ratio: z.string().trim().max(120).optional().nullable(),
   cutterName: z.string().trim().max(120).optional().nullable(),
@@ -70,7 +76,7 @@ export const cuttingSchema = z.object({
 })
 
 type Breakup = Record<string, number>
-const breakupOf = (v: unknown): Breakup => (v && typeof v === 'object' ? (v as Breakup) : {})
+export const breakupOf = (v: unknown): Breakup => (v && typeof v === 'object' ? (v as Breakup) : {})
 
 /** Everything the cutting form needs for one order. */
 export async function cuttingPrep(db: Db, moId: string) {
@@ -269,7 +275,8 @@ export const cutterIssueSchema = z.object({
   issuedOn: z.coerce.date().optional(),
   lotNo: z.string().trim().max(60).optional().nullable(),
   ratio: z.string().trim().max(120).optional().nullable(),
-  noOfLayers: z.number().int().min(0).max(10_000).optional().nullable(),
+  // Part layers allowed (0.1, 2.5), kept to two decimal places like the column.
+  noOfLayers: z.number().min(0, 'Layers cannot be negative').max(10_000).transform((n) => Math.round(n * 100) / 100).optional().nullable(),
   /** The fabric given to the contractor for the lay, and how much of it. */
   fabricItemId: z.string().optional().nullable(),
   fabricGiven: z.number().min(0).max(9_999_999).optional().nullable(),
@@ -341,6 +348,48 @@ export async function contractorsFor(db: Db, operationId: string) {
   return db.contractor.findMany({ where: { isActive: true, operationIds: { has: operationId } }, select: { id: true, name: true }, orderBy: { name: 'asc' } })
 }
 
+type PrepLine = Awaited<ReturnType<typeof cuttingPrep>>['lines'][number]
+
+/**
+ * The pieces on one lay, by size, checked against what is left of each size:
+ * the order's pieces, less what is cut, less what the other lays still with
+ * contractors have (`others`). More than that only with `excessOk` — a
+ * production manager's allowance. Used when a lay is issued, and when a lay
+ * still with its contractor has its pieces changed.
+ */
+function layPieces(
+  line: PrepLine,
+  others: Array<{ plannedBreakup: Prisma.JsonValue | null; plannedPieces: number }>,
+  d: { planned?: Array<{ sizeId: string; qty: number }>; pieces?: number },
+  excessOk: boolean,
+) {
+  const withCutters = (sizeId: string) => others.reduce((s, c) => s + Number(breakupOf(c.plannedBreakup)[sizeId] ?? 0), 0)
+  const planned: Breakup = {}
+  if (line.sizes.length) {
+    for (const z of d.planned ?? []) {
+      if (z.qty <= 0) continue
+      const own = line.sizes.find((x) => x.sizeId === z.sizeId)
+      if (!own) throw new AppError(`That size is not on ${line.style.code} ${line.color}`, 400, 'BAD_SIZE')
+      const out = withCutters(z.sizeId)
+      if (!excessOk && own.cut + out + (planned[z.sizeId] ?? 0) + z.qty > own.planned) {
+        throw new AppError(
+          `${line.style.code} ${line.color}, size ${own.code}: ${own.planned} to make, ${own.cut} cut and ${out} out on other lays, so ${z.qty} is too many.`,
+          400,
+          'MORE_THAN_PLANNED',
+        )
+      }
+      planned[z.sizeId] = (planned[z.sizeId] ?? 0) + z.qty
+    }
+  }
+  const pieces = line.sizes.length ? Object.values(planned).reduce((s, n) => s + n, 0) : d.pieces ?? 0
+  if (pieces <= 0) throw new AppError('Enter how many pieces of each size are issued for cutting.', 400, 'NOTHING_ISSUED')
+  if (!line.sizes.length && !excessOk) {
+    const out = others.reduce((s, c) => s + c.plannedPieces, 0)
+    if (line.cut + out + pieces > line.totalQty) throw new AppError(`${line.totalQty} to make, ${line.cut} cut and ${out} out on other lays, so ${pieces} is too many.`, 400, 'MORE_THAN_PLANNED')
+  }
+  return { planned, pieces }
+}
+
 export async function issueToCutter(tx: Db, moId: string, d: z.infer<typeof cutterIssueSchema>, userId: string, opts: { mayApprove?: boolean } = {}) {
   await lockMo(tx, moId)
   const prep = await cuttingPrep(tx, moId)
@@ -363,30 +412,7 @@ export async function issueToCutter(tx: Db, moId: string, d: z.infer<typeof cutt
 
   // With the contractors still: issued and not yet received back.
   const open = prep.cuttings.filter((c) => c.moLineId === line.id && c.status === 'IN_PROGRESS')
-  const withCutters = (sizeId: string) => open.reduce((s, c) => s + Number(breakupOf(c.plannedBreakup)[sizeId] ?? 0), 0)
-  const planned: Breakup = {}
-  if (line.sizes.length) {
-    for (const z of d.planned ?? []) {
-      if (z.qty <= 0) continue
-      const own = line.sizes.find((x) => x.sizeId === z.sizeId)
-      if (!own) throw new AppError(`That size is not on ${line.style.code} ${line.color}`, 400, 'BAD_SIZE')
-      const out = withCutters(z.sizeId)
-      if (!excessOk && own.cut + out + (planned[z.sizeId] ?? 0) + z.qty > own.planned) {
-        throw new AppError(
-          `${line.style.code} ${line.color}, size ${own.code}: ${own.planned} to make, ${own.cut} cut and ${out} with contractors, so ${z.qty} more is too many.`,
-          400,
-          'MORE_THAN_PLANNED',
-        )
-      }
-      planned[z.sizeId] = (planned[z.sizeId] ?? 0) + z.qty
-    }
-  }
-  const pieces = line.sizes.length ? Object.values(planned).reduce((s, n) => s + n, 0) : d.pieces ?? 0
-  if (pieces <= 0) throw new AppError('Enter how many pieces of each size are issued for cutting.', 400, 'NOTHING_ISSUED')
-  if (!line.sizes.length && !excessOk) {
-    const out = open.reduce((s, c) => s + c.plannedPieces, 0)
-    if (line.cut + out + pieces > line.totalQty) throw new AppError(`${line.totalQty} to make, ${line.cut} cut and ${out} with contractors, so ${pieces} more is too many.`, 400, 'MORE_THAN_PLANNED')
-  }
+  const { planned, pieces } = layPieces(line, open, d, excessOk)
 
   return tx.cuttingOrder.create({
     data: {
@@ -409,6 +435,146 @@ export async function issueToCutter(tx: Db, moId: string, d: z.infer<typeof cutt
       createdById: userId,
     },
   })
+}
+
+/**
+ * The details of a lay still with its cutting contractor — who has it, the
+ * day it went, its lot, ratio, layers, the fabric given, and its pieces by
+ * size — that can be put right until the cut comes back. Nothing has moved
+ * yet while a lay is out (no stock, no floor entries: those come when it is
+ * received), so its pieces change in place, checked the way an issue is.
+ */
+export const cutterIssueDetailsSchema = cutterIssueSchema
+  .pick({
+    cutterName: true,
+    issuedOn: true,
+    lotNo: true,
+    ratio: true,
+    noOfLayers: true,
+    fabricItemId: true,
+    fabricGiven: true,
+    notes: true,
+    planned: true,
+    pieces: true,
+    allowExcess: true,
+  })
+  .extend({ id: z.string().min(1) })
+
+type LayHolding = { plannedBreakup: Breakup | null; plannedPieces: number }
+
+/**
+ * What each lay in one save will hold once it is saved — only the lays whose
+ * pieces change. Each lay is checked against the others at these figures, so
+ * pieces can move from one lay to another in a single save, whatever order
+ * the lays come in.
+ */
+export function piecesBeingSaved(issues: Array<z.infer<typeof cutterIssueDetailsSchema>>) {
+  const out = new Map<string, LayHolding>()
+  for (const i of issues) {
+    if (i.planned) {
+      const b: Breakup = {}
+      for (const z of i.planned) if (z.qty > 0) b[z.sizeId] = (b[z.sizeId] ?? 0) + z.qty
+      out.set(i.id, { plannedBreakup: b, plannedPieces: Object.values(b).reduce((s, n) => s + n, 0) })
+    } else if (i.pieces !== undefined) {
+      out.set(i.id, { plannedBreakup: null, plannedPieces: i.pieces })
+    }
+  }
+  return out
+}
+
+export async function updateCutterIssue(
+  tx: Db,
+  moId: string,
+  d: z.infer<typeof cutterIssueDetailsSchema>,
+  opts: { mayApprove?: boolean; saving?: Map<string, LayHolding> } = {},
+) {
+  const issue = await tx.cuttingOrder.findUnique({ where: { id: d.id }, select: { id: true, moId: true, moLineId: true, status: true, cutOrderNumber: true } })
+  if (!issue || issue.moId !== moId) throw new AppError('That issue to a cutting contractor is not on this order', 404, 'NOT_FOUND')
+  if (issue.status !== 'IN_PROGRESS') {
+    throw new AppError(`${issue.cutOrderNumber} is ${issue.status === 'CANCELLED' ? 'cancelled' : 'already received'}, so it can no longer be changed.`, 409, 'NOT_WITH_CUTTER')
+  }
+  const changingPieces = d.planned !== undefined || d.pieces !== undefined
+  // Pieces are checked against the other lays, so the order is locked first, as an issue does.
+  if (changingPieces) await lockMo(tx, moId)
+  const prep = d.fabricItemId || changingPieces ? await cuttingPrep(tx, moId) : null
+  if (prep && d.fabricItemId && !prep.fabrics.some((f) => f.itemId === d.fabricItemId && f.issued > 0)) {
+    throw new AppError(`That fabric has not been issued to ${prep.mo.moNumber}. Issue it on the order's requisition first.`, 400, 'FABRIC_NOT_ISSUED')
+  }
+  let pieces: { plannedBreakup?: Breakup; plannedPieces: number } | null = null
+  if (prep && changingPieces) {
+    const line = prep.lines.find((l) => l.id === issue.moLineId)
+    if (!line) throw new AppError(`${issue.cutOrderNumber} is not for a colour on ${prep.mo.moNumber}`, 400, 'BAD_LINE')
+    if (d.allowExcess && !opts.mayApprove) throw new AppError('Cutting more than the order plans needs a production manager.', 403, 'NEEDS_APPROVAL')
+    // The colour's other lays still out, each at what it will hold if it is in this same save.
+    const others = prep.cuttings
+      .filter((c) => c.moLineId === line.id && c.status === 'IN_PROGRESS' && c.id !== issue.id)
+      .map((c) => opts.saving?.get(c.id) ?? c)
+    const shaped = layPieces(line, others, d, !!(d.allowExcess && opts.mayApprove))
+    pieces = { ...(line.sizes.length ? { plannedBreakup: shaped.planned } : {}), plannedPieces: shaped.pieces }
+  }
+  return tx.cuttingOrder.update({
+    where: { id: issue.id },
+    data: {
+      ...(pieces ?? {}),
+      cutterName: await canonicalCutter(tx, d.cutterName),
+      ...(d.issuedOn ? { cutDate: d.issuedOn } : {}),
+      lotNo: d.lotNo || null,
+      ratio: d.ratio || null,
+      noOfLayers: d.noOfLayers ?? null,
+      fabricItemId: d.fabricItemId || null,
+      fabricIssued: d.fabricGiven ?? null,
+      notes: d.notes || null,
+    },
+  })
+}
+
+/** A received lay's fabric, put right: what was given, used and wasted. */
+export const layFabricSchema = z.object({
+  fabricGiven: z.number().min(0, 'Fabric given cannot be negative').max(9_999_999).nullable(),
+  fabricUsed: z.number().min(0, 'Fabric used cannot be negative').max(9_999_999),
+  wastage: z.number().min(0, 'Waste cannot be negative').max(9_999_999),
+})
+
+/**
+ * Puts right the fabric on a lay that has come back cut — given, used and
+ * wasted — so what is left over with its contractor reads true. Only the
+ * record changes: its pieces and bundles stay as they are. Used with waste
+ * still cannot come to more of the fabric than the order has had issued, and
+ * a lay whose panels went into a store keeps its used and waste, which
+ * valued them.
+ */
+export async function correctLayFabric(tx: Db, id: string, d: z.infer<typeof layFabricSchema>) {
+  const head = await tx.cuttingOrder.findUnique({ where: { id }, select: { moId: true } })
+  if (!head) throw new AppError('That cutting was not found', 404, 'NOT_FOUND')
+  await lockMo(tx, head.moId)
+  const before = await tx.cuttingOrder.findUniqueOrThrow({ where: { id } })
+  if (before.status === 'CANCELLED') throw new AppError(`${before.cutOrderNumber} is cancelled.`, 409, 'CANCELLED')
+  if (before.status !== 'COMPLETED') {
+    throw new AppError(`${before.cutOrderNumber} has not come back cut yet: change the fabric given on its Edit.`, 409, 'NOT_RECEIVED')
+  }
+  const prep = await cuttingPrep(tx, head.moId)
+  if (prep.mo.status === 'CLOSED') throw new AppError(`${prep.mo.moNumber} is closed.`, 409, 'CLOSED')
+  const wasUsed = Number(before.fabricUsed ?? 0)
+  const wasWaste = Number(before.wastage ?? 0)
+  const changesUse = round3(d.fabricUsed) !== round3(wasUsed) || round3(d.wastage) !== round3(wasWaste)
+  if (changesUse && before.panelItemId) {
+    throw new AppError(`${before.cutOrderNumber}'s panels went into the store at the value of the fabric used, so its used and waste stay as they are.`, 409, 'PANELS_IN_STORE')
+  }
+  const fabric = prep.fabrics.find((f) => f.itemId === before.fabricItemId)
+  if (changesUse && fabric) {
+    // This lay's own use is counted back in: what else is left is all it may take.
+    const room = round3(fabric.left + wasUsed + wasWaste)
+    const now = round3(d.fabricUsed + d.wastage)
+    if (now > room + 1e-9) {
+      throw new AppError(`Only ${room} ${fabric.uom ?? ''} of ${fabric.name} issued to ${prep.mo.moNumber} is free for this lay; used with waste come to ${now}.`.replace(/\s+/g, ' '), 400, 'MORE_THAN_ISSUED')
+    }
+  }
+  const after = await tx.cuttingOrder.update({
+    where: { id },
+    data: { fabricIssued: d.fabricGiven, fabricUsed: d.fabricUsed, wastage: d.wastage },
+    include: { fabricItem: { select: { uom: { select: { symbol: true } } } } },
+  })
+  return { before, after }
 }
 
 /** Records one cutting against an order, inside the caller's transaction. */
@@ -438,7 +604,7 @@ export async function createCutting(
       cutterName: data.cutterName || issue.cutterName,
       lotNo: data.lotNo || issue.lotNo,
       ratio: data.ratio || issue.ratio,
-      noOfLayers: data.noOfLayers ?? issue.noOfLayers,
+      noOfLayers: data.noOfLayers ?? (issue.noOfLayers == null ? null : Number(issue.noOfLayers)),
       fabricItemId: data.fabricItemId || issue.fabricItemId || '',
       planned: data.planned ?? Object.entries(breakupOf(issue.plannedBreakup)).map(([sizeId, qty]) => ({ sizeId, qty: Number(qty) })),
     }
@@ -544,7 +710,9 @@ export async function createCutting(
       moLineId: line?.id ?? null,
       cutDate: data.cutDate ?? new Date(),
       fabricItemId: data.fabricItemId,
-      fabricIssued: issue?.fabricIssued ?? fabric.issued,
+      // What this lay's contractor was given — never the order's whole issue,
+      // which would show fabric left over that was never theirs.
+      fabricIssued: data.fabricGiven !== undefined ? data.fabricGiven : (issue?.fabricIssued ?? null),
       fabricUsed: data.fabricUsed,
       wastage,
       noOfLayers: data.noOfLayers ?? null,

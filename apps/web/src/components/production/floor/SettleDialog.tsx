@@ -75,11 +75,12 @@ export function SettleDialog({ transfer, onClose, onSaved }: { transfer: FlowTra
       busy={saving}
     >
       <Section icon={Scale} title="What happened to them">
-        <BundleQtyTable rows={rows} columns={columns} values={values} onChange={(row, col, v) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: v } }))} availableLabel="Short" empty="Nothing on this card is short." />
-        <label className="mt-3 block">
+        {/* What happened first, as the sending window has its own; the pieces it is for below. */}
+        <label className="mb-3 block">
           <span className="form-label">What happened</span>
           <input className="form-input" value={reason} maxLength={500} placeholder="Three found under the cutting table; two not found anywhere" onChange={(e) => setReason(e.target.value)} />
         </label>
+        <BundleQtyTable rows={rows} columns={columns} values={values} onChange={(row, col, v) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: v } }))} availableLabel="Short" empty="Nothing on this card is short." />
       </Section>
     </FormFrame>
   )

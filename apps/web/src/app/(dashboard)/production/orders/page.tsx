@@ -13,6 +13,7 @@ import { FLOOR_NOTE, MO_STAGE, moStage } from '@/components/production/status'
 import { PROGRESS } from '@/components/production/floor/types'
 import { ManufacturingOrderDialog } from '@/components/production/ManufacturingOrderDialog'
 import { ManufacturingOrderDetailDialog } from '@/components/production/ManufacturingOrderDetailDialog'
+import { MoDetailsDialog } from '@/components/production/MoDetailsDialog'
 
 interface MoRow {
   id: string
@@ -130,6 +131,8 @@ export default function ManufacturingOrdersPage() {
 
   const [form, setForm] = useState<{ open: boolean; soId: string | null; moId: string | null }>({ open: false, soId: null, moId: null })
   const [viewId, setViewId] = useState<string | null>(null)
+  /** The order whose details window is open: plan fixed, cutting not complete. */
+  const [detailsId, setDetailsId] = useState<string | null>(null)
   /** A save just made in the form, confirmed in the window it opens. */
   const [savedNote, setSavedNote] = useState<string | null>(null)
   /** One whose sales order is over, being closed. */
@@ -225,8 +228,15 @@ export default function ManufacturingOrdersPage() {
     if (mayEdit && mo.editable) {
       items.push({ key: 'edit', label: mo.status === 'DRAFT' ? 'Edit draft' : 'Edit', icon: <Pencil size={15} />, onClick: () => setForm({ open: true, soId: null, moId: mo.id }) })
     } else if (mayEdit && mo.editBlock && mo.status !== 'COMPLETED' && mo.status !== 'CLOSED') {
-      // Shown, greyed, with what is in the way: a missing Edit reads as a fault.
-      items.push({ key: 'edit', label: 'Edit', icon: <Pencil size={15} />, disabled: true, hint: `Cannot be edited: ${mo.editBlock}.` })
+      // Its plan is fixed, but its details stay open until cutting is complete
+      // (the server has the last word, counting lays still with contractors).
+      const cutDone = mo.totalPlannedQty > 0 && mo.totalCutQty >= mo.totalPlannedQty
+      items.push(
+        cutDone
+          ? // Shown, greyed, with what is in the way: a missing Edit reads as a fault.
+            { key: 'edit', label: 'Edit', icon: <Pencil size={15} />, disabled: true, hint: `Cannot be edited: cutting is complete on ${mo.moNumber}.` }
+          : { key: 'edit', label: 'Edit details — lot no., fabric, dates', icon: <Pencil size={15} />, onClick: () => setDetailsId(mo.id) },
+      )
     }
     if (mo.status === 'DRAFT' && mayEdit && mo.stage !== 'ORDER_CLOSED') {
       items.push({ key: 'release', label: 'Release to the floor', icon: <CheckCircle2 size={15} />, onClick: () => void release(mo) })
@@ -492,6 +502,17 @@ export default function ManufacturingOrdersPage() {
           void load()
         }}
       />
+      {detailsId && (
+        <MoDetailsDialog
+          moId={detailsId}
+          onClose={() => setDetailsId(null)}
+          onSaved={(msg) => {
+            setDetailsId(null)
+            setMessage(msg)
+            void load()
+          }}
+        />
+      )}
     </div>
   )
 }
