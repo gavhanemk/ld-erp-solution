@@ -72,6 +72,24 @@ function spread(total: number, caps: number[]) {
   return out
 }
 
+/** Bundle numbers as runs, the way a person writes them: "B006–B013, B015". */
+function bundleRuns(codes: string[]) {
+  const parts = codes.map((code) => {
+    const short = bundleShort(code)
+    const m = /^(\D*)(\d+)$/.exec(short)
+    return m ? { short, head: m[1], n: Number(m[2]) } : null
+  })
+  if (parts.some((x) => !x)) return codes.map(bundleShort).join(', ')
+  const sorted = (parts as Array<{ short: string; head: string; n: number }>).sort((a, b) => a.head.localeCompare(b.head) || a.n - b.n)
+  const runs: Array<{ first: (typeof sorted)[number]; last: (typeof sorted)[number] }> = []
+  for (const x of sorted) {
+    const run = runs[runs.length - 1]
+    if (run && run.last.head === x.head && x.n === run.last.n + 1) run.last = x
+    else runs.push({ first: x, last: x })
+  }
+  return runs.map((r) => (r.first === r.last ? r.first.short : `${r.first.short}–${r.last.short}`)).join(', ')
+}
+
 export function CountInDialog({
   transfer,
   moNumber,
@@ -178,6 +196,31 @@ export function CountInDialog({
   const hasPlan = sizeTable.some((z) => z.plan != null)
   // Only when this card holds the whole order line does each size's figure have to match the plan.
   const wholeLine = hasPlan && planTotal > 0 && cutTotal === planTotal
+
+  // The changes by move — S → XS, L → M — each with its pieces and bundles: a line to check per change of
+  // size, not one per bundle (12 Nov 2026: 26 bundles in one sentence read as a mess).
+  const sizeOrder = (code: string | null) => (sizes ?? []).findIndex((z) => z.code === code)
+  const moves = Object.values(
+    changes.reduce<Record<string, { from: string; toSizeId: string; items: typeof changes }>>((acc, c) => {
+      const key = `${c.row.size}|${c.toSizeId}`
+      const move = acc[key] ?? (acc[key] = { from: c.row.size ?? '—', toSizeId: c.toSizeId, items: [] })
+      move.items.push(c)
+      return acc
+    }, {}),
+  ).sort((a, b) => sizeOrder(a.from) - sizeOrder(b.from) || sizeOrder(sizeCode(a.toSizeId)) - sizeOrder(sizeCode(b.toSizeId)))
+  /** One move undone: its bundles keep their own size, their pieces back in Same size. */
+  const undoMove = (m: (typeof moves)[number]) => {
+    setValues((x) => {
+      const next = { ...x }
+      for (const c of m.items) next[c.row.id] = { ...next[c.row.id], qty: String(countOf(c.row.id)) }
+      return next
+    })
+    setMadeAs((x) => {
+      const next = { ...x }
+      for (const c of m.items) delete next[c.row.id]
+      return next
+    })
+  }
 
   const setSame = (lineId: string, qty: number) => setValues((x) => ({ ...x, [lineId]: { ...x[lineId], qty: String(qty) } }))
   /** After a size is picked on a row: to its pieces box, once the list has handed focus back. */
@@ -539,9 +582,8 @@ export function CountInDialog({
         {sizing && (
           <div className="border-primary/30 bg-primary/5 mb-3 rounded-lg border p-3">
             <p className="text-foreground text-xs">
-              Tick the bundles to change — <b>Shift+click</b> ticks a run, or tick a whole size — then set the size and pieces once in the bar and <b>Apply</b>. A
-              single bundle can be set in its own row. Pieces made as another size come out of <b>Same size</b>, so every bundle&apos;s count stays as it arrived;
-              each bundle&apos;s changed pieces become a new bundle with its own sticker.
+              Tick bundles (<b>Shift+click</b> ticks a run, or tick a whole size), set the size and pieces in the bar, and <b>Apply</b>. Pieces made as another
+              size come out of <b>Same size</b>, so each bundle&apos;s count stays as it arrived.
             </p>
             <label className="mt-2 block sm:max-w-lg">
               <span className="form-label">
@@ -623,6 +665,62 @@ export function CountInDialog({
                     ? 'This card holds the whole order line: a size in green matches the order’s plan, one in amber does not yet.'
                     : 'Pieces only move between sizes; the total stays as counted.'}
                 </p>
+              </div>
+            )}
+
+            {/* The changes by move, to check before saving: a line per change of size, not one per bundle. */}
+            {moves.length > 0 && (
+              <div className="border-border bg-card mt-3 overflow-x-auto rounded-lg border">
+                <table className="w-full text-xs tabular-nums" aria-label="Size changes">
+                  <thead>
+                    <tr className="bg-secondary text-muted-foreground">
+                      <th className="px-2.5 py-1.5 text-left font-medium">Size change</th>
+                      <th className="px-2.5 py-1.5 text-right font-medium">Pieces</th>
+                      <th className="px-2.5 py-1.5 text-right font-medium">Bundles</th>
+                      <th className="px-2.5 py-1.5 text-left font-medium">Which bundles</th>
+                      <th className="px-2.5 py-1.5 text-right font-medium">From each</th>
+                      <th className="px-2.5 py-1.5">
+                        <span className="sr-only">Undo</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {moves.map((m) => {
+                      const qtys = m.items.map((c) => c.qty)
+                      const lo = Math.min(...qtys)
+                      const hi = Math.max(...qtys)
+                      const to = sizeCode(m.toSizeId)
+                      return (
+                        <tr key={`${m.from}-${m.toSizeId}`} className="border-border border-t">
+                          <td className="text-foreground whitespace-nowrap px-2.5 py-1.5 font-semibold">
+                            {m.from} → {to}
+                          </td>
+                          <td className="text-foreground px-2.5 py-1.5 text-right font-semibold">{pcs(qtys.reduce((s, q) => s + q, 0))}</td>
+                          <td className="px-2.5 py-1.5 text-right">{m.items.length}</td>
+                          <td className="px-2.5 py-1.5 font-mono text-[11px]">{bundleRuns(m.items.map((c) => c.row.code))}</td>
+                          <td className="px-2.5 py-1.5 text-right">{lo === hi ? pcs(lo) : `${pcs(lo)}–${pcs(hi)}`}</td>
+                          <td className="px-2.5 py-1 text-right">
+                            <button type="button" className="btn-ghost h-6 px-2 text-[11px]" onClick={() => undoMove(m)} aria-label={`Undo ${m.from} to ${to}`}>
+                              Undo
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                  {moves.length > 1 && (
+                    <tfoot>
+                      <tr className="bg-secondary border-border border-t">
+                        <td className="px-2.5 py-1.5 font-semibold">Total</td>
+                        <td className="px-2.5 py-1.5 text-right font-semibold">{pcs(moving)}</td>
+                        <td className="px-2.5 py-1.5 text-right font-semibold">{changes.length}</td>
+                        <td className="text-muted-foreground px-2.5 py-1.5" colSpan={3}>
+                          {changes.length} new bundles, stickers after saving
+                        </td>
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
               </div>
             )}
           </div>
@@ -740,13 +838,6 @@ export function CountInDialog({
           }
           select={sizing ? { on: (id) => ticked.includes(id), can: mayChange, onTick: tick, onAll: tickAll } : undefined}
         />
-        {/* Each change in a line, so nobody has to scroll the table to check them. */}
-        {changes.length > 0 && (
-          <p className="text-muted-foreground mt-2 text-xs">
-            <span className="text-foreground font-medium">Changing size:</span>{' '}
-            {changes.map((c) => `${bundleShort(c.row.code)} ${pcs(c.qty)} pcs ${c.row.size} → ${sizeCode(c.toSizeId)}`).join(' · ')}
-          </p>
-        )}
       </Section>
     </FormFrame>
   )
