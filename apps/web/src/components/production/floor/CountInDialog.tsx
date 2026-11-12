@@ -72,8 +72,10 @@ export function CountInDialog({ transfer, moNumber, onClose, onSaved }: { transf
   return (
     <FormFrame
       icon={ClipboardCheck}
-      title={`Count in ${transfer.transferNumber}`}
-      subtitle={`${moNumber}: ${transfer.fromStep.name} → ${transfer.toStep.name}, sent ${formatDate(transfer.dispatchDate)}${transfer.issuedBy ? ` by ${transfer.issuedBy}` : ''}`}
+      // Named for where the pieces are counted in. The card's number begins with the department that
+      // sent it (FUS/… from Fusing), so on its own it read as if the count were at the sending end.
+      title={`Count in at ${transfer.toStep.name}`}
+      subtitle={`Card ${transfer.transferNumber} from ${transfer.fromStep.name} · ${moNumber} · sent ${formatDate(transfer.dispatchDate)}${transfer.issuedBy ? ` by ${transfer.issuedBy}` : ''}`}
       width="max-w-3xl"
       primary={
         <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving || !!blocker}>
