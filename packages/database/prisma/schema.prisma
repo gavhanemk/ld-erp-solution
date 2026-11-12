@@ -3500,7 +3500,7 @@ model CuttingOrder {
   fabricWidth      Decimal?           @db.Decimal(5, 2)
   fabricGSM        Int?
   shrinkagePercent Decimal?           @db.Decimal(4, 2)
-  noOfLayers       Int?
+  noOfLayers       Decimal?           @db.Decimal(10, 2)
   fabricIssued     Decimal?           @db.Decimal(10, 3)
   fabricUsed       Decimal?           @db.Decimal(10, 3)
   wastage          Decimal?           @db.Decimal(10, 3)

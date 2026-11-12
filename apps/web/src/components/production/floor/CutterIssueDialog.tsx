@@ -228,7 +228,8 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
           </label>
           <label className="block">
             <span className="form-label">Layers</span>
-            <StepInput className="form-input text-right tabular-nums" value={layers} placeholder="0" onValueChange={setLayers} aria-label="Layers" />
+            {/* Part layers are allowed — 0.1, 0.25, 2.5 — to two decimals. */}
+            <StepInput decimals className="form-input text-right tabular-nums" value={layers} placeholder="0" onValueChange={setLayers} aria-label="Layers" />
           </label>
           <label className="block">
             <span className="form-label">Fabric</span>

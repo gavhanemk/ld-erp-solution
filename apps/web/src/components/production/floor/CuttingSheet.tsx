@@ -171,7 +171,7 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
                         {c.status === 'COMPLETED' ? ` · received ${formatDate(c.updatedAt)}` : ''}
                         {c.lotNo ? ` · lot ${c.lotNo}` : ''}
                         {c.ratio ? ` · ratio ${c.ratio}` : ''}
-                        {c.noOfLayers ? ` · ${c.noOfLayers} layers` : ''}
+                        {Number(c.noOfLayers) > 0 ? ` · ${Number(c.noOfLayers)} layers` : ''}
                         {c.fabricItem ? ` · ${c.fabricItem.name}` : ''}
                         {c.fabricIssued != null ? ` · ${Number(c.fabricIssued)} ${c.fabricItem?.uom?.symbol ?? ''} given` : ''}
                         {c.status === 'COMPLETED' && c.fabricUsed != null ? ` · ${Number(c.fabricUsed)} used, ${Number(c.wastage ?? 0)} waste` : ''}

@@ -205,7 +205,7 @@ export interface JobCardCutting {
   cutterName: string | null
   lotNo: string | null
   ratio: string | null
-  noOfLayers: number | null
+  noOfLayers: number | string | null
   fabricIssued: string | number | null
   fabricUsed: string | number | null
   wastage: string | number | null

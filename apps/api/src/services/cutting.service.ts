@@ -48,7 +48,8 @@ export const cuttingSchema = z.object({
   fabricItemId: z.string().min(1, 'Say which fabric was cut'),
   fabricUsed: z.number().min(0, 'Fabric used cannot be negative').max(9_999_999),
   wastage: z.number().min(0, 'Waste cannot be negative').max(9_999_999).optional(),
-  noOfLayers: z.number().int().min(0).max(10_000).optional().nullable(),
+  // Part layers allowed (0.1, 2.5), kept to two decimal places like the column.
+  noOfLayers: z.number().min(0, 'Layers cannot be negative').max(10_000).transform((n) => Math.round(n * 100) / 100).optional().nullable(),
   lotNo: z.string().trim().max(60).optional().nullable(),
   ratio: z.string().trim().max(120).optional().nullable(),
   cutterName: z.string().trim().max(120).optional().nullable(),
@@ -269,7 +270,8 @@ export const cutterIssueSchema = z.object({
   issuedOn: z.coerce.date().optional(),
   lotNo: z.string().trim().max(60).optional().nullable(),
   ratio: z.string().trim().max(120).optional().nullable(),
-  noOfLayers: z.number().int().min(0).max(10_000).optional().nullable(),
+  // Part layers allowed (0.1, 2.5), kept to two decimal places like the column.
+  noOfLayers: z.number().min(0, 'Layers cannot be negative').max(10_000).transform((n) => Math.round(n * 100) / 100).optional().nullable(),
   /** The fabric given to the contractor for the lay, and how much of it. */
   fabricItemId: z.string().optional().nullable(),
   fabricGiven: z.number().min(0).max(9_999_999).optional().nullable(),
@@ -438,7 +440,7 @@ export async function createCutting(
       cutterName: data.cutterName || issue.cutterName,
       lotNo: data.lotNo || issue.lotNo,
       ratio: data.ratio || issue.ratio,
-      noOfLayers: data.noOfLayers ?? issue.noOfLayers,
+      noOfLayers: data.noOfLayers ?? (issue.noOfLayers == null ? null : Number(issue.noOfLayers)),
       fabricItemId: data.fabricItemId || issue.fabricItemId || '',
       planned: data.planned ?? Object.entries(breakupOf(issue.plannedBreakup)).map(([sizeId, qty]) => ({ sizeId, qty: Number(qty) })),
     }

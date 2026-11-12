@@ -18,7 +18,7 @@ interface Payload {
     fabricIssued: string | number | null
     fabricUsed: string | number | null
     wastage: string | number | null
-    noOfLayers: number | null
+    noOfLayers: number | string | null
     lotNo: string | null
     ratio: string | null
     cutterName: string | null
@@ -130,7 +130,7 @@ export default function PrintCutting() {
               <Fact label="Metres used" value={`${qty(used)} ${uom}${Number(c.wastage ?? 0) ? ` + ${qty(c.wastage!)} waste` : ''}`} />
               <Fact label="Average" value={average ? `${qty(Math.round(average * 1000) / 1000)} ${uom} a piece` : null} />
               <Fact label="Ratio" value={c.ratio} />
-              <Fact label="Layers" value={c.noOfLayers ? String(c.noOfLayers) : null} />
+              <Fact label="Layers" value={Number(c.noOfLayers) > 0 ? String(Number(c.noOfLayers)) : null} />
               <Fact label="Cut by" value={c.cutterName} />
             </>
           ),
