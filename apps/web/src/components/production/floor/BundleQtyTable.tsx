@@ -59,6 +59,9 @@ export function BundleQtyTable({
   empty,
   allowOver = false,
   extraColumns = [],
+  held,
+  onFill,
+  onClear,
 }: {
   rows: BundleRow[]
   columns: QtyColumn[]
@@ -71,16 +74,28 @@ export function BundleQtyTable({
   /** A count can come out higher than expected: allowed, and marked rather than refused. */
   allowOver?: boolean
   extraColumns?: ExtraColumn[]
+  /**
+   * Pieces of a row the extra columns already account for — the count-in's
+   * "made as another size": they belong to the row's count, so the boxes give
+   * only the rest and a row is over when both together pass what it has.
+   */
+  held?: (rowId: string) => number
+  /** In place of the fill button's and Clear's own work, when the extra columns take part in it. */
+  onFill?: () => void
+  onClear?: () => void
 }) {
   if (!rows.length) return <p className="text-muted-foreground text-sm">{empty}</p>
   const colTotal = (key: string) => rows.reduce((s, r) => s + n(values[r.id]?.[key]), 0)
+  const heldOf = (rowId: string) => held?.(rowId) ?? 0
   const fillAll = () => {
     if (!fill) return
+    if (onFill) return onFill()
     for (const r of rows) {
       for (const c of columns) onChange(r.id, c.key, c.key === fill.column ? String(r.available) : '')
     }
   }
   const clearAll = () => {
+    if (onClear) return onClear()
     for (const r of rows) for (const c of columns) onChange(r.id, c.key, '')
   }
   const totalAvailable = rows.reduce((s, r) => s + r.available, 0)
@@ -104,7 +119,7 @@ export function BundleQtyTable({
       {/* Phone: one card per bundle. */}
       <div className="space-y-2 sm:hidden">
         {rows.map((r) => {
-          const over = rowTotal(values, r.id, columns) > r.available
+          const over = rowTotal(values, r.id, columns) + heldOf(r.id) > r.available
           return (
             <div key={r.id} className={`rounded-lg border p-2.5 ${over ? 'border-destructive/60' : 'border-border'}`}>
               <div className="flex items-baseline justify-between gap-2">
@@ -123,7 +138,7 @@ export function BundleQtyTable({
                     <StepInput
                       className="form-input h-9 w-full text-right tabular-nums"
                       value={values[r.id]?.[c.key] ?? ''}
-                      max={r.available}
+                      max={Math.max(0, r.available - heldOf(r.id))}
                       placeholder="0"
                       onValueChange={(v) => onChange(r.id, c.key, v)}
                       aria-label={`${r.code} ${c.label}`}
@@ -151,7 +166,7 @@ export function BundleQtyTable({
               <th>Line · size</th>
               <th style={{ textAlign: 'right' }}>{availableLabel}</th>
               {columns.map((c) => (
-                <th key={c.key} style={{ textAlign: 'right' }} className={c.bad ? 'warn-text' : undefined}>
+                <th key={c.key} style={{ textAlign: 'right' }} className={`whitespace-nowrap ${c.bad ? 'warn-text' : ''}`}>
                   {c.label}
                 </th>
               ))}
@@ -162,7 +177,7 @@ export function BundleQtyTable({
           </thead>
           <tbody>
             {rows.map((r) => {
-              const over = rowTotal(values, r.id, columns) > r.available
+              const over = rowTotal(values, r.id, columns) + heldOf(r.id) > r.available
               return (
                 <tr key={r.id}>
                   <td className="font-mono text-xs">{r.code}</td>
@@ -176,7 +191,7 @@ export function BundleQtyTable({
                       <StepInput
                         className={`form-input h-8 text-right text-xs tabular-nums ${over ? 'border-destructive/60' : ''}`}
                         value={values[r.id]?.[c.key] ?? ''}
-                        max={r.available}
+                        max={Math.max(0, r.available - heldOf(r.id))}
                         placeholder="0"
                         onValueChange={(v) => onChange(r.id, c.key, v)}
                         aria-label={`${r.code} ${c.label}`}

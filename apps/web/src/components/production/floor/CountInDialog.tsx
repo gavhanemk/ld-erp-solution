@@ -23,6 +23,12 @@ import { bundleShort, newClientKey, pcs, type FlowTransfer } from './types'
  * the table, so pieces made as another size are recorded with the count,
  * bundle by bundle: saved together, by the same rules as Change sizes on the
  * sheet (12 Nov 2026 — the user asked for the button here, bundle-wise).
+ *
+ * With sizes on, a bundle's count is split: the count box becomes "Same size",
+ * the pieces that keep the bundle's size, and Pcs are those made as another
+ * size — both are counted in. Pieces typed in Pcs come out of Same size, so a
+ * bundle's count stays as it was. (The user counted a 20-piece bundle as 10 +
+ * 10 made as M and expected 20 counted in, not 10.)
  */
 export function CountInDialog({
   transfer,
@@ -62,7 +68,7 @@ export function CountInDialog({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [clientKey] = useState(newClientKey)
-  // Change sizes: on each bundle, the size its pieces are made as and how many of those counted in.
+  // Change sizes: on each bundle, the size its pieces are made as and how many.
   const [sizing, setSizing] = useState(false)
   const [madeAs, setMadeAs] = useState<Record<string, { toSizeId: string; qty: string }>>({})
   const [reason, setReason] = useState('')
@@ -71,12 +77,15 @@ export function CountInDialog({
   const [tried, setTried] = useState(false)
   const offerSizes = !!sizes && sizes.length > 1 && !transfer.vendor
 
-  const counted = rows.map((r) => ({ lineId: r.id, qty: Number(values[r.id]?.qty) || 0 }))
+  // A bundle's count: its box (Same size, with sizes on) and the pieces made as another size.
+  const sameOf = (lineId: string) => Number(values[lineId]?.qty) || 0
+  const madeOf = (lineId: string) => (sizing && madeAs[lineId]?.toSizeId ? Number(madeAs[lineId].qty) || 0 : 0)
+  const countOf = (lineId: string) => sameOf(lineId) + madeOf(lineId)
+  const counted = rows.map((r) => ({ lineId: r.id, qty: countOf(r.id) }))
   const total = counted.reduce((s, l) => s + l.qty, 0)
   const pending = rows.reduce((s, r) => s + r.available, 0)
-  const shortBy = rows.reduce((s, r) => s + Math.max(0, r.available - (Number(values[r.id]?.qty) || 0)), 0)
-  const overBy = rows.reduce((s, r) => s + Math.max(0, (Number(values[r.id]?.qty) || 0) - r.available), 0)
-  const countedOf = (lineId: string) => Number(values[lineId]?.qty) || 0
+  const shortBy = rows.reduce((s, r) => s + Math.max(0, r.available - countOf(r.id)), 0)
+  const overBy = rows.reduce((s, r) => s + Math.max(0, countOf(r.id) - r.available), 0)
   const sizeCode = (id: string) => sizes?.find((z) => z.id === id)?.code ?? '—'
 
   // A bundle cut in a size, not made by an earlier change (pieces change size once), can change size here.
@@ -92,10 +101,7 @@ export function CountInDialog({
   const changeProblem = (lineId: string) => {
     const m = madeAs[lineId]
     if (!sizing || !m?.toSizeId) return null
-    const q = Number(m.qty) || 0
-    if (q <= 0) return 'Enter how many pieces.'
-    if (q > countedOf(lineId)) return countedOf(lineId) ? `Only ${pcs(countedOf(lineId))} counted in.` : 'Count it in first.'
-    return null
+    return (Number(m.qty) || 0) <= 0 ? 'Enter how many pieces.' : null
   }
   const firstWrong = changes.find((c) => changeProblem(c.row.id))
   const reasonMissing = changes.length > 0 && reason.trim().length < 5
@@ -106,15 +112,40 @@ export function CountInDialog({
       : null
   const blocker = !total && !close ? 'Enter what was counted in, or close it as short.' : sizeBlocker
 
-  const pick = (lineId: string, toSizeId: string) =>
-    setMadeAs((x) => {
+  const setSame = (lineId: string, qty: number) => setValues((x) => ({ ...x, [lineId]: { ...x[lineId], qty: String(qty) } }))
+  const pick = (r: BundleRow, toSizeId: string) => {
+    const had = madeAs[r.id]
+    if (!toSizeId) {
+      // Back to its own size: the pieces return to Same size.
+      if (had?.toSizeId) setSame(r.id, sameOf(r.id) + (Number(had.qty) || 0))
+      setMadeAs((x) => {
+        const next = { ...x }
+        delete next[r.id]
+        return next
+      })
+      return
+    }
+    // Another size for the same pieces.
+    if (had?.toSizeId) return setMadeAs((x) => ({ ...x, [r.id]: { ...x[r.id], toSizeId } }))
+    // The bundle's pieces not counted as the same size, if any; otherwise how many is typed, and taken from Same size.
+    const rest = Math.max(0, r.available - sameOf(r.id))
+    setMadeAs((x) => ({ ...x, [r.id]: { toSizeId, qty: rest ? String(rest) : '' } }))
+  }
+  /** Pieces made as another size come out of Same size: the bundle's count stays as it was. */
+  const setMade = (lineId: string, v: string) => {
+    const moved = (Number(v) || 0) - (Number(madeAs[lineId]?.qty) || 0)
+    const same = sameOf(lineId)
+    const nextSame = Math.max(0, same - moved)
+    setMadeAs((x) => ({ ...x, [lineId]: { ...x[lineId], qty: v } }))
+    if (nextSame !== same) setSame(lineId, nextSame)
+  }
+  const stopSizing = () => {
+    // The pieces made as other sizes go back to Same size: the count stays as it was.
+    setValues((x) => {
       const next = { ...x }
-      if (!toSizeId) delete next[lineId]
-      // Picked for a bundle: all of it counted in, to begin with — fewer is typed over it.
-      else next[lineId] = { toSizeId, qty: x[lineId]?.qty || String(countedOf(lineId)) }
+      for (const [id, m] of Object.entries(madeAs)) if (m.toSizeId) next[id] = { ...next[id], qty: String((Number(next[id]?.qty) || 0) + (Number(m.qty) || 0)) }
       return next
     })
-  const stopSizing = () => {
     setSizing(false)
     setMadeAs({})
   }
@@ -136,6 +167,7 @@ export function CountInDialog({
     setError(null)
     try {
       const res = await api.post<{ message?: string }>(`/production/transfers/${transfer.id}/receive`, {
+        // Each bundle's whole count, whatever size its pieces are made as.
         lines: counted.filter((l) => l.qty > 0),
         close,
         receivedBy: receivedBy.trim() || null,
@@ -180,7 +212,7 @@ export function CountInDialog({
                 <SmartSelect
                   className={`form-input h-8 py-0 text-xs ${m?.toSizeId ? 'border-primary/60 text-primary font-medium' : ''}`}
                   value={m?.toSizeId ?? ''}
-                  onChange={(e) => pick(r.id, e.target.value)}
+                  onChange={(e) => pick(r, e.target.value)}
                   aria-label={`${r.code} made as size`}
                 >
                   <option value="">Same ({r.size})</option>
@@ -210,9 +242,9 @@ export function CountInDialog({
                 <StepInput
                   className={`form-input h-8 text-right text-xs tabular-nums ${wrong ? 'border-destructive/60' : ''}`}
                   value={m.qty}
-                  max={countedOf(r.id)}
+                  max={r.available}
                   placeholder="0"
-                  onValueChange={(v) => setMadeAs((x) => ({ ...x, [r.id]: { ...x[r.id], qty: v } }))}
+                  onValueChange={(v) => setMade(r.id, v)}
                   aria-label={`${r.code} pieces made as another size`}
                   aria-invalid={wrong}
                 />
@@ -263,7 +295,8 @@ export function CountInDialog({
             {moving > 0 && (
               <span className="text-primary">
                 {' '}
-                {pcs(moving)} pcs made as another size: {changes.length} new {changes.length === 1 ? 'bundle' : 'bundles'}, stickers after saving.
+                {pcs(total - moving)} keep their size, {pcs(moving)} made as another size: {changes.length} new {changes.length === 1 ? 'bundle' : 'bundles'}, stickers
+                after saving.
               </span>
             )}
           </>
@@ -316,8 +349,9 @@ export function CountInDialog({
         {sizing && (
           <div className="border-primary/30 bg-primary/5 mb-3 rounded-lg border p-3">
             <p className="text-foreground text-xs">
-              On a bundle whose pieces are made as another size, pick the size and say how many of those counted in. Each bundle&apos;s changed pieces become a new
-              bundle with its own sticker; the order&apos;s planned sizes stay as they are.
+              On a bundle whose pieces are made as another size, pick the size and enter how many. They are taken from <b>Same size</b>, so the bundle&apos;s count stays
+              as it was: Same size + made as another size = what arrived, and all of it is counted in. Each bundle&apos;s changed pieces become a new bundle with its own
+              sticker; the order&apos;s planned sizes stay as they are.
             </p>
             <label className="mt-2 block sm:max-w-lg">
               <span className="form-label">
@@ -338,7 +372,7 @@ export function CountInDialog({
         )}
         <BundleQtyTable
           rows={rows}
-          columns={[{ key: 'qty', label: 'Counted' }]}
+          columns={[{ key: 'qty', label: sizing ? 'Same size' : 'Counted' }]}
           values={values}
           onChange={(row, col, v) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: v } }))}
           availableLabel="Sent, not counted"
@@ -346,6 +380,17 @@ export function CountInDialog({
           allowOver
           empty="Everything on this card has been counted in."
           extraColumns={sizeColumns}
+          // With sizes on, a bundle's pieces made as another size are part of its count.
+          held={sizing ? madeOf : undefined}
+          onFill={sizing ? () => setValues(Object.fromEntries(rows.map((r) => [r.id, { qty: String(Math.max(0, r.available - madeOf(r.id))) }]))) : undefined}
+          onClear={
+            sizing
+              ? () => {
+                  setValues(Object.fromEntries(rows.map((r) => [r.id, { qty: '' }])))
+                  setMadeAs((x) => Object.fromEntries(Object.entries(x).map(([id, m]) => [id, { ...m, qty: '' }])))
+                }
+              : undefined
+          }
         />
         {/* Each change in a line, so nobody has to scroll the table to check them. */}
         {changes.length > 0 && (
