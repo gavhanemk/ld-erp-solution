@@ -145,12 +145,12 @@ export function BundleQtyTable({
         </div>
       )}
 
-      {/* Phone: one card per bundle. */}
-      <div className="space-y-2 sm:hidden">
+      {/* Phone: one card per bundle. A grid to the keyboard: Enter goes down to the same box of the next bundle. */}
+      <div className="space-y-2 sm:hidden" data-grid>
         {rows.map((r) => {
           const over = rowTotal(values, r.id, columns) + heldOf(r.id) > r.available
           return (
-            <div key={r.id} className={`rounded-lg border p-2.5 ${over ? 'border-destructive/60' : 'border-border'}`}>
+            <div key={r.id} className={`rounded-lg border p-2.5 ${over ? 'border-destructive/60' : 'border-border'}`} data-grid-row>
               <div className="flex items-baseline justify-between gap-2">
                 <span className="flex items-center gap-2 font-mono text-xs">
                   {tickBox(r)}
@@ -189,9 +189,10 @@ export function BundleQtyTable({
         })}
       </div>
 
-      {/* Wider: a table. */}
+      {/* Wider: a table — a grid to the keyboard, so Enter types a column straight down, bundle after
+          bundle, and Tab goes across (12 Nov 2026: Enter went across the row). */}
       <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
-        <table className="data-table table-totals w-full">
+        <table className="data-table table-totals w-full" data-grid>
           <thead>
             <tr className="bg-secondary">
               {select && (
@@ -227,7 +228,7 @@ export function BundleQtyTable({
             {rows.map((r) => {
               const over = rowTotal(values, r.id, columns) + heldOf(r.id) > r.available
               return (
-                <tr key={r.id} className={select?.on(r.id) ? 'bg-primary/5' : undefined}>
+                <tr key={r.id} className={select?.on(r.id) ? 'bg-primary/5' : undefined} data-grid-row>
                   {select && <td className="w-8">{tickBox(r)}</td>}
                   <td
                     className={`font-mono text-xs ${select?.can(r) ? 'cursor-pointer select-none' : ''}`}

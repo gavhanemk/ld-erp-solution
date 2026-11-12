@@ -576,6 +576,22 @@ export function KeyboardLayer() {
       // there is no line to make before it.
       const toRow = (dir: 1 | -1) => {
         const peers = rows.filter((r) => kindOf(r) === kindOf(row))
+        // In a table, the next line that has a box in this column: a line without one (a bundle with no
+        // size change has no pieces box) is passed over, rather than landing in some other column.
+        const td = el.closest('td')
+        if (row instanceof HTMLTableRowElement && td) {
+          for (let i = peers.indexOf(row) + dir; i >= 0 && i < peers.length; i += dir) {
+            const line = peers[i]
+            const sameTd = line instanceof HTMLTableRowElement ? (line.cells[td.cellIndex] as HTMLElement | undefined) : undefined
+            const found = sameTd ? cells(line).find((c) => sameTd.contains(c)) : undefined
+            if (found) {
+              e.preventDefault()
+              found.focus()
+              if (found instanceof HTMLInputElement && isTyping(found)) found.select()
+              return
+            }
+          }
+        }
         const other = peers[peers.indexOf(row) + dir]
         if (other) {
           e.preventDefault()
