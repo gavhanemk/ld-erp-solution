@@ -333,9 +333,12 @@ export function lotOf(d: Pick<JobCardDetail, 'card' | 'cuttings'>): { lot: strin
   return lots.length ? { lot: lots.join(', '), fromLays: true } : null
 }
 
-/** The reference the floor's papers carry: order no. / project ID / design no. */
+/**
+ * The reference the floor's papers carry: order no. / project ID / design no., as the paper sheets'
+ * "LDCM-06/DC-46/DCSHRFS01001099-02" — a number written once even when two of them are the same.
+ */
 export const refNo = (c: Pick<JobCardHeader, 'orderNo' | 'projectId' | 'designNo' | 'jobCardNumber'>) =>
-  [c.orderNo, c.projectId, c.designNo].filter(Boolean).join('/') || c.jobCardNumber
+  [...new Set([c.orderNo, c.projectId, c.designNo].map((v) => v?.trim()).filter(Boolean))].join('/') || c.jobCardNumber
 
 export type Stage = 'CUTTING' | 'STITCHING' | 'OTHER' | 'QC'
 export const stageOf = (s: { kind: string; isQcStep: boolean }): Stage => (isCheck(s) ? 'QC' : s.kind === 'CUTTING' ? 'CUTTING' : s.kind === 'STITCHING' ? 'STITCHING' : 'OTHER')

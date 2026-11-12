@@ -747,6 +747,9 @@ router.get('/job-cards/:id', requirePermission(MODULE, 'view'), async (req, res)
 
 /** GET /job-cards/:id/print?stepId= — the job card, or one of its sheets, to print. */
 router.get('/job-cards/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  // As when the card is opened: anything the order has learnt since fills its blanks before it prints.
+  const card = await prisma.jobCard.findUnique({ where: { id: req.params.id }, select: { moId: true } })
+  if (card) await prisma.$transaction((tx) => fillJobCardBlanks(tx, card.moId), { timeout: 30_000 })
   const detail = await jobCardDetail(prisma, req.params.id)
   const step = detail.steps.find((s) => s.id === text(req.query.stepId))
   const header = await getPrintHeader(!step ? 'JC' : step.kind === 'CUTTING' ? 'CUT' : 'SHEET')
