@@ -89,6 +89,15 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
   }, [d.cuttings, everyone, routed])
   // A name nobody has used before is fine, but worth a second look for spelling.
   const typedNew = !!cutterName.trim() && !known.some((k) => k.value.toLowerCase() === cutterName.trim().replace(/\s+/g, ' ').toLowerCase())
+  /*
+   * The contractor is picked from a dropdown — the routing's, this order's,
+   * then everyone else — so another one is one click away. A typing box with
+   * suggestions only listed names matching what was already in it, so with
+   * the routing's name filled in nobody else could be seen. "New contractor…"
+   * switches to typing, for somebody not on the list yet.
+   */
+  const [typing, setTyping] = useState(false)
+  const NEW = '__new__'
   const sizes = useMemo(
     () =>
       (d.line?.sizes ?? []).map((z) => {
@@ -164,8 +173,46 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
         <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="block sm:col-span-2">
             <span className="form-label">Cutting contractor</span>
-            <SuggestInput className="form-input" value={cutterName} maxLength={120} placeholder="Ramesh (cutting master)" onValueChange={setCutterName} suggestions={known} aria-label="Cutting contractor" />
-            {typedNew && known.length > 0 && <span className="form-help">A new contractor. Check the spelling: the same name written two ways counts as two people.</span>}
+            {typing ? (
+              <>
+                <SuggestInput className="form-input" value={cutterName} maxLength={120} placeholder="Ramesh (cutting master)" onValueChange={setCutterName} suggestions={known} aria-label="Cutting contractor" autoFocus />
+                <span className="form-help">
+                  {typedNew && known.length > 0 ? 'A new contractor. Check the spelling: the same name written two ways counts as two people. ' : ''}
+                  <button
+                    type="button"
+                    className="text-primary hover:underline"
+                    onClick={() => {
+                      setTyping(false)
+                      setCutterName(routed ?? '')
+                    }}
+                  >
+                    Pick from the list instead
+                  </button>
+                </span>
+              </>
+            ) : (
+              <SmartSelect
+                className="form-input"
+                value={known.some((k) => k.value === cutterName) ? cutterName : ''}
+                onChange={(e) => {
+                  if (e.target.value === NEW) {
+                    setTyping(true)
+                    setCutterName('')
+                  } else {
+                    setCutterName(e.target.value)
+                  }
+                }}
+                aria-label="Cutting contractor"
+              >
+                <option value="">Choose the cutting contractor…</option>
+                {known.map((k) => (
+                  <option key={k.value} value={k.value}>
+                    {k.label ? `${k.value} — ${k.label}` : k.value}
+                  </option>
+                ))}
+                <option value={NEW}>+ New contractor…</option>
+              </SmartSelect>
+            )}
           </label>
           <label className="block">
             <span className="form-label">Issued on</span>
