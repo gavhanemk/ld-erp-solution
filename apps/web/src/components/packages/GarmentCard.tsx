@@ -35,7 +35,8 @@ export interface GarmentDetail {
     lot: string | null
     jobCard: string | null
     /** Made from another bundle when its pieces were made as this size at stitching: cut as M, made as L. */
-    madeFrom?: { code: string; size: string; step: string } | null
+    /** inBundle: made as this size in the bundle it was cut in (since 12 Nov 2026), not moved to another. */
+    madeFrom?: { code: string; size: string; step: string; inBundle?: boolean } | null
   } | null
   production: Array<{
     date: string
@@ -199,7 +200,9 @@ export function GarmentCard({ g, onChange, onDone }: { g: GarmentDetail; onChang
                 {g.bundle.cutOrder ? `, cut on ${g.bundle.cutOrder} ${day(g.bundle.cutDate)}` : ''}
                 {g.bundle.jobCard ? ` · job card ${g.bundle.jobCard}` : ''}.{' '}
                 {g.bundle.madeFrom
-                  ? `Its pieces were cut as ${g.bundle.madeFrom.size} in bundle ${shortBundle(g.bundle.madeFrom.code)} and made as ${g.size || 'this size'} at ${g.bundle.madeFrom.step}: the steps before that are ${shortBundle(g.bundle.madeFrom.code)}'s.`
+                  ? g.bundle.madeFrom.inBundle
+                    ? `Cut as ${g.bundle.madeFrom.size} and made as ${g.size || 'this size'} at ${g.bundle.madeFrom.step}, in its own bundle ${shortBundle(g.bundle.madeFrom.code)}.`
+                    : `Its pieces were cut as ${g.bundle.madeFrom.size} in bundle ${shortBundle(g.bundle.madeFrom.code)} and made as ${g.size || 'this size'} at ${g.bundle.madeFrom.step}: the steps before that are ${shortBundle(g.bundle.madeFrom.code)}'s.`
                   : "The steps below are that bundle's."}
               </p>
               <ol className="space-y-1.5">

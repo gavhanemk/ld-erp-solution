@@ -1,16 +1,19 @@
 // Size jumps at stitching, end to end, inside one transaction that always
 // throws (nothing is kept): pieces of a bundle cut as one size made as another
-// size of the order line at stitching on our own floor. Each change makes a
-// new bundle of the new size from the old one; the order's planned sizes and
-// the sales order are never edited; finished goods are taken in the revised
-// sizes; a change can be undone while its pieces have not moved on.
+// size of the order line at stitching on our own floor. Since 12 Nov 2026 the
+// pieces change size inside their own bundle — no bundle is made, so the
+// bundle count and the cutting stickers stay as cut — and a bundle can hold two
+// sizes from then on; the order's planned sizes and the sales order are never
+// edited; finished goods are taken by the size the pieces are now; a change
+// can be undone while its pieces have not moved on.
 //
-// Covers: no change; one size to another; two sizes swapped both ways in one
-// save; several in one save and in two saves; pieces from several bundles and
-// lays; pieces changing size only once; from pieces in hand and done;
-// part of the order packed before the change; part of a bundle gone on before
-// the change; finished goods by revised size; reconciliation; duplicates; two
-// saves in a row; undo, undo refused, cancelling a receipt; and every refusal.
+// Covers: no change; a change undone; two sizes swapped both ways in one save;
+// one size to another inside the bundle (ledger, rows, revised sizes,
+// duplicates); pieces changing size only once and every refusal; a whole
+// bundle becoming the new size (its sticker printed again); a count-in with a
+// size change; a bundle holding two sizes sent on whole and in part; undo
+// refused and done; finished goods by the size the pieces are now, refused,
+// and a receipt cancelled; and the ledger adding up for every bundle and size.
 //
 // Rolled back: everything happens inside one transaction that always throws,
 // so nothing is kept and no number series moves. It needs the demo masters
@@ -317,57 +320,61 @@ async function main() {
         const L0: Line[] = [[A5, S3, 5]]
         const s0 = await save(L0, 'Measured big at the line')
         await checkRevised('12. a change moves the revised sizes (size 2 −5, size 3 +5)')
-        const c0 = s0.bundleIds[0]
         check('12. the job card totals do not move with a size change', totalsOf(await card()) === totals0)
         await undoSizeChange(tx, s0.eventId, 'Measured again: they were right', user.id)
         expect(L0, -1)
         const sc0 = await tx.sizeChange.findFirstOrThrow({ where: { eventId: s0.eventId } })
-        check('12. undone: the 5 are back in their bundle, the new bundle holds none', (await held(STI, A5.id, 'WIP')) === 25 && (await held(STI, c0)) === 0)
+        const a5 = await tx.wipEntry.groupBy({ by: ['sizeId'], where: { bundleId: A5.id, stepId: STI, bucket: 'WIP' }, _sum: { qty: true } })
+        check(
+          '12. undone: A5 holds its 25, all of size 2 again',
+          (await held(STI, A5.id, 'WIP')) === 25 && (a5.find((r) => r.sizeId === S2.id)?._sum.qty ?? 0) === 25 && (a5.find((r) => r.sizeId === S3.id)?._sum.qty ?? 0) === 0,
+        )
         check(
           '12. the change stays on record as undone, with who and why',
           !!sc0.undoneAt && sc0.undoneById === user.id && sc0.undoReason === 'Measured again: they were right' && !!(await tx.wipEvent.findUniqueOrThrow({ where: { id: s0.eventId } })).reversedAt,
         )
         await checkRevised('12. undone: every size is back to its planned count')
         jc = await card()
-        check('12. the undone bundle is not listed on the job card; totals as before', !jc.bundles.some((b) => b.id === c0) && totalsOf(jc) === totals0)
+        check('12. no bundle was made: the job card lists its 12 bundles as cut; totals as before', jc.bundles.length === 12 && totalsOf(jc) === totals0, `${jc.bundles.length} bundles`)
         await refuses('12. a size change is undone only once', () => undoSizeChange(tx, s0.eventId, 'twice over', user.id), 'ALREADY_UNDONE')
 
+        // Since 12 Nov 2026 a size change makes no bundle: the pieces change size inside their own
+        // bundle, on the ledger, where they lie. These read a bundle's pieces size by size.
+        const bundleCount = () => tx.productionBundle.count({ where: { moId: mo.id } })
+        const sizesAt = async (stepId: string, bundleId: string) => {
+          const rows = await tx.wipEntry.groupBy({ by: ['sizeId'], where: { bundleId, stepId, vendorId: null, bucket: { in: ['WIP', 'DONE'] } }, _sum: { qty: true } })
+          const m = new Map(rows.map((r) => [r.sizeId, r._sum.qty ?? 0]))
+          return (z: { id: string }) => m.get(z.id) ?? 0
+        }
+
         // ═══ The floor's swap, in one save: 20 of size 1 made as size 2 and 25 of size 2 made as
-        // size 1 (38 → 40 20 pcs, 40 → 38 25 pcs), from five bundles. Tried, then rolled back. ═══
+        // size 1, from five bundles — inside those five bundles. Tried, then rolled back. ═══
         await tx.$executeRawUnsafe('SAVEPOINT swap')
         {
-          const noSwap = await lastNo()
+          const count0 = await bundleCount()
           const sw = await changeSizes(
             tx,
             mo.id,
             input([[A1, S2, 10], [A2, S2, 10], [A5, S1, 10], [A6, S1, 10], [A7, S1, 5]], 'Size 1 measured as size 2, and size 2 as size 1'),
             user.id,
           )
-          const made = await tx.productionBundle.findMany({ where: { id: { in: sw.bundleIds } }, orderBy: { bundleNo: 'asc' } })
+          const rows = await tx.sizeChange.findMany({ where: { eventId: sw.eventId } })
+          check(
+            'swap: one save, five size-change rows, all inside their own bundles; no bundle made; none wholly changed',
+            rows.length === 5 && rows.every((r) => r.toBundleId === null) && (await bundleCount()) === count0 && sw.bundleIds.length === 0,
+            `${await bundleCount()} bundles`,
+          )
+          const [a1, a7] = await Promise.all([sizesAt(STI, A1.id), sizesAt(STI, A7.id)])
+          const kept = await Promise.all([A1, A2, A5, A6, A7].map((b) => held(STI, b.id, 'WIP')))
+          check(
+            'swap: every bundle still holds its 25; A1 is 15 of size 1 and 10 of size 2, A7 20 of size 2 and 5 of size 1',
+            kept.every((q) => q === 25) && a1(S1) === 15 && a1(S2) === 10 && a7(S2) === 20 && a7(S1) === 5,
+            `held ${kept.join('/')}; A1 ${a1(S1)}+${a1(S2)}; A7 ${a7(S2)}+${a7(S1)}`,
+          )
           const os = (await orderSizes(tx, mo.id)).find((l) => l.moLineId === lineA.id)!
           const rev = (z: { id: string }) => os.sizes.find((s) => s.sizeId === z.id)!.revised
           const swapCard = await card()
-          check(
-            'swap: one save takes 20 of size 1 to size 2 and 25 of size 2 to size 1, into 5 new bundles',
-            (await tx.sizeChange.count({ where: { eventId: sw.eventId } })) === 5 &&
-              made.length === 5 &&
-              made.every((b, i) => b.bundleNo === noSwap + 1 + i && b.splitAtStepId === STI) &&
-              made.filter((b) => b.sizeId === S2.id).length === 2 &&
-              made.filter((b) => b.sizeId === S1.id).length === 3,
-            made.map((b) => `${b.code} ${b.qty}`).join(', '),
-          )
-          const kept = await Promise.all([A1, A2, A5, A6, A7].map((b) => held(STI, b.id, 'WIP')))
-          const took = await Promise.all(made.map((b) => held(STI, b.id, 'WIP')))
-          check(
-            'swap: each old bundle holds what it kept, each new bundle what it took',
-            kept.join('/') === '15/15/15/15/20' && took.every((q, i) => q === made[i].qty) && took.reduce((s, q) => s + q, 0) === 45,
-            `kept ${kept.join('/')}; took ${took.join('/')}`,
-          )
-          check(
-            'swap: size 1 = 100 − 20 + 25 = 105, size 2 = 100 − 25 + 20 = 95, size 3 untouched; still 300 in all',
-            rev(S1) === 105 && rev(S2) === 95 && rev(S3) === 100,
-            `${rev(S1)}/${rev(S2)}/${rev(S3)}`,
-          )
+          check('swap: size 1 = 105, size 2 = 95, size 3 untouched', rev(S1) === 105 && rev(S2) === 95 && rev(S3) === 100, `${rev(S1)}/${rev(S2)}/${rev(S3)}`)
           check(
             'swap: stitching shows both ways (size 1 in 25, out 20; size 2 in 20, out 25); the job card totals do not move',
             sizeFig(swapCard, S1.id, STI).sizeIn === 25 &&
@@ -380,502 +387,138 @@ async function main() {
         await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT swap')
         await checkRevised('swap rolled back: every size is back to its planned count')
 
-        // ═══ 2. One size to another: 20 of B001 (size 1) made as size 2 ═══
-        const no1 = await lastNo()
+        // ═══ 2. One size to another, inside the bundle: 20 of A1 (size 1) made as size 2 ═══
+        const count0 = await bundleCount()
         const k1 = `k-size-1-${stamp}`
         const L1: Line[] = [[A1, S2, 20]]
         const s1 = await save(L1, 'Panels cut large, made as the next size', { clientKey: k1, personName: 'Line 3' })
-        const C1 = await tx.productionBundle.findUniqueOrThrow({ where: { id: s1.bundleIds[0] } })
-        check(
-          `2. a new bundle for the 20: made from ${A1.code} at stitching, numbered next, size 2, same lay`,
-          s1.bundleIds.length === 1 &&
-            C1.parentId === A1.id &&
-            C1.splitAtStepId === STI &&
-            C1.bundleNo === no1 + 1 &&
-            C1.code === codeFor(no1 + 1) &&
-            C1.sizeId === S2.id &&
-            C1.qty === 20 &&
-            C1.moLineId === lineA.id &&
-            C1.cuttingOrderId === A1.cuttingOrderId,
-          `${C1.code} size ${C1.sizeId === S2.id ? S2.code : C1.sizeId} qty ${C1.qty}`,
-        )
+        check('2. no bundle is made: the count stays as cut, and nothing to print again', (await bundleCount()) === count0 && s1.bundleIds.length === 0, `${await bundleCount()} bundles`)
         const sc1 = await tx.sizeChange.findMany({ where: { eventId: s1.eventId } })
         check(
-          '2. one size-change row: from bundle and size, to bundle and size, pieces, reason, who',
+          '2. one size-change row: from A1 and size 1, to size 2 in the same bundle, pieces, reason, who',
           sc1.length === 1 &&
-            sc1[0].moId === mo.id &&
-            sc1[0].moLineId === lineA.id &&
-            sc1[0].stepId === STI &&
             sc1[0].fromBundleId === A1.id &&
-            sc1[0].toBundleId === C1.id &&
+            sc1[0].toBundleId === null &&
             sc1[0].fromSizeId === S1.id &&
             sc1[0].toSizeId === S2.id &&
             sc1[0].qty === 20 &&
+            sc1[0].stepId === STI &&
             sc1[0].reason === 'Panels cut large, made as the next size' &&
-            sc1[0].createdById === user.id &&
-            !sc1[0].undoneAt,
+            sc1[0].createdById === user.id,
         )
         const ev1 = await tx.wipEvent.findUniqueOrThrow({ where: { id: s1.eventId }, include: { entries: true } })
         check(
-          '2. one SIZE_CHANGE entry at stitching; the new bundle’s pieces carry the new size',
-          ev1.type === 'SIZE_CHANGE' &&
-            ev1.stepId === STI &&
-            ev1.personName === 'Line 3' &&
-            ev1.entries.filter((e) => e.bundleId === C1.id).every((e) => e.sizeId === S2.id && e.qty > 0) &&
-            ev1.entries.filter((e) => e.bundleId === A1.id).every((e) => e.sizeId === S1.id && e.qty < 0) &&
-            ev1.entries.reduce((s, e) => s + e.qty, 0) === 0,
+          '2. on the ledger: A1 at stitching gives 20 of size 1 and takes 20 of size 2 — no piece moves',
+          ev1.entries.length === 2 &&
+            ev1.entries.every((e) => e.bundleId === A1.id && e.stepId === STI && e.bucket === 'WIP') &&
+            ev1.entries.some((e) => e.sizeId === S1.id && e.qty === -20) &&
+            ev1.entries.some((e) => e.sizeId === S2.id && e.qty === 20),
+          ev1.entries.map((e) => `${e.qty}`).join(' '),
         )
-        check(`2. ${A1.code} keeps 5 in hand, the new bundle holds 20`, (await held(STI, A1.id, 'WIP')) === 5 && (await held(STI, C1.id, 'WIP')) === 20)
-        await checkRevised('2. revised: size 1 down 20, size 2 up 20')
-        jc = await card()
-        check('2. the job card totals are unchanged', totalsOf(jc) === totals0 && jc.lines[0].totalQty === 300)
-        check('2. the order’s planned sizes and the sales order are not touched', (await moSizes()) === moSizes0 && (await soSizes()) === soSizes0)
-        check(
-          '2. stitching by size: size 1 shows 20 out, size 2 shows 20 in',
-          sizeFig(jc, S1.id, STI).sizeOut === 20 && sizeFig(jc, S1.id, STI).sizeIn === 0 && sizeFig(jc, S2.id, STI).sizeIn === 20 && sizeFig(jc, S2.id, STI).sizeOut === 0 && sizeFig(jc, S3.id, STI).sizeIn + sizeFig(jc, S3.id, STI).sizeOut === 0,
-        )
-        check(
-          '2. in hand at stitching by size: 80 of size 1, 95 of size 2, 100 of size 3',
-          sizeFig(jc, S1.id, STI).inHand === 80 && sizeFig(jc, S2.id, STI).inHand === 95 && sizeFig(jc, S3.id, STI).inHand === 100,
-          SIZES.map((z) => sizeFig(jc, z.id, STI).inHand).join('/'),
-        )
-        check(
-          '2. later steps wait for the revised counts: finishing 80 / 95 / 100, packing the same',
-          [FIN, PKG].every((st) => sizeFig(jc, S1.id, st).yetToCome === 80 && sizeFig(jc, S2.id, st).yetToCome === 95 && sizeFig(jc, S3.id, st).yetToCome === 100),
-          [FIN, PKG].map((st) => SIZES.map((z) => sizeFig(jc, z.id, st).yetToCome).join('/')).join(' · '),
-        )
-        check('2. stitching still has nothing of any size yet to come', SIZES.every((z) => sizeFig(jc, z.id, STI).yetToCome === 0))
-        const listed = jc.bundles.find((b) => b.id === C1.id)
-        check(
-          '2. the job card lists the new bundle with the bundle and size it came from',
-          !!listed && listed.parent?.id === A1.id && listed.parent?.code === A1.code && listed.parent?.size === S1.code && listed.madeAtStepId === STI && listed.undone === false,
-        )
-        const h1 = (await sizeChangeHistory(tx, { moId: mo.id })).find((h) => h.eventId === s1.eventId)
-        check(
-          '2. the history shows it: step, reason, who, and the move',
-          !!h1 &&
-            h1.step.id === STI &&
-            h1.reason === 'Panels cut large, made as the next size' &&
-            h1.personName === 'Line 3' &&
-            !h1.undone &&
-            h1.moves.length === 1 &&
-            h1.moves[0].from.code === A1.code &&
-            h1.moves[0].from.size === S1.code &&
-            h1.moves[0].to.code === C1.code &&
-            h1.moves[0].to.size === S2.code &&
-            h1.moves[0].qty === 20,
-        )
-        check('2. nothing is posted to stock by a size change', (await tx.stockLedger.count({ where: { itemId: fgA.id } })) === 1)
+        const a1 = await sizesAt(STI, A1.id)
+        check('2. A1 holds its 25 at stitching: 5 of size 1, 20 of size 2', (await held(STI, A1.id)) === 25 && a1(S1) === 5 && a1(S2) === 20, `${a1(S1)} + ${a1(S2)}`)
+        await checkRevised('2. revised: size 1 −20, size 2 +20')
+        const again = await changeSizes(tx, mo.id, input(L1, 'Panels cut large, made as the next size', { clientKey: k1 }), user.id)
+        check('2. the same save sent twice is kept once', again.duplicate === true && (await tx.sizeChange.count({ where: { fromBundleId: A1.id } })) === 1)
 
-        // ═══ 10. Duplicates ═══
-        const bundlesBefore = await tx.productionBundle.count({ where: { moId: mo.id } })
-        const dup = await changeSizes(tx, mo.id, input(L1, 'Panels cut large, made as the next size', { clientKey: k1 }), user.id)
+        // ═══ 3. Pieces change size once: only A1's 5 still of size 1 can change ═══
+        await refuses('3. 6 more of A1 is more than its 5 still of size 1', () => changeSizes(tx, mo.id, input([[A1, S3, 6]], 'Again'), user.id), 'NOT_ENOUGH_PIECES')
+        await refuses('3. not to the size it was cut in', () => changeSizes(tx, mo.id, input([[A5, S2, 3]], 'Same size'), user.id), 'SAME_SIZE')
+        await refuses('3. only to a size on the order line', () => changeSizes(tx, mo.id, input([[A5, S4, 3]], 'Not on the order'), user.id), 'NOT_ON_ORDER')
+        await refuses('3. only at stitching', () => changeSizes(tx, mo.id, input([[A5, S1, 3]], 'At finishing', { stepId: FIN }), user.id), 'NOT_AT_STITCHING')
+
+        // ═══ 4. A whole bundle: all 25 of A2 (size 1) made as size 2 — the same bundle, wholly size 2 now ═══
+        const s4 = await save([[A2, S2, 25]], 'The whole bundle measured as size 2')
+        const a2 = await sizesAt(STI, A2.id)
         check(
-          '10. the same save sent twice is recorded once',
-          dup.duplicate === true &&
-            dup.eventId === s1.eventId &&
-            JSON.stringify(dup.bundleIds) === JSON.stringify(s1.bundleIds) &&
-            (await tx.productionBundle.count({ where: { moId: mo.id } })) === bundlesBefore &&
-            (await tx.sizeChange.count({ where: { moId: mo.id } })) === 2,
+          '4. a whole bundle: no bundle made, A2 is wholly size 2 now, and its sticker is to be printed again',
+          (await bundleCount()) === count0 && a2(S1) === 0 && a2(S2) === 25 && s4.bundleIds.length === 1 && s4.bundleIds[0] === A2.id,
+          `${a2(S1)} + ${a2(S2)}; reprint ${s4.bundleIds.length}`,
         )
-        await refuses(`10. pieces moved once cannot be moved again (${A1.code} has 5 left, 20 asked)`, () => changeSizes(tx, mo.id, input(L1, 'Sent again by mistake'), user.id), 'NOT_ENOUGH_PIECES')
-        await checkRevised('10. still only one change of 20 counted')
+        await checkRevised('4. revised: size 1 −45, size 2 +45 in all')
 
-        // ═══ Refusals ═══
-        const one = (b: { id: string }, z: { id: string }, qty = 1): Line[] => [[b, z, qty]]
-        await refuses('refused: not at a step other than stitching (finishing)', () => changeSizes(tx, mo.id, input(one(A5, S3), 'Wrong step', { stepId: FIN }), user.id), 'NOT_AT_STITCHING')
-        await refuses('refused: not at cutting', () => changeSizes(tx, mo.id, input(one(A5, S3), 'Wrong step', { stepId: CUT }), user.id), 'NOT_AT_STITCHING')
-        await refuses(
-          `refused: pieces given to an outside unit for stitching, though the step is our own floor (${A5.code})`,
-          async () => {
-            const unit = await tx.supplier.findFirstOrThrow({ where: { isActive: true }, select: { id: true } })
-            await tx.processTransfer.create({
-              data: { transferNumber: `ZZ-JW-${stamp}`, moId: mo.id, fromStepId: CUT, toStepId: STI, vendorId: unit.id, status: 'RECEIVED', createdById: user.id, lines: { create: [{ bundleId: A5.id, dispatchedQty: 5, receivedQty: 5 }] } },
-            })
-            return changeSizes(tx, mo.id, input(one(A5, S3), 'Came back from a unit'), user.id)
-          },
-          'STITCHED_OUTSIDE',
-        )
-        await refuses(
-          'refused: stitching done by an outside unit',
-          async () => {
-            await tx.mOStep.update({ where: { id: STI }, data: { execution: 'OUTSOURCED' } })
-            return changeSizes(tx, mo.id, input(one(A5, S3), 'At the unit'), user.id)
-          },
-          'NOT_AT_STITCHING',
-        )
-        await refuses(`refused: size ${S4.code} is not on the order line`, () => changeSizes(tx, mo.id, input(one(A5, S4), 'Not on order'), user.id), 'NOT_ON_ORDER')
-        await refuses('refused: the size it already is', () => changeSizes(tx, mo.id, input(one(A5, S2), 'Same size'), user.id), 'SAME_SIZE')
-        await refuses(`refused: more than in hand and done (${A5.code}: 25, 26 asked)`, () => changeSizes(tx, mo.id, input(one(A5, S3, 26), 'Too many'), user.id), 'NOT_ENOUGH_PIECES')
-        await refuses(
-          'refused: damaged pieces waiting for a decision are not counted (23 left of 25, 24 asked)',
-          async () => {
-            await recordWork(tx, mo.id, STI, workSchema.parse({ lines: [{ bundleId: A6.id, damaged: 2 }], reason: 'needle holes' }), user.id)
-            return changeSizes(tx, mo.id, input(one(A6, S1, 24), 'Too many'), user.id)
-          },
-          'NOT_ENOUGH_PIECES',
-        )
-        await refuses(`refused: pieces on a transfer card not counted in yet (${B1.code})`, () => changeSizes(tx, mo.id, input(one(B1, S2), 'Still on the way'), user.id), 'NOT_ENOUGH_PIECES')
-        await refuses(
-          'refused: an order on hold',
-          async () => {
-            await holdMo(tx, mo.id, 'Buyer asked to wait', user.id)
-            return changeSizes(tx, mo.id, input(one(A5, S3), 'On hold'), user.id)
-          },
-          'ON_HOLD',
-        )
-        await refuses('refused: bundles of two colours in one save', () => changeSizes(tx, mo.id, input([...one(A5, S3), ...one(B1, S2)], 'Two colours'), user.id), 'ONE_JOB_CARD')
-        await refuses('refused: a bundle that is not on the order', () => changeSizes(tx, mo.id, sizeChangeSchema.parse({ stepId: STI, lines: [{ bundleId: 'not-a-bundle', toSizeId: S3.id, qty: 1 }], reason: 'No such bundle' }), user.id), 'BAD_BUNDLE')
-        await refuses('refused: nothing entered (every line nought)', () => changeSizes(tx, mo.id, input(one(A5, S3, 0), 'Nothing at all'), user.id), 'NOTHING_RECORDED')
-        const shortReason = sizeChangeSchema.safeParse({ stepId: STI, lines: [{ bundleId: A5.id, toSizeId: S3.id, qty: 1 }], reason: 'abc' })
-        check('refused: a reason of under five letters', !shortReason.success && shortReason.error.issues.some((i) => i.path[0] === 'reason'))
-        const noReason = sizeChangeSchema.safeParse({ stepId: STI, lines: [{ bundleId: A5.id, toSizeId: S3.id, qty: 1 }] })
-        check('refused: no reason at all', !noReason.success)
-        check(
-          'refusals leave nothing behind: no new bundles, rows or entries; stitching still in our hands; order not on hold',
-          (await tx.productionBundle.count({ where: { moId: mo.id } })) === bundlesBefore &&
-            (await tx.sizeChange.count({ where: { moId: mo.id } })) === 2 &&
-            (await tx.mOStep.findUniqueOrThrow({ where: { id: STI } })).execution === 'IN_HOUSE' &&
-            !(await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: mo.id } })).heldAt &&
-            (await held(STI, A6.id, 'WIP')) === 25,
-        )
-
-        // Pieces change size once: a new bundle's pieces were already made as another size.
-        await refuses(`refused: a new bundle's pieces change size only once (${C1.code}, made from ${A1.code})`, () => changeSizes(tx, mo.id, input([[C1, S3, 2]], 'Made as size 3 after all'), user.id), 'ALREADY_CHANGED')
-
-        // ═══ Count in with a size change, in one save (the Count in window at stitching) ═══
-        // Tried in a savepoint and undone, so the blue card goes on below exactly as before.
-        {
-          const lines0 = await tx.processTransferLine.findMany({ where: { transferId: toStiBlue.id } })
-          const all = lines0.map((l) => ({ lineId: l.id, qty: l.dispatchedQty }))
-          const withSizes = (qty: number) =>
-            receiveSchema.parse({ lines: all, receivedBy: 'Sunita', sizeChanges: { lines: [{ bundleId: B1.id, toSizeId: S2.id, qty }], reason: 'Counted in long, made as size 2' } })
-          await refuses(
-            `count-in with more of ${B1.code} made as another size than was counted in is refused whole`,
-            () => receiveWithSizes(tx, toStiBlue.id, withSizes(B1.qty + 5), user.id),
-            'NOT_ENOUGH_PIECES',
-          )
-          const still = await tx.processTransfer.findUniqueOrThrow({ where: { id: toStiBlue.id } })
-          check('…and nothing of it stands: the card is still on its way, nothing counted in', still.status === 'DISPATCHED' && (await held(STI, B1.id, 'WIP')) === 0)
-          await tx.$executeRawUnsafe('SAVEPOINT countin_sizes')
-          const out = await receiveWithSizes(tx, toStiBlue.id, withSizes(5), user.id)
-          const card1 = await tx.processTransfer.findUniqueOrThrow({ where: { id: toStiBlue.id } })
-          const kid = await tx.productionBundle.findFirst({ where: { parentId: B1.id } })
-          check(
-            `count-in with a size change: the card counted in, and 5 of ${B1.code} made as size ${S2.code} in a new bundle at stitching`,
-            card1.status === 'RECEIVED' && out.sizes?.moves?.length === 1 && kid?.sizeId === S2.id && (await held(STI, B1.id, 'WIP')) === B1.qty - 5 && (await held(STI, kid!.id, 'WIP')) === 5,
-            { status: card1.status, kid: kid && { size: kid.sizeId, qty: kid.qty } },
-          )
-          const change = await tx.sizeChange.findFirst({ where: { moId: mo.id, fromBundleId: B1.id }, orderBy: { createdAt: 'desc' } })
-          check('…recorded as a size change at stitching, with its reason and who counted in', !!change && change.qty === 5 && change.toSizeId === S2.id)
-          await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT countin_sizes')
-        }
-
-        // The blue card is counted in now.
+        // ═══ 5. Counted in at stitching with a size change: the blue card, 4 of B1 made as size 2 ═══
         const blueLines = await tx.processTransferLine.findMany({ where: { transferId: toStiBlue.id } })
-        await receive(tx, toStiBlue.id, receiveSchema.parse({ lines: blueLines.map((l) => ({ lineId: l.id, qty: l.dispatchedQty })) }), user.id)
-
-        // ═══ 3 + 4. Several changes in one save, from several bundles and both lays ═══
-        const no2 = await lastNo()
-        const L2: Line[] = [
-          [A2, S2, 5],
-          [A10, S2, 5],
-          [A11, S1, 5],
-        ]
-        const s2 = await save(L2, 'Lay 2 marker ran small')
-        const kids2 = await tx.productionBundle.findMany({ where: { id: { in: s2.bundleIds } }, orderBy: { bundleNo: 'asc' } })
-        const kidOf = (parentId: string) => kids2.find((k) => k.parentId === parentId)
-        check(
-          '3. one save, three changes (1→2, 3→2, 3→1): one entry, three new bundles numbered on',
-          s2.bundleIds.length === 3 &&
-            kids2.map((k) => k.bundleNo).join(',') === [no2 + 1, no2 + 2, no2 + 3].join(',') &&
-            (await tx.sizeChange.count({ where: { eventId: s2.eventId } })) === 3 &&
-            (await tx.wipEvent.count({ where: { moId: mo.id, type: 'SIZE_CHANGE' } })) === 3,
+        const r5 = await receiveWithSizes(
+          tx,
+          toStiBlue.id,
+          receiveSchema.parse({
+            lines: blueLines.map((l) => ({ lineId: l.id, qty: l.dispatchedQty })),
+            sizeChanges: { lines: [{ bundleId: B1.id, toSizeId: S2.id, qty: 4 }], reason: 'Counted in: 4 made as size 2' },
+          }),
+          user.id,
         )
+        const b1 = await sizesAt(STI, B1.id)
         check(
-          '4. one new bundle per old bundle, each made from its own bundle and in its own lay',
-          kidOf(A2.id)?.sizeId === S2.id &&
-            kidOf(A10.id)?.sizeId === S2.id &&
-            kidOf(A11.id)?.sizeId === S1.id &&
-            kidOf(A2.id)?.cuttingOrderId === lay1.id &&
-            kidOf(A10.id)?.cuttingOrderId === lay1.id &&
-            kidOf(A11.id)?.cuttingOrderId === lay2.id &&
-            kids2.every((k) => k.qty === 5 && k.splitAtStepId === STI),
-          kids2.map((k) => `${k.code} from ${codeOf.get(k.parentId!)}`).join(', '),
+          '5. counted in with a size change: B1 holds its 10, 6 of size 1 and 4 of size 2; no bundle made',
+          !!r5.sizes && (await held(STI, B1.id)) === 10 && b1(S1) === 6 && b1(S2) === 4 && (await bundleCount()) === count0,
+          `${b1(S1)} + ${b1(S2)}`,
         )
+
+        // ═══ 6. A bundle holding two sizes goes on: each size goes with it, exactly ═══
+        await sendOn(STI, [{ bundleId: A1.id, qty: 25 }])
+        const a1f = await sizesAt(FIN, A1.id)
+        check('6. A1 sent on whole: at finishing 5 of size 1 and 20 of size 2', a1f(S1) === 5 && a1f(S2) === 20 && (await held(STI, A1.id)) === 0, `${a1f(S1)} + ${a1f(S2)}`)
+        // Part of one: 10 of A9 (size 3) made as size 1, then 15 of A9 sent on — shared out by what each size has.
+        const s6 = await save([[A9, S1, 10]], 'Ten of A9 made as size 1')
+        await sendOn(STI, [{ bundleId: A9.id, qty: 15 }])
+        const [a9s, a9f] = await Promise.all([sizesAt(STI, A9.id), sizesAt(FIN, A9.id)])
         check(
-          '4. each old bundle gave 5 from in hand',
-          (await held(STI, A2.id, 'WIP')) === 20 && (await held(STI, A10.id, 'WIP')) === 20 && (await held(STI, A11.id, 'WIP')) === 20 && (await Promise.all(s2.bundleIds.map((id) => held(STI, id, 'WIP')))).every((q) => q === 5),
+          '6. 15 of A9 (15 of size 3, 10 of size 1) sent on: 9 of size 3 and 6 of size 1 go, 6 and 4 stay — never more of a size than there is',
+          a9f(S3) === 9 && a9f(S1) === 6 && a9s(S3) === 6 && a9s(S1) === 4,
+          `went ${a9f(S3)}+${a9f(S1)}, stayed ${a9s(S3)}+${a9s(S1)}`,
         )
-        await checkRevised('3. two saves add up')
-
-        // Two sizes from one bundle in one save; lines naming the same bundle and size are one.
-        const L2b: Line[] = [
-          [A9, S1, 2],
-          [A9, S2, 3],
-          [A9, S1, 1],
-        ]
-        const s2b = await save(L2b, 'Mixed panels in one bundle')
-        const kids2b = await tx.productionBundle.findMany({ where: { id: { in: s2b.bundleIds } }, orderBy: { bundleNo: 'asc' } })
-        check(
-          '3. one bundle into two sizes in one save: two new bundles, the repeated line merged',
-          kids2b.length === 2 && kids2b.every((k) => k.parentId === A9.id) && kids2b.find((k) => k.sizeId === S1.id)?.qty === 3 && kids2b.find((k) => k.sizeId === S2.id)?.qty === 3 && (await held(STI, A9.id, 'WIP')) === 19,
-          kids2b.map((k) => `${k.code} ${k.qty}`).join(', '),
-        )
-        await checkRevised('3. three saves add up')
-
-        // ═══ 5. From pieces in hand and from pieces done and waiting ═══
-        await recordWork(tx, mo.id, STI, workSchema.parse({ lines: [{ bundleId: A4.id, done: 25 }, { bundleId: A12.id, done: 20 }], personName: 'Line 3' }), user.id)
-        const L3: Line[] = [
-          [A4, S3, 10],
-          [A12, S1, 10],
-        ]
-        const s3 = await save(L3, 'Made as the other size after stitching')
-        const [k4, k12] = await Promise.all([A4, A12].map((p) => tx.productionBundle.findFirstOrThrow({ where: { parentId: p.id, id: { in: s3.bundleIds } } })))
-        check(
-          `5. from done pieces: ${A4.code}'s 10 go as done (it had none in hand)`,
-          (await held(STI, k4.id, 'DONE')) === 10 && (await held(STI, k4.id, 'WIP')) === 0 && (await held(STI, A4.id, 'DONE')) === 15,
-        )
-        check(
-          `5. in hand first, then done: ${A12.code} gives its 5 in hand and 5 done`,
-          (await held(STI, k12.id, 'WIP')) === 5 && (await held(STI, k12.id, 'DONE')) === 5 && (await held(STI, A12.id, 'WIP')) === 0 && (await held(STI, A12.id, 'DONE')) === 15,
-        )
-        await checkRevised('5. revised after changes of done pieces')
-
-        // ═══ 11. Two saves in a row see each other ═══
-        const s4 = await save([[A3, S2, 15]], 'First save of the day')
-        const err = await refuses(`11. the second save sees the first: ${A3.code} has 10 left, 15 asked`, () => changeSizes(tx, mo.id, input([[A3, S3, 15]], 'Second save of the day'), user.id), 'NOT_ENOUGH_PIECES')
-        check('11. the refusal says how many are left', !!err?.message?.includes('10 in hand or done'), err?.message ?? '')
-        const s5 = await save([[A3, S3, 10]], 'Second save of the day')
-        check(`11. the second save of the 10 left goes through; ${A3.code} is empty at stitching`, (await held(STI, A3.id)) === 0)
-        await checkRevised('11. four saves add up')
-
-        // ═══ 7. After part of a bundle went on ═══
-        await sendOn(STI, [{ bundleId: A7.id, qty: 10 }])
-        const L6: Line[] = [[A7, S3, 10]]
-        const s6 = await save(L6, 'Rest of the bundle made as the size up')
-        const C6 = s6.bundleIds[0]
-        const [dest] = await destinationsOf(tx, { id: mo.id, steps: await tx.mOStep.findMany({ where: { moId: mo.id } }) }, STI)
-        check(
-          `7. the route takes the new bundle on to finishing: all 10 of it; ${A7.code} 15 more`,
-          dest?.step.id === FIN && dest.caps[C6] === 10 && dest.caps[A7.id] === 15,
-          dest ? `new ${dest.caps[C6]}, old ${dest.caps[A7.id]}` : 'no destination',
-        )
-        await sendOn(STI, [{ bundleId: C6, qty: 10 }])
-        check('7. the new bundle is counted in at finishing', (await held(FIN, C6, 'WIP')) === 10)
-        await refuses('12. undo refused once the new bundle has moved on', () => undoSizeChange(tx, s6.eventId, 'Wrong size after all', user.id), 'NOT_ENOUGH_PIECES')
-        check('12. the refused undo leaves the change standing', !(await tx.sizeChange.findFirstOrThrow({ where: { eventId: s6.eventId } })).undoneAt)
-
-        // ═══ 12. Undo through the floor’s general undo ═══
-        const L7: Line[] = [[A6, S1, 3]]
-        const s7 = await save(L7, 'Three made small')
-        await undoEvent(tx, s7.eventId, 'Counted wrong', user.id)
-        expect(L7, -1)
-        const sc7 = await tx.sizeChange.findFirstOrThrow({ where: { eventId: s7.eventId } })
-        check('12. the floor’s undo takes a size change back too', (await held(STI, A6.id, 'WIP')) === 25 && (await held(STI, s7.bundleIds[0])) === 0 && !!sc7.undoneAt && sc7.undoReason === 'Counted wrong')
-        await checkRevised('12. revised as before the undone change')
-
         jc = await card()
         check(
-          'stitching by size: the moves in and out add up to every change not undone',
-          SIZES.every((z) => sizeFig(jc, z.id, STI).sizeIn === inAt.get(z.id) && sizeFig(jc, z.id, STI).sizeOut === outAt.get(z.id)),
-          SIZES.map((z) => `${z.code} +${sizeFig(jc, z.id, STI).sizeIn} −${sizeFig(jc, z.id, STI).sizeOut}`).join('; '),
+          '6. finishing receives each size as it is made: size 1 5 + 6, size 2 20 (and 25 earlier), size 3 9',
+          sizeFig(jc, S1.id, FIN).received === 11 && sizeFig(jc, S2.id, FIN).received === 45 && sizeFig(jc, S3.id, FIN).received === 9,
+          SIZES.map((z) => sizeFig(jc, z.id, FIN).received).join('/'),
         )
+
+        // ═══ 7. Undo: refused once the pieces have moved on, done while they are still there ═══
+        await refuses('7. A9’s change cannot be undone: some of its size-1 pieces have gone on', () => undoSizeChange(tx, s6.eventId, 'Measured again', user.id), 'NOT_ENOUGH_PIECES')
+        const blueChange = await tx.sizeChange.findFirstOrThrow({ where: { fromBundleId: B1.id } })
+        await undoSizeChange(tx, blueChange.eventId, 'Counted wrong', user.id)
+        const b1u = await sizesAt(STI, B1.id)
+        check('7. B1’s change undone: all 10 of size 1 again, the row kept as undone', b1u(S1) === 10 && b1u(S2) === 0 && !!(await tx.sizeChange.findUniqueOrThrow({ where: { id: blueChange.id } })).undoneAt)
+
+        // ═══ 8. Finished goods by the size the pieces are now ═══
+        await sendOn(FIN, [{ bundleId: A1.id, qty: 25 }])
+        const r8 = await createFgReceipt(tx, fgSchema.parse({ warehouseId: store.id, moId: mo.id, lines: [{ itemId: fgA.id, sizeId: S2.id, qty: 20 }] }), user.id)
+        const packed = await tx.wipEntry.findMany({ where: { event: { fgReceiptId: r8.id, type: 'PACK' }, bucket: 'PACKED' } })
         check(
-          `finishing waits for size 1’s revised ${revisedOf(S1.id)}, not its planned 100; every size its revised count less what came`,
-          sizeFig(jc, S1.id, FIN).yetToCome === revisedOf(S1.id) && SIZES.every((z) => sizeFig(jc, z.id, FIN).yetToCome === revisedOf(z.id) - sizeFig(jc, z.id, FIN).received),
-          SIZES.map((z) => `${z.code} ${sizeFig(jc, z.id, FIN).yetToCome}`).join('; '),
-        )
-        check('the sizes add up to the job card: in hand at stitching', SIZES.reduce((s, z) => s + sizeFig(jc, z.id, STI).inHand, 0) === stepFig(jc, STI).inHand)
-        check('the job card lists live new bundles, not the undone ones', !jc.bundles.some((b) => b.id === c0 || b.id === s7.bundleIds[0]) && [C1.id, ...s2.bundleIds, C6].every((id) => jc.bundles.some((b) => b.id === id)))
-
-        // ── Everything on to finishing ──
-        await sendOn(STI, await readyAt(STI, lineA.id))
-        await sendOn(STI, await readyAt(STI, lineB.id))
-        await refuses(`12. undo refused once ${C1.code} has gone on to finishing`, () => undoSizeChange(tx, s1.eventId, 'Wrong size after all', user.id), 'NOT_ENOUGH_PIECES')
-
-        // ═══ 9 (on the way). Reconciliation with pieces written off ═══
-        const recon = async (label: string) => {
-          const os = (await orderSizes(tx, mo.id)).find((l) => l.moLineId === lineA.id)!
-          const rows = await tx.wipEntry.groupBy({ by: ['sizeId', 'bucket'], where: { moLineId: lineA.id }, _sum: { qty: true } })
-          const parts = SIZES.map((z) => {
-            const of = rows.filter((r) => r.sizeId === z.id)
-            const sumOf = (buckets: string[]) => of.filter((r) => buckets.includes(r.bucket)).reduce((s, r) => s + (r._sum.qty ?? 0), 0)
-            const all = of.reduce((s, r) => s + (r._sum.qty ?? 0), 0)
-            const packedFloor = sumOf(['PACKED', 'PACKED_B'])
-            const writtenOff = sumOf(['SCRAPPED'])
-            const onFloor = all - packedFloor - writtenOff
-            const r = os.sizes.find((s) => s.sizeId === z.id)!
-            return { code: z.code, revised: r.revised, packed: r.packed, onFloor, writtenOff, ok: r.revised === revisedOf(z.id) && r.revised === r.packed + onFloor + writtenOff && r.packed === packedFloor }
-          })
-          check(label, parts.every((p) => p.ok), parts.map((p) => `${p.code}: ${p.revised} = ${p.packed} packed + ${p.onFloor} on the floor + ${p.writtenOff} written off`).join('; '))
-          return parts
-        }
-        const dmg = await recordWork(tx, mo.id, FIN, workSchema.parse({ lines: [{ bundleId: C1.id, damaged: 2 }], reason: 'oil stain' }), user.id)
-        const off = await decide(tx, mo.id, FIN, decideSchema.parse({ from: 'DAMAGED', to: 'SCRAPPED', lines: [{ bundleId: C1.id, qty: 2 }], reason: 'Stain will not wash out' }), { userId: user.id, mayApprove: true })
-        const mid = await recon('9. on the way: each size’s revised count = packed + on the floor + written off')
-        check('9. the 2 written off count against size 2, the size they were made as', mid.find((p) => p.code === S2.code)?.writtenOff === 2 && mid.filter((p) => p.code !== S2.code).every((p) => p.writtenOff === 0))
-        if ('event' in off && off.event) await undoEvent(tx, off.event.id, 'Washed out after all', user.id)
-        if ('event' in dmg && dmg.event) await undoEvent(tx, dmg.event.id, 'Washed out after all', user.id)
-        check('9. written off and undone: the 2 are back in hand at finishing', (await held(FIN, C1.id, 'WIP')) === 20)
-
-        // ── Everything on to packing ──
-        await sendOn(FIN, await readyAt(FIN, lineA.id))
-        await sendOn(FIN, await readyAt(FIN, lineB.id))
-
-        // ═══ 8. Finished goods in the revised sizes ═══
-        let os = (await orderSizes(tx, mo.id)).find((l) => l.moLineId === lineA.id)!
-        const toPack = (sizeId: string) => os.sizes.find((s) => s.sizeId === sizeId)!.toPack
-        check(
-          '8. still to pack: each size’s revised count, less the 25 of size 2 packed before',
-          SIZES.every((z) => toPack(z.id) === revisedOf(z.id) - (z.id === S2.id ? 25 : 0)),
-          SIZES.map((z) => `${z.code} ${toPack(z.id)}`).join('; '),
+          '8. 20 of size 2 booked in: taken from A1 (cut as size 1), packed as size 2',
+          packed.length === 1 && packed[0].bundleId === A1.id && packed[0].sizeId === S2.id && packed[0].qty === 20 && (await balanceOf(tx, { itemId: fgA.id, warehouseId: store.id, sizeId: S2.id })).qty === 45,
+          packed.map((e) => `${codeOf.get(e.bundleId)} ${e.qty}`).join(', '),
         )
         await refuses(
-          `8. size 1 cannot be packed at its planned 100, only its revised ${revisedOf(S1.id)}`,
-          () => createFgReceipt(tx, fgSchema.parse({ warehouseId: store.id, moId: mo.id, lines: [{ itemId: fgA.id, sizeId: S1.id, qty: 100 }] }), user.id),
+          '8. size 1 booked in finds only A1’s 5 of size 1 at packing: 6 is more than has reached it',
+          () => createFgReceipt(tx, fgSchema.parse({ warehouseId: store.id, moId: mo.id, lines: [{ itemId: fgA.id, sizeId: S1.id, qty: 6 }] }), user.id),
           'NOT_FINISHED',
         )
-        await refuses(
-          `8. one more of size 1 than its revised count is refused`,
-          () => createFgReceipt(tx, fgSchema.parse({ warehouseId: store.id, moId: mo.id, lines: [{ itemId: fgA.id, sizeId: S1.id, qty: toPack(S1.id) + 1 }] }), user.id),
-          'NOT_FINISHED',
-        )
-        const restLines = SIZES.map((z) => ({ itemId: fgA.id, sizeId: z.id, qty: toPack(z.id) }))
-        const r2 = await createFgReceipt(tx, fgSchema.parse({ warehouseId: store.id, moId: mo.id, lines: restLines }), user.id)
-        check('8. the rest packed in exactly the revised sizes', r2.lines.length === 3 && SIZES.every((z) => Number(r2.lines.find((l) => l.sizeId === z.id)!.qty) === toPack(z.id)))
-        for (const z of SIZES) {
-          await refuses(`8. one more of size ${z.code} is refused once all are packed`, () => createFgReceipt(tx, fgSchema.parse({ warehouseId: store.id, moId: mo.id, lines: [{ itemId: fgA.id, sizeId: z.id, qty: 1 }] }), user.id), 'NOT_FINISHED')
-        }
-        const r1Now = await tx.finishedGoodsReceipt.findUniqueOrThrow({ where: { id: r1.id }, include: { lines: true } })
-        const r1Pack = await tx.wipEvent.findFirstOrThrow({ where: { fgReceiptId: r1.id, type: 'PACK' } })
+        const r8b = await createFgReceipt(tx, fgSchema.parse({ warehouseId: store.id, moId: mo.id, lines: [{ itemId: fgA.id, sizeId: S1.id, qty: 5 }] }), user.id)
+        const packedB = await tx.wipEntry.findMany({ where: { event: { fgReceiptId: r8b.id, type: 'PACK' }, bucket: 'PACKED' } })
+        const os8 = (await orderSizes(tx, mo.id)).find((l) => l.moLineId === lineA.id)!
         check(
-          '6. the receipt made before the changes is untouched',
-          !r1Now.cancelledAt && JSON.stringify(r1Now.lines.map((l) => ({ itemId: l.itemId, sizeId: l.sizeId, qty: Number(l.qty) }))) === r1Lines0 && !r1Pack.reversedAt && (await held(PKG, A8.id, 'PACKED')) === 25,
+          '8. the 5 of size 1 from A1 booked in as size 1; the order counts size 2 packed 45, size 1 5',
+          packedB.length === 1 && packedB[0].bundleId === A1.id && packedB[0].sizeId === S1.id && os8.sizes.find((s) => s.sizeId === S2.id)!.packed === 45 && os8.sizes.find((s) => s.sizeId === S1.id)!.packed === 5,
         )
-        await createFgReceipt(tx, fgSchema.parse({ warehouseId: store.id, moId: mo.id, lines: sizesB.map((z) => ({ itemId: fgB.id, sizeId: z.sizeId, qty: z.qty })) }), user.id)
+        // Cancelling a receipt puts its pieces back in the size they were packed as.
+        await unpackForReceipt(tx, r8.id, 'Booked by mistake', user.id)
+        const a1p = await sizesAt(PKG, A1.id)
+        check('8. a cancelled receipt puts the 20 back at packing as size 2', a1p(S2) === 20 && a1p(S1) === 0, `${a1p(S2)} + ${a1p(S1)}`)
 
-        // ═══ 9. Reconciliation, all packed ═══
-        const fgStock = async (sizeId: string) => (await balanceOf(tx, { itemId: fgA.id, warehouseId: store.id, sizeId })).qty
-        const parts = await recon('9. all packed: each size’s revised count = packed, nothing on the floor or written off')
-        check('9. nothing left on the floor', parts.every((p) => p.onFloor === 0 && p.writtenOff === 0 && p.packed === p.revised))
+        // ═══ Ledger: every bundle holds exactly what was cut, and no size of any bundle anywhere is below nothing ═══
+        const sums = await tx.wipEntry.groupBy({ by: ['bundleId'], where: { moId: mo.id }, _sum: { qty: true } })
+        const qtyOf = new Map(cutBundles.map((b) => [b.id, b.qty]))
         check(
-          '9. finished-goods stock per size = the revised count',
-          (await Promise.all(SIZES.map(async (z) => (await fgStock(z.id)) === revisedOf(z.id)))).every(Boolean),
-          (await Promise.all(SIZES.map(async (z) => `${z.code} ${await fgStock(z.id)}`))).join('; '),
+          'ledger: still 14 bundles, each holding exactly what was cut',
+          (await bundleCount()) === 14 && sums.length === 14 && sums.every((r) => (r._sum.qty ?? 0) === qtyOf.get(r.bundleId)),
+          sums.filter((r) => (r._sum.qty ?? 0) !== qtyOf.get(r.bundleId)).map((r) => `${codeOf.get(r.bundleId)} ${r._sum.qty}`).join(', '),
         )
-        os = (await orderSizes(tx, mo.id)).find((l) => l.moLineId === lineA.id)!
-        check('9. nothing left to pack of any size', os.sizes.every((s) => s.toPack === 0 && s.packed === s.revised))
-        let moNow = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: mo.id } })
-        check('9. the order completes when all is packed', moNow.status === 'COMPLETED' && moNow.progress === 'DONE' && moNow.totalPackedQty === 320, `${moNow.status} ${moNow.progress} ${moNow.totalPackedQty}`)
-        jc = await card()
-        check(
-          '9. no size is stuck "yet to come" at finishing or packing; both done',
-          [FIN, PKG].every((st) => SIZES.every((z) => sizeFig(jc, z.id, st).yetToCome === 0 && sizeFig(jc, z.id, st).state === 'DONE')),
-          [FIN, PKG].map((st) => SIZES.map((z) => `${sizeFig(jc, z.id, st).yetToCome}:${sizeFig(jc, z.id, st).state}`).join('/')).join(' · '),
-        )
-        check('9. the sales order keeps the buyer’s sizes; the order’s plan is unchanged', (await soSizes()) === soSizes0 && (await moSizes()) === moSizes0 && moNow.totalPlannedQty === 320)
-
-        // ═══ 12. Cancelling a receipt puts the pieces back in the new bundles ═══
-        // As POST /finished-goods/:id/cancel does it, inside this transaction.
-        const cancelReceipt = async (id: string, reason: string) => {
-          await lockRow(tx, 'fgReceipt', id)
-          const before = await tx.finishedGoodsReceipt.findUniqueOrThrow({ where: { id } })
-          await assertStockUnused(tx, { referenceId: before.id, label: before.fgrNumber })
-          const ins = await tx.stockLedger.findMany({ where: { referenceType: 'FG_RECEIPT', referenceId: before.id, inQty: { gt: 0 } } })
-          for (const row of ins) {
-            await recordMovement(tx, {
-              itemId: row.itemId,
-              warehouseId: row.warehouseId,
-              sizeId: row.sizeId,
-              grade: row.grade,
-              ownership: row.ownership,
-              ownerCustomerId: row.ownerCustomerId,
-              transactionType: 'ADJUSTMENT',
-              direction: 'OUT',
-              qty: Number(row.inQty),
-              referenceType: 'FG_RECEIPT_CANCEL',
-              referenceId: before.id,
-              notes: `Cancelled ${before.fgrNumber}: ${reason}`,
-              earlierDate: 'move-up',
-            })
-          }
-          await tx.finishedGoodsReceipt.update({ where: { id: before.id }, data: { cancelledAt: new Date(), cancelledById: user.id, cancelReason: reason } })
-          await voidForCancelledReceipt(tx, before.id, `Cancelled ${before.fgrNumber}: ${reason}`, user.id)
-          await unpackForReceipt(tx, before.id, `Cancelled ${before.fgrNumber}: ${reason}`, user.id)
-          if (before.moId) await syncMoPacked(tx, before.moId)
-        }
-        await cancelReceipt(r2.id, 'Booked to the wrong store')
-        const liveKids = await tx.sizeChange.findMany({ where: { moId: mo.id, undoneAt: null }, select: { toBundleId: true, toBundle: { select: { code: true, qty: true } } } })
-        const back = await Promise.all(liveKids.map(async (k) => ({ code: k.toBundle.code, qty: k.toBundle.qty, wip: await held(PKG, k.toBundleId, 'WIP'), packed: await held(PKG, k.toBundleId, 'PACKED') })))
-        check(
-          '12. cancelling the receipt puts every new bundle’s pieces back in hand at packing',
-          back.length === 11 && back.every((k) => k.wip === k.qty && k.packed === 0),
-          back.map((k) => `${k.code} ${k.wip}/${k.qty}`).join(', '),
-        )
-        os = (await orderSizes(tx, mo.id)).find((l) => l.moLineId === lineA.id)!
-        moNow = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: mo.id } })
-        check(
-          '12. after the cancel: only the first receipt’s 25 of size 2 still packed; the order reopens',
-          os.sizes.every((s) => s.packed === (s.sizeId === S2.id ? 25 : 0)) && (await fgStock(S2.id)) === 25 && (await fgStock(S1.id)) === 0 && moNow.status !== 'COMPLETED' && (await held(PKG, A8.id, 'PACKED')) === 25,
-          `${moNow.status}; ${os.sizes.map((s) => `${s.code} ${s.packed}`).join('/')}`,
-        )
-        await createFgReceipt(tx, fgSchema.parse({ warehouseId: store.id, moId: mo.id, lines: restLines }), user.id)
-        moNow = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: mo.id } })
-        check('12. packed again in the revised sizes, the order completes again', moNow.status === 'COMPLETED' && moNow.progress === 'DONE' && (await Promise.all(SIZES.map(async (z) => (await fgStock(z.id)) === revisedOf(z.id)))).every(Boolean))
-
-        jc = await card()
-        check(
-          'stitching by size: what came in, plus what was made as it, less what was made as another, all went on',
-          SIZES.every((z) => {
-            const f = sizeFig(jc, z.id, STI)
-            return f.received + f.sizeIn - f.sizeOut === f.sentOn && f.inHand + f.waiting === 0 && f.sentOn === revisedOf(z.id)
-          }),
-          SIZES.map((z) => {
-            const f = sizeFig(jc, z.id, STI)
-            return `${z.code}: ${f.received} + ${f.sizeIn} − ${f.sizeOut} = ${f.sentOn}`
-          }).join('; '),
-        )
-
-        // ═══ History, and the other colour ═══
-        const hist = await sizeChangeHistory(tx, { moId: mo.id })
-        const saves = [s0, s1, s2, s2b, s3, s4, s5, s6, s7].map((s) => s.eventId)
-        check(
-          'history: one entry per save, newest first, undone ones marked',
-          hist.length === saves.length &&
-            saves.every((id) => hist.some((h) => h.eventId === id)) &&
-            hist.every((h, i) => i === 0 || hist[i - 1].at.getTime() >= h.at.getTime()) &&
-            hist.filter((h) => h.undone).map((h) => h.eventId).sort().join() === [s0.eventId, s7.eventId].sort().join() &&
-            hist.find((h) => h.eventId === s2.eventId)!.moves.length === 3,
-          `${hist.length} entries`,
-        )
-        check('the grey job card lists its size changes; the blue one has none', (await card()).sizeChanges.length === saves.length && (await jobCardDetail(tx, cardB.id)).sizeChanges.length === 0)
-        const osB = (await orderSizes(tx, mo.id)).find((l) => l.moLineId === lineB.id)!
-        check('the blue line’s sizes are untouched and all packed', osB.sizes.every((s) => s.changed === 0 && s.revised === s.planned && s.packed === s.planned))
-
-        // ═══ The ledger: no piece appears or vanishes ═══
-        const all = await tx.productionBundle.findMany({ where: { moId: mo.id }, select: { id: true, code: true, qty: true, parentId: true } })
-        const sums = new Map((await tx.wipEntry.groupBy({ by: ['bundleId'], where: { moId: mo.id }, _sum: { qty: true } })).map((r) => [r.bundleId, r._sum.qty ?? 0]))
-        const kids = new Map<string, string[]>()
-        for (const b of all) if (b.parentId) kids.set(b.parentId, [...(kids.get(b.parentId) ?? []), b.id])
-        const family = (id: string): number => (sums.get(id) ?? 0) + (kids.get(id) ?? []).reduce((s, k) => s + family(k), 0)
-        const originals = all.filter((b) => !b.parentId)
-        check(
-          'ledger: every bundle as cut, with the bundles made from it, holds exactly what was cut',
-          originals.length === 14 && originals.every((b) => family(b.id) === b.qty),
-          originals.filter((b) => family(b.id) !== b.qty).map((b) => `${b.code} ${family(b.id)}/${b.qty}`).join(', '),
-        )
-        const live = new Set(liveKids.map((k) => k.toBundleId))
-        const qtyById = new Map(all.map((b) => [b.id, b.qty]))
-        check(
-          'ledger: a live new bundle holds its pieces, an undone one none, an old one what it did not give',
-          all.every((b) => {
-            const own = sums.get(b.id) ?? 0
-            if (b.parentId) return own === (live.has(b.id) ? b.qty : 0)
-            const given = (kids.get(b.id) ?? []).filter((k) => live.has(k)).reduce((s, k) => s + qtyById.get(k)!, 0)
-            return own === b.qty - given
-          }),
-        )
+        const bySize = await tx.wipEntry.groupBy({ by: ['stepId', 'vendorId', 'bucket', 'bundleId', 'reworkStepId', 'sizeId'], where: { moId: mo.id }, _sum: { qty: true } })
+        check('ledger: no size of any bundle at any place is below nothing', bySize.every((r) => (r._sum.qty ?? 0) >= 0), `${bySize.filter((r) => (r._sum.qty ?? 0) < 0).length} below`)
+        check('the order and the sales order keep their planned sizes', (await moSizes()) === moSizes0 && (await soSizes()) === soSizes0)
 
         throw ROLLBACK
       },

@@ -223,33 +223,36 @@ Every order is cut on its cutting sheet: the older one-step cutting on the
 order window is gone (6 Nov 2026), and `POST /orders/:id/cutting` refuses an
 order without stages (`NEEDS_STAGES`).
 
-**Size jumps (6 Nov 2026).** At stitching on our own floor, pieces cut as one
-size can be made as another size *of the order line* (cut M, made L): the
-Stitching sheet's **Change sizes**. `changeSizes` never edits a bundle: each
-old bundle's pieces go into a **new bundle** of the new size — next bundle
-number, `parentId` the old one, `splitAtStepId` the stitching step, same line
-and lay — in one `SIZE_CHANGE` event at the same step and bucket (in hand
-first, then done), with a `size_changes` row each (who, when, why). The ledger
-refuses a split that does not keep every place's count, gives pieces to
-anything but a brand-new child of the giving bundle, or crosses colour lines.
-A child shares its parent's route only up to the step it was made at
-(`destinationsFrom`). The order's planned sizes (`MOLineSize`) are never
-edited: a line's revised size is planned + changes not undone, worked out by
-`netSizeChanges`, never stored. Nothing is posted to stock: Finished Goods In
-takes pieces by each bundle's current size, so it accepts the revised sizes
-and nothing beyond what was made. The sales order keeps the buyer's sizes;
-the delivery challan may swap sizes within a line's total without a note.
-Anyone with `production:create` may change sizes, with a reason; the undo
-(`undoSizeChange`, `production:edit`) puts the pieces back while they are
-still where the change put them. Not at outside units, not at any other step,
-and never by editing a bundle's `sizeId` in place — every entry keeps the size
-its bundle had when it was written, so that would split one bundle's history
-across two sizes. Pieces change size once: a bundle made by a size change is
-refused (`ALREADY_CHANGED`) and corrected by undoing its change. The window
-(`SizeChangeDialog`) works per cut size — what was cut, what is here, what
-earlier changes took, what this change takes, what is left — and ends on the
-final sizes against planned; its Save is never greyed out, it names what is
-missing and scrolls to it.
+**Size jumps (6 Nov 2026; inside the bundle since 12 Nov 2026).** At stitching
+on our own floor, pieces cut as one size can be made as another size *of the
+order line* (cut M, made L): the Stitching sheet's **Change sizes**, or
+**Change sizes** in the Count in window (bundle by bundle, with a bar that sets
+ticked bundles at once). The floor works bundle by bundle from the stickers
+made at cutting, so a size change **makes no bundle**: the pieces stay in the
+bundle they were cut in, and one `SIZE_CHANGE` event moves them on the ledger
+out of the cut size and into the new one, at the same step and bucket (in hand
+first, then done), with a `size_changes` row each (`toBundleId` null; who,
+when, why). A bundle can then hold two sizes; one whose every piece changed is
+simply the new size, same number, and its sticker is printed again (it says
+"Cut as M"). The ledger keeps each piece's size: every `wip_entries` row
+carries `sizeId`, `postEvent` shares the pieces of a bundle holding two sizes
+over the sizes at a place when part of it moves on (largest remainders, never
+more of a size than is there), reversals copy each entry's own size, and
+`packForReceipt` takes a size by the size the pieces are now — so the size
+tables, the order's revised and packed sizes, finished goods and garments all
+read exact sizes. The order's planned sizes (`MOLineSize`) are never edited: a
+line's revised size is planned + changes not undone (`netSizeChanges`), never
+stored. Nothing is posted to stock until Finished Goods In. Anyone with
+`production:create` may change sizes, with a reason; the undo
+(`undoSizeChange`, `production:edit`) puts the pieces back in the cut size
+while they are still where the change put them. Pieces change size once: only
+pieces still in the size they were cut in can change. Changes made before 12
+Nov 2026 made a new bundle (`parentId`, `splitAtStepId`, `toBundleId`); those
+bundles are still read and undone as before, and are refused a second change
+(`ALREADY_CHANGED`). The window (`SizeChangeDialog`) works per cut size — what
+was cut, what is here, what earlier changes took, what this change takes, what
+is left — and ends on the final sizes against planned; its Save is never greyed
+out, it names what is missing and scrolls to it.
 
 ---
 
@@ -266,8 +269,8 @@ mixes styles needing different routes cannot be loaded (`applyRouting` refuses
 with `ROUTING_DOES_NOT_FIT`); split it into two MOs for now. Per-line routes
 would mean `mo_steps` per line.
 
-**Bundle split and merge.** Size jumps use `ProductionBundle.parentId` and
-`splitAtStepId` (§4). A plain split of a bundle without a size change — the
+**Bundle split and merge.** Size jumps made before 12 Nov 2026 used
+`ProductionBundle.parentId` and `splitAtStepId` (§4); since, they make no bundle. A plain split of a bundle without a size change — the
 original brief asks for authorised splitting when part of a bundle goes ahead
 — is still not built; the `SPLIT` event type follows the same ledger rules
 when it is.
@@ -334,7 +337,7 @@ series moves. They need the demo masters (listed at the top of each).
 cd apps/api
 npx tsx ../../tools/check-production-flow.ts    # 31 checks — the job-card flow
 npx tsx ../../tools/check-production-floor.ts   # 91 checks — routes, transfers, QC, outside units
-npx tsx ../../tools/check-size-change.ts        # 101 checks — size jumps, from the change to finished goods and undo
+npx tsx ../../tools/check-size-change.ts        # 46 checks — size jumps inside the bundle, from the change to finished goods and undo
 ```
 
 All three refuse to run unless `DATABASE_URL` (and `DIRECT_URL`) point at a

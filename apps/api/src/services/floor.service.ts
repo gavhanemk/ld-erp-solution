@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { assertNotCancelling } from './orderCancel.service'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { balancesOf, flowsOf, keyOf, lockMo, postEvent, reverseEvent, type BalanceRow, type Move } from './wip.service'
+import { balancesOf, flowsOf, keyOf, lockMo, postEvent, reverseEvent, sizeBalancesOf, type BalanceRow, type Move } from './wip.service'
 import { destinationsFrom, isCheck, isLastStep, nextStepAfter, passedBy, type RouteStep } from './route.service'
 import { nextChallanNo } from './challanNo'
 
@@ -1008,6 +1008,10 @@ export async function setReturnBill(tx: Tx, eventId: string, d: z.infer<typeof b
  * quality only from pieces the last step has passed, B-grade only from pieces
  * set aside as B-grade. The oldest bundles go first. Refused when the floor
  * has not finished that many — nothing is packed that was not made.
+ *
+ * A size is taken by the size the pieces are now, not the size their bundle was
+ * cut in: since 12 Nov 2026 a bundle can hold pieces made as another size, so
+ * XS booked in finds the XS pieces of an S bundle, and S booked in leaves them.
  */
 export async function packForReceipt(
   tx: Tx,
@@ -1028,6 +1032,9 @@ export async function packForReceipt(
   const lastIds = new Set(last.map((s) => s.id))
   const bundleNo = new Map(bundles.map((b) => [b.id, b.bundleNo]))
   const left = new Map(held.map((r) => [keyOf(r), r.qty]))
+  // What each place holds, size by size, as the pieces are now.
+  const leftOfSize = new Map<string, number>()
+  for (const [k, at] of await sizeBalancesOf(tx, bundles.map((b) => b.id))) for (const [size, q] of at) leftOfSize.set(`${k}|${size ?? ''}`, q)
 
   const moves: Move[] = []
   for (const line of a.lines) {
@@ -1038,8 +1045,10 @@ export async function packForReceipt(
     if (!linesOfItem.length) throw new AppError(`${item?.code ?? 'That item'} is not made on ${mo.moNumber}.`, 400, 'NOT_ON_MO')
     const lineIds = new Set(linesOfItem.map((m) => m.id))
     // A garment item with no size run is booked in without a size: it takes
-    // pieces of any size of its line.
-    const mine = new Set(bundles.filter((b) => lineIds.has(b.moLineId) && (!line.sizeId || b.sizeId === line.sizeId)).map((b) => b.id))
+    // pieces of any size of its line. One with a size takes pieces that are
+    // that size now, in whatever bundle.
+    const mine = new Set(bundles.filter((b) => lineIds.has(b.moLineId)).map((b) => b.id))
+    const ofSize = (r: BalanceRow) => (line.sizeId ? (leftOfSize.get(`${keyOf(r)}|${line.sizeId}`) ?? 0) : Infinity)
     const want: WipBucket = line.grade === 'B' ? 'B_GRADE' : 'DONE'
     // Done pieces first; at a working last step (packing), pieces in hand after.
     const handIds = new Set(last.filter(sendsFromHand).map((s) => s.id))
@@ -1049,6 +1058,7 @@ export async function packForReceipt(
         (r) =>
           !r.vendorId &&
           mine.has(r.bundleId) &&
+          ofSize(r) > 0 &&
           (want === 'B_GRADE' ? r.bucket === 'B_GRADE' : (r.bucket === 'DONE' && lastIds.has(r.stepId)) || (r.bucket === 'WIP' && handIds.has(r.stepId))),
       )
       .sort((x, y) => rank(x) - rank(y) || (bundleNo.get(x.bundleId) ?? 0) - (bundleNo.get(y.bundleId) ?? 0))
@@ -1056,10 +1066,16 @@ export async function packForReceipt(
     for (const r of sources) {
       if (need <= 0) break
       const k = keyOf(r)
-      const take = Math.min(need, left.get(k) ?? 0)
+      const take = Math.min(need, left.get(k) ?? 0, ofSize(r))
       if (take <= 0) continue
       left.set(k, (left.get(k) ?? 0) - take)
-      moves.push({ stepId: r.stepId, bundleId: r.bundleId, bucket: r.bucket, qty: -take }, { stepId: r.stepId, bundleId: r.bundleId, bucket: want === 'B_GRADE' ? 'PACKED_B' : 'PACKED', qty: take })
+      if (line.sizeId) leftOfSize.set(`${k}|${line.sizeId}`, ofSize(r) - take)
+      // Packed in the size booked: what the order's sizes, the stock and the garments go by.
+      const sizeId = line.sizeId ?? undefined
+      moves.push(
+        { stepId: r.stepId, bundleId: r.bundleId, bucket: r.bucket, qty: -take, sizeId },
+        { stepId: r.stepId, bundleId: r.bundleId, bucket: want === 'B_GRADE' ? 'PACKED_B' : 'PACKED', qty: take, sizeId },
+      )
       need -= take
     }
     if (need > 0) {
@@ -1124,20 +1140,23 @@ export const sizeChangeSchema = z.object({
 
 /**
  * A size jump: pieces of a bundle made as another size of the order at
- * stitching (cut as M, made as L). They move into a new bundle of the new
- * size, made from the old one at this step and numbered next on the order,
- * with its own sticker; the old bundle keeps everything it went through. Only
- * at stitching done on our own floor, only on pieces in hand or done there —
- * not on a transfer card, at an outside unit, or waiting for a decision — and
- * only to a size on the order line. The order's planned sizes are never
- * edited, and nothing is posted to stock: finished goods take the pieces by
- * their new size when they are packed.
+ * stitching (cut as M, made as L). They stay in their own bundle — the floor
+ * works bundle by bundle from the stickers made at cutting, so the bundle count
+ * and the stickers stay as cut (12 Nov 2026; before, a new bundle was made for
+ * them). On the ledger the pieces go out of the size they were cut in and into
+ * the new one, where they lie, so a bundle can hold two sizes from here on; one
+ * whose every piece changed is simply the new size now, with the same number,
+ * and its sticker can be printed again. Only at stitching done on our own floor,
+ * only on pieces in hand or done there still in the size they were cut in
+ * (pieces change size once), and only to a size on the order line. The order's
+ * planned sizes are never edited, and nothing is posted to stock: finished
+ * goods take the pieces by the size they are made as when they are packed.
  */
 export async function changeSizes(tx: Tx, moId: string, d: z.infer<typeof sizeChangeSchema>, userId: string) {
   const mo = await openMo(tx, moId)
   if (await seen(tx, d.clientKey)) {
     const ev = await tx.wipEvent.findUniqueOrThrow({ where: { clientKey: d.clientKey! }, select: { id: true } })
-    return { eventId: ev.id, bundleIds: (await tx.sizeChange.findMany({ where: { eventId: ev.id }, select: { toBundleId: true } })).map((c) => c.toBundleId), duplicate: true }
+    return { eventId: ev.id, bundleIds: [] as string[], duplicate: true }
   }
   const step = stepOf(mo, d.stepId)
   if (step.kind !== 'STITCHING') throw new AppError(`Sizes change only at stitching, not at ${step.name}.`, 400, 'NOT_AT_STITCHING')
@@ -1163,14 +1182,13 @@ export async function changeSizes(tx: Tx, moId: string, d: z.infer<typeof sizeCh
       code: true,
       moLineId: true,
       sizeId: true,
-      cuttingOrderId: true,
       size: { select: { code: true } },
       parent: { select: { code: true, size: { select: { code: true } } } },
     },
   })
   if (bundles.length !== ids.length) throw new AppError('One of those bundles is not on this order.', 400, 'BAD_BUNDLE')
-  // Pieces change size once, from the size they were cut in. A bundle made by an earlier size change
-  // holds pieces already made as another size: a mistake there is undone, not changed again.
+  // A bundle made by a size change before 12 Nov 2026 holds pieces already made as another size: a
+  // mistake there is undone, not changed again.
   const again = bundles.find((b) => b.parent)
   if (again) {
     throw new AppError(
@@ -1191,7 +1209,7 @@ export async function changeSizes(tx: Tx, moId: string, d: z.infer<typeof sizeCh
   for (const l of lines) {
     const b = byId.get(l.bundleId)!
     if (!b.sizeId) throw new AppError(`${b.code} has no size, so it cannot change size.`, 400, 'NO_SIZE')
-    if (l.toSizeId === b.sizeId) throw new AppError(`${b.code} is already size ${b.size?.code}.`, 400, 'SAME_SIZE')
+    if (l.toSizeId === b.sizeId) throw new AppError(`${b.code} was cut as size ${b.size?.code}: pick another size for its pieces.`, 400, 'SAME_SIZE')
     if (!onOrder.has(l.toSizeId)) {
       throw new AppError(`Pieces can be made only as a size on the order: ${[...onOrder.values()].join(', ')}.`, 400, 'NOT_ON_ORDER')
     }
@@ -1227,16 +1245,23 @@ export async function changeSizes(tx: Tx, moId: string, d: z.infer<typeof sizeCh
     }
   }
 
-  // Pieces in hand first, then those done and waiting to go on.
-  const held = await balancesOf(tx, moId, moLineId)
+  // Each bundle's pieces here still in the size they were cut in: in hand first, then those done
+  // and waiting to go on. Pieces already made as another size do not change again.
+  const bySize = await sizeBalancesOf(tx, ids)
+  const placeOf = (bundleId: string, bucket: 'WIP' | 'DONE') => keyOf({ stepId: step.id, vendorId: null, bucket, bundleId, reworkStepId: null })
   const left = new Map<string, number>()
-  for (const r of held) if (r.stepId === step.id && !r.vendorId && (r.bucket === 'WIP' || r.bucket === 'DONE')) left.set(`${r.bundleId}|${r.bucket}`, (left.get(`${r.bundleId}|${r.bucket}`) ?? 0) + r.qty)
+  for (const b of bundles) for (const bucket of ['WIP', 'DONE'] as const) left.set(`${b.id}|${bucket}`, bySize.get(placeOf(b.id, bucket))?.get(b.sizeId) ?? 0)
   const asked = new Map<string, number>()
   for (const l of lines) asked.set(l.bundleId, (asked.get(l.bundleId) ?? 0) + l.qty)
   for (const [bundleId, n] of asked) {
+    const b = byId.get(bundleId)!
     const there = (left.get(`${bundleId}|WIP`) ?? 0) + (left.get(`${bundleId}|DONE`) ?? 0)
     if (n > there) {
-      throw new AppError(`${byId.get(bundleId)!.code}: ${there} in hand or done at ${step.name}, so ${n} is more than there is.`, 409, 'NOT_ENOUGH_PIECES')
+      throw new AppError(
+        `${b.code}: ${there} in hand or done at ${step.name} still size ${b.size?.code ?? ''}, so ${n} is more than there is. Pieces already made as another size do not change again.`,
+        409,
+        'NOT_ENOUGH_PIECES',
+      )
     }
   }
   const take = (bundleId: string, bucket: 'WIP' | 'DONE', want: number) => {
@@ -1246,37 +1271,18 @@ export async function changeSizes(tx: Tx, moId: string, d: z.infer<typeof sizeCh
     return n
   }
 
-  // A new bundle for each old bundle and new size, numbered next on the order.
-  const top = await tx.productionBundle.aggregate({ where: { moId }, _max: { bundleNo: true } })
-  let no = top._max.bundleNo ?? 0
+  // Out of the cut size, into the new one — in the same bundle, where the pieces lie.
   const moves: Move[] = []
-  const made: Array<{ from: (typeof bundles)[number]; toId: string; toCode: string; toSizeId: string; qty: number }> = []
   for (const l of lines) {
     const from = byId.get(l.bundleId)!
     const inHand = take(from.id, 'WIP', l.qty)
     const done = take(from.id, 'DONE', l.qty - inHand)
-    no += 1
-    const child = await tx.productionBundle.create({
-      data: {
-        code: `${mo.moNumber}-B${String(no).padStart(3, '0')}`,
-        bundleNo: no,
-        moId,
-        moLineId,
-        cuttingOrderId: from.cuttingOrderId,
-        sizeId: l.toSizeId,
-        qty: l.qty,
-        parentId: from.id,
-        splitAtStepId: step.id,
-      },
-      select: { id: true, code: true },
-    })
     moves.push(
-      { stepId: step.id, bundleId: from.id, bucket: 'WIP', qty: -inHand },
-      { stepId: step.id, bundleId: child.id, bucket: 'WIP', qty: inHand },
-      { stepId: step.id, bundleId: from.id, bucket: 'DONE', qty: -done },
-      { stepId: step.id, bundleId: child.id, bucket: 'DONE', qty: done },
+      { stepId: step.id, bundleId: from.id, bucket: 'WIP', qty: -inHand, sizeId: from.sizeId },
+      { stepId: step.id, bundleId: from.id, bucket: 'WIP', qty: inHand, sizeId: l.toSizeId },
+      { stepId: step.id, bundleId: from.id, bucket: 'DONE', qty: -done, sizeId: from.sizeId },
+      { stepId: step.id, bundleId: from.id, bucket: 'DONE', qty: done, sizeId: l.toSizeId },
     )
-    made.push({ from, toId: child.id, toCode: child.code, toSizeId: l.toSizeId, qty: l.qty })
   }
   const event = await postEvent(tx, {
     moId,
@@ -1291,30 +1297,41 @@ export async function changeSizes(tx: Tx, moId: string, d: z.infer<typeof sizeCh
     moves,
     shortMessage: (detail) => `${detail}, so that is more than is in hand there.`,
   })
-  for (const m of made) {
+  for (const l of lines) {
+    const from = byId.get(l.bundleId)!
     await tx.sizeChange.create({
       data: {
         moId,
         moLineId,
         stepId: step.id,
         eventId: event.id,
-        fromBundleId: m.from.id,
-        toBundleId: m.toId,
-        fromSizeId: m.from.sizeId!,
-        toSizeId: m.toSizeId,
-        qty: m.qty,
+        fromBundleId: from.id,
+        fromSizeId: from.sizeId!,
+        toSizeId: l.toSizeId,
+        qty: l.qty,
         reason: d.reason,
         createdById: userId,
       },
     })
   }
   await syncProgress(tx, moId)
+
+  // Whole bundles: none of their pieces left in the size they were cut in — the bundle is the new size
+  // now, same number, and its sticker is printed again.
+  const after = await sizeBalancesOf(tx, ids)
+  const cutLeft = (b: (typeof bundles)[number]) => [...after.entries()].reduce((s, [k, at]) => s + (k.split('|')[3] === b.id ? (at.get(b.sizeId) ?? 0) : 0), 0)
+  const whole = bundles.filter((b) => cutLeft(b) === 0)
   return {
     eventId: event.id,
-    bundleIds: made.map((m) => m.toId),
+    /** Bundles whose sticker is printed again: every piece of them changed size. */
+    bundleIds: whole.map((b) => b.id),
+    whole: whole.map((b) => b.code),
     duplicate: false,
     step: step.name,
-    moves: made.map((m) => ({ from: m.from.code, fromSize: m.from.size?.code ?? '', to: m.toCode, toSize: onOrder.get(m.toSizeId) ?? '', qty: m.qty })),
+    moves: lines.map((l) => {
+      const b = byId.get(l.bundleId)!
+      return { from: b.code, fromSize: b.size?.code ?? '', to: b.code, toSize: onOrder.get(l.toSizeId) ?? '', qty: l.qty }
+    }),
   }
 }
 

@@ -75,14 +75,15 @@ export async function stageReport(db: Db, q: StageReportQuery) {
   const changes = changeIds.length
     ? await db.sizeChange.findMany({
         where: { eventId: { in: changeIds } },
-        orderBy: { toBundle: { bundleNo: 'asc' } },
+        orderBy: { fromBundle: { bundleNo: 'asc' } },
         select: { eventId: true, qty: true, fromBundle: { select: { bundleNo: true } }, toBundle: { select: { bundleNo: true } }, fromSize: { select: { code: true } }, toSize: { select: { code: true } } },
       })
     : []
   const bNo = (n: number) => `B${String(n).padStart(3, '0')}`
   const movesOf = new Map<string, Array<{ from: string; fromSize: string; to: string; toSize: string; qty: number }>>()
   for (const c of changes) {
-    movesOf.set(c.eventId, [...(movesOf.get(c.eventId) ?? []), { from: bNo(c.fromBundle.bundleNo), fromSize: c.fromSize.code, to: bNo(c.toBundle.bundleNo), toSize: c.toSize.code, qty: c.qty }])
+    // Since 12 Nov 2026 the pieces stay in their own bundle: from and to are the same bundle.
+    movesOf.set(c.eventId, [...(movesOf.get(c.eventId) ?? []), { from: bNo(c.fromBundle.bundleNo), fromSize: c.fromSize.code, to: bNo((c.toBundle ?? c.fromBundle).bundleNo), toSize: c.toSize.code, qty: c.qty }])
   }
 
   const byEvent = new Map<string, typeof entries>()

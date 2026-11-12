@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient, WipBucket } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
-import { balancesOf } from './wip.service'
+import { balancesOf, keyOf, sizeBalancesOf } from './wip.service'
 import { isLastStep, nextStepAfter } from './route.service'
 import { stepFigures } from './floor.service'
 import { netSizeChanges } from './sizeChanges.service'
@@ -209,10 +209,30 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
     }
   })
 
-  const placesOf = new Map<string, Array<{ stepId: string; bucket: WipBucket; vendorId: string | null; reworkStepId: string | null; qty: number }>>()
+  // Bundles holding pieces made as another size in them (since 12 Nov 2026): what each was made as,
+  // and, where its pieces are, how many of each size — the size they were cut in is the bundle's own.
+  const inBundle = await db.sizeChange.findMany({
+    where: { moId: mo.id, toBundleId: null, undoneAt: null },
+    orderBy: { createdAt: 'asc' },
+    select: { fromBundleId: true, toSizeId: true, qty: true, toSize: { select: { code: true } } },
+  })
+  const madeAsOf = new Map<string, Array<{ sizeId: string; size: string; qty: number }>>()
+  for (const c of inBundle) {
+    const list = madeAsOf.get(c.fromBundleId) ?? []
+    const had = list.find((x) => x.sizeId === c.toSizeId)
+    if (had) had.qty += c.qty
+    else list.push({ sizeId: c.toSizeId, size: c.toSize.code, qty: c.qty })
+    madeAsOf.set(c.fromBundleId, list)
+  }
+  const bySize = madeAsOf.size ? await sizeBalancesOf(db as Prisma.TransactionClient, [...madeAsOf.keys()]) : null
+  const placesOf = new Map<
+    string,
+    Array<{ stepId: string; bucket: WipBucket; vendorId: string | null; reworkStepId: string | null; qty: number; sizes?: Array<{ sizeId: string | null; qty: number }> }>
+  >()
   for (const r of held) {
     const list = placesOf.get(r.bundleId) ?? []
-    list.push({ stepId: r.stepId, bucket: r.bucket, vendorId: r.vendorId, reworkStepId: r.reworkStepId, qty: r.qty })
+    const sizes = madeAsOf.has(r.bundleId) ? [...(bySize?.get(keyOf(r))?.entries() ?? [])].filter(([, q]) => q > 0).map(([sizeId, qty]) => ({ sizeId, qty })) : undefined
+    list.push({ stepId: r.stepId, bucket: r.bucket, vendorId: r.vendorId, reworkStepId: r.reworkStepId, qty: r.qty, ...(sizes ? { sizes } : {}) })
     placesOf.set(r.bundleId, list)
   }
   const bundleList = bundles
@@ -232,6 +252,8 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
         parent: b.parent ? { id: b.parent.id, code: b.parent.code, size: b.parent.size?.code ?? null } : null,
         madeAtStepId: b.splitAtStepId,
         undone: !!b.sizeChangeIn?.undoneAt,
+        /** Pieces of it made as another size, in it (since 12 Nov 2026): the rest are the size it was cut in. */
+        madeAs: madeAsOf.get(b.id) ?? [],
         places: placesOf.get(b.id) ?? [],
       }
     })

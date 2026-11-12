@@ -330,7 +330,7 @@ function DetailTag({ g, maker }: { g: Label; maker: Maker }) {
             .join(' · '),
         )}
         {j?.sizeChanges?.length
-          ? row('Size', `cut ${j.sizeChanges[0].fromSize}, ` + j.sizeChanges.map((c) => `made ${c.toSize} at ${c.step} (${bundleNo(c.from)} → ${bundleNo(c.to)})`).join(', then '))
+          ? row('Size', `cut ${j.sizeChanges[0].fromSize}, ` + j.sizeChanges.map((c) => `made ${c.toSize} at ${c.step} (${c.from === c.to ? `in ${bundleNo(c.from)}` : `${bundleNo(c.from)} → ${bundleNo(c.to)}`})`).join(', then '))
           : null}
         {outside.length > 0 &&
           row(

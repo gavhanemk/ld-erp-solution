@@ -486,9 +486,7 @@ router.post('/transfers/:id/receive', requirePermission(MODULE, 'create'), async
     message: out.duplicate
       ? 'That count was already saved.'
       : `${t.transferNumber}: ${pcs(got)} counted in at ${t.toStep.name}.${excess ? ` ${pcs(excess)} more than was sent — taken off ${t.fromStep.name}.` : ''}${short ? ` ${pcs(short)} short, to be settled.` : t.status === 'PARTLY_RECEIVED' ? ' The rest is still on its way.' : ''}${
-          out.sizes?.moves?.length
-            ? ` Sizes changed: ${sizeMoves(out.sizes.moves)}. New ${out.sizes.moves.length === 1 ? 'bundle' : 'bundles'} ${out.sizes.moves.map((m) => m.to.split('-').pop()).join(', ')}: print ${out.sizes.moves.length === 1 ? 'its sticker' : 'their stickers'}.`
-            : ''
+          out.sizes?.moves?.length ? ` Sizes changed: ${sizeMoves(out.sizes.moves)}, in their own bundles.${wholeNote(out.sizes.whole)}` : ''
         }`,
     data: t,
   })
@@ -558,6 +556,12 @@ router.post('/events/:id/undo', requirePermission(MODULE, 'edit'), async (req: A
 // ─── Size changes (size jumps at stitching) ───────────────────
 
 /** "20 pcs M → L, 50 pcs XL → XXL": a size change in a line. */
+/** Bundles every piece of which changed size: the same bundle, now the new size, its sticker printed again. */
+const wholeNote = (codes: string[] | undefined) =>
+  codes?.length
+    ? ` ${codes.map((c) => c.split('-').pop()).join(', ')} ${codes.length === 1 ? 'is' : 'are'} wholly the new size now: print ${codes.length === 1 ? 'its sticker' : 'their stickers'} again.`
+    : ''
+
 const sizeMoves = (moves: Array<{ fromSize: string; toSize: string; qty: number }>) => {
   const by = new Map<string, number>()
   for (const m of moves) by.set(`${m.fromSize} → ${m.toSize}`, (by.get(`${m.fromSize} → ${m.toSize}`) ?? 0) + m.qty)
@@ -570,7 +574,8 @@ async function auditSizeChangeUndo(req: AuthRequest, eventId: string, moId: stri
     where: { eventId },
     select: { qty: true, step: { select: { name: true } }, fromBundle: { select: { code: true } }, toBundle: { select: { code: true } }, fromSize: { select: { code: true } }, toSize: { select: { code: true } } },
   })
-  const moves = rows.map((r) => ({ from: r.fromBundle.code, fromSize: r.fromSize.code, to: r.toBundle.code, toSize: r.toSize.code, qty: r.qty }))
+  // A change since 12 Nov 2026 stays in its bundle: from and to are the same bundle.
+  const moves = rows.map((r) => ({ from: r.fromBundle.code, fromSize: r.fromSize.code, to: r.toBundle?.code ?? r.fromBundle.code, toSize: r.toSize.code, qty: r.qty }))
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: moId, after: { sizeChangeUndone: { eventId, step: rows[0]?.step.name ?? null, reason, moves } } })
   return moves
 }
@@ -583,8 +588,9 @@ router.get('/orders/:id/sizes', requirePermission(MODULE, 'view'), async (req, r
 
 /**
  * POST /orders/:id/size-changes — pieces made as another size at stitching
- * (a size jump), each bundle's into a new bundle of the new size. Anyone who
- * records the floor's work may, with a reason. Prints follow: the new bundles' stickers.
+ * (a size jump), in their own bundles: the bundle count stays as cut. Anyone
+ * who records the floor's work may, with a reason. A bundle every piece of
+ * which changed has its sticker printed again, in its new size.
  */
 router.post('/orders/:id/size-changes', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = sizeChangeSchema.parse(req.body)
@@ -597,10 +603,9 @@ router.post('/orders/:id/size-changes', requirePermission(MODULE, 'create'), asy
     entityId: req.params.id,
     after: { sizeChange: { eventId: out.eventId, step: out.step, reason: data.reason, moves: out.moves } },
   })
-  const made = out.moves!.map((m) => m.to.split('-').pop()).join(', ')
   res.status(201).json({
     success: true,
-    message: `Sizes changed at ${out.step}: ${sizeMoves(out.moves!)}. New ${out.moves!.length === 1 ? 'bundle' : 'bundles'} ${made}: print ${out.moves!.length === 1 ? 'its sticker' : 'their stickers'}.`,
+    message: `Sizes changed at ${out.step}: ${sizeMoves(out.moves!)}, in their own bundles.${wholeNote(out.whole)}`,
     data: { eventId: out.eventId, bundleIds: out.bundleIds },
   })
 })
@@ -898,6 +903,7 @@ router.get('/orders/:id/stickers', requirePermission(MODULE, 'view'), async (req
       code: true,
       bundleNo: true,
       qty: true,
+      sizeId: true,
       size: { select: { code: true } },
       parent: { select: { code: true, bundleNo: true, size: { select: { code: true } } } },
       sizeChangeIn: { select: { undoneAt: true } },
@@ -911,10 +917,29 @@ router.get('/orders/:id/stickers', requirePermission(MODULE, 'view'), async (req
   // A bundle with no entries at all holds what was tied into it.
   const gone = new Set<string>(['PACKED', 'PACKED_B', 'SCRAPPED'])
   const held = bundles.length
-    ? await prisma.wipEntry.groupBy({ by: ['bundleId', 'bucket'], where: { bundleId: { in: bundles.map((b) => b.id) } }, _sum: { qty: true } })
+    ? await prisma.wipEntry.groupBy({ by: ['bundleId', 'bucket', 'sizeId'], where: { bundleId: { in: bundles.map((b) => b.id) } }, _sum: { qty: true } })
     : []
   const now = new Map<string, number>()
-  for (const r of held) now.set(r.bundleId, (now.get(r.bundleId) ?? 0) + (gone.has(r.bucket) ? 0 : (r._sum.qty ?? 0)))
+  // And size by size (since 12 Nov 2026 a bundle can hold pieces made as another size in it).
+  const nowBySize = new Map<string, Map<string | null, number>>()
+  for (const r of held) {
+    const q = gone.has(r.bucket) ? 0 : (r._sum.qty ?? 0)
+    now.set(r.bundleId, (now.get(r.bundleId) ?? 0) + q)
+    const at = nowBySize.get(r.bundleId) ?? new Map<string | null, number>()
+    at.set(r.sizeId, (at.get(r.sizeId) ?? 0) + q)
+    nowBySize.set(r.bundleId, at)
+  }
+  const sizeIds = [...new Set([...nowBySize.values()].flatMap((m) => [...m.keys()]).filter((x): x is string => !!x))]
+  const codeOfSize = new Map((sizeIds.length ? await prisma.size.findMany({ where: { id: { in: sizeIds } }, select: { id: true, code: true } }) : []).map((z) => [z.id, z.code]))
+  // A bundle's sticker size: the size it was cut in — or, every piece of it now made as one other size,
+  // that size ("cut as" the old one). Holding both, it says how many were made as which.
+  const sizesOf = (b: (typeof bundles)[number]) => {
+    const at = [...(nowBySize.get(b.id)?.entries() ?? [])].filter(([, q]) => q > 0)
+    const others = at.filter(([z]) => z && z !== b.sizeId).map(([z, q]) => ({ size: codeOfSize.get(z!) ?? '', qty: q }))
+    const cutLeft = at.find(([z]) => z === b.sizeId)?.[1] ?? 0
+    if (others.length === 1 && !cutLeft) return { size: { code: others[0].size }, cutAs: b.size?.code ?? null, madeAs: [] }
+    return { size: b.size, cutAs: null, madeAs: others }
+  }
   const company = await prisma.company.findFirst({ select: { name: true } })
   res.json({
     success: true,
@@ -928,7 +953,7 @@ router.get('/orders/:id/stickers', requirePermission(MODULE, 'view'), async (req
           bundleNo: b.bundleNo,
           qty: b.qty,
           now: now.get(b.id) ?? b.qty,
-          size: b.size,
+          ...sizesOf(b),
           parent: b.parent,
           undone: !!b.sizeChangeIn?.undoneAt,
           moLine: b.moLine,

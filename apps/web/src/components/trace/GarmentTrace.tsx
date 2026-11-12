@@ -43,7 +43,8 @@ export interface GarmentStory {
     lot: string | null
     jobCard: string | null
     /** Made from another bundle when its pieces were made as this size at stitching: cut as M, made as L. */
-    madeFrom?: { code: string; size: string; step: string } | null
+    /** inBundle: made as this size in the bundle it was cut in (since 12 Nov 2026), not moved to another. */
+    madeFrom?: { code: string; size: string; step: string; inBundle?: boolean } | null
   } | null
   challan: { dcNumber: string; dcDate: string; status: string; dispatchedAt: string | null; deliveredAt: string | null; vehicle: string | null; transporter: string | null; lr: string | null; invoice: string | null } | null
   where: string
@@ -160,7 +161,7 @@ export function GarmentTrace({ g, open }: { g: GarmentStory; open: (t: Target) =
                 <div className="text-xs text-muted-foreground">
                   {g.bundle.qty} pieces{g.bundle.cutOrder ? ` · ${g.bundle.cutOrder}` : ''}
                 </div>
-                {g.bundle.madeFrom && <div className="text-xs text-muted-foreground">Made from {g.bundle.madeFrom.code.split('-').pop()}</div>}
+                {g.bundle.madeFrom && !g.bundle.madeFrom.inBundle && <div className="text-xs text-muted-foreground">Made from {g.bundle.madeFrom.code.split('-').pop()}</div>}
               </>
             ) : (
               '—'

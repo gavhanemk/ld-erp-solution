@@ -20,9 +20,10 @@ import { bundleShort, newClientKey, pcs, revisedQty, type FlowStep, type JobCard
  * Pieces change size once, from the size they were cut in: bundles made by an
  * earlier change, and pieces an outside unit stitched, are not offered. The
  * pieces of a size are taken from the bundles picked, or else its oldest
- * bundles first; each bundle's changed pieces become a new bundle with its own
- * sticker. The order's planned sizes stay as they are, and nothing goes into
- * stock until the pieces are packed in their new size.
+ * bundles first; they stay in their own bundle (since 12 Nov 2026: the bundle
+ * count and the cutting stickers stay as cut), and a bundle all of whose pieces
+ * changed has its sticker printed again. The order's planned sizes stay as they
+ * are, and nothing goes into stock until the pieces are packed in their new size.
  */
 
 interface Target {
@@ -62,13 +63,23 @@ export function SizeChangeDialog({
     const viaUnit = new Set(
       d.transfers.filter((t) => t.toStep.id === step.id && t.vendor && t.status !== 'CANCELLED').flatMap((t) => t.lines.map((l) => l.bundle.id)),
     )
-    const rows = bundleRows(own, { stepId: step.id, bucket: ['WIP', 'DONE'] }).map((r) => ({ ...r, sizeId: byId.get(r.id)?.size?.id ?? null, parent: byId.get(r.id)?.parent ?? null }))
+    // A bundle holding pieces already made as another size offers only those still in the size it was cut in.
+    const cutHere = (b: (typeof own)[number] | undefined) =>
+      b?.madeAs?.length
+        ? b.places
+            .filter((p) => p.stepId === step.id && !p.vendorId && (p.bucket === 'WIP' || p.bucket === 'DONE'))
+            .reduce((t, p) => t + (p.sizes ? (p.sizes.find((x) => x.sizeId === b.size?.id)?.qty ?? 0) : p.qty), 0)
+        : null
+    const rows = bundleRows(own, { stepId: step.id, bucket: ['WIP', 'DONE'] }).map((r) => {
+      const b = byId.get(r.id)
+      return { ...r, here: r.available, available: cutHere(b) ?? r.available, sizeId: b?.size?.id ?? null, parent: b?.parent ?? null }
+    })
     return {
       own,
       cut: rows.filter((r) => !r.parent && !viaUnit.has(r.id)),
       madeEarlier: rows.filter((r) => r.parent),
       outside: rows.filter((r) => !r.parent && viaUnit.has(r.id)),
-      total: rows.reduce((s, r) => s + r.available, 0),
+      total: rows.reduce((s, r) => s + r.here, 0),
     }
   }, [d.bundles, d.line, d.transfers, step.id])
   const hereOf = (sizeId: string) => floor.cut.filter((r) => r.sizeId === sizeId).reduce((s, r) => s + r.available, 0)
@@ -209,7 +220,7 @@ export function SizeChangeDialog({
         tried && issues.length ? (
           <span className="warn-text">{issues[0].message}</span>
         ) : !issues.length ? (
-          `${pcs(changing)} pcs change size into ${newBundles} new ${newBundles === 1 ? 'bundle' : 'bundles'}; the order stays ${pcs(after)} pcs. Stickers print after saving.`
+          `${pcs(changing)} pcs change size in ${newBundles} ${newBundles === 1 ? 'bundle' : 'bundles'}, which stay as they are; the order stays ${pcs(after)} pcs.`
         ) : (
           'Nothing changes until you save.'
         )
@@ -262,8 +273,8 @@ export function SizeChangeDialog({
 
       <Section icon={Shirt} title={`Sizes at ${step.name}`}>
         <p id="sc-sizes" className="text-muted-foreground mb-3 text-xs">
-          For pieces cut in one size and stitched as another. Under the size they were cut in, say what they were made as. Each bundle&apos;s changed pieces become
-          a new bundle with its own sticker.
+          For pieces cut in one size and stitched as another. Under the size they were cut in, say what they were made as. The pieces stay in their own bundle, so
+          the bundle count and the cutting stickers stay as they are.
         </p>
         {tried && !targets.length && (
           <p className="warn-text mb-3 flex items-center gap-1.5 text-xs">

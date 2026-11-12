@@ -39,7 +39,7 @@ export async function netSizeChanges(db: Db, where: Prisma.SizeChangeWhereInput)
 export async function sizeChangeHistory(db: Db, where: { moId: string } | { moLineId: string }) {
   const rows = await db.sizeChange.findMany({
     where,
-    orderBy: [{ createdAt: 'desc' }, { toBundle: { bundleNo: 'asc' } }],
+    orderBy: [{ createdAt: 'desc' }, { fromBundle: { bundleNo: 'asc' } }],
     select: {
       id: true,
       eventId: true,
@@ -69,7 +69,8 @@ export async function sizeChangeHistory(db: Db, where: { moId: string } | { moLi
     step: { id: string; name: string }
     reason: string
     undone: { at: Date; by: string | null; reason: string | null } | null
-    moves: Array<{ from: { bundleId: string; code: string; bundleNo: number; size: string; sizeId: string }; to: { bundleId: string; code: string; bundleNo: number; size: string; sizeId: string }; qty: number }>
+    /** inBundle: the pieces changed size in their own bundle (since 12 Nov 2026), so from and to are one bundle. */
+    moves: Array<{ from: { bundleId: string; code: string; bundleNo: number; size: string; sizeId: string }; to: { bundleId: string; code: string; bundleNo: number; size: string; sizeId: string }; qty: number; inBundle: boolean }>
   }>()
   for (const r of rows) {
     const e =
@@ -90,7 +91,9 @@ export async function sizeChangeHistory(db: Db, where: { moId: string } | { moLi
         .get(r.eventId)!
     e.moves.push({
       from: { bundleId: r.fromBundle.id, code: r.fromBundle.code, bundleNo: r.fromBundle.bundleNo, size: r.fromSize.code, sizeId: r.fromSize.id },
-      to: { bundleId: r.toBundle.id, code: r.toBundle.code, bundleNo: r.toBundle.bundleNo, size: r.toSize.code, sizeId: r.toSize.id },
+      // Since 12 Nov 2026 the pieces stay in their own bundle: "to" is that same bundle, in its new size.
+      to: { bundleId: (r.toBundle ?? r.fromBundle).id, code: (r.toBundle ?? r.fromBundle).code, bundleNo: (r.toBundle ?? r.fromBundle).bundleNo, size: r.toSize.code, sizeId: r.toSize.id },
+      inBundle: !r.toBundle,
       qty: r.qty,
     })
   }

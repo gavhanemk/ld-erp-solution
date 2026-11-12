@@ -135,7 +135,8 @@ async function main() {
         const mo = await createMo(tx, createMoSchema.parse({ soId: so.id, release: true, lines: [{ soLineId: so.lines[0].id, sizes: [{ sizeId: S1.id, qty: 200 }, { sizeId: S2.id, qty: 200 }] }] }), user.id)
         check('released without a routing', mo.status === 'RELEASED' && !mo.routingId)
         const card = await tx.jobCard.findFirstOrThrow({ where: { moId: mo.id } })
-        check('a job card per colour, numbered from the order, header from the sales order', card.jobCardNumber === `${mo.moNumber}-JC1` && card.orderNo === 'LDCM-06' && card.designNo === 'DCSHRFS01001099-02' && card.fabricQuality === 'Poplin print PS-426A', JSON.stringify({ n: card.jobCardNumber, o: card.orderNo, d: card.designNo, f: card.fabricQuality }))
+        // Order no. is our own order no., the sales order's (12 Nov 2026; it was the buyer's PO before).
+        check('a job card per colour, numbered from the order, header from the sales order', card.jobCardNumber === `${mo.moNumber}-JC1` && card.orderNo === so.soNumber && card.designNo === 'DCSHRFS01001099-02' && card.fabricQuality === 'Poplin print PS-426A', JSON.stringify({ n: card.jobCardNumber, o: card.orderNo, d: card.designNo, f: card.fabricQuality }))
         await updateJobCard(tx, card.id, jobCardSchema.parse({ orderNo: 'LDCM-06', projectId: 'DC-46', designNo: 'DCSHRFS01001099-02', fabricQuality: 'Poplin print PS-426A', meters: 560, average: 1.4, ratio: 'S2 M2', lotNo: 'LOT-7' }))
 
         // ── No cutting before stages and materials ──

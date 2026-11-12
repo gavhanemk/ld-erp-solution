@@ -63,6 +63,8 @@ export interface Place {
   vendorId: string | null
   reworkStepId: string | null
   qty: number
+  /** In a bundle holding pieces made as another size: how many of each size are here. */
+  sizes?: Array<{ sizeId: string | null; qty: number }>
 }
 
 export interface FlowBundle {
@@ -80,8 +82,11 @@ export interface FlowBundle {
   madeAtStepId?: string | null
   /** Its size change was taken back. */
   undone?: boolean
+  /** Pieces of it made as another size, in it (since 12 Nov 2026); the rest are the size it was cut in. */
+  madeAs?: Array<{ sizeId: string; size: string; qty: number }>
   places: Place[]
 }
+
 
 export interface TransferLine {
   id: string
@@ -313,6 +318,8 @@ export interface SizeChangeEntry {
     from: { bundleId: string; code: string; bundleNo: number; size: string; sizeId: string }
     to: { bundleId: string; code: string; bundleNo: number; size: string; sizeId: string }
     qty: number
+    /** The pieces changed size inside their own bundle (since 12 Nov 2026): from and to are one bundle. */
+    inBundle?: boolean
   }>
 }
 
@@ -321,6 +328,44 @@ export const revisedQty = (z: { qty: number; changed?: number }) => Math.max(0, 
 
 /** The bundle's own number from its code: "B003" from "MO-2627-0042-B003". */
 export const bundleShort = (code: string) => code.split('-').pop() ?? code
+
+/** Bundle numbers as runs, the way a person writes them: "B006–B013, B015". */
+export function bundleRuns(codes: string[]) {
+  const parts = [...new Set(codes)].map((code) => {
+    const short = bundleShort(code)
+    const m = /^(\D*)(\d+)$/.exec(short)
+    return m ? { short, head: m[1], n: Number(m[2]) } : null
+  })
+  if (parts.some((x) => !x)) return [...new Set(codes)].map(bundleShort).join(', ')
+  const sorted = (parts as Array<{ short: string; head: string; n: number }>).sort((a, b) => a.head.localeCompare(b.head) || a.n - b.n)
+  const runs: Array<{ first: (typeof sorted)[number]; last: (typeof sorted)[number] }> = []
+  for (const x of sorted) {
+    const run = runs[runs.length - 1]
+    if (run && run.last.head === x.head && x.n === run.last.n + 1) run.last = x
+    else runs.push({ first: x, last: x })
+  }
+  return runs.map((r) => (r.first === r.last ? r.first.short : `${r.first.short}–${r.last.short}`)).join(', ')
+}
+
+/**
+ * A size change in a line per change of size, not one per bundle: "50 pcs S → XS (B006–B013)".
+ * Pieces that changed inside their own bundle are written with that bundle; those moved into a new
+ * bundle (before 12 Nov 2026) with "from → to".
+ */
+export function sizeMovesText(moves: SizeChangeEntry['moves']) {
+  const groups = new Map<string, { from: string; to: string; qty: number; codes: string[]; arrows: string[] }>()
+  for (const m of moves) {
+    const k = `${m.from.size}→${m.to.size}`
+    const g = groups.get(k) ?? { from: m.from.size, to: m.to.size, qty: 0, codes: [], arrows: [] }
+    g.qty += m.qty
+    if (m.inBundle || m.from.bundleId === m.to.bundleId) g.codes.push(m.from.code)
+    else g.arrows.push(`${bundleShort(m.from.code)} → ${bundleShort(m.to.code)}`)
+    groups.set(k, g)
+  }
+  return [...groups.values()]
+    .map((g) => `${pcs(g.qty)} pcs ${g.from} → ${g.to} (${[g.codes.length ? bundleRuns(g.codes) : '', ...g.arrows].filter(Boolean).join(', ')})`)
+    .join('; ')
+}
 
 /**
  * The lot no. a sheet shows: the job card's own, or else the lots written on

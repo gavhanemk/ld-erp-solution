@@ -9,7 +9,7 @@ import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { BundleQtyTable, type BundleRow, type ExtraColumn, type QtyValues } from './BundleQtyTable'
-import { bundleShort, newClientKey, pcs, type FlowTransfer } from './types'
+import { bundleRuns, bundleShort, newClientKey, pcs, type FlowTransfer } from './types'
 
 /**
  * Counting a transfer card in at the receiving desk. What was sent is kept as
@@ -70,24 +70,6 @@ function spread(total: number, caps: number[]) {
     open = open.filter((i) => out[i] < caps[i])
   }
   return out
-}
-
-/** Bundle numbers as runs, the way a person writes them: "B006–B013, B015". */
-function bundleRuns(codes: string[]) {
-  const parts = codes.map((code) => {
-    const short = bundleShort(code)
-    const m = /^(\D*)(\d+)$/.exec(short)
-    return m ? { short, head: m[1], n: Number(m[2]) } : null
-  })
-  if (parts.some((x) => !x)) return codes.map(bundleShort).join(', ')
-  const sorted = (parts as Array<{ short: string; head: string; n: number }>).sort((a, b) => a.head.localeCompare(b.head) || a.n - b.n)
-  const runs: Array<{ first: (typeof sorted)[number]; last: (typeof sorted)[number] }> = []
-  for (const x of sorted) {
-    const run = runs[runs.length - 1]
-    if (run && run.last.head === x.head && x.n === run.last.n + 1) run.last = x
-    else runs.push({ first: x, last: x })
-  }
-  return runs.map((r) => (r.first === r.last ? r.first.short : `${r.first.short}–${r.last.short}`)).join(', ')
 }
 
 export function CountInDialog({
@@ -546,8 +528,7 @@ export function CountInDialog({
             {moving > 0 && (
               <span className="text-primary">
                 {' '}
-                {pcs(total - moving)} keep their size, {pcs(moving)} made as another size: {changes.length} new {changes.length === 1 ? 'bundle' : 'bundles'}, stickers
-                after saving.
+                {pcs(total - moving)} keep their size, {pcs(moving)} made as another size, in their own {changes.length === 1 ? 'bundle' : 'bundles'}.
               </span>
             )}
           </>
@@ -733,7 +714,7 @@ export function CountInDialog({
                         <td className="px-2.5 py-1.5 text-right font-semibold">{pcs(moving)}</td>
                         <td className="px-2.5 py-1.5 text-right font-semibold">{changes.length}</td>
                         <td className="text-muted-foreground px-2.5 py-1.5" colSpan={3}>
-                          {changes.length} new bundles, stickers after saving
+                          in their own bundles: the bundle count stays as cut
                         </td>
                       </tr>
                     </tfoot>

@@ -374,8 +374,11 @@ type Journey = {
   cut: { date: Date; ref: string | null; by: string | null } | null
   steps: Array<{ name: string; check: boolean; outside: boolean; done: boolean; date: Date | null; by: string | null; challan: string | null }>
   packed: { date: Date; ref: string | null; store: string | null } | null
-  /** Made as another size at stitching, oldest first: cut as M, made as L. */
-  sizeChanges: Array<{ from: string; fromSize: string; to: string; toSize: string; qty: number; step: string; date: Date; reason: string }>
+  /**
+   * Made as another size at stitching, oldest first: cut as M, made as L. inBundle: pieces of this
+   * bundle changed size in it (since 12 Nov 2026) — true of a garment only when it is that size.
+   */
+  sizeChanges: Array<{ from: string; fromSize: string; to: string; toSize: string; qty: number; step: string; date: Date; reason: string; inBundle?: boolean }>
 }
 
 /**
@@ -419,10 +422,12 @@ async function journeysOf(bundleIds: string[], moIds: string[]): Promise<Map<str
         },
       },
     }),
-    // The size changes that made a bundle of the chain, still standing.
+    // The size changes that made a bundle of the chain, and those made inside a bundle, still standing.
     prisma.sizeChange.findMany({
-      where: { toBundleId: { in: allIds }, undoneAt: null },
+      where: { undoneAt: null, OR: [{ toBundleId: { in: allIds } }, { fromBundleId: { in: bundleIds }, toBundleId: null }] },
+      orderBy: { createdAt: 'asc' },
       select: {
+        fromBundleId: true,
         toBundleId: true,
         qty: true,
         reason: true,
@@ -437,7 +442,7 @@ async function journeysOf(bundleIds: string[], moIds: string[]): Promise<Map<str
   ])
   const stepsOf = new Map<string, typeof steps>()
   for (const s of steps) stepsOf.set(s.moId, [...(stepsOf.get(s.moId) ?? []), s])
-  const madeBy = new Map(changes.map((c) => [c.toBundleId, c]))
+  const madeBy = new Map(changes.filter((c) => c.toBundleId).map((c) => [c.toBundleId!, c]))
   const bundles = await prisma.productionBundle.findMany({ where: { id: { in: bundleIds } }, select: { id: true, moId: true } })
   for (const b of bundles) {
     const chain = lineages.get(b.id) ?? [{ id: b.id, code: '', upTo: null }]
@@ -466,11 +471,17 @@ async function journeysOf(bundleIds: string[], moIds: string[]): Promise<Map<str
         }
       }),
       packed: packE?.fgReceipt ? { date: packE.fgReceipt.receiptDate, ref: packE.fgReceipt.fgrNumber, store: packE.fgReceipt.warehouse?.name ?? null } : null,
-      sizeChanges: chain
-        .map((x) => madeBy.get(x.id))
-        .filter((c): c is NonNullable<typeof c> => !!c)
-        .reverse()
-        .map((c) => ({ from: c.fromBundle.code, fromSize: c.fromSize.code, to: c.toBundle.code, toSize: c.toSize.code, qty: c.qty, step: c.step.name, date: c.event.eventDate, reason: c.reason })),
+      sizeChanges: [
+        ...chain
+          .map((x) => madeBy.get(x.id))
+          .filter((c): c is NonNullable<typeof c> => !!c)
+          .reverse()
+          .map((c) => ({ from: c.fromBundle.code, fromSize: c.fromSize.code, to: c.toBundle?.code ?? c.fromBundle.code, toSize: c.toSize.code, qty: c.qty, step: c.step.name, date: c.event.eventDate, reason: c.reason })),
+        // Pieces of this bundle made as another size in it: on a garment's label only when it is that size.
+        ...changes
+          .filter((c) => !c.toBundleId && c.fromBundleId === b.id)
+          .map((c) => ({ from: c.fromBundle.code, fromSize: c.fromSize.code, to: c.fromBundle.code, toSize: c.toSize.code, qty: c.qty, step: c.step.name, date: c.event.eventDate, reason: c.reason, inBundle: true })),
+      ],
     })
   }
   return out
@@ -622,7 +633,12 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
                 packedOn: g.fgReceipt.receiptDate,
                 fgr: g.fgReceipt.fgrNumber,
                 store: g.fgReceipt.warehouse?.name ?? null,
-                journey: g.bundle ? (journeys.get(g.bundle.id) ?? null) : null,
+                journey: (() => {
+                  const j = g.bundle ? journeys.get(g.bundle.id) : undefined
+                  if (!j) return null
+                  // A change inside the bundle is this garment's only when it is the size its pieces were made as.
+                  return { ...j, sizeChanges: j.sizeChanges.filter((c) => !c.inBundle || c.toSize === (g.size?.code ?? '')) }
+                })(),
               },
             }
           : {}),
@@ -907,9 +923,13 @@ export async function garmentDetail(id: string) {
           qty: true,
           cuttingOrder: { select: { cutOrderNumber: true, cutDate: true, lotNo: true } },
           moLine: { select: { jobCard: { select: { jobCardNumber: true, lotNo: true } } } },
-          // Made from another bundle by a size change at stitching.
+          // Made from another bundle by a size change at stitching (before 12 Nov 2026) …
           parentId: true,
           sizeChangeIn: { select: { step: { select: { name: true } }, fromBundle: { select: { code: true } }, fromSize: { select: { code: true } } } },
+          // … or, since, its pieces made as another size in it: the size it was cut in, and where.
+          sizeId: true,
+          size: { select: { code: true } },
+          sizeChangesOut: { where: { toBundleId: null, undoneAt: null }, select: { toSizeId: true, step: { select: { name: true } } } },
         },
       },
       events: { orderBy: { createdAt: 'asc' }, include: { createdBy: { select: { name: true } } } },
@@ -966,6 +986,7 @@ export async function garmentDetail(id: string) {
           eventId: true,
           fromBundleId: true,
           toBundleId: true,
+          toSizeId: true,
           qty: true,
           reason: true,
           fromBundle: { select: { code: true } },
@@ -1048,11 +1069,13 @@ export async function garmentDetail(id: string) {
   for (const [eventId, ev] of byEvent) {
     if (ev.kind !== 'SIZE_CHANGE') continue
     const rows = sizeRows.filter((r) => r.eventId === eventId)
-    const made = rows.find((r) => codeOf.has(r.toBundleId))
-    const moves = (made ? [made] : rows.filter((r) => codeOf.has(r.fromBundleId) && !codeOf.has(r.toBundleId))).map((r) => ({
+    // This piece was made by it: a new bundle it is in (before 12 Nov 2026), or pieces of its own
+    // bundle made, in it, as the size this piece is.
+    const made = rows.find((r) => (r.toBundleId ? codeOf.has(r.toBundleId) : codeOf.has(r.fromBundleId) && r.toSizeId === g.sizeId))
+    const moves = (made ? [made] : rows.filter((r) => codeOf.has(r.fromBundleId) && !(r.toBundleId && codeOf.has(r.toBundleId)))).map((r) => ({
       from: r.fromBundle.code,
       fromSize: r.fromSize.code,
-      to: r.toBundle.code,
+      to: r.toBundle?.code ?? r.fromBundle.code,
       toSize: r.toSize.code,
       qty: r.qty,
     }))
@@ -1062,8 +1085,8 @@ export async function garmentDetail(id: string) {
     ev.sizeChange = { made: Boolean(made), qty, reason: rows[0]?.reason ?? '', moves }
     ev.qty = qty
     ev.type = made ? `Made as ${moves[0].toSize} instead of ${moves[0].fromSize}` : `${qty} ${qty === 1 ? 'pc' : 'pcs'} made as ${sizes.join(', ')}`
-    ev.changes = moves.map((m) => `${m.qty} ${m.fromSize} → ${m.toSize} (${shortBundle(m.from)} → ${shortBundle(m.to)})`)
-    ev.bundle = made ? made.toBundle.code : moves[0].from
+    ev.changes = moves.map((m) => `${m.qty} ${m.fromSize} → ${m.toSize} (${m.from === m.to ? `in ${shortBundle(m.from)}` : `${shortBundle(m.from)} → ${shortBundle(m.to)}`})`)
+    ev.bundle = made ? (made.toBundle?.code ?? made.fromBundle.code) : moves[0].from
   }
 
   return {
@@ -1099,8 +1122,15 @@ export async function garmentDetail(id: string) {
           jobCard: g.bundle.moLine?.jobCard?.jobCardNumber ?? null,
           /** Made from another bundle when its pieces were made as this size at stitching: cut as M, made as L. */
           madeFrom: g.bundle.sizeChangeIn
-            ? { code: g.bundle.sizeChangeIn.fromBundle.code, size: g.bundle.sizeChangeIn.fromSize.code, step: g.bundle.sizeChangeIn.step.name }
-            : null,
+            ? { code: g.bundle.sizeChangeIn.fromBundle.code, size: g.bundle.sizeChangeIn.fromSize.code, step: g.bundle.sizeChangeIn.step.name, inBundle: false }
+            : g.sizeId && g.bundle.sizeId && g.sizeId !== g.bundle.sizeId
+              ? {
+                  code: g.bundle.code,
+                  size: g.bundle.size?.code ?? '',
+                  step: g.bundle.sizeChangesOut.find((c) => c.toSizeId === g.sizeId)?.step.name ?? 'stitching',
+                  inBundle: true,
+                }
+              : null,
         }
       : null,
     production: [...byEvent.values()].filter((e) => e.changes.length),
