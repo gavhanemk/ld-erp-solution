@@ -174,6 +174,8 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   const [sizeId, setSizeId] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** Change sizes pressed when it cannot be used yet: what to do first. */
+  const [sizeNote, setSizeNote] = useState<string | null>(null)
   const live = !['DRAFT', 'CLOSED'].includes(d.mo.status)
   const workable = live && !d.mo.held
   const mayCreate = can('production', 'create') && workable
@@ -231,6 +233,14 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   // Size jumps: only at stitching on our own floor, on pieces in hand or done here.
   const sizeStep = step.kind === 'STITCHING' && !outside
   const mayChangeSizes = mayCreate && sizeStep && sizes.length > 1 && !cameWrong.length && (f?.inHand ?? 0) + (f?.waiting ?? 0) > 0
+  // The button shows on every stitching sheet with more than one size, so it can be found; when it
+  // cannot be used yet it says why instead of being missing.
+  const showSizeButton = mayCreate && sizeStep && sizes.length > 1
+  const sizeBlock = cameWrong.length
+    ? 'Pieces came here past a stage. Take that card back first, then change sizes.'
+    : (f?.inTransit ?? 0) > 0 && (f?.inHand ?? 0) + (f?.waiting ?? 0) === 0
+      ? `Count the pieces in first (${pcs(f!.inTransit)} pcs are on their way here): sizes change only on pieces in hand at ${step.name}.`
+      : `No pieces in hand at ${step.name}. Count pieces in first: sizes change only on pieces in hand here, before they are sent on.`
   const sizesChanged = sizes.some((z) => (z.changed ?? 0) !== 0)
   const changedHere = sizes.some((z) => (fig(z.id)?.sizeIn ?? 0) + (fig(z.id)?.sizeOut ?? 0) > 0)
   const changesHere = (d.sizeChanges ?? []).filter((c) => c.step.id === step.id)
@@ -376,13 +386,19 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
         icon={ClipboardCheck}
         title="Size details"
         actions={
-          mayChangeSizes ? (
-            <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOpen({ kind: 'sizes' })} title="Pieces cut as one size made as another size of the order">
+          showSizeButton ? (
+            <button
+              type="button"
+              className="btn-secondary h-7 px-2.5 text-xs"
+              onClick={() => (mayChangeSizes ? (setSizeNote(null), setOpen({ kind: 'sizes' })) : setSizeNote(sizeBlock))}
+              title="Pieces cut as one size made as another size of the order"
+            >
               <ArrowLeftRight size={13} /> Change sizes
             </button>
           ) : undefined
         }
       >
+        {sizeNote && !mayChangeSizes && <p className="warn-text mb-2 text-xs">{sizeNote}</p>}
         <SizeTable
           d={d}
           rows={[
