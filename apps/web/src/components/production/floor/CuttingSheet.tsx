@@ -102,9 +102,23 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
     steps.push({
       key: c.id,
       tone: 'info',
+      // What the Edit beside it changes shows here too: its lot no. and the fabric given.
       text: (
         <>
-          {pcs(c.plannedPieces)} pcs with <span className="text-foreground font-medium">{c.cutterName ?? 'a contractor'}</span> on {c.cutOrderNumber}, issued {formatDate(c.cutDate)} — receive them when cut
+          {pcs(c.plannedPieces)} pcs with <span className="text-foreground font-medium">{c.cutterName ?? 'a contractor'}</span> on {c.cutOrderNumber}, issued {formatDate(c.cutDate)}
+          {c.lotNo ? (
+            <>
+              {' '}
+              · lot <span className="text-foreground font-medium">{c.lotNo}</span>
+            </>
+          ) : null}
+          {c.fabricIssued != null ? (
+            <>
+              {' '}
+              · <span className="text-foreground font-medium">{fabricQty(Number(c.fabricIssued), c.fabricItem?.uom?.symbol ?? '')}</span> fabric given
+            </>
+          ) : null}{' '}
+          — receive them when cut
         </>
       ),
       actions: [

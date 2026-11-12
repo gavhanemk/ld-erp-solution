@@ -1,7 +1,7 @@
 'use client'
 
 import { formatDate } from '@/lib/utils'
-import { pcs, refNo, type FlowStep, type JobCardDetail } from './types'
+import { lotOf, pcs, refNo, type FlowStep, type JobCardDetail } from './types'
 
 /**
  * The top of a department's sheet, as the paper ones had it: the order and
@@ -12,6 +12,7 @@ export function SheetHeader({ d, step }: { d: JobCardDetail; step?: FlowStep }) 
   const c = d.card
   const cutting = d.steps.find((s) => s.kind === 'CUTTING')
   const cut = cutting?.figures?.completed ?? 0
+  const lot = lotOf(d)
   const facts: Array<[string, React.ReactNode]> = [
     ['Ref no.', <span key="ref" className="font-mono">{refNo(c)}</span>],
     ['Job card', <span key="jc" className="font-mono">{c.jobCardNumber}</span>],
@@ -21,7 +22,7 @@ export function SheetHeader({ d, step }: { d: JobCardDetail; step?: FlowStep }) 
     ['Fabric quality', c.fabricQuality ?? '—'],
     ['Colour', d.line?.color || '—'],
     ['Design no.', c.designNo ?? '—'],
-    ['Lot no.', c.lotNo ?? '—'],
+    ['Lot no.', lot ? <span key="lot" title={lot.fromLays ? 'As written on the lays issued for cutting' : undefined}>{lot.lot}</span> : '—'],
     ['Metres', c.meters != null ? c.meters.toLocaleString('en-IN', { maximumFractionDigits: 3 }) : '—'],
     ['Average', c.average != null ? `${c.average.toLocaleString('en-IN', { maximumFractionDigits: 4 })} m/pc` : '—'],
     ['Ratio', c.ratio ?? '—'],

@@ -321,6 +321,17 @@ export const revisedQty = (z: { qty: number; changed?: number }) => Math.max(0, 
 /** The bundle's own number from its code: "B003" from "MO-2627-0042-B003". */
 export const bundleShort = (code: string) => code.split('-').pop() ?? code
 
+/**
+ * The lot no. a sheet shows: the job card's own, or else the lots written on
+ * its lays (issued to cutting contractors) — a lot put on a lay's Edit shows
+ * at the top of the sheet without being typed twice.
+ */
+export function lotOf(d: Pick<JobCardDetail, 'card' | 'cuttings'>): { lot: string; fromLays: boolean } | null {
+  if (d.card.lotNo?.trim()) return { lot: d.card.lotNo.trim(), fromLays: false }
+  const lots = [...new Set(d.cuttings.filter((c) => c.status !== 'CANCELLED' && c.lotNo?.trim()).map((c) => c.lotNo!.trim()))]
+  return lots.length ? { lot: lots.join(', '), fromLays: true } : null
+}
+
 /** The reference the floor's papers carry: order no. / project ID / design no. */
 export const refNo = (c: Pick<JobCardHeader, 'orderNo' | 'projectId' | 'designNo' | 'jobCardNumber'>) =>
   [c.orderNo, c.projectId, c.designNo].filter(Boolean).join('/') || c.jobCardNumber

@@ -284,6 +284,22 @@ export function MoDetailsDialog({
           : {}),
       }
     }
+    // One lay: say what it now holds, so it is plain what was saved.
+    const layMessage = (i: IssueRow) => {
+      const f = issues[i.id]
+      const unit = d.fabrics.find((x) => x.itemId === f.fabricItemId)?.uom ?? ''
+      const pieces = !piecesTouched[i.id]
+        ? i.plannedPieces
+        : i.sizes.length
+          ? i.sizes.reduce((s, z) => s + n(layQty[i.id]?.[z.sizeId]), 0)
+          : n(layQty[i.id]?.[''])
+      const held = [
+        `${pieces.toLocaleString('en-IN')} pcs with ${f.cutterName.trim()}`,
+        f.lotNo.trim() ? `lot ${f.lotNo.trim()}` : null,
+        f.fabricGiven.trim() ? `${f.fabricGiven.trim()}${unit ? ` ${unit}` : ''} fabric given` : null,
+      ]
+      return `${i.cutOrderNumber} saved: ${held.filter(Boolean).join(' · ')}.`
+    }
     try {
       // One lay: only that lay is sent, so nothing else on the order is touched.
       const body = oneLay
@@ -311,7 +327,7 @@ export function MoDetailsDialog({
             cuttingIssues: d.cuttingIssues.map(layBody),
           }
       const res = await api.patch<{ message?: string }>(`/production/orders/${d.id}/details`, body)
-      onSaved(res.message ?? 'Saved.')
+      onSaved(oneLay ? layMessage(oneLay) : (res.message ?? 'Saved.'))
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save the details.')
     } finally {
