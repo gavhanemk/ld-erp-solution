@@ -117,7 +117,7 @@ export function JobCardView({ jobCardId, onClose, onChanged }: { jobCardId: stri
             )}
             <Section icon={FileText} title="Header">
               <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
-                {field('orderNo', 'Order no.', { placeholder: 'LDCM-06' })}
+                {field('orderNo', 'Order no.', { placeholder: 'Our order no., e.g. SO-2627-0001' })}
                 {field('projectId', 'Project ID', { placeholder: 'DC-46' })}
                 {field('description', 'Description', { span: 2, placeholder: 'Formal shirts' })}
                 {field('fabricQuality', 'Fabric quality', { span: 2, placeholder: 'Poplin print PS-426A' })}

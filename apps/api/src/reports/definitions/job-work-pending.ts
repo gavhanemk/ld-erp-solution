@@ -21,7 +21,7 @@ const GST_WARN = 60
  *
  *  - the store's job-work challans (Inventory → Job Work): one row per item
  *    sent on a challan;
- *  - production's outside stages (Production Stages): one row per job-work
+ *  - production's outside stages (Production Floor): one row per job-work
  *    order — an order's stage at one unit — in pieces, across its challans.
  *
  * Pending is what the unit has not yet accounted for; wastage is what it
@@ -172,7 +172,7 @@ export const jobWorkPending: ReportDefinition = {
       }
     })
 
-    // ── Production's outside stages, read as the Production Stages screen reads them ──
+    // ── Production's outside stages, read as Production Floor's By stage tab reads them ──
     const orders = await tx.jobWorkOrder.findMany({
       where: params.jobWorkerId ? { vendorId: params.jobWorkerId } : {},
       select: {
@@ -331,7 +331,7 @@ export const jobWorkPending: ReportDefinition = {
         ).filter((p) => p.points.some((x) => x.value > 0)),
         insights,
         caveats: [
-          'Sent By: Store is a job-work challan from Inventory → Job Work; Production is an outside stage on Production Stages, in pieces, one row per order, stage and unit across its challans.',
+          'Sent By: Store is a job-work challan from Inventory → Job Work; Production is an outside stage on Production Floor, in pieces, one row per order, stage and unit across its challans.',
           'Accounted for is what the unit settled on a return — back as itself, as a new item, wasted or damaged. For production, accepted, rejected and damaged pieces back.',
           'Damaged is spoiled at the unit and chargeable to it. Damage not charged is damage on a receipt with no debit note yet.',
           `GST year: material sent for job work must come back within ${GST_DAYS} days of leaving, or tax falls due as if it was supplied that day. Production rows count from the first challan.`,

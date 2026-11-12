@@ -203,7 +203,7 @@ router.get('/', async (req: AuthRequest, res) => {
           orderBy: newest,
           take: TAKE,
         })
-        .then((rows) => rows.map((r) => ({ kind: 'Process transfer', number: r.transferNumber, title: 'Transfer', sub: `${said(r.status)} · ${day(r.dispatchDate)}`, path: '/production/transfers', term: r.transferNumber }))),
+        .then((rows) => rows.map((r) => ({ kind: 'Process transfer', number: r.transferNumber, title: 'Transfer', sub: `${said(r.status)} · ${day(r.dispatchDate)}`, path: `/production/floor?tab=transfers&view=all&q=${encodeURIComponent(r.transferNumber)}`, term: r.transferNumber }))),
       prisma.jobCard
         .findMany({
           where: { OR: [{ jobCardNumber: has(q) }, { lotNo: has(q) }, { designNo: has(q) }] },
@@ -217,7 +217,7 @@ router.get('/', async (req: AuthRequest, res) => {
             number: r.jobCardNumber,
             title: r.designNo ? `Design ${r.designNo}` : 'Job card',
             sub: r.lotNo ? `lot ${r.lotNo}` : null,
-            path: '/production/job-cards',
+            path: `/production/floor?tab=cards&q=${encodeURIComponent(r.jobCardNumber)}`,
             term: r.jobCardNumber,
           })),
         ),

@@ -18,6 +18,10 @@ interface Payload {
     /** Pieces it holds now, anywhere on the floor (not packed or written off). */
     now: number
     size: { code: string } | null
+    /** Every piece of it made as one other size (since 12 Nov 2026): the size it was cut in; size is the new one. */
+    cutAs?: string | null
+    /** Pieces of it made as another size, in it, while the rest keep the size it was cut in. */
+    madeAs?: Array<{ size: string; qty: number }>
     /** The bundle it was made from, by a size change at stitching. */
     parent: { code: string; bundleNo: number; size: { code: string } | null } | null
     moLine: { color: string; style: { code: string; name: string } }
@@ -69,6 +73,12 @@ function Sticker({ b, data, layout }: { b: Payload['bundles'][number]; data: Pay
         <div style={{ fontSize: big ? '8pt' : '6.5pt', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           Made from {bNo(b.parent.bundleNo)}
           {b.parent.size ? ` (${b.parent.size.code})` : ''}
+        </div>
+      )}
+      {/* Its pieces made as another size in it: wholly (the size above is the new one), or some of them. */}
+      {(b.cutAs || (b.madeAs?.length ?? 0) > 0) && (
+        <div style={{ fontSize: big ? '8pt' : '6.5pt', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {b.cutAs ? `Cut as ${b.cutAs}` : b.madeAs!.map((m) => `${m.qty} made as ${m.size}`).join(' · ')}
         </div>
       )}
       <div style={{ fontSize: big ? '8pt' : '6.5pt', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

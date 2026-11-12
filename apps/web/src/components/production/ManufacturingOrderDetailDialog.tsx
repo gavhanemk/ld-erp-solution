@@ -1151,7 +1151,9 @@ export function ManufacturingOrderDetailDialog({
 const signed = (n: number) => (n > 0 ? `+${pcs(n)}` : n < 0 ? `−${pcs(-n)}` : '—')
 
 /** "20 pcs M → L (B003 → B061)": one bundle's pieces made as another size, into a new bundle. */
-const moveText = (m: SizeChangeEntry['moves'][number]) => `${pcs(m.qty)} pcs ${m.from.size} → ${m.to.size} (${bundleShort(m.from.code)} → ${bundleShort(m.to.code)})`
+// Inside its own bundle since 12 Nov 2026 ("in B006"); into a new bundle before ("B006 → B042").
+const moveText = (m: SizeChangeEntry['moves'][number]) =>
+  `${pcs(m.qty)} pcs ${m.from.size} → ${m.to.size} (${m.from.code === m.to.code ? `in ${bundleShort(m.from.code)}` : `${bundleShort(m.from.code)} → ${bundleShort(m.to.code)}`})`
 
 /**
  * The order's sizes line by line: planned, changed at stitching, revised,

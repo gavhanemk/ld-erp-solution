@@ -56,7 +56,8 @@ const time = (d: string) => new Date(d).toLocaleTimeString('en-IN', { hour: 'num
 const isoDay = (d: Date) => d.toLocaleDateString('en-CA', IST)
 
 /** "20 pcs M → L (B003 → B061)" */
-const moveText = (m: SizeMove) => `${pcs(m.qty)} pcs ${m.fromSize} → ${m.toSize} (${m.from} → ${m.to})`
+// Inside its own bundle since 12 Nov 2026 ("in B006"); into a new bundle before ("B006 → B042").
+const moveText = (m: SizeMove) => `${pcs(m.qty)} pcs ${m.fromSize} → ${m.toSize} (${m.from === m.to ? `in ${m.from}` : `${m.from} → ${m.to}`})`
 
 /** What one entry was, in a few words. */
 function what(r: Row, check: boolean) {
@@ -195,7 +196,7 @@ export function StageReport({ operationId, name, check }: { operationId: string;
                         {r.sizeChange && r.sizeChange.length > 1 && (
                           <div className="text-muted-foreground text-xs">
                             {r.sizeChange.map((m) => (
-                              <div key={m.to}>{moveText(m)}</div>
+                              <div key={`${m.from}-${m.to}-${m.toSize}`}>{moveText(m)}</div>
                             ))}
                           </div>
                         )}

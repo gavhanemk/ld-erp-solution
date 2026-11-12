@@ -273,7 +273,7 @@ export function MoProductionPanel({
         </ol>
         {staged && (
           <p className="text-muted-foreground mt-3 flex items-center gap-1.5 text-xs">
-            <ClipboardList size={13} /> The same sheets are on Production → Production Stages, one tab per process; the handovers on Process Transfers.
+            <ClipboardList size={13} /> The same sheets are on Production → Production Floor: by job card, by stage, and the transfer cards between departments.
           </p>
         )}
         {mo.heldAt && (

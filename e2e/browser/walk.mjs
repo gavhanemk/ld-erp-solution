@@ -153,7 +153,7 @@ const plan = [
   ['05-quotation.js'], ['06-convert.js'], ['07-so.js'], ['08-mo.js'], ['09-raise-mr.js'],
   ['10-approve-indent.js'], ['11-po.js'], ['12-grn.js'], ['13-qc.js'], ['14-issue.js'],
   ['15-routing.js'], ['16-stages.js'], ['16b-jobcard.js'],
-  ['17-stage-open.js', { tab: 'Cutting', caption: 'Step 14 · Production Stages — every process is a tab; this job card waits on Cutting' }],
+  ['17-stage-open.js', { tab: 'Cutting', caption: 'Step 14 · Production Floor, By stage — every process is a tab; this job card waits on Cutting' }],
   ['18-cut-issue.js'], ['19-cut-receive.js'],
   ['20-send.js', { dest: 'Fusing', unit: null, issuedBy: 'Ramesh (cutting)', caption: 'Step 15 · Process transfer — the 4 bundles go from Cutting to Fusing; a transfer card prints for Fusing' }],
   ['17-stage-open.js', { tab: 'Fusing', caption: 'Step 15 · Fusing counts the bundles in, as sent' }],

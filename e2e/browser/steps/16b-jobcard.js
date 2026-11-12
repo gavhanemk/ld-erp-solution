@@ -1,8 +1,8 @@
-// Production → Job Cards: one per colour, made with the stages; the header fills itself in.
+// Production → Production Floor, Job cards tab: one per colour, made with the stages; the header fills itself in.
 await h.say(`Step 13 · Job card ${S.jobCard} — made by itself, header filled from the order, BOM and fabric lot`)
-await h.go('/production/job-cards')
+await h.go('/production/floor?tab=cards&q=' + encodeURIComponent(S.jobCard))
 await h.beat(1500)
-await page.locator('tbody tr').filter({ hasText: S.jobCard }).first().click()
+await page.getByRole('button', { name: 'Open job card ' + S.jobCard }).first().click()
 await h.sleep(1500)
 const d = h.dlg()
 await h.beat(3000)

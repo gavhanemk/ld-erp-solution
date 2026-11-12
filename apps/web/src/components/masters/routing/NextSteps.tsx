@@ -29,9 +29,9 @@ const STEPS: Array<{ title: string; what: string; href: string; go: string }> = 
   },
   {
     title: 'Set up its stages — this routing comes in here',
-    what: 'On the manufacturing order press "Set up stages": it takes this routing’s steps, lines and contractors. Then record the work stage by stage.',
-    href: '/production/stages',
-    go: 'Production Stages',
+    what: 'On the manufacturing order press "Set up stages": it takes this routing’s steps, lines and contractors. Then record the work stage by stage on Production Floor.',
+    href: '/production/floor',
+    go: 'Production Floor',
   },
 ]
 

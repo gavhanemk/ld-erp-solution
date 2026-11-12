@@ -269,7 +269,8 @@ function assemble(
           steps.push({ ...base, by: e.person, phase: 'production', title: `Size changed at ${e.step}`, detail: e.changes.join(', '), minor: true })
           break
         }
-        const bundles = sc.moves.map((m) => `${shortBundle(m.from)} → ${shortBundle(m.to)}`).join(', ')
+        // Inside its own bundle since 12 Nov 2026 ("in B006"); into a new bundle before ("B006 → B042").
+        const bundles = sc.moves.map((m) => (m.from === m.to ? `in ${shortBundle(m.from)}` : `${shortBundle(m.from)} → ${shortBundle(m.to)}`)).join(', ')
         const m = sc.moves[0]
         steps.push({
           ...base,
@@ -808,7 +809,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
       const one = list.length === 1 ? list[0] : null
       const line = manyLines ? m.lines.find((l) => l.id === h.moLineId) : null
       const where = [mos.length > 1 ? m.moNumber : null, line ? `${line.style.code} ${line.color}` : null]
-      const bundles = h.moves.map((x) => `${shortBundle(x.from.code)} → ${shortBundle(x.to.code)}`).join(', ')
+      const bundles = h.moves.map((x) => (x.from.code === x.to.code ? `in ${shortBundle(x.from.code)}` : `${shortBundle(x.from.code)} → ${shortBundle(x.to.code)}`)).join(', ')
       steps.push({
         at: h.date,
         phase: 'production',

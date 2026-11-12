@@ -173,7 +173,13 @@ export function BundleTable({
                       </span>
                     )}
                   </td>
-                  <td className="text-sm font-semibold">{l.b.size?.code ?? '—'}</td>
+                  <td className="text-sm font-semibold">
+                    {l.b.size?.code ?? '—'}
+                    {/* Pieces of it made as another size, in it (since 12 Nov 2026). */}
+                    {(l.b.madeAs ?? []).length > 0 && (
+                      <span className="text-primary block text-[11px] font-medium">{l.b.madeAs!.map((m) => `${pcs(m.qty)} made as ${m.size}`).join(', ')}</span>
+                    )}
+                  </td>
                   <td className="text-right tabular-nums">{pcs(l.b.qty)}</td>
                   <td className="text-right tabular-nums">{l.in ? pcs(l.in) : <span className="text-muted-foreground">—</span>}</td>
                   <td className="text-right tabular-nums">{l.processed ? pcs(l.processed) : <span className="text-muted-foreground">—</span>}</td>

@@ -3698,7 +3698,8 @@ enum WipEventType {
   VENDOR_RETURN
   PACK
   SPLIT
-  /// Pieces of a bundle carried on as another size, in a new bundle made from it.
+  /// Pieces of a bundle made as another size: since 12 Nov 2026 inside the bundle, where they lie
+  /// (out of the cut size, into the new one); before, carried on in a new bundle made from it.
   SIZE_CHANGE
   REVERSAL
 }
@@ -3795,7 +3796,7 @@ model ProductionBundle {
 
   wipEntries     WipEntry[]
   transferLines  ProcessTransferLine[]
-  /// Size changes that took pieces out of it, and the one that made it.
+  /// Size changes of its pieces (inside it since 12 Nov 2026), and the one that made it (before).
   sizeChangesOut SizeChange[]       @relation("SizeChangeFrom")
   sizeChangeIn   SizeChange?        @relation("SizeChangeTo")
 
@@ -3898,11 +3899,14 @@ model WipEntry {
 }
 
 /// A size jump: pieces of one bundle made as another size at stitching, on
-/// our own floor. They move into a new bundle of the new size, made from the
-/// old one, so every piece still traces back to the bundle and lay it was cut
-/// in. Nothing is edited: not the old bundle, not its entries, not the order's
-/// planned sizes. An order line's revised sizes are its planned sizes plus
-/// these (those not undone), worked out, never stored.
+/// our own floor. Since 12 Nov 2026 they stay in their own bundle — the floor
+/// works bundle by bundle from the cutting stickers, so the bundle count stays
+/// as cut — and the ledger moves them out of the cut size and into the new one
+/// where they lie (its entries carry each piece's size). Before, they moved
+/// into a new bundle made from the old one (toBundle). Nothing is edited: not
+/// the bundle, not its entries, not the order's planned sizes. An order line's
+/// revised sizes are its planned sizes plus these (those not undone), worked
+/// out, never stored.
 model SizeChange {
   id           String             @id @default(cuid())
   moId         String
@@ -3912,14 +3916,15 @@ model SizeChange {
   /// The stitching step it was done at.
   stepId       String
   step         MOStep             @relation(fields: [stepId], references: [id], onDelete: Cascade)
-  /// The SIZE_CHANGE entry on the floor ledger that moved the pieces.
+  /// The SIZE_CHANGE entry on the floor ledger that changed the pieces' size.
   eventId      String
   event        WipEvent           @relation(fields: [eventId], references: [id], onDelete: Cascade)
   fromBundleId String
   fromBundle   ProductionBundle   @relation("SizeChangeFrom", fields: [fromBundleId], references: [id], onDelete: Cascade)
-  /// The bundle made for these pieces.
-  toBundleId   String             @unique
-  toBundle     ProductionBundle   @relation("SizeChangeTo", fields: [toBundleId], references: [id], onDelete: Cascade)
+  /// The bundle made for these pieces — only changes made before 12 Nov 2026. Since then pieces change
+  /// size inside their own bundle (fromBundle), so the bundle count stays as cut: null.
+  toBundleId   String?            @unique
+  toBundle     ProductionBundle?  @relation("SizeChangeTo", fields: [toBundleId], references: [id], onDelete: Cascade)
   fromSizeId   String
   fromSize     Size               @relation("SizeChangeFromSize", fields: [fromSizeId], references: [id])
   toSizeId     String

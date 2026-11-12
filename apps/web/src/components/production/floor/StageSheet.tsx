@@ -36,7 +36,7 @@ import { ReturnBillDialog } from './ReturnBillDialog'
 import { SizeChangeDialog } from './SizeChangeDialog'
 import { sendsFromHand } from './useFlow'
 import { transferStatus } from './transferStatus'
-import { bundleShort, isCheck, pcs, revisedQty, type FlowStep, type FlowTransfer, type JobCardDetail, type JobWorkReturn, type LogEntry } from './types'
+import { bundleShort, isCheck, pcs, revisedQty, sizeMovesText, type FlowStep, type FlowTransfer, type JobCardDetail, type JobWorkReturn, type LogEntry } from './types'
 import { BundleTable, type SheetPiece } from './BundleTable'
 import { PieceList } from './PieceList'
 
@@ -124,10 +124,14 @@ export function sheetRows(d: JobCardDetail, step: FlowStep): SheetRow[] {
     balance.set(e0.bundleId, bal)
     if (!row.in && !row.processed && !row.out && !row.damaged && !row.rejected && !row.rework && !row.sizeIn && !row.sizeOut) continue
     const b = bundleOf.get(e0.bundleId)
-    // A size change: which new bundles took this one's pieces, or which bundle this one was made from.
+    // A size change: its pieces made as another size in this bundle (since 12 Nov 2026), which new
+    // bundles took this one's pieces, or which bundle this one was made from.
     const sc = row.sizeIn || row.sizeOut ? changeOf.get(e0.eventId) : undefined
     const sizeNote = row.sizeOut
-      ? (sc?.moves.filter((m) => m.from.bundleId === e0.bundleId).map((m) => `${pcs(m.qty)} made as ${m.to.size} → ${bundleShort(m.to.code)}`).join(', ') ?? null) || 'Made as another size'
+      ? (sc?.moves
+          .filter((m) => m.from.bundleId === e0.bundleId)
+          .map((m) => (m.inBundle ? `${pcs(m.qty)} made as ${m.to.size}` : `${pcs(m.qty)} made as ${m.to.size} → ${bundleShort(m.to.code)}`))
+          .join(', ') ?? null) || 'Made as another size'
       : row.sizeIn
         ? (() => {
             const m = sc?.moves.find((x) => x.to.bundleId === e0.bundleId)
@@ -174,6 +178,8 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   const [sizeId, setSizeId] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** Change sizes pressed when it cannot be used yet: what to do first. */
+  const [sizeNote, setSizeNote] = useState<string | null>(null)
   const live = !['DRAFT', 'CLOSED'].includes(d.mo.status)
   const workable = live && !d.mo.held
   const mayCreate = can('production', 'create') && workable
@@ -231,9 +237,28 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   // Size jumps: only at stitching on our own floor, on pieces in hand or done here.
   const sizeStep = step.kind === 'STITCHING' && !outside
   const mayChangeSizes = mayCreate && sizeStep && sizes.length > 1 && !cameWrong.length && (f?.inHand ?? 0) + (f?.waiting ?? 0) > 0
+  // The button shows on every stitching sheet with more than one size, so it can be found; when it
+  // cannot be used yet it says why instead of being missing.
+  const showSizeButton = mayCreate && sizeStep && sizes.length > 1
+  const sizeBlock = cameWrong.length
+    ? 'Pieces came here past a stage. Take that card back first, then change sizes.'
+    : (f?.inTransit ?? 0) > 0 && (f?.inHand ?? 0) + (f?.waiting ?? 0) === 0
+      ? `Count the pieces in first (${pcs(f!.inTransit)} pcs are on their way here): sizes change only on pieces in hand at ${step.name}.`
+      : `No pieces in hand at ${step.name}. Count pieces in first: sizes change only on pieces in hand here, before they are sent on.`
   const sizesChanged = sizes.some((z) => (z.changed ?? 0) !== 0)
   const changedHere = sizes.some((z) => (fig(z.id)?.sizeIn ?? 0) + (fig(z.id)?.sizeOut ?? 0) > 0)
   const changesHere = (d.sizeChanges ?? []).filter((c) => c.step.id === step.id)
+  // Pieces of each bundle made as another size inside it, still standing: a bundle all of whose
+  // pieces changed is wholly the new size, and its sticker is printed again.
+  const changedIn = new Map<string, number>()
+  for (const c of d.sizeChanges ?? []) if (!c.undone) for (const m of c.moves) if (m.inBundle) changedIn.set(m.from.bundleId, (changedIn.get(m.from.bundleId) ?? 0) + m.qty)
+  const stickersOf = (c: (typeof changesHere)[number]) => [
+    ...new Set(
+      c.moves
+        .filter((m) => (m.inBundle ? (changedIn.get(m.from.bundleId) ?? 0) >= (d.bundles.find((b) => b.id === m.from.bundleId)?.qty ?? Infinity) : true))
+        .map((m) => (m.inBundle ? m.from.bundleId : m.to.bundleId)),
+    ),
+  ]
 
   const post = async (path: string, body: unknown, fallback: string) => {
     setBusy(true)
@@ -376,13 +401,19 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
         icon={ClipboardCheck}
         title="Size details"
         actions={
-          mayChangeSizes ? (
-            <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setOpen({ kind: 'sizes' })} title="Pieces cut as one size made as another size of the order">
+          showSizeButton ? (
+            <button
+              type="button"
+              className="btn-secondary h-7 px-2.5 text-xs"
+              onClick={() => (mayChangeSizes ? (setSizeNote(null), setOpen({ kind: 'sizes' })) : setSizeNote(sizeBlock))}
+              title="Pieces cut as one size made as another size of the order"
+            >
               <ArrowLeftRight size={13} /> Change sizes
             </button>
           ) : undefined
         }
       >
+        {sizeNote && !mayChangeSizes && <p className="warn-text mb-2 text-xs">{sizeNote}</p>}
         <SizeTable
           d={d}
           rows={[
@@ -412,7 +443,7 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
                 <li key={c.eventId} className={`flex flex-wrap items-start justify-between gap-2 px-3 py-2 text-xs ${c.undone ? 'opacity-60' : ''}`}>
                   <span className="min-w-0">
                     <span className="text-foreground font-medium">
-                      {c.moves.map((m) => `${pcs(m.qty)} pcs ${m.from.size} → ${m.to.size} (${bundleShort(m.from.code)} → ${bundleShort(m.to.code)})`).join(', ')}
+                      {sizeMovesText(c.moves)}
                     </span>
                     <span className="text-muted-foreground block">
                       {formatDate(c.date)} · {c.personName ? `${c.personName}, recorded by ${c.by}` : c.by} · {c.reason}
@@ -425,12 +456,12 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
                     )}
                   </span>
                   <span className="flex items-center gap-1">
-                    {!c.undone && (
+                    {!c.undone && stickersOf(c).length > 0 && (
                       <button
                         type="button"
                         className="btn-ghost h-6 px-2 text-xs"
-                        title="Print the new bundles' stickers"
-                        onClick={() => openWindow(`/print/bundles?mo=${d.mo.id}&ids=${c.moves.map((m) => m.to.bundleId).join(',')}`)}
+                        title="Print the stickers of the bundles that are wholly another size now (or, before 12 Nov 2026, the new bundles)"
+                        onClick={() => openWindow(`/print/bundles?mo=${d.mo.id}&ids=${stickersOf(c).join(',')}`)}
                       >
                         <Printer size={12} /> Stickers
                       </button>
@@ -684,7 +715,16 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
         </div>
       </div>
 
-      {open?.kind === 'count' && <CountInDialog transfer={open.transfer} moNumber={d.mo.moNumber} onClose={() => setOpen(null)} onSaved={done} />}
+      {open?.kind === 'count' && (
+        <CountInDialog
+          transfer={open.transfer}
+          moNumber={d.mo.moNumber}
+          // Counting in at stitching on our own floor: pieces made as another size can be recorded with the count.
+          sizes={sizeStep && mayCreate && sizes.length > 1 ? sizes : null}
+          onClose={() => setOpen(null)}
+          onSaved={done}
+        />
+      )}
       {open?.kind === 'settle' && <SettleDialog transfer={open.transfer} onClose={() => setOpen(null)} onSaved={done} />}
       {open?.kind === 'work' && <WorkDialog flow={d} stepId={step.id} onClose={() => setOpen(null)} onSaved={done} />}
       {open?.kind === 'send' && (
@@ -738,7 +778,7 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
       {open?.kind === 'undoSize' && (
         <ReasonDialog
           title={`Undo the size change (${open.label})?`}
-          description="The pieces go back into the bundles they came from, and the new bundles' stickers are no longer valid. Refused once any of those pieces has moved on."
+          description="The pieces go back to the size they were cut in. A bundle that had become wholly the new size is its cut size again: print its sticker again. Refused once any of those pieces has moved on."
           confirmLabel="Undo it"
           danger
           busy={busy}

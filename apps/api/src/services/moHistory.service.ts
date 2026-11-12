@@ -118,7 +118,14 @@ function describe(action: string, beforeRaw: unknown, afterRaw: unknown): { what
     const c = asObj(undone ? a.sizeChangeUndone : a.sizeChange) ?? {}
     const short = (code: unknown) => String(code).split('-').pop()
     const moves = ((c.moves ?? []) as Snap[]).map((m) =>
-      undone ? `${pcs(m.qty)} back to ${m.fromSize} (${short(m.to)} → ${short(m.from)})` : `${pcs(m.qty)} ${m.fromSize} → ${m.toSize} (${short(m.from)} → ${short(m.to)})`,
+      // Inside its own bundle since 12 Nov 2026 ("in B006"); into a new bundle before ("B006 → B042").
+      m.from === m.to
+        ? undone
+          ? `${pcs(m.qty)} back to ${m.fromSize} (in ${short(m.from)})`
+          : `${pcs(m.qty)} ${m.fromSize} → ${m.toSize} (in ${short(m.from)})`
+        : undone
+          ? `${pcs(m.qty)} back to ${m.fromSize} (${short(m.to)} → ${short(m.from)})`
+          : `${pcs(m.qty)} ${m.fromSize} → ${m.toSize} (${short(m.from)} → ${short(m.to)})`,
     )
     return { what: `${undone ? 'Size change undone' : 'Sizes changed'}${c.step ? ` at ${c.step}` : ''}`, changes: [...moves, ...(c.reason ? [String(c.reason)] : [])] }
   }

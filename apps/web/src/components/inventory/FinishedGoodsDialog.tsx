@@ -193,7 +193,12 @@ export function FinishedGoodsDialog({
     }
     type FlowBrief = {
       steps: Array<{ id: string; last: boolean; kind: string; isQcStep: boolean; execution: string }>
-      bundles: Array<{ line: { id: string } | null; size: { id: string } | null; places: Array<{ stepId: string; bucket: string; vendorId: string | null; qty: number }> }>
+      // sizes: a bundle holding pieces made as another size (since 12 Nov 2026) says each size's pieces at a place.
+      bundles: Array<{
+        line: { id: string } | null
+        size: { id: string } | null
+        places: Array<{ stepId: string; bucket: string; vendorId: string | null; qty: number; sizes?: Array<{ sizeId: string | null; qty: number }> }>
+      }>
     }
     const mo = (await api.get<{ data: MoBrief }>(`/production/orders/${id}`)).data
     if (!alive()) return
@@ -219,8 +224,12 @@ export function FinishedGoodsDialog({
       if (!itemId) continue
       for (const p of b.places) {
         if (p.vendorId || p.qty <= 0) continue
-        if ((p.bucket === 'DONE' && last.has(p.stepId)) || (p.bucket === 'WIP' && fromHand.has(p.stepId))) add(`${itemId}|A`, b.size?.id ?? null, p.qty)
-        if (p.bucket === 'B_GRADE') add(`${itemId}|B`, b.size?.id ?? null, p.qty)
+        // Each size as the pieces are now; a bundle of one size is all its own.
+        const parts = p.sizes?.length ? p.sizes : [{ sizeId: b.size?.id ?? null, qty: p.qty }]
+        for (const part of parts) {
+          if ((p.bucket === 'DONE' && last.has(p.stepId)) || (p.bucket === 'WIP' && fromHand.has(p.stepId))) add(`${itemId}|A`, part.sizeId, part.qty)
+          if (p.bucket === 'B_GRADE') add(`${itemId}|B`, part.sizeId, part.qty)
+        }
       }
     }
     const filled = [...ready.entries()].map(([key, r]) => {

@@ -144,13 +144,13 @@ export const navItems: NavItem[] = [
     label: 'Production', icon: Factory,
     children: [
       /* In the order the work happens: the order, the stages a style goes
-         through, each colour's job card, the handovers between departments,
-         and every stage — cutting to the last check — on one screen. */
+         through, and the floor — each colour's job card, every stage from
+         cutting to the last check, and the handovers between departments, on
+         one screen (Job Cards, Process Transfers and Production Stages were
+         three menus until 12 Nov 2026; their old addresses lead here). */
       { label: 'Manufacturing Orders', href: '/production/orders' },
       { label: 'Routings', href: '/masters/routings' },
-      { label: 'Job Cards', href: '/production/job-cards' },
-      { label: 'Process Transfers', href: '/production/transfers' },
-      { label: 'Production Stages', href: '/production/stages' },
+      { label: 'Production Floor', href: '/production/floor', also: ['/production/job-cards', '/production/transfers', '/production/stages'] },
     ],
   },
   {

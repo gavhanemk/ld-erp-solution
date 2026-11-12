@@ -41,7 +41,7 @@ export async function ensureJobCards(tx: Tx, moId: string) {
       id: true,
       moNumber: true,
       createdById: true,
-      so: { select: { customerPORef: true } },
+      so: { select: { soNumber: true } },
       lines: {
         orderBy: { id: 'asc' },
         select: {
@@ -68,7 +68,8 @@ export async function ensureJobCards(tx: Tx, moId: string) {
         jobCardNumber: `${mo.moNumber}-JC${n}`,
         moId: mo.id,
         moLineId: l.id,
-        orderNo: mo.so?.customerPORef ?? null,
+        // Our own order no. (LDCM-06 on the paper sheets): the sales order, or the MO when made for stock.
+        orderNo: mo.so?.soNumber ?? mo.moNumber,
         description: l.soLine?.description || l.style.category || l.style.name,
         fabricQuality: l.soLine?.fabric || fabric?.componentItem.name || null,
         designNo: l.soLine?.printName ?? null,
@@ -92,11 +93,17 @@ function ratioOf(sizes: Array<{ qty: number; size: { code: string; sequence: num
 
 /**
  * Fills the blanks of an order's job cards from what is already known, so the
- * floor never retypes it: the buyer's PO no. as the order no., the sales order
- * as the project ID, the lot the fabric came in (from the rolls issued to the
- * order, else the rolls bought for it), the size ratio and the order's note.
- * Only blanks — whatever somebody typed stays. Run when the cards are made,
- * when material is issued to the order, and when a card is opened.
+ * floor never retypes it: our own order no. (the sales order, or the MO when
+ * made for stock), the sales order as the project ID, the lot the fabric came
+ * in (from the rolls issued to the order, else the rolls bought for it), the
+ * size ratio and the order's note. Only blanks — whatever somebody typed
+ * stays. Run when the cards are made, when material is issued to the order,
+ * and when a card is opened or printed.
+ *
+ * Until 12 Nov 2026 the order no. was filled from the buyer's PO no.; the user
+ * set it to our own order no., as on the paper sheets (LDCM-06). An order no.
+ * that is still the buyer's PO was filled by that old rule, and is put right.
+ * (What Project ID should be the user is to confirm.)
  */
 export async function fillJobCardBlanks(tx: Tx, moId: string) {
   const mo = await tx.manufacturingOrder.findUnique({
@@ -156,7 +163,9 @@ export async function fillJobCardBlanks(tx: Tx, moId: string) {
   }
   for (const c of mo.jobCards) {
     const data: Record<string, string> = {}
-    if (blank(c.orderNo) && mo.so?.customerPORef) data.orderNo = mo.so.customerPORef
+    const ours = mo.so?.soNumber ?? mo.moNumber
+    const oldRule = !!mo.so?.customerPORef?.trim() && c.orderNo?.trim() === mo.so.customerPORef.trim()
+    if ((blank(c.orderNo) || oldRule) && c.orderNo !== ours) data.orderNo = ours
     if (blank(c.projectId)) data.projectId = mo.so?.soNumber ?? mo.moNumber
     if (blank(c.lotNo) && lot) data.lotNo = lot
     if (blank(c.ratio)) {
@@ -346,10 +355,19 @@ const searchOf = (q: string | undefined): Prisma.JobCardWhereInput =>
       }
     : {}
 
-/** GET /job-cards — every job card of open orders, or all, with where its pieces are. */
+/**
+ * GET /job-cards — every job card of open orders, or all, with where its pieces
+ * are. show=nostages: those of released orders whose stages are not loaded yet
+ * (Production Floor lists them above its board, which starts at the stages).
+ */
 export async function listJobCards(db: Db, q: { q?: string; show?: string; moId?: string; page: number; limit: number }) {
   const where: Prisma.JobCardWhereInput = {
-    AND: [searchOf(q.q), q.moId ? { moId: q.moId } : {}, q.show === 'all' ? {} : { mo: { status: { notIn: ['CLOSED'] } } }],
+    AND: [
+      searchOf(q.q),
+      q.moId ? { moId: q.moId } : {},
+      q.show === 'all' ? {} : { mo: { status: { notIn: ['CLOSED'] } } },
+      q.show === 'nostages' ? { mo: { status: { notIn: ['DRAFT', 'CLOSED'] }, steps: { none: {} } } } : {},
+    ],
   }
   let rows = await loadCards(db, where)
   if (q.show === 'open' || !q.show) rows = rows.filter((r) => r.state !== 'DONE')

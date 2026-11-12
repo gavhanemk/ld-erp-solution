@@ -1,11 +1,12 @@
-// Production → Production Stages: open this job card's sheet on a stage tab.
+// Production → Production Floor, By stage tab: open this job card's sheet on a stage tab.
 // S.tab = the tab to open (e.g. 'Cutting'); S.caption = what to say.
 if (S.caption) await h.say(S.caption)
-await h.go('/production/stages')
-const tabNames = (await page.getByRole('tab').allInnerTexts()).map((n) => n.replace(/\s+/g, ' ').replace(/ \d+ [a-z ]+$/, '').trim())
+await h.go('/production/floor?tab=stages')
+const stageTabs = page.getByRole('tablist', { name: 'Stages' }).getByRole('tab')
+const tabNames = (await stageTabs.allInnerTexts()).map((n) => n.replace(/\s+/g, ' ').replace(/ \d+ [a-z ]+$/, '').trim())
 const ti = tabNames.indexOf(S.tab)
 if (ti < 0) throw new Error('no tab ' + S.tab + ' in ' + tabNames.join(' | '))
-await page.getByRole('tab').nth(ti).click()
+await stageTabs.nth(ti).click()
 await h.sleep(1000)
 await h.beat(1200)
 await page.locator('tbody tr').filter({ hasText: S.mo + '-JC1' }).first().click()

@@ -25,6 +25,13 @@ export interface Move {
   qty: number
   vendorId?: string | null
   reworkStepId?: string | null
+  /**
+   * The pieces' size, when it is said rather than worked out: a size change
+   * (out of the cut size, into the new one) and the undoing of an entry. Left
+   * out, a bundle's pieces are its own size — or, in a bundle holding two
+   * sizes since a size change, shared over the sizes it has at that place.
+   */
+  sizeId?: string | null
 }
 
 export interface BalanceRow {
@@ -75,16 +82,68 @@ export async function balancesOf(tx: Db, moId: string, moLineId?: string): Promi
     .filter((r) => r.qty !== 0)
 }
 
-/** Moves to the same place are one move. */
+/** Moves to the same place (and, where it is said, of the same size) are one move. */
 function merge(moves: Move[]): Move[] {
   const out = new Map<string, Move>()
   for (const m of moves) {
-    const k = keyOf(m)
+    const k = `${keyOf(m)}|${m.sizeId ?? ''}`
     const had = out.get(k)
     if (had) had.qty += m.qty
     else out.set(k, { ...m, vendorId: m.vendorId ?? null, reworkStepId: m.reworkStepId ?? null })
   }
   return [...out.values()].filter((m) => m.qty !== 0)
+}
+
+/** Pieces of the given bundles at each place, size by size: keyOf(place) → size → pieces. */
+export async function sizeBalancesOf(tx: Db, bundleIds: string[]) {
+  const rows = bundleIds.length
+    ? await tx.wipEntry.groupBy({
+        by: ['stepId', 'vendorId', 'bucket', 'bundleId', 'reworkStepId', 'sizeId'],
+        where: { bundleId: { in: bundleIds } },
+        _sum: { qty: true },
+      })
+    : []
+  const out = new Map<string, Map<string | null, number>>()
+  for (const r of rows) {
+    const q = r._sum.qty ?? 0
+    if (!q) continue
+    const k = keyOf(r)
+    const at = out.get(k) ?? new Map<string | null, number>()
+    at.set(r.sizeId, (at.get(r.sizeId) ?? 0) + q)
+    out.set(k, at)
+  }
+  return out
+}
+
+/**
+ * `qty` pieces shared over the sizes in `have`, in proportion to what each
+ * holds and never past it (the largest remainders take the odd pieces): which
+ * sizes go when part of a bundle holding two sizes moves on.
+ */
+export function shareOut(qty: number, have: Array<[string | null, number]>): Array<[string | null, number]> {
+  const pool = have.filter(([, n]) => n > 0)
+  const total = pool.reduce((s, [, n]) => s + n, 0)
+  const take = Math.min(qty, total)
+  if (take <= 0) return []
+  const parts = pool.map(([size, n]) => {
+    const exact = (take * n) / total
+    return { size, n, q: Math.min(n, Math.floor(exact)), rest: exact - Math.floor(exact) }
+  })
+  let left = take - parts.reduce((s, p) => s + p.q, 0)
+  for (const p of [...parts].sort((a, b) => b.rest - a.rest)) {
+    if (left <= 0) break
+    if (p.q < p.n) {
+      p.q += 1
+      left -= 1
+    }
+  }
+  for (const p of parts) {
+    while (left > 0 && p.q < p.n) {
+      p.q += 1
+      left -= 1
+    }
+  }
+  return parts.filter((p) => p.q > 0).map((p) => [p.size, p.q])
 }
 
 export interface EventInput {
@@ -126,11 +185,18 @@ export async function postEvent(tx: Db, e: EventInput) {
     if (!Number.isInteger(m.qty)) throw new AppError('Pieces are whole numbers.', 400, 'NOT_WHOLE')
   }
   // Pieces move, they do not appear: every bundle's moves net to nothing,
-  // except where a cutting makes them, a split (or a size change) hands them
-  // to a new bundle, or an undo takes back what a cutting made.
-  const splits = e.type === 'SPLIT' || e.type === 'SIZE_CHANGE'
+  // except where a cutting makes them, a split hands them to a new bundle, or
+  // an undo takes back what a cutting made. A size change (12 Nov 2026) moves
+  // no piece at all: in its own bundle and where they lie, pieces go out of
+  // the size they were cut in and into the one they are made as.
+  const splits = e.type === 'SPLIT'
   if (e.type === 'CUT') {
     if (moves.some((m) => m.qty < 0)) throw new AppError('A cutting only adds pieces.', 500, 'UNBALANCED')
+  } else if (e.type === 'SIZE_CHANGE') {
+    if (moves.some((m) => !m.sizeId)) throw new AppError('A size change says the size of every piece it moves.', 500, 'UNBALANCED')
+    const place = new Map<string, number>()
+    for (const m of moves) place.set(keyOf(m), (place.get(keyOf(m)) ?? 0) + m.qty)
+    if ([...place.values()].some((q) => q !== 0)) throw new AppError('A size change keeps every piece in its bundle and where it is.', 500, 'UNBALANCED')
   } else if (splits) {
     // A split hands pieces over where they lie: every place keeps its count.
     const place = new Map<string, number>()
@@ -156,30 +222,86 @@ export async function postEvent(tx: Db, e: EventInput) {
   }
   if (splits) {
     // Pieces go only to new bundles made from the ones giving them, on the
-    // same colour line; a size change makes them another size.
+    // same colour line.
     if (new Set(bundles.map((b) => b.moLineId)).size > 1) throw new AppError('A split stays on one colour line.', 500, 'UNBALANCED')
     const giving = new Set(moves.filter((m) => m.qty < 0).map((m) => m.bundleId))
     const taking = [...new Set(moves.filter((m) => m.qty > 0).map((m) => m.bundleId))]
     for (const id of taking) {
       const b = bundleById.get(id)!
       if (giving.has(id) || !b.parentId || !giving.has(b.parentId)) throw new AppError('A split hands pieces only to a new bundle made from the one giving them.', 500, 'UNBALANCED')
-      if (e.type === 'SIZE_CHANGE' && b.sizeId === bundleById.get(b.parentId)!.sizeId) throw new AppError('A size change makes the pieces another size.', 500, 'UNBALANCED')
     }
     if (await tx.wipEntry.count({ where: { bundleId: { in: taking } } })) throw new AppError('A split hands pieces only to a new bundle.', 500, 'UNBALANCED')
   }
 
+  // Bundles that hold, or held, two sizes since a size change: their pieces are counted size by size.
+  const mixed = new Set(
+    (await tx.sizeChange.findMany({ where: { fromBundleId: { in: bundleIds }, toBundleId: null }, select: { fromBundleId: true } })).map((c) => c.fromBundleId),
+  )
+  const bySize = mixed.size || moves.some((m) => m.sizeId) ? await sizeBalancesOf(tx, bundleIds) : new Map<string, Map<string | null, number>>()
+
   const outs = moves.filter((m) => m.qty < 0)
   if (outs.length) {
     const have = new Map((await balancesOf(tx, e.moId)).map((r) => [keyOf(r), r.qty]))
-    for (const m of outs) {
-      const held = have.get(keyOf(m)) ?? 0
-      if (held + m.qty >= 0) continue
+    const sayShort = async (m: Move, held: number) => {
       const [step, vendor] = await Promise.all([
         tx.mOStep.findUnique({ where: { id: m.stepId }, select: { name: true } }),
         m.vendorId ? tx.supplier.findUnique({ where: { id: m.vendorId }, select: { name: true } }) : null,
       ])
       const detail = `${bundleById.get(m.bundleId)!.code}: ${held} ${PLACE[m.bucket]} ${step?.name ?? 'that step'}${vendor ? ` (${vendor.name})` : ''}`
-      throw new AppError(e.shortMessage ? e.shortMessage(detail) : `${detail}, so ${-m.qty} is more than there is.`, 409, 'NOT_ENOUGH_PIECES')
+      return new AppError(e.shortMessage ? e.shortMessage(detail) : `${detail}, so ${-m.qty} is more than there is.`, 409, 'NOT_ENOUGH_PIECES')
+    }
+    for (const m of outs) {
+      const held = have.get(keyOf(m)) ?? 0
+      if (held + m.qty < 0) throw await sayShort(m, held)
+    }
+    // Where a move says its size, that size must hold the pieces: a size change takes only pieces
+    // still in the size they were cut in, and an undo only what is still where the entry put it.
+    const sized = new Map<string, number>()
+    for (const m of outs.filter((x) => x.sizeId)) {
+      const k = `${keyOf(m)}|${m.sizeId}`
+      sized.set(k, (sized.get(k) ?? 0) - m.qty)
+      const heldOfSize = bySize.get(keyOf(m))?.get(m.sizeId!) ?? 0
+      if (heldOfSize < sized.get(k)!) throw await sayShort(m, heldOfSize)
+    }
+  }
+
+  // Each move's pieces, size by size. A bundle of one size: its own. A bundle holding two sizes:
+  // what leaves a place is shared over the sizes there, and what arrives takes the sizes that left.
+  const parts: Array<{ m: Move; sizeId: string | null; qty: number }> = []
+  for (const id of bundleIds) {
+    const b = bundleById.get(id)!
+    const mine = moves.filter((m) => m.bundleId === id)
+    if (!mixed.has(id)) {
+      for (const m of mine) parts.push({ m, sizeId: m.sizeId ?? b.sizeId, qty: m.qty })
+      continue
+    }
+    const left = new Map<string, Map<string | null, number>>()
+    const at = (m: Move) => left.get(keyOf(m)) ?? new Map(bySize.get(keyOf(m)) ?? [])
+    const pool = new Map<string | null, number>()
+    for (const m of mine.filter((x) => x.qty < 0)) {
+      const here = at(m)
+      const shares: Array<[string | null, number]> = m.sizeId ? [[m.sizeId, -m.qty]] : shareOut(-m.qty, [...here.entries()])
+      const given = shares.reduce((s, [, q]) => s + q, 0)
+      if (given < -m.qty) shares.push([b.sizeId, -m.qty - given])
+      for (const [size, q] of shares) {
+        parts.push({ m, sizeId: size, qty: -q })
+        pool.set(size, (pool.get(size) ?? 0) + q)
+        here.set(size, (here.get(size) ?? 0) - q)
+      }
+      left.set(keyOf(m), here)
+    }
+    for (const m of mine.filter((x) => x.qty > 0)) {
+      if (m.sizeId) {
+        parts.push({ m, sizeId: m.sizeId, qty: m.qty })
+        continue
+      }
+      const shares = shareOut(m.qty, [...pool.entries()])
+      const got = shares.reduce((s, [, q]) => s + q, 0)
+      if (got < m.qty) shares.push([b.sizeId, m.qty - got])
+      for (const [size, q] of shares) {
+        parts.push({ m, sizeId: size, qty: q })
+        pool.set(size, (pool.get(size) ?? 0) - q)
+      }
     }
   }
 
@@ -207,7 +329,7 @@ export async function postEvent(tx: Db, e: EventInput) {
       clientKey: e.clientKey ?? null,
       createdById: e.createdById,
       entries: {
-        create: moves.map((m) => {
+        create: parts.map(({ m, sizeId, qty }) => {
           const b = bundleById.get(m.bundleId)!
           return {
             eventType: e.type,
@@ -215,10 +337,10 @@ export async function postEvent(tx: Db, e: EventInput) {
             stepId: m.stepId,
             bundleId: m.bundleId,
             moLineId: b.moLineId,
-            sizeId: b.sizeId,
+            sizeId,
             vendorId: m.vendorId ?? null,
             bucket: m.bucket,
-            qty: m.qty,
+            qty,
             reworkStepId: m.reworkStepId ?? null,
           }
         }),
@@ -251,7 +373,8 @@ export async function reverseEvent(tx: Db, eventId: string, reason: string, user
     reversalOfId: full.id,
     reason,
     createdById: userId,
-    moves: full.entries.map((x) => ({ stepId: x.stepId, bundleId: x.bundleId, bucket: x.bucket, qty: -x.qty, vendorId: x.vendorId, reworkStepId: x.reworkStepId })),
+    // Each entry taken back in its own size, so a bundle holding two sizes gets back exactly what it gave.
+    moves: full.entries.map((x) => ({ stepId: x.stepId, bundleId: x.bundleId, bucket: x.bucket, qty: -x.qty, vendorId: x.vendorId, reworkStepId: x.reworkStepId, sizeId: x.sizeId })),
     shortMessage: (detail) => `It cannot be undone: some of those pieces have moved on since (${detail}). Undo what came after it first.`,
   })
   await tx.wipEvent.update({ where: { id: full.id }, data: { reversedAt: new Date() } })
