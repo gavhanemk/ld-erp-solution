@@ -339,7 +339,7 @@ export const refNo = (c: Pick<JobCardHeader, 'orderNo' | 'projectId' | 'designNo
 export type Stage = 'CUTTING' | 'STITCHING' | 'OTHER' | 'QC'
 export const stageOf = (s: { kind: string; isQcStep: boolean }): Stage => (isCheck(s) ? 'QC' : s.kind === 'CUTTING' ? 'CUTTING' : s.kind === 'STITCHING' ? 'STITCHING' : 'OTHER')
 /** A job card's sheet for one stage, on the production stages screen. */
-export const sheetHref = (jobCardId: string, stepId: string) => `/production/stages?card=${jobCardId}&step=${stepId}`
+export const sheetHref = (jobCardId: string, stepId: string) => `/production/floor?tab=stages&card=${jobCardId}&step=${stepId}`
 
 /** How many pieces of a bundle sit in one place. */
 export const heldAt = (b: FlowBundle, stepId: string, bucket: Bucket, opts: { vendorId?: string | null; reworkStepId?: string | null } = {}) =>

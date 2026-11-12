@@ -89,9 +89,7 @@ were rejected. Do not collapse screens or merge steps without asking.
 |---|---|---|
 | Manufacturing Orders | `/production/orders` | The MO. Its **Production** section shows the three steps in order — materials issued, stages loaded, process forms by job card — and opens any sheet |
 | Routings | `/masters/routings` | Opens on the **Styles** tab: each style, the routing it follows, and where it stands. A style's page (`/masters/routings/style/[id]`) shows each step's state and units completed, both from the floor (no Start/Stop since 15 Oct). **All routings** is the second tab: make, edit, lock, stop using or delete a routing, with its fabric and who changed it last. Process Master is under Masters |
-| Job Cards | `/production/job-cards` | One per colour: header (order no., project ID, fabric quality, design no., metres, average, ratio, lot) and its forms |
-| Process Transfers | `/production/transfers` | Tabs: to count in · short · at outside units · received · all. Count in, settle, print, cancel |
-| Production Stages | `/production/stages` | **Every stage on one screen**, a tab each (cutting first, then process-master order) with the work waiting there; a row opens the job card's sheet |
+| Production Floor | `/production/floor` | The floor on one screen (since 12 Nov 2026; it replaced the Job Cards, Process Transfers and Production Stages menus, whose addresses now redirect to the matching tab). **New transfer** at the top. Three tabs, kept in `?tab=`: **Job cards** (`cards`) — the board: each job card's route with the next thing to do, Board or Rows; its **Job card** button opens the header (order no., project ID, fabric quality, design no., metres, average, ratio, lot) and its forms; job cards whose order's stages are not loaded yet are listed above it (`GET /job-cards?show=nostages`). **By stage** (`stages`) — every stage a tab (cutting first, then process-master order) with the work waiting there, or its report; `?op=` a stage, `?card=&step=` one sheet. **Transfer cards** (`transfers`) — to count in · short · at outside units · received · all (`?view=`, `?q=`); count in, settle, print, cancel |
 
 The sheet itself is `SheetView` → `CuttingSheet` or `StageSheet`. Each opens
 with a **"What to do now"** box listing what waits at that stage, each with its
@@ -184,7 +182,7 @@ while on their way, or after the count-in as long as the receiving step has not
 worked on them (the count-in is reversed first; `WORKED_ON` otherwise). A card
 counted in short or over stands.
 
-**The board.** Process Transfers opens on `GET /production/board`: each open
+**The board.** Production Floor opens on `GET /production/board`: each open
 job card's route with each step's figures, the cards to count in, short ones
 and flagged ones; the screen turns these into "next to do" lines with one
 button each.

@@ -167,7 +167,7 @@ function Sheet() {
         number={data.series ?? refNo(c)}
         dateLabel="Department"
         date={`CUTTING · ${longDate(new Date()) ?? ''}`}
-        backHref="/production/stages"
+        backHref="/production/floor?tab=stages"
         backLabel="Production stages"
         panels={panels}
         columns={columns}
@@ -263,7 +263,7 @@ function Sheet() {
       number={data.series ?? refNo(c)}
       dateLabel="Department"
       date={`${step.department.name.toUpperCase()} · ${longDate(new Date()) ?? ''}`}
-      backHref="/production/stages"
+      backHref="/production/floor?tab=stages"
       backLabel="Production stages"
       panels={panels}
       columns={columns}

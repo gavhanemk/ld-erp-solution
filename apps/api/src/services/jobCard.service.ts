@@ -346,10 +346,19 @@ const searchOf = (q: string | undefined): Prisma.JobCardWhereInput =>
       }
     : {}
 
-/** GET /job-cards — every job card of open orders, or all, with where its pieces are. */
+/**
+ * GET /job-cards — every job card of open orders, or all, with where its pieces
+ * are. show=nostages: those of released orders whose stages are not loaded yet
+ * (Production Floor lists them above its board, which starts at the stages).
+ */
 export async function listJobCards(db: Db, q: { q?: string; show?: string; moId?: string; page: number; limit: number }) {
   const where: Prisma.JobCardWhereInput = {
-    AND: [searchOf(q.q), q.moId ? { moId: q.moId } : {}, q.show === 'all' ? {} : { mo: { status: { notIn: ['CLOSED'] } } }],
+    AND: [
+      searchOf(q.q),
+      q.moId ? { moId: q.moId } : {},
+      q.show === 'all' ? {} : { mo: { status: { notIn: ['CLOSED'] } } },
+      q.show === 'nostages' ? { mo: { status: { notIn: ['DRAFT', 'CLOSED'] }, steps: { none: {} } } } : {},
+    ],
   }
   let rows = await loadCards(db, where)
   if (q.show === 'open' || !q.show) rows = rows.filter((r) => r.state !== 'DONE')

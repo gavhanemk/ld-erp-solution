@@ -27,6 +27,7 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { CountInDialog } from './CountInDialog'
+import { JobCardView } from './JobCardView'
 import { SettleDialog } from './SettleDialog'
 import { SendOnDialog } from './SendOnDialog'
 import { SheetView } from './SheetView'
@@ -91,6 +92,8 @@ export interface BoardCard {
 
 type Open =
   | { kind: 'sheet'; jobCardId: string; stepId: string | null }
+  /** The job card itself: its header, process forms and print (once the Job Cards page). */
+  | { kind: 'card'; jobCardId: string }
   | { kind: 'send'; jobCardId: string; stepId: string }
   | { kind: 'count'; transfer: TransferRow; sizes?: Array<{ id: string; code: string }> | null }
   | { kind: 'settle'; transfer: TransferRow }
@@ -105,6 +108,8 @@ interface Todo {
 
 interface Handlers {
   sheet: (stepId: string | null) => void
+  /** Opens the job card: header, process forms, print. */
+  card: () => void
   send: (stepId: string) => void
   count: (transferId: string) => void
   settle: (transferId: string) => void
@@ -220,9 +225,14 @@ function BoardRow({ c, h }: { c: BoardCard; h: Handlers }) {
             {c.mo.due ? ` · due ${formatDate(c.mo.due)}` : ''} · cut {pcs(c.cut)} · packed {pcs(c.packed)} of {pcs(c.line.totalQty)}
           </p>
         </div>
-        <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => h.sheet(null)}>
-          <ExternalLink size={14} /> Open sheets
-        </button>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={h.card} aria-label={`Open job card ${c.jobCardNumber}`} title="Its header, process forms and print">
+            <ClipboardList size={14} /> Job card
+          </button>
+          <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => h.sheet(null)}>
+            <ExternalLink size={14} /> Open sheets
+          </button>
+        </div>
       </div>
 
       <RouteStrip steps={c.steps} onPick={(id) => h.sheet(id)} withCutters={c.withCutters} fabric={c.fabric} label={`${c.jobCardNumber} route`} />
@@ -336,6 +346,9 @@ function RowsTable({ rows, handlers }: { rows: BoardCard[]; handlers: (c: BoardC
                         <first.action.icon size={14} /> {first.action.label}
                       </button>
                     )}
+                    <button type="button" className="btn-ghost h-8 px-2" onClick={h.card} title="The job card: header, process forms, print" aria-label={`Open job card ${c.jobCardNumber}`}>
+                      <ClipboardList size={14} />
+                    </button>
                     <button type="button" className="btn-ghost h-8 px-2" onClick={() => h.sheet(null)} title="Open the job card's sheets" aria-label={`Open ${c.jobCardNumber}`}>
                       <ExternalLink size={14} />
                     </button>
@@ -376,6 +389,77 @@ function SendLauncher({ jobCardId, stepId, onClose, onSaved }: { jobCardId: stri
     >
       <div className="skeleton h-40 w-full rounded-xl" />
     </FormFrame>
+  )
+}
+
+/** A job card whose order's stages are not loaded yet (GET /job-cards?show=nostages). */
+interface Unstaged {
+  id: string
+  jobCardNumber: string
+  moLine: { color: string; totalQty: number; style: { code: string } }
+  mo: { id: string; moNumber: string; heldAt: string | null; so: { soNumber: string; customer: { name: string } } | null }
+}
+
+/**
+ * Job cards the board cannot show yet: their order is released but its stages
+ * are not loaded, so there is no route to draw. Each opens as a job card, and
+ * its order is where Set up stages is. (Until 12 Nov 2026 the Job Cards list
+ * showed these as "Stages not loaded".)
+ */
+function WaitingForStages({ search, refreshKey, onOpen }: { search: string; refreshKey: number; onOpen: (jobCardId: string) => void }) {
+  const [rows, setRows] = useState<Unstaged[]>([])
+  const [total, setTotal] = useState(0)
+  useEffect(() => {
+    let alive = true
+    const qs = new URLSearchParams({ show: 'nostages', page: '1', limit: '20' })
+    if (search) qs.set('q', search)
+    api
+      .get<Paginated<Unstaged>>(`/production/job-cards?${qs}`)
+      .then((r) => {
+        if (!alive) return
+        setRows(r.data)
+        setTotal(r.pagination.total)
+      })
+      .catch(() => {
+        // The board works without this list.
+      })
+    return () => {
+      alive = false
+    }
+  }, [search, refreshKey])
+  if (!rows.length) return null
+  return (
+    <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3">
+      <p className="text-foreground flex items-start gap-1.5 text-sm font-medium">
+        <AlertCircle size={15} className="mt-0.5 shrink-0 text-amber-600" aria-hidden />
+        {total === 1 ? '1 job card is' : `${total} job cards are`} waiting for their stages
+      </p>
+      <p className="text-muted-foreground mb-2 ml-5 text-xs">They join the board once their order&apos;s stages are set up: open the order and press Set up stages.</p>
+      <ul className="ml-5 space-y-1.5">
+        {rows.map((r) => (
+          <li key={r.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            <span className="text-primary font-mono">{r.jobCardNumber}</span>
+            <span>
+              {r.mo.moNumber}
+              {r.mo.so ? <span className="text-muted-foreground"> · {r.mo.so.customer.name}</span> : null}
+            </span>
+            <span>
+              <span className="font-medium">{r.moLine.style.code}</span> · {r.moLine.color} · {pcs(r.moLine.totalQty)} pcs
+            </span>
+            {r.mo.heldAt && <span className="badge-warning">On hold</span>}
+            <span className="ml-auto flex items-center gap-1.5">
+              <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => onOpen(r.id)} aria-label={`Open job card ${r.jobCardNumber}`}>
+                <ClipboardList size={13} /> Job card
+              </button>
+              <a href={`/production/orders?open=${r.mo.id}`} className="btn-secondary h-7 px-2.5 text-xs">
+                <ExternalLink size={13} /> Open order
+              </a>
+            </span>
+          </li>
+        ))}
+      </ul>
+      {total > rows.length && <p className="text-muted-foreground ml-5 mt-2 text-xs">and {total - rows.length} more — search to find one.</p>}
+    </div>
   )
 }
 
@@ -479,6 +563,7 @@ export function BoardView({
 
   const handlers = (c: BoardCard): Handlers => ({
     sheet: (stepId) => setOpen({ kind: 'sheet', jobCardId: c.id, stepId }),
+    card: () => setOpen({ kind: 'card', jobCardId: c.id }),
     send: (stepId) => setOpen({ kind: 'send', jobCardId: c.id, stepId }),
     count: (id) => void withTransfer(id, 'count'),
     settle: (id) => void withTransfer(id, 'settle'),
@@ -525,6 +610,8 @@ export function BoardView({
         </div>
       </div>
 
+      {!filtered && <WaitingForStages search={search} refreshKey={refreshKey} onOpen={(jobCardId) => setOpen({ kind: 'card', jobCardId })} />}
+
       {loading && !rows ? (
         <div className="space-y-3">
           {[0, 1].map((i) => (
@@ -557,6 +644,16 @@ export function BoardView({
         <SheetView
           jobCardId={open.jobCardId}
           stepId={open.stepId}
+          onClose={() => {
+            setOpen(null)
+            void load()
+          }}
+          onChanged={(m) => m && onSaved(m)}
+        />
+      )}
+      {open?.kind === 'card' && (
+        <JobCardView
+          jobCardId={open.jobCardId}
           onClose={() => {
             setOpen(null)
             void load()

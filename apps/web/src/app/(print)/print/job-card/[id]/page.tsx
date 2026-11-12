@@ -49,7 +49,7 @@ export default function PrintJobCard() {
       number={c.jobCardNumber}
       dateLabel="Made on"
       date={longDate(c.createdAt) ?? ''}
-      backHref="/production/job-cards"
+      backHref="/production/floor"
       backLabel="Job cards"
       panels={[
         {

@@ -146,11 +146,11 @@ export function MoFlowStrip({
   } else if (!isFinished(f)) {
     next = {
       text: f.cutStarted
-        ? 'Record the work as it moves from stage to stage on Production Stages. Pieces count as packed at the last stage.'
-        : 'Start with cutting: record it on Production Stages, then each next stage in turn.',
+        ? 'Record the work as it moves from stage to stage on Production Floor. Pieces count as packed at the last stage.'
+        : 'Start with cutting: record it on Production Floor, then each next stage in turn.',
       action: (
-        <Link href="/production/stages" className="btn-primary h-8 px-3 text-xs">
-          Production Stages <ArrowRight size={13} />
+        <Link href="/production/floor" className="btn-primary h-8 px-3 text-xs">
+          Production Floor <ArrowRight size={13} />
         </Link>
       ),
     }
