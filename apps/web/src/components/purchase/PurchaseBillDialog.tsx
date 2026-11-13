@@ -33,8 +33,8 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
 import { StepInput } from '@/components/ui/StepInput'
 import { ExpenseTdsPanel, type TdsChoice } from '@/components/purchase/ExpenseTdsPanel'
-import { TaxBreakdown } from '@/components/purchase/TaxBreakdown'
-import { priceDocument, type GstSplit } from '@ld-erp/shared'
+import { ChargeGstControl, TaxBreakdown, type HsnOption } from '@/components/purchase/TaxBreakdown'
+import { priceDocument, type ChargeGstMode, type GstSplit } from '@ld-erp/shared'
 import {
   CashPaymentSection,
   cashPaymentMissing,
@@ -78,6 +78,10 @@ export interface BillLine {
 export interface BillCharge {
   chargeTypeId: string
   amount: number | string
+  /** Where gstRate comes from — see resolveBillCharges on the server. */
+  gstMode: ChargeGstMode
+  /** The HSN / SAC code chosen when gstMode is HSN. */
+  hsnCodeId: string
   gstRate: number | string
 }
 
@@ -455,6 +459,8 @@ export function PurchaseBillDialog({
   /** The line a new expense head is being created for, if any. */
   const [newHeadFor, setNewHeadFor] = useState<number | null>(null)
   const [chargeTypes, setChargeTypes] = useState<Option[]>([])
+  /** Every active HSN / SAC code, offered to a charge taken "By HSN / SAC code". */
+  const [hsnCodes, setHsnCodes] = useState<HsnOption[]>([])
   const [grns, setGrns] = useState<GrnOption[]>([])
   const [companyState, setCompanyState] = useState<string | null>(null)
 
@@ -611,13 +617,22 @@ export function PurchaseBillDialog({
           }))
         : [freshLine()]
     )
-    // Charges are the supplier's figure with any GST inside it, so none is
-    // added on top — a bill saved when it was reopens at 0% like the rest.
+    /*
+     * Each charge's GST as saved — except a charge saved before 13 Nov 2026
+     * (gstMode missing or NONE, from the migration's backfill) that still
+     * carries a real rate from before 6 Nov, when GST was already added on
+     * top. That rate is read back as Manual rather than silently as None, so
+     * resaving the bill without touching it keeps it, instead of a hidden
+     * rate being dropped the moment anything is saved.
+     */
     setCharges(
       record?.charges?.map((c) => ({
         chargeTypeId: c.chargeTypeId,
         amount: String(c.amount),
-        gstRate: '0',
+        gstMode:
+          c.gstMode === 'HSN' || c.gstMode === 'MANUAL' ? c.gstMode : Number(c.gstRate ?? 0) > 0 ? 'MANUAL' : 'NONE',
+        hsnCodeId: c.hsnCodeId ?? '',
+        gstRate: Number(c.gstRate ?? 0) > 0 ? String(Number(c.gstRate)) : '',
       })) ?? []
     )
     setChargeNote(null)
@@ -684,10 +699,15 @@ export function PurchaseBillDialog({
       masterResource<Option>('charge-types')
         .list({ limit: 100, active: true })
         .catch(() => null),
+      // Offered to a charge taken "By HSN / SAC code". Failing to load them
+      // costs that one choice, not the form.
+      masterResource<HsnOption>('hsn-codes')
+        .list({ limit: 500, active: true })
+        .catch(() => null),
       api
         .get<{ success: boolean; data: { stateCode: string | null } }>('/settings/company')
         .catch(() => null),
-    ]).then(([s, i, c, co]) => {
+    ]).then(([s, i, c, hc, co]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
@@ -696,6 +716,7 @@ export function PurchaseBillDialog({
       setChargeTypes(
         c ? (c as Paginated<Option>).data.filter((x) => x.applyOnPurchase !== false) : []
       )
+      setHsnCodes(hc ? (hc as Paginated<HsnOption>).data : [])
       setCompanyState(co?.data?.stateCode ?? null)
     })
 
@@ -1100,6 +1121,8 @@ export function PurchaseBillDialog({
           chargeTypeId: string
           name: string
           amount: number | string
+          gstMode?: ChargeGstMode | null
+          hsnCodeId?: string | null
           gstRate: number | string
         }>
       }>(`/purchase/orders/${forPo}/unbilled-charges`)
@@ -1109,11 +1132,16 @@ export function PurchaseBillDialog({
         const rows = res.data.filter((c) => num(c.amount) > 0)
         // Somebody may have typed a charge in while this was on its way.
         if (!rows.length || hasCharges()) return
+        // The order's own GST for each charge — see the note on the record
+        // load above for why a legacy nonzero rate reads back as Manual.
         setCharges(
           rows.map((c) => ({
             chargeTypeId: c.chargeTypeId,
             amount: String(c.amount),
-            gstRate: '0',
+            gstMode:
+              c.gstMode === 'HSN' || c.gstMode === 'MANUAL' ? c.gstMode : Number(c.gstRate ?? 0) > 0 ? 'MANUAL' : 'NONE',
+            hsnCodeId: c.hsnCodeId ?? '',
+            gstRate: Number(c.gstRate ?? 0) > 0 ? String(Number(c.gstRate)) : '',
           }))
         )
         setChargeNote({
@@ -1484,14 +1512,26 @@ export function PurchaseBillDialog({
       : tdsChoice.rate
     : 0
 
+  /**
+   * The rate actually applied to a charge: an HSN / SAC code's rate, a rate
+   * typed by hand, or 0 when there is none.
+   */
+  const chargeRateOf = (c: BillCharge) => {
+    if (c.gstMode === 'NONE') return 0
+    if (c.gstMode === 'HSN') return Number(hsnCodes.find((h) => h.id === c.hsnCodeId)?.gstRate ?? 0)
+    return num(String(c.gstRate))
+  }
+
   /*
    * The bill's figures, from the one calculation the server prices it with.
    *
    * priceDocument() is shared with the purchase order and with the API, so
    * the screen, the saved bill and the print cannot disagree by a rupee: the
    * order discount is spread over the lines by value, every line and every
-   * charge is taxed at its own rate, CGST and SGST are each worked out at
-   * half the rate, and the total is rounded to the rupee once, at the end.
+   * charge is typed before GST and taxed at its own rate — by HSN / SAC code,
+   * by hand, or not at all — added on top, and CGST and SGST are each worked
+   * out at half the rate, with the total rounded to the rupee once, at the
+   * end.
    *
    * Before a supplier is picked the tax is previewed as CGST + SGST (it adds
    * up the same either way); an unregistered supplier with no reverse charge
@@ -1509,16 +1549,15 @@ export function PurchaseBillDialog({
           gstRate: num(l.gstRate),
         })),
         orderDiscount: num(discountAmount),
-        // As on the supplier's bill, GST included: nothing is taxed on top.
         charges: charges.map((c, i) => ({
           key: c.chargeTypeId || `row-${i}`,
           amount: num(c.amount),
-          gstRate: 0,
+          gstRate: chargeRateOf(c),
         })),
         split: priceSplit,
         reverseCharge: isReverseCharge,
       }),
-    [lines, charges, discountAmount, priceSplit, isReverseCharge]
+    [lines, charges, discountAmount, priceSplit, isReverseCharge, hsnCodes]
   )
 
   /** The figures the form shows, with TDS and what is left to pay on top. */
@@ -1789,12 +1828,16 @@ export function PurchaseBillDialog({
         rateAction: l.rateAction ?? null,
       })),
       rateVarianceReason: rateVarianceReason.trim() || null,
+      // The figure before GST, and where its GST comes from — an HSN / SAC
+      // code, typed by hand, or none.
       charges: charges
         .filter((c) => c.chargeTypeId && num(c.amount) > 0)
         .map((c) => ({
           chargeTypeId: c.chargeTypeId,
           amount: num(c.amount),
-          gstRate: 0,
+          gstMode: c.gstMode,
+          hsnCodeId: c.gstMode === 'HSN' ? c.hsnCodeId || null : null,
+          gstRate: chargeRateOf(c),
         })),
     }
 
@@ -3065,49 +3108,95 @@ export function PurchaseBillDialog({
                             <span />
                           </div>
                         )}
-                        {charges.map((c, i) => (
-                          <div
-                            key={i}
-                            className="grid grid-cols-[minmax(0,22rem)_7rem_1.75rem] items-center gap-1.5"
-                          >
-                            <SmartSelect
-                              className="form-input h-8 min-w-0 text-xs"
-                              value={c.chargeTypeId}
-                              onChange={(e) => {
-                                const id = e.target.value
-                                setCharges((p) =>
-                                  p.map((x, y) => (y === i ? { ...x, chargeTypeId: id } : x))
-                                )
-                              }}
-                              aria-label={`Charge ${i + 1} type`}
-                            >
-                              <option value="">Pick a charge…</option>
-                              {chargeTypes.map((ct) => (
-                                <option key={ct.id} value={ct.id}>
-                                  {ct.name}
-                                </option>
-                              ))}
-                            </SmartSelect>
-                            <StepInput
-                              className="form-input h-8 text-right text-xs"
-                              decimals
-                              placeholder="0"
-                              value={String(c.amount)}
-                              onValueChange={(v) =>
-                                setCharges((p) => p.map((x, y) => (y === i ? { ...x, amount: v } : x)))
-                              }
-                              aria-label={`Charge ${i + 1} amount`}
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
-                              className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
-                              aria-label={`Remove charge ${i + 1}`}
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </div>
-                        ))}
+                        {charges.map((c, i) => {
+                          const name = chargeTypes.find((ct) => ct.id === c.chargeTypeId)?.name ?? `Charge ${i + 1}`
+                          const p = priced.charges[i]
+                          return (
+                            <div key={i}>
+                              <div className="grid grid-cols-[minmax(0,22rem)_7rem_1.75rem] items-center gap-1.5">
+                                <SmartSelect
+                                  className="form-input h-8 min-w-0 text-xs"
+                                  value={c.chargeTypeId}
+                                  onChange={(e) => {
+                                    const id = e.target.value
+                                    const type = chargeTypes.find((ct) => ct.id === id)
+                                    setCharges((p) =>
+                                      p.map((x, y) =>
+                                        y === i
+                                          ? {
+                                              ...x,
+                                              chargeTypeId: id,
+                                              // Only the first time a type is picked for
+                                              // this row — its own GST starts at the
+                                              // charge type's usual rate, Masters →
+                                              // Charges' defaultGstRate, as a manual
+                                              // figure the buyer can still change.
+                                              ...(x.chargeTypeId
+                                                ? {}
+                                                : {
+                                                    gstMode: 'MANUAL' as ChargeGstMode,
+                                                    gstRate:
+                                                      Number(type?.defaultGstRate) > 0
+                                                        ? String(Number(type?.defaultGstRate))
+                                                        : '',
+                                                  }),
+                                            }
+                                          : x
+                                      )
+                                    )
+                                  }}
+                                  aria-label={`Charge ${i + 1} type`}
+                                >
+                                  <option value="">Pick a charge…</option>
+                                  {chargeTypes.map((ct) => (
+                                    <option key={ct.id} value={ct.id}>
+                                      {ct.name}
+                                    </option>
+                                  ))}
+                                </SmartSelect>
+                                <StepInput
+                                  className="form-input h-8 text-right text-xs"
+                                  decimals
+                                  placeholder="0"
+                                  value={String(c.amount)}
+                                  onValueChange={(v) =>
+                                    setCharges((p) => p.map((x, y) => (y === i ? { ...x, amount: v } : x)))
+                                  }
+                                  aria-label={`Charge ${i + 1} amount`}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
+                                  className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                                  aria-label={`Remove charge ${i + 1}`}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
+                              {c.chargeTypeId && (
+                                <ChargeGstControl
+                                  mode={c.gstMode}
+                                  onMode={(m) =>
+                                    setCharges((p) => p.map((x, y) => (y === i ? { ...x, gstMode: m } : x)))
+                                  }
+                                  hsnId={c.hsnCodeId}
+                                  onHsnId={(id) =>
+                                    setCharges((p) => p.map((x, y) => (y === i ? { ...x, hsnCodeId: id } : x)))
+                                  }
+                                  manualRate={String(c.gstRate)}
+                                  onManualRate={(v) =>
+                                    setCharges((p) => p.map((x, y) => (y === i ? { ...x, gstRate: v } : x)))
+                                  }
+                                  hsnOptions={hsnCodes}
+                                  label={name}
+                                  disabled={taxMode === 'NONE'}
+                                  resolvedRate={p?.gstRate ?? 0}
+                                  tax={p?.tax ?? 0}
+                                />
+                              )}
+                            </div>
+                          )
+                        })}
                         {chargeNote && charges.length > 0 && (
                           <p className="text-muted-foreground flex items-center gap-1 text-xs">
                             <Info size={12} className="shrink-0" />
@@ -3132,7 +3221,7 @@ export function PurchaseBillDialog({
                             onClick={() =>
                               setCharges((p) => [
                                 ...p,
-                                { chargeTypeId: '', amount: '', gstRate: '0' },
+                                { chargeTypeId: '', amount: '', gstMode: 'NONE', hsnCodeId: '', gstRate: '' },
                               ])
                             }
                             className="btn-secondary text-xs"
@@ -3145,8 +3234,9 @@ export function PurchaseBillDialog({
                         </div>
                         {charges.length > 0 && (
                           <p className="text-muted-foreground text-xs">
-                            Type each charge as it is on the supplier&apos;s bill, GST included — no GST
-                            is added on top.
+                            Type each charge as it is before GST, then say where its GST comes from — an
+                            HSN / SAC code, a rate you set, or none — and it is worked out and added on
+                            top, not read as already inside the figure.
                           </p>
                         )}
                       </div>
@@ -3227,11 +3317,9 @@ export function PurchaseBillDialog({
                       the supplier is paid.
                     </p>
                   )}
-                  {/* After the tax: the supplier's charges are their final
-                    figure with any GST already in it, added as they are. */}
-                  {totals.chargeTotal > 0 && (
-                    <Row label="Add charges (GST included)" value={totals.chargeTotal} />
-                  )}
+                  {/* The charges before their own GST — already worked into
+                    the GST / tax row above, goods and charges together. */}
+                  {totals.chargeTotal > 0 && <Row label="Charges" value={totals.chargeTotal} />}
                   <Row label="Rounding" value={totals.roundOff} />
                   <div className="border-border flex items-center justify-between border-t pt-2">
                     <span className="text-foreground font-semibold">Bill total</span>

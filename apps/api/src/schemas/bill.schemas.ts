@@ -76,12 +76,17 @@ export const billLineSchema = z.object({
 
 /**
  * Freight, transport, dyeing — the extras the supplier adds at the foot of the
- * bill. Each carries its own GST rate, which is why they cannot simply be
- * added to the goods value.
+ * bill. Each carries its own GST, which is why they cannot simply be added to
+ * the goods value: `gstMode` says where the rate comes from (an HSN/SAC code,
+ * typed by hand, or none at all — see `resolveBillCharges`), and `gstRate` is
+ * the rate actually applied.
  */
 export const billChargeSchema = z.object({
   chargeTypeId: id('a charge'),
   amount: money,
+  gstMode: z.enum(['HSN', 'MANUAL', 'NONE']).optional(),
+  /** The HSN/SAC code chosen when `gstMode` is HSN, kept on the row. */
+  hsnCodeId: z.string().optional().nullable(),
   gstRate: percent('GST rate').optional(),
 })
 

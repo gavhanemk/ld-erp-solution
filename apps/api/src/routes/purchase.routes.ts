@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { PackType, Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
-import { priceDocument, type GstSplit, type TaxByRate } from '@ld-erp/shared'
+import { priceDocument, type ChargeGstMode, type GstSplit, type TaxByRate } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -85,13 +85,16 @@ const lineSchema = z.object({
 /**
  * One charge on the order — transport, freight, dyeing, packing, Other Charges.
  *
- * The amount is the final figure on the supplier's bill, GST included. A
- * `gstRate` is still accepted so an older form is not refused, but it is not
- * used: every charge is taken at 0% — see `resolveCharges`.
+ * `amount` is the figure before GST. `gstMode` says where its GST rate comes
+ * from — an HSN/SAC code chosen for it, typed by hand, or none at all — and
+ * `gstRate` is the rate actually applied. See `resolveCharges`.
  */
 const chargeSchema = z.object({
   chargeTypeId: z.string().min(1, 'Pick a charge'),
   amount: z.number().min(0, 'A charge cannot be negative'),
+  gstMode: z.enum(['HSN', 'MANUAL', 'NONE']).optional(),
+  /** The HSN/SAC code chosen when `gstMode` is HSN, kept on the row. */
+  hsnCodeId: z.string().optional().nullable(),
   gstRate: z
     .number()
     .min(0, 'A GST rate cannot be negative')
@@ -202,7 +205,10 @@ const poInclude = {
     },
   },
   charges: {
-    include: { chargeType: { select: { id: true, name: true, defaultGstRate: true } } },
+    include: {
+      chargeType: { select: { id: true, name: true, defaultGstRate: true } },
+      hsnCode: { select: { id: true, code: true, description: true, gstRate: true } },
+    },
   },
   deliveryWarehouse: { select: { id: true, name: true, address: true } },
   deliveryCustomer: { select: { id: true, name: true, code: true, gstin: true } },
@@ -519,16 +525,19 @@ function orderDiscountOf(poType: string | null | undefined, discountAmount: numb
   return poType === 'ITEM_LEVEL' || poType === 'NONE' ? 0 : discountAmount
 }
 
+/** A charge with its GST settled — see `resolveCharges`. */
+type ResolvedCharge = { chargeTypeId: string; amount: number; gstMode: ChargeGstMode; hsnCodeId: string | null; gstRate: number }
+
 /**
  * Prices a purchase order with the one shared calculation (`priceDocument`),
  * the same one the order form runs as the buyer types and the bill runs when
  * it arrives — so the screen, the saved order and the bill cannot come to
  * different figures.
  *
- * `charges` arrive with the GST rate chosen on the order — see
- * `resolveCharges`. They are taxed at that rate on their own, never folded
- * into the goods, and are not discountable: the mill's discount is negotiated
- * on the goods, not on the transporter's bill.
+ * `charges` arrive with their GST settled — see `resolveCharges`. Each is
+ * taxed at its own rate, GST added on top of the figure typed, never folded
+ * into the goods, and the charges are not discountable: the mill's discount
+ * is negotiated on the goods, not on the transporter's bill.
  *
  * `otherCharges` is the old untaxed box. It carries no GST and is added after
  * tax, which is how the old system treated it; only orders saved before
@@ -543,7 +552,7 @@ function priceOrder(
   lines: z.infer<typeof lineSchema>[],
   orderDiscount: number,
   split: GstSplit,
-  charges: { chargeTypeId: string; amount: number; gstRate: number }[] = [],
+  charges: ResolvedCharge[] = [],
   otherCharges = 0
 ) {
   const priced = priceDocument({
@@ -560,11 +569,15 @@ function priceOrder(
   })
 
   // Each charge's own tax, kept per charge so the row can be compared against
-  // the same row on the bill when it arrives. The rate stored is the one
-  // applied: 0 from a supplier with no GSTIN, as on the lines.
+  // the same row on the bill when it arrives. priceDocument only knows a
+  // charge's key, amount and rate, so gstMode and hsnCodeId are matched back
+  // in from what resolveCharges settled.
+  const settledByType = new Map(charges.map((c) => [c.chargeTypeId, c]))
   const chargeRows = priced.charges.map((c) => ({
     chargeTypeId: c.key,
     amount: c.amount,
+    gstMode: settledByType.get(c.key)?.gstMode ?? 'NONE',
+    hsnCodeId: settledByType.get(c.key)?.hsnCodeId ?? null,
     gstRate: c.gstRate,
     cgst: c.cgst,
     sgst: c.sgst,
@@ -588,22 +601,43 @@ function priceOrder(
 }
 
 /**
- * Checks each charge is one the mill uses on purchases.
+ * Checks each charge is one the mill uses on purchases, and settles its GST.
  *
- * Every charge is taken at 0% GST, whatever rate is sent. Freight, transport
- * and the rest are typed as the final figure on the supplier's bill with any
- * GST already inside it, so they are added to the total as they are — GST on
- * top would charge it twice.
+ * `amount` is the figure before GST; GST on it is always worked out and added
+ * on top of the total — never read as already sitting inside the figure,
+ * which is how every purchase charge was wrongly priced between 6 and
+ * 13 Nov 2026. Where the rate comes from is `gstMode`:
+ *
+ *   HSN     `hsnCodeId` must name an HSN / SAC code still in the master; its
+ *           rate is kept on the charge the same way an item's HSN rate is —
+ *           typed in, trusted, reviewed by accounts, not re-derived here on
+ *           every save.
+ *   MANUAL  the rate sent is taken as typed.
+ *   NONE, or left out (an older form) — 0%, whatever rate was sent.
  *
  * The same charge sent twice is added together into one row rather than
- * refused at the database's unique index with a message nobody could act on.
+ * refused at the database's unique index with a message nobody could act on;
+ * the first occurrence's GST settles the merged row.
  */
-async function resolveCharges(tx: Prisma.TransactionClient, charges: z.infer<typeof chargeSchema>[]) {
-  const merged = new Map<string, { chargeTypeId: string; amount: number }>()
+async function resolveCharges(
+  tx: Prisma.TransactionClient,
+  charges: z.infer<typeof chargeSchema>[]
+): Promise<ResolvedCharge[]> {
+  const merged = new Map<string, ResolvedCharge>()
   for (const c of charges) {
     const seen = merged.get(c.chargeTypeId)
-    if (seen) seen.amount = round2(seen.amount + c.amount)
-    else merged.set(c.chargeTypeId, { chargeTypeId: c.chargeTypeId, amount: c.amount })
+    if (seen) {
+      seen.amount = round2(seen.amount + c.amount)
+      continue
+    }
+    const mode: ChargeGstMode = c.gstMode ?? 'NONE'
+    merged.set(c.chargeTypeId, {
+      chargeTypeId: c.chargeTypeId,
+      amount: c.amount,
+      gstMode: mode,
+      hsnCodeId: mode === 'HSN' ? c.hsnCodeId || null : null,
+      gstRate: mode === 'NONE' ? 0 : round2(c.gstRate ?? 0),
+    })
   }
   const wanted = [...merged.values()].filter((c) => c.amount > 0)
   if (!wanted.length) return []
@@ -622,7 +656,31 @@ async function resolveCharges(tx: Prisma.TransactionClient, charges: z.infer<typ
     )
   }
 
-  return wanted.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: 0 }))
+  // A charge taken by HSN names an actual, active code, so a code picked and
+  // later retired from the master is said plainly rather than saved pointing
+  // nowhere.
+  const hsnWanted = wanted.filter((c) => c.gstMode === 'HSN')
+  if (hsnWanted.some((c) => !c.hsnCodeId)) {
+    throw new AppError(
+      'Pick an HSN / SAC code for every charge taken by HSN, or choose a different way to set its GST.',
+      400,
+      'NO_HSN_CODE'
+    )
+  }
+  if (hsnWanted.length) {
+    const ids = [...new Set(hsnWanted.map((c) => c.hsnCodeId as string))]
+    const hsnRows = await tx.hsnCode.findMany({ where: { id: { in: ids }, isActive: true }, select: { id: true } })
+    const knownHsn = new Set(hsnRows.map((h) => h.id))
+    if (ids.some((id) => !knownHsn.has(id))) {
+      throw new AppError(
+        'One of those HSN / SAC codes is no longer in the HSN master. Pick another.',
+        400,
+        'INVALID_HSN_CODE'
+      )
+    }
+  }
+
+  return wanted
 }
 
 // ── Purchase orders ─────────────────────────────────────────────────────────
@@ -1046,7 +1104,8 @@ router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, r
  *
  * Each charge on the order less what live bills of this order already carry
  * for the same charge type. A cancelled bill claims nothing. Only what is
- * still to bill comes back, at the GST rate chosen on the order.
+ * still to bill comes back, with the GST the order chose for it — mode, HSN
+ * code and rate — so the bill does not have to be told it over again.
  */
 router.get(
   '/orders/:id/unbilled-charges',
@@ -1061,8 +1120,11 @@ router.get(
           select: {
             chargeTypeId: true,
             amount: true,
+            gstMode: true,
+            hsnCodeId: true,
             gstRate: true,
             chargeType: { select: { name: true } },
+            hsnCode: { select: { id: true, code: true, description: true } },
           },
         },
       },
@@ -1081,6 +1143,9 @@ router.get(
         chargeTypeId: c.chargeTypeId,
         name: c.chargeType.name,
         amount: round2(Number(c.amount) - (billedByType.get(c.chargeTypeId) ?? 0)),
+        gstMode: c.gstMode,
+        hsnCodeId: c.hsnCodeId,
+        hsnCode: c.hsnCode,
         gstRate: Number(c.gstRate),
       }))
       .filter((c) => c.amount > 0)
@@ -1539,6 +1604,8 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
           : before.charges.map((c) => ({
               chargeTypeId: c.chargeTypeId,
               amount: Number(c.amount),
+              gstMode: c.gstMode,
+              hsnCodeId: c.hsnCodeId,
               gstRate: Number(c.gstRate),
             }))
 
@@ -4220,7 +4287,12 @@ const billInclude = {
       },
     },
   },
-  charges: { include: { chargeType: { select: { id: true, name: true } } } },
+  charges: {
+    include: {
+      chargeType: { select: { id: true, name: true } },
+      hsnCode: { select: { id: true, code: true, description: true, gstRate: true } },
+    },
+  },
   /*
    * What has been paid against the bill, and what has been claimed back from
    * the supplier on it.
@@ -4281,7 +4353,7 @@ const billInclude = {
  * come to the same figures for the same goods and charges.
  *
  * Differs from an order in three ways that all cost money if they are missed:
- * charges carry their own GST rate and cannot be folded into the goods value;
+ * charges carry their own GST and cannot be folded into the goods value;
  * reverse charge means the tax is ours to pay rather than the supplier's, so it
  * is recorded but never added to what they are paid; and TDS is withheld from
  * the payment while still settling the bill in full.
@@ -4293,8 +4365,8 @@ const billInclude = {
  */
 function priceBill(opts: {
   lines: BillLineInput[]
-  /** Each with its GST rate settled — see `resolveBillCharges`. */
-  charges: { chargeTypeId: string; amount: number; gstRate: number }[]
+  /** Each with its GST settled — see `resolveBillCharges`. */
+  charges: ResolvedCharge[]
   discountAmount: number
   split: GstSplit
   isReverseCharge: boolean
@@ -4371,23 +4443,30 @@ function priceBill(opts: {
 }
 
 /**
- * Checks each charge on a bill.
+ * Checks each charge on a bill, and settles its GST.
  *
- * Every charge is taken at 0% GST, whatever rate is sent: it is typed as the
- * final figure on the supplier's bill with any GST already inside it, and is
- * added to the total as it is. Same rule as on the order (`resolveCharges`),
- * so a bill raised from an order comes to the same figure.
+ * `amount` is the figure before GST; GST on it is always worked out and added
+ * on top of the total — never read as already sitting inside the figure,
+ * which is how every purchase charge was wrongly priced between 6 and
+ * 13 Nov 2026. Same rule as on the order (`resolveCharges`), so a bill raised
+ * from an order comes to the same figure for the same charge.
  *
  * A charge type has to be one the mill uses on purchases and still in use. An
  * edit may also keep a charge type already on that bill, so a bill booked
- * before a charge was retired can still be corrected without losing it.
+ * before a charge was retired can still be corrected without losing it. An
+ * HSN-taken charge must name an active HSN / SAC code, the same check the
+ * order makes.
+ *
+ * Unlike the order's charges, a bill's can repeat the same charge type as
+ * separate rows — two legs of freight on one bill, say — so nothing here
+ * merges them.
  */
 async function resolveBillCharges(
   tx: Prisma.TransactionClient,
   charges: BillChargeInput[],
   /** Charge types already on the bill being edited. */
   alreadyOnBill: Set<string> = new Set()
-) {
+): Promise<ResolvedCharge[]> {
   if (!charges.length) return []
 
   const types = await tx.chargeType.findMany({
@@ -4414,7 +4493,36 @@ async function resolveBillCharges(
     }
   }
 
-  return charges.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: 0 }))
+  const hsnIds = [...new Set(charges.filter((c) => c.gstMode === 'HSN').map((c) => c.hsnCodeId))]
+  if (hsnIds.some((id) => !id)) {
+    throw new AppError(
+      'Pick an HSN / SAC code for every charge taken by HSN, or choose a different way to set its GST.',
+      400,
+      'NO_HSN_CODE'
+    )
+  }
+  if (hsnIds.length) {
+    const hsnRows = await tx.hsnCode.findMany({ where: { id: { in: hsnIds as string[] }, isActive: true }, select: { id: true } })
+    const knownHsn = new Set(hsnRows.map((h) => h.id))
+    if (hsnIds.some((id) => !knownHsn.has(id as string))) {
+      throw new AppError(
+        'One of those HSN / SAC codes is no longer in the HSN master. Pick another.',
+        400,
+        'INVALID_HSN_CODE'
+      )
+    }
+  }
+
+  return charges.map((c) => {
+    const mode: ChargeGstMode = c.gstMode ?? 'NONE'
+    return {
+      chargeTypeId: c.chargeTypeId,
+      amount: c.amount,
+      gstMode: mode,
+      hsnCodeId: mode === 'HSN' ? c.hsnCodeId || null : null,
+      gstRate: mode === 'NONE' ? 0 : round2(c.gstRate ?? 0),
+    }
+  })
 }
 
 /**
@@ -5183,6 +5291,8 @@ async function bookBill(
         create: charges.map((c, i) => ({
           chargeTypeId: c.chargeTypeId,
           amount: priced.pricedCharges[i].amount,
+          gstMode: c.gstMode,
+          hsnCodeId: c.hsnCodeId,
           gstRate: priced.pricedCharges[i].gstRate,
           cgst: priced.pricedCharges[i].cgst,
           sgst: priced.pricedCharges[i].sgst,
@@ -5448,6 +5558,8 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
       : before.charges.map((c) => ({
           chargeTypeId: c.chargeTypeId,
           amount: Number(c.amount),
+          gstMode: c.gstMode,
+          hsnCodeId: c.hsnCodeId,
           gstRate: Number(c.gstRate),
         }))
 
@@ -5548,6 +5660,8 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
           create: charges.map((c, i) => ({
             chargeTypeId: c.chargeTypeId,
             amount: priced.pricedCharges[i].amount,
+            gstMode: c.gstMode,
+            hsnCodeId: c.hsnCodeId,
             gstRate: priced.pricedCharges[i].gstRate,
             cgst: priced.pricedCharges[i].cgst,
             sgst: priced.pricedCharges[i].sgst,

@@ -43,8 +43,8 @@ import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } f
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
-import { priceDocument } from '@ld-erp/shared'
-import { TaxBreakdown } from '@/components/purchase/TaxBreakdown'
+import { priceDocument, type ChargeGstMode } from '@ld-erp/shared'
+import { ChargeGstControl, TaxBreakdown, type HsnOption } from '@/components/purchase/TaxBreakdown'
 
 /**
  * Raising a purchase order.
@@ -178,10 +178,14 @@ export interface PurchaseOrder {
   charges?: {
     chargeTypeId: string
     amount: string | number
+    /** Where gstRate comes from — see resolveCharges on the server. Absent on an order saved before 13 Nov 2026 reads as NONE. */
+    gstMode?: ChargeGstMode | null
+    hsnCodeId?: string | null
     gstRate: string | number
     /** Sent by the list and the detail call, so a charge can be named rather
         than shown as an unexplained figure. Absent on a form's own draft. */
     chargeType?: { id: string; name: string } | null
+    hsnCode?: { id: string; code: string; description: string } | null
   }[]
   notes: string | null
   terms: string | null
@@ -526,6 +530,8 @@ export function PurchaseOrderDialog({
   const [categories, setCategories] = useState<Option[]>([])
   const [styles, setStyles] = useState<Option[]>([])
   const [chargeTypes, setChargeTypes] = useState<ChargeTypeOption[]>([])
+  /** Every active HSN / SAC code, offered to a charge taken "By HSN / SAC code". */
+  const [hsnCodes, setHsnCodes] = useState<HsnOption[]>([])
   const [company, setCompany] = useState<CompanyLite | null>(null)
 
   // Header
@@ -588,6 +594,17 @@ export function PurchaseOrderDialog({
    */
   const [chargeUnit, setChargeUnit] = useState<Record<string, '%' | 'INR'>>({})
   /**
+   * Each charge's GST, keyed by charge type id: where the rate comes from
+   * (`chargeGstMode`), which HSN / SAC code when it is HSN (`chargeHsnId`),
+   * and the rate typed by hand when it is manual (`chargeGstRate`).
+   *
+   * A charge is always typed as the figure before GST, and its GST is always
+   * worked out and added on top — never read as already inside the figure.
+   */
+  const [chargeGstMode, setChargeGstMode] = useState<Record<string, ChargeGstMode>>({})
+  const [chargeHsnId, setChargeHsnId] = useState<Record<string, string>>({})
+  const [chargeGstRate, setChargeGstRate] = useState<Record<string, string>>({})
+  /**
    * The old "Other charges" box of an order saved before Other Charges became
    * a charge type. '' when there is none.
    *
@@ -598,30 +615,20 @@ export function PurchaseOrderDialog({
    */
   const [legacyOther, setLegacyOther] = useState('')
 
-  /** Takes a charge off the order: its row, its amount and its ₹/% go. */
+  /** Takes a charge off the order: its row, its amount, its ₹/% and its GST go. */
   const removeCharge = (id: string) => {
     setShownCharges((prev) => prev.filter((x) => x !== id))
-    setCharges((prev) => {
+    const drop = <T,>(prev: Record<string, T>) => {
       const next = { ...prev }
       delete next[id]
       return next
-    })
-    setChargeUnit((prev) => {
-      const next = { ...prev }
-      delete next[id]
-      return next
-    })
+    }
+    setCharges(drop)
+    setChargeUnit(drop)
+    setChargeGstMode(drop)
+    setChargeHsnId(drop)
+    setChargeGstRate(drop)
   }
-
-  /*
-   * A saved order whose charges had GST added on top, the way orders were
-   * priced before charges were taken as the supplier's GST-included figure.
-   * Said beside the charges, because saving it again drops that GST and the
-   * total comes down by it.
-   */
-  const chargesTaxedBefore = (record?.charges ?? []).some(
-    (c) => Number(c.amount) > 0 && Number(c.gstRate ?? 0) > 0
-  )
 
   /*
    * Charges already on a saved order whose type has since been retired in the
@@ -840,6 +847,30 @@ export function PurchaseOrderDialog({
     setShownCharges(
       (record?.charges ?? []).filter((c) => Number(c.amount) > 0).map((c) => c.chargeTypeId)
     )
+    /*
+     * Each charge's GST as saved — except an order saved before 13 Nov 2026
+     * (gstMode missing or NONE, from the migration's backfill) that still
+     * carries a real rate from before 6 Nov, when GST was already added on
+     * top. That rate is read back as Manual rather than silently as None, so
+     * it stays in sight and resaving the order without touching it keeps it,
+     * instead of a hidden rate being dropped the moment anything is saved.
+     */
+    setChargeGstMode(
+      Object.fromEntries(
+        (record?.charges ?? []).map((c) => [
+          c.chargeTypeId,
+          c.gstMode === 'HSN' || c.gstMode === 'MANUAL' ? c.gstMode : Number(c.gstRate ?? 0) > 0 ? 'MANUAL' : 'NONE',
+        ])
+      )
+    )
+    setChargeHsnId(
+      Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, c.hsnCodeId ?? '']))
+    )
+    setChargeGstRate(
+      Object.fromEntries(
+        (record?.charges ?? []).map((c) => [c.chargeTypeId, Number(c.gstRate ?? 0) > 0 ? String(Number(c.gstRate)) : ''])
+      )
+    )
     setLegacyOther(num(record?.otherCharges) > 0 ? String(Number(record?.otherCharges)) : '')
     setAttachments([])
     setPendingFiles([])
@@ -982,6 +1013,12 @@ export function PurchaseOrderDialog({
       masterResource<ChargeTypeOption>('charge-types')
         .list({ limit: 100, active: true })
         .catch(() => null),
+      // Offered to a charge taken "By HSN / SAC code". Failing to load them
+      // costs that one choice, not the form — a charge can still be taxed by
+      // hand or left at none.
+      masterResource<HsnOption>('hsn-codes')
+        .list({ limit: 500, active: true })
+        .catch(() => null),
       // The company block under "deliver to" is our own address. A purchase
       // clerk may not be allowed into Settings, so a refusal here falls back
       // to the copy order-defaults carries, below.
@@ -1011,7 +1048,7 @@ export function PurchaseOrderDialog({
           '/purchase/order-defaults'
         )
         .catch(() => null),
-    ]).then(([s, i, w, cust, c, st, ct, co, ns, dflt]) => {
+    ]).then(([s, i, w, cust, c, st, ct, hc, co, ns, dflt]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
@@ -1028,6 +1065,7 @@ export function PurchaseOrderDialog({
             )
           : []
       )
+      setHsnCodes(hc ? (hc as Paginated<HsnOption>).data : [])
       // Settings first; the purchase module's copy for a buyer who may not open
       // Settings. Our state code decides CGST + SGST against IGST, so it must
       // not depend on who is signed in.
@@ -1255,19 +1293,32 @@ export function PurchaseOrderDialog({
   /** The "Other Charges" charge type, when Masters → Charges has one. */
   const otherChargeType = chargeTypes.find(isOtherChargesType) ?? null
 
-  /** Puts a charge on the order. */
+  /**
+   * Puts a charge on the order.
+   *
+   * Its GST starts as a manual rate at the charge type's own usual GST —
+   * Masters → Charges' defaultGstRate, blank when nobody has set one there —
+   * so a buyer who agrees the usual charge gets its usual GST too, and can
+   * still switch to an HSN / SAC code or clear it to none.
+   */
   const addCharge = (id: string) => {
-    if (!chargeTypes.some((x) => x.id === id)) return
+    const type = chargeTypes.find((x) => x.id === id)
+    if (!type) return
     setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
+    setChargeGstMode((prev) => (prev[id] ? prev : { ...prev, [id]: 'MANUAL' }))
+    setChargeGstRate((prev) =>
+      prev[id] ? prev : { ...prev, [id]: Number(type.defaultGstRate) > 0 ? String(Number(type.defaultGstRate)) : '' }
+    )
   }
 
   /*
    * An order saved with the old "Other charges" box, reopened.
    *
    * The figure is moved onto the "Other Charges" charge row and the box it
-   * came from is sent back as 0. Both are the supplier's figure taken as it
-   * is, so the total does not move. Until the charge master has loaded, or
-   * when it has no "Other Charges" row at all, nothing moves.
+   * came from is sent back as 0. The old box carried no GST of its own, so
+   * the row it moves onto starts at None — the total does not move. Until
+   * the charge master has loaded, or when it has no "Other Charges" row at
+   * all, nothing moves.
    */
   useEffect(() => {
     if (!open || !legacyOther || !otherChargeType) return
@@ -1275,9 +1326,21 @@ export function PurchaseOrderDialog({
     const amount = num(legacyOther)
     setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
     setCharges((prev) => ({ ...prev, [id]: String(Number((num(prev[id]) + amount).toFixed(2))) }))
+    setChargeGstMode((prev) => (prev[id] ? prev : { ...prev, [id]: 'NONE' }))
     setLegacyOther('')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, legacyOther, otherChargeType?.id])
+
+  /**
+   * The rate actually applied to a charge: an HSN / SAC code's rate, a rate
+   * typed by hand, or 0 when there is none.
+   */
+  const chargeRateOf = (id: string) => {
+    const mode = chargeGstMode[id] ?? 'NONE'
+    if (mode === 'NONE') return 0
+    if (mode === 'HSN') return Number(hsnCodes.find((h) => h.id === chargeHsnId[id])?.gstRate ?? 0)
+    return num(chargeGstRate[id])
+  }
 
   /*
    * Every figure on the form, from the one calculation.
@@ -1288,9 +1351,9 @@ export function PurchaseOrderDialog({
    * row is not part of the order — the order discount where the dropdown
    * allows one, and the charges.
    *
-   * Every charge goes in at 0% GST. Freight, transport and the rest are typed
-   * as the final figure on the supplier's bill, with any GST already inside
-   * it, so they are added to the total as they are and nothing is taxed on top.
+   * Each charge goes in at the figure typed, before GST, and its own GST —
+   * by HSN / SAC code, typed by hand, or none — is worked out on it and added
+   * on top: never read as already sitting inside the figure.
    *
    * While no supplier is chosen there is no telling CGST + SGST from IGST, so
    * the tax is previewed as CGST + SGST and the panel says so. The tax itself
@@ -1325,7 +1388,7 @@ export function PurchaseOrderDialog({
 
     const result = priceDocument({
       ...goods,
-      charges: shown.map((t) => ({ key: t.id, amount: chargeAmountOf(t.id), gstRate: 0 })),
+      charges: shown.map((t) => ({ key: t.id, amount: chargeAmountOf(t.id), gstRate: chargeRateOf(t.id) })),
       untaxedExtra: num(legacyOther),
     })
 
@@ -1340,15 +1403,19 @@ export function PurchaseOrderDialog({
     })
 
     /*
-     * The charges on this order, one row each, as typed. Not discountable —
-     * the mill's discount is negotiated on the goods, not on the
-     * transporter's bill.
+     * The charges on this order, one row each, as typed, before GST, plus
+     * each one's own GST — not discountable, since the mill's discount is
+     * negotiated on the goods, not on the transporter's bill.
      */
     const chargeRows = shown.map((t, i) => ({
       chargeTypeId: t.id,
       name: t.name,
       unit: chargeUnit[t.id] ?? ('INR' as const),
       amount: result.charges[i]?.amount ?? 0,
+      gstMode: chargeGstMode[t.id] ?? ('NONE' as ChargeGstMode),
+      hsnCodeId: chargeHsnId[t.id] || null,
+      gstRate: result.charges[i]?.gstRate ?? 0,
+      tax: result.charges[i]?.tax ?? 0,
     }))
 
     /*
@@ -1374,7 +1441,21 @@ export function PurchaseOrderDialog({
       total: result.total,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines, discountAmount, taxMode, poType, chargeTypes, shownCharges, charges, chargeUnit, legacyOther])
+  }, [
+    lines,
+    discountAmount,
+    taxMode,
+    poType,
+    chargeTypes,
+    shownCharges,
+    charges,
+    chargeUnit,
+    chargeGstMode,
+    chargeHsnId,
+    chargeGstRate,
+    hsnCodes,
+    legacyOther,
+  ])
 
   /** One row's own figures, worked out for the row it is shown in. */
   const priceOf = (l: PoLine) => {
@@ -1963,11 +2044,17 @@ export function PurchaseOrderDialog({
     // Only an order-level order has one. Sending whatever is in the box on an
     // item-level order would take the discount twice.
     discountAmount: poType === 'ORDER_LEVEL' ? num(discountAmount) : 0,
-    // The kind and the amount, GST included, as on the supplier's bill. No GST
-    // goes on top of a charge, so none is sent; the server takes it at 0%.
+    // The kind, the figure before GST, and where its GST comes from — an
+    // HSN / SAC code, typed by hand, or none.
     charges: totals.chargeRows
       .filter((c) => c.amount > 0)
-      .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount, gstRate: 0 })),
+      .map((c) => ({
+        chargeTypeId: c.chargeTypeId,
+        amount: c.amount,
+        gstMode: c.gstMode,
+        hsnCodeId: c.gstMode === 'HSN' ? c.hsnCodeId : null,
+        gstRate: c.gstRate,
+      })),
     // 0 on every new order, and on an old one once its figure has moved onto
     // the "Other Charges" row. Only an old order whose charge master has no
     // such row still sends its figure here, so saving it loses nothing.
@@ -3906,12 +3993,12 @@ export function PurchaseOrderDialog({
 
                   <Row label="Total tax" value={totals.tax} />
 
-                  {/* The supplier's charges, after the tax and outside it.
-                    Each is typed as the final figure on their bill — freight
-                    ₹1,200 is ₹1,200, any GST already inside it — and added to
-                    the grand total as it is. Only the charges this order
-                    carries; "+ Add a charge" offers the purchase charges from
-                    Masters → Charges that are not on it yet. */}
+                  {/* Each charge, typed before GST — freight at ₹1,200 is
+                    ₹1,200 — with its own GST chosen below it and worked into
+                    the Total tax row above, same as the goods'. Only the
+                    charges this order carries; "+ Add a charge" offers the
+                    purchase charges from Masters → Charges that are not on it
+                    yet. */}
                   {chargeTypes.length === 0 ? (
                     <p className="text-muted-foreground py-1 text-xs">
                       No purchase charges are set up yet — add them under{' '}
@@ -3929,9 +4016,11 @@ export function PurchaseOrderDialog({
                     <div className="space-y-1.5 pt-0.5">
                       {totals.chargeRows.length > 0 && (
                         <p className="text-muted-foreground text-[11px]">
-                          Charges as on the supplier&apos;s bill, GST included — no GST is added on top.
-                          Type the amount in ₹, or press % next to the box and type any percentage (5,
-                          7.5, 10…) of the goods value before GST.
+                          Type each charge as it is before GST. Press % next to the box to type it as a
+                          percentage (5, 7.5, 10…) of the goods value before GST instead of an amount in
+                          ₹. Then say where its GST comes from — an HSN / SAC code, a rate you set, or
+                          none — and it is worked out and added on top, not read as already inside the
+                          figure.
                         </p>
                       )}
                       {totals.chargeRows.map((c) => (
@@ -4031,6 +4120,19 @@ export function PurchaseOrderDialog({
                               )}
                             </p>
                           )}
+                          <ChargeGstControl
+                            mode={c.gstMode}
+                            onMode={(m) => setChargeGstMode((prev) => ({ ...prev, [c.chargeTypeId]: m }))}
+                            hsnId={chargeHsnId[c.chargeTypeId] ?? ''}
+                            onHsnId={(id) => setChargeHsnId((prev) => ({ ...prev, [c.chargeTypeId]: id }))}
+                            manualRate={chargeGstRate[c.chargeTypeId] ?? ''}
+                            onManualRate={(v) => setChargeGstRate((prev) => ({ ...prev, [c.chargeTypeId]: v }))}
+                            hsnOptions={hsnCodes}
+                            label={c.name}
+                            disabled={taxMode === 'NONE'}
+                            resolvedRate={c.gstRate}
+                            tax={c.tax}
+                          />
                         </div>
                       ))}
                       {chargeTypes.some((t) => !shownCharges.includes(t.id)) && (
@@ -4051,15 +4153,6 @@ export function PurchaseOrderDialog({
                               </option>
                             ))}
                         </SmartSelect>
-                      )}
-                      {/* Only an order saved while charges still had GST added
-                        on top. Saving it again takes that GST off. */}
-                      {chargesTaxedBefore && (
-                        <p className="warn-text text-xs">
-                          This order was saved with GST added on its charges. Charges are now taken as
-                          the supplier&apos;s figure with GST included, so the total comes down by that
-                          GST when you save.
-                        </p>
                       )}
                       {retiredCharges.length > 0 && (
                         <p className="warn-text text-xs">
