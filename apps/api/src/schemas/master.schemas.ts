@@ -964,6 +964,18 @@ export const createChargeTypeSchema = z.object({
    * at the GST rate above.
    */
   followsGoodsRate: z.boolean().default(true),
+  /*
+   * How a purchase order or bill starts this charge's GST, unless the row is
+   * changed there: an HSN / SAC code, a rate typed by hand, or not
+   * applicable — see PurchaseOrderCharge.gstMode, which every row starts at.
+   */
+  defaultGstMode: z.enum(['HSN', 'MANUAL', 'NONE']).default('MANUAL'),
+  /*
+   * The HSN / SAC code a purchase row starts with when defaultGstMode is HSN.
+   * Checked against the master in the route's beforeSave, where the two
+   * fields can be read together even on an edit that sends only one of them.
+   */
+  defaultHsnCodeId: z.string().min(1).optional().nullable(),
   applyOnSale: z.boolean().default(true),
   applyOnPurchase: z.boolean().default(false),
   isActive,

@@ -223,6 +223,9 @@ interface Option {
   uom?: { symbol: string } | null
   defaultGstRate?: string | number | null
   applyOnPurchase?: boolean
+  /** How a new row of this charge starts its GST, and the SAC it starts from when that is HSN. */
+  defaultGstMode?: ChargeGstMode
+  defaultHsnCodeId?: string | null
   /** Payment to an MSME supplier falls due within 45 days by law. */
   isMsme?: boolean
   /** The terms agreed with this supplier — what the due date is counted in. */
@@ -3120,21 +3123,27 @@ export function PurchaseBillDialog({
                                   onChange={(e) => {
                                     const id = e.target.value
                                     const type = chargeTypes.find((ct) => ct.id === id)
+                                    // The SAC a type usually takes its GST from, when it's
+                                    // still active; a retired one falls back to manual
+                                    // rather than silently picking nothing.
+                                    const sacStillActive = type?.defaultGstMode === 'HSN' && hsnCodes.some((h) => h.id === type?.defaultHsnCodeId)
+                                    const mode: ChargeGstMode = type?.defaultGstMode === 'HSN' && !sacStillActive ? 'MANUAL' : (type?.defaultGstMode ?? 'MANUAL')
                                     setCharges((p) =>
                                       p.map((x, y) =>
                                         y === i
                                           ? {
                                               ...x,
                                               chargeTypeId: id,
-                                              // Only the first time a type is picked for
-                                              // this row — its own GST starts at the
-                                              // charge type's usual rate, Masters →
-                                              // Charges' defaultGstRate, as a manual
-                                              // figure the buyer can still change.
+                                              // Only the first time a type is picked for this
+                                              // row — its own GST starts as the charge type
+                                              // sets under Masters → Charges: its usual HSN /
+                                              // SAC code, a manual figure at its usual rate, or
+                                              // not applicable — and can still be changed here.
                                               ...(x.chargeTypeId
                                                 ? {}
                                                 : {
-                                                    gstMode: 'MANUAL' as ChargeGstMode,
+                                                    gstMode: mode,
+                                                    hsnCodeId: mode === 'HSN' ? (type?.defaultHsnCodeId ?? '') : '',
                                                     gstRate:
                                                       Number(type?.defaultGstRate) > 0
                                                         ? String(Number(type?.defaultGstRate))

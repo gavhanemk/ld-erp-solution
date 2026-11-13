@@ -266,6 +266,10 @@ interface ChargeTypeOption {
    * who agreed something else types over it. 0 means nobody has set one.
    */
   percentOfValue?: string | number | null
+  /** How a new row of this charge starts its GST, and the SAC it starts from when that is HSN. */
+  defaultGstMode?: ChargeGstMode
+  defaultHsnCodeId?: string | null
+  defaultHsnCode?: { code: string } | null
 }
 
 interface Option {
@@ -1296,16 +1300,20 @@ export function PurchaseOrderDialog({
   /**
    * Puts a charge on the order.
    *
-   * Its GST starts as a manual rate at the charge type's own usual GST —
-   * Masters → Charges' defaultGstRate, blank when nobody has set one there —
-   * so a buyer who agrees the usual charge gets its usual GST too, and can
-   * still switch to an HSN / SAC code or clear it to none.
+   * Its GST starts as the charge type sets under Masters → Charges: by its
+   * usual HSN / SAC code, a manual rate at its usual GST (defaultGstRate,
+   * blank when nobody has set one), or not applicable — and can still be
+   * changed on this one order. A type whose usual SAC has since gone
+   * inactive falls back to manual rather than silently picking nothing.
    */
   const addCharge = (id: string) => {
     const type = chargeTypes.find((x) => x.id === id)
     if (!type) return
+    const sacStillActive = type.defaultGstMode === 'HSN' && hsnCodes.some((h) => h.id === type.defaultHsnCodeId)
+    const mode: ChargeGstMode = type.defaultGstMode === 'HSN' && !sacStillActive ? 'MANUAL' : (type.defaultGstMode ?? 'MANUAL')
     setShownCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
-    setChargeGstMode((prev) => (prev[id] ? prev : { ...prev, [id]: 'MANUAL' }))
+    setChargeGstMode((prev) => (prev[id] ? prev : { ...prev, [id]: mode }))
+    setChargeHsnId((prev) => (prev[id] ? prev : { ...prev, [id]: mode === 'HSN' ? (type.defaultHsnCodeId ?? '') : '' }))
     setChargeGstRate((prev) =>
       prev[id] ? prev : { ...prev, [id]: Number(type.defaultGstRate) > 0 ? String(Number(type.defaultGstRate)) : '' }
     )

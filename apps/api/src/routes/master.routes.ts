@@ -2152,6 +2152,25 @@ router.use(
     searchFields: ['name'],
     sortableFields: ['name', 'defaultGstRate', 'percentOfValue'],
     defaultSort: { field: 'name', order: 'asc' },
+    include: { defaultHsnCode: { select: { code: true, description: true, gstRate: true } } },
+    beforeSave: async (data, before) => {
+      const mode = (data.defaultGstMode ?? before?.defaultGstMode) as string | undefined
+      const code = data.defaultHsnCodeId !== undefined ? data.defaultHsnCodeId : before?.defaultHsnCodeId
+      if (mode === 'HSN') {
+        if (!code) {
+          throw new AppError('Pick an HSN / SAC code for its usual GST, or choose a different way to set it.', 400, 'NO_DEFAULT_HSN')
+        }
+        const sac = await prisma.hsnCode.findUnique({ where: { id: code as string }, select: { isActive: true } })
+        if (!sac?.isActive) {
+          throw new AppError('That HSN / SAC code is no longer in the HSN master. Pick another.', 400, 'INVALID_DEFAULT_HSN')
+        }
+      }
+      // Only HSN keeps the code it starts from; MANUAL and NONE have nothing to remember here.
+      return { data: mode === 'HSN' ? data : { ...data, defaultHsnCodeId: null } }
+    },
+    // Each charge with its default SAC's own rate, so the form can show "SAC 9965 · 18%" without a second lookup.
+    afterRead: async (rows) =>
+      rows.map((r) => ({ ...r, defaultHsnRate: (r.defaultHsnCode as { gstRate?: unknown } | null)?.gstRate != null ? Number((r.defaultHsnCode as { gstRate: unknown }).gstRate) : null })),
   }),
 )
 

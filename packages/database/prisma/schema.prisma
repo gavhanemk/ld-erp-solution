@@ -598,6 +598,8 @@ model HsnCode {
 
   purchaseOrderCharges   PurchaseOrderCharge[]
   purchaseInvoiceCharges PurchaseInvoiceCharge[]
+  /// Charge types that start a purchase row on this code (ChargeType.defaultHsnCodeId).
+  chargeTypeDefaults     ChargeType[]
 
   @@index([isActive])
   @@map("hsn_codes")
@@ -5042,6 +5044,16 @@ model ChargeType {
   /// is billed with (CGST Act s.15(2)(c)), shared across their rates by
   /// value. Off: a supply of its own, at defaultGstRate.
   followsGoodsRate Boolean            @default(true)
+  /// How a purchase order or bill starts this charge's GST unless the row is
+  /// changed: an HSN / SAC code, a rate typed by hand, or not applicable —
+  /// see PurchaseOrderCharge.gstMode, which every row starts at. Every charge
+  /// type existing before 14 Nov 2026 starts MANUAL, the one every row
+  /// already defaulted to.
+  defaultGstMode   ChargeGstMode      @default(MANUAL)
+  /// The HSN / SAC code a purchase row starts with when defaultGstMode is
+  /// HSN — Transport Charges always being billed under SAC 9965, say.
+  defaultHsnCodeId String?
+  defaultHsnCode   HsnCode?           @relation(fields: [defaultHsnCodeId], references: [id])
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { CHARGE_TAX_TREATMENT_LABEL, type ChargeTaxTreatment } from '@ld-erp/shared'
+import { CHARGE_GST_MODE_LABEL, CHARGE_TAX_TREATMENT_LABEL, type ChargeGstMode, type ChargeTaxTreatment } from '@ld-erp/shared'
 import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 
@@ -29,6 +29,12 @@ interface ChargeType {
   isActive: boolean
   taxTreatment: ChargeTaxTreatment
   followsGoodsRate: boolean
+  /** How a purchase order or bill starts this charge's GST; each row can still change it. */
+  defaultGstMode: ChargeGstMode
+  defaultHsnCodeId: string | null
+  defaultHsnCode?: { code: string } | null
+  /** The chosen SAC's own rate, sent alongside so the column needs no second lookup. */
+  defaultHsnRate: number | null
 }
 
 const columns: Column<ChargeType>[] = [
@@ -81,6 +87,25 @@ const columns: Column<ChargeType>[] = [
           {CHARGE_TAX_TREATMENT_LABEL[c.taxTreatment] ?? c.taxTreatment}
           {c.taxTreatment !== 'NON_TAXABLE' && (
             <span className="text-muted-foreground"> · {c.followsGoodsRate ? "goods' rate" : `${Number(c.defaultGstRate)}%`}</span>
+          )}
+        </span>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
+  },
+  {
+    key: 'defaultGstMode',
+    header: 'GST on a purchase',
+    render: (c) =>
+      c.applyOnPurchase ? (
+        <span>
+          {CHARGE_GST_MODE_LABEL[c.defaultGstMode] ?? c.defaultGstMode}
+          {c.defaultGstMode === 'HSN' && (
+            <span className="text-muted-foreground">
+              {' '}
+              · {c.defaultHsnCode?.code ?? '—'}
+              {c.defaultHsnRate != null && ` · ${c.defaultHsnRate}%`}
+            </span>
           )}
         </span>
       ) : (
@@ -141,6 +166,29 @@ const formFields: FormField[] = [
     label: 'On purchases',
     type: 'checkbox',
     placeholder: 'Offer on supplier bills',
+  },
+  {
+    name: 'defaultGstMode',
+    label: 'GST on a purchase',
+    type: 'select',
+    required: true,
+    valueForNew: 'MANUAL',
+    showIf: (v) => Boolean(v.applyOnPurchase),
+    options: [
+      { value: 'HSN', label: 'By HSN / SAC code' },
+      { value: 'MANUAL', label: 'A % I set' },
+      { value: 'NONE', label: 'Not applicable' },
+    ],
+    help: 'How a purchase order or bill starts this charge — each row can still change it',
+  },
+  {
+    name: 'defaultHsnCodeId',
+    label: 'Usual SAC',
+    type: 'select',
+    showIf: (v) => Boolean(v.applyOnPurchase) && v.defaultGstMode === 'HSN',
+    optionsFrom: { resource: 'hsn-codes', labelKey: 'code' },
+    emptyLabel: 'No SAC',
+    help: 'From Masters → HSN / SAC Codes — 9965 for goods transport, say',
   },
   {
     name: 'isActive',
