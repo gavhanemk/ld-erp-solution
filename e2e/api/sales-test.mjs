@@ -6,9 +6,10 @@
 // (LD-TR-2602, HSN 6203) and the Bexley Stripe Shirt in Grey Stripe
 // (LD-SH-2604, HSN 6205: 5%, or 18% above ₹2,500 a piece). They are sold to
 // Orient Overseas Sourcing (Maharashtra, the company's own state: CGST + SGST)
-// and Metro Menswear Wholesale (Delhi: IGST). A test customer of its own,
-// ZZTEST Credit Watch Buyer, made once through the masters API, carries the
-// credit-limit and blacklist cases. Every money figure is worked out here the
+// and Metro Menswear Wholesale (Delhi: IGST). The chino is the one the browser
+// walk makes; the shirt, when the demo has none, is made once through the
+// masters API. A test customer of its own, ZZTEST Credit Watch Buyer, made
+// once through the masters API, carries the credit-limit and blacklist cases. Every money figure is worked out here the
 // way the business prices it and compared with what the API saved. SQL only
 // reads, but for one step that moves an invoice's dates back to stand in for
 // time passing; everything else is written through the API, as a user would.
@@ -45,11 +46,32 @@ const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0
 
 // ── Setup: the demo's masters, looked up by name ──
 const STORE = await one(`SELECT id, name FROM warehouses WHERE name = 'Store' AND "isActive"`, [], 'the store named "Store"')
-const garment = (code, style, colour) => one(
+// A garment is found by its style and colour, not its item code: codes come from a number series, so
+// in a fresh demo the same garment can carry another code (live's SHI-002 is now another shirt).
+const garment = (style, colour, why = '') => one(
   `SELECT i.id, i.code, i.name, i."hsnCode" hsn, s.code style, s."brandType" brand, s."sizeGroupId" grp,
-     (SELECT b."costPerPiece"::float8 FROM bom b WHERE b."styleId" = s.id AND b.status = 'APPROVED' AND lower(b.color) = lower($3) ORDER BY b."approvedAt" DESC NULLS LAST LIMIT 1) cost
-   FROM items i JOIN styles s ON s.id = i."styleId" WHERE i.code = $1 AND s.code = $2 AND i."isActive"`, [code, style, colour], `${code} (${style})`)
-const TRO = await garment('TRO-001', 'LD-TR-2602', 'Khaki'), SHI = await garment('SHI-002', 'LD-SH-2604', 'Grey Stripe')
+     (SELECT b."costPerPiece"::float8 FROM bom b WHERE b."styleId" = s.id AND b.status = 'APPROVED' AND lower(b.color) = lower($2) ORDER BY b."approvedAt" DESC NULLS LAST LIMIT 1) cost
+   FROM items i JOIN styles s ON s.id = i."styleId" WHERE s.code = $1 AND lower(i.color) = lower($2) AND i."isActive"
+   ORDER BY i."createdAt" LIMIT 1`, [style, colour], `${style} in ${colour}${why}`)
+// The shirt: live has no Bexley item now, so a demo without one gets it once, through the masters API —
+// the finished good (HSN 6205) and a BOM, priced at a 25% margin and approved.
+const SHIRT_STYLE = 'LD-SH-2604', SHIRT_COLOUR = 'Grey Stripe'
+if (!(await q(`SELECT 1 FROM items i JOIN styles s ON s.id = i."styleId" WHERE s.code = $1 AND lower(i.color) = lower($2) AND i."isActive"`, [SHIRT_STYLE, SHIRT_COLOUR])).length) {
+  const style = await one(`SELECT id FROM styles WHERE code = $1 AND "isActive"`, [SHIRT_STYLE], `the style ${SHIRT_STYLE}`)
+  const shirts = await one(`SELECT id FROM item_categories WHERE name = 'Shirts' AND "isActive"`, [], 'the Shirts category')
+  const piece = await one(`SELECT id FROM uom WHERE symbol = 'pcs' AND "isActive"`, [], 'the unit pcs')
+  must(await call('POST', '/masters/items', { name: `Bexley Stripe Shirt — ${SHIRT_COLOUR}`, type: 'FINISHED_GOOD', categoryId: shirts.id, uomId: piece.id, hsnCode: '6205', styleId: style.id, color: SHIRT_COLOUR }), 'the test shirt')
+  const lines = []
+  for (const [code, component, qty] of [['FAB-COT-004', 'Body', 1.6], ['LBL-MAIN-001', 'Main label', 1], ['BTN-PLY-001', 'Buttons', 8], ['PKG-POLY-001', 'Poly bag', 1]]) {
+    const part = await one(`SELECT id, "standardRate"::float8 rate FROM items WHERE code = $1 AND "isActive"`, [code], code)
+    lines.push({ componentItemId: part.id, component, qtyPerUnit: qty, unitCost: part.rate })
+  }
+  const bom = must(await call('POST', '/masters/bom', { styleId: style.id, color: SHIRT_COLOUR, lines, costLines: [{ kind: 'LABOUR', name: 'Stitching', value: 55 }, { kind: 'LABOUR', name: 'Cutting', value: 6 }] }), 'the test shirt BOM')
+  must(await call('PATCH', `/masters/bom/${bom.id}/price`, { marginPercent: 25 }), 'the test shirt BOM price')
+  must(await call('PATCH', `/masters/bom/${bom.id}/approve`, {}), 'the test shirt BOM approval')
+  console.log(`setup: made the test shirt Bexley Stripe Shirt — ${SHIRT_COLOUR} (${SHIRT_STYLE}), with an approved BOM`)
+}
+const TRO = await garment('LD-TR-2602', 'Khaki', ' (the browser walk makes it)'), SHI = await garment(SHIRT_STYLE, SHIRT_COLOUR)
 if ([TRO, SHI].some((g) => g.brand !== 'LD_COTTON_MILLS')) { console.log('setup failed: a test garment is not an LD Cotton Mills style'); process.exit(1) }
 // A plain LD shirt with no style and no size run: sold by the piece, valued at its standard rate.
 const FGS = await one(`SELECT id, code, name, "hsnCode" hsn, "standardRate"::float8 std FROM items WHERE code = 'FG-SHRT-001' AND type = 'FINISHED_GOOD' AND "styleId" IS NULL AND "isActive" AND name NOT ILIKE '%vhagar%'`, [], 'FG-SHRT-001')

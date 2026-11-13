@@ -6,7 +6,7 @@ await d.getByRole('heading', { name: 'Production' }).scrollIntoViewIfNeeded(); a
 await h.click('Set up stages', d); await h.sleep(1200)
 d = h.dlg()
 await h.beat(3500)
-await d.getByRole('button', { name: 'Save stages' }).first().click()
+await d.getByRole('button', { name: /^(Load these stages|Save settings)$/ }).first().click()
 await h.sleep(2500)
 d = h.dlg()
 const sec = d.locator('section').filter({ has: page.getByRole('heading', { name: 'Production' }) }).first()
