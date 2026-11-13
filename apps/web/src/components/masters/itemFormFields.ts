@@ -46,6 +46,18 @@ export const itemFormFields: FormField[] = [
     placeholder: 'Cotton Poplin 40s',
     section: 'Identity',
     span: 2,
+    // Warns against the other items filed under the same category (a
+    // sub-category wins over its main category, the same rule the save
+    // itself follows) and of the same type, so a raw material is never
+    // compared against a finished good of a similar name.
+    duplicateCheck: {
+      resource: 'items',
+      paramsFrom: (v) => {
+        const categoryId = (v.subCategoryId || v.mainCategoryId) as string | undefined
+        const type = v.type as string | undefined
+        return categoryId && type ? { categoryId, type } : null
+      },
+    },
   },
   {
     name: 'type',
