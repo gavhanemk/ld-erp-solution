@@ -407,6 +407,34 @@ export const CHARGE_TAX_TREATMENT_LABEL: Record<ChargeTaxTreatment, string> = {
   NON_TAXABLE: 'No GST',
 }
 
+/**
+ * Where a purchase charge's GST rate comes from.
+ *
+ * A purchase charge (freight, transport, dyeing) is always typed as a figure
+ * before GST, and its GST is always added on top — unlike a sales charge,
+ * which can be typed either way (see `ChargeTaxTreatment` above). What is
+ * chosen here is only where the rate itself comes from:
+ *
+ *   HSN     the rate carried by an HSN / SAC code picked for this charge.
+ *   MANUAL  a rate typed by hand — the mill knows the rate and is not
+ *           looking it up.
+ *   NONE    no GST on this charge at all.
+ *
+ * Every purchase charge saved before 13 Nov 2026 is NONE: between 6 and
+ * 13 Nov 2026 every purchase charge was taken as the supplier's GST-included
+ * figure with nothing added on top, which came to the same total as NONE at
+ * 0%, so nothing already saved changes.
+ */
+export type ChargeGstMode = 'HSN' | 'MANUAL' | 'NONE'
+
+export const CHARGE_GST_MODES: readonly ChargeGstMode[] = ['HSN', 'MANUAL', 'NONE']
+
+export const CHARGE_GST_MODE_LABEL: Record<ChargeGstMode, string> = {
+  HSN: 'By HSN / SAC code',
+  MANUAL: 'A % I set',
+  NONE: 'Not applicable',
+}
+
 const r2 = (n: number) => {
   const v = Math.round((Number.isFinite(n) ? n : 0) * 100) / 100
   return v === 0 ? 0 : v

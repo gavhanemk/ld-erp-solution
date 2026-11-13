@@ -596,6 +596,9 @@ model HsnCode {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
+  purchaseOrderCharges   PurchaseOrderCharge[]
+  purchaseInvoiceCharges PurchaseInvoiceCharge[]
+
   @@index([isActive])
   @@map("hsn_codes")
 }
@@ -5093,9 +5096,19 @@ model PurchaseOrderCharge {
   po           PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
   chargeTypeId String
   chargeType   ChargeType    @relation(fields: [chargeTypeId], references: [id])
+  /// The figure before GST. GST is always added on top of this — see
+  /// `gstMode` — never worked out as already inside it.
   amount       Decimal       @db.Decimal(12, 2)
-  /// Copied from the charge type when the order is raised. A rate corrected in
-  /// the master next week must not silently change an order already sent.
+  /// Where `gstRate` below comes from: an HSN/SAC code, typed by hand, or
+  /// none at all. See the type's own note. Every charge saved before
+  /// 13 Nov 2026 is NONE.
+  gstMode      ChargeGstMode @default(NONE)
+  /// The HSN/SAC code chosen when `gstMode` is HSN, kept so the code the GST
+  /// was taken from stays on the record even if the master's entry changes.
+  hsnCodeId    String?
+  hsnCode      HsnCode?      @relation(fields: [hsnCodeId], references: [id])
+  /// The rate actually applied: the chosen HSN code's rate, the rate typed by
+  /// hand, or 0 when `gstMode` is NONE.
   gstRate      Decimal       @default(0) @db.Decimal(5, 2)
   cgst         Decimal       @default(0) @db.Decimal(12, 2)
   sgst         Decimal       @default(0) @db.Decimal(12, 2)
@@ -5160,7 +5173,13 @@ model PurchaseInvoiceCharge {
   bill         PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Cascade)
   chargeTypeId String
   chargeType   ChargeType      @relation(fields: [chargeTypeId], references: [id])
+  /// The figure before GST. GST is always added on top — see `gstMode`.
   amount       Decimal         @db.Decimal(12, 2)
+  /// See `PurchaseOrderCharge.gstMode`. Every charge saved before
+  /// 13 Nov 2026 is NONE.
+  gstMode      ChargeGstMode   @default(NONE)
+  hsnCodeId    String?
+  hsnCode      HsnCode?        @relation(fields: [hsnCodeId], references: [id])
   gstRate      Decimal         @default(0) @db.Decimal(5, 2)
   cgst         Decimal         @default(0) @db.Decimal(12, 2)
   sgst         Decimal         @default(0) @db.Decimal(12, 2)
@@ -5426,6 +5445,14 @@ enum ChargeTaxTreatment {
   INCLUSIVE
   EXCLUSIVE
   NON_TAXABLE
+}
+
+/// Where a purchase charge's GST rate comes from. See
+/// `PurchaseOrderCharge.gstMode`.
+enum ChargeGstMode {
+  HSN
+  MANUAL
+  NONE
 }
 
 enum PurchaseGstTreatment {
