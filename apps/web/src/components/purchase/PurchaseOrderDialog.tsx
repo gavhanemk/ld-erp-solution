@@ -1214,7 +1214,22 @@ export function PurchaseOrderDialog({
    * a row below it. Two sets of controls for one line, and roughly 180px of
    * height spent saying the same thing twice. The row is the only place now.
    */
-  const topCategories = useMemo(() => categories.filter((c) => !c.parentId), [categories])
+  /*
+   * The expense heads — Expenses and what is filed under it: labour, job
+   * charges, repairs. They belong on a service order (which opens its rows on
+   * them) and on an expense bill, not on an order for goods, so a goods order
+   * does not offer them. A row an older order already has on one keeps it.
+   */
+  const expenseCategoryIds = useMemo(() => {
+    const heads = new Set(categories.filter((c) => !c.parentId && /expense/i.test(c.name)).map((c) => c.id))
+    for (const c of categories) if (c.parentId && heads.has(c.parentId)) heads.add(c.id)
+    return heads
+  }, [categories])
+  const offersExpenses = serviceMode || lines.some((l) => expenseCategoryIds.has(l.categoryId ?? ''))
+  const topCategories = useMemo(
+    () => categories.filter((c) => !c.parentId && (offersExpenses || !expenseCategoryIds.has(c.id))),
+    [categories, offersExpenses, expenseCategoryIds]
+  )
 
   /** The children of one category, for that row's second dropdown. */
   const subCategoriesOf = (categoryId?: string | null) =>
@@ -1228,6 +1243,8 @@ export function PurchaseOrderDialog({
   const itemsFor = (line: PoLine) => {
     const childIds = new Set(subCategoriesOf(line.categoryId).map((c) => c.id))
     const inCategory = items.filter((it) => {
+      // A goods order's rows do not list expense heads' items; one already on the row stays.
+      if (!serviceMode && it.id !== line.itemId && expenseCategoryIds.has(it.categoryId ?? '')) return false
       if (line.subcategoryId) return it.categoryId === line.subcategoryId
       if (line.categoryId) {
         return it.categoryId === line.categoryId || childIds.has(it.categoryId ?? '')
