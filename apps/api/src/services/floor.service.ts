@@ -392,6 +392,18 @@ export const receiveSchema = z.object({
       reason: reasonText,
     })
     .optional(),
+  /**
+   * Pieces that arrived damaged (13 Nov 2026): counted in with the rest, then
+   * put among the damaged at the receiving step in the same save, as Record
+   * work / damaged on the sheet does — waiting there for rework, B-grade or
+   * write-off. They are part of each bundle's count in `lines`.
+   */
+  damaged: z
+    .object({
+      lines: z.array(z.object({ bundleId: z.string().min(1), qty: pcs })).min(1),
+      reason: reasonText,
+    })
+    .optional(),
 })
 
 /**
@@ -1106,23 +1118,42 @@ export async function unpackForReceipt(tx: Tx, fgReceiptId: string, reason: stri
 // ─── Size changes (size jumps at stitching) ───────────────────
 
 /**
- * A count-in with the pieces made as another size there, in one go — the Count
- * in window at stitching. Counted in first, then the size change by the same
- * rules as Change sizes on the sheet; inside the caller's transaction, so a
- * size change that is refused takes the count back with it.
+ * A count-in with what was found on the desk, in one go — the Count in window.
+ * Counted in first; then the pieces that arrived damaged put among the damaged
+ * there (as Record work / damaged does); then, at stitching, the pieces made as
+ * another size, by the same rules as Change sizes on the sheet. Inside the
+ * caller's transaction, so anything refused takes the count back with it.
  */
 export async function receiveWithSizes(tx: Tx, transferId: string, d: z.infer<typeof receiveSchema>, userId: string) {
   const r = await receive(tx, transferId, d, userId)
-  const lines = d.sizeChanges?.lines.filter((l) => l.qty > 0) ?? []
-  if (r.duplicate || !lines.length) return { ...r, sizes: null }
+  if (r.duplicate) return { ...r, sizes: null, damaged: 0 }
   const t = await tx.processTransfer.findUniqueOrThrow({ where: { id: transferId }, select: { moId: true, toStepId: true } })
+  const hurt = d.damaged?.lines.filter((l) => l.qty > 0) ?? []
+  if (hurt.length) {
+    await recordWork(
+      tx,
+      t.moId,
+      t.toStepId,
+      workSchema.parse({
+        lines: hurt.map((l) => ({ bundleId: l.bundleId, damaged: l.qty })),
+        reason: d.damaged!.reason,
+        personName: d.receivedBy ?? null,
+        eventDate: d.receivedAt,
+        notes: d.notes ?? null,
+      }),
+      userId,
+    )
+  }
+  const damaged = hurt.reduce((s, l) => s + l.qty, 0)
+  const lines = d.sizeChanges?.lines.filter((l) => l.qty > 0) ?? []
+  if (!lines.length) return { ...r, sizes: null, damaged }
   const sizes = await changeSizes(
     tx,
     t.moId,
     sizeChangeSchema.parse({ stepId: t.toStepId, lines, reason: d.sizeChanges!.reason, personName: d.receivedBy ?? null, eventDate: d.receivedAt, notes: d.notes ?? null }),
     userId,
   )
-  return { ...r, sizes }
+  return { ...r, sizes, damaged }
 }
 
 export const sizeChangeSchema = z.object({

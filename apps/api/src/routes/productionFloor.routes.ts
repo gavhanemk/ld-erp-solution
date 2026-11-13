@@ -486,6 +486,8 @@ router.post('/transfers/:id/receive', requirePermission(MODULE, 'create'), async
     message: out.duplicate
       ? 'That count was already saved.'
       : `${t.transferNumber}: ${pcs(got)} counted in at ${t.toStep.name}.${excess ? ` ${pcs(excess)} more than was sent — taken off ${t.fromStep.name}.` : ''}${short ? ` ${pcs(short)} short, to be settled.` : t.status === 'PARTLY_RECEIVED' ? ' The rest is still on its way.' : ''}${
+          out.damaged ? ` ${pcs(out.damaged)} arrived damaged: decide on the ${t.toStep.name} sheet — rework, B-grade or write off.` : ''
+        }${
           out.sizes?.moves?.length ? ` Sizes changed: ${sizeMoves(out.sizes.moves)}, in their own bundles.${wholeNote(out.sizes.whole)}` : ''
         }`,
     data: t,

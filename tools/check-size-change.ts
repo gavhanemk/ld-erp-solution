@@ -445,6 +445,8 @@ async function main() {
           receiveSchema.parse({
             lines: blueLines.map((l) => ({ lineId: l.id, qty: l.dispatchedQty })),
             sizeChanges: { lines: [{ bundleId: B1.id, toSizeId: S2.id, qty: 4 }], reason: 'Counted in: 4 made as size 2' },
+            // 2 of B2 arrived damaged: counted in and put among the damaged in the same save.
+            damaged: { lines: [{ bundleId: B2.id, qty: 2 }], reason: 'Arrived torn' },
           }),
           user.id,
         )
@@ -453,6 +455,15 @@ async function main() {
           '5. counted in with a size change: B1 holds its 10, 6 of size 1 and 4 of size 2; no bundle made',
           !!r5.sizes && (await held(STI, B1.id)) === 10 && b1(S1) === 6 && b1(S2) === 4 && (await bundleCount()) === count0,
           `${b1(S1)} + ${b1(S2)}`,
+        )
+
+        const b2 = await tx.wipEntry.groupBy({ by: ['bucket'], where: { bundleId: B2.id, stepId: STI }, _sum: { qty: true } })
+        const b2In = (bucket: string) => b2.find((r) => r.bucket === bucket)?._sum.qty ?? 0
+        const hurt = await tx.wipEvent.findFirst({ where: { moId: mo.id, type: 'PROCESS', stepId: STI, reason: 'Arrived torn' }, include: { entries: true } })
+        check(
+          '5. arrived damaged: B2 counted in whole (10), 8 in hand and 2 among the damaged at stitching, with the reason; waits for a decision',
+          r5.damaged === 2 && b2In('WIP') === 8 && b2In('DAMAGED') === 2 && !!hurt && hurt.entries.some((e) => e.bundleId === B2.id && e.bucket === 'DAMAGED' && e.qty === 2),
+          `in hand ${b2In('WIP')}, damaged ${b2In('DAMAGED')}`,
         )
 
         // ═══ 6. A bundle holding two sizes goes on: each size goes with it, exactly ═══
