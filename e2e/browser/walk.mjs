@@ -159,7 +159,7 @@ const plan = [
   ['17-stage-open.js', { tab: 'Fusing', caption: 'Step 15 · Fusing counts the bundles in, as sent' }],
   ['21-countin.js', { receivedBy: 'Meena (fusing)' }],
   ['22-work.js', { caption: 'Step 15 · Fusing — record the work: all 60 fused', doneBy: 'Meena (fusing)' }],
-  ['20-send.js', { dest: 'Stitching', unit: cfg.unit, due: new Date(Date.now() + 7 * 86400000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }), issuedBy: 'Meena (fusing)', caption: `Step 16 · Job work — the 60 fused pieces go out to ${cfg.unit} on a job-work challan, ₹45 a piece` }],
+  ['20-send.js', { dest: 'Stitching', unit: cfg.unit, rate: 45, due: new Date(Date.now() + 7 * 86400000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }), issuedBy: 'Meena (fusing)', caption: `Step 16 · Job work — the 60 fused pieces go out to ${cfg.unit} on a job-work challan, ₹45 a piece` }],
   ['17-stage-open.js', { tab: 'Stitching', caption: null }],
   ['23-vendor-back.js'],
   ['20-send.js', { dest: 'Kaj Button', unit: null, issuedBy: 'Suresh (stitching)', caption: 'Step 18 · Process transfer — the stitched pieces go to Kaj Button for buttonholes and buttons' }],

@@ -1,14 +1,15 @@
-// BOM, step 2: labour and overheads. Row labels follow the name typed ("Stitching amount").
+// BOM, step 2: labour and overheads. Each labour row's work is picked from Routing Masters, and
+// the row's labels follow it ("Stitching amount").
 const d = h.dlg()
 await h.say('Step 2 · BOM costing — labour and overheads for one piece')
 const labour = [['Stitching', '45'], ['Cutting', '6']]
 for (let i = 0; i < labour.length; i++) {
   const [name, amt] = labour[i]
-  if ((await d.locator('[aria-label="Labour name"]').count()) <= i) {
+  if ((await d.locator('[aria-label="Labour work"]').count()) <= i) {
     if (i === 0) await h.click('Add labour', d)
     else { await d.locator('[title="Add a labour row below this one"]').nth(i - 1).click(); await h.beat(400) }
   }
-  await h.type(d.locator('[aria-label="Labour name"]').nth(i), name)
+  await h.pick(d.locator('[aria-label="Labour work"]').nth(i), name, name)
   await h.pick(d.locator(`[aria-label="Department for ${name}"]`), name, name)
   await h.type(d.locator(`[aria-label="${name} amount"]`), amt)
 }

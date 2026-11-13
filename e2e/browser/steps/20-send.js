@@ -1,8 +1,8 @@
-// From the open stage sheet: "Transfer on" → pick where they go → send every bundle.
-// S.dest = destination step name; S.unit = outside unit (optional); S.caption.
+// From the open stage sheet: "Send to <next stage>" → pick where they go → send every bundle.
+// S.dest = destination step name; S.unit = outside unit (optional); S.rate; S.caption.
 if (S.caption) await h.say(S.caption)
 let d = h.dlg()
-if (!/Process transfer from/.test(await d.innerText())) { await h.click('Transfer on', d); await h.sleep(1200); d = h.dlg() }
+if (!/Process transfer from/.test(await d.innerText())) { await d.getByRole('button', { name: /^Send to / }).first().click(); await h.sleep(1200); d = h.dlg() }
 const card = d.getByRole('button').filter({ hasText: new RegExp('^' + S.dest) }).first()
 if (await card.count()) { await card.click(); await h.beat(800) }
 if (S.unit) {

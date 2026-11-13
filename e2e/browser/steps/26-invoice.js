@@ -1,6 +1,6 @@
 // Sales → the tax invoice, opened from the challan already filled in: save it.
 const d = h.dlg()
-await h.say(`Step 23 · Tax invoice — filled in from the challan: HSN ${S.cfg.hsn}, 60 × ₹${S.price}, GST added; due in 30 days`)
+await h.say(`Step 23 · Tax invoice — filled in from the challan: HSN ${S.cfg.hsn}, 60 × ₹${S.price}, GST added; due on the customer's credit terms`)
 await h.beat(3500)
 const popup = ctx.waitForEvent('page', { timeout: 6000 }).catch(() => null)
 await d.getByRole('button', { name: 'Save invoice' }).first().click()

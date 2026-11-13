@@ -115,6 +115,9 @@ export function CountInDialog({
   const [madeAs, setMadeAs] = useState<Record<string, { toSizeId: string; qty: string }>>({})
   const [reason, setReason] = useState('')
   const reasonRef = useRef<HTMLInputElement>(null)
+  // What was wrong with the pieces that arrived damaged (13 Nov 2026): asked once any are entered.
+  const [hurtWhy, setHurtWhy] = useState('')
+  const hurtRef = useRef<HTMLInputElement>(null)
   // Several bundles at once: those ticked, the last one clicked (for Shift+click), and what the bar sets.
   const [ticked, setTicked] = useState<string[]>([])
   const [lastTick, setLastTick] = useState<string | null>(null)
@@ -128,10 +131,12 @@ export function CountInDialog({
   const [tried, setTried] = useState(false)
   const offerSizes = !!sizes && sizes.length > 1 && !transfer.vendor
 
-  // A bundle's count: its box (Same size, with sizes on) and the pieces made as another size.
+  // A bundle's count: its good pieces (Same size, with sizes on), the pieces made as another size, and
+  // those that arrived damaged — all counted in.
   const sameOf = (lineId: string) => Number(values[lineId]?.qty) || 0
   const madeOf = (lineId: string) => (sizing && madeAs[lineId]?.toSizeId ? Number(madeAs[lineId].qty) || 0 : 0)
-  const countOf = (lineId: string) => sameOf(lineId) + madeOf(lineId)
+  const damagedOf = (lineId: string) => Number(values[lineId]?.damaged) || 0
+  const countOf = (lineId: string) => sameOf(lineId) + madeOf(lineId) + damagedOf(lineId)
   const counted = rows.map((r) => ({ lineId: r.id, qty: countOf(r.id) }))
   const total = counted.reduce((s, l) => s + l.qty, 0)
   const pending = rows.reduce((s, r) => s + r.available, 0)
@@ -162,7 +167,9 @@ export function CountInDialog({
     : reasonMissing
       ? 'Say why the pieces are made as another size.'
       : null
-  const blocker = !total && !close ? 'Enter what was counted in, or close it as short.' : sizeBlocker
+  const damagedTotal = rows.reduce((s, r) => s + damagedOf(r.id), 0)
+  const hurtMissing = damagedTotal > 0 && hurtWhy.trim().length < 3
+  const blocker = !total && !close ? 'Enter what was counted in, or close it as short.' : (sizeBlocker ?? (hurtMissing ? 'Say what was wrong with the damaged pieces.' : null))
 
   // The card's sizes as cut and as made, beside the order's plan — followed as changes are made.
   const sizeTable = (sizes ?? [])
@@ -194,7 +201,7 @@ export function CountInDialog({
   const undoMove = (m: (typeof moves)[number]) => {
     setValues((x) => {
       const next = { ...x }
-      for (const c of m.items) next[c.row.id] = { ...next[c.row.id], qty: String(countOf(c.row.id)) }
+      for (const c of m.items) next[c.row.id] = { ...next[c.row.id], qty: String(sameOf(c.row.id) + madeOf(c.row.id)) }
       return next
     })
     setMadeAs((x) => {
@@ -230,7 +237,7 @@ export function CountInDialog({
       return toPieces(r.id)
     }
     // The bundle's pieces not counted as the same size, if any; otherwise how many is typed, and taken from Same size.
-    const rest = Math.max(0, r.available - sameOf(r.id))
+    const rest = Math.max(0, r.available - sameOf(r.id) - damagedOf(r.id))
     setMadeAs((x) => ({ ...x, [r.id]: { toSizeId, qty: rest ? String(rest) : '' } }))
     toPieces(r.id)
   }
@@ -282,7 +289,7 @@ export function CountInDialog({
   const tickedSizes = [...new Set(tickedRows.map((r) => r.size))]
   const tickedPcs = tickedRows.reduce((s, r) => s + r.available, 0)
   /** Pieces of a bundle not kept in Same size — what the user meant as the other size by lowering it. */
-  const restOf = (r: BundleRow) => Math.max(0, r.available - sameOf(r.id))
+  const restOf = (r: BundleRow) => Math.max(0, r.available - sameOf(r.id) - damagedOf(r.id))
 
   /**
    * What the bar would do with what it holds now — said in a sentence before Apply, and what Apply
@@ -298,7 +305,7 @@ export function CountInDialog({
     const asked = Number(bulkQty) || 0
     const to = sizeCode(bulkTo)
     const fit = tickedRows.filter((r) => r.size !== to)
-    const caps = fit.map((r) => r.available)
+    const caps = fit.map((r) => Math.max(0, r.available - damagedOf(r.id)))
     const rests = fit.map(restOf)
     const rest = bulkHow === 'each' && asked <= 0
     if (rest && !rests.some((x) => x > 0)) return { kind: 'error', text: 'Enter how many pieces from every bundle.' }
@@ -358,7 +365,7 @@ export function CountInDialog({
     const nextMade = { ...madeAs }
     if (p.kind === 'undo') {
       for (const r of p.rows) {
-        nextValues[r.id] = { ...nextValues[r.id], qty: String(countOf(r.id)) }
+        nextValues[r.id] = { ...nextValues[r.id], qty: String(sameOf(r.id) + madeOf(r.id)) }
         delete nextMade[r.id]
       }
       // An undo is a one-off: the bar goes back to asking for a size, not to undoing the next run too.
@@ -392,6 +399,9 @@ export function CountInDialog({
       } else if (sizeBlocker) {
         reasonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
         reasonRef.current?.focus({ preventScroll: true })
+      } else if (hurtMissing) {
+        hurtRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        hurtRef.current?.focus({ preventScroll: true })
       }
       return
     }
@@ -411,6 +421,15 @@ export function CountInDialog({
               sizeChanges: {
                 lines: changes.map((c) => ({ bundleId: lineOf.get(c.row.id)!.bundle.id, toSizeId: c.toSizeId, qty: c.qty })),
                 reason: reason.trim(),
+              },
+            }
+          : {}),
+        // Counted in, then put among the damaged here, waiting for rework, B-grade or write-off.
+        ...(damagedTotal > 0
+          ? {
+              damaged: {
+                lines: rows.filter((r) => damagedOf(r.id) > 0).map((r) => ({ bundleId: lineOf.get(r.id)!.bundle.id, qty: damagedOf(r.id) })),
+                reason: hurtWhy.trim(),
               },
             }
           : {}),
@@ -525,6 +544,12 @@ export function CountInDialog({
         ) : (
           <>
             {countNote}
+            {damagedTotal > 0 && (
+              <span className="warn-text">
+                {' '}
+                {pcs(damagedTotal)} damaged — to decide at {transfer.toStep.name}.
+              </span>
+            )}
             {moving > 0 && (
               <span className="text-primary">
                 {' '}
@@ -817,9 +842,20 @@ export function CountInDialog({
 
         <BundleQtyTable
           rows={rows}
-          columns={[{ key: 'qty', label: sizing ? 'Same size' : 'Counted' }]}
+          columns={[
+            { key: 'qty', label: sizing ? 'Same size' : 'Good' },
+            { key: 'damaged', label: 'Damaged', bad: true },
+          ]}
           values={values}
-          onChange={(row, col, v) => setValues((x) => ({ ...x, [row]: { ...x[row], [col]: v } }))}
+          onChange={(row, col, v) =>
+            setValues((x) => {
+              const cur = x[row] ?? {}
+              if (col !== 'damaged') return { ...x, [row]: { ...cur, [col]: v } }
+              // Damaged pieces come out of the good ones: the bundle's count stays as it arrived.
+              const moved = (Number(v) || 0) - (Number(cur.damaged) || 0)
+              return { ...x, [row]: { ...cur, damaged: v, qty: String(Math.max(0, (Number(cur.qty) || 0) - moved)) } }
+            })
+          }
           availableLabel="Sent, not counted"
           fill={{ label: 'As sent', column: 'qty' }}
           allowOver
@@ -827,17 +863,37 @@ export function CountInDialog({
           extraColumns={sizeColumns}
           // With sizes on, a bundle's pieces made as another size are part of its count.
           held={sizing ? madeOf : undefined}
-          onFill={sizing ? () => setValues(Object.fromEntries(rows.map((r) => [r.id, { qty: String(Math.max(0, r.available - madeOf(r.id))) }]))) : undefined}
-          onClear={
-            sizing
-              ? () => {
-                  setValues(Object.fromEntries(rows.map((r) => [r.id, { qty: '' }])))
-                  setMadeAs((x) => Object.fromEntries(Object.entries(x).map(([id, m]) => [id, { ...m, qty: '' }])))
-                }
-              : undefined
-          }
+          // As sent: every piece good (less any made as another size); Clear: nothing counted yet.
+          onFill={() => setValues(Object.fromEntries(rows.map((r) => [r.id, { qty: String(Math.max(0, r.available - madeOf(r.id))), damaged: '' }])))}
+          onClear={() => {
+            setValues(Object.fromEntries(rows.map((r) => [r.id, { qty: '', damaged: '' }])))
+            if (sizing) setMadeAs((x) => Object.fromEntries(Object.entries(x).map(([id, m]) => [id, { ...m, qty: '' }])))
+          }}
           select={sizing ? { on: (id) => ticked.includes(id), can: mayChange, onTick: tick, onAll: tickAll } : undefined}
         />
+        {damagedTotal > 0 && (
+          <label className="mt-3 block sm:max-w-lg">
+            <span className="form-label">
+              What was wrong with the {pcs(damagedTotal)} damaged? <span className="text-destructive">*</span>
+            </span>
+            <input
+              ref={hurtRef}
+              className={`form-input ${tried && hurtMissing ? 'border-destructive' : ''}`}
+              value={hurtWhy}
+              maxLength={500}
+              placeholder="e.g. Arrived torn; stained in transit"
+              onChange={(e) => setHurtWhy(e.target.value)}
+              aria-invalid={tried && hurtMissing}
+            />
+            {tried && hurtMissing ? (
+              <span className="text-destructive mt-1 block text-[11px] font-medium">Say what was wrong, in a few words.</span>
+            ) : (
+              <span className="text-muted-foreground mt-1 block text-[11px]">
+                They are counted in and put among the damaged at {transfer.toStep.name}: decide there — rework, B-grade or write off.
+              </span>
+            )}
+          </label>
+        )}
       </Section>
     </FormFrame>
   )
