@@ -1,3 +1,4 @@
+import { chargeEntryFields } from '../services/chargeConfiguration'
 import { z } from 'zod'
 import { paymentModes } from './payment.schemas'
 
@@ -82,9 +83,10 @@ export const billLineSchema = z.object({
  * the rate actually applied.
  */
 export const billChargeSchema = z.object({
+  ...chargeEntryFields,
   chargeTypeId: id('a charge'),
   amount: money,
-  gstMode: z.enum(['HSN', 'MANUAL', 'NONE']).optional(),
+  gstMode: z.enum(['HSN', 'MANUAL', 'NONE', 'INHERIT']).optional(),
   /** The HSN/SAC code chosen when `gstMode` is HSN, kept on the row. */
   hsnCodeId: z.string().optional().nullable(),
   gstRate: percent('GST rate').optional(),

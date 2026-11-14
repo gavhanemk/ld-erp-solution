@@ -1,3 +1,4 @@
+import type { ChargeResolveOptions } from '../services/chargeConfiguration'
 import { Router } from 'express'
 import type { Prisma, SalesOrderStatus } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
@@ -684,7 +685,7 @@ export async function prepareOrder(
   tx: Prisma.TransactionClient,
   data: OrderInput,
   /** A quotation is priced by the piece; an order is split into sizes. */
-  opts: { piecesOnly?: boolean } = {},
+  opts: ChargeResolveOptions & { piecesOnly?: boolean } = {},
 ) {
   const customer = await tx.customer.findUnique({ where: { id: data.customerId }, select: { name: true, isActive: true } })
   if (!customer) throw new AppError('That customer does not exist', 400, 'BAD_CUSTOMER')
@@ -789,7 +790,9 @@ export async function prepareOrder(
   // the lines by value (LD prices at invoice level, so taxing before it would
   // overstate the GST); each line's GST at its rate; each charge as its row
   // says (GST included, added on top, or none); the other charges; rounded.
-  const resolvedCharges = await resolveSaleCharges(tx, data.charges)
+  const quoteCharges = !opts.saved && data.quotationId
+    ? await tx.salesQuotationCharge.findMany({ where: { quoteId: data.quotationId }, include: { chargeType: { select: { name: true } } } }) : undefined
+  const resolvedCharges = await resolveSaleCharges(tx, data.charges, { ...opts, saved: opts.saved ?? quoteCharges })
   const priced = priceSale({
     lines: data.lines.map((l) => ({ qty: l.totalQty, price: l.unitPrice, discountPct: l.discount ?? 0, ...rateOf(l) })),
     orderDiscount: data.discountAmount ?? 0,
@@ -903,7 +906,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
 
   const { order, confirmed } = await prisma.$transaction(async (tx) => {
     // Checked and priced first, so a refused order never takes a number.
-    const { header, lines, charges } = await prepareOrder(tx, data)
+    const { header, lines, charges } = await prepareOrder(tx, data, { canOverride: userCan(req.user, 'masters', 'edit') })
     if (data.quotationId) await winQuote(tx, data.quotationId, data.customerId)
     const soNumber = await nextDocumentNumber(tx, 'SO', data.orderDate ?? new Date())
 
@@ -967,7 +970,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
 
     // A form that leaves it out keeps how the order bills our own material.
     data.ownMaterialBilling = data.ownMaterialBilling ?? (before.ownMaterialBilling as 'IN_JOB_CHARGE' | 'BILLED')
-    const { header, lines, charges } = await prepareOrder(tx, data)
+    const { header, lines, charges } = await prepareOrder(tx, data, { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
 
     // The lines are replaced whole. A draft has nothing pointing at its lines
     // yet — no production, no challan — so nothing is cut loose.
@@ -1220,7 +1223,7 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       }
     }
 
-    const { header, lines, charges } = await prepareOrder(tx, data)
+    const { header, lines, charges } = await prepareOrder(tx, data, { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
 
     // A change that raises the order's value meets the credit limit, as confirming it did.
     const release = await creditForAmendment(

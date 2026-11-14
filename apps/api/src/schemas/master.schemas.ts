@@ -957,25 +957,30 @@ export const createChargeTypeSchema = z.object({
    * no GST at all (outside the taxable value). Inclusive and no-GST both leave
    * the figure as typed, but only an inclusive charge carries GST to report.
    */
-  taxTreatment: z.enum(['INCLUSIVE', 'EXCLUSIVE', 'NON_TAXABLE']).default('INCLUSIVE'),
+  taxTreatment: z.enum(['INCLUSIVE', 'EXCLUSIVE', 'NON_TAXABLE']).default('EXCLUSIVE'),
   /*
    * On a sale, taxed at the goods' rate: billed with the goods it is part of
    * what they are sold for (CGST Act s.15(2)(c)). Off: a supply of its own,
    * at the GST rate above.
    */
-  followsGoodsRate: z.boolean().default(true),
+  followsGoodsRate: z.boolean().default(false),
   /*
    * How a purchase order or bill starts this charge's GST, unless the row is
    * changed there: an HSN / SAC code, a rate typed by hand, or not
    * applicable — see PurchaseOrderCharge.gstMode, which every row starts at.
    */
-  defaultGstMode: z.enum(['HSN', 'MANUAL', 'NONE']).default('MANUAL'),
+  defaultGstMode: z.enum(['HSN', 'MANUAL', 'NONE', 'INHERIT']).default('MANUAL'),
   /*
    * The HSN / SAC code a purchase row starts with when defaultGstMode is HSN.
    * Checked against the master in the route's beforeSave, where the two
    * fields can be read together even on an edit that sends only one of them.
    */
   defaultHsnCodeId: z.string().min(1).optional().nullable(),
+  salesHsnCodeId: z.string().min(1).optional().nullable(),
+  purchaseTaxTreatment: z.enum(['INCLUSIVE', 'EXCLUSIVE']).default('EXCLUSIVE'),
+  salesTaxCategory: z.enum(['TAXABLE', 'EXEMPT', 'NIL_RATED', 'NON_GST', 'UNSPECIFIED']).default('TAXABLE'),
+  purchaseTaxCategory: z.enum(['TAXABLE', 'EXEMPT', 'NIL_RATED', 'NON_GST', 'UNSPECIFIED']).default('TAXABLE'),
+  taxReviewRequired: z.boolean().default(false),
   applyOnSale: z.boolean().default(true),
   applyOnPurchase: z.boolean().default(false),
   isActive,

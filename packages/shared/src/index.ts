@@ -131,7 +131,32 @@ export interface PriceLineInput {
   gstRate: number
 }
 
+/** Classification is independent of whether the entered price includes GST. */
+export type ChargeTaxCategory = 'TAXABLE' | 'EXEMPT' | 'NIL_RATED' | 'NON_GST' | 'UNSPECIFIED'
+export type ChargeAmountMode = 'FIXED' | 'PERCENT'
+export interface ChargeTaxSnapshot {
+  version: 1
+  name: string
+  treatment: ChargeTaxTreatment
+  followsGoodsRate: boolean
+  ownRate: number
+  hsnCodeId: string | null
+  hsnCode: string | null
+  taxCategory: ChargeTaxCategory
+  amountMode: ChargeAmountMode
+  inputAmount: number
+  basis: 'GOODS_AFTER_DISCOUNT'
+  overrideReason?: string
+  parts?: SaleChargePart[]
+}
+/** Read only a version we understand; old records are deliberately not inferred. */
+export function chargeSnapshot(value: unknown): ChargeTaxSnapshot | null {
+  if (!value || typeof value !== 'object' || !('version' in value) || value.version !== 1) return null
+  return value as ChargeTaxSnapshot
+}
+
 export interface PriceChargeInput {
+  config?: ChargeTaxSnapshot
   /** The charge type id, or any key the caller wants back. */
   key: string
   amount: number
@@ -180,6 +205,10 @@ export interface PricedLine extends PricedTax {
 }
 
 export interface PricedCharge extends PricedTax {
+  enteredAmount: number
+  payable: number
+  parts: SaleChargePart[]
+  taxSnapshot?: ChargeTaxSnapshot
   key: string
   amount: number
 }
@@ -254,23 +283,25 @@ export function priceDocument(input: PriceInput): PriceResult {
   const value = gross.map((g, i) => g - ownDiscount[i])
   const valueTotal = value.reduce((s, v) => s + v, 0)
 
-  // The order-level discount is spread over the lines by value, and any paisa
-  // left over by rounding goes on the biggest line, so the shares add up to
-  // exactly the discount taken.
+  // Allocate the discount by value using whole paise and largest remainders.
   const orderDiscount = Math.min(Math.max(0, toPaise(input.orderDiscount ?? 0)), valueTotal)
-  const share = value.map((v) => (valueTotal > 0 ? Math.round((orderDiscount * v) / valueTotal) : 0))
-  const shared = share.reduce((s, v) => s + v, 0)
-  if (shared !== orderDiscount && value.length) {
-    const biggest = value.indexOf(Math.max(...value))
-    share[biggest] += orderDiscount - shared
-  }
+  const share = allocatePaise(orderDiscount, value)
 
   const lineTax = value.map((v, i) => taxOn(v - share[i], Number(input.lines[i].gstRate) || 0, split))
 
   // ── Charges ──────────────────────────────────────────────────────────────
   const charges = (input.charges ?? []).map((c) => {
-    const amount = Math.max(0, toPaise(c.amount))
-    return { key: c.key, amount, ...taxOn(amount, Number(c.gstRate) || 0, split) }
+    const config = c.config
+    const p = priceSaleCharge({ key: c.key, amount: c.amount,
+      treatment: split === 'NONE' ? 'NON_TAXABLE' : config?.treatment ?? 'EXCLUSIVE',
+      followsGoodsRate: config?.followsGoodsRate ?? false, ownRate: config?.ownRate ?? c.gstRate,
+      amountMode: config?.amountMode, taxCategory: config?.taxCategory,
+    }, value.map((v, i) => ({ taxable: toRupees(v - share[i]), gstRate: input.lines[i].gstRate })), split === 'CGST_SGST')
+    return { key: c.key, amount: toPaise(p.net), gstRate: p.gstRate,
+      cgst: toPaise(p.cgst), sgst: toPaise(p.sgst), igst: toPaise(p.igst), tax: toPaise(p.tax),
+      enteredAmount: p.amount, payable: p.payable, parts: p.parts,
+      taxSnapshot: config ? { ...config, inputAmount: c.amount, parts: p.parts } : undefined }
+
   })
 
   // ── Tax by rate ──────────────────────────────────────────────────────────
@@ -289,13 +320,12 @@ export function priceDocument(input: PriceInput): PriceResult {
     b.tax += t.tax
   })
   charges.forEach((c) => {
-    if (c.amount === 0) return
-    const b = bucket(c.gstRate)
-    b.charges += c.amount
-    b.cgst += c.cgst
-    b.sgst += c.sgst
-    b.igst += c.igst
-    b.tax += c.tax
+    const parts = c.parts.length ? c.parts : [{ gstRate: 0, net: toRupees(c.amount), cgst: 0, sgst: 0, igst: 0, tax: 0 }]
+    for (const p of parts) {
+      const b = bucket(p.gstRate)
+      b.charges += toPaise(p.net)
+      b.cgst += toPaise(p.cgst); b.sgst += toPaise(p.sgst); b.igst += toPaise(p.igst); b.tax += toPaise(p.tax)
+    }
   })
 
   // ── Totals ───────────────────────────────────────────────────────────────
@@ -326,6 +356,7 @@ export function priceDocument(input: PriceInput): PriceResult {
       amount: toRupees(value[i] - share[i] + lineTax[i].tax),
     })),
     charges: charges.map((c) => ({
+      enteredAmount: c.enteredAmount, payable: c.payable, parts: c.parts, taxSnapshot: c.taxSnapshot,
       key: c.key,
       amount: toRupees(c.amount),
       gstRate: c.gstRate,
@@ -425,11 +456,12 @@ export const CHARGE_TAX_TREATMENT_LABEL: Record<ChargeTaxTreatment, string> = {
  * figure with nothing added on top, which came to the same total as NONE at
  * 0%, so nothing already saved changes.
  */
-export type ChargeGstMode = 'HSN' | 'MANUAL' | 'NONE'
+export type ChargeGstMode = 'HSN' | 'MANUAL' | 'NONE' | 'INHERIT'
 
-export const CHARGE_GST_MODES: readonly ChargeGstMode[] = ['HSN', 'MANUAL', 'NONE']
+export const CHARGE_GST_MODES: readonly ChargeGstMode[] = ['HSN', 'MANUAL', 'NONE', 'INHERIT']
 
 export const CHARGE_GST_MODE_LABEL: Record<ChargeGstMode, string> = {
+  INHERIT: 'Inherit from goods',
   HSN: 'By HSN / SAC code',
   MANUAL: 'A % I set',
   NONE: 'Not applicable',
@@ -446,25 +478,34 @@ export interface SaleGoods {
   gstRate: number
 }
 
-/**
- * A charge shared across the goods' rates by their taxable value, the biggest
- * share taking any rounding paisa. With no goods to follow, the whole of it at
- * the fallback rate.
+/** Largest remainders conserve paise without making small shares negative. */
+export function allocatePaise(total: number, weights: number[]): number[] {
+  const sum = weights.reduce((n, weight) => n + Math.max(0, weight), 0)
+  if (!(sum > 0)) return weights.map(() => 0)
+  const raw = weights.map(weight => total * Math.max(0, weight) / sum)
+  const shares = raw.map(Math.floor)
+  let remainder = total - shares.reduce((n, share) => n + share, 0)
+  const order = raw.map((v, i) => ({ i, fraction: v - shares[i] })).sort((a, b) => b.fraction - a.fraction || a.i - b.i)
+  for (const { i } of order) { if (remainder-- <= 0) break; shares[i]++ }
+  return shares
+}
+
+/** Share the charge across goods rates by taxable value, conserving paise.
+ * Legacy callers without goods retain the configured fallback rate.
  */
 export function shareSaleCharge(amount: number, goods: SaleGoods[], fallbackRate: number): Array<{ amount: number; gstRate: number }> {
   const byRate = new Map<number, number>()
   for (const g of goods) if (g.taxable > 0) byRate.set(g.gstRate, (byRate.get(g.gstRate) ?? 0) + g.taxable)
   const total = [...byRate.values()].reduce((s, v) => s + v, 0)
   if (!(total > 0)) return [{ amount, gstRate: fallbackRate }]
-  const parts = [...byRate.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
-    .map(([gstRate, taxable]) => ({ gstRate, amount: r2((amount * taxable) / total) }))
-  const drift = r2(amount - parts.reduce((s, p) => s + p.amount, 0))
-  if (drift !== 0) parts[0].amount = r2(parts[0].amount + drift)
-  return parts.filter((p) => p.amount !== 0)
+  const entries = [...byRate.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])
+  const shares = allocatePaise(toPaise(amount), entries.map(([, value]) => value))
+  return entries.map(([gstRate], i) => ({ gstRate, amount: toRupees(shares[i]) })).filter(p => p.amount > 0)
 }
 
 export interface SaleChargeInput {
+  amountMode?: ChargeAmountMode
+  taxCategory?: ChargeTaxCategory
   /** The charge type id, or any key the caller wants back. */
   key: string
   /** The figure typed. */
@@ -514,12 +555,9 @@ export interface PricedSaleCharge {
  * within the state, as the order has always done.
  */
 function addedOn(amount: number, gstRate: number, intra: boolean | undefined): SaleChargePart {
-  const raw = (amount * gstRate) / 100
-  const cgst = intra ? r2(raw / 2) : 0
-  const sgst = intra ? r2(raw / 2) : 0
-  const igst = intra === false ? r2(raw) : 0
-  const tax = intra === undefined ? r2(raw) : r2(cgst + sgst + igst)
-  return { gstRate, amount, net: amount, cgst, sgst, igst, tax }
+  const t = taxOn(toPaise(amount), gstRate, intra ? 'CGST_SGST' : 'IGST')
+  return { gstRate, amount, net: amount, cgst: intra === undefined ? 0 : toRupees(t.cgst),
+    sgst: intra === undefined ? 0 : toRupees(t.sgst), igst: intra === undefined ? 0 : toRupees(t.igst), tax: toRupees(t.tax) }
 }
 
 /**
@@ -545,9 +583,10 @@ function includedIn(amount: number, gstRate: number, intra: boolean | undefined)
  * shown whole).
  */
 export function priceSaleCharge(c: SaleChargeInput, goods: SaleGoods[], intra: boolean | undefined): PricedSaleCharge {
-  const amount = r2(Math.max(0, Number(c.amount) || 0))
+  const basis = goods.reduce((sum, g) => sum + Math.max(0, g.taxable), 0)
+  const amount = r2(Math.max(0, Number(c.amount) || 0) * (c.amountMode === 'PERCENT' ? basis / 100 : 1))
   const ownRate = Number(c.ownRate) || 0
-  if (c.treatment === 'NON_TAXABLE' || amount === 0) {
+  if (c.treatment === 'NON_TAXABLE' || (c.taxCategory && !['TAXABLE', 'UNSPECIFIED'].includes(c.taxCategory)) || amount === 0) {
     return { key: c.key, treatment: c.treatment, amount, net: amount, gstRate: 0, cgst: 0, sgst: 0, igst: 0, tax: 0, payable: amount, parts: [], rateText: '' }
   }
   const shares = c.followsGoodsRate ? shareSaleCharge(amount, goods, ownRate) : [{ amount, gstRate: ownRate }]
@@ -740,4 +779,41 @@ export function priceSale(input: SaleInput): SaleResult {
     total,
     brokerage: r2((goodsTaxable * (Number(input.brokeragePct) || 0)) / 100),
   }
+}
+
+/** The existing Extra Charges master, including its existing HSN relation. */
+export interface ChargeMasterConfig {
+  name: string
+  defaultGstRate: number | string | null
+  taxTreatment?: ChargeTaxTreatment
+  followsGoodsRate?: boolean
+  defaultGstMode?: ChargeGstMode
+  defaultHsnCodeId?: string | null
+  defaultHsnCode?: { code: string; gstRate?: number | string } | null
+  salesHsnCodeId?: string | null
+  salesHsnCode?: { code: string; gstRate: number | string } | null
+  purchaseTaxTreatment?: ChargeTaxTreatment
+  salesTaxCategory?: string
+  purchaseTaxCategory?: string
+}
+export function chargeConfigOf(t: ChargeMasterConfig, side: 'sales' | 'purchase'): ChargeTaxSnapshot {
+  const sale = side === 'sales'
+  const hsn = sale ? t.salesHsnCode : t.defaultHsnCode
+  const followsGoodsRate = sale ? t.followsGoodsRate === true : t.defaultGstMode === 'INHERIT'
+  const modeNone = !sale && t.defaultGstMode === 'NONE'
+  return { version: 1, name: t.name,
+    treatment: modeNone ? 'NON_TAXABLE' : (sale ? t.taxTreatment : t.purchaseTaxTreatment) ?? 'EXCLUSIVE',
+    followsGoodsRate, ownRate: modeNone ? 0 : Number(hsn?.gstRate ?? t.defaultGstRate),
+    hsnCodeId: followsGoodsRate || modeNone ? null : (sale ? t.salesHsnCodeId : t.defaultHsnCodeId) ?? null,
+    hsnCode: followsGoodsRate || modeNone ? null : hsn?.code ?? null,
+    taxCategory: ((sale ? t.salesTaxCategory : t.purchaseTaxCategory) ?? 'UNSPECIFIED') as ChargeTaxCategory,
+    amountMode: 'FIXED', inputAmount: 0, basis: 'GOODS_AFTER_DISCOUNT' }
+}
+
+/** Restore legacy rows from their saved rate, never from a changed master. */
+export function savedChargeConfig(c: { taxSnapshot?: unknown; amount: unknown; gstRate: unknown; taxTreatment?: ChargeTaxTreatment | null; hsnCodeId?: string | null; chargeType?: { name: string } | null }): ChargeTaxSnapshot {
+  return chargeSnapshot(c.taxSnapshot) ?? { version: 1, name: c.chargeType?.name ?? 'Charge',
+    treatment: c.taxTreatment ?? 'EXCLUSIVE', followsGoodsRate: false, ownRate: Number(c.gstRate),
+    hsnCodeId: c.hsnCodeId ?? null, hsnCode: null, taxCategory: 'UNSPECIFIED', amountMode: 'FIXED',
+    inputAmount: Number(c.amount), basis: 'GOODS_AFTER_DISCOUNT' }
 }

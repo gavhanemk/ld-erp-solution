@@ -1,5 +1,8 @@
 'use client'
 
+import { ChargeTaxDetails, taxOverridePayload } from '../purchase/ChargeTaxDetails'
+import { chargeConfigOf, savedChargeConfig, type ChargeMasterConfig, type ChargeTaxSnapshot } from '@ld-erp/shared'
+
 import { Plus, Trash2 } from 'lucide-react'
 import { CHARGE_TAX_TREATMENT_LABEL, type ChargeTaxTreatment, type PricedSaleCharge } from '@ld-erp/shared'
 import { formatRupees } from '@/lib/utils'
@@ -21,7 +24,7 @@ import type { TotalsCharge } from './orderTotals'
  * can be changed for this document.
  */
 
-export interface SaleChargeType {
+export interface SaleChargeType extends ChargeMasterConfig {
   id: string
   name: string
   defaultGstRate: string | number
@@ -32,6 +35,10 @@ export interface SaleChargeType {
 }
 
 export interface SaleChargeDraft {
+  sourceChargeId?: string
+  config?: ChargeTaxSnapshot
+  taxOverride?: ChargeTaxSnapshot
+  amountMode?: 'FIXED' | 'PERCENT'
   key: string
   chargeTypeId: string
   amount: string
@@ -43,11 +50,13 @@ let chargeKey = 0
 export const blankSaleCharge = (): SaleChargeDraft => ({ key: `ch${++chargeKey}`, chargeTypeId: '', amount: '', treatment: '' })
 
 /** A saved document's charges, back into the box. */
-export function chargeDraftsOf(saved: Array<{ chargeTypeId: string; amount: string | number; taxTreatment?: ChargeTaxTreatment | null }> | undefined): SaleChargeDraft[] {
+export function chargeDraftsOf(saved: Array<{ id?: string; taxSnapshot?: unknown; gstRate?: string | number; chargeType?: { name: string } | null; chargeTypeId: string; amount: string | number; taxTreatment?: ChargeTaxTreatment | null }> | undefined): SaleChargeDraft[] {
   return (saved ?? []).map((c) => ({
     key: `ch${++chargeKey}`,
     chargeTypeId: c.chargeTypeId,
-    amount: Number(c.amount) > 0 ? String(Number(c.amount)) : '',
+    amount: String(savedChargeConfig({ ...c, gstRate: c.gstRate ?? 0 }).inputAmount),
+    config: savedChargeConfig({ ...c, gstRate: c.gstRate ?? 0 }), sourceChargeId: c.id,
+    amountMode: savedChargeConfig({ ...c, gstRate: c.gstRate ?? 0 }).amountMode,
     // A charge saved before charges said how GST sits on them had GST added on top.
     treatment: c.taxTreatment ?? 'EXCLUSIVE',
   }))
@@ -58,14 +67,14 @@ export function chargesToPrice(rows: SaleChargeDraft[], typeById: Map<string, Sa
   return rows.flatMap((c) => {
     const type = typeById.get(c.chargeTypeId)
     const amount = Number(c.amount) || 0
-    if (!type || !(amount > 0)) return []
+    if ((!type && !c.config) || !(amount > 0)) return []
+    const config = c.taxOverride ?? c.config ?? chargeConfigOf(type!, 'sales')
     return [
       {
         key: c.key,
         amount,
-        treatment: c.treatment || type.taxTreatment || 'INCLUSIVE',
-        followsGoodsRate: type.followsGoodsRate ?? true,
-        ownRate: Number(type.defaultGstRate) || 0,
+        treatment: config.treatment, followsGoodsRate: config.followsGoodsRate, ownRate: config.ownRate,
+        amountMode: c.amountMode ?? 'FIXED', taxCategory: config.taxCategory,
       },
     ]
   })
@@ -73,7 +82,11 @@ export function chargesToPrice(rows: SaleChargeDraft[], typeById: Map<string, Sa
 
 /** What the server is sent. */
 export function chargesToSave(rows: SaleChargeDraft[], typeById: Map<string, SaleChargeType>) {
-  return chargesToPrice(rows, typeById).map((c) => ({ chargeTypeId: rows.find((r) => r.key === c.key)!.chargeTypeId, amount: c.amount, taxTreatment: c.treatment }))
+  return chargesToPrice(rows, typeById).map(c => {
+    const row = rows.find(r => r.key === c.key)!
+    return { chargeTypeId: row.chargeTypeId, amount: c.amount, amountMode: row.amountMode ?? 'FIXED',
+      sourceChargeId: row.sourceChargeId, taxOverride: taxOverridePayload(row.taxOverride) }
+  })
 }
 
 const SHORT: Record<ChargeTaxTreatment, string> = { INCLUSIVE: 'GST incl.', EXCLUSIVE: '+ GST', NON_TAXABLE: 'No GST' }
@@ -107,7 +120,7 @@ export function SaleCharges({
   const set = (key: string, patch: Partial<SaleChargeDraft>) => onChange(rows.map((r) => (r.key === key ? { ...r, ...patch } : r)))
   const label = idPrefix ?? 'Charge'
 
-  if (types.length === 0) {
+  if (types.length === 0 && rows.length === 0) {
     return (
       <p className="text-muted-foreground py-1 text-xs">
         No sales charges set up yet. Add them under{' '}
@@ -125,7 +138,7 @@ export function SaleCharges({
         const taken = new Set(rows.filter((x) => x.key !== c.key).map((x) => x.chargeTypeId))
         const type = typeById.get(c.chargeTypeId)
         const p = priced.get(c.key)
-        const treatment = c.treatment || type?.taxTreatment || 'INCLUSIVE'
+        const config = { ...(c.taxOverride ?? c.config ?? chargeConfigOf(type ?? { name: 'Charge', defaultGstRate: 0 }, 'sales')), amountMode: c.amountMode ?? 'FIXED' as const, inputAmount: Number(c.amount) || 0 }
         return (
           <div key={c.key} className="space-y-1">
             <div className="flex items-center gap-1.5">
@@ -134,15 +147,16 @@ export function SaleCharges({
                 value={c.chargeTypeId}
                 disabled={disabled}
                 // A charge type picked starts with its own treatment from the master.
-                onChange={(e) => set(c.key, { chargeTypeId: e.target.value, treatment: typeById.get(e.target.value)?.taxTreatment ?? 'INCLUSIVE' })}
+                onChange={(e) => set(c.key, { chargeTypeId: e.target.value, treatment: '', config: undefined, taxOverride: undefined, sourceChargeId: undefined })}
                 aria-label={`${label} ${i + 1}`}
               >
                 <option value="">Charge…</option>
+                {!type && c.config && <option value={c.chargeTypeId}>{c.config.name} (saved)</option>}
                 {types
                   .filter((ct) => !taken.has(ct.id))
                   .map((ct) => (
                     <option key={ct.id} value={ct.id}>
-                      {ct.name}
+                      {ct.id === c.chargeTypeId ? c.config?.name ?? ct.name : ct.name}
                     </option>
                   ))}
               </SmartSelect>
@@ -165,25 +179,13 @@ export function SaleCharges({
                 <Trash2 size={12} />
               </button>
             </div>
-            {type && (
-              <div className="flex items-center gap-2 pr-7">
-                <SmartSelect
-                  className="form-input h-7 w-[6.5rem] shrink-0 text-[11px]"
-                  value={treatment}
-                  disabled={disabled}
-                  onChange={(e) => set(c.key, { treatment: e.target.value as ChargeTaxTreatment })}
-                  aria-label={`${label} ${i + 1}: how GST sits on the amount`}
-                  title="How GST sits on the amount typed"
-                >
-                  {(Object.keys(SHORT) as ChargeTaxTreatment[]).map((t) => (
-                    <option key={t} value={t} data-sub={CHARGE_TAX_TREATMENT_LABEL[t]}>
-                      {SHORT[t]}
-                    </option>
-                  ))}
-                </SmartSelect>
-                <span className="text-muted-foreground min-w-0 flex-1 text-right text-[11px] leading-tight tabular-nums">
-                  {p ? chargeNote(p) : treatment === 'NON_TAXABLE' ? 'No GST' : treatment === 'INCLUSIVE' ? 'GST included in the amount' : 'GST added on top'}
-                </span>
+            {(type || c.config) && (
+              <div>
+                <div className="flex justify-end gap-1" role="group" aria-label={`${label} ${i + 1} amount type`}>
+                  {(['FIXED', 'PERCENT'] as const).map(mode => <button type="button" key={mode} disabled={disabled} aria-pressed={(c.amountMode ?? 'FIXED') === mode} className="btn-ghost px-2 text-xs" onClick={() => set(c.key, { amountMode: mode })}>{mode === 'FIXED' ? '₹' : '%'}</button>)}
+                </div>
+                <ChargeTaxDetails config={config} priced={p ? { ...p, amount: p.net } : undefined}
+                  onOverride={disabled ? undefined : value => set(c.key, { taxOverride: value })} />
               </div>
             )}
           </div>

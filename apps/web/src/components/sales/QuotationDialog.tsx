@@ -440,7 +440,7 @@ export function QuotationDialog({
 
   const filled = totals.lines.filter((p) => p.l.itemId || p.l.styleCode.trim())
   const noItem = filled.find((p) => !p.l.itemId)
-  const chargeNoType = charges.find((c) => !chargeTypeById.get(c.chargeTypeId) && (Number(c.amount) || 0) > 0)
+  const chargeNoType = charges.find((c) => !chargeTypeById.get(c.chargeTypeId) && !c.config && (Number(c.amount) || 0) > 0)
   const blocker = !customerId
     ? 'Choose the customer.'
     : filled.length === 0

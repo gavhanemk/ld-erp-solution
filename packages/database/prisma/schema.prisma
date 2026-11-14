@@ -580,6 +580,7 @@ enum HsnKind {
 /// Only the total rate is stored. Within the state it is split half CGST and
 /// half SGST, across states it is all IGST, so the three can never disagree.
 model HsnCode {
+  salesChargeTypes ChargeType[] @relation("SalesChargeHsn")
   id          String  @id @default(cuid())
   code        String  @unique
   description String
@@ -5039,11 +5040,11 @@ model ChargeType {
   /// top (EXCLUSIVE), or there is no GST at all (NON_TAXABLE: outside the
   /// value GST is worked out on). Every charge type started INCLUSIVE on
   /// 9 Nov 2026: a charge is typed as the final figure, as on purchases.
-  taxTreatment     ChargeTaxTreatment @default(INCLUSIVE)
+  taxTreatment     ChargeTaxTreatment @default(EXCLUSIVE)
   /// On a sale, taxed at the goods' rate: part of the value of the goods it
   /// is billed with (CGST Act s.15(2)(c)), shared across their rates by
   /// value. Off: a supply of its own, at defaultGstRate.
-  followsGoodsRate Boolean            @default(true)
+  followsGoodsRate Boolean            @default(false)
   /// How a purchase order or bill starts this charge's GST unless the row is
   /// changed: an HSN / SAC code, a rate typed by hand, or not applicable —
   /// see PurchaseOrderCharge.gstMode, which every row starts at. Every charge
@@ -5054,6 +5055,12 @@ model ChargeType {
   /// HSN — Transport Charges always being billed under SAC 9965, say.
   defaultHsnCodeId String?
   defaultHsnCode   HsnCode?           @relation(fields: [defaultHsnCodeId], references: [id])
+  purchaseTaxTreatment ChargeTaxTreatment @default(EXCLUSIVE)
+  salesHsnCodeId String?
+  salesHsnCode HsnCode? @relation("SalesChargeHsn", fields: [salesHsnCodeId], references: [id])
+  salesTaxCategory String @default("TAXABLE")
+  purchaseTaxCategory String @default("TAXABLE")
+  taxReviewRequired Boolean @default(false)
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
 
@@ -5067,6 +5074,8 @@ model ChargeType {
 }
 
 model SalesInvoiceCharge {
+  /// Frozen configuration, input unit and calculated tax allocations. Null on historical rows.
+  taxSnapshot Json?
   id           String       @id @default(cuid())
   invoiceId    String
   invoice      SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
@@ -5103,6 +5112,8 @@ model SalesInvoiceCharge {
 /// order would have been quicker to write and would have baked today's GST
 /// rates into column names; the mill has renamed and re-rated these before.
 model PurchaseOrderCharge {
+  /// Frozen configuration, input unit and calculated tax allocations. Null on historical rows.
+  taxSnapshot Json?
   id           String        @id @default(cuid())
   poId         String
   po           PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
@@ -5134,6 +5145,8 @@ model PurchaseOrderCharge {
 /// A charge on a sales order — transport, freight, packing. The same shape as
 /// the purchase order's, so the invoice raised later can carry it line for line.
 model SalesOrderCharge {
+  /// Frozen configuration, input unit and calculated tax allocations. Null on historical rows.
+  taxSnapshot Json?
   id           String     @id @default(cuid())
   soId         String
   so           SalesOrder @relation(fields: [soId], references: [id], onDelete: Cascade)
@@ -5180,6 +5193,8 @@ model SalesOrderAttachment {
 }
 
 model PurchaseInvoiceCharge {
+  /// Frozen configuration, input unit and calculated tax allocations. Null on historical rows.
+  taxSnapshot Json?
   id           String          @id @default(cuid())
   billId       String
   bill         PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Cascade)
@@ -5275,6 +5290,8 @@ model SalesQuotationLine {
 /// A charge on a quotation (transport, packing), priced exactly as it will
 /// be on the order the quotation becomes, and carried onto that order.
 model SalesQuotationCharge {
+  /// Frozen configuration, input unit and calculated tax allocations. Null on historical rows.
+  taxSnapshot Json?
   id           String             @id @default(cuid())
   quoteId      String
   quote        SalesQuotation     @relation(fields: [quoteId], references: [id], onDelete: Cascade)
@@ -5462,6 +5479,7 @@ enum ChargeTaxTreatment {
 /// Where a purchase charge's GST rate comes from. See
 /// `PurchaseOrderCharge.gstMode`.
 enum ChargeGstMode {
+  INHERIT
   HSN
   MANUAL
   NONE

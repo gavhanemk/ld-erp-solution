@@ -1,5 +1,7 @@
 'use client'
 
+import { chargeSnapshot } from '@ld-erp/shared'
+
 import { Fragment, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
@@ -118,6 +120,7 @@ interface PrintData {
     createdBy: { name: string } | null
     lines: BillLine[]
     charges: Array<{
+      taxSnapshot?: unknown
       id: string
       amount: string
       gstRate: string
@@ -256,7 +259,7 @@ export default function PurchaseBillPrintPage() {
     const namesAt = (rate: number) =>
       live
         .filter((c) => Number(c.gstRate) === rate)
-        .map((c) => c.chargeType.name)
+        .map((c) => (chargeSnapshot(c.taxSnapshot)?.name ?? c.chargeType.name))
         .join(', ') || 'Charges'
     const round2 = (n: number) => Math.round(n * 100) / 100
 
@@ -647,7 +650,7 @@ export default function PurchaseBillPrintPage() {
               <tr key={c.id}>
                 <td style={{ ...td, textAlign: 'center', ...NUM }}>{bill.lines.length + i + 1}</td>
                 <td style={td}>
-                  <div style={{ fontWeight: 700, color: NAVY }}>{c.chargeType.name}</div>
+                  <div style={{ fontWeight: 700, color: NAVY }}>{(chargeSnapshot(c.taxSnapshot)?.name ?? c.chargeType.name)}</div>
                 </td>
                 <td style={{ ...td, textAlign: 'center' }}>—</td>
                 <td style={{ ...td, textAlign: 'center' }} />

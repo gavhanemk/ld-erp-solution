@@ -1,30 +1,20 @@
+import { chargeEntryFields, resolveChargeConfigurations, type ChargeEntry, type ChargeResolveOptions } from './chargeConfiguration'
+import { chargeSnapshot, type ChargeTaxSnapshot } from '@ld-erp/shared'
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { CHARGE_TAX_TREATMENTS, priceSaleCharge, type ChargeTaxTreatment, type PricedSaleCharge, type SaleChargeInput, type SaleGoods } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 
-/**
- * Charges on a sales document — transport, freight, packing — as the forms
- * send them, checked against Masters → Charges, and their saved rows.
- *
- * The pricing itself is the shared engine's (priceSale / priceSaleCharge in
- * packages/shared), the same function the quotation and order forms run as
- * you type, so the screen, the saved document and the print agree. What a
- * charge is taxed at and how its GST sits on it:
- *
- *   - by default it follows the goods' rate — billed with the goods, it is
- *     part of what they are sold for (CGST Act s.15(2)(c); the business's
- *     answer of 19 Oct 2026) — shared across their rates by value; a charge
- *     type can instead be a supply of its own at its own rate;
- *   - the figure typed is GST-inclusive, GST-exclusive or non-taxable, as the
- *     row says, else as its charge type says (every type starts inclusive:
- *     the business's answer of 9 Nov 2026).
+/** Sales charges resolve server-side from their master or saved source snapshot.
+ * All charge calculations use the shared engine. Goods inheritance is explicit;
+ * new configurations default to GST-exclusive, with authorized overrides audited.
  */
 
 export const chargeTreatmentSchema = z.enum(CHARGE_TAX_TREATMENTS as [ChargeTaxTreatment, ...ChargeTaxTreatment[]])
 
 /** A charge row as a sales form sends it. */
 export const saleChargeSchema = z.object({
+  ...chargeEntryFields,
   chargeTypeId: z.string().min(1, 'Pick the charge'),
   amount: z.number().min(0, 'A charge cannot be negative'),
   /** Only for our own trims on a job-work invoice; any other charge's rate is worked out. */
@@ -33,7 +23,7 @@ export const saleChargeSchema = z.object({
   taxTreatment: chargeTreatmentSchema.optional().nullable(),
 })
 
-export interface ChargeInput {
+export interface ChargeInput extends ChargeEntry {
   chargeTypeId: string
   amount: number
   gstRate?: number | null
@@ -47,7 +37,7 @@ export interface ChargeInput {
 }
 
 /** A charge checked and ready to price: the engine's input, and whose it is. */
-export type ResolvedCharge = SaleChargeInput & { chargeTypeId: string; ownMaterial: boolean; sortOrder: number }
+export type ResolvedCharge = SaleChargeInput & { chargeTypeId: string; ownMaterial: boolean; sortOrder: number; config: ChargeTaxSnapshot }
 
 /**
  * Checks each charge against Masters → Charges (it exists, and is on for
@@ -59,33 +49,17 @@ export type ResolvedCharge = SaleChargeInput & { chargeTypeId: string; ownMateri
 export async function resolveSaleCharges(
   tx: Prisma.TransactionClient,
   input: ChargeInput[] | undefined,
-  { treatmentByType }: { treatmentByType?: Map<string, ChargeTaxTreatment> } = {},
+  opts: ChargeResolveOptions & { treatmentByType?: Map<string, ChargeTaxTreatment> } = {},
 ): Promise<ResolvedCharge[]> {
-  const wanted = (input ?? []).filter((c) => c.amount > 0)
-  const types = wanted.length
-    ? await tx.chargeType.findMany({
-        where: { id: { in: wanted.map((c) => c.chargeTypeId) } },
-        select: { id: true, name: true, defaultGstRate: true, isActive: true, applyOnSale: true, taxTreatment: true, followsGoodsRate: true },
-      })
-    : []
-  const typeById = new Map(types.map((t) => [t.id, t]))
-  return wanted.map((c, i) => {
-    const type = typeById.get(c.chargeTypeId)
-    if (!type) throw new AppError('One of the charges does not exist', 400, 'BAD_CHARGE')
-    if (!type.isActive || !type.applyOnSale) {
-      throw new AppError(`${type.name} is not a sales charge. Turn it on for sales under Masters → Charges.`, 400, 'BAD_CHARGE')
-    }
-    const ownMaterial = !!c.ownMaterial
-    return {
-      key: type.id,
-      chargeTypeId: type.id,
-      amount: c.amount,
-      treatment: ownMaterial ? 'EXCLUSIVE' : (c.taxTreatment ?? treatmentByType?.get(type.id) ?? type.taxTreatment),
-      followsGoodsRate: ownMaterial ? false : type.followsGoodsRate,
-      ownRate: ownMaterial ? (c.gstRate ?? Number(type.defaultGstRate)) : Number(type.defaultGstRate),
-      ownMaterial,
-      sortOrder: i,
-    }
+  const wanted = (input ?? []).filter(c => c.amount > 0)
+  const configs = await resolveChargeConfigurations(tx, wanted, 'sales', opts)
+  return configs.map((c, i) => {
+    const ownMaterial = !!wanted[i].ownMaterial
+    const config = { ...c.config }
+    if (ownMaterial) { config.followsGoodsRate = false; config.treatment = 'EXCLUSIVE' }
+    return { key: c.chargeTypeId, chargeTypeId: c.chargeTypeId, amount: c.amount,
+      treatment: config.treatment, followsGoodsRate: config.followsGoodsRate, ownRate: config.ownRate,
+      amountMode: config.amountMode, taxCategory: config.taxCategory, config, ownMaterial, sortOrder: i }
   })
 }
 
@@ -97,7 +71,7 @@ export async function resolveSaleCharges(
 export function chargeRows(resolved: ResolvedCharge[], priced: PricedSaleCharge[], { split = false }: { split?: boolean } = {}) {
   return priced.flatMap((p, i) => {
     const r = resolved[i]
-    const base = { chargeTypeId: r.chargeTypeId, taxTreatment: p.treatment, sortOrder: r.sortOrder }
+    const base = { chargeTypeId: r.chargeTypeId, taxTreatment: p.treatment, sortOrder: r.sortOrder, taxSnapshot: { ...r.config, parts: p.parts } as unknown as Prisma.InputJsonValue }
     if (split && p.parts.length > 1) {
       return p.parts.map((part) => ({ ...base, amount: part.amount, netAmount: part.net, gstRate: part.gstRate, cgst: part.cgst, sgst: part.sgst, igst: part.igst }))
     }
@@ -111,7 +85,7 @@ export async function priceSalesCharges(
   input: ChargeInput[] | undefined,
   isIntraState: boolean,
   goods: SaleGoods[],
-  opts: { split?: boolean; treatmentByType?: Map<string, ChargeTaxTreatment> } = {},
+  opts: ChargeResolveOptions & { split?: boolean; treatmentByType?: Map<string, ChargeTaxTreatment> } = {},
 ) {
   const resolved = await resolveSaleCharges(tx, input, opts)
   const priced = resolved.map((c) => priceSaleCharge(c, goods, isIntraState))
@@ -121,7 +95,7 @@ export async function priceSalesCharges(
 type TaxRow = { taxable: number; cgst: number; sgst: number; igst: number }
 type GoodsLine = TaxRow & { hsnCode: string | null; gstRate: number }
 /** A saved charge row: its value without GST is what GST was worked out on, unless it carries none. */
-export type ChargeRow = { name: string; gstRate: number; netAmount: number; treatment: ChargeTaxTreatment; cgst: number; sgst: number; igst: number }
+export type ChargeRow = { taxSnapshot?: ChargeTaxSnapshot | null; name: string; gstRate: number; netAmount: number; treatment: ChargeTaxTreatment; cgst: number; sgst: number; igst: number }
 
 /**
  * Where an invoice's charges sit in its HSN table. A charge taxed at the
@@ -136,6 +110,12 @@ export function chargeShares(lines: GoodsLine[], charges: ChargeRow[]) {
   const out: Array<TaxRow & { key: string; hsn: string; rate: number; charge: boolean }> = []
   for (const c of charges) {
     if (c.treatment === 'NON_TAXABLE') continue
+    if (c.taxSnapshot && !c.taxSnapshot.followsGoodsRate) {
+      const hsn = c.taxSnapshot.hsnCode ?? c.name
+      out.push({ key: `charge|${hsn}|${c.gstRate}|${c.taxSnapshot.taxCategory}`, hsn, rate: c.gstRate,
+        taxable: c.netAmount, cgst: c.cgst, sgst: c.sgst, igst: c.igst, charge: true })
+      continue
+    }
     const goods = lines.filter((l) => l.gstRate === c.gstRate && l.taxable > 0)
     const base = goods.reduce((s, l) => s + l.taxable, 0)
     if (!(base > 0)) {
@@ -177,6 +157,7 @@ export function foldChargesIntoHsn(lines: GoodsLine[], charges: ChargeRow[]) {
 
 /** A saved charge row in the shape chargeShares reads. */
 export function chargeRowOf(c: {
+  taxSnapshot?: unknown
   chargeType: { name: string }
   gstRate: Prisma.Decimal | number
   amount: Prisma.Decimal | number
@@ -188,7 +169,8 @@ export function chargeRowOf(c: {
   igst: Prisma.Decimal | number
 }): ChargeRow {
   return {
-    name: c.chargeType.name,
+    taxSnapshot: chargeSnapshot(c.taxSnapshot),
+    name: chargeSnapshot(c.taxSnapshot)?.name ?? c.chargeType.name,
     gstRate: Number(c.gstRate),
     netAmount: Number(c.netAmount ?? c.amount),
     treatment: c.taxTreatment,

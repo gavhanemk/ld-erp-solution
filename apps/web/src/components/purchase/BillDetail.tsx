@@ -1,5 +1,7 @@
 'use client'
 
+import { chargeSnapshot } from '@ld-erp/shared'
+
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -569,7 +571,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
                     {bill.charges.map((c) => (
                       <tr key={c.id} className="border-border/50 border-b last:border-0">
                         <td className="text-foreground py-2 pr-3">
-                          {c.chargeType?.name ?? 'Charge'}
+                          {chargeSnapshot(c.taxSnapshot)?.name ?? c.chargeType?.name ?? 'Charge'}
                         </td>
                         <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
                           {Number(c.gstRate ?? 0)}%
