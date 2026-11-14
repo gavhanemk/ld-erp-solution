@@ -1,3 +1,6 @@
+import { chargeEntryFields, resolveChargeConfigurations, type ChargeResolveOptions } from '../services/chargeConfiguration'
+import { chargeSnapshot, type ChargeTaxSnapshot } from '@ld-erp/shared'
+import { userCan } from '../middleware/auth'
 import { Router } from 'express'
 import { z } from 'zod'
 import type { PackType, Prisma } from '@prisma/client'
@@ -90,9 +93,10 @@ const lineSchema = z.object({
  * `gstRate` is the rate actually applied. See `resolveCharges`.
  */
 const chargeSchema = z.object({
+  ...chargeEntryFields,
   chargeTypeId: z.string().min(1, 'Pick a charge'),
   amount: z.number().min(0, 'A charge cannot be negative'),
-  gstMode: z.enum(['HSN', 'MANUAL', 'NONE']).optional(),
+  gstMode: z.enum(['HSN', 'MANUAL', 'NONE', 'INHERIT']).optional(),
   /** The HSN/SAC code chosen when `gstMode` is HSN, kept on the row. */
   hsnCodeId: z.string().optional().nullable(),
   gstRate: z
@@ -526,7 +530,7 @@ function orderDiscountOf(poType: string | null | undefined, discountAmount: numb
 }
 
 /** A charge with its GST settled — see `resolveCharges`. */
-type ResolvedCharge = { chargeTypeId: string; amount: number; gstMode: ChargeGstMode; hsnCodeId: string | null; gstRate: number }
+type ResolvedCharge = { config?: ChargeTaxSnapshot; chargeTypeId: string; amount: number; gstMode: ChargeGstMode; hsnCodeId: string | null; gstRate: number }
 
 /**
  * Prices a purchase order with the one shared calculation (`priceDocument`),
@@ -563,7 +567,7 @@ function priceOrder(
       gstRate: l.gstRate ?? 0,
     })),
     orderDiscount,
-    charges: charges.map((c) => ({ key: c.chargeTypeId, amount: c.amount, gstRate: c.gstRate })),
+    charges: charges.map((c) => ({ key: c.chargeTypeId, amount: c.amount, gstRate: c.gstRate, config: c.config })),
     untaxedExtra: otherCharges,
     split,
   })
@@ -576,6 +580,7 @@ function priceOrder(
   const chargeRows = priced.charges.map((c) => ({
     chargeTypeId: c.key,
     amount: c.amount,
+    taxSnapshot: c.taxSnapshot as unknown as Prisma.InputJsonValue,
     gstMode: settledByType.get(c.key)?.gstMode ?? 'NONE',
     hsnCodeId: settledByType.get(c.key)?.hsnCodeId ?? null,
     gstRate: c.gstRate,
@@ -619,68 +624,10 @@ function priceOrder(
  * refused at the database's unique index with a message nobody could act on;
  * the first occurrence's GST settles the merged row.
  */
-async function resolveCharges(
-  tx: Prisma.TransactionClient,
-  charges: z.infer<typeof chargeSchema>[]
-): Promise<ResolvedCharge[]> {
-  const merged = new Map<string, ResolvedCharge>()
-  for (const c of charges) {
-    const seen = merged.get(c.chargeTypeId)
-    if (seen) {
-      seen.amount = round2(seen.amount + c.amount)
-      continue
-    }
-    const mode: ChargeGstMode = c.gstMode ?? 'NONE'
-    merged.set(c.chargeTypeId, {
-      chargeTypeId: c.chargeTypeId,
-      amount: c.amount,
-      gstMode: mode,
-      hsnCodeId: mode === 'HSN' ? c.hsnCodeId || null : null,
-      gstRate: mode === 'NONE' ? 0 : round2(c.gstRate ?? 0),
-    })
-  }
-  const wanted = [...merged.values()].filter((c) => c.amount > 0)
-  if (!wanted.length) return []
-
-  const types = await tx.chargeType.findMany({
-    where: { id: { in: wanted.map((c) => c.chargeTypeId) }, applyOnPurchase: true, isActive: true },
-    select: { id: true },
-  })
-  const known = new Set(types.map((t) => t.id))
-
-  if (wanted.some((c) => !known.has(c.chargeTypeId))) {
-    throw new AppError(
-      'One of those charges is not a charge the mill uses on purchases.',
-      400,
-      'INVALID_CHARGE'
-    )
-  }
-
-  // A charge taken by HSN names an actual, active code, so a code picked and
-  // later retired from the master is said plainly rather than saved pointing
-  // nowhere.
-  const hsnWanted = wanted.filter((c) => c.gstMode === 'HSN')
-  if (hsnWanted.some((c) => !c.hsnCodeId)) {
-    throw new AppError(
-      'Pick an HSN / SAC code for every charge taken by HSN, or choose a different way to set its GST.',
-      400,
-      'NO_HSN_CODE'
-    )
-  }
-  if (hsnWanted.length) {
-    const ids = [...new Set(hsnWanted.map((c) => c.hsnCodeId as string))]
-    const hsnRows = await tx.hsnCode.findMany({ where: { id: { in: ids }, isActive: true }, select: { id: true } })
-    const knownHsn = new Set(hsnRows.map((h) => h.id))
-    if (ids.some((id) => !knownHsn.has(id))) {
-      throw new AppError(
-        'One of those HSN / SAC codes is no longer in the HSN master. Pick another.',
-        400,
-        'INVALID_HSN_CODE'
-      )
-    }
-  }
-
-  return wanted
+async function resolveCharges(tx: Prisma.TransactionClient, charges: z.infer<typeof chargeSchema>[], opts: ChargeResolveOptions = {}): Promise<ResolvedCharge[]> {
+  const ids = charges.map(c => c.chargeTypeId)
+  if (new Set(ids).size !== ids.length) throw new AppError('Add each charge only once on an order.', 400, 'DUPLICATE_CHARGE')
+  return resolveBillCharges(tx, charges.filter(c => c.amount > 0), opts)
 }
 
 // ── Purchase orders ─────────────────────────────────────────────────────────
@@ -1070,7 +1017,8 @@ router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, r
     orderDiscount: Number(po.discountAmount),
     charges: po.charges.map((c) => ({
       key: c.chargeTypeId,
-      amount: Number(c.amount),
+      amount: chargeSnapshot(c.taxSnapshot)?.inputAmount ?? Number(c.amount),
+      config: chargeSnapshot(c.taxSnapshot) ?? undefined,
       gstRate: Number(c.gstRate),
     })),
     untaxedExtra: Number(po.otherCharges),
@@ -1118,6 +1066,7 @@ router.get(
         deletedAt: true,
         charges: {
           select: {
+            id: true, taxSnapshot: true,
             chargeTypeId: true,
             amount: true,
             gstMode: true,
@@ -1138,17 +1087,17 @@ router.get(
     })
     const billedByType = new Map(billed.map((b) => [b.chargeTypeId, Number(b._sum.amount ?? 0)]))
 
-    const data = po.charges
-      .map((c) => ({
-        chargeTypeId: c.chargeTypeId,
-        name: c.chargeType.name,
-        amount: round2(Number(c.amount) - (billedByType.get(c.chargeTypeId) ?? 0)),
-        gstMode: c.gstMode,
-        hsnCodeId: c.hsnCodeId,
-        hsnCode: c.hsnCode,
-        gstRate: Number(c.gstRate),
-      }))
-      .filter((c) => c.amount > 0)
+    const data = po.charges.flatMap(c => {
+      const remaining = round2(Number(c.amount) - (billedByType.get(c.chargeTypeId) ?? 0))
+      if (remaining <= 0) return []
+      const snapshot = chargeSnapshot(c.taxSnapshot)
+      const enteredTotal = snapshot?.parts?.reduce((sum, p) => sum + p.amount, 0) ?? Number(c.amount)
+      const amount = snapshot?.amountMode === 'PERCENT' ? snapshot.inputAmount
+        : Number(c.amount) > 0 ? round2(enteredTotal * remaining / Number(c.amount)) : remaining
+      return [{ sourceChargeId: c.id, taxSnapshot: c.taxSnapshot, chargeTypeId: c.chargeTypeId,
+        name: snapshot?.name ?? c.chargeType.name, amount, amountMode: snapshot?.amountMode ?? 'FIXED',
+        remainingNet: remaining, gstMode: c.gstMode, hsnCodeId: c.hsnCodeId, hsnCode: c.hsnCode, gstRate: Number(c.gstRate) }]
+    })
 
     res.json({ success: true, data })
   }
@@ -1347,7 +1296,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
 
     await assertIndentLines(tx, data.lines)
 
-    const charges = await resolveCharges(tx, data.charges ?? [])
+    const charges = await resolveCharges(tx, data.charges ?? [], { canOverride: userCan(req.user, 'masters', 'edit') })
 
     const priced = priceOrder(
       data.lines,
@@ -1598,16 +1547,11 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
        * order already carries alone rather than clearing them — the same rule
        * the header fields follow.
        */
-      const charges =
-        data.charges !== undefined
-          ? await resolveCharges(tx, data.charges)
-          : before.charges.map((c) => ({
-              chargeTypeId: c.chargeTypeId,
-              amount: Number(c.amount),
-              gstMode: c.gstMode,
-              hsnCodeId: c.hsnCodeId,
-              gstRate: Number(c.gstRate),
-            }))
+      const charges = await resolveCharges(tx, data.charges ?? before.charges.map(c => ({
+        chargeTypeId: c.chargeTypeId, sourceChargeId: c.id,
+        amount: chargeSnapshot(c.taxSnapshot)?.inputAmount ?? Number(c.amount),
+        amountMode: chargeSnapshot(c.taxSnapshot)?.amountMode ?? 'FIXED',
+      })), { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
 
       await assertIndentLines(tx, data.lines, before.id)
 
@@ -4383,7 +4327,7 @@ function priceBill(opts: {
     })),
     // Discount comes off before tax — see the business rules.
     orderDiscount: opts.discountAmount,
-    charges: opts.charges.map((c) => ({ key: c.chargeTypeId, amount: c.amount, gstRate: c.gstRate })),
+    charges: opts.charges.map((c) => ({ key: c.chargeTypeId, amount: c.amount, gstRate: c.gstRate, config: c.config })),
     split: opts.split,
     // Under reverse charge the supplier's bill carries no tax — we pay it to
     // the government ourselves. Recording it and then adding it to their
@@ -4401,6 +4345,7 @@ function priceBill(opts: {
   }))
 
   const pricedCharges = priced.charges.map((c) => ({
+    taxSnapshot: c.taxSnapshot as unknown as Prisma.InputJsonValue,
     amount: c.amount,
     gstRate: c.gstRate,
     cgst: c.cgst,
@@ -4461,68 +4406,12 @@ function priceBill(opts: {
  * separate rows — two legs of freight on one bill, say — so nothing here
  * merges them.
  */
-async function resolveBillCharges(
-  tx: Prisma.TransactionClient,
-  charges: BillChargeInput[],
-  /** Charge types already on the bill being edited. */
-  alreadyOnBill: Set<string> = new Set()
-): Promise<ResolvedCharge[]> {
-  if (!charges.length) return []
-
-  const types = await tx.chargeType.findMany({
-    where: { id: { in: [...new Set(charges.map((c) => c.chargeTypeId))] } },
-    select: { id: true, name: true, defaultGstRate: true, applyOnPurchase: true, isActive: true },
-  })
-  const typeById = new Map(types.map((t) => [t.id, t]))
-
-  for (const c of charges) {
-    const type = typeById.get(c.chargeTypeId)
-    if (!type) {
-      throw new AppError(
-        'One of the charges on this bill no longer exists. Pick it again from the list.',
-        400,
-        'INVALID_CHARGE'
-      )
-    }
-    if (!(type.applyOnPurchase && type.isActive) && !alreadyOnBill.has(type.id)) {
-      throw new AppError(
-        `${type.name} is not a charge the mill uses on purchases. Pick another charge, or switch it on for purchases under Masters → Charges.`,
-        400,
-        'INVALID_CHARGE'
-      )
-    }
-  }
-
-  const hsnIds = [...new Set(charges.filter((c) => c.gstMode === 'HSN').map((c) => c.hsnCodeId))]
-  if (hsnIds.some((id) => !id)) {
-    throw new AppError(
-      'Pick an HSN / SAC code for every charge taken by HSN, or choose a different way to set its GST.',
-      400,
-      'NO_HSN_CODE'
-    )
-  }
-  if (hsnIds.length) {
-    const hsnRows = await tx.hsnCode.findMany({ where: { id: { in: hsnIds as string[] }, isActive: true }, select: { id: true } })
-    const knownHsn = new Set(hsnRows.map((h) => h.id))
-    if (hsnIds.some((id) => !knownHsn.has(id as string))) {
-      throw new AppError(
-        'One of those HSN / SAC codes is no longer in the HSN master. Pick another.',
-        400,
-        'INVALID_HSN_CODE'
-      )
-    }
-  }
-
-  return charges.map((c) => {
-    const mode: ChargeGstMode = c.gstMode ?? 'NONE'
-    return {
-      chargeTypeId: c.chargeTypeId,
-      amount: c.amount,
-      gstMode: mode,
-      hsnCodeId: mode === 'HSN' ? c.hsnCodeId || null : null,
-      gstRate: mode === 'NONE' ? 0 : round2(c.gstRate ?? 0),
-    }
-  })
+async function resolveBillCharges(tx: Prisma.TransactionClient, charges: BillChargeInput[], opts: ChargeResolveOptions = {}): Promise<ResolvedCharge[]> {
+  const rows = await resolveChargeConfigurations(tx, charges, 'purchase', opts)
+  return rows.map(c => ({ ...c,
+    gstMode: c.config.followsGoodsRate ? 'INHERIT' : c.config.treatment === 'NON_TAXABLE' ? 'NONE' : c.config.hsnCodeId ? 'HSN' : 'MANUAL',
+    hsnCodeId: c.config.hsnCodeId, gstRate: c.config.ownRate,
+  }))
 }
 
 /**
@@ -4539,6 +4428,7 @@ function billTaxByRate(bill: {
     igst: Prisma.Decimal
   }>
   charges: Array<{
+    taxSnapshot?: unknown
     amount: Prisma.Decimal
     gstRate: Prisma.Decimal
     cgst: Prisma.Decimal
@@ -4551,7 +4441,7 @@ function billTaxByRate(bill: {
     rate: number,
     goods: number,
     charge: number,
-    t: { cgst: Prisma.Decimal; sgst: Prisma.Decimal; igst: Prisma.Decimal }
+    t: { cgst: Prisma.Decimal | number; sgst: Prisma.Decimal | number; igst: Prisma.Decimal | number }
   ) => {
     let b = buckets.get(rate)
     if (!b) {
@@ -4572,7 +4462,9 @@ function billTaxByRate(bill: {
   for (const l of bill.lines) add(Number(l.gstRate), Number(l.taxableValue), 0, l)
   for (const c of bill.charges) {
     if (Number(c.amount) === 0) continue
-    add(Number(c.gstRate), 0, Number(c.amount), c)
+    const parts = chargeSnapshot(c.taxSnapshot)?.parts
+    if (parts?.length) for (const p of parts) add(p.gstRate, 0, p.net, p)
+    else add(Number(c.gstRate), 0, Number(c.amount), c)
   }
   return [...buckets.values()].filter((b) => b.taxable > 0).sort((a, b) => a.gstRate - b.gstRate)
 }
@@ -5167,7 +5059,8 @@ async function checkLocation(tx: Prisma.TransactionClient, warehouseId?: string 
 async function bookBill(
   tx: Prisma.TransactionClient,
   data: z.infer<typeof createBillSchema>,
-  userId: string
+  userId: string,
+  canOverride = false
 ) {
   const billDate = data.billDate ?? new Date()
 
@@ -5221,7 +5114,12 @@ async function bookBill(
   }
   const hsnById = new Map(items.map((i) => [i.id, i.hsnCode]))
 
-  const charges = await resolveBillCharges(tx, data.charges ?? [])
+  if (data.poId) {
+    const source = await tx.purchaseOrder.findUnique({ where: { id: data.poId }, select: { supplierId: true } })
+    if (!source || source.supplierId !== data.supplierId) throw new AppError('The linked order belongs to another supplier.', 400, 'WRONG_CHARGE_SOURCE')
+  }
+  const sourceCharges = data.poId ? await tx.purchaseOrderCharge.findMany({ where: { poId: data.poId }, include: { chargeType: { select: { name: true } }, hsnCode: { select: { code: true } } } }) : []
+  const charges = await resolveBillCharges(tx, data.charges ?? [], { saved: sourceCharges, canOverride })
   const priced = priceBill({
     lines: effectiveLines,
     charges,
@@ -5291,6 +5189,7 @@ async function bookBill(
         create: charges.map((c, i) => ({
           chargeTypeId: c.chargeTypeId,
           amount: priced.pricedCharges[i].amount,
+          taxSnapshot: priced.pricedCharges[i].taxSnapshot,
           gstMode: c.gstMode,
           hsnCodeId: c.hsnCodeId,
           gstRate: priced.pricedCharges[i].gstRate,
@@ -5408,7 +5307,7 @@ async function bookBill(
 router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createBillSchema.parse(req.body)
 
-  const bill = await prisma.$transaction((tx) => bookBill(tx, data, req.user!.id))
+  const bill = await prisma.$transaction((tx) => bookBill(tx, data, req.user!.id, userCan(req.user, 'masters', 'edit')))
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -5439,7 +5338,7 @@ router.post('/expenses/cash', requirePermission(MODULE, 'create'), async (req: A
   const { payment: pay, ...billData } = cashExpenseSchema.parse(req.body)
 
   const result = await prisma.$transaction(async (tx) => {
-    const booked = await bookBill(tx, billData, req.user!.id)
+    const booked = await bookBill(tx, billData, req.user!.id, userCan(req.user, 'masters', 'edit'))
     const owing = round2(Number(booked.bill.totalAmount) - Number(booked.bill.tdsAmount))
     const payment = await recordPayment(
       tx,
@@ -5553,15 +5452,11 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
     await checkAgainstReceipts(tx, lines, supplierId, before.id)
 
     const tax = await purchaseTaxContext(tx, supplierId)
-    const charges = data.charges
-      ? await resolveBillCharges(tx, data.charges, new Set(before.charges.map((c) => c.chargeTypeId)))
-      : before.charges.map((c) => ({
-          chargeTypeId: c.chargeTypeId,
-          amount: Number(c.amount),
-          gstMode: c.gstMode,
-          hsnCodeId: c.hsnCodeId,
-          gstRate: Number(c.gstRate),
-        }))
+    const charges = await resolveBillCharges(tx, data.charges ?? before.charges.map(c => ({
+      chargeTypeId: c.chargeTypeId, sourceChargeId: c.id,
+      amount: chargeSnapshot(c.taxSnapshot)?.inputAmount ?? Number(c.amount),
+      amountMode: chargeSnapshot(c.taxSnapshot)?.amountMode ?? 'FIXED',
+    })), { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
 
     const isReverseCharge = data.isReverseCharge ?? before.isReverseCharge
     // What the edit leaves out stays as it was: the section, whether the TDS
@@ -5660,6 +5555,7 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
           create: charges.map((c, i) => ({
             chargeTypeId: c.chargeTypeId,
             amount: priced.pricedCharges[i].amount,
+          taxSnapshot: priced.pricedCharges[i].taxSnapshot,
             gstMode: c.gstMode,
             hsnCodeId: c.hsnCodeId,
             gstRate: priced.pricedCharges[i].gstRate,

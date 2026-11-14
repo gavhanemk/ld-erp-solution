@@ -1,3 +1,4 @@
+import { chargeSnapshot } from '@ld-erp/shared'
 import type { ChargeTaxTreatment } from '@ld-erp/shared'
 import { money } from './StoreSheet'
 
@@ -14,13 +15,14 @@ import { money } from './StoreSheet'
  * A charge saved before charges said how GST sits on them had it added on top.
  */
 export function saleChargeRow(ch: {
+  taxSnapshot?: unknown
   amount: string | number
   netAmount?: string | number | null
   gstRate: string | number
   taxTreatment?: ChargeTaxTreatment | null
   chargeType: { name: string }
 }): [string, string] {
-  const name = ch.chargeType.name
+  const name = chargeSnapshot(ch.taxSnapshot)?.name ?? ch.chargeType.name
   const net = ch.netAmount != null ? Number(ch.netAmount) : Number(ch.amount)
   const rate = Number(ch.gstRate)
   const treatment = ch.taxTreatment ?? 'EXCLUSIVE'

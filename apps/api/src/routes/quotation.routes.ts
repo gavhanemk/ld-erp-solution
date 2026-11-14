@@ -1,3 +1,5 @@
+import type { ChargeResolveOptions } from '../services/chargeConfiguration'
+import { userCan } from '../middleware/auth'
 import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
@@ -128,7 +130,7 @@ async function bomPrice(db: Prisma.TransactionClient | typeof prisma, itemId: st
 }
 
 /** Prices a quotation the way an order is priced, charges and all, and adds each line's BOM cost. */
-async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput) {
+async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput, opts: ChargeResolveOptions = {}) {
   const { header, lines, charges } = await prepareOrder(
     tx,
     createSalesOrderSchema.parse({
@@ -150,7 +152,7 @@ async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput) {
         jobGstRate: l.jobGstRate ?? null,
       })),
     }),
-    { piecesOnly: true },
+    { piecesOnly: true, ...opts },
   )
   const costs = await Promise.all(data.lines.map((l) => bomPrice(tx, l.itemId, l.styleCode, l.color)))
   return {
@@ -368,8 +370,8 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
 })
 
 /** Saves a quotation inside the caller's transaction. Exported for the checks that roll it back. */
-export async function createQuote(tx: Prisma.TransactionClient, data: QuoteInput, userId: string) {
-  const { header, lines, charges } = await priceQuote(tx, data)
+export async function createQuote(tx: Prisma.TransactionClient, data: QuoteInput, userId: string, canOverride = false) {
+  const { header, lines, charges } = await priceQuote(tx, data, { canOverride })
   const quoteDate = data.quoteDate ?? new Date()
   // Priced and checked first: a refused quotation takes no number.
   const quoteNumber = await nextDocumentNumber(tx, 'QT', quoteDate)
@@ -390,7 +392,7 @@ export async function createQuote(tx: Prisma.TransactionClient, data: QuoteInput
 
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = quoteSchema.parse(req.body)
-  const quote = await prisma.$transaction((tx) => createQuote(tx, data, req.user!.id), { timeout: 30_000 })
+  const quote = await prisma.$transaction((tx) => createQuote(tx, data, req.user!.id, userCan(req.user, 'masters', 'edit')), { timeout: 30_000 })
   await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'SalesQuotation', entityId: quote.id, after: quote })
   res.status(201).json({ success: true, message: `${quote.quoteNumber} ${quote.status === 'SENT' ? 'saved and marked sent' : 'saved as a draft'}`, data: quote })
 })
@@ -405,7 +407,7 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
       if (before.status === 'WON' || before.status === 'LOST') {
         throw new AppError(`${before.quoteNumber} is ${before.status.toLowerCase()}, so it can no longer change. Copy it into a new one.`, 409, 'DECIDED')
       }
-      const { header, lines, charges } = await priceQuote(tx, data)
+      const { header, lines, charges } = await priceQuote(tx, data, { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
       await tx.salesQuotationLine.deleteMany({ where: { quoteId: before.id } })
       await tx.salesQuotationCharge.deleteMany({ where: { quoteId: before.id } })
       const sending = data.send && before.status === 'DRAFT'

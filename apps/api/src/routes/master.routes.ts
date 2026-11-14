@@ -2152,6 +2152,37 @@ router.use(
     searchFields: ['name'],
     sortableFields: ['name', 'defaultGstRate', 'percentOfValue'],
     defaultSort: { field: 'name', order: 'asc' },
+    include: { defaultHsnCode: { select: { code: true, description: true, gstRate: true } }, salesHsnCode: { select: { code: true, description: true, gstRate: true } } },
+    beforeSave: async (data, before) => {
+      const merged = { ...before, ...data }
+      if (merged.salesHsnCodeId) {
+        const hsn = await prisma.hsnCode.findUnique({ where: { id: String(merged.salesHsnCodeId) } })
+        if (!hsn?.isActive || hsn.priceLimit != null) throw new AppError('Choose an active sales HSN / SAC with a single charge rate.', 400, 'INVALID_CHARGE_HSN')
+      }
+      if (merged.taxReviewRequired === false) {
+        for (const side of ['sales', 'purchase']) {
+          const enabled = side === 'sales' ? merged.applyOnSale : merged.applyOnPurchase
+          const category = merged[`${side}TaxCategory`]
+          if (enabled && category === 'UNSPECIFIED') throw new AppError('Classify zero GST before clearing the review flag.', 400, 'CHARGE_REVIEW_REQUIRED')
+        }
+      }
+      const mode = (data.defaultGstMode ?? before?.defaultGstMode) as string | undefined
+      const code = data.defaultHsnCodeId !== undefined ? data.defaultHsnCodeId : before?.defaultHsnCodeId
+      if (mode === 'HSN') {
+        if (!code) {
+          throw new AppError('Pick an HSN / SAC code for its usual GST, or choose a different way to set it.', 400, 'NO_DEFAULT_HSN')
+        }
+        const sac = await prisma.hsnCode.findUnique({ where: { id: code as string }, select: { isActive: true, priceLimit: true } })
+        if (!sac?.isActive || sac.priceLimit != null) {
+          throw new AppError('That HSN / SAC code is no longer in the HSN master. Pick another.', 400, 'INVALID_DEFAULT_HSN')
+        }
+      }
+      // Only HSN keeps the code it starts from; MANUAL and NONE have nothing to remember here.
+      return { data: mode === 'HSN' ? data : { ...data, defaultHsnCodeId: null } }
+    },
+    // Each charge with its default SAC's own rate, so the form can show "SAC 9965 · 18%" without a second lookup.
+    afterRead: async (rows) =>
+      rows.map((r) => ({ ...r, defaultHsnRate: (r.defaultHsnCode as { gstRate?: unknown } | null)?.gstRate != null ? Number((r.defaultHsnCode as { gstRate: unknown }).gstRate) : null })),
   }),
 )
 

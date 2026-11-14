@@ -1,5 +1,8 @@
 'use client'
 
+import { ChargeTaxDetails, taxOverridePayload } from '../purchase/ChargeTaxDetails'
+import { chargeConfigOf, savedChargeConfig, type ChargeMasterConfig, type ChargeTaxSnapshot } from '@ld-erp/shared'
+
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -83,7 +86,7 @@ interface Prepared {
     sizes: Array<{ code: string; qty: number }>
   }>
   /** What of the order's charges is still to bill, each with how the order priced it. */
-  charges: Array<{ chargeTypeId: string; name: string; amount: number; gstRate: number; taxTreatment?: ChargeTaxTreatment }>
+  charges: Array<{ inputAmount?: number; amountMode?: 'FIXED' | 'PERCENT'; sourceChargeId?: string; taxSnapshot?: ChargeTaxSnapshot | null; chargeTypeId: string; name: string; amount: number; gstRate: number; taxTreatment?: ChargeTaxTreatment }>
   otherCharges: number
   defaults: { invoiceDate: string; dueDate: string }
   /** India dates: today, and the year's last invoice, which a new one may not be dated before. */
@@ -92,7 +95,7 @@ interface Prepared {
   ownMaterial?: { cost: number; billed: number; toBill: number; lines: Array<{ item: { name: string; uom: string | null }; qty: number; value: number }> } | null
 }
 
-interface ChargeTypeOption {
+interface ChargeTypeOption extends ChargeMasterConfig {
   id: string
   name: string
   defaultGstRate: string | number
@@ -103,6 +106,10 @@ interface ChargeTypeOption {
 }
 
 interface ChargeDraft {
+  sourceChargeId?: string
+  config?: ChargeTaxSnapshot
+  taxOverride?: ChargeTaxSnapshot
+  amountMode?: 'FIXED' | 'PERCENT'
   key: string
   chargeTypeId: string
   amount: string
@@ -259,9 +266,10 @@ export function SalesInvoiceDialog({
           d.charges.map((c) => ({
             key: `c${++chargeKey}`,
             chargeTypeId: c.chargeTypeId,
-            amount: String(c.amount),
+            amount: String(c.inputAmount ?? c.amount),
             gstRate: String(c.gstRate),
             treatment: c.taxTreatment,
+            sourceChargeId: c.sourceChargeId, config: savedChargeConfig(c), amountMode: c.amountMode ?? 'FIXED',
           }))
         )
         setOtherCharges(d.otherCharges > 0 ? String(d.otherCharges) : '')
@@ -322,16 +330,15 @@ export function SalesInvoiceDialog({
       const type = chargeTypeById.get(c.chargeTypeId)
       const amount = Number(c.amount) || 0
       // Our own trims are goods of their own, at their own rate, GST added on top like a goods line.
-      const own = c.ownMaterial ? (c.gstRate !== '' ? Number(c.gstRate) || 0 : Number(type?.defaultGstRate ?? 0)) : null
-      const treatment: ChargeTaxTreatment = own != null ? 'EXCLUSIVE' : (c.treatment ?? type?.taxTreatment ?? 'INCLUSIVE')
+      const base = c.taxOverride ?? c.config ?? chargeConfigOf(type ?? { name: 'Charge', defaultGstRate: 0 }, 'sales')
+      const config: ChargeTaxSnapshot = { ...base, amountMode: c.amountMode ?? 'FIXED', inputAmount: amount,
+        ...(c.ownMaterial ? { followsGoodsRate: false, treatment: 'EXCLUSIVE' as const } : {}) }
+      const treatment = config.treatment
       const p = priceSaleCharge(
-        { key: c.key, amount, treatment, followsGoodsRate: own == null && (type?.followsGoodsRate ?? true), ownRate: own ?? Number(type?.defaultGstRate ?? 0) },
-        goods,
-        !!intra,
-      )
-      return { ...c, type, value: amount, treatment, priced: p, rateText: p.rateText, net: p.net, cgst: p.cgst, sgst: p.sgst, igst: p.igst }
+        { key: c.key, amount, treatment, followsGoodsRate: config.followsGoodsRate, ownRate: config.ownRate, amountMode: config.amountMode, taxCategory: config.taxCategory }, goods, !!intra)
+      return { ...c, config, type, value: amount, treatment, priced: p, rateText: p.rateText, net: p.net, cgst: p.cgst, sgst: p.sgst, igst: p.igst }
     })
-    const live = chargeRows.filter((c) => c.type && c.value > 0)
+    const live = chargeRows.filter((c) => (c.type || c.sourceChargeId) && c.value > 0)
     // What the charges add before their GST: each one's value without GST.
     const chargeTotal = round2(live.reduce((s, c) => s + c.net, 0))
     const sum = (k: 'cgst' | 'sgst' | 'igst') =>
@@ -359,7 +366,7 @@ export function SalesInvoiceDialog({
     }
   }, [prep, charges, chargeTypeById, otherCharges])
 
-  const chargeNoType = totals?.chargeRows.find((c) => !c.type && c.value > 0)
+  const chargeNoType = totals?.chargeRows.find((c) => !c.type && !c.sourceChargeId && c.value > 0)
   // The server checks the same; an earlier year's date is left to it, as that year has its own series.
   const range = prep?.dateRange
   const todayIn = range?.today
@@ -405,6 +412,7 @@ export function SalesInvoiceDialog({
           .map((c) => ({
             chargeTypeId: c.chargeTypeId,
             amount: c.value,
+            sourceChargeId: c.sourceChargeId, amountMode: c.amountMode ?? 'FIXED', taxOverride: taxOverridePayload(c.taxOverride),
             gstRate: c.ownMaterial && c.gstRate !== '' ? Number(c.gstRate) || 0 : null,
             ownMaterial: !!c.ownMaterial,
             taxTreatment: c.treatment,
@@ -665,7 +673,7 @@ export function SalesInvoiceDialog({
                               <SmartSelect
                                 className="form-input h-8 min-w-0 flex-1 text-xs"
                                 value={c.chargeTypeId}
-                                onChange={(e) => setCharge(c.key, { chargeTypeId: e.target.value, gstRate: '' })}
+                                onChange={(e) => setCharge(c.key, { chargeTypeId: e.target.value, gstRate: '', config: undefined, sourceChargeId: undefined, taxOverride: undefined })}
                                 aria-label={`Charge ${i + 1}`}
                               >
                                 <option value="">{c.ownMaterial ? 'Which charge bills our trims…' : 'Charge…'}</option>
@@ -685,18 +693,7 @@ export function SalesInvoiceDialog({
                                 onValueChange={(v) => setCharge(c.key, { amount: v })}
                                 aria-label={`Charge ${i + 1} amount`}
                               />
-                              {c.ownMaterial ? (
-                                <StepInput
-                                  decimals
-                                  max={100}
-                                  className="form-input h-8 w-14 shrink-0 text-right text-xs tabular-nums"
-                                  placeholder={c.type ? String(Number(c.type.defaultGstRate)) : 'GST%'}
-                                  value={c.gstRate}
-                                  onValueChange={(v) => setCharge(c.key, { gstRate: v })}
-                                  aria-label={`Charge ${i + 1} GST rate`}
-                                  title="GST % on our own trims"
-                                />
-                              ) : null}
+
                               <button
                                 type="button"
                                 onClick={() => setCharges((cs) => cs.filter((x) => x.key !== c.key))}
@@ -707,11 +704,12 @@ export function SalesInvoiceDialog({
                               </button>
                             </div>
                             {/* What the figure does to the bill, as the order priced the charge. */}
-                            {!c.ownMaterial && c.type && c.value > 0 && (
-                              <p className="text-muted-foreground pr-7 text-right text-[11px] tabular-nums" aria-label={`Charge ${i + 1} GST`}>
-                                {chargeNote(c.priced)}
-                              </p>
-                            )}
+                            {c.type && <>
+                              <div className="flex justify-end" role="group" aria-label={`Charge ${i + 1} amount type`}>
+                                {(['FIXED', 'PERCENT'] as const).map(mode => <button key={mode} type="button" className="btn-ghost px-2 text-xs" aria-pressed={(c.amountMode ?? 'FIXED') === mode} onClick={() => setCharge(c.key, { amountMode: mode })}>{mode === 'FIXED' ? '₹' : '%'}</button>)}
+                              </div>
+                              <ChargeTaxDetails config={c.config} priced={{ ...c.priced, amount: c.priced.net }} onOverride={value => setCharge(c.key, { taxOverride: value })} />
+                            </>}
                             </div>
                           )
                         })}

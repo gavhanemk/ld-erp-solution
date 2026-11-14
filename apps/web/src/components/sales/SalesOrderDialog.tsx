@@ -934,7 +934,7 @@ export function SalesOrderDialog({
   const filled = totals.lines.filter((p) => p.line.itemId)
   const unfinished = filled.filter((p) => p.qty <= 0 || p.line.unitPrice.trim() === '')
   const noGst = filled.filter((p) => p.gst === null)
-  const chargeNoType = charges.find((c) => !chargeTypeById.get(c.chargeTypeId) && (Number(c.amount) || 0) > 0)
+  const chargeNoType = charges.find((c) => !chargeTypeById.get(c.chargeTypeId) && !c.config && (Number(c.amount) || 0) > 0)
   const blocker = !customerId
     ? 'Choose a customer to save this order.'
     : context?.placeOfSupplyProblem

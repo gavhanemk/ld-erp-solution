@@ -93,7 +93,7 @@ export interface HsnOption {
   gstRate: string | number
 }
 
-const GST_MODE_SHORT: Record<ChargeGstMode, string> = { HSN: 'HSN', MANUAL: '%', NONE: 'None' }
+const GST_MODE_SHORT: Record<ChargeGstMode, string> = { INHERIT: 'Goods', HSN: 'HSN', MANUAL: '%', NONE: 'None' }
 
 /**
  * Where one charge's GST comes from, beside its amount box: an HSN / SAC code

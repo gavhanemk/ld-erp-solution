@@ -1,5 +1,7 @@
 'use client'
 
+import { ChargeTaxDetails, taxOverridePayload } from './ChargeTaxDetails'
+
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -34,7 +36,7 @@ import { SuggestInput } from '@/components/ui/SuggestInput'
 import { StepInput } from '@/components/ui/StepInput'
 import { ExpenseTdsPanel, type TdsChoice } from '@/components/purchase/ExpenseTdsPanel'
 import { ChargeGstControl, TaxBreakdown, type HsnOption } from '@/components/purchase/TaxBreakdown'
-import { priceDocument, type ChargeGstMode, type GstSplit } from '@ld-erp/shared'
+import { chargeConfigOf, chargeSnapshot, savedChargeConfig, type ChargeMasterConfig, type ChargeTaxSnapshot, priceDocument, type ChargeGstMode, type GstSplit } from '@ld-erp/shared'
 import {
   CashPaymentSection,
   cashPaymentMissing,
@@ -76,6 +78,11 @@ export interface BillLine {
 }
 
 export interface BillCharge {
+  id?: string
+  sourceChargeId?: string
+  taxSnapshot?: ChargeTaxSnapshot | null
+  amountMode?: 'FIXED' | 'PERCENT'
+  taxOverride?: ChargeTaxSnapshot
   chargeTypeId: string
   amount: number | string
   /** Where gstRate comes from — see resolveBillCharges on the server. */
@@ -211,7 +218,7 @@ export interface PurchaseBill {
   noteAdjustment?: string | number
 }
 
-interface Option {
+interface Option extends Partial<ChargeMasterConfig> {
   id: string
   code?: string
   name: string
@@ -223,6 +230,9 @@ interface Option {
   uom?: { symbol: string } | null
   defaultGstRate?: string | number | null
   applyOnPurchase?: boolean
+  /** How a new row of this charge starts its GST, and the SAC it starts from when that is HSN. */
+  defaultGstMode?: ChargeGstMode
+  defaultHsnCodeId?: string | null
   /** Payment to an MSME supplier falls due within 45 days by law. */
   isMsme?: boolean
   /** The terms agreed with this supplier — what the due date is counted in. */
@@ -628,7 +638,8 @@ export function PurchaseBillDialog({
     setCharges(
       record?.charges?.map((c) => ({
         chargeTypeId: c.chargeTypeId,
-        amount: String(c.amount),
+        amount: String(savedChargeConfig(c).inputAmount),
+        sourceChargeId: c.id, taxSnapshot: savedChargeConfig(c), amountMode: savedChargeConfig(c).amountMode,
         gstMode:
           c.gstMode === 'HSN' || c.gstMode === 'MANUAL' ? c.gstMode : Number(c.gstRate ?? 0) > 0 ? 'MANUAL' : 'NONE',
         hsnCodeId: c.hsnCodeId ?? '',
@@ -1118,6 +1129,9 @@ export function PurchaseBillDialog({
       .get<{
         success: boolean
         data: Array<{
+          sourceChargeId?: string
+          amountMode?: 'FIXED' | 'PERCENT'
+          taxSnapshot?: ChargeTaxSnapshot | null
           chargeTypeId: string
           name: string
           amount: number | string
@@ -1138,6 +1152,7 @@ export function PurchaseBillDialog({
           rows.map((c) => ({
             chargeTypeId: c.chargeTypeId,
             amount: String(c.amount),
+            sourceChargeId: c.sourceChargeId, taxSnapshot: savedChargeConfig(c), amountMode: c.amountMode ?? 'FIXED',
             gstMode:
               c.gstMode === 'HSN' || c.gstMode === 'MANUAL' ? c.gstMode : Number(c.gstRate ?? 0) > 0 ? 'MANUAL' : 'NONE',
             hsnCodeId: c.hsnCodeId ?? '',
@@ -1516,11 +1531,12 @@ export function PurchaseBillDialog({
    * The rate actually applied to a charge: an HSN / SAC code's rate, a rate
    * typed by hand, or 0 when there is none.
    */
-  const chargeRateOf = (c: BillCharge) => {
-    if (c.gstMode === 'NONE') return 0
-    if (c.gstMode === 'HSN') return Number(hsnCodes.find((h) => h.id === c.hsnCodeId)?.gstRate ?? 0)
-    return num(String(c.gstRate))
+  const configForCharge = (c: BillCharge): ChargeTaxSnapshot => {
+    const type = chargeTypes.find(t => t.id === c.chargeTypeId)
+    const base = c.taxOverride ?? c.taxSnapshot ?? chargeConfigOf({ ...type, name: type?.name ?? 'Charge', defaultGstRate: type?.defaultGstRate ?? 0 }, 'purchase')
+    return { ...base, amountMode: c.amountMode ?? 'FIXED', inputAmount: num(c.amount) }
   }
+  const chargeRateOf = (c: BillCharge) => configForCharge(c).ownRate
 
   /*
    * The bill's figures, from the one calculation the server prices it with.
@@ -1553,11 +1569,12 @@ export function PurchaseBillDialog({
           key: c.chargeTypeId || `row-${i}`,
           amount: num(c.amount),
           gstRate: chargeRateOf(c),
+          config: configForCharge(c),
         })),
         split: priceSplit,
         reverseCharge: isReverseCharge,
       }),
-    [lines, charges, discountAmount, priceSplit, isReverseCharge, hsnCodes]
+    [lines, charges, discountAmount, priceSplit, isReverseCharge, hsnCodes, chargeTypes]
   )
 
   /** The figures the form shows, with TDS and what is left to pay on top. */
@@ -1835,6 +1852,7 @@ export function PurchaseBillDialog({
         .map((c) => ({
           chargeTypeId: c.chargeTypeId,
           amount: num(c.amount),
+          amountMode: c.amountMode ?? 'FIXED', sourceChargeId: c.sourceChargeId, taxOverride: taxOverridePayload(c.taxOverride),
           gstMode: c.gstMode,
           hsnCodeId: c.gstMode === 'HSN' ? c.hsnCodeId || null : null,
           gstRate: chargeRateOf(c),
@@ -3109,7 +3127,7 @@ export function PurchaseBillDialog({
                           </div>
                         )}
                         {charges.map((c, i) => {
-                          const name = chargeTypes.find((ct) => ct.id === c.chargeTypeId)?.name ?? `Charge ${i + 1}`
+                          const name = c.taxSnapshot?.name ?? chargeTypes.find((ct) => ct.id === c.chargeTypeId)?.name ?? `Charge ${i + 1}`
                           const p = priced.charges[i]
                           return (
                             <div key={i}>
@@ -3120,21 +3138,27 @@ export function PurchaseBillDialog({
                                   onChange={(e) => {
                                     const id = e.target.value
                                     const type = chargeTypes.find((ct) => ct.id === id)
+                                    // The SAC a type usually takes its GST from, when it's
+                                    // still active; a retired one falls back to manual
+                                    // rather than silently picking nothing.
+                                    const sacStillActive = type?.defaultGstMode === 'HSN' && hsnCodes.some((h) => h.id === type?.defaultHsnCodeId)
+                                    const mode: ChargeGstMode = type?.defaultGstMode === 'HSN' && !sacStillActive ? 'MANUAL' : (type?.defaultGstMode ?? 'MANUAL')
                                     setCharges((p) =>
                                       p.map((x, y) =>
                                         y === i
                                           ? {
                                               ...x,
-                                              chargeTypeId: id,
-                                              // Only the first time a type is picked for
-                                              // this row — its own GST starts at the
-                                              // charge type's usual rate, Masters →
-                                              // Charges' defaultGstRate, as a manual
-                                              // figure the buyer can still change.
+                                              chargeTypeId: id, taxSnapshot: undefined, sourceChargeId: undefined, taxOverride: undefined,
+                                              // Only the first time a type is picked for this
+                                              // row — its own GST starts as the charge type
+                                              // sets under Masters → Charges: its usual HSN /
+                                              // SAC code, a manual figure at its usual rate, or
+                                              // not applicable — and can still be changed here.
                                               ...(x.chargeTypeId
                                                 ? {}
                                                 : {
-                                                    gstMode: 'MANUAL' as ChargeGstMode,
+                                                    gstMode: mode,
+                                                    hsnCodeId: mode === 'HSN' ? (type?.defaultHsnCodeId ?? '') : '',
                                                     gstRate:
                                                       Number(type?.defaultGstRate) > 0
                                                         ? String(Number(type?.defaultGstRate))
@@ -3148,6 +3172,7 @@ export function PurchaseBillDialog({
                                   aria-label={`Charge ${i + 1} type`}
                                 >
                                   <option value="">Pick a charge…</option>
+                                  {c.taxSnapshot && !chargeTypes.some(ct => ct.id === c.chargeTypeId) && <option value={c.chargeTypeId}>{c.taxSnapshot.name} (saved)</option>}
                                   {chargeTypes.map((ct) => (
                                     <option key={ct.id} value={ct.id}>
                                       {ct.name}
@@ -3174,25 +3199,13 @@ export function PurchaseBillDialog({
                                 </button>
                               </div>
                               {c.chargeTypeId && (
-                                <ChargeGstControl
-                                  mode={c.gstMode}
-                                  onMode={(m) =>
-                                    setCharges((p) => p.map((x, y) => (y === i ? { ...x, gstMode: m } : x)))
-                                  }
-                                  hsnId={c.hsnCodeId}
-                                  onHsnId={(id) =>
-                                    setCharges((p) => p.map((x, y) => (y === i ? { ...x, hsnCodeId: id } : x)))
-                                  }
-                                  manualRate={String(c.gstRate)}
-                                  onManualRate={(v) =>
-                                    setCharges((p) => p.map((x, y) => (y === i ? { ...x, gstRate: v } : x)))
-                                  }
-                                  hsnOptions={hsnCodes}
-                                  label={name}
-                                  disabled={taxMode === 'NONE'}
-                                  resolvedRate={p?.gstRate ?? 0}
-                                  tax={p?.tax ?? 0}
-                                />
+                                <div>
+                                  <div className="flex justify-end gap-2" role="group" aria-label={`${name} amount type`}>
+                                    {(['FIXED', 'PERCENT'] as const).map(mode => <button key={mode} type="button" className="btn-ghost px-2 text-xs" aria-pressed={(c.amountMode ?? 'FIXED') === mode} onClick={() => setCharges(rows => rows.map((x, y) => y === i ? { ...x, amountMode: mode } : x))}>{mode === 'FIXED' ? '₹' : '%'}</button>)}
+                                  </div>
+                                  <ChargeTaxDetails config={configForCharge(c)} priced={p} hsnOptions={hsnCodes}
+                                    onOverride={value => setCharges(rows => rows.map((x, y) => y === i ? { ...x, taxOverride: value } : x))} />
+                                </div>
                               )}
                             </div>
                           )

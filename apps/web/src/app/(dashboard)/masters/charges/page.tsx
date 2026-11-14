@@ -1,6 +1,6 @@
 'use client'
 
-import { CHARGE_TAX_TREATMENT_LABEL, type ChargeTaxTreatment } from '@ld-erp/shared'
+import { chargeConfigOf, type ChargeMasterConfig, CHARGE_GST_MODE_LABEL, CHARGE_TAX_TREATMENT_LABEL, type ChargeGstMode, type ChargeTaxTreatment } from '@ld-erp/shared'
 import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 
@@ -14,7 +14,7 @@ import type { FormField } from '@/components/masters/MasterFormDialog'
  * goods) or the GST % set here. A sales order or quotation row starts
  * with these and can change them for that one document.
  */
-interface ChargeType {
+interface ChargeType extends ChargeMasterConfig {
   id: string
   name: string
   defaultGstRate: string | number
@@ -26,16 +26,31 @@ interface ChargeType {
   percentOfValue: string | number
   applyOnSale: boolean
   applyOnPurchase: boolean
+  taxReviewRequired?: boolean
   isActive: boolean
   taxTreatment: ChargeTaxTreatment
   followsGoodsRate: boolean
+  /** How a purchase order or bill starts this charge's GST; authorized users can override it in Advanced Tax Settings. */
+  defaultGstMode: ChargeGstMode
+  defaultHsnCodeId: string | null
+  defaultHsnCode?: { code: string; gstRate?: string | number } | null
+  /** The chosen SAC's own rate, sent alongside so the column needs no second lookup. */
+  defaultHsnRate: number | null
+}
+
+function describeTax(c: ChargeType, side: 'sales' | 'purchase') {
+  if (!(side === 'sales' ? c.applyOnSale : c.applyOnPurchase)) return <span>-</span>
+  const cfg = chargeConfigOf(c, side)
+  const zero = !['TAXABLE', 'UNSPECIFIED'].includes(cfg.taxCategory)
+  return <span>{zero ? cfg.taxCategory.replace('_', ' ') : cfg.followsGoodsRate ? "Goods' rates" : cfg.hsnCode ? `${cfg.hsnCode} / ${cfg.ownRate}%` : `${cfg.ownRate}%`}
+    <span className="text-muted-foreground"> / {cfg.treatment === 'INCLUSIVE' ? 'GST-inclusive' : 'GST-exclusive'}</span></span>
 }
 
 const columns: Column<ChargeType>[] = [
   { key: 'name', header: 'Charge', sortable: true, className: 'font-medium' },
   {
     key: 'defaultGstRate',
-    header: 'GST',
+    header: 'Own GST fallback',
     align: 'right',
     sortable: true,
     render: (c) => <span className="font-semibold">{Number(c.defaultGstRate)}%</span>,
@@ -73,20 +88,10 @@ const columns: Column<ChargeType>[] = [
     },
   },
   {
-    key: 'taxTreatment',
-    header: 'GST on a sale',
-    render: (c) =>
-      c.applyOnSale ? (
-        <span>
-          {CHARGE_TAX_TREATMENT_LABEL[c.taxTreatment] ?? c.taxTreatment}
-          {c.taxTreatment !== 'NON_TAXABLE' && (
-            <span className="text-muted-foreground"> · {c.followsGoodsRate ? "goods' rate" : `${Number(c.defaultGstRate)}%`}</span>
-          )}
-        </span>
-      ) : (
-        <span className="text-muted-foreground">—</span>
-      ),
+    key: 'taxTreatment', header: 'GST on a sale', render: c => describeTax(c, 'sales'),
   },
+  { key: 'defaultGstMode', header: 'GST on a purchase', render: c => describeTax(c, 'purchase') },
+  { key: 'taxReviewRequired', header: 'Tax review', render: (c) => c.taxReviewRequired ? <span className="warn-text">Administrator review needed</span> : <span>Reviewed</span> },
   { key: 'isActive', header: 'Status', render: (c) => <ActiveBadge isActive={c.isActive} /> },
 ]
 
@@ -120,21 +125,21 @@ const formFields: FormField[] = [
     label: 'GST on a sale',
     type: 'select',
     required: true,
-    valueForNew: 'INCLUSIVE',
+    valueForNew: 'EXCLUSIVE',
     options: [
       { value: 'INCLUSIVE', label: 'GST included in the amount typed' },
       { value: 'EXCLUSIVE', label: 'GST added on top of the amount' },
       { value: 'NON_TAXABLE', label: 'No GST on it' },
     ],
-    help: 'How a sales order or quotation starts this charge — each row can still change it',
+    help: 'Default amount type for a sales charge — authorized users can override it in Advanced Tax Settings',
   },
   {
     name: 'followsGoodsRate',
     label: 'Rate on a sale',
     type: 'checkbox',
-    checkedForNew: true,
+    checkedForNew: false,
     placeholder: "Take the goods' GST rate",
-    help: 'A charge billed with the goods is taxed at their rate. Untick to use the GST % above',
+    help: 'Select only when this charge is incidental to the goods supply. Untick to use the GST % above',
   },
   {
     name: 'applyOnPurchase',
@@ -142,6 +147,48 @@ const formFields: FormField[] = [
     type: 'checkbox',
     placeholder: 'Offer on supplier bills',
   },
+  {
+    name: 'defaultGstMode',
+    label: 'GST on a purchase',
+    type: 'select',
+    required: true,
+    valueForNew: 'MANUAL',
+    showIf: (v) => Boolean(v.applyOnPurchase),
+    options: [
+      { value: 'HSN', label: 'By HSN / SAC code' },
+      { value: 'INHERIT', label: 'Inherit from goods (incidental charge)' },
+      { value: 'MANUAL', label: 'A % I set' },
+      { value: 'NONE', label: 'Not applicable' },
+    ],
+    help: 'How a purchase order or bill starts this charge — authorized users can override it in Advanced Tax Settings',
+  },
+  {
+    name: 'defaultHsnCodeId',
+    label: 'Usual SAC',
+    type: 'select',
+    showIf: (v) => Boolean(v.applyOnPurchase) && v.defaultGstMode === 'HSN',
+    optionsFrom: { resource: 'hsn-codes', labelKey: 'code' },
+    emptyLabel: 'No SAC',
+    help: 'From Masters → HSN / SAC Codes — 9965 for goods transport, say',
+  },
+  {
+    name: 'salesHsnCodeId', label: 'Own sales HSN / SAC', type: 'select',
+    optionsFrom: { resource: 'hsn-codes', labelKey: 'code' },
+    help: 'For a separately classified charge, turn off goods inheritance and select its classification here.',
+  },
+  {
+    name: 'purchaseTaxTreatment', label: 'Purchase amount includes GST?', type: 'select', valueForNew: 'EXCLUSIVE',
+    options: [{ value: 'EXCLUSIVE', label: 'GST-exclusive (add tax)' }, { value: 'INCLUSIVE', label: 'GST-inclusive (extract tax)' }],
+  },
+  ...(['sales', 'purchase'] as const).map((side): FormField => ({
+    name: `${side}TaxCategory`, label: `${side === 'sales' ? 'Sales' : 'Purchase'} tax classification`,
+    type: 'select', valueForNew: 'TAXABLE', required: true,
+    options: [{ value: 'TAXABLE', label: 'Taxable' }, { value: 'EXEMPT', label: 'Exempt' },
+      { value: 'NIL_RATED', label: 'Nil-rated' }, { value: 'NON_GST', label: 'Non-GST' },
+      { value: 'UNSPECIFIED', label: 'Unclassified legacy setting - review required' }],
+  })),
+  { name: 'taxReviewRequired', label: 'Tax configuration needs review', type: 'checkbox',
+    help: 'Existing records are flagged for review. Clear after confirming classification on both sides.' },
   {
     name: 'isActive',
     label: 'Active',

@@ -40,6 +40,8 @@ export interface TotalsLine {
 
 /** A charge as the form has it: its figure, how GST sits on it, and the rate it falls back on. */
 export interface TotalsCharge {
+  amountMode?: 'FIXED' | 'PERCENT'
+  taxCategory?: import('@ld-erp/shared').ChargeTaxCategory
   key: string
   amount: number
   treatment: ChargeTaxTreatment
