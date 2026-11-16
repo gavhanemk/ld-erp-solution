@@ -1276,7 +1276,7 @@ router.get('/requisitions', requirePermission(MODULE, 'view'), async (req, res) 
     prisma.materialRequisition.findMany({
       where,
       include: mrInclude,
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (page - 1) * limit,
       take: limit,
     }),
