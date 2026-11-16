@@ -17,6 +17,10 @@ $env:NEXT_PUBLIC_SOCKET_URL='http://localhost:5102'
 $env:NEXT_PUBLIC_SAMPLING_ENABLED='true'
 $env:SAMPLING_WEB_DIST='.next-sampling'
 $env:NEXT_TELEMETRY_DISABLED='1'
+# Tech packs and other uploads stay on this PC under the pilot's state folder, never in shared storage.
+$env:STORAGE_DRIVER='local'
+$env:LOCAL_STORAGE_DIR="$state/files"
+$env:LOCAL_STORAGE_BASE_URL='http://localhost:5102/api/local-files'
 New-Item -ItemType Directory -Path $state -Force | Out-Null
 function RunNode($argsForNode) { & node @argsForNode; if($LASTEXITCODE -ne 0){throw "Node command failed: $($argsForNode[0])"} }
 if($Action -eq 'Stop') {
@@ -32,6 +36,16 @@ if($Action -eq 'Stop') {
   exit
 }
 if(Test-Path "$state/processes.json") { throw 'A pilot session has already been started. Run -Action Stop before preparing or restarting.' }
+# Signs the file links. Made once and kept, so links already handed out survive a restart; never printed.
+$secretFile = Join-Path $state 'storage.secret'
+if(!(Test-Path $secretFile) -or !([IO.File]::ReadAllText($secretFile).Trim())) {
+  $secretBytes = New-Object byte[] 48
+  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $rng.GetBytes($secretBytes) } finally { $rng.Dispose() }
+  [IO.File]::WriteAllText($secretFile, [Convert]::ToBase64String($secretBytes))
+}
+$env:LOCAL_STORAGE_SECRET = [IO.File]::ReadAllText($secretFile).Trim()
+New-Item -ItemType Directory -Path $env:LOCAL_STORAGE_DIR -Force | Out-Null
 if(!(Test-Path "$pgBin/initdb.exe")){throw 'PostgreSQL tools were not found. Set PG_BIN to their bin directory.'}
 if(!(Test-Path "$state/data/PG_VERSION")) {
   $init = Start-Process "$pgBin/initdb.exe" -ArgumentList @('-D',('"'+"$state/data"+'"'),'-U','postgres','-A','trust','--no-locale','-E','UTF8') -WindowStyle Hidden -RedirectStandardOutput "$state/init.log" -RedirectStandardError "$state/init.err.log" -Wait -PassThru

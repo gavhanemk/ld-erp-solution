@@ -212,6 +212,30 @@ async function main() {
     403,
     'sampling:view,sampling:edit'
   )
+  // Pilot roles as the fixtures made them, read from the database.
+  const grantsOf = async (name) =>
+    (
+      await db.rolePermission.findMany({
+        where: { role: { name } },
+        select: { permission: { select: { module: true, action: true } } },
+      })
+    )
+      .map((g) => `${g.permission.module}:${g.permission.action}`)
+      .sort()
+  const merchGrants = await grantsOf('Merchandiser'),
+    storeGrants = await grantsOf('Local Store')
+  // Issuing needs inventory edit as well as sampling edit, and no desk below
+  // Admin holds both, so until issuing from the Sample Store is reworked
+  // (phase 4) only Admin issues sample material. Recorded here so the gap is
+  // known rather than found in testing, and so a change to it is deliberate.
+  const issueForSample = { materialId: mat.id, kind: 'ISSUE', qty: 5, reason: 'Issue for sample' }
+  const merchIssue = await action('MATERIAL', issueForSample, 403, merchGrants.join(','))
+  const storeIssue = await action('MATERIAL', issueForSample, 403, storeGrants.join(','))
+  check('until phase 4 neither merchandiser nor store login can issue sample material', () => {
+    assert.equal(merchIssue.body.code, 'FORBIDDEN')
+    assert.match(merchIssue.body.message, /inventory edit/)
+    assert.equal(storeIssue.status, 403)
+  })
   const stock = await db.stockLedger.aggregate({
     where: { itemId: 'sample-fabric', warehouseId: 'sample-store' },
     _sum: { inQty: true, outQty: true },
@@ -579,6 +603,131 @@ async function main() {
   )
   doc = competingEdits.find((r) => r.status === 200).body.data
   await action('CANCEL', 'Local concurrency test complete; no material issued')
+
+  // Pilot masters the merchandiser workflow builds on. Expected values are written out here
+  // rather than read from the fixtures, so a wrong grant in the fixtures fails instead of passing.
+  check('merchandiser role holds exactly its sampling, purchase, stock and masters rights', () =>
+    assert.deepEqual(merchGrants, [
+      'dashboard:view',
+      'inventory:view',
+      'masters:view',
+      'purchase:create',
+      'purchase:edit',
+      'purchase:view',
+      'sampling:approve',
+      'sampling:create',
+      'sampling:edit',
+      'sampling:export',
+      'sampling:view',
+    ])
+  )
+  check('store role buys and moves stock but has no sampling rights', () => {
+    for (const g of ['inventory:approve', 'inventory:edit', 'purchase:create', 'purchase:edit'])
+      assert.ok(storeGrants.includes(g), g)
+    assert.equal(storeGrants.filter((g) => g.startsWith('sampling:')).length, 0)
+  })
+  const logins = await db.user.findMany({
+    where: { email: { in: ['merch@example.com', 'store@example.com'] } },
+    select: { email: true, status: true, role: { select: { name: true } } },
+  })
+  check('merchandiser and store logins carry their own roles', () =>
+    assert.deepEqual(
+      Object.fromEntries(logins.map((u) => [u.email, `${u.role.name} ${u.status}`])),
+      { 'merch@example.com': 'Merchandiser ACTIVE', 'store@example.com': 'Local Store ACTIVE' }
+    )
+  )
+  const asMerch = await call('GET', '', undefined, merchGrants.join(',')),
+    asStore = await call('GET', '', undefined, storeGrants.join(','))
+  check('merchandiser opens the sampling register; the store login is refused', () => {
+    assert.equal(asMerch.status, 200)
+    assert.equal(asStore.status, 403)
+  })
+  const company = await db.company.findUnique({ where: { id: 'sample-company' } })
+  check('company has the GST state a purchase order is taxed from', () => {
+    assert.equal(company.stateCode, '27')
+    assert.equal(company.gstin?.slice(0, 2), '27')
+  })
+  const suppliers = await db.supplier.findMany({
+    where: { code: { in: ['EX-SUP-TRIMS', 'EX-SUP-FABRIC', 'EX-SUP-EMB'] }, isActive: true },
+  })
+  check('registered same-state suppliers and an embroidery job worker exist', () => {
+    assert.deepEqual(
+      Object.fromEntries(suppliers.map((s) => [s.code, `${s.name} ${s.category}`])),
+      {
+        'EX-SUP-TRIMS': 'Example Trims Supplier TRIM',
+        'EX-SUP-FABRIC': 'Example Fabric Mill FABRIC',
+        'EX-SUP-EMB': 'Example Embroidery Unit SERVICE',
+      }
+    )
+    for (const s of suppliers) {
+      assert.equal(s.stateCode, '27', s.code)
+      assert.equal(s.gstin?.slice(0, 2), '27', s.code)
+      assert.ok(s.address, s.code)
+    }
+  })
+  const items = await db.item.findMany({
+    where: { code: { in: ['EX-FAB-002', 'EX-TRM-001', 'EX-TRM-002', 'EX-THR-001'] } },
+    select: { code: true, type: true, taxRate: { select: { rate: true } } },
+  })
+  check('sample fabric, trims and thread carry the GST rate the order form fills in', () =>
+    assert.deepEqual(
+      Object.fromEntries(items.map((i) => [i.code, `${i.type} ${Number(i.taxRate?.rate)}`])),
+      {
+        'EX-FAB-002': 'RAW_MATERIAL 5',
+        'EX-TRM-001': 'TRIM 12',
+        'EX-TRM-002': 'TRIM 12',
+        'EX-THR-001': 'CONSUMABLE 12',
+      }
+    )
+  )
+  const processes = await db.operation.findMany({
+    where: { code: { in: ['EX-CUT', 'OP-STI', 'OP-EMB', 'OP-WSH', 'OP-FIN', 'OP-QC'] } },
+    select: {
+      id: true,
+      code: true,
+      kind: true,
+      defaultExecution: true,
+      isActive: true,
+      department: { select: { isActive: true } },
+    },
+  })
+  check('sample processes carry their kind and where they are usually done', () => {
+    assert.deepEqual(
+      Object.fromEntries(processes.map((o) => [o.code, `${o.kind} ${o.defaultExecution}`])),
+      {
+        'EX-CUT': 'CUTTING IN_HOUSE',
+        'OP-STI': 'STITCHING IN_HOUSE',
+        'OP-EMB': 'OTHER OUTSOURCED',
+        'OP-WSH': 'FINISHING OUTSOURCED',
+        'OP-FIN': 'FINISHING IN_HOUSE',
+        'OP-QC': 'QC IN_HOUSE',
+      }
+    )
+    for (const o of processes) assert.ok(o.isActive && o.department.isActive, o.code)
+  })
+  const tailor = await db.contractor.findUnique({ where: { code: 'EX-CON-001' } })
+  check('sample tailor takes stitching', () =>
+    assert.ok(tailor?.operationIds.includes(processes.find((o) => o.code === 'OP-STI').id))
+  )
+  const sampleStore = await db.warehouse.findUnique({ where: { code: 'EX-SAMPLE-STORE' } })
+  check('a sample store exists apart from the general store', () => {
+    assert.equal(sampleStore?.name, 'Example Sample Store')
+    assert.ok(sampleStore.isActive)
+    assert.notEqual(sampleStore.id, 'sample-store')
+  })
+  const pilotDocTypes = ['ENQ', 'GRN', 'JW', 'MR', 'PB', 'PO', 'STN']
+  const series = await db.numberSeries.findMany({
+    where: { companyId: 'sample-company', docType: { in: pilotDocTypes }, isActive: true },
+  })
+  check('pilot documents are numbered within the 16-character limit', () => {
+    assert.deepEqual([...new Set(series.map((s) => s.docType))].sort(), pilotDocTypes)
+    for (const s of series) {
+      const next = [s.prefix, s.financialYear, String(s.lastNumber + 1).padStart(s.padding, '0')]
+        .filter((part) => part !== '')
+        .join(s.separator)
+      assert.ok(next.length <= 16 && /^[A-Za-z0-9/-]*$/.test(next), next)
+    }
+  })
 
   console.log(`\n${passed} checks passed on local lderp_sampling. Shared database never accessed.`)
 }

@@ -3,6 +3,7 @@ import { prisma } from '@ld-erp/database'
 import { z } from 'zod'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
+import { samplingPilotEnabled } from '../lib/pilot'
 import { createSampleSchema, sampleActionSchema } from '../schemas/sampling.schemas'
 import {
   actOnSample,
@@ -12,19 +13,13 @@ import {
 } from '../services/sampling.service'
 
 const router = Router()
-/** The pilot must never point at the shared database, even with the flag set. */
+/**
+ * The pilot must never point at the shared database, even with the flag set.
+ * The rule itself lives in lib/pilot.ts, so local file storage asks exactly
+ * the same question and cannot drift from it.
+ */
 export function samplingEnabled() {
-  if (process.env.SAMPLING_ENABLED !== 'true' || process.env.NODE_ENV === 'production') return false
-  return ['DATABASE_URL', 'DIRECT_URL'].every((k) => {
-    try {
-      const u = new URL(process.env[k] ?? '')
-      return (
-        ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname) && u.pathname === '/lderp_sampling'
-      )
-    } catch {
-      return false
-    }
-  })
+  return samplingPilotEnabled()
 }
 router.use((_req, res, next) =>
   samplingEnabled()

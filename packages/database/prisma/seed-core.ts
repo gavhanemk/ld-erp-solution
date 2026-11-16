@@ -94,6 +94,26 @@ export async function seedCore(prisma: PrismaClient) {
     create: { name: 'Store Manager', description: 'Inventory & Purchase access' },
   })
 
+  // The merchandiser runs a sample request end to end: the buyer's tech pack,
+  // the purchase orders for sample fabric and trims, the making and outside
+  // work, dispatch to the buyer and the sample's cost sheet. Their grants are
+  // in step 10.
+  //
+  // Unlike the roles above, which this seed has always made, 'Merchandiser' is
+  // a name an administrator may already have given a role of their own in
+  // Settings → People, perhaps with view-only rights. The grants are added only
+  // when this run makes the role, so a hand-made role of that name is never
+  // widened behind its owner's back. Rights for it are then set in People.
+  const merchandiserExisted = await prisma.role.findUnique({
+    where: { name: 'Merchandiser' },
+    select: { id: true },
+  })
+  const merchandiserRole = await prisma.role.upsert({
+    where: { name: 'Merchandiser' },
+    update: {},
+    create: { name: 'Merchandiser', description: 'Sampling, and purchase for sample materials' },
+  })
+
   // 3. Admin User
   const hashedPassword = await bcrypt.hash('Admin@123', 12)
   await prisma.user.upsert({
@@ -544,6 +564,32 @@ export async function seedCore(prisma: PrismaClient) {
         ...only(['view'], 'production'),
       ],
     },
+
+    // Only when this run made the role; see step 2.
+    ...(merchandiserExisted
+      ? []
+      : [
+          {
+            roleId: merchandiserRole.id,
+            grants: [
+              // Approve covers releasing a round, passing its QC, recording the
+              // buyer's decision, handover and cancellation — all the
+              // merchandiser's own calls. Delete is not given: a request is
+              // cancelled with a reason, never removed.
+              ...only(['view', 'create', 'edit', 'approve', 'export'], 'sampling'),
+              // They raise and amend the purchase orders that buy sample
+              // material. Deleting purchase documents and posting notes to the
+              // books stay with the purchase desk and accounts.
+              ...only(['view', 'create', 'edit'], 'purchase'),
+              // Stock is view only, which for now leaves issuing sample material
+              // to Admin alone: an issue needs inventory edit as well as
+              // sampling edit, and the Store Manager, who has inventory edit,
+              // has no sampling rights. Who issues is settled when issuing from
+              // the Sample Store is reworked (phase 4 of the sampling plan).
+              ...only(['view'], 'dashboard', 'masters', 'inventory'),
+            ],
+          },
+        ]),
   ]
 
   for (const { roleId, grants } of roleGrants) {

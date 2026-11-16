@@ -48,6 +48,7 @@ import aiRoutes from './routes/ai.routes'
 import notificationRoutes from './routes/notification.routes'
 import settingsRoutes from './routes/settings.routes'
 import webhookRoutes from './routes/webhook.routes'
+import localFilesRoutes from './routes/localFiles.routes'
 
 import { errorHandler } from './middleware/errorHandler'
 import { storageConfigured } from './lib/storage'
@@ -214,6 +215,20 @@ const addressLimit = rateLimit({
   },
 })
 app.use('/api/', globalLimit)
+
+/*
+ * Files kept on this machine by the local sampling pilot (lib/storage.ts,
+ * STORAGE_DRIVER=local). Answers 404 to everything anywhere else.
+ *
+ * Here rather than with the other routes below, for two reasons. It is above
+ * the body parsers: express.json() would take a file sent as application/json
+ * for a request body, and what was written to disk would not be the file that
+ * was sent. And it is outside authMiddleware: the browser sends the file with
+ * no Authorization header, and the signed token in the link is the whole
+ * authorisation, exactly as with Supabase's own upload link. CORS is already
+ * applied above, so the web app can send and fetch from its own origin.
+ */
+app.use('/api/local-files', localFilesRoutes)
 
 // Body & Logging
 app.use(compression())
