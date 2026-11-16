@@ -52,6 +52,9 @@ interface ReturnableLine {
   gstRate: number
   billedQty: number
   billedRate: number
+  /** The pack billedRate is per (quantities are in pieces): a box of 20 is 20. */
+  packSymbol?: string | null
+  packFactor?: number
   remainingQty: number
   rejectedQty: number
   adjustedQty: number
@@ -314,7 +317,8 @@ export function ReturnChallanDialog({
 
   const value = going.reduce((t, r) => {
     const l = lineById.get(r.billLineId)
-    return t + (l ? num(r.qty) * l.billedRate : 0)
+    // Pieces going back at the bill's rate per pack: 10 pcs at ₹99 a box of 20 is ₹49.50.
+    return t + (l ? (num(r.qty) / (l.packFactor || 1)) * l.billedRate : 0)
   }, 0)
 
   /*
@@ -612,7 +616,7 @@ export function ReturnChallanDialog({
                             </p>
                             <p className="text-muted-foreground font-mono text-[10px]">
                               {l.itemCode}
-                              {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}
+                              {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}{l.packSymbol && (l.packFactor ?? 1) !== 1 ? ` / ${l.packSymbol}` : ''}
                             </p>
                             {first && l.rejectedQty > 0 && (
                               <p className="warn-text text-[11px] font-semibold">
@@ -800,7 +804,7 @@ export function ReturnChallanDialog({
                                   </p>
                                   <p className="text-muted-foreground font-mono text-[10px]">
                                     {l.itemCode}
-                                    {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}
+                                    {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}{l.packSymbol && (l.packFactor ?? 1) !== 1 ? ` / ${l.packSymbol}` : ''}
                                     {l.rejectedQty > 0 && (
                                       <span className="warn-text font-semibold">
                                         {' '}

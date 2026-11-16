@@ -1393,6 +1393,8 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       HAVING SUM(s."inQty" - s."outQty") > 0`,
     // Each order line raised against these lines. Cancelled orders have bought nothing.
     // Deleted orders are gone; their numbers are not offered as the order.
+    // Rates per piece (an order in boxes of 20 at ₹99 reads ₹4.95), as the
+    // store counts everything here in the item's own unit.
     prisma.$queryRaw<
       Array<{
         mrLineId: string; poLineId: string; poId: string; poNumber: string; poDate: Date; status: string
@@ -1400,7 +1402,7 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       }>
     >`
       SELECT pol."mrLineId", pol.id AS "poLineId", po.id AS "poId", po."poNumber", po."poDate", po.status::text AS "status",
-             po."deliveryDate", sp.name AS "supplierName", pol."unitRate"::float8 AS "unitRate",
+             po."deliveryDate", sp.name AS "supplierName", (pol."unitRate" / COALESCE(NULLIF(pol."uomFactor", 0), 1))::float8 AS "unitRate",
              pol.qty::float8 AS "qty", pol."receivedQty"::float8 AS "receivedQty"
       FROM ld_erp.purchase_order_lines pol
       JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
@@ -1458,7 +1460,7 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       }>
     >`
       SELECT pol."itemId", pol."mrLineId", m."mrNumber", po."poNumber", po."poDate", po.status::text AS "status",
-             sp.name AS "supplierName", pol."unitRate"::float8 AS "unitRate", pol.qty::float8 AS "qty",
+             sp.name AS "supplierName", (pol."unitRate" / COALESCE(NULLIF(pol."uomFactor", 0), 1))::float8 AS "unitRate", pol.qty::float8 AS "qty",
              pol."receivedQty"::float8 AS "receivedQty", po."deliveryDate"
       FROM ld_erp.purchase_order_lines pol
       JOIN ld_erp.purchase_orders po ON po.id = pol."poId"

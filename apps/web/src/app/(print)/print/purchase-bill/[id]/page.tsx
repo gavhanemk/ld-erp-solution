@@ -1,5 +1,6 @@
 'use client'
 
+import { inPack } from '@/lib/packs'
 import { chargeSnapshot } from '@ld-erp/shared'
 
 import { Fragment, useEffect, useState } from 'react'
@@ -82,6 +83,9 @@ interface BillLine {
   igst: string
   amount: string
   item: { code: string; name: string; uom?: { symbol: string } | null }
+  /** The pack it was billed in (a box of 20 pcs); qty is in the item's own unit. */
+  uomFactor?: string | number
+  uom?: { symbol: string } | null
   grnLine?: { grn: { grnNumber: string } } | null
 }
 
@@ -633,8 +637,9 @@ export default function PurchaseBillPrintPage() {
                 </td>
                 <td style={{ ...td, textAlign: 'center', ...NUM }}>{l.hsnCode || '—'}</td>
                 <td style={{ ...td, textAlign: 'center', ...NUM }}>
-                  {qtyFmt(l.qty)}
-                  {l.item.uom?.symbol ? ` (${l.item.uom.symbol})` : ''}
+                  {qtyFmt(inPack(l).qty)}
+                  {inPack(l).unit ? ` (${inPack(l).unit})` : ''}
+                  {inPack(l).pieces && <div style={{ fontSize: '9.5px', color: '#64748b' }}>= {inPack(l).pieces}</div>}
                 </td>
                 <td style={{ ...td, textAlign: 'right', ...NUM }}>{money(l.unitPrice)}</td>
                 <td style={{ ...td, textAlign: 'right', ...NUM }}>{money(l.discount)}</td>

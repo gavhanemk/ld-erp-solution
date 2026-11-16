@@ -550,6 +550,9 @@ export interface AdjustableGrnLine {
   /** What was rejected on this receipt line — never billed, and so the whole of what there is to note. */
   rejectedQty: number
   rejectedRate: number
+  /** The pack rejectedRate is per (quantities are in pieces): a box of 20 is 20. */
+  packSymbol: string | null
+  packFactor: number
   /** What the receipt recorded alongside the rejection, so it can be shown next to it. */
   receivedQty: number
   acceptedQty: number
@@ -579,6 +582,8 @@ export async function adjustableOnGrn(
           receivedQty: true,
           acceptedQty: true,
           unitRate: true,
+          uomFactor: true,
+          uom: { select: { symbol: true } },
           warehouseId: true,
           poLine: { select: { gstRate: true } },
           item: {
@@ -632,6 +637,8 @@ export async function adjustableOnGrn(
       gstRate: Number(l.poLine?.gstRate ?? l.item.taxRate?.rate ?? 0),
       rejectedQty,
       rejectedRate: Number(l.unitRate),
+      packSymbol: l.uom?.symbol ?? null,
+      packFactor: Number(l.uomFactor) || 1,
       receivedQty: round3(Number(l.receivedQty)),
       acceptedQty: round3(Number(l.acceptedQty)),
       notedQty: noted,

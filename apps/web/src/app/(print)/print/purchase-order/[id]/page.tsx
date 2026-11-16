@@ -1,5 +1,6 @@
 'use client'
 
+import { inPack } from '@/lib/packs'
 import { chargeSnapshot } from '@ld-erp/shared'
 
 import { useCallback, useEffect, useState } from 'react'
@@ -80,6 +81,9 @@ interface Line {
   style: { code: string; name: string } | null
   hsnCode: string | null
   qty: string
+  /** The pack it is ordered in (a box of 20 pcs); qty is in the item's own unit. */
+  uomFactor?: string | number
+  uom?: { symbol: string } | null
   unitRate: string
   discount: string
   gstRate: string
@@ -836,10 +840,11 @@ function LineTable({ lines, startIndex }: { lines: Line[]; startIndex: number })
               {line.hsnCode || <Dash />}
             </td>
             <td style={{ ...td, ...NUM, textAlign: 'right', fontWeight: 700, color: NAVY }}>
-              {money(line.qty)}
+              {money(inPack(line).qty)}
+              {inPack(line).pieces && <div style={{ fontSize: '9.5px', fontWeight: 400, color: GREY }}>= {inPack(line).pieces}</div>}
             </td>
             <td style={{ ...td, textAlign: 'center', color: GREY }}>
-              {line.item.uom?.symbol || <Dash />}
+              {inPack(line).unit || <Dash />}
             </td>
             <td style={{ ...td, ...NUM, textAlign: 'right' }}>₹{money(line.unitRate)}</td>
             <td

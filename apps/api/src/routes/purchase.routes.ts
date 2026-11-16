@@ -3188,6 +3188,7 @@ router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res)
               uom: { select: { symbol: true } },
             },
           },
+          uom: { select: { symbol: true } },
           warehouse: { select: { id: true, name: true } },
           poLine: {
             select: { id: true, discount: true, gstRate: true, hsnCode: true, description: true },
@@ -3224,7 +3225,8 @@ router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res)
   const taxMode = Number(grn.po.igst) > 0 ? 'IGST' : Number(grn.po.cgst) > 0 ? 'CGST_SGST' : 'NONE'
 
   const lines = grn.lines.map((l) => {
-    const accepted = Number(l.acceptedQty)
+    // Pieces, at the rate per the order's pack: 20 pcs in boxes of 20 at ₹99 is ₹99.
+    const accepted = Number(l.acceptedQty) / (Number(l.uomFactor ?? 1) || 1)
     const rate = Number(l.unitRate)
     const discountPct = Number(l.poLine?.discount ?? 0)
     const gstPct = taxMode === 'NONE' ? 0 : Number(l.poLine?.gstRate ?? 0)
