@@ -1,5 +1,5 @@
 import type { FormField } from '@/components/masters/MasterFormDialog'
-import { createUomFrom } from '@/components/masters/uomFormFields'
+import { createUomFrom, QTY_PLACES_OPTIONS } from '@/components/masters/uomFormFields'
 import { createHsnFrom } from '@/components/masters/hsnFormFields'
 
 /*
@@ -200,6 +200,19 @@ export const itemFormFields: FormField[] = [
     placeholder: 'pcs',
     showIf: (v) => v.type !== 'FINISHED_GOOD',
     help: 'pcs, m, gross… Empty means pcs',
+  },
+  // Whether 2.5 of it can be asked for, issued or bought; normally its unit decides.
+  {
+    name: 'decimalPlaces',
+    label: 'Quantities',
+    type: 'select',
+    section: 'Costing & Stock',
+    noneLabel: 'As its unit',
+    options: QTY_PLACES_OPTIONS,
+    nullWhenEmpty: true,
+    initial: (r) => (r.decimalPlaces == null ? '' : String(r.decimalPlaces)),
+    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    help: 'Leave as its unit unless this one item is counted differently',
   },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new documents' },
 ]

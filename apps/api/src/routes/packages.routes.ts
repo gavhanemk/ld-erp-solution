@@ -1,3 +1,4 @@
+import { assertLineQtyFitsUnits, assertQtyFitsUnits } from '../services/unitQuantity.service'
 import { Router } from 'express'
 import { z } from 'zod'
 import { prisma, type Prisma } from '@ld-erp/database'
@@ -766,6 +767,7 @@ router.post('/outward/plan', requirePermission(MODULE, 'view'), async (req, res)
  */
 router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = outwardApplySchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'package', data.takes.map((t) => ({ lineId: t.packageId, qty: t.qty, what: 'Taken' })))
   const doc = await loadOutward(data.type, data.id, data.q)
   const { moves } = OUTWARD[data.type]
   if (moves && !doc.toWarehouseId) throw new AppError('Where it went is not on the document.', 400, 'NO_DESTINATION')
@@ -964,6 +966,7 @@ const labelledMessage = (created: Array<{ code: string }>) =>
 /** Labelling stock: one package per quantity given. */
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = groupSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, data.qtys.map((q) => ({ itemId: data.itemId, qty: q, what: 'One package' })))
   const created = await prisma.$transaction((tx) => labelGroup(tx, data, { type: 'STOCK', id: null, ref: null }, req.user?.id ?? null), {
     timeout: 60_000,
     maxWait: 20_000,
@@ -986,6 +989,7 @@ router.post('/plan', requirePermission(MODULE, 'view'), async (req, res) => {
  */
 router.post('/auto', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = planSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, (data.lines ?? []).map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'To sticker' })))
   const made = await autoStickers(data, req.user?.id ?? null)
   const all = await prisma.stockPackage.findMany({
     where: { sourceType: data.sourceType, sourceId: data.sourceId, status: 'IN_STOCK' },
@@ -1001,6 +1005,7 @@ router.post('/auto', requirePermission(MODULE, 'create'), async (req: AuthReques
  */
 router.post('/restick', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = restickSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'package', data.qtys.map((q) => ({ lineId: data.ids[0], qty: q, what: 'One sticker' })))
   const result = await prisma.$transaction((tx) => restickStickers(tx, data.ids, data.qtys, data.packType ?? null, req.user?.id ?? null, data.notes), {
     timeout: 60_000,
     maxWait: 20_000,
@@ -1047,6 +1052,7 @@ router.post('/printed', requirePermission(MODULE, 'view'), async (req: AuthReque
 
 router.post('/batch', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = batchSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, data.groups.flatMap((g) => g.qtys.map((q) => ({ itemId: g.itemId, qty: q, what: 'One package' }))))
   const sourceRef = await sourceRefOf(data.sourceType, data.sourceId)
   if (!sourceRef) throw new AppError('That document does not exist', 404, 'NOT_FOUND')
   const created = await prisma.$transaction(
@@ -1086,6 +1092,7 @@ router.post('/:id/rack', requirePermission(MODULE, 'edit'), async (req: AuthRequ
 /** Issuing from a scanned package against a requisition. The rest stays in the package. */
 router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = issueSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'package', [{ lineId: req.params.id, qty: data.qty, what: 'From the package' }])
   // Kept for the audit trail of a first issue; a repeat writes none.
   let audit: { mr: unknown; handedOver: unknown } | null = null
   const result = await prisma.$transaction(
@@ -1188,6 +1195,7 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
  */
 router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = transferSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'package', [{ lineId: req.params.id, qty: data.qty, what: 'From the package' }])
   const result = await prisma.$transaction(
     async (tx) => {
       const pkg = await lockPackage(tx, req.params.id)
@@ -1266,6 +1274,7 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
  */
 router.post('/:id/split', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = splitSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'package', data.qtys.map((q) => ({ lineId: req.params.id, qty: q, what: 'One new package' })))
   const result = await prisma.$transaction(
     async (tx) => {
       const pkg = await lockPackage(tx, req.params.id)
@@ -1323,6 +1332,7 @@ router.post('/:id/split', requirePermission(MODULE, 'edit'), async (req: AuthReq
  */
 router.post('/:id/correct', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = correctSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'package', [{ lineId: req.params.id, qty: data.qty, what: 'From the package' }])
   const result = await prisma.$transaction(async (tx) => {
     const pkg = await lockPackage(tx, req.params.id)
     const unit = pkg.item.uom?.symbol ?? ''

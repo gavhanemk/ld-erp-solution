@@ -8,6 +8,8 @@ import {
 import { api, ApiError, currentUser } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { StepInput } from '@/components/ui/StepInput'
+import { QtyProblem } from '@/components/ui/QtyProblem'
+import { fitsPlaces, placesMessage } from '@ld-erp/shared'
 import { formatDate, newRequestId } from '@/lib/utils'
 import { useAppSettings } from '@/lib/appSettings'
 import type { OutwardRef } from '@/components/packages/packageTypes'
@@ -172,6 +174,11 @@ export function ProcessDialog({
       const name = r.l.item.name
       if (Number.isNaN(v) || v < 0) {
         problems.push(`${name}: enter a number.`)
+        continue
+      }
+      // 2.5 cartons: said under the box, and Save says it again.
+      if (!fitsPlaces(v, r.places) && !(tab === 'buy' && noBuyBox(r))) {
+        problems.push(`${name}: ${placesMessage(r.places)}`)
         continue
       }
       if (tab === 'issue') {
@@ -646,9 +653,11 @@ export function ProcessDialog({
             onValueChange={(x) => set(tab, r.l.id, x)}
             disabled={saving}
             aria-label={`${ariaWord} quantity for ${r.l.item.name}`}
+            aria-invalid={v > 0 && !fitsPlaces(v, r.places)}
           />
           <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground">{r.unit}</span>
         </div>
+        <QtyProblem className="md:text-right" text={v > 0 && !fitsPlaces(v, r.places) ? placesMessage(r.places) : null} />
         {from.length > 0 && (
           <div className={`mt-0.5 text-right ${small}`}>
             from {from.map(([id, q]) => `${r.stores.find((s) => s.id === id)?.name}${from.length > 1 ? ` ${fmt(q)}` : ''}`).join(' + ')}

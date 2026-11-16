@@ -8,6 +8,8 @@ import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
 import { StepInput } from '@/components/ui/StepInput'
+import { QtyProblem } from '@/components/ui/QtyProblem'
+import { qtyPlaces, qtyProblem, roundDownToPlaces, roundUpToPlaces } from '@ld-erp/shared'
 
 /**
  * A department asking the store for material.
@@ -36,7 +38,9 @@ interface ItemOption {
   id: string
   code: string
   name: string
-  uom?: { symbol: string } | null
+  /** Places after the point its quantities may carry; empty: its unit's. */
+  decimalPlaces?: number | null
+  uom?: { symbol: string; decimalPlaces?: number } | null
   departmentId?: string | null
   category?: Category | null
 }
@@ -200,6 +204,13 @@ export function RequisitionDialog({
       return (!l.categoryId || p.main === l.categoryId) && (!l.subCategoryId || p.sub === l.subCategoryId)
     })
 
+  /** Places after the point an item's quantities may carry: 0 for cartons and pieces. */
+  const placesOf = (itemId: string) => qtyPlaces(itemsById.get(itemId))
+  /** What can actually be handed over from a rack: 0.6 of a carton is none. */
+  const usable = (qty: number, places: number) => roundDownToPlaces(qty, places)
+  /** What is wrong with a line's quantity, for the line under its box. */
+  const problemOf = (line: Line) => (line.itemId ? qtyProblem(line.requestedQty, itemsById.get(line.itemId)) : null)
+
   /** Every store holding an item, ours and customers' apart, most of ours first. */
   const storesHolding = (itemId: string) => {
     const by = new Map<string, { id: string; name: string; ours: number; theirs: number }>()
@@ -233,17 +244,20 @@ export function RequisitionDialog({
    * has to be bought. Worked out on the quantity actually typed.
    */
   const planFor = (itemId: string, storeId: string, asked: number) => {
-    const here = ownersAt(itemId, storeId).ours
+    // Only what can be handed over counts: 0.6 of a carton on a rack gives none,
+    // and what is short is bought in whole cartons.
+    const places = placesOf(itemId)
+    const here = usable(ownersAt(itemId, storeId).ours, places)
     const fromHere = Math.min(here, asked)
     let need = asked - fromHere
     const moves: Array<{ name: string; qty: number; has: number }> = []
-    for (const o of storesHolding(itemId).filter((s) => s.id !== storeId && s.ours > 0)) {
+    for (const o of storesHolding(itemId).filter((s) => s.id !== storeId && usable(s.ours, places) > 0)) {
       if (need <= 0) break
-      const take = Math.min(o.ours, need)
+      const take = Math.min(usable(o.ours, places), need)
       moves.push({ name: o.name, qty: take, has: o.ours })
       need -= take
     }
-    return { here, fromHere, moves, toBuy: Math.max(0, need) }
+    return { here, fromHere, moves, toBuy: roundUpToPlaces(Math.max(0, need), places) }
   }
 
   const setLine = (index: number, patch: Partial<Line>) =>
@@ -269,6 +283,9 @@ export function RequisitionDialog({
     if (filled.length === 0) return setError('Add at least one item with a quantity.')
     const noStore = filled.findIndex((l) => !l.warehouseId)
     if (noStore >= 0) return setError(`Line ${lines.indexOf(filled[noStore]) + 1}: pick the store to ask.`)
+    // 2.5 cartons: said under the box already, and again here so Raise explains itself.
+    const badQty = lines.findIndex((l) => problemOf(l))
+    if (badQty >= 0) return setError(`Line ${badQty + 1}: ${problemOf(lines[badQty])}`)
 
     setSaving(true)
     try {
@@ -318,7 +335,10 @@ export function RequisitionDialog({
     if (!line.itemId) return null
     if (!line.warehouseId) return <p className="text-[11px] text-muted-foreground">Pick the store to see what it has.</p>
     const asked = Number(line.requestedQty) || 0
-    const owners = ownersAt(line.itemId, line.warehouseId)
+    const places = placesOf(line.itemId)
+    const raw = ownersAt(line.itemId, line.warehouseId)
+    // Counted as what can be handed over: 0.6 of a carton on the rack is none.
+    const owners = { ours: usable(raw.ours, places), theirs: raw.theirs.map((t) => ({ ...t, qty: usable(t.qty, places) })) }
 
     // A customer's cloth is never bought or moved in from our stock; the gap is theirs to send.
     if (line.owner !== 'OWNED') {
@@ -333,7 +353,7 @@ export function RequisitionDialog({
     const storeName = warehouses.find((w) => w.id === line.warehouseId)?.name ?? 'this store'
     const elsewhere = storesHolding(line.itemId)
       .filter((s) => s.id !== line.warehouseId)
-      .reduce((t, s) => t + s.ours, 0)
+      .reduce((t, s) => t + usable(s.ours, places), 0)
 
     // Not on any rack of ours: whatever store is picked, it has to be bought and comes in there.
     if (owners.ours <= 0 && elsewhere <= 0) {
@@ -677,14 +697,20 @@ export function RequisitionDialog({
                         decimals
                         className="form-input h-9 pr-10 text-right tabular-nums"
                         value={line.requestedQty}
-                        onValueChange={(v) => setLine(i, { requestedQty: v })}
+                        onValueChange={(v) => {
+                          setLine(i, { requestedQty: v })
+                          // The banner Raise left about this line's quantity goes once it is put right.
+                          if (error?.startsWith(`Line ${i + 1}: `) && /decimal/i.test(error) && !(line.itemId && qtyProblem(v, itemsById.get(line.itemId)))) setError(null)
+                        }}
                         disabled={!line.itemId}
                         aria-label={`Quantity on line ${i + 1}`}
+                        aria-invalid={!!problemOf(line)}
                       />
                       {unit && (
                         <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">{unit}</span>
                       )}
                     </div>
+                    <QtyProblem text={problemOf(line)} />
                   </label>
                   <label className="block min-w-0 sm:col-span-3">
                     <span className="form-label">What for</span>

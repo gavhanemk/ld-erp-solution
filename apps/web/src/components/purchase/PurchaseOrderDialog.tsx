@@ -1,5 +1,7 @@
 'use client'
 
+import { useQtyRules } from '@/lib/qtyRules'
+import { QtyProblem } from '@/components/ui/QtyProblem'
 import { ChargeTaxDetails, taxOverridePayload } from './ChargeTaxDetails'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -717,6 +719,7 @@ export function PurchaseOrderDialog({
   const [dragOver, setDragOver] = useState(false)
 
   const [saving, setSaving] = useState<'draft' | 'send' | 'print' | null>(null)
+  const qtyRules = useQtyRules()
   const [error, setError] = useState<string | null>(null)
   const [mounted, setMounted] = useState(false)
   const firstFieldRef = useRef<HTMLButtonElement | null>(null)
@@ -1540,9 +1543,11 @@ export function PurchaseOrderDialog({
     .map((l) => ({
       name: itemById.get(l.itemId)?.name ?? 'A line',
       noQty: num(l.qty) <= 0,
+      // 2.5 cartons: a whole number for an item counted whole.
+      badQty: !!qtyRules.placesProblem(l.qty, itemById.get(l.itemId)),
       noRate: String(l.unitRate).trim() === '',
     }))
-    .filter((r) => r.noQty || r.noRate)
+    .filter((r) => r.noQty || r.badQty || r.noRate)
 
   if (!open || !mounted) return null
 
@@ -3072,12 +3077,14 @@ export function PurchaseOrderDialog({
                               value={String(line.qty)}
                               onValueChange={(v) => setLine(i, { qty: v })}
                               aria-label={`Row ${i + 1} quantity`}
+                              aria-invalid={!!qtyRules.placesProblem(line.qty, item)}
                             />
                             {item?.uom?.symbol && (
                               <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
                                 {item.uom.symbol}
                               </p>
                             )}
+                            <QtyProblem className="text-right" text={qtyRules.placesProblem(line.qty, item)} />
                           </td>
 
                           <td className={COL.rate}>
@@ -3381,10 +3388,12 @@ export function PurchaseOrderDialog({
                             value={String(line.qty)}
                             onValueChange={(v) => setLine(i, { qty: v })}
                             aria-label={`Row ${i + 1} quantity`}
+                            aria-invalid={!!qtyRules.placesProblem(line.qty, item)}
                           />
                           {item?.uom?.symbol && (
                             <p className="text-muted-foreground text-[10px]">{item.uom.symbol}</p>
                           )}
+                          <QtyProblem text={qtyRules.placesProblem(line.qty, item)} />
                         </div>
                         <div className="space-y-1">
                           <label className={fieldLabel}>Rate</label>
@@ -4224,7 +4233,7 @@ export function PurchaseOrderDialog({
                           .slice(0, 3)
                           .map(
                             (r) =>
-                              `${r.name} (${[r.noQty && 'quantity', r.noRate && 'rate']
+                              `${r.name} (${[r.noQty && 'quantity', r.badQty && 'a whole-number quantity', r.noRate && 'rate']
                                 .filter(Boolean)
                                 .join(' and ')})`
                           )

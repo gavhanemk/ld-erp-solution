@@ -1,3 +1,4 @@
+import { assertLineQtyFitsUnits, assertQtyFitsUnits } from '../services/unitQuantity.service'
 import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
@@ -415,6 +416,7 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
  */
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createReturnSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'billLine', data.lines.map((l) => ({ lineId: l.billLineId, qty: l.qty, what: 'Going back' })))
   const returnDate = data.returnDate ?? new Date()
 
   const result = await prisma.$transaction(async (tx) => {

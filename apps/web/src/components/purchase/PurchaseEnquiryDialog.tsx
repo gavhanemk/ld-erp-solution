@@ -1,5 +1,7 @@
 'use client'
 
+import { useQtyRules } from '@/lib/qtyRules'
+import { QtyProblem } from '@/components/ui/QtyProblem'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -228,6 +230,9 @@ export function PurchaseEnquiryDialog({
   /** Which row asked for a brand-new item, or null when nobody has. */
   const [newItemFor, setNewItemFor] = useState<Line | null>(null)
   const [saving, setSaving] = useState(false)
+  const qtyRules = useQtyRules()
+  /** 2.5 cartons on a line: what is wrong, said under its box. */
+  const lineQtyProblem = (l: { itemId: string; uom: string; qty: string }) => qtyRules.placesProblem(l.qty, { id: l.itemId, uom: { symbol: l.uom } })
   const [error, setError] = useState<string | null>(null)
   const filesRef = useRef<AttachmentsBoxHandle>(null)
 
@@ -460,11 +465,14 @@ export function PurchaseEnquiryDialog({
     if (lines.length === 0) out.push('Add at least one item')
     if (lines.some((l) => !l.itemId)) out.push('Every line needs an item')
     if (lines.some((l) => num(l.qty) <= 0)) out.push('Every line needs a quantity above zero')
+    const half = lines.findIndex((l) => lineQtyProblem(l))
+    if (half >= 0) out.push(`Row ${half + 1}: ${lineQtyProblem(lines[half])}`)
     if (requiredDate && enquiryDate && requiredDate < enquiryDate) {
       out.push('The date needed cannot be before the enquiry date')
     }
     return out
-  }, [lines, requiredDate, enquiryDate])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lines, requiredDate, enquiryDate, qtyRules.places])
 
   const save = useCallback(async () => {
     if (problems.length) return
@@ -893,7 +901,9 @@ export function PurchaseEnquiryDialog({
                               onValueChange={(v) => setLine(l.key, { qty: v })}
                               className="form-input h-9 w-full text-right"
                               aria-label={`Row ${i + 1} quantity`}
+                              aria-invalid={!!lineQtyProblem(l)}
                             />
+                            <QtyProblem text={lineQtyProblem(l)} />
                           </div>
                           <div className="space-y-1">
                             <label className={fieldLabel}>Expected rate</label>
@@ -1043,7 +1053,9 @@ export function PurchaseEnquiryDialog({
                               onValueChange={(v) => setLine(l.key, { qty: v })}
                               className="form-input text-right"
                               aria-label={`Row ${i + 1} quantity`}
+                              aria-invalid={!!lineQtyProblem(l)}
                             />
+                            <QtyProblem className="text-right" text={lineQtyProblem(l)} />
                             {l.uom && (
                               <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
                                 {l.uom}

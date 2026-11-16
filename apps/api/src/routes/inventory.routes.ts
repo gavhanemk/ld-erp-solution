@@ -65,6 +65,15 @@ import { assertOwnersFitOrder } from '../services/ownership.service'
 import { onceFor } from '../lib/onceFor'
 import { CGRN_STATUS_LABEL, HELD, heldByLine, postGrnStock, releaseHeld, reverseGrnStock, takeHeldPackages } from '../services/customerGrn.service'
 import { fillJobCardBlanks } from '../services/jobCard.service'
+import { assertLineQtyFitsUnits, assertQtyFitsUnits, assertRequisitionFitsUnits } from '../services/unitQuantity.service'
+
+/** A customer's receipt's quantities, each against its item: what their challan said, what came, what was refused. */
+const customerGrnQtys = (data: { lines: Array<{ itemId: string; challanQty?: number | null; receivedQty: number; rejectedQty?: number | null }> }) =>
+  data.lines.flatMap((l) => [
+    { itemId: l.itemId, qty: l.challanQty, what: 'On their challan' },
+    { itemId: l.itemId, qty: l.receivedQty, what: 'Received' },
+    { itemId: l.itemId, qty: l.rejectedQty, what: 'Rejected' },
+  ])
 
 const router = Router()
 const MODULE = 'inventory'
@@ -626,6 +635,7 @@ router.post('/opening', requirePermission(MODULE, 'create'), async (req: AuthReq
     if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
 
     await refuseRepeatedItems(tx, data.lines.map((l) => l.itemId))
+    await assertQtyFitsUnits(tx, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Opening stock' })))
 
     const reference = `OPEN-${Date.now()}`
     const written = []
@@ -805,6 +815,7 @@ export async function createStockIn(tx: Prisma.TransactionClient, data: z.infer<
 
 router.post('/stock-in', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = stockInSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Stock in' })))
   const adj = await prisma.$transaction((tx) => createStockIn(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
   await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockAdjustment', entityId: adj.id, after: adj })
   res.status(201).json({
@@ -829,6 +840,9 @@ router.post('/stock-in', requirePermission(MODULE, 'create'), async (req: AuthRe
  */
 router.post('/adjustments', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = adjustmentSchema.parse(req.body)
+  // The count itself must be whole for a whole-number item (0 or 1 carton, never 0.6);
+  // the difference it books may still be a fraction, which is how an old 0.6 is put right.
+  await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.countedQty, what: 'Counted' })))
   const adjustment = await prisma.$transaction((tx) => createAdjustment(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
 
   await writeAuditLog(req, {
@@ -1019,6 +1033,7 @@ export async function createTransfer(
  */
 router.post('/transfers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = transferSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Transfer' })))
   const transfer = await prisma.$transaction((tx) => createTransfer(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
 
   await writeAuditLog(req, {
@@ -1187,7 +1202,7 @@ const mrInclude = {
     include: {
       item: {
         select: {
-          id: true, code: true, name: true, uom: { select: { symbol: true } },
+          id: true, code: true, name: true, decimalPlaces: true, uom: { select: { symbol: true, decimalPlaces: true } },
           // For the list's item panel: category and sub-category in their own columns.
           category: { select: { name: true, parent: { select: { name: true } } } },
         },
@@ -1576,6 +1591,8 @@ export async function createRequisition(
   ])
   if (!department) throw new AppError('That department does not exist', 404, 'NOT_FOUND')
   if (stores.length !== storeIds.length) throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+  // No 2.5 cartons asked for, whichever screen (or the assistant) sent it.
+  await assertQtyFitsUnits(tx, data.lines.map((l) => ({ itemId: l.itemId, qty: l.requestedQty, what: 'Asked for' })))
 
   const owners = [...new Set(data.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomerId!))]
   if (owners.length) {
@@ -1919,6 +1936,11 @@ router.patch(
         _sum: { qty: true },
       })
       const orderedOf = new Map(ordered.map((o) => [o.mrLineId, Number(o._sum.qty ?? 0)]))
+      // Never 1.5 cartons on the indent.
+      await assertQtyFitsUnits(
+        tx,
+        data.lines.filter((l) => own.has(l.lineId)).map((l) => ({ itemId: own.get(l.lineId)!.itemId, qty: l.buyQty, what: 'To buy' })),
+      )
 
       for (const l of data.lines) {
         const line = own.get(l.lineId)
@@ -1997,6 +2019,8 @@ router.patch(
         'SELF_APPROVAL',
       )
     }
+    // One raised before its item's unit counted whole (2.1 cartons) is refused, not approved.
+    await assertRequisitionFitsUnits(prisma, before.id)
 
     // Only a requisition still pending is approved, checked in the same
     // statement that approves it, so an approve and a refuse arriving
@@ -2240,6 +2264,14 @@ export async function issueRequisition(
       if (owed > 0) plan.set(line.id, [{ qty: owed, warehouseId: line.warehouseId }])
     }
   }
+  // Never 0.5 of a carton across the counter, typed or worked out.
+  await assertQtyFitsUnits(
+    tx,
+    [...plan].flatMap(([lineId, parts]) => {
+      const itemId = mr.lines.find((l) => l.id === lineId)!.itemId
+      return parts.map((p) => ({ itemId, qty: p.qty, what: 'Issue' }))
+    }),
+  )
 
   // A customer's material goes only to that customer's job-work order:
   // checked again at the hand-over, whatever was true when it was raised —
@@ -2548,6 +2580,14 @@ router.post(
         })).map((w) => [w.id, w.name]),
       )
       const changed: string[] = []
+      // Never half a carton held on a rack.
+      await assertQtyFitsUnits(
+        tx,
+        body.lines.flatMap((a) => {
+          const line = mr.lines.find((l) => l.id === a.lineId)
+          return line ? [{ itemId: line.itemId, qty: a.qty, what: 'Reserve' }] : []
+        }),
+      )
 
       for (const a of body.lines) {
         const line = mr.lines.find((l) => l.id === a.lineId)
@@ -3191,6 +3231,7 @@ function assertNotPostedOnReceipt(action: string) {
 
 router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createCustomerGrnSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, customerGrnQtys(data))
   const action = data.action ?? 'SUBMIT'
   assertNotPostedOnReceipt(action)
   const status = action === 'DRAFT' ? 'DRAFT' : 'SUBMITTED'
@@ -3216,6 +3257,7 @@ router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: Au
  */
 router.patch('/customer-grn/:id', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = asReceived(createCustomerGrnSchema.parse(req.body))
+  await assertQtyFitsUnits(prisma, customerGrnQtys(data))
   const action = data.action ?? 'DRAFT'
   assertNotPostedOnReceipt(action)
   const userId = req.user?.id ?? null
@@ -3284,6 +3326,7 @@ router.post('/customer-grn/:id/submit', requirePermission(MODULE, 'create'), asy
  */
 router.post('/customer-grn/:id/inspect', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = inspectCustomerGrnSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'customerGrnLine', data.lines.map((l) => ({ lineId: l.lineId, qty: l.rejectedQty, what: 'Rejected' })))
   if (data.approve) assertMayPost(req)
   const userId = req.user?.id ?? null
   const before = await prisma.customerGRN.findUnique({ where: { id: req.params.id }, include: { lines: true } })
@@ -3851,6 +3894,7 @@ router.post('/customer-grn/:id/correct', requirePermission(MODULE, 'edit'), asyn
  */
 router.post('/customer-grn/:id/release', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
   const data = releaseCustomerGrnSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'customerGrnLine', [{ lineId: data.lineId, qty: data.qty, what: 'Released' }])
   const result = await prisma.$transaction(
     async (tx) => {
       await lockRow(tx, 'customerGrn', req.params.id)
@@ -4025,6 +4069,7 @@ export async function createCustomerReturn(tx: Prisma.TransactionClient, data: z
  */
 router.post('/customer-return', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createCustomerReturnSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Going back' })))
 
   const created = await prisma.$transaction((tx) => createCustomerReturn(tx, data, req.user?.id ?? null), { timeout: 60_000 })
 
@@ -4335,6 +4380,7 @@ export async function createJobWorkChallan(tx: Prisma.TransactionClient, data: z
  */
 router.post('/job-work', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createJobWorkChallanSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Sent' })))
   const challan = await prisma.$transaction((tx) => createJobWorkChallan(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
 
   await writeAuditLog(req, {
@@ -4743,6 +4789,15 @@ router.post(
   requirePermission(MODULE, 'create'),
   async (req: AuthRequest, res) => {
     const data = createJobWorkReturnSchema.parse({ ...req.body, challanId: req.params.id })
+    await assertLineQtyFitsUnits(prisma, 'jobWorkLine', data.lines.map((l) => ({ lineId: l.challanLineId, qty: l.consumedQty, what: 'Used' })))
+    await assertQtyFitsUnits(
+      prisma,
+      data.lines.flatMap((l) => [
+        { itemId: l.itemId, qty: l.receivedQty, what: 'Came back' },
+        { itemId: l.itemId, qty: l.wastedQty, what: 'Wasted' },
+        { itemId: l.itemId, qty: l.damagedQty, what: 'Damaged' },
+      ]),
+    )
     const result = await prisma.$transaction((tx) => createJobWorkReturn(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
 
     await writeAuditLog(req, {
@@ -5079,6 +5134,7 @@ router.patch('/job-work/returns/:id/cancel', requirePermission(MODULE, 'edit'), 
 /** POST /api/inventory/requisitions/:id/return — leftover material back from the floor. */
 router.post('/requisitions/:id/return', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = floorReturnSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'mrLine', data.lines.map((l) => ({ lineId: l.lineId, qty: l.qty, what: 'Back from the floor' })))
   const result = await prisma.$transaction((tx) => returnFromFloor(tx, req.params.id, data, req.user?.id ?? null), { timeout: 60_000 })
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'MaterialRequisition', entityId: req.params.id, after: result })
   const mrLines = await prisma.materialRequisitionLine.findMany({

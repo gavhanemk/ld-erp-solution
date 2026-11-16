@@ -1,5 +1,7 @@
 'use client'
 
+import { qtyProblem } from '@ld-erp/shared'
+import { QtyProblem } from '@/components/ui/QtyProblem'
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, History, Info, Layers, Loader2, Lock, PackageCheck, Pencil, Ruler, Send, X, Scissors } from 'lucide-react'
@@ -107,7 +109,8 @@ interface PlanRow {
   baseKey: string
   defaultOwnership: 'OWNED' | 'CUSTOMER_OWNED'
   issued: number
-  item: { id: string; code: string; name: string; type: string; uom: string | null }
+  /** places: how many after the point its quantities may carry (0: whole numbers only). */
+  item: { id: string; code: string; name: string; type: string; uom: string | null; places?: number }
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomerId: string | null
   department: { id: string; name: string } | null
@@ -397,6 +400,9 @@ export function ManufacturingOrderDetailDialog({
   )
   const live = !!mo && LIVE_MO.includes(mo.status)
   const mayRaise = can('production', 'create')
+  /** 2.5 cartons asked for: what is wrong, said under its box and above Raise. */
+  const askProblem = (r: { item: { places?: number } }, v: string | undefined) =>
+    v && Number(v) > 0 ? qtyProblem(v, { decimalPlaces: r.item.places ?? null }) : null
   const raiseBlocker = !mo
     ? null
     : mo.status === 'DRAFT'
@@ -413,7 +419,9 @@ export function ManufacturingOrderDetailDialog({
             ? `Say which process ${chosen.find((x) => !x.a.processId)!.r.item.code} is for.`
             : chosen.find((x) => !x.a.warehouseId)
               ? `Say which store to ask for ${chosen.find((x) => !x.a.warehouseId)!.r.item.code}.`
-              : null
+              : chosen.find((x) => askProblem(x.r, x.a.qty))
+                ? `${chosen.find((x) => askProblem(x.r, x.a.qty))!.r.item.code}: ${askProblem(chosen.find((x) => askProblem(x.r, x.a.qty))!.r, chosen.find((x) => askProblem(x.r, x.a.qty))!.a.qty)}`
+                : null
 
   const raise = async () => {
     if (!mo || raiseBlocker) return
@@ -938,8 +946,11 @@ export function ManufacturingOrderDetailDialog({
                                                 onValueChange={(v) => setRow(r.key, { qty: v, on: Number(v) > 0 })}
                                                 onKeyDown={askEnter(i)}
                                                 aria-label={`Ask for ${r.item.code}, quantity`}
+                                                aria-invalid={!!askProblem(r, a?.qty)}
                                               />
-                                            ) : (
+                                            ) : null}
+                                            {r.toRequest > 0 && <QtyProblem className="w-28 text-left" text={askProblem(r, a?.qty)} />}
+                                            {r.toRequest > 0 ? null : (
                                               // Nothing left to ask for: said, rather than an empty box that looks like one to fill.
                                               <span className="text-primary text-xs font-medium">All asked</span>
                                             )}

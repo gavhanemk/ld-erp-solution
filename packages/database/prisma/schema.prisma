@@ -722,6 +722,11 @@ model UOM {
   name     String  @unique
   symbol   String  @unique
   isActive Boolean @default(true)
+  /// How many places after the point a quantity in this unit may carry: 0 for
+  /// things that only come whole (pieces, boxes, sets), up to 3 (the stock
+  /// columns' own precision) for things measured out (metres, kilograms).
+  /// An item may set its own instead (Item.decimalPlaces).
+  decimalPlaces Int @default(3)
 
   items        Item[]
   challanLines DeliveryChallanLine[]
@@ -776,6 +781,10 @@ model Item {
   /// this only says what is inside, so a sticker can read "1 box · 144 pcs".
   contentQty   Decimal?     @db.Decimal(12, 3)
   contentUnit  String?
+  /// This item's own places after the point, when it differs from its unit's
+  /// (rolls are measured in parts, but one item's rolls may only go out
+  /// whole). Empty means the unit's (UOM.decimalPlaces).
+  decimalPlaces Int?
   isActive     Boolean      @default(true)
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt

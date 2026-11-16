@@ -1,3 +1,4 @@
+import { fitsPlaces, placesMessage, qtyPlaces } from '@ld-erp/shared'
 import ExcelJS from 'exceljs'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
@@ -98,7 +99,7 @@ async function loadMasters() {
       select: { id: true, name: true, parentId: true, departmentId: true },
     }),
     prisma.department.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true } }),
-    prisma.uOM.findMany({ where: { isActive: true }, select: { id: true, name: true, symbol: true } }),
+    prisma.uOM.findMany({ where: { isActive: true }, select: { id: true, name: true, symbol: true, decimalPlaces: true } }),
     prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true } }),
     prisma.item.findMany({
       select: {
@@ -110,9 +111,10 @@ async function loadMasters() {
         standardRate: true,
         packType: true,
         packQty: true,
+        decimalPlaces: true,
         category: { select: { name: true, parent: { select: { name: true } } } },
         department: { select: { name: true } },
-        uom: { select: { name: true } },
+        uom: { select: { name: true, decimalPlaces: true } },
       },
     }),
   ])
@@ -374,6 +376,11 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
       if (!raw.store) problems.push('Stock Qty is given but Store is empty.')
       else if (!s) problems.push(`No store "${raw.store}".`)
       if (qty === undefined || Number.isNaN(qty) || !(qty > 0)) problems.push('Stock Qty has to be a number more than nought.')
+      // 2.5 cartons is not stock: the item's own places, else its unit's (the row's for a new item).
+      else {
+        const places = existing ? qtyPlaces(existing) : qtyPlaces({ uom: unit.get(low(raw.unit)) ?? null })
+        if (!fitsPlaces(qty, places)) problems.push(`Stock Qty ${qty}: ${placesMessage(places)}`)
+      }
       if (rate === undefined || Number.isNaN(rate) || !(rate > 0)) {
         problems.push('Stock Rate is needed (or a Standard Rate on the item): stock at ₹0 would be worth nothing.')
       }

@@ -1,3 +1,4 @@
+import { assertQtyFitsUnits } from '../services/unitQuantity.service'
 import { Router } from 'express'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
@@ -674,6 +675,12 @@ async function supplierFromGrn(tx: Prisma.TransactionClient, grnId: string): Pro
 
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createNoteSchema.parse(req.body)
+  // A quantity copied unchanged from the bill or receipt it corrects stands as it was.
+  if (data.lines)
+    await assertQtyFitsUnits(
+      prisma,
+      data.lines.filter((l) => l.originalQty == null || Math.abs(Number(l.qty) - Number(l.originalQty)) > 1e-9).map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'On the note' })),
+    )
 
   const note = await prisma.$transaction((tx) => createPurchaseNoteIn(tx, data, req.user!.id))
 
@@ -694,6 +701,12 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
 
 router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateNoteSchema.parse(req.body)
+  // A quantity copied unchanged from the bill or receipt it corrects stands as it was.
+  if (data.lines)
+    await assertQtyFitsUnits(
+      prisma,
+      data.lines.filter((l) => l.originalQty == null || Math.abs(Number(l.qty) - Number(l.originalQty)) > 1e-9).map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'On the note' })),
+    )
 
   const note = await prisma.$transaction(async (tx) => {
     const before = await tx.purchaseNote.findUnique({

@@ -312,6 +312,8 @@ export const createItemSchema = z
     // What one unit holds, printed on its stickers: a box of 144 pcs.
     contentQty: nonNegativeDecimal,
     contentUnit: z.preprocess((v) => (v === '' ? null : v), z.string().trim().max(20).optional().nullable()),
+    // Its own places after the point, when it differs from its unit's. Empty: the unit's.
+    decimalPlaces: z.preprocess((v) => (v === '' ? null : v), z.coerce.number().int().min(0).max(3).optional().nullable()),
     imageUrl: z.string().url().optional().nullable(),
     // Which garment this is, for a finished good. Shape only, here — whether
     // the colour is actually one of the style's own colours needs a database
@@ -641,6 +643,8 @@ export const createUomSchema = z.object({
     .max(20)
     .optional()
     .transform((v) => v || undefined),
+  // Places after the point a quantity in this unit may carry: 0 = whole numbers only.
+  decimalPlaces: z.coerce.number().int().min(0, 'Choose how quantities are counted').max(3).optional(),
   isActive,
 })
 export const updateUomSchema = createUomSchema.partial()

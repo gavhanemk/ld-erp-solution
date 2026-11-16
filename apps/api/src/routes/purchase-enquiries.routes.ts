@@ -1,3 +1,4 @@
+import { assertLineQtyFitsUnits, assertQtyFitsUnits } from '../services/unitQuantity.service'
 import { Router } from 'express'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
@@ -575,6 +576,7 @@ async function buildQuotes(tx: Prisma.TransactionClient, supplierIds: string[]) 
 
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createEnquirySchema.parse(req.body)
+  if (data.lines) await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Asked' })))
 
   const created = await prisma.$transaction(async (tx) => {
     const enquiryDate = data.enquiryDate ?? new Date()
@@ -651,6 +653,7 @@ async function editable(id: string) {
  */
 router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateEnquirySchema.parse(req.body)
+  if (data.lines) await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Asked' })))
   const before = await editable(req.params.id)
   const enquiryId = before.id
 
@@ -958,6 +961,7 @@ router.patch(
   requirePermission(MODULE, 'edit'),
   async (req: AuthRequest, res) => {
     const data = recordQuoteSchema.parse(req.body)
+    await assertLineQtyFitsUnits(prisma, 'enquiryLine', (data.rates ?? []).map((r) => ({ lineId: r.lineId, qty: r.offeredQty, what: 'Offered' })))
     const quote = await quoteFor(req.params.quoteId)
 
     if (data.validUntil && data.validUntil < data.piDate) {

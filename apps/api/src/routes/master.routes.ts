@@ -644,6 +644,28 @@ async function departmentFromCategory(data: Record<string, unknown>, before?: Re
 }
 
 /*
+ * How finely each unit is counted, and the few items counted differently
+ * from their unit: what every quantity box on the screen checks against
+ * before a save, so "2.5 cartons" is said beside the box rather than only
+ * after the server refuses it. Open to anyone signed in — whoever types a
+ * quantity needs it, and it says nothing about anybody's business.
+ */
+router.get('/qty-places', async (_req, res) => {
+  const [units, items] = await Promise.all([
+    prisma.uOM.findMany({ select: { id: true, symbol: true, decimalPlaces: true } }),
+    prisma.item.findMany({ where: { decimalPlaces: { not: null } }, select: { id: true, decimalPlaces: true } }),
+  ])
+  res.json({
+    success: true,
+    data: {
+      units: Object.fromEntries(units.map((u) => [u.symbol, u.decimalPlaces])),
+      unitsById: Object.fromEntries(units.map((u) => [u.id, u.decimalPlaces])),
+      items: Object.fromEntries(items.map((i) => [i.id, i.decimalPlaces])),
+    },
+  })
+})
+
+/*
  * The TDS sections, for the "usual TDS section" box on a supplier or an
  * expense head. Read-only here — they are set up in Settings — and shaped like
  * any other master list so the master forms can pick from it.

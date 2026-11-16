@@ -1,3 +1,4 @@
+import { assertQtyFitsUnits } from '../services/unitQuantity.service'
 import { Router } from 'express'
 import { prisma } from '@ld-erp/database'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
@@ -64,6 +65,8 @@ router.delete('/:id/scans/:scanId', requirePermission(MODULE, 'create'), async (
 /** Stock without stickers, counted by hand. */
 router.patch('/:id/loose', requirePermission(MODULE, 'create'), async (req, res) => {
   const data = looseSchema.parse(req.body)
+  // What is on the rack, counted the way its item is: never 0.6 of a carton.
+  await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Counted' })))
   const loose = await prisma.$transaction((tx) => setLoose(tx, req.params.id, data), T)
   res.json({ success: true, data: loose })
 })

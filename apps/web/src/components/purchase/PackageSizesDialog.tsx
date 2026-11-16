@@ -36,6 +36,7 @@ export function PackageSizesDialog({
   packType,
   packNouns,
   perPack,
+  places = 3,
   initial,
   onSave,
   onClose,
@@ -48,6 +49,8 @@ export function PackageSizesDialog({
   packNouns: Array<{ value: string; label: string }>
   /** The item's own qty per sticker, to start the quick fill with. */
   perPack?: number | null
+  /** How finely the item is counted: 0 splits pieces and cartons whole. */
+  places?: number
   initial: PackageRow[]
   onSave: (r: { rows: Array<{ qty: number; note: string }>; packType: string; received?: number }) => void
   onClose: () => void
@@ -74,7 +77,7 @@ export function PackageSizesDialog({
     const n = Math.floor(num(fillCount))
     if (!(n >= 1)) return
     const each = num(fillSize)
-    const qtys = each > 0 ? Array<number>(n).fill(round3(each)) : splitEvenly(received, n)
+    const qtys = each > 0 ? Array<number>(n).fill(round3(each)) : splitEvenly(received, n, places)
     setRows(qtys.map((q, i) => ({ qty: String(q), note: rows[i]?.note ?? '' })))
   }
   const usePasted = () => {

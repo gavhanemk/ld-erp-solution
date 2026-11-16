@@ -1,5 +1,7 @@
 'use client'
 
+import { QtyProblem } from '@/components/ui/QtyProblem'
+import { useQtyRules } from '@/lib/qtyRules'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   X,
@@ -151,9 +153,10 @@ const packWord = (type: string, n: number) =>
  * 500 is five of 100, the last taking what does not divide; typed sizes are
  * taken as they are. Nothing said: none, and the item's own rule applies.
  */
-function packQtysOf(a: Alloc): number[] {
+function packQtysOf(a: Alloc, places = 3): number[] {
   if (a.exact) return parseSizes(a.sizes ?? '')
-  return splitEvenly(num(a.received), Math.floor(num(a.packs)))
+  // Pieces and cartons split whole: 10 in 3 packages is 3, 3 and 4.
+  return splitEvenly(num(a.received), Math.floor(num(a.packs)), places)
 }
 
 /**
@@ -174,13 +177,14 @@ function PackedAs({
 }) {
   // The Package sizes window, open over the receipt.
   const [sizing, setSizing] = useState(false)
+  const places = useQtyRules().places(line.item)
   const pack = line.pack
   if (pack && !pack.tracked) {
     return <span className="text-muted-foreground text-xs">No stickers</span>
   }
   const unit = line.item.uom?.symbol ?? ''
   const received = num(alloc.received)
-  const qtys = packQtysOf(alloc)
+  const qtys = packQtysOf(alloc, places)
   const total = round3(qtys.reduce((sum, q) => sum + q, 0))
   const type = alloc.packType || pack?.packType || 'BUNDLE'
   const mismatch = alloc.exact && qtys.length > 0 && Math.abs(total - received) > 0.0005
@@ -275,6 +279,7 @@ function PackedAs({
           packType={type}
           packNouns={PACK_NOUNS}
           perPack={pack?.perPack ?? null}
+          places={places}
           initial={qtys.map((q, i) => ({ qty: String(q), note: alloc.exact ? (alloc.notes?.[i] ?? '') : '' }))}
           onClose={() => setSizing(false)}
           onSave={(r) => {
@@ -470,6 +475,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
   const already = num(line.receivedQty)
   const pending = ordered - already
   const unit = line.item.uom?.symbol ?? ''
+  const qtyRules = useQtyRules()
   const done = pending <= 0 || Boolean(line.shortClosed)
   const category = line.item.category
   const categoryLabel = category
@@ -560,7 +566,9 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                 aria-label={`Quantity of ${line.item.name} received on this receipt${
                   first ? '' : `, row ${i + 1}`
                 }`}
+                aria-invalid={!!qtyRules.placesProblem(alloc.received, line.item)}
               />
+              <QtyProblem className="text-right" text={qtyRules.placesProblem(alloc.received, line.item)} />
             </td>
             <td>
               <input
@@ -656,6 +664,7 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
   const already = num(line.receivedQty)
   const pending = ordered - already
   const unit = line.item.uom?.symbol ?? ''
+  const qtyRules = useQtyRules()
   const done = pending <= 0 || Boolean(line.shortClosed)
   const category = line.item.category
   const categoryLabel = category
@@ -769,7 +778,9 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
                   aria-label={`Quantity of ${line.item.name} received on this receipt${
                     first ? '' : `, row ${i + 1}`
                   }`}
+                  aria-invalid={!!qtyRules.placesProblem(alloc.received, line.item)}
                 />
+                <QtyProblem className="text-right" text={qtyRules.placesProblem(alloc.received, line.item)} />
               </div>
               <div className="space-y-1">
                 <label className={fieldLabel}>Lot no</label>
@@ -848,6 +859,7 @@ export function ReceiveGoodsDialog({
 }) {
   const editing = Boolean(grnId)
   const [orders, setOrders] = useState<OrderOption[]>([])
+  const qtyRules = useQtyRules()
   const [warehouses, setWarehouses] = useState<Store[]>([])
   /*
    * Stores switched off in Masters. Never offered for new goods — they are
@@ -1123,7 +1135,10 @@ export function ReceiveGoodsDialog({
           const received = String(l.receivedQty)
           const packQtys = (l.packQtys ?? []).map((q) => round3(Number(q)))
           // Split evenly, it reads back as a count; otherwise as the sizes typed.
-          const even = packQtysOf({ key: '', warehouseId: '', received, packs: String(packQtys.length) })
+          const even = packQtysOf(
+            { key: '', warehouseId: '', received, packs: String(packQtys.length) },
+            qtyRules.places(detail.lines.find((x) => x.id === l.poLineId)?.item),
+          )
           const packNotes = (l.packNotes ?? []).slice(0, packQtys.length)
           // Notes on the packages keep it as sizes, so they are seen and kept.
           const exact = packQtys.length > 0 && (even.join(',') !== packQtys.join(',') || packNotes.some((n) => n.trim()))
@@ -1383,6 +1398,9 @@ export function ReceiveGoodsDialog({
       )
     }
 
+    // 2.5 cartons received: said under its box, and again here.
+    const halfReceived = rows.find(({ line, alloc }) => qtyRules.placesProblem(alloc.received, line.item))
+    if (halfReceived) return setError(`${halfReceived.line.item.name}: ${qtyRules.placesProblem(halfReceived.alloc.received, halfReceived.line.item)}`)
     const offPacks = rows.find(({ line, alloc }) => {
       if (!alloc.exact || line.pack?.tracked === false) return false
       const qtys = packQtysOf(alloc)
@@ -1430,7 +1448,7 @@ export function ReceiveGoodsDialog({
 
       lines: rows.map(({ line, alloc }) => {
         // How it came packed: a sticker for each package, made on saving.
-        const packQtys = line.pack?.tracked === false ? [] : packQtysOf(alloc)
+        const packQtys = line.pack?.tracked === false ? [] : packQtysOf(alloc, qtyRules.places(line.item))
         // A note on each package, lined up with its size.
         const packNotes = alloc.exact ? packQtys.map((_, i) => (alloc.notes?.[i] ?? '').trim()) : []
         return {

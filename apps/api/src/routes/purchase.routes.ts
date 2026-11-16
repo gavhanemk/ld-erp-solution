@@ -44,6 +44,7 @@ import {
 } from '../schemas/bill.schemas'
 import { createPaymentSchema } from '../schemas/payment.schemas'
 import { autoStickers, packDefaults, repackGrnStickers, stickersNote, trimGrnStickers, withdrawStickers } from '../services/stickers.service'
+import { assertLineQtyFitsUnits, assertQtyFitsUnits } from '../services/unitQuantity.service'
 
 const router = Router()
 const MODULE = 'purchase'
@@ -1181,6 +1182,8 @@ function poTaxMode(po: {
 
 router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSchema.parse(req.body)
+  // Never 2.5 cartons ordered.
+  await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Order' })))
 
   /*
    * The enquiry this order is being raised from, if any.
@@ -1426,6 +1429,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
 
 router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateSchema.parse(req.body)
+  if (data.lines) await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Order' })))
 
   const before = await prisma.purchaseOrder.findUnique({
     where: { id: req.params.id },
@@ -3299,6 +3303,17 @@ router.get('/grn/:id', requirePermission(MODULE, 'view'), async (req, res) => {
  */
 router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createGrnSchema.parse(req.body)
+  // Never half a carton received, rejected or stickered.
+  if (data.lines)
+    await assertLineQtyFitsUnits(
+      prisma,
+      'poLine',
+      data.lines.flatMap((l) => [
+        { lineId: l.poLineId, qty: l.receivedQty, what: 'Received' },
+        { lineId: l.poLineId, qty: l.rejectedQty, what: 'Rejected' },
+        ...(l.packQtys ?? []).map((q) => ({ lineId: l.poLineId, qty: q, what: 'One package' })),
+      ]),
+    )
   const when = data.grnDate ?? new Date()
 
   const grn = await prisma.$transaction(async (tx) => {
@@ -3490,6 +3505,17 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
  */
 router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateGrnSchema.parse(req.body)
+  // Never half a carton received, rejected or stickered.
+  if (data.lines)
+    await assertLineQtyFitsUnits(
+      prisma,
+      'poLine',
+      data.lines.flatMap((l) => [
+        { lineId: l.poLineId, qty: l.receivedQty, what: 'Received' },
+        { lineId: l.poLineId, qty: l.rejectedQty, what: 'Rejected' },
+        ...(l.packQtys ?? []).map((q) => ({ lineId: l.poLineId, qty: q, what: 'One package' })),
+      ]),
+    )
   const when = data.grnDate ?? new Date()
 
   const grn = await prisma.$transaction(async (tx) => {
@@ -5306,6 +5332,8 @@ async function bookBill(
 
 router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createBillSchema.parse(req.body)
+  // Never 2.5 cartons billed.
+  if (data.lines) await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Billed' })))
 
   const bill = await prisma.$transaction((tx) => bookBill(tx, data, req.user!.id, userCan(req.user, 'masters', 'edit')))
 
@@ -5336,6 +5364,7 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
  */
 router.post('/expenses/cash', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const { payment: pay, ...billData } = cashExpenseSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, billData.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Billed' })))
 
   const result = await prisma.$transaction(async (tx) => {
     const booked = await bookBill(tx, billData, req.user!.id, userCan(req.user, 'masters', 'edit'))
@@ -5383,6 +5412,8 @@ router.post('/expenses/cash', requirePermission(MODULE, 'create'), async (req: A
 
 router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateBillSchema.parse(req.body)
+  // Never 2.5 cartons billed.
+  if (data.lines) await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Billed' })))
 
   const before = await prisma.purchaseInvoice.findUnique({
     where: { id: req.params.id },

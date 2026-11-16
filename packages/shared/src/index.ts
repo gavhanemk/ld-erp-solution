@@ -817,3 +817,6 @@ export function savedChargeConfig(c: { taxSnapshot?: unknown; amount: unknown; g
     hsnCodeId: c.hsnCodeId ?? null, hsnCode: null, taxCategory: 'UNSPECIFIED', amountMode: 'FIXED',
     inputAmount: Number(c.amount), basis: 'GOODS_AFTER_DISCOUNT' }
 }
+
+// Quantity precision per unit / item.
+export * from './quantity'

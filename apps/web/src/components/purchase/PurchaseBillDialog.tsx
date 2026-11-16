@@ -1,5 +1,7 @@
 'use client'
 
+import { useQtyRules } from '@/lib/qtyRules'
+import { QtyProblem } from '@/components/ui/QtyProblem'
 import { ChargeTaxDetails, taxOverridePayload } from './ChargeTaxDetails'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -571,6 +573,7 @@ export function PurchaseBillDialog({
 
   const [pulling, setPulling] = useState(false)
   const [saving, setSaving] = useState(false)
+  const qtyRules = useQtyRules()
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -1918,6 +1921,9 @@ export function PurchaseBillDialog({
     missing.push({ what: 'the date on their bill', focus: 'bill-supplier-date' })
   if (lines.some((l) => !l.itemId)) missing.push({ what: 'an item on every line' })
   if (lines.some((l) => num(l.qty) <= 0)) missing.push({ what: 'a quantity on every line' })
+  // 2.5 cartons: said under its box, and here so Save explains itself.
+  const badQty = lines.findIndex((l) => qtyRules.placesProblem(l.qty, itemById.get(l.itemId)))
+  if (badQty >= 0) missing.push({ what: `a whole number on line ${badQty + 1} (${itemById.get(lines[badQty].itemId)?.name ?? 'its item'} is counted whole)` })
   if (expenseMode && tdsChoice && !tdsAuto && tdsTyped.trim() === '')
     missing.push({ what: 'the TDS amount', focus: 'bill-tds-amount' })
   if (payNow && expenseMode && !isEdit) missing.push(...cashPaymentMissing(payment))
@@ -2859,12 +2865,14 @@ export function PurchaseBillDialog({
                               value={String(line.qty)}
                               onValueChange={(v) => setLine(i, { qty: v })}
                               aria-label={`Line ${i + 1} quantity`}
+                              aria-invalid={!!qtyRules.placesProblem(line.qty, item)}
                             />
                             {item?.uom?.symbol && (
                               <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
                                 {item.uom.symbol}
                               </p>
                             )}
+                            <QtyProblem className="text-right" text={qtyRules.placesProblem(line.qty, item)} />
                           </td>
                           <td className="w-28 px-3 py-1.5">
                             <StepInput
@@ -3033,12 +3041,14 @@ export function PurchaseBillDialog({
                             value={String(line.qty)}
                             onValueChange={(v) => setLine(i, { qty: v })}
                             aria-label={`Line ${i + 1} quantity`}
+                            aria-invalid={!!qtyRules.placesProblem(line.qty, item)}
                           />
                           {item?.uom?.symbol && (
                             <p className="text-muted-foreground text-right text-[10px]">
                               {item.uom.symbol}
                             </p>
                           )}
+                          <QtyProblem className="text-right" text={qtyRules.placesProblem(line.qty, item)} />
                         </div>
                         <div className="space-y-1">
                           <label className={fieldLabel}>Rate</label>
