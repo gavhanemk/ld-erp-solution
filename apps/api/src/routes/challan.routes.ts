@@ -276,9 +276,10 @@ router.get('/waiting', requirePermission(MODULE, 'view'), async (req, res) => {
   })
 })
 
+const challanCustomerSelect = { id: true, name: true, gstin: true, billingCity: true, shippingCity: true } as const
 const challanInclude = {
-  so: { select: { id: true, soNumber: true, status: true, isJobWork: true, customerPORef: true } },
-  customer: { select: { id: true, name: true, gstin: true, billingCity: true, shippingCity: true } },
+  so: { select: { id: true, soNumber: true, status: true, isJobWork: true, customerPORef: true, customer: { select: challanCustomerSelect } } },
+  customer: { select: challanCustomerSelect },
   warehouse: { select: { id: true, name: true } },
   createdBy: { select: { id: true, name: true } },
   dispatchedBy: { select: { id: true, name: true } },
@@ -306,6 +307,7 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
         { dcNumber: { contains: q, mode: 'insensitive' } },
         { so: { soNumber: { contains: q, mode: 'insensitive' } } },
         { customer: { name: { contains: q, mode: 'insensitive' } } },
+        { customerId: null, so: { customer: { name: { contains: q, mode: 'insensitive' } } } },
         { lrNumber: { contains: q, mode: 'insensitive' } },
         { vehicleNumber: { contains: q, mode: 'insensitive' } },
       ],
@@ -319,7 +321,7 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     and.push({ status: status as ChallanStatus })
   }
   const customerId = text(req.query.customerId)
-  if (customerId) and.push({ customerId })
+  if (customerId) and.push({ OR: [{ customerId }, { customerId: null, so: { customerId } }] })
   const soId = text(req.query.soId)
   if (soId) and.push({ soId })
   const from = text(req.query.from)
@@ -341,7 +343,9 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     }),
     prisma.deliveryChallan.count({ where }),
   ])
-  const data = rows.map((r) => ({ ...r, pieces: r.lines.reduce((s, l) => s + Number(l.qty), 0) }))
+  // Legacy challans predate the direct customer link. Resolve from the order on
+  // read, retaining any explicitly recorded customer and leaving history intact.
+  const data = rows.map((r) => ({ ...r, customer: r.customer ?? r.so.customer, pieces: r.lines.reduce((s, l) => s + Number(l.qty), 0) }))
   res.json({ success: true, data, pagination: { page, limit, total, pages: Math.ceil(total / limit) } })
 })
 
@@ -349,7 +353,7 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
 router.get('/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const dc = await prisma.deliveryChallan.findUnique({ where: { id: req.params.id }, include: challanInclude })
   if (!dc) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
-  res.json({ success: true, data: dc })
+  res.json({ success: true, data: { ...dc, customer: dc.customer ?? dc.so.customer } })
 })
 
 type ChallanInput = z.infer<typeof challanSchema>
@@ -786,23 +790,13 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
  * at the order's rates — the figure an e-way bill is judged on.
  */
 router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const printCustomerSelect = { name: true, gstin: true, phone: true, billingAddress: true, billingCity: true, billingState: true, billingStateCode: true, billingPincode: true } as const
   const dc = await prisma.deliveryChallan.findUnique({
     where: { id: req.params.id },
     include: {
       ...challanInclude,
-      so: { select: { id: true, soNumber: true, orderDate: true, customerPORef: true, customerPODate: true, isJobWork: true, placeOfSupplyCode: true } },
-      customer: {
-        select: {
-          name: true,
-          gstin: true,
-          phone: true,
-          billingAddress: true,
-          billingCity: true,
-          billingState: true,
-          billingStateCode: true,
-          billingPincode: true,
-        },
-      },
+      so: { select: { id: true, soNumber: true, orderDate: true, customerPORef: true, customerPODate: true, isJobWork: true, placeOfSupplyCode: true, customer: { select: printCustomerSelect } } },
+      customer: { select: printCustomerSelect },
     },
   })
   if (!dc) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
@@ -822,7 +816,7 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
   )
   res.json({
     success: true,
-    data: { ...header, challan: dc, value, gst, valueInWords: amountInWords(round2(value + gst)) },
+    data: { ...header, challan: { ...dc, customer: dc.customer ?? dc.so.customer }, value, gst, valueInWords: amountInWords(round2(value + gst)) },
   })
 })
 

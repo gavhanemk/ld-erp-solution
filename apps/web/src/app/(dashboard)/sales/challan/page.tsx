@@ -45,6 +45,13 @@ interface WaitingOrder {
   pending: number
 }
 
+interface ChallanCustomer {
+  id: string
+  name: string
+  billingCity: string | null
+  shippingCity: string | null
+}
+
 interface ChallanRow {
   id: string
   dcNumber: string
@@ -58,8 +65,8 @@ interface ChallanRow {
   dispatchedAt: string | null
   deliveredAt: string | null
   cancelReason: string | null
-  so: { id: string; soNumber: string; isJobWork: boolean; customerPORef: string | null }
-  customer: { id: string; name: string; billingCity: string | null; shippingCity: string | null }
+  so: { id: string; soNumber: string; isJobWork: boolean; customerPORef: string | null; customer?: ChallanCustomer | null }
+  customer: ChallanCustomer | null
   warehouse: { id: string; name: string } | null
   /** The live invoice billing it, if any. */
   invoices: Array<{ id: string; invoiceNumber: string }>
@@ -85,7 +92,9 @@ function dueNote(date: string | null): { text: string; cls: string } | null {
   return { text: `in ${days} ${days === 1 ? 'day' : 'days'}`, cls: 'text-muted-foreground' }
 }
 
-const town = (c: { shippingCity: string | null; billingCity: string | null }) => c.shippingCity || c.billingCity || ''
+const town = (c: { shippingCity: string | null; billingCity: string | null } | null | undefined) => c?.shippingCity || c?.billingCity || ''
+const challanCustomer = (c: ChallanRow) => c.customer ?? c.so.customer
+const customerName = (c: ChallanRow) => challanCustomer(c)?.name ?? 'Customer unavailable'
 
 /** The transport in one line: transporter, vehicle, LR. */
 const transport = (c: ChallanRow) => [c.transporter, c.vehicleNumber, c.lrNumber && `LR ${c.lrNumber}`].filter(Boolean).join(' · ')
@@ -239,7 +248,7 @@ export default function DeliveryChallanPage() {
   }
 
   const markDelivered = async (c: ChallanRow) => {
-    if (!window.confirm(`Mark ${c.dcNumber} as delivered to ${c.customer.name}?`)) return
+    if (!window.confirm(`Mark ${c.dcNumber} as delivered to ${customerName(c)}?`)) return
     setError(null)
     setMessage(null)
     try {
@@ -311,8 +320,8 @@ export default function DeliveryChallanPage() {
     { header: 'Status', value: (c) => challanStatus(c.status).label },
     { header: 'Order', value: (c) => c.so.soNumber },
     { header: 'Buyer PO', value: (c) => c.so.customerPORef ?? '' },
-    { header: 'Customer', value: (c) => c.customer.name },
-    { header: 'Town', value: (c) => town(c.customer) },
+    { header: 'Customer', value: (c) => customerName(c) },
+    { header: 'Town', value: (c) => town(challanCustomer(c)) },
     { header: 'From store', value: (c) => c.warehouse?.name ?? '' },
     { header: 'Pieces', value: (c) => c.pieces },
     { header: 'Cartons', value: (c) => c.cartons ?? '' },
@@ -650,7 +659,7 @@ export default function DeliveryChallanPage() {
                           <span className="text-foreground font-mono text-xs font-semibold">{c.dcNumber}</span>
                           <span className={s.cls}>{s.label}</span>
                         </div>
-                        <p className="text-foreground mt-1 font-medium leading-snug">{c.customer.name}</p>
+                        <p className="text-foreground mt-1 font-medium leading-snug">{customerName(c)}</p>
                         <p className="text-muted-foreground text-[11px]">
                           {formatDate(c.dcDate)} · {c.so.soNumber}
                         </p>
@@ -715,9 +724,9 @@ export default function DeliveryChallanPage() {
                           </div>
                         </td>
                         <td>
-                          <div className="text-foreground max-w-[15rem] truncate font-medium">{c.customer.name}</div>
-                          {town(c.customer) && (
-                            <div className="text-muted-foreground max-w-[15rem] truncate text-[11px] leading-tight">{town(c.customer)}</div>
+                          <div className="text-foreground max-w-[15rem] truncate font-medium">{customerName(c)}</div>
+                          {town(challanCustomer(c)) && (
+                            <div className="text-muted-foreground max-w-[15rem] truncate text-[11px] leading-tight">{town(challanCustomer(c))}</div>
                           )}
                         </td>
                         <td className="whitespace-nowrap text-xs">
