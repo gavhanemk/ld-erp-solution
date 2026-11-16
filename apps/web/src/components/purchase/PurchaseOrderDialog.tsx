@@ -265,7 +265,16 @@ interface RateHistoryRow {
   qty: string | number
   unitRate: string | number
   amount: string | number
+  /** The pack it was bought in, when it was: the rate is per it. */
+  packSymbol?: string | null
+  packFactor?: number
+  /** The rate per the item's own unit, to compare orders in different packs. */
+  ratePerPiece?: number
 }
+
+/** A past order's rate brought to the unit a line is in now: ₹4.95 a piece is ₹99 for a line in boxes of 20. */
+const rateFor = (h: RateHistoryRow, lineFactor: number) =>
+  Math.round((h.ratePerPiece ?? num(h.unitRate)) * lineFactor * 100) / 100
 
 interface ChargeTypeOption extends ChargeMasterConfig {
   id: string
@@ -852,7 +861,9 @@ export function PurchaseOrderDialog({
                 description: l.description ?? '',
                 styleNo: '',
                 styleId: '',
-                qty: String(Number(ql?.offeredQty ?? l.qty)),
+                // In the pack the enquiry asked in (pieces ÷ 20: 2 boxes); the quoted rate is per it.
+                qty: String(Math.round((Number(ql?.offeredQty ?? l.qty) / (Number(l.uomFactor ?? 1) || 1)) * 1000) / 1000),
+                uomId: l.uomId ?? null,
                 unitRate: ql?.quotedRate == null ? '' : String(Number(ql.quotedRate)),
                 discount: '0',
                 discountUnit: '%' as const,
@@ -3168,7 +3179,7 @@ export function PurchaseOrderDialog({
                               would just be a row of noise. */}
                             {lastRate && (
                               <div className="mt-0.5 text-right">
-                                <LastRate rate={num(lastRate.unitRate)} use={String(line.unitRate).trim() === '' ? () => setLine(i, { unitRate: String(num(lastRate.unitRate)) }) : undefined} />
+                                <LastRate rate={rateFor(lastRate, packOf(line)?.factor ?? 1)} use={String(line.unitRate).trim() === '' ? () => setLine(i, { unitRate: String(rateFor(lastRate, packOf(line)?.factor ?? 1)) }) : undefined} />
                                 <button
                                   type="button"
                                   onClick={() => setHistoryFor(line.itemId)}
@@ -3464,7 +3475,7 @@ export function PurchaseOrderDialog({
                           />
                           {lastRate && (
                             <div>
-                              <LastRate rate={num(lastRate.unitRate)} use={String(line.unitRate).trim() === '' ? () => setLine(i, { unitRate: String(num(lastRate.unitRate)) }) : undefined} />
+                              <LastRate rate={rateFor(lastRate, packOf(line)?.factor ?? 1)} use={String(line.unitRate).trim() === '' ? () => setLine(i, { unitRate: String(rateFor(lastRate, packOf(line)?.factor ?? 1)) }) : undefined} />
                               <button
                                 type="button"
                                 onClick={() => setHistoryFor(line.itemId)}
@@ -4611,7 +4622,9 @@ export function PurchaseOrderDialog({
       {historyFor &&
         (() => {
           const rows = rateHistory[historyFor] ?? []
-          const rates = rows.map((r) => num(r.unitRate))
+          // Orders in different packs compared per piece: last, lowest, highest.
+          const mixed = rows.some((r) => (r.packFactor ?? 1) !== 1)
+          const rates = rows.map((r) => (mixed ? (r.ratePerPiece ?? num(r.unitRate)) : num(r.unitRate)))
           return (
             <div
               className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
@@ -4730,6 +4743,11 @@ export function PurchaseOrderDialog({
                               </td>
                               <td className="px-3 py-2 text-right font-medium tabular-nums">
                                 {inr(num(h.unitRate))}
+                                {h.packSymbol && (h.packFactor ?? 1) !== 1 && (
+                                  <span className="text-muted-foreground block text-[10px] font-normal">
+                                    / {h.packSymbol} of {h.packFactor} · {inr(h.ratePerPiece ?? 0)} each
+                                  </span>
+                                )}
                               </td>
                               <td className="text-muted-foreground px-3 py-2 text-right tabular-nums">
                                 {num(h.qty)}

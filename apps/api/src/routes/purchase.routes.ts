@@ -713,6 +713,8 @@ router.get(
         id: true,
         qty: true,
         unitRate: true,
+        uomFactor: true,
+        uom: { select: { symbol: true } },
         amount: true,
         po: {
           select: {
@@ -736,6 +738,11 @@ router.get(
         qty: r.qty,
         unitRate: r.unitRate,
         amount: r.amount,
+        // Bought in a pack: the rate is per it (₹99 a box of 20), the quantity
+        // in pieces. ratePerPiece sets every past order on the same footing.
+        packSymbol: r.uom?.symbol ?? null,
+        packFactor: Number(r.uomFactor) || 1,
+        ratePerPiece: Number(r.unitRate) / (Number(r.uomFactor) || 1),
       })),
     })
   }

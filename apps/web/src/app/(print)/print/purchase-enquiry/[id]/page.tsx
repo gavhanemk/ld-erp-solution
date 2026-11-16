@@ -16,6 +16,7 @@ import {
   Users,
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { inPack } from '@/lib/packs'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/enquiryTypes'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -516,10 +517,12 @@ export default function PurchaseRequisitionPrintPage() {
                     </td>
                     <td style={{ ...TD, color: SOFT, ...NUM }}>{l.hsnCode ?? '—'}</td>
                     <td style={{ ...TD, textAlign: 'right', fontWeight: 600, ...NUM }}>
-                      {qtyFmt(l.qty)}
+                      {/* Asked in the pack it is bought in: 2 box (= 40 pcs). */}
+                      {qtyFmt(inPack(l).qty)}
+                      {inPack(l).pieces && <div style={{ fontSize: '9.5px', fontWeight: 400, color: GREY }}>= {inPack(l).pieces}</div>}
                     </td>
                     <td style={{ ...TD, paddingRight: 16, color: GREY }}>
-                      {l.item.uom?.symbol ?? '—'}
+                      {inPack(l).unit || '—'}
                     </td>
                   </tr>
                 ))}

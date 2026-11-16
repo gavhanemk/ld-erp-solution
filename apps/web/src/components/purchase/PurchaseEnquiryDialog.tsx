@@ -1,5 +1,6 @@
 'use client'
 
+import { packsFor } from '@ld-erp/shared'
 import { useQtyRules } from '@/lib/qtyRules'
 import { QtyProblem } from '@/components/ui/QtyProblem'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -72,6 +73,8 @@ interface Item {
   name: string
   hsnCode: string | null
   uom: { symbol: string } | null
+  /** The packs it is bought in (a box of 20 pcs), the usual one first. */
+  buyUnits?: Array<{ factor: string | number; isDefault: boolean; uom: { id: string; symbol: string; decimalPlaces?: number } }>
   category: { id: string; name: string; parentId: string | null } | null
 }
 
@@ -92,6 +95,8 @@ interface Line {
   qty: string
   /** The item's unit, shown under the quantity so a figure says what it counts. */
   uom: string
+  /** The pack it is asked in (a box of 20 pcs); null for the item's own unit. */
+  uomId: string | null
   expectedRate: string
   description: string
   mrLineId: string | null
@@ -149,6 +154,7 @@ const blank = (): Line => ({
   subcategoryId: '',
   qty: '',
   uom: '',
+  uomId: null,
   expectedRate: '',
   description: '',
   mrLineId: null,
@@ -198,8 +204,10 @@ export function PurchaseEnquiryDialog({
           codeText: l.item.code,
           categoryId: '',
           subcategoryId: '',
-          qty: String(Number(l.qty)),
+          // Stored in pieces; reopened in the pack it was asked in.
+          qty: String(Math.round((Number(l.qty) / (Number(l.uomFactor ?? 1) || 1)) * 1000) / 1000),
           uom: l.item.uom?.symbol ?? '',
+          uomId: l.uomId ?? null,
           expectedRate: l.expectedRate == null ? '' : String(Number(l.expectedRate)),
           description: l.description ?? '',
           mrLineId: l.mrLineId,
@@ -232,7 +240,46 @@ export function PurchaseEnquiryDialog({
   const [saving, setSaving] = useState(false)
   const qtyRules = useQtyRules()
   /** 2.5 cartons on a line: what is wrong, said under its box. */
-  const lineQtyProblem = (l: { itemId: string; uom: string; qty: string }) => qtyRules.placesProblem(l.qty, { id: l.itemId, uom: { symbol: l.uom } })
+  /** The pack a line is asked in, from the item's list. */
+  const packOfLine = (l: { itemId: string; uomId: string | null }) =>
+    l.uomId ? (items.find((i) => i.id === l.itemId)?.buyUnits?.find((u) => u.uom.id === l.uomId) ?? null) : null
+  /** 2.5 boxes: checked against the pack it is typed in, else the item's own unit. */
+  const lineQtyProblem = (l: { itemId: string; uom: string; uomId: string | null; qty: string }) => {
+    const p = packOfLine(l)
+    return qtyRules.placesProblem(l.qty, p ? { uom: { symbol: p.uom.symbol, decimalPlaces: p.uom.decimalPlaces } } : { id: l.itemId, uom: { symbol: l.uom } })
+  }
+  /** Under a quantity box: the unit — a choice when the item is bought in packs — and what it comes to. */
+  const unitPicker = (l: Line, i: number) => {
+    const item = items.find((it) => it.id === l.itemId)
+    const pack = packOfLine(l)
+    if (!item) return null
+    return (
+      <div className="text-muted-foreground mt-0.5 text-right text-[10px]">
+        {item.buyUnits?.length ? (
+          <select
+            className="form-input h-6 w-full px-1 py-0 text-[10px]"
+            value={l.uomId ?? ''}
+            onChange={(e) => setLine(l.key, { uomId: e.target.value || null })}
+            aria-label={`Row ${i + 1} unit`}
+          >
+            <option value="">{l.uom}</option>
+            {item.buyUnits.map((u) => (
+              <option key={u.uom.id} value={u.uom.id}>
+                {u.uom.symbol} ({Number(u.factor).toLocaleString('en-IN')})
+              </option>
+            ))}
+          </select>
+        ) : (
+          l.uom
+        )}
+        {pack && num(l.qty) > 0 && (
+          <p>
+            = {(num(l.qty) * Number(pack.factor)).toLocaleString('en-IN')} {l.uom}
+          </p>
+        )}
+      </div>
+    )
+  }
   const [error, setError] = useState<string | null>(null)
   const filesRef = useRef<AttachmentsBoxHandle>(null)
 
@@ -354,7 +401,7 @@ export function PurchaseEnquiryDialog({
       // Cleared to choose again: the category the row was narrowed to stays,
       // so the lists still show only what it holds.
       if (!itemId) {
-        setLine(key, { itemId: '', codeText: '', uom: '' })
+        setLine(key, { itemId: '', codeText: '', uom: '', uomId: null })
         return
       }
       const item = items.find((i) => i.id === itemId)
@@ -363,6 +410,8 @@ export function PurchaseEnquiryDialog({
         itemId,
         codeText: item?.code ?? '',
         uom: item?.uom?.symbol ?? '',
+        // Asked in the pack it is usually bought in; its own unit when it has none.
+        uomId: item?.buyUnits?.find((u) => u.isDefault)?.uom.id ?? null,
         categoryId: cat?.parentId ?? cat?.id ?? '',
         subcategoryId: cat?.parentId ? cat.id : '',
       })
@@ -435,7 +484,14 @@ export function PurchaseEnquiryDialog({
             codeText: p.row.item.code,
             categoryId: cat?.parentId ?? cat?.id ?? '',
             subcategoryId: cat?.parentId ? cat.id : '',
-            qty: String(p.qty),
+            // The indent is in pieces; asked in the usual pack, in whole packs (30 pcs in boxes of 20: 2).
+            ...(() => {
+              const pack = items.find((it) => it.id === p.row.item.id)?.buyUnits?.find((u) => u.isDefault)
+              return {
+                qty: String(pack ? packsFor(p.qty, Number(pack.factor), pack.uom.decimalPlaces ?? 0) : p.qty),
+                uomId: pack?.uom.id ?? null,
+              }
+            })(),
             uom: p.row.item.uom?.symbol ?? '',
             expectedRate: '',
             description: '',
@@ -495,6 +551,8 @@ export function PurchaseEnquiryDialog({
         itemId: l.itemId,
         description: l.description.trim() || null,
         qty: num(l.qty),
+        // The pack it is asked in; the server knows its size.
+        uomId: l.uomId,
         expectedRate: l.expectedRate === '' ? null : num(l.expectedRate),
         mrLineId: l.mrLineId,
       })),
@@ -903,6 +961,7 @@ export function PurchaseEnquiryDialog({
                               aria-label={`Row ${i + 1} quantity`}
                               aria-invalid={!!lineQtyProblem(l)}
                             />
+                            {unitPicker(l, i)}
                             <QtyProblem text={lineQtyProblem(l)} />
                           </div>
                           <div className="space-y-1">
@@ -1055,12 +1114,8 @@ export function PurchaseEnquiryDialog({
                               aria-label={`Row ${i + 1} quantity`}
                               aria-invalid={!!lineQtyProblem(l)}
                             />
+                            {unitPicker(l, i)}
                             <QtyProblem className="text-right" text={lineQtyProblem(l)} />
-                            {l.uom && (
-                              <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
-                                {l.uom}
-                              </p>
-                            )}
                           </td>
                           {/* Ours, not theirs. What a supplier quotes is recorded
                           against his PI number and never typed on this form. */}
@@ -1322,6 +1377,7 @@ export function PurchaseEnquiryDialog({
               itemId: item.id,
               codeText: item.code,
               uom: item.uom?.symbol ?? '',
+              uomId: null,
               categoryId: cat?.parentId ?? cat?.id ?? '',
               subcategoryId: cat?.parentId ? cat.id : '',
               // Offered as the expected rate where the master carries one. It

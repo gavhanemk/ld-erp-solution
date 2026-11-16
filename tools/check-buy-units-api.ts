@@ -106,6 +106,30 @@ async function main() {
   const noteRow = await prisma.purchaseNote.findFirst({ where: { returnId: ret.body?.data?.id }, select: { taxableAmount: true, lines: { select: { qty: true, uomFactor: true, taxableValue: true } } } })
   check('Its debit note: 10 pcs = half a box, taxable ₹49.50', !!noteRow && near(Number(noteRow.taxableAmount), 49.5), noteRow ?? note)
 
+  // ── Enquiry and quote in boxes ──
+  const enqHalf = await call('POST', '/purchase/enquiries', { lines: [{ itemId: item.id, uomId: u('box').id, qty: 1.5 }], supplierIds: [supplier.id] })
+  check('Enquiry: 1.5 boxes refused', enqHalf.status === 400 && enqHalf.body?.code === 'QTY_NOT_IN_UNIT', enqHalf)
+  const enq = await call('POST', '/purchase/enquiries', { lines: [{ itemId: item.id, uomId: u('box').id, qty: 3, expectedRate: 95 }], supplierIds: [supplier.id] })
+  check('Enquiry: 3 boxes asked', okay(enq), enq)
+  const el = enq.body?.data?.lines?.[0]
+  check('Enquiry line: 60 pcs, in boxes of 20', Number(el?.qty) === 60 && Number(el?.uomFactor) === 20 && el?.uomId === u('box').id, el)
+  const quoteId = enq.body?.data?.quotes?.[0]?.id
+  const quote = await call('PATCH', `/purchase/enquiries/quotes/${quoteId}/quote`, {
+    piNumber: `ZZPI-${stamp}`,
+    piDate: new Date().toISOString(),
+    rates: [{ lineId: el?.id, quotedRate: 98, offeredQty: 2 }],
+  })
+  check('Quote: ₹98 a box, can supply 2 boxes', okay(quote), quote)
+  const enqNow = (await call('GET', `/purchase/enquiries/${enq.body?.data?.id}`)).body?.data
+  const ql = enqNow?.quotes?.[0]?.lines?.[0]
+  check('Quote line keeps the offer in pieces (40)', Number(ql?.offeredQty) === 40, ql)
+  check('Quote is worth ₹196 (2 boxes × ₹98), not ₹3,920', Math.abs(Number(enqNow?.quotes?.[0]?.value) - 196) < 0.01, enqNow?.quotes?.[0]?.value)
+
+  // ── Rate history: a box order read per piece ──
+  const hist = (await call('GET', `/purchase/rate-history/${item.id}`)).body?.data ?? []
+  const boxRow = hist.find((h: any) => h.packSymbol === 'box')
+  check('Rate history: the box order is ₹99 a box = ₹4.95 a piece', !!boxRow && Number(boxRow.unitRate) === 99 && Math.abs(Number(boxRow.ratePerPiece) - 4.95) < 0.001, hist)
+
   console.log(`\n${pass} passed, ${fail} failed`)
   process.exitCode = fail ? 1 : 0
 }

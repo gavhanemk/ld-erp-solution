@@ -30,6 +30,8 @@ const lineSchema = z.object({
   itemId: z.string().min(1, 'Pick an item'),
   description: z.string().max(300).optional().nullable(),
   qty: z.number().positive('Quantity must be more than zero'),
+  /** The pack it is asked in (a box of 20 pcs); empty: the item's own unit. Its size comes from the item's list. */
+  uomId: z.string().optional().nullable(),
   /*
    * What the mill expects to pay, where the buyer has a view. Optional, and
    * usually empty — an enquiry goes out precisely because nobody knows the
