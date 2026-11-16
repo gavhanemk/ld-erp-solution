@@ -1,9 +1,160 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Tue 3 Nov 2026 — Accounts, phase 6: dashboard and prints (branch `feat/accounts-posting`)_
+_Last updated: 14 Nov 2026 — Sampling local pilot (branch `feat/sampling-local`; not merged or deployed)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Sampling — local pilot, awaiting team feedback (14 Nov 2026)
+
+This is a first working vertical slice, not a completed replacement for the
+production floor. Sampling lives under `/sampling`, with Requests, Sampling
+floor, Reviews and Handover queues. Sample records are separate from bulk MOs,
+garments and sales fulfilment. Material issues/returns use the existing stock
+writer, including ownership, reservations and valuation. Recording use/waste
+does not deduct the material a second time.
+
+Implemented: request intake; editable specifications before release; style,
+colour, sizes, measurements/tolerances, tech-pack/pattern references, route and
+material plan; frozen release; material issue/use/waste/return; sequential making
+steps with quantity reconciliation; measurement QC; buyer submission and decision;
+new rounds preserving old versions/decisions; approved BOM/routing handover and
+production acceptance; cancellation after material reconciliation; event history;
+CSV register and record printing. Every mutation is serialized on its request
+with an expected version. Separate sampling permissions are enforced; material
+movement also needs inventory edit, acceptance needs production approve, and
+material values need accounts view.
+
+### Start and stop locally
+
+**First daily-use improvements (local only, 14 Nov 2026):** added partial
+technical draft saves and request-detail editing from the implementation plan.
+Save draft is available in all four preparation sections and preserves incomplete
+rows. Draft patches retain omitted fields, validate supplied master references
+and remain subject to permission/version checks. Release still applies the full
+specification rules; incomplete drafts create no making or stock records.
+
+Request & buyer brief now has Edit request details. Changes require a reason
+and retain before/after values in Activity. Buyer and brand lock after the first
+release, including when a later revision is still a draft; other request details
+can be edited until a handover is prepared. Before changing a draft's brand,
+clear and save its selected style to avoid silently discarding technical details.
+Cancelled and handed-over requests cannot be edited. No database migration was
+needed for these two improvements.
+
+Scope selected for this pass: partial drafts and request editing. Staff-linked
+ownership, sample-type masters, local attachments and later plan phases remain
+pending. Existing attachments use cloud storage, so Sampling has not enabled or
+written to that service as part of this local pass. Material-issue policy,
+milestone sequencing and the final approval gate still need process-owner input.
+The expanded local API/database regression suite passes **122 checks**; the
+17 workflow-presentation checks also pass. API and web builds and TypeScript
+checks passed after these changes. The restarted local API was exercised with
+real authentication to create, partially save, edit and reopen a fictional
+request. **SMP-2627-0025 / Local review - incomplete fit sample** is available
+for personal testing. Browser interaction and visual QA remain pending.
+
+**UI refinement for personal review (14 Nov 2026):** the Sampling register now
+has descriptive work queues, a lifecycle overview and next-action text. Each
+request has an ordered stage navigator, visible cutting/stitching/finishing
+steps, separate QC, buyer review and handover views, and a contextual next
+action. The specification editor uses four sections: style/construction,
+sizes/measurements, materials/route, then review/release. Making routes use
+ordered rows; the review lists missing details. Draft specification edits survive
+switching workspace sections, with an unsaved-change prompt before leaving the
+request or changing rounds. Future making forms explain their prerequisites.
+Material balances, measurement sizes/units and form guidance are clearer.
+
+This refinement changes the UI only; workflow APIs and database rules are
+unchanged. `node tools/check-sampling-ui.cjs` passes 17 workflow-presentation
+checks, and the web production build/type check passes. Local Sampling responds
+successfully. Browser visual inspection was blocked by automatic approval review
+because the available Chrome window contained unrelated private content. The
+owner will test the revised interface personally before team testing. Start with
+New sample request, complete the four preparation sections, then follow the
+Next action prompt through making, QC and buyer feedback.
+
+Run from the repository root in PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/sampling-local.ps1
+# Later, stop only the pilot's own processes:
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/sampling-local.ps1 -Action Stop
+```
+
+Requires PostgreSQL 16 binaries (default `C:/Program Files/PostgreSQL/16/bin`;
+override with `PG_BIN`) and the existing Node dependencies. Uses its own data at
+`.local-sampling/data`, database **lderp_sampling on 127.0.0.1:55439**, API
+**http://localhost:5102**, web **http://localhost:3302/sampling**. Fictional local
+login: **sampler@example.com / LocalSample@123**. Fixtures are idempotent and
+never copy shared data. The launcher overrides both database URLs and local
+auth settings without changing `.env` files. Local logs/cache/data are ignored.
+Stop the pilot before preparing/generating again on Windows.
+
+The API is disabled unless `SAMPLING_ENABLED=true`, both database URLs identify
+the loopback `lderp_sampling` database, and NODE_ENV is not production. The menu
+also requires `NEXT_PUBLIC_SAMPLING_ENABLED=true`. These are set only by the
+local launcher; this branch has not been pushed. **Do not run the usual
+db:migrate/dev or seeds against the shared database.**
+
+### Tests and open scope
+
+`node tools/check-sampling.cjs` runs the HTTP lifecycle against the isolated
+database only, including revision/approval/handover, stale and concurrent writes,
+permission denials, owner separation, quantity errors, cancellation and stock
+valuation/return. It leaves fictional test requests for inspection. Prepare the
+local database before running it. It refuses any non-local database target.
+
+Validated locally: **96 HTTP/database checks passed**, API and web TypeScript
+checks passed, API build and Next production build passed. After a clean stop
+and restart, login, Sampling, lookups, the authenticated print API and the print
+page returned successfully. The launcher stops its own recorded Node processes
+and PostgreSQL cluster; ports 3302, 5102 and 55439 were confirmed closed before
+restart. The browser host was unavailable, and native computer use could not
+verify the Chrome URL, so **interactive UI/visual and printed-page review remain
+unverified**. HTTP responses do not replace that review.
+
+### Team walkthrough
+
+1. Sign in locally, open Sampling and create a fictional buyer request under
+   Example Studio. Use style EX-SH-2601 and one colour. Set a milestone, size
+   quantity, construction, tech-pack/pattern references, measurements with
+   tolerances, a making route and Example Cotton from Example Store. The current
+   pilot allows incomplete drafts to be saved from any preparation section.
+   Save a partial draft, reopen it, then finish the checklist before release.
+   Try editing the request owner/due date with a reason and review its history.
+2. Release the specification, issue the planned material and record each making
+   step in order. Record the first step before returning surplus material. Check
+   that done plus rejected equals the incoming quantity. Reconcile material as
+   used, wasted or returned; use/waste must not deduct stock again.
+3. Enter actual measurements and inspect the QC result. Submit only passed
+   pieces, record buyer feedback/evidence, then create a new round for changes
+   or the next milestone. Confirm that the previous specification and decision
+   remain available. Reconcile materials on earlier rounds as well.
+4. After unconditional approval, prepare the approved BOM/routing handover and
+   accept it with production permission. Confirm that this does not create or
+   release a bulk order. Review the print record and CSV export. Also try a stale
+   save in two windows and review access with the intended non-admin roles.
+
+The regression checks leave clearly named fictional requests with completed,
+revised and cancelled cases for inspection. Create fresh requests for team tests.
+
+The first pilot deliberately records **document references**, not uploaded
+tech-pack/pattern files. Making steps record completed batches rather than
+reusing the bulk bundle/transfer ledger; outside processing records work
+references, not statutory challans. Detailed piece custody/returns, sourcing
+requisitions/purchase links, labour/courier costing, accounting postings,
+rework within an attempt, fine-grained size-set rejection and automatic bulk
+creation remain follow-up work. Multi-size rounds currently require complete
+size sets through QC/submission; partially rejected sizes need separate rounds.
+Handover creates a frozen reference and does not release production.
+
+Team review should confirm milestones, stage exceptions, approvers, material
+ownership, sample custody, costs and the bulk gate before those integrations.
+The previous FIFO/sticker-age and bulk route-refresh review findings are not
+fixed by this pilot. No production-readiness claim or main merge is intended.
 
 ---
 

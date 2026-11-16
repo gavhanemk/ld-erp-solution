@@ -318,6 +318,7 @@ const MODULE_LABELS: Record<string, string> = {
   purchase: 'Purchase',
   inventory: 'Inventory',
   production: 'Production',
+  sampling: 'Sampling',
   accounts: 'Accounts',
   hr: 'HR & Payroll',
   vhagar: 'VHAGAR brand',

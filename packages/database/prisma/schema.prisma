@@ -13,6 +13,103 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+// Sampling is intentionally separate from bulk MOs, WIP and saleable garments.
+// A released round's specification is a snapshot, not a live master lookup.
+model SampleRequest {
+  id          String @id @default(cuid())
+  clientKey   String @unique
+  number      String @unique
+  title       String
+  customerId  String?
+  customer    Customer? @relation(fields: [customerId], references: [id])
+  brandId     String
+  brand       Brand @relation(fields: [brandId], references: [id])
+  buyerRef    String?
+  requiredAt  DateTime?
+  owner       String
+  brief       String
+  state       String @default("DRAFT")
+  version     Int @default(0)
+  cancelledAt DateTime?
+  cancelReason String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  rounds      SampleRound[]
+  events      SampleEvent[]
+  @@index([state, createdAt])
+  @@map("sample_requests")
+}
+
+model SampleRound {
+  id           String @id @default(cuid())
+  requestId    String
+  request      SampleRequest @relation(fields: [requestId], references: [id])
+  revision     Int
+  state        String @default("DRAFT")
+  specification Json
+  releasedAt   DateTime?
+  releasedById String?
+  qc           Json?
+  submission   Json?
+  decision     Json?
+  handover     Json?
+  createdAt    DateTime @default(now())
+  stages       SampleStage[]
+  materials    SampleMaterial[]
+  @@unique([requestId, revision])
+  @@map("sample_rounds")
+}
+
+model SampleStage {
+  id        String @id @default(cuid())
+  roundId   String
+  round     SampleRound @relation(fields: [roundId], references: [id])
+  sequence  Int
+  name      String
+  doneQty   Int?
+  rejectedQty Int?
+  responsible String?
+  reference String?
+  notes     String?
+  completedAt DateTime?
+  @@unique([roundId, sequence])
+  @@map("sample_stages")
+}
+
+model SampleMaterial {
+  id          String @id @default(cuid())
+  roundId     String
+  round       SampleRound @relation(fields: [roundId], references: [id])
+  itemId      String
+  item        Item @relation(fields: [itemId], references: [id])
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+  ownership   StockOwnership
+  plannedQty  Decimal @db.Decimal(10,3)
+  issuedQty   Decimal @default(0) @db.Decimal(10,3)
+  returnedQty Decimal @default(0) @db.Decimal(10,3)
+  usedQty     Decimal @default(0) @db.Decimal(10,3)
+  wasteQty    Decimal @default(0) @db.Decimal(10,3)
+  issuedValue Decimal @default(0) @db.Decimal(14,2)
+  returnedValue Decimal @default(0) @db.Decimal(14,2)
+  @@index([roundId])
+  @@map("sample_materials")
+}
+
+model SampleEvent {
+  id        String @id @default(cuid())
+  requestId String
+  request   SampleRequest @relation(fields: [requestId], references: [id])
+  version   Int
+  action    String
+  actorId   String
+  detail    Json
+  createdAt DateTime @default(now())
+  @@unique([requestId, version])
+  @@map("sample_events")
+}
+
 // ═══════════════════════════════════════════
 // ENUMS
 // ═══════════════════════════════════════════
@@ -509,6 +606,8 @@ model Company {
 }
 
 model Brand {
+  sampleRequests SampleRequest[]
+
   id          String    @id @default(cuid())
   companyId   String
   company     Company   @relation(fields: [companyId], references: [id])
@@ -727,6 +826,8 @@ model UOM {
 }
 
 model Item {
+  sampleMaterials SampleMaterial[]
+
   id           String       @id @default(cuid())
   code         String       @unique
   name         String
@@ -1019,6 +1120,8 @@ model BOMLineSize {
 }
 
 model Customer {
+  sampleRequests SampleRequest[]
+
   id                String       @id @default(cuid())
   code              String       @unique
   name              String
@@ -1183,6 +1286,8 @@ model Supplier {
 }
 
 model Warehouse {
+  sampleMaterials SampleMaterial[]
+
   id        String  @id @default(cuid())
   companyId String
   company   Company @relation(fields: [companyId], references: [id])

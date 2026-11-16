@@ -42,6 +42,7 @@ import finishedGoodsRoutes from './routes/finishedGoods.routes'
 import productionRoutes from './routes/production.routes'
 import accountsRoutes from './routes/accounts.routes'
 import hrRoutes from './routes/hr.routes'
+import samplingRoutes from './routes/sampling.routes'
 import approvalRoutes from './routes/approvals.routes'
 import aiRoutes from './routes/ai.routes'
 import notificationRoutes from './routes/notification.routes'
@@ -318,6 +319,7 @@ app.use('/api/finished-goods', authMiddleware, finishedGoodsRoutes)
 app.use('/api/production', authMiddleware, productionRoutes)
 app.use('/api/accounts', authMiddleware, accountsRoutes)
 app.use('/api/hr', authMiddleware, hrRoutes)
+app.use('/api/sampling', authMiddleware, samplingRoutes)
 app.use('/api/approvals', authMiddleware, approvalRoutes)
 app.use('/api/ai', authMiddleware, aiRoutes)
 app.use('/api/notifications', authMiddleware, notificationRoutes)
@@ -330,7 +332,7 @@ app.use('*', (req, res) => res.status(404).json({ error: 'Route not found', path
 app.use(errorHandler)
 
 const PORT = process.env.PORT || 5000
-httpServer.listen(PORT, () => {
+httpServer.listen(Number(PORT), process.env.SAMPLING_ENABLED === 'true' ? '127.0.0.1' : '0.0.0.0', () => {
   logger.info(`🚀 LD ERP Solution API → http://localhost:${PORT}`)
   logger.info(`📡 Socket.io ready | 🌍 ${process.env.NODE_ENV}`)
 })

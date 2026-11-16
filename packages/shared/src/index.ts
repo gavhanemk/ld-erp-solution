@@ -90,7 +90,7 @@ export const formatINR = (amount: number): string => {
 
 export const MODULES = [
   'dashboard', 'masters', 'sales', 'purchase', 'inventory',
-  'production', 'accounts', 'hr', 'vhagar', 'maintenance', 'ai', 'settings', 'admin'
+  'production', 'sampling', 'accounts', 'hr', 'vhagar', 'maintenance', 'ai', 'settings', 'admin'
 ] as const
 
 export type Module = typeof MODULES[number]
@@ -741,3 +741,5 @@ export function priceSale(input: SaleInput): SaleResult {
     brokerage: r2((goodsTaxable * (Number(input.brokeragePct) || 0)) / 100),
   }
 }
+
+export * from './sampling'

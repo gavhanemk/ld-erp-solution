@@ -333,6 +333,7 @@ export async function seedCore(prisma: PrismaClient) {
     { docType: 'SO', prefix: 'SO' },
     { docType: 'PO', prefix: 'PO' },
     { docType: 'MO', prefix: 'MO' },
+    { docType: 'SAMPLE', prefix: 'SMP' },
     { docType: 'GRN', prefix: 'GRN' },
     { docType: 'INV', prefix: 'INV' },
     // Our booking reference for a supplier's bill. The supplier's own invoice
@@ -466,7 +467,7 @@ export async function seedCore(prisma: PrismaClient) {
   // Without these rows every non-Admin user is refused by requirePermission.
   const MODULES = [
     'dashboard', 'masters', 'sales', 'purchase', 'inventory',
-    'production', 'accounts', 'hr', 'vhagar', 'maintenance', 'ai', 'settings', 'admin',
+    'production', 'sampling', 'accounts', 'hr', 'vhagar', 'maintenance', 'ai', 'settings', 'admin',
   ]
   /*
    * `post` is separate from `approve` on purpose.
