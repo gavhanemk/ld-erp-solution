@@ -52,6 +52,7 @@ import { errorHandler } from './middleware/errorHandler'
 import { storageConfigured } from './lib/storage'
 import { authMiddleware } from './middleware/auth'
 import { logger } from './utils/logger'
+import { keepAwake } from './lib/keepAwake'
 import { prisma } from '@ld-erp/database'
 
 const app = express()
@@ -333,6 +334,7 @@ const PORT = process.env.PORT || 5000
 httpServer.listen(PORT, () => {
   logger.info(`🚀 LD ERP Solution API → http://localhost:${PORT}`)
   logger.info(`📡 Socket.io ready | 🌍 ${process.env.NODE_ENV}`)
+  keepAwake()
 })
 
 export default app
