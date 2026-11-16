@@ -5,7 +5,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { PackType, Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
-import { priceDocument, type ChargeGstMode, type GstSplit, type TaxByRate } from '@ld-erp/shared'
+import { fitsPlaces, placesMessage, priceDocument, qtyPlaces, type ChargeGstMode, type GstSplit, type TaxByRate } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -44,7 +44,7 @@ import {
 } from '../schemas/bill.schemas'
 import { createPaymentSchema } from '../schemas/payment.schemas'
 import { autoStickers, packDefaults, repackGrnStickers, stickersNote, trimGrnStickers, withdrawStickers } from '../services/stickers.service'
-import { assertLineQtyFitsUnits, assertQtyFitsUnits } from '../services/unitQuantity.service'
+import { assertLineQtyFitsUnits, assertQtyFitsUnits, packLines, packQtyOf, stockRateOf, toStock } from '../services/unitQuantity.service'
 
 const router = Router()
 const MODULE = 'purchase'
@@ -65,6 +65,12 @@ const lineSchema = z.object({
   styleNo: z.string().max(50).optional().nullable(),
   styleId: z.string().optional().nullable(),
   qty: z.number().positive('Quantity must be more than zero'),
+  /*
+   * The pack the quantity and rate are in — a box of 20 pcs — when it is not
+   * the item's own unit. Its size comes from the item's "Bought in" list, not
+   * from here; the line stores its quantity in the item's own unit.
+   */
+  uomId: z.string().optional().nullable(),
   unitRate: z.number().min(0, 'Rate cannot be negative'),
   discount: z.number().min(0).max(100).optional(),
   gstRate: z.number().min(0).max(100).optional(),
@@ -1010,7 +1016,8 @@ router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, r
    */
   const repriced = priceDocument({
     lines: po.lines.map((l) => ({
-      qty: Number(l.qty),
+      // In the pack the rate is for: 40 pcs bought in boxes of 20 is 2.
+      qty: packQtyOf(l),
       rate: Number(l.unitRate),
       discountPct: Number(l.discount),
       gstRate: Number(l.gstRate),
@@ -1182,8 +1189,8 @@ function poTaxMode(po: {
 
 router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSchema.parse(req.body)
-  // Never 2.5 cartons ordered.
-  await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Order' })))
+  // Each line's pack (2 boxes of 20), its size from the item's list; never 2.5 boxes ordered.
+  const packed = await packLines(prisma, data.lines, ['qty'], 'Order')
 
   /*
    * The enquiry this order is being raised from, if any.
@@ -1358,12 +1365,15 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
             mrLineId: l.mrLineId || null,
             enquiryLineId: l.enquiryLineId || null,
             hsnCode: hsnById.get(l.itemId) ?? null,
-            qty: l.qty,
+            // Stored in the item's own unit; the pack and its size kept beside it.
+            qty: toStock(l.qty, packed[i].pack),
+            uomId: packed[i].pack.uomId,
+            uomFactor: packed[i].pack.factor,
             unitRate: l.unitRate,
             discount: pct6(l.discount),
             gstRate: tax.supplierIsUnregistered ? 0 : (l.gstRate ?? 0),
             amount: round2(priced.lineTotals[i]),
-            pendingQty: l.qty,
+            pendingQty: toStock(l.qty, packed[i].pack),
             sortOrder: i,
           })),
         },
@@ -1429,7 +1439,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
 
 router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateSchema.parse(req.body)
-  if (data.lines) await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Order' })))
+  const packed = data.lines ? await packLines(prisma, data.lines, ['qty'], 'Order') : null
 
   const before = await prisma.purchaseOrder.findUnique({
     where: { id: req.params.id },
@@ -1588,12 +1598,14 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
           mrLineId: l.mrLineId || null,
           enquiryLineId: l.enquiryLineId || null,
           hsnCode: hsnById.get(l.itemId) ?? null,
-          qty: l.qty,
+          qty: toStock(l.qty, packed![i].pack),
+          uomId: packed![i].pack.uomId,
+          uomFactor: packed![i].pack.factor,
           unitRate: l.unitRate,
           discount: pct6(l.discount),
           gstRate: tax.supplierIsUnregistered ? 0 : (l.gstRate ?? 0),
           amount: round2(priced.lineTotals[i]),
-          pendingQty: l.qty,
+          pendingQty: toStock(l.qty, packed![i].pack),
           sortOrder: i,
         })),
       })
@@ -2367,6 +2379,8 @@ const grnInclude = {
         },
       },
       warehouse: { select: { id: true, name: true } },
+      // The pack the order was placed in (a box of 20 pcs), for showing it.
+      uom: { select: { id: true, symbol: true } },
       // What has already been claimed against each receipt line, so the list
       // can say which receipts are still waiting on a supplier's bill. A
       // cancelled bill claims nothing, so it is filtered out of the sum rather
@@ -2396,6 +2410,8 @@ function billingStateOf(grn: {
     acceptedQty: Prisma.Decimal | number | string
     receivedQty: Prisma.Decimal | number | string
     unitRate: Prisma.Decimal | number | string
+    /** What one of the pack the rate is for holds (1 in the item's own unit). */
+    uomFactor?: Prisma.Decimal | number | string
     billLines: Array<{ qty: Prisma.Decimal | number | string }>
   }>
 }) {
@@ -2426,7 +2442,8 @@ function billingStateOf(grn: {
     for (const bl of line.billLines) billedOnLine += Number(bl.qty)
     billed += billedOnLine
 
-    pendingValue += Math.max(0, Number(line.receivedQty) - billedOnLine) * Number(line.unitRate)
+    // Quantities in pieces, the rate per pack: 20 pcs unbilled in boxes of 20 at ₹99 is ₹99.
+    pendingValue += (Math.max(0, Number(line.receivedQty) - billedOnLine) / (Number(line.uomFactor ?? 1) || 1)) * Number(line.unitRate)
   }
 
   return {
@@ -2755,6 +2772,9 @@ interface BookablePoLine {
   itemId: string
   qty: Prisma.Decimal | number | string
   unitRate: Prisma.Decimal | number | string
+  /** The pack it was ordered in and what one holds; the rate is per that pack. */
+  uomId?: string | null
+  uomFactor?: Prisma.Decimal | number | string
   shortClosed: boolean
   item: { name: string }
 }
@@ -2879,11 +2899,50 @@ function prepareGrnLines(
       received,
       rejected,
       accepted,
+      // The order's pack and its rate per pack, kept on the receipt line: what
+      // came is valued as packs × rate (40 pcs in boxes of 20 at ₹99 is ₹198),
+      // and goes into stock at the rate per piece (₹4.95).
+      uomId: poLine.uomId ?? null,
+      uomFactor: Number(poLine.uomFactor ?? 1) || 1,
       unitRate: Number(poLine.unitRate),
+      stockRate: stockRateOf(poLine.unitRate, poLine.uomFactor),
+      value: round2((accepted / (Number(poLine.uomFactor ?? 1) || 1)) * Number(poLine.unitRate)),
     }
   })
 
   return { prepared }
+}
+
+/**
+ * A receipt's lines as typed, made into the item's own unit. Each line is in
+ * the pack its order line was placed in (2 boxes of 20), or — `inStockUnit` —
+ * in pieces, for a delivery that came loose. Quantities are checked against
+ * the unit they were typed in, then multiplied out: received, rejected and
+ * each package's size.
+ */
+async function grnLinesToStock<L extends { poLineId: string; receivedQty: number; rejectedQty?: number; packQtys?: number[]; inStockUnit?: boolean }>(
+  db: typeof prisma,
+  lines: L[],
+): Promise<L[]> {
+  const poLines = await db.purchaseOrderLine.findMany({
+    where: { id: { in: [...new Set(lines.map((l) => l.poLineId))] } },
+    select: { id: true, itemId: true, uomFactor: true, uom: { select: { symbol: true, decimalPlaces: true } }, item: { select: { name: true, decimalPlaces: true, uom: { select: { symbol: true, decimalPlaces: true } } } } },
+  })
+  const byId = new Map(poLines.map((l) => [l.id, l]))
+  return lines.map((l) => {
+    const po = byId.get(l.poLineId)
+    if (!po) return l
+    const loose = l.inStockUnit || !po.uom
+    const factor = loose ? 1 : Number(po.uomFactor) || 1
+    const places = loose ? qtyPlaces(po.item) : qtyPlaces({ uom: po.uom })
+    const unit = loose ? po.item.uom.symbol : po.uom!.symbol
+    for (const [what, v] of [['received', l.receivedQty], ['rejected', l.rejectedQty], ...(l.packQtys ?? []).map((q) => ['one package', q] as const)] as const) {
+      if (v == null || !(Number(v) > 0)) continue
+      if (!fitsPlaces(Number(v), places)) throw new AppError(`${po.item.name} (${what}): ${Number(v)} ${unit}. ${placesMessage(places)}`, 400, 'QTY_NOT_IN_UNIT')
+    }
+    const x = (q: number | undefined) => (q == null ? q : Math.round(Number(q) * factor * 1000) / 1000)
+    return { ...l, receivedQty: x(l.receivedQty)!, rejectedQty: x(l.rejectedQty), packQtys: l.packQtys?.map((q) => x(q)!) }
+  })
 }
 
 /** Refuses a store that does not exist, or is no longer in use. */
@@ -3303,17 +3362,9 @@ router.get('/grn/:id', requirePermission(MODULE, 'view'), async (req, res) => {
  */
 router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createGrnSchema.parse(req.body)
-  // Never half a carton received, rejected or stickered.
-  if (data.lines)
-    await assertLineQtyFitsUnits(
-      prisma,
-      'poLine',
-      data.lines.flatMap((l) => [
-        { lineId: l.poLineId, qty: l.receivedQty, what: 'Received' },
-        { lineId: l.poLineId, qty: l.rejectedQty, what: 'Rejected' },
-        ...(l.packQtys ?? []).map((q) => ({ lineId: l.poLineId, qty: q, what: 'One package' })),
-      ]),
-    )
+  // Typed in the order's pack (2 boxes) or in pieces (1 box and 5 loose: 25
+  // pcs); never half a box. From here on every quantity is in pieces.
+  if (data.lines) data.lines = await grnLinesToStock(prisma, data.lines)
   const when = data.grnDate ?? new Date()
 
   const grn = await prisma.$transaction(async (tx) => {
@@ -3435,8 +3486,10 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
             packType: p.packType,
             packQtys: p.packQtys,
             packNotes: p.packNotes,
+            uomId: p.uomId,
+            uomFactor: p.uomFactor,
             unitRate: p.unitRate,
-            amount: round2(p.accepted * p.unitRate),
+            amount: p.value,
           })),
         },
       },
@@ -3454,7 +3507,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
         transactionType: 'PURCHASE',
         direction: 'IN',
         qty: p.accepted,
-        unitRate: p.unitRate,
+        unitRate: p.stockRate,
         batchNumber: p.batchNumber,
         referenceType: 'GRN',
         referenceId: created.id,
@@ -3505,17 +3558,9 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
  */
 router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateGrnSchema.parse(req.body)
-  // Never half a carton received, rejected or stickered.
-  if (data.lines)
-    await assertLineQtyFitsUnits(
-      prisma,
-      'poLine',
-      data.lines.flatMap((l) => [
-        { lineId: l.poLineId, qty: l.receivedQty, what: 'Received' },
-        { lineId: l.poLineId, qty: l.rejectedQty, what: 'Rejected' },
-        ...(l.packQtys ?? []).map((q) => ({ lineId: l.poLineId, qty: q, what: 'One package' })),
-      ]),
-    )
+  // Typed in the order's pack (2 boxes) or in pieces (1 box and 5 loose: 25
+  // pcs); never half a box. From here on every quantity is in pieces.
+  if (data.lines) data.lines = await grnLinesToStock(prisma, data.lines)
   const when = data.grnDate ?? new Date()
 
   const grn = await prisma.$transaction(async (tx) => {
@@ -3748,8 +3793,10 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
           packType: p.packType,
           packQtys: p.packQtys,
           packNotes: p.packNotes,
+          uomId: p.uomId,
+          uomFactor: p.uomFactor,
           unitRate: p.unitRate,
-          amount: round2(p.accepted * p.unitRate),
+          amount: p.value,
         },
       })
       const oldPacks = old.packQtys.map((q) => round3(Number(q))).join(',')
@@ -3805,8 +3852,10 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
               packType: p.packType,
               packQtys: p.packQtys,
               packNotes: p.packNotes,
+              uomId: p.uomId,
+              uomFactor: p.uomFactor,
               unitRate: p.unitRate,
-              amount: round2(p.accepted * p.unitRate),
+              amount: p.value,
             })),
         },
       },
@@ -3820,7 +3869,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
         transactionType: 'PURCHASE',
         direction: 'IN',
         qty: p.accepted,
-        unitRate: p.unitRate,
+        unitRate: p.stockRate,
         batchNumber: p.batchNumber,
         referenceType: 'GRN',
         referenceId: before.id,
@@ -4816,6 +4865,7 @@ router.get('/bills/match/:grnId', requirePermission(MODULE, 'view'), async (req,
             },
           },
           poLine: { select: { id: true, unitRate: true, gstRate: true, discount: true } },
+          uom: { select: { id: true, symbol: true } },
         },
       },
     },
@@ -4877,6 +4927,9 @@ router.get('/bills/match/:grnId', requirePermission(MODULE, 'view'), async (req,
           orderedRate: l.poLine ? Number(l.poLine.unitRate) : Number(l.unitRate),
           gstRate: l.poLine ? Number(l.poLine.gstRate) : 0,
           hsnCode: l.item.hsnCode,
+          // The pack it was ordered in: every quantity above is in pieces, the
+          // rate is per this pack, and the bill line is billed in it.
+          pack: l.uomId ? { uomId: l.uomId, symbol: l.uom?.symbol ?? '', factor: Number(l.uomFactor) } : null,
         }
       }),
     },
@@ -5082,6 +5135,23 @@ async function checkLocation(tx: Prisma.TransactionClient, warehouseId?: string 
  * transaction — the two succeed together or not at all, and a cash bill is
  * never left unpaid because the payment half failed.
  */
+/**
+ * A bill's lines as typed — each in the pack the supplier billed it in, a line
+ * against a receipt always in that receipt's pack — with the same lines in the
+ * item's own unit for every check against what was received or ordered.
+ */
+async function packBillLines<L extends { itemId: string; qty: number; grnLineId?: string | null; uomId?: string | null }>(
+  tx: Prisma.TransactionClient,
+  lines: L[],
+) {
+  const grnIds = lines.map((l) => l.grnLineId).filter((v): v is string => !!v)
+  const receipt = grnIds.length ? await tx.gRNLine.findMany({ where: { id: { in: grnIds } }, select: { id: true, uomId: true } }) : []
+  const packOfReceipt = new Map(receipt.map((r) => [r.id, r.uomId]))
+  const asTyped = lines.map((l) => (l.grnLineId && packOfReceipt.has(l.grnLineId) ? { ...l, uomId: packOfReceipt.get(l.grnLineId) ?? null } : l))
+  const packed = await packLines(tx, asTyped, ['qty'], 'Billed')
+  return { packed, stockLines: lines.map((l, i) => ({ ...l, qty: toStock(l.qty, packed[i].pack) })) }
+}
+
 async function bookBill(
   tx: Prisma.TransactionClient,
   data: z.infer<typeof createBillSchema>,
@@ -5107,7 +5177,9 @@ async function bookBill(
     }
   }
 
-  await checkAgainstReceipts(tx, data.lines, data.supplierId)
+  // Priced in the supplier's packs; checked against receipts in pieces.
+  const { packed, stockLines } = await packBillLines(tx, data.lines)
+  await checkAgainstReceipts(tx, stockLines, data.supplierId)
 
   // The rate half of the match. Quantity was already checked above; this is
   // what stops a supplier billing the goods that did arrive at their own
@@ -5128,7 +5200,7 @@ async function bookBill(
   const tax = await purchaseTaxContext(tx, data.supplierId)
   const tds = await resolveBillTds(tx, data, data.supplierId, billDate)
   await checkLocation(tx, data.warehouseId)
-  const servicePos = await checkServiceLines(tx, data.lines, data.supplierId)
+  const servicePos = await checkServiceLines(tx, stockLines, data.supplierId)
   const billNumber = await nextDocumentNumber(tx, 'PB', billDate)
 
   const items = await tx.item.findMany({
@@ -5199,7 +5271,9 @@ async function bookBill(
           // Frozen at booking, so correcting the item master later cannot
           // change a bill that has already been claimed.
           hsnCode: hsnById.get(l.itemId) ?? null,
-          qty: l.qty,
+          qty: toStock(l.qty, packed[i].pack),
+          uomId: packed[i].pack.uomId,
+          uomFactor: packed[i].pack.factor,
           unitPrice: l.unitPrice,
           discount: pct2(l.discount),
           taxableValue: priced.pricedLines[i].taxableValue,
@@ -5263,9 +5337,12 @@ async function bookBill(
         billLineId: billLineAt.get(v.lineIndex) ?? null,
         description: `Billed at ${v.billedRate.toFixed(2)} against ${v.poRate.toFixed(2)} on the order`,
         hsnCode: hsnById.get(v.itemId) ?? null,
-        originalQty: v.qty,
+        // The bill line's quantity in pieces, the difference per its pack.
+        originalQty: toStock(v.qty, packed[v.lineIndex].pack),
         originalRate: v.billedRate,
-        qty: v.qty,
+        qty: toStock(v.qty, packed[v.lineIndex].pack),
+        uomId: packed[v.lineIndex].pack.uomId,
+        uomFactor: packed[v.lineIndex].pack.factor,
         unitPrice: v.difference,
         gstRate: v.gstRate,
       })),
@@ -5307,6 +5384,8 @@ async function bookBill(
             originalQty: l.originalQty ?? null,
             originalRate: l.originalRate ?? null,
             qty: l.qty,
+            uomId: l.uomId ?? null,
+            uomFactor: l.uomFactor ?? 1,
             unitPrice: l.unitPrice,
             taxableValue: l.taxableValue,
             gstRate: l.gstRate,
@@ -5332,8 +5411,6 @@ async function bookBill(
 
 router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createBillSchema.parse(req.body)
-  // Never 2.5 cartons billed.
-  if (data.lines) await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Billed' })))
 
   const bill = await prisma.$transaction((tx) => bookBill(tx, data, req.user!.id, userCan(req.user, 'masters', 'edit')))
 
@@ -5364,7 +5441,6 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
  */
 router.post('/expenses/cash', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const { payment: pay, ...billData } = cashExpenseSchema.parse(req.body)
-  await assertQtyFitsUnits(prisma, billData.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Billed' })))
 
   const result = await prisma.$transaction(async (tx) => {
     const booked = await bookBill(tx, billData, req.user!.id, userCan(req.user, 'masters', 'edit'))
@@ -5412,8 +5488,6 @@ router.post('/expenses/cash', requirePermission(MODULE, 'create'), async (req: A
 
 router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateBillSchema.parse(req.body)
-  // Never 2.5 cartons billed.
-  if (data.lines) await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Billed' })))
 
   const before = await prisma.purchaseInvoice.findUnique({
     where: { id: req.params.id },
@@ -5453,11 +5527,14 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
         grnLineId: l.grnLineId,
         poLineId: l.poLineId,
         description: l.description,
-        qty: Number(l.qty),
+        // Back in the pack it was billed in: 40 pcs in boxes of 20 is 2.
+        qty: packQtyOf(l),
+        uomId: l.uomId,
         unitPrice: Number(l.unitPrice),
         discount: Number(l.discount),
         gstRate: Number(l.gstRate),
       }))
+    const { packed, stockLines } = await packBillLines(tx, lines)
 
     const supplierInvoiceNo =
       data.supplierInvoiceNo !== undefined ? data.supplierInvoiceNo : before.supplierInvoiceNo
@@ -5480,7 +5557,7 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
       }
     }
 
-    await checkAgainstReceipts(tx, lines, supplierId, before.id)
+    await checkAgainstReceipts(tx, stockLines, supplierId, before.id)
 
     const tax = await purchaseTaxContext(tx, supplierId)
     const charges = await resolveBillCharges(tx, data.charges ?? before.charges.map(c => ({
@@ -5511,7 +5588,7 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
     )
     const warehouseId = data.warehouseId !== undefined ? data.warehouseId || null : before.warehouseId
     await checkLocation(tx, warehouseId)
-    const servicePos = await checkServiceLines(tx, lines, supplierId, before.id)
+    const servicePos = await checkServiceLines(tx, stockLines, supplierId, before.id)
 
     const priced = priceBill({
       lines,
@@ -5570,7 +5647,9 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
             poLineId: l.poLineId || null,
             description: l.description ?? null,
             hsnCode: hsnById.get(l.itemId) ?? null,
-            qty: l.qty,
+            qty: toStock(l.qty, packed[i].pack),
+            uomId: packed[i].pack.uomId,
+            uomFactor: packed[i].pack.factor,
             unitPrice: l.unitPrice,
             discount: pct2(l.discount),
             taxableValue: priced.pricedLines[i].taxableValue,

@@ -119,6 +119,14 @@ const DEPARTMENT_USES: Record<string, DeleteUse> = {
 const UOM_USES: Record<string, DeleteUse> = {
   items: { one: 'item', many: 'items', model: 'item', field: 'uomId', then: 'move' },
   challanLines: { one: 'delivery challan line', many: 'delivery challan lines', then: 'refuse' },
+  // Packs items are bought in, and the purchase lines counted in them.
+  itemUnits: { one: 'item bought in it', many: 'items bought in it', then: 'refuse' },
+  enquiryLines: { one: 'purchase enquiry line', many: 'purchase enquiry lines', then: 'refuse' },
+  poLines: { one: 'purchase order line', many: 'purchase order lines', then: 'refuse' },
+  grnLines: { one: 'goods receipt line', many: 'goods receipt lines', then: 'refuse' },
+  billLines: { one: 'purchase bill line', many: 'purchase bill lines', then: 'refuse' },
+  returnLines: { one: 'purchase return line', many: 'purchase return lines', then: 'refuse' },
+  noteLines: { one: 'purchase note line', many: 'purchase note lines', then: 'refuse' },
 }
 
 const router = Router()
@@ -625,7 +633,59 @@ const itemInclude = {
   department: { select: { id: true, name: true, code: true } },
   style: { select: { id: true, code: true, name: true, colors: true } },
   tdsSection: { select: { id: true, section: true, label: true } },
+  // The packs it is bought in (1 Box = 20 pcs), the usual one first.
+  buyUnits: {
+    select: { id: true, factor: true, isDefault: true, uom: { select: { id: true, name: true, symbol: true, decimalPlaces: true } } },
+    orderBy: [{ isDefault: 'desc' as const }, { factor: 'asc' as const }],
+  },
 }
+
+/*
+ * The packs an item is bought in, besides its own unit: a box of 20 pcs, a
+ * gross of 144. Saved as the whole list at once, from the item's "Bought in"
+ * window. A purchase line keeps the size it was bought at, so changing one
+ * here never changes an order or bill already made.
+ */
+const buyUnitsSchema = z.object({
+  units: z
+    .array(
+      z.object({
+        uomId: z.string().min(1, 'Choose the pack unit'),
+        factor: z.coerce.number().positive('Say how many one pack holds').max(1_000_000),
+        isDefault: z.boolean().optional().default(false),
+      }),
+    )
+    .max(10, 'Up to 10 pack sizes'),
+})
+
+router.patch('/items/:id/buy-units', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = buyUnitsSchema.parse(req.body)
+  const item = await prisma.item.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, uomId: true, uom: { select: { symbol: true } } } })
+  if (!item) throw new AppError('Item not found', 404, 'NOT_FOUND')
+  const ids = data.units.map((u) => u.uomId)
+  if (ids.includes(item.uomId)) {
+    throw new AppError(`${item.name} is already counted in ${item.uom.symbol}; a pack has to be another unit (a box, a gross).`, 400, 'SAME_UNIT')
+  }
+  if (new Set(ids).size !== ids.length) throw new AppError('The same pack unit is on the list twice.', 400, 'REPEATED_UNIT')
+  if (data.units.filter((u) => u.isDefault).length > 1) throw new AppError('Only one pack can be the usual one.', 400, 'TWO_DEFAULTS')
+  const units = await prisma.uOM.findMany({ where: { id: { in: ids } }, select: { id: true } })
+  if (units.length !== ids.length) throw new AppError('One of those units does not exist.', 404, 'NOT_FOUND')
+
+  const before = await prisma.itemUnit.findMany({ where: { itemId: item.id } })
+  const after = await prisma.$transaction(async (tx) => {
+    await tx.itemUnit.deleteMany({ where: { itemId: item.id, uomId: { notIn: ids } } })
+    for (const u of data.units) {
+      await tx.itemUnit.upsert({
+        where: { itemId_uomId: { itemId: item.id, uomId: u.uomId } },
+        create: { itemId: item.id, uomId: u.uomId, factor: u.factor, isDefault: u.isDefault },
+        update: { factor: u.factor, isDefault: u.isDefault },
+      })
+    }
+    return tx.itemUnit.findMany({ where: { itemId: item.id }, include: { uom: { select: { id: true, name: true, symbol: true, decimalPlaces: true } } } })
+  })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'Item', entityId: item.id, before: { buyUnits: before }, after: { buyUnits: after } })
+  res.json({ success: true, data: after, message: after.length ? `${item.name}: bought in ${after.map((u) => `${u.uom.symbol} of ${Number(u.factor)}`).join(', ')}.` : `${item.name}: bought in ${item.uom.symbol} only.` })
+})
 
 /*
  * An item's department is its category's: the sub-category's own, or else its

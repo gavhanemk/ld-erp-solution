@@ -1,6 +1,6 @@
 // No database access. Run: pnpm --filter api exec tsx ../../tools/check-unit-quantity.ts
 import assert from 'node:assert/strict'
-import { fitsPlaces, placesMessage, qtyPlaces, qtyProblem, roundDownToPlaces, roundUpToPlaces } from '../packages/shared/src/quantity'
+import { fitsPlaces, packsFor, packText, placesMessage, qtyPlaces, qtyProblem, roundDownToPlaces, roundUpToPlaces, stockQtyOf } from '../packages/shared/src/quantity'
 
 let passed = 0
 const eq = (got: unknown, want: unknown, what: string) => {
@@ -51,5 +51,17 @@ eq(qtyProblem('0', box), 'Enter a quantity above zero.', 'zero refused')
 eq(qtyProblem('0', box, { allowZero: true }), null, 'zero allowed where it means "none" (e.g. rejected)')
 eq(qtyProblem('-1', mtr), 'A quantity cannot be below zero.', 'negative refused')
 eq(qtyProblem('abc', mtr), 'Enter a number.', 'not a number')
+
+// Packs: bought in a box of 20 pcs, stocked in pcs.
+eq(stockQtyOf(2, 20), 40, '2 boxes of 20 = 40 pcs')
+eq(stockQtyOf(3, null), 3, 'no pack: the quantity itself')
+eq(packsFor(30, 20), 2, '30 pcs needed in boxes of 20: 2 boxes, not 1.5')
+eq(packsFor(40, 20), 2, '40 pcs: exactly 2 boxes')
+eq(packsFor(41, 20), 3, '41 pcs: 3 boxes')
+eq(packsFor(1000, 144), 7, '1000 buttons in gross of 144: 7 gross')
+eq(packsFor(30, 1, 3), 30, 'no pack, metres: as needed')
+eq(packsFor(12.5, 1, 3), 12.5, 'no pack, 12.5 metres stays')
+eq(packText(2, 'box', 20, 'pcs'), '2 box = 40 pcs', 'beside the box')
+eq(packText(5, 'pcs', 1, 'pcs'), '5 pcs', 'no pack: just the quantity')
 
 console.log(`PASS ${passed} unit quantity rules`)

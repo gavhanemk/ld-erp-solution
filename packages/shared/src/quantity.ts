@@ -75,3 +75,28 @@ export function qtyProblem(
   const places = qtyPlaces(item)
   return fitsPlaces(qty, places) ? null : placesMessage(places)
 }
+
+// ── Packs: an item bought in a box of 20 pcs, stocked in pcs ──
+
+const round3 = (n: number) => Math.round(n * 1000) / 1000
+
+/** What a quantity in a pack comes to in the item's own unit: 2 boxes of 20 = 40 pcs. */
+export function stockQtyOf(qty: number, factor: number | null | undefined): number {
+  return round3(qty * (factor && factor > 0 ? factor : 1))
+}
+
+/**
+ * How many packs to buy for what is needed in the item's own unit, rounded up
+ * to how the pack is counted: 30 pcs in boxes of 20 is 2 boxes (40 pcs), never
+ * 1.5. With no pack (factor 1) it is the quantity itself, up to its own places.
+ */
+export function packsFor(stockQty: number, factor: number | null | undefined, packPlaces = 0): number {
+  const f = factor && factor > 0 ? factor : 1
+  return roundUpToPlaces(round3(stockQty / f), packPlaces)
+}
+
+/** "2 box = 40 pcs" — a pack quantity with what it holds, for beside a box. */
+export function packText(qty: number, packUnit: string, factor: number, stockUnit: string): string {
+  const fmt = (n: number) => Number(n.toFixed(3)).toLocaleString('en-IN')
+  return factor === 1 ? `${fmt(qty)} ${stockUnit}` : `${fmt(qty)} ${packUnit} = ${fmt(stockQtyOf(qty, factor))} ${stockUnit}`
+}

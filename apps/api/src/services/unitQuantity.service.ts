@@ -115,3 +115,96 @@ export async function assertLineQtyFitsUnits(
 export const qtyUp = (qty: number, places: number) => roundUpToPlaces(qty, places)
 /** Down to what can actually be handed over: 0.6 of a carton on the shelf gives 0. */
 export const qtyDown = (qty: number, places: number) => roundDownToPlaces(qty, places)
+
+// ── Packs: an item bought in a box of 20 pcs ──
+//
+// Every quantity a purchase document stores stays in the item's own unit (pcs),
+// so stock, requisitions, receipts and bills always compare like with like. A
+// line also remembers the pack it was entered in (uomId) and what one holds
+// (uomFactor); its rate is per that pack, so a line's value is
+// (qty ÷ uomFactor) × rate — 40 pcs in boxes of 20 at ₹99 a box is ₹198.
+
+/** A line's quantity in the pack it was entered in: 40 pcs in boxes of 20 is 2. */
+export const packQtyOf = (line: { qty: unknown; uomFactor?: unknown }) => {
+  const f = Number(line.uomFactor ?? 1) || 1
+  return Math.round((Number(line.qty) / f) * 1000) / 1000
+}
+
+/** A rate per pack as a rate per the item's own unit, for stock value: ₹99 a box of 20 is ₹4.95 a pc. */
+export const stockRateOf = (rate: unknown, factor: unknown) => Number(rate) / (Number(factor ?? 1) || 1)
+
+export interface ResolvedPack {
+  /** The pack, or null for the item's own unit. */
+  uomId: string | null
+  factor: number
+  /** Its symbol, and the item's own, for messages. */
+  symbol: string
+  stockSymbol: string
+  /** Places after the point the pack itself is counted to (boxes: 0). */
+  places: number
+}
+
+/**
+ * The pack each line names, checked against the item's own "Bought in" list —
+ * the server's sizes, never a factor the screen sent. No pack named, or the
+ * item's own unit named: its own unit, factor 1.
+ */
+export async function resolvePacks(db: Db, lines: Array<{ itemId: string; uomId?: string | null }>): Promise<ResolvedPack[]> {
+  const ids = [...new Set(lines.map((l) => l.itemId).filter(Boolean))]
+  const items = ids.length
+    ? await db.item.findMany({
+        where: { id: { in: ids } },
+        select: {
+          id: true,
+          name: true,
+          uomId: true,
+          decimalPlaces: true,
+          uom: { select: { symbol: true, decimalPlaces: true } },
+          buyUnits: { select: { uomId: true, factor: true, uom: { select: { symbol: true, decimalPlaces: true } } } },
+        },
+      })
+    : []
+  const byId = new Map(items.map((i) => [i.id, i]))
+  return lines.map((l) => {
+    const item = byId.get(l.itemId)
+    const own: ResolvedPack = { uomId: null, factor: 1, symbol: item?.uom.symbol ?? '', stockSymbol: item?.uom.symbol ?? '', places: qtyPlaces(item) }
+    if (!item || !l.uomId || l.uomId === item.uomId) return own
+    const pack = item.buyUnits.find((u) => u.uomId === l.uomId)
+    if (!pack) {
+      throw new AppError(
+        `${item.name} is not bought in that unit. Add it under Masters → Items → Bought in, or enter the line in ${item.uom.symbol}.`,
+        400,
+        'NOT_A_PACK',
+      )
+    }
+    return { uomId: l.uomId, factor: Number(pack.factor), symbol: pack.uom.symbol, stockSymbol: item.uom.symbol, places: qtyPlaces({ uom: pack.uom }) }
+  })
+}
+
+/**
+ * Lines as typed (in their packs) made ready to store: each one's quantity in
+ * the item's own unit, its pack and what one holds. A pack quantity is checked
+ * against the pack (2.5 boxes refused), the stock quantity against the item.
+ */
+export async function packLines<L extends { itemId: string; uomId?: string | null }>(
+  db: Db,
+  lines: L[],
+  qtyFields: Array<keyof L>,
+  what: string,
+): Promise<Array<L & { pack: ResolvedPack }>> {
+  const packs = await resolvePacks(db, lines)
+  lines.forEach((l, i) => {
+    const p = packs[i]
+    for (const f of qtyFields) {
+      const v = l[f]
+      if (v == null || String(v).trim() === '') continue
+      if (!fitsPlaces(Number(v), p.places)) {
+        throw new AppError(`${what}: ${Number(v)} ${p.symbol}. ${placesMessage(p.places)}`, 400, 'QTY_NOT_IN_UNIT')
+      }
+    }
+  })
+  return lines.map((l, i) => ({ ...l, pack: packs[i] }))
+}
+
+/** A quantity typed in a pack, in the item's own unit: 2 boxes of 20 is 40. */
+export const toStock = (qty: unknown, pack: { factor: number }) => Math.round(Number(qty) * pack.factor * 1000) / 1000

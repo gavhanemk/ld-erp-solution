@@ -730,8 +730,35 @@ model UOM {
 
   items        Item[]
   challanLines DeliveryChallanLine[]
+  itemUnits    ItemUnit[]
+  enquiryLines PurchaseEnquiryLine[]
+  poLines      PurchaseOrderLine[]
+  grnLines     GRNLine[]
+  billLines    PurchaseInvoiceLine[]
+  returnLines  PurchaseReturnLine[]
+  noteLines    PurchaseNoteLine[]
 
   @@map("uom")
+}
+
+/// A pack an item is bought in, besides its own unit: a box of 20 pcs, a gross
+/// of 144. Purchase lines may count in it; stock, requisitions and issues stay
+/// in the item's own unit, so a box received puts its 20 pcs into stock.
+model ItemUnit {
+  id        String   @id @default(cuid())
+  itemId    String
+  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  uomId     String
+  uom       UOM      @relation(fields: [uomId], references: [id])
+  /// How many of the item's own unit one of this holds: 20 for a box of 20 pcs.
+  factor    Decimal  @db.Decimal(12, 4)
+  /// The one a new purchase line starts in. At most one per item.
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([itemId, uomId])
+  @@map("item_units")
 }
 
 model Item {
@@ -789,6 +816,8 @@ model Item {
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
+  /// The packs it is bought in besides its own unit: 1 Box = 20 pcs, 1 Gross = 144 pcs.
+  buyUnits      ItemUnit[]
   barcodes      RetailBarcode[]           @relation("ItemBarcodes")
   bomComponents BOMLine[]                 @relation("ComponentItem")
   stockLedger   StockLedger[]
@@ -1919,6 +1948,13 @@ model PurchaseEnquiryLine {
   enquiry     PurchaseEnquiry @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
   itemId      String
   item        Item            @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
   /// What we asked for in our own words, when it differs from the item name.
   description String?
   /// Copied from the item when the enquiry is raised, so correcting the master
@@ -2236,6 +2272,13 @@ model PurchaseOrderLine {
   po          PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
   itemId      String
   item        Item          @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
   /// What we asked for in our own words, when it differs from the item name.
   description String?
   /// The garment style this material is being bought for, both ways round.
@@ -2454,6 +2497,13 @@ model GRNLine {
   poLine       PurchaseOrderLine? @relation(fields: [poLineId], references: [id], onDelete: Restrict)
   itemId       String
   item         Item               @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
   warehouseId  String
   warehouse    Warehouse          @relation(fields: [warehouseId], references: [id])
   orderedQty   Decimal            @db.Decimal(10, 3)
@@ -4979,6 +5029,13 @@ model PurchaseInvoiceLine {
   bill         PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Cascade)
   itemId       String
   item         Item            @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
   /// The receipt line this bill line settles, which is what makes the
   /// three-way match possible: ordered, received and billed have to agree one
   /// row at a time. Held per line rather than once on the bill, because a
@@ -5788,6 +5845,13 @@ model PurchaseReturnLine {
 
   itemId String
   item   Item   @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
 
   /// The bill line the goods were charged on. Required: a return with nothing
   /// to be returned against cannot be valued, and cannot be checked against
@@ -5828,6 +5892,13 @@ model PurchaseNoteLine {
   note   PurchaseNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
   itemId String
   item   Item         @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
 
   /// The bill line this adjusts, which is the whole basis of the balance
   /// check: what is left to adjust is that line's quantity less every note

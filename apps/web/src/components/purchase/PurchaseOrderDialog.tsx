@@ -1,5 +1,6 @@
 'use client'
 
+import { packsFor, packText } from '@ld-erp/shared'
 import { useQtyRules } from '@/lib/qtyRules'
 import { QtyProblem } from '@/components/ui/QtyProblem'
 import { ChargeTaxDetails, taxOverridePayload } from './ChargeTaxDetails'
@@ -82,6 +83,14 @@ export interface PoLine {
   /** The master style that text turned out to be, when it matched one. */
   styleId?: string | null
   qty: number | string
+  /**
+   * The pack the quantity and rate are in (a box of 20 pcs); empty for the
+   * item's own unit. The order stores the quantity in the item's own unit and
+   * this beside it, so a saved line reopens as the boxes it was ordered in.
+   */
+  uomId?: string | null
+  /** What one pack held when saved (a saved line only). */
+  uomFactor?: number | string
   unitRate: number | string
   discount: number | string
   gstRate: number | string
@@ -288,6 +297,8 @@ interface Option {
   standardRate?: string | number | null
   taxRate?: { rate: string | number } | null
   uom?: { symbol: string } | null
+  /** The packs an item is bought in (a box of 20 pcs), the usual one first. */
+  buyUnits?: Array<{ factor: string | number; isDefault: boolean; uom: { id: string; symbol: string; decimalPlaces?: number } }>
   categoryId?: string | null
   category?: { id: string; name: string } | null
   parentId?: string | null
@@ -782,7 +793,9 @@ export function PurchaseOrderDialog({
               // style rather than an empty box.
               styleNo: l.styleNo ?? l.style?.code ?? '',
               styleId: l.styleId ?? '',
-              qty: String(l.qty),
+              // Stored in the item's own unit; reopened in the pack it was ordered in.
+              qty: String(Math.round((Number(l.qty) / (Number(l.uomFactor ?? 1) || 1)) * 1000) / 1000),
+              uomId: l.uomId ?? null,
               unitRate: String(l.unitRate),
               // A stored line holds a percentage, so it reopens as one.
               discount: String(l.discount ?? 0),
@@ -1139,6 +1152,46 @@ export function PurchaseOrderDialog({
   }, [open])
 
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
+
+  /** The pack a line is in (a box of 20 pcs), or null for the item's own unit. */
+  const packOf = (line: PoLine) => {
+    const p = line.uomId ? itemById.get(line.itemId)?.buyUnits?.find((u) => u.uom.id === line.uomId) : undefined
+    return p ? { uomId: p.uom.id, symbol: p.uom.symbol, factor: Number(p.factor), places: { uom: { symbol: p.uom.symbol, decimalPlaces: p.uom.decimalPlaces } } } : null
+  }
+  /** 2.5 boxes: checked against the pack it is typed in, else the item's own unit. */
+  const lineQtyProblem = (line: PoLine) => qtyRules.placesProblem(line.qty, packOf(line)?.places ?? itemById.get(line.itemId))
+  /**
+   * Under a quantity box: the unit it is in — a choice when the item is bought
+   * in packs — and what the boxes come to in the item's own unit.
+   */
+  const unitPicker = (line: PoLine, i: number, align: 'right' | 'left') => {
+    const item = itemById.get(line.itemId)
+    const own = item?.uom?.symbol ?? ''
+    const pack = packOf(line)
+    if (!item) return null
+    return (
+      <div className={`mt-0.5 text-[10px] text-muted-foreground ${align === 'right' ? 'text-right' : ''}`}>
+        {item.buyUnits?.length ? (
+          <SmartSelect
+            className="form-input h-6 w-full py-0 text-[10px]"
+            value={line.uomId ?? ''}
+            onChange={(e) => setLine(i, { uomId: e.target.value || null })}
+            aria-label={`Row ${i + 1} unit`}
+          >
+            <option value="">{own}</option>
+            {item.buyUnits.map((u) => (
+              <option key={u.uom.id} value={u.uom.id}>
+                {u.uom.symbol} of {Number(u.factor).toLocaleString('en-IN')} {own}
+              </option>
+            ))}
+          </SmartSelect>
+        ) : (
+          own
+        )}
+        {pack && num(line.qty) > 0 && <p>= {packText(num(line.qty), pack.symbol, pack.factor, own).split(' = ')[1]}</p>}
+      </div>
+    )
+  }
   const supplier = suppliers.find((s) => s.id === supplierId)
 
   /**
@@ -1196,6 +1249,7 @@ export function PurchaseOrderDialog({
     styleNo: '',
     styleId: '',
     qty: '',
+    uomId: null,
     unitRate: '',
     discount: '0',
     discountUnit: '%',
@@ -1544,7 +1598,7 @@ export function PurchaseOrderDialog({
       name: itemById.get(l.itemId)?.name ?? 'A line',
       noQty: num(l.qty) <= 0,
       // 2.5 cartons: a whole number for an item counted whole.
-      badQty: !!qtyRules.placesProblem(l.qty, itemById.get(l.itemId)),
+      badQty: !!lineQtyProblem(l),
       noRate: String(l.unitRate).trim() === '',
     }))
     .filter((r) => r.noQty || r.badQty || r.noRate)
@@ -1654,6 +1708,8 @@ export function PurchaseOrderDialog({
     setLine(index, {
       itemId,
       codeText: item?.code ?? '',
+      // Starts in the pack it is usually bought in (a box of 20); its own unit when it has none.
+      uomId: item?.buyUnits?.find((u) => u.isDefault)?.uom.id ?? null,
       ...styleFill,
       ...(cat
         ? cat.parentId
@@ -1802,6 +1858,9 @@ export function PurchaseOrderDialog({
       const kept = prev.filter((l) => l.itemId)
       const fresh = picks.map(({ row, qty }) => {
         const cat = categories.find((c) => c.id === itemById.get(row.item.id)?.categoryId)
+        // The indent is in the item's own unit; bought in its usual pack, it is
+        // ordered in whole packs — 30 pcs in boxes of 20 is 2 boxes.
+        const pack = itemById.get(row.item.id)?.buyUnits?.find((u) => u.isDefault)
         return {
           ...blankLine(),
           itemId: row.item.id,
@@ -1811,7 +1870,8 @@ export function PurchaseOrderDialog({
               ? { categoryId: cat.parentId, subcategoryId: cat.id }
               : { categoryId: cat.id, subcategoryId: '' }
             : {}),
-          qty: String(qty),
+          qty: String(pack ? packsFor(qty, Number(pack.factor), pack.uom.decimalPlaces ?? 0) : qty),
+          uomId: pack?.uom.id ?? null,
           gstRate: row.item.taxRate ? String(Number(row.item.taxRate.rate)) : '',
           // The garment the material is for, as the requisition gave it.
           ...(row.styleNo
@@ -2100,6 +2160,8 @@ export function PurchaseOrderDialog({
       mrLineId: l.mrLineId || null,
       enquiryLineId: l.enquiryLineId || null,
       qty: num(l.qty),
+      // The pack the quantity and rate are in; the server knows its size.
+      uomId: l.uomId || null,
       unitRate: num(l.unitRate),
       // A percentage whichever unit it was typed in — see `lineDiscountOf`.
       // Sent unrounded: the column keeps six decimals, so ₹100 off a line of
@@ -3077,14 +3139,10 @@ export function PurchaseOrderDialog({
                               value={String(line.qty)}
                               onValueChange={(v) => setLine(i, { qty: v })}
                               aria-label={`Row ${i + 1} quantity`}
-                              aria-invalid={!!qtyRules.placesProblem(line.qty, item)}
+                              aria-invalid={!!lineQtyProblem(line)}
                             />
-                            {item?.uom?.symbol && (
-                              <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
-                                {item.uom.symbol}
-                              </p>
-                            )}
-                            <QtyProblem className="text-right" text={qtyRules.placesProblem(line.qty, item)} />
+                            {unitPicker(line, i, 'right')}
+                            <QtyProblem className="text-right" text={lineQtyProblem(line)} />
                           </td>
 
                           <td className={COL.rate}>
@@ -3388,12 +3446,10 @@ export function PurchaseOrderDialog({
                             value={String(line.qty)}
                             onValueChange={(v) => setLine(i, { qty: v })}
                             aria-label={`Row ${i + 1} quantity`}
-                            aria-invalid={!!qtyRules.placesProblem(line.qty, item)}
+                            aria-invalid={!!lineQtyProblem(line)}
                           />
-                          {item?.uom?.symbol && (
-                            <p className="text-muted-foreground text-[10px]">{item.uom.symbol}</p>
-                          )}
-                          <QtyProblem text={qtyRules.placesProblem(line.qty, item)} />
+                          {unitPicker(line, i, 'left')}
+                          <QtyProblem text={lineQtyProblem(line)} />
                         </div>
                         <div className="space-y-1">
                           <label className={fieldLabel}>Rate</label>

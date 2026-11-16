@@ -28,7 +28,7 @@ import {
   effectFor,
   GST_TREATMENTS,
   moveNoteStock,
-  priceNote,
+  notePacks, priceNote,
   REASON_RULES,
   syncBillAdjustments,
   taxContextFor,
@@ -118,6 +118,9 @@ const noteInclude = {
       originalRate: true,
       qty: true,
       unitPrice: true,
+      // The pack the price is per (qty is in pieces), and its symbol.
+      uomFactor: true,
+      uom: { select: { id: true, symbol: true } },
       taxableValue: true,
       gstRate: true,
       cgst: true,
@@ -561,7 +564,8 @@ export async function createPurchaseNoteIn(tx: Prisma.TransactionClient, data: z
 
   const isIntraState = await taxContextFor(tx, supplierId, data.billId)
   const priced = priceNote({
-    lines: data.lines,
+    // Each line per the pack of the bill or receipt line it corrects.
+    lines: await notePacks(tx, data.lines),
     isIntraState,
     otherCharges: data.otherCharges,
     discountAmount: data.discountAmount,
@@ -642,6 +646,8 @@ export async function createPurchaseNoteIn(tx: Prisma.TransactionClient, data: z
           originalRate: l.originalRate ?? null,
           qty: l.qty,
           unitPrice: l.unitPrice,
+          uomId: l.uomId ?? null,
+          uomFactor: l.uomFactor ?? 1,
           taxableValue: l.taxableValue,
           gstRate: l.gstRate,
           cgst: l.cgst,
@@ -787,7 +793,7 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
 
     const isIntraState = await taxContextFor(tx, supplierId, data.billId)
     const priced = priceNote({
-      lines: data.lines,
+      lines: await notePacks(tx, data.lines),
       isIntraState,
       otherCharges: data.otherCharges,
       discountAmount: data.discountAmount,
@@ -866,6 +872,8 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
             originalRate: l.originalRate ?? null,
             qty: l.qty,
             unitPrice: l.unitPrice,
+            uomId: l.uomId ?? null,
+            uomFactor: l.uomFactor ?? 1,
             taxableValue: l.taxableValue,
             gstRate: l.gstRate,
             cgst: l.cgst,
