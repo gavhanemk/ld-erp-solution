@@ -334,7 +334,9 @@ export function RequisitionDialog({
   const stockNote = (line: Line, unit: string) => {
     if (!line.itemId) return null
     if (!line.warehouseId) return <p className="text-[11px] text-muted-foreground">Pick the store to see what it has.</p>
-    const asked = Number(line.requestedQty) || 0
+    // A quantity the item cannot take (2.1 cartons) is said under its box;
+    // nothing here works figures out from it.
+    const asked = problemOf(line) ? 0 : Number(line.requestedQty) || 0
     const places = placesOf(line.itemId)
     const raw = ownersAt(line.itemId, line.warehouseId)
     // Counted as what can be handed over: 0.6 of a carton on the rack is none.
