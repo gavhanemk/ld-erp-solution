@@ -1,7 +1,11 @@
 import type {
+  ProcessKind,
   SampleAttachment,
+  SampleItemOption,
+  SampleMaterialSource,
   SampleRequestStyle,
   SampleSpecification,
+  StepExecution,
   StyleStage,
 } from '@ld-erp/shared'
 export interface Choice {
@@ -27,39 +31,116 @@ export interface Lookups {
   /** Active size runs, for the style a request makes for itself. */
   sizeGroups: Choice[]
   sizes: Array<{ id: string; code: string; sizeGroupId: string }>
-  items: Array<Choice & { code: string; uom: { symbol: string } | null }>
+  /** The materials a sample BOM line can name, as the BOM's picker shows them. */
+  items: SampleItemOption[]
   boms: Array<{ id: string; styleId: string; color: string | null; version: string }>
   routings: Array<Choice & { styleId: string | null; category: string | null; version: number }>
+  /** What a round's making route is built from: the Operation master, in floor order. */
+  operations: LookupOperation[]
+  departments: Array<Choice & { code: string }>
+  /** Floor contractors, with the processes each one takes. */
+  contractors: LookupContractor[]
+  /** Outside units a step can go to: every supplier in use, service suppliers first. */
+  jobWorkers: Array<Choice & { code: string; category: string }>
+  /** For adding a material the masters do not have yet. */
+  itemCategories: Array<Choice & { parentId: string | null; departmentId: string | null }>
+  uoms: Array<Choice & { symbol: string }>
 }
+export interface LookupOperation {
+  id: string
+  code: string
+  name: string
+  kind: ProcessKind
+  departmentId: string
+  defaultExecution: StepExecution
+  instructions: string | null
+  sortOrder: number
+}
+export interface LookupContractor {
+  id: string
+  code: string
+  name: string
+  operationIds: string[]
+  operations: Choice[]
+}
+/**
+ * One line of a round's sample BOM, as its row (sample_materials). Figures
+ * arrive as text, as every decimal column does. The specification carries a
+ * copy of these lines with the same ids; the rows are what is issued against.
+ */
 export interface SampleMaterial {
   id: string
+  /** The order the lines are listed in. */
+  sequence: number
+  /** Which part of the garment it goes into: Body, Collar, Placket. */
+  component: string
+  /** Null on a draft line whose material is not picked yet. */
+  itemId: string | null
+  /** Null: every colour of the round. */
+  colour: string | null
+  departmentId: string | null
+  qtyPerPiece: string
+  wastagePct: string
+  /** The required quantity: worked out, or typed by hand (requiredOverride). */
   plannedQty: string
+  requiredOverride: boolean
+  overrideReason: string | null
+  source: SampleMaterialSource
+  estRate: string | null
+  remarks: string
+  /** The store it is issued from: null until the first issue names it. */
+  warehouseId: string | null
   issuedQty: string
   usedQty: string
   wasteQty: string
   returnedQty: string
+  /** Sent only to people who can see accounts. */
   issuedValue?: string
   returnedValue?: string
+  /** Follows the source: ours when we buy it, the buyer's when they send it. */
   ownership: string
-  item: { name: string; uom: { symbol: string } | null }
-  warehouse: { name: string }
+  /** The item as the BOM's picker lists it, with whether it is still in use. */
+  item: {
+    id?: string
+    name: string
+    code: string
+    type: string
+    isActive?: boolean
+    departmentId?: string | null
+    /** Decimal: arrives as text. */
+    standardRate?: string | number | null
+    uom: { id?: string; name?: string; symbol: string } | null
+  } | null
+  warehouse: { name: string } | null
+}
+/** A step of a released round's making route (sample_stages). */
+export interface SampleStage {
+  id: string
+  sequence: number
+  name: string
+  /** As the route named it at release; null on a step released before routes named a process. */
+  operationId: string | null
+  kind: ProcessKind | null
+  departmentId: string | null
+  execution: StepExecution
+  /** The floor contractor of a step done on our floor. */
+  contractorId: string | null
+  /** The outside unit (a supplier) of a step done outside. */
+  vendorId: string | null
+  instructions: string | null
+  doneQty: number | null
+  rejectedQty: number | null
+  responsible: string | null
+  reference: string | null
+  notes: string | null
+  completedAt: string | null
 }
 export interface SampleRound {
   id: string
   revision: number
   state: string
   specification: SampleSpecification
-  stages: Array<{
-    id: string
-    sequence: number
-    name: string
-    doneQty: number | null
-    rejectedQty: number | null
-    responsible: string | null
-    reference: string | null
-    notes: string | null
-    completedAt: string | null
-  }>
+  stages: SampleStage[]
   materials: SampleMaterial[]
   qc: {
     passed: boolean

@@ -6,10 +6,23 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { CODE_ATTEMPTS, nextStyleCode } from '../lib/masterCode'
 import { MAX_FILE_BYTES, MAX_FILES_PER_DOCUMENT, removeObject, statObject } from '../lib/storage'
 import { recordMovement } from './stock.service'
-import { routingProblem } from './route.service'
+import { checkRouteSteps, routingProblem } from './route.service'
+import { assertContractorsFit } from './routing.service'
 import {
+  OVERRIDE_REASON_MIN,
   SAMPLE_ATTACHMENT_KIND_LABEL,
+  SAMPLE_MATERIAL_TYPES,
+  cellCount,
+  lineRequiredQty,
+  normaliseSpec,
+  repeatedBomLines,
+  sampleSpecGaps,
+  totalPieces,
   type SampleAttachmentKind,
+  type SampleBomLine,
+  type SampleItemOption,
+  type SampleMaterialType,
+  type SampleRouteStep,
   type SampleSpecification,
 } from '../../../../packages/shared/src/sampling'
 import {
@@ -55,6 +68,16 @@ export const sampleStyleSelect = {
   colors: true,
   isActive: true,
 } satisfies Prisma.StyleSelect
+/** An item as the sample BOM's picker reads it (sampleItemOption). */
+export const sampleItemSelect = {
+  id: true,
+  code: true,
+  name: true,
+  type: true,
+  departmentId: true,
+  standardRate: true,
+  uom: { select: { id: true, name: true, symbol: true } },
+} satisfies Prisma.ItemSelect
 export const sampleInclude = {
   customer: { select: { id: true, name: true } },
   brand: { select: { id: true, name: true } },
@@ -64,8 +87,14 @@ export const sampleInclude = {
     include: {
       stages: { orderBy: { sequence: 'asc' as const } },
       materials: {
+        // As the merchandiser listed them; the id breaks a tie between lines
+        // released before lines were numbered.
+        orderBy: [{ sequence: 'asc' as const }, { id: 'asc' as const }],
         include: {
-          item: { select: { name: true, code: true, uom: { select: { symbol: true } } } },
+          // As the BOM's picker lists an item (sampleItemSelect), with whether it
+          // is still in use: the editor offers a line's own material even when
+          // it was added after the page read its list.
+          item: { select: { ...sampleItemSelect, isActive: true } },
           warehouse: { select: { name: true } },
         },
       },
@@ -80,7 +109,12 @@ export const sampleInclude = {
 export async function sampleDetail(tx: Tx, id: string) {
   const row = await tx.sampleRequest.findUnique({ where: { id }, include: sampleInclude })
   if (!row) throw new AppError('Sample request not found', 404, 'NOT_FOUND')
-  return row
+  // Every reader (the request, its print, every action) sees each round's
+  // specification in today's shape, however old the round.
+  return {
+    ...row,
+    rounds: row.rounds.map((r) => ({ ...r, specification: normaliseSpec(r.specification) })),
+  }
 }
 function grant(actor: Actor, module: string, action: string) {
   if (!userCan(actor, module, action))
@@ -135,35 +169,38 @@ export async function createSample(tx: Tx, data: z.infer<typeof createSampleSche
       createdById: actor.id,
     },
   })
+  // A new round starts on the usual route, which the merchandiser changes.
+  const specification: SampleSpecification = {
+    milestone: 'Development sample',
+    styleId: '',
+    construction: '',
+    techPackRef: '',
+    patternRef: '',
+    colours: [],
+    measurements: [],
+    route: await routeTemplate(tx),
+    materials: [],
+    notes: '',
+  }
   await tx.sampleRound.create({
-    data: {
-      requestId: request.id,
-      revision: 1,
-      specification: {
-        milestone: 'Development sample',
-        styleId: '',
-        color: '',
-        construction: '',
-        techPackRef: '',
-        patternRef: '',
-        sizes: [],
-        measurements: [],
-        stages: ['Cutting', 'Stitching', 'Finishing'],
-        materials: [],
-        notes: '',
-      },
-    },
+    data: { requestId: request.id, revision: 1, specification: json(specification) },
   })
   await event(tx, request.id, 0, 'CREATE', actor, { number })
   return sampleDetail(tx, request.id)
 }
+/**
+ * The style, colours and sizes of a specification against the masters.
+ * Returns it with each colour spelt as the style spells it. A blank colour or
+ * size is allowed here and left to sampleSpecGaps; one that is filled in must
+ * be the style's.
+ */
 async function validateSpec(
   tx: Tx,
   s: SampleSpecification,
   owner: { brandId: string; customerId: string | null; styleId: string | null },
   draft = false
-) {
-  const { brandId, customerId } = owner
+): Promise<SampleSpecification> {
+  const { brandId } = owner
   // Once the request has its style, every round samples that style; another
   // style is another request.
   if (owner.styleId && s.styleId && s.styleId !== owner.styleId)
@@ -182,31 +219,492 @@ async function validateSpec(
     fail(
       'The style must belong to this request’s brand. Clear the draft style before changing the brand.'
     )
-  if (s.color && (!style || !style.colors.some((c) => c.toLowerCase() === s.color.toLowerCase())))
-    fail('Choose one of the style’s colours.')
+  const colours = s.colours.map((row) => {
+    const asked = row.colour.trim()
+    if (!asked) return { ...row, colour: '' }
+    const own = style?.colors.find((c) => c.toLowerCase() === asked.toLowerCase())
+    if (!own)
+      fail(
+        style
+          ? `${asked} is not one of the style’s colours. Add it to the style first, or pick another.`
+          : 'Pick the style before its colours.',
+        'NOT_STYLE_COLOUR'
+      )
+    return { ...row, colour: own }
+  })
   const sizeIds = new Set(style?.sizeGroup?.sizes.map((x) => x.id) ?? [])
   if (
-    s.sizes.some((x) => (!draft || x.sizeId) && !sizeIds.has(x.sizeId)) ||
+    colours.some((r) => r.sizes.some((x) => x.sizeId && !sizeIds.has(x.sizeId))) ||
     s.measurements.some((x) => x.sizeId && !sizeIds.has(x.sizeId))
   )
     fail('Every sample size must belong to the style’s size run.')
-  for (const m of s.materials) {
-    const item = m.itemId
-      ? await tx.item.findFirst({ where: { id: m.itemId, isActive: true } })
-      : null
-    if (
-      (!draft || m.itemId) &&
-      (!item || !['RAW_MATERIAL', 'TRIM', 'PACKING_MATERIAL', 'CONSUMABLE'].includes(item.type))
-    )
-      fail('Choose active materials, trims, packing or consumables.')
-    if (
-      (!draft || m.warehouseId) &&
-      !(await tx.warehouse.findFirst({ where: { id: m.warehouseId, isActive: true } }))
-    )
-      fail('Pick an active store.')
-    if (!draft && m.ownership === 'CUSTOMER_OWNED' && !customerId)
-      fail('Buyer-owned material requires a buyer on the request.')
+  return { ...s, colours }
+}
+
+// ── The sample BOM: the round's material rows ────────────────────────────────
+
+/** The item kinds a sample BOM line can be. */
+const BOM_TYPES: readonly string[] = SAMPLE_MATERIAL_TYPES
+/** Most a sample round can need of one material: a typing slip beyond it (DECIMAL(10,3)). */
+const MAX_REQUIRED = 999999.999
+/** A material row, as the round's include reads it. */
+interface MaterialRow {
+  id: string
+  sequence: number
+  component: string
+  itemId: string | null
+  colour: string | null
+  departmentId: string | null
+  qtyPerPiece: unknown
+  wastagePct: unknown
+  plannedQty: unknown
+  requiredOverride: boolean
+  overrideReason: string | null
+  source: string
+  estRate: unknown
+  remarks: string
+  issuedQty: unknown
+  returnedQty: unknown
+  usedQty: unknown
+  wasteQty: unknown
+  item?: { name: string } | null
+}
+/** A row as the specification's copy of it lists it. */
+function bomLineOf(m: MaterialRow): SampleBomLine {
+  return {
+    id: m.id,
+    component: m.component,
+    itemId: m.itemId ?? '',
+    colour: m.colour,
+    departmentId: m.departmentId,
+    qtyPerPiece: n(m.qtyPerPiece),
+    wastagePct: n(m.wastagePct),
+    requiredQty: n(m.plannedQty),
+    requiredOverride: m.requiredOverride,
+    overrideReason: m.overrideReason ?? '',
+    source: m.source === 'BUYER_SUPPLIED' ? 'BUYER_SUPPLIED' : 'PURCHASE',
+    estRate: m.estRate === null || m.estRate === undefined ? null : n(m.estRate),
+    remarks: m.remarks,
   }
+}
+const byListing = (a: { sequence: number; id: string }, b: { sequence: number; id: string }) =>
+  a.sequence - b.sequence || a.id.localeCompare(b.id)
+/**
+ * The round's lines as they stand: its rows, which decide, once it has any;
+ * else the lines a round saved before the rows existed lists in its
+ * specification, which become rows on its next save.
+ */
+function currentLines(round: { materials: MaterialRow[]; specification: SampleSpecification }) {
+  return round.materials.length
+    ? [...round.materials].sort(byListing).map(bomLineOf)
+    : round.specification.materials
+}
+/** Anything issued, returned, used or wasted on the line. */
+const hasMovement = (m: MaterialRow) =>
+  n(m.issuedQty) > 0 || n(m.returnedQty) > 0 || n(m.usedQty) > 0 || n(m.wasteQty) > 0
+
+/**
+ * Writes a round's BOM lines as its rows and returns the specification's copy
+ * of them, with their ids, in the order listed. Rows are kept, never written
+ * afresh: a line sent with its id is updated in place, a line without one is
+ * added, and only a line the screen dropped is removed. A purchase linked to
+ * a line before release (phase 3) therefore stays linked however often the
+ * draft is saved.
+ *
+ * Each required quantity is worked out here by the shared arithmetic
+ * (lineRequiredQty), never taken from the screen unless typed by hand, and
+ * kept as the row's planned quantity. A draft may leave lines unfinished;
+ * whatever is filled in must still be right. `copy` is a round's own lines
+ * carried over (a new round, a style change): what was accepted once is not
+ * refused for a master switched off since; the next save checks it again,
+ * except a department switched off, which is cleared so the line goes back to
+ * the item's own rather than carry a dead one into every later save. Each
+ * refusal names its line, numbered as listed, as the gaps number them.
+ */
+async function syncBomRows(
+  tx: Tx,
+  round: { id: string; materials: MaterialRow[] },
+  spec: Pick<SampleSpecification, 'colours'>,
+  lines: SampleBomLine[],
+  opts: { draft: boolean; customerId: string | null; copy?: boolean }
+): Promise<SampleBomLine[]> {
+  const rows = new Map(round.materials.map((m) => [m.id, m]))
+  const sent = new Set<string>()
+  for (const l of lines) {
+    if (!l.id) continue
+    if (!rows.has(l.id)) fail('That material line is not on this round.', 'NOT_THIS_ROUND')
+    if (sent.has(l.id))
+      fail('A material line is listed twice. Refresh and save again.', 'LINE_TWICE')
+    sent.add(l.id)
+  }
+  // The round's colours as the style spells them.
+  const colours = new Map(
+    spec.colours
+      .map((r) => r.colour.trim())
+      .filter(Boolean)
+      .map((c) => [c.toLowerCase(), c])
+  )
+  const itemIds = [...new Set(lines.map((l) => l.itemId.trim()).filter(Boolean))]
+  const items = new Map(
+    (itemIds.length
+      ? await tx.item.findMany({
+          where: { id: { in: itemIds } },
+          select: { id: true, isActive: true, type: true, departmentId: true },
+        })
+      : []
+    ).map((i) => [i.id, i])
+  )
+  const deptIds = [
+    ...new Set(
+      [
+        ...lines.map((l) => l.departmentId),
+        ...[...items.values()].map((i) => i.departmentId),
+      ].filter((x): x is string => !!x)
+    ),
+  ]
+  const activeDepts = new Set(
+    deptIds.length
+      ? (
+          await tx.department.findMany({
+            where: { id: { in: deptIds }, isActive: true },
+            select: { id: true },
+          })
+        ).map((d) => d.id)
+      : []
+  )
+  // The same part and material twice for a colour, a line for every colour
+  // among them: the shared rule the gaps list, by the line's place.
+  const repeated = opts.copy ? new Map<number, string>() : repeatedBomLines(lines)
+  const prepared = lines.map((l, i) => {
+    const at = `Line ${i + 1}:`
+    const itemId = l.itemId.trim()
+    const item = itemId ? items.get(itemId) : undefined
+    if (itemId && !opts.copy && (!item || !item.isActive || !BOM_TYPES.includes(item.type)))
+      fail(
+        `${at} ${l.component.trim() ? `the material for ${l.component.trim()}` : 'its material'} is no longer in use, or is not a material, trim, packing or consumable. Pick another.`,
+        'ITEM_NOT_IN_USE'
+      )
+    const asked = l.colour?.trim() || null
+    const colour = asked ? colours.get(asked.toLowerCase()) : null
+    if (asked && !colour)
+      fail(
+        `${at} ${asked} is not one of this round’s colours. A material is for one of them, or for every colour.`,
+        'NOT_ROUND_COLOUR'
+      )
+    const named = l.departmentId?.trim() || null
+    if (named && !opts.copy && !activeDepts.has(named))
+      fail(
+        `${at} pick a department that is still in use, or leave it blank for the item’s own.`,
+        'BAD_DEPARTMENT'
+      )
+    const given = named && activeDepts.has(named) ? named : null
+    // Left blank: drawn by whoever normally uses the item.
+    const departmentId =
+      given ?? (item?.departmentId && activeDepts.has(item.departmentId) ? item.departmentId : null)
+    const repeat = repeated.get(i)
+    if (repeat) fail(`${at} ${repeat}`, 'DUPLICATE_MATERIAL')
+    const requiredQty = lineRequiredQty({ ...l, colour: colour ?? null }, spec)
+    if (requiredQty > MAX_REQUIRED)
+      fail(
+        `${at} that is more of one material than a sample round can need. Check how much one piece takes.`,
+        'QTY_TOO_LARGE'
+      )
+    if (!opts.draft) {
+      if (l.requiredOverride && !(requiredQty > 0)) fail(`${at} enter the quantity needed.`)
+      if (l.requiredOverride && l.overrideReason.trim().length < OVERRIDE_REASON_MIN)
+        fail(
+          `${at} say why the quantity is typed by hand (${OVERRIDE_REASON_MIN} characters or more).`,
+          'OVERRIDE_REASON'
+        )
+      if (l.source === 'BUYER_SUPPLIED' && !opts.customerId)
+        fail(`${at} material the buyer sends needs a buyer on the request.`, 'NO_BUYER')
+    }
+    return {
+      id: l.id || undefined,
+      data: {
+        component: l.component.trim(),
+        itemId: itemId || null,
+        colour: colour ?? null,
+        departmentId,
+        qtyPerPiece: l.qtyPerPiece,
+        wastagePct: l.wastagePct,
+        plannedQty: requiredQty,
+        requiredOverride: l.requiredOverride,
+        // A reason belongs to a quantity typed by hand; worked out, it needs none.
+        overrideReason: l.requiredOverride ? l.overrideReason.trim() || null : null,
+        source: l.source,
+        ownership: l.source === 'BUYER_SUPPLIED' ? ('CUSTOMER_OWNED' as const) : ('OWNED' as const),
+        estRate: l.estRate,
+        remarks: l.remarks.trim(),
+      },
+    }
+  })
+  // Nothing in a draft has moved, but a line that has keeps its material.
+  for (const row of round.materials) {
+    if (!hasMovement(row)) continue
+    const kept = prepared.find((p) => p.id === row.id)
+    const name = row.item?.name ?? 'A material'
+    if (!kept) fail(`${name} has stock movements on this round, so its line stays.`, 'LINE_IN_USE')
+    if (kept!.data.itemId !== row.itemId || kept!.data.source !== row.source)
+      fail(
+        `${name} has stock movements on this round, so its material and who supplies it stay.`,
+        'LINE_IN_USE'
+      )
+  }
+  const dropped = round.materials.filter((m) => !sent.has(m.id)).map((m) => m.id)
+  if (dropped.length)
+    await tx.sampleMaterial.deleteMany({ where: { id: { in: dropped }, roundId: round.id } })
+  for (const [i, p] of prepared.entries()) {
+    const data = { ...p.data, sequence: i + 1 }
+    if (p.id) await tx.sampleMaterial.update({ where: { id: p.id }, data })
+    else await tx.sampleMaterial.create({ data: { ...data, roundId: round.id } })
+  }
+  const saved = await tx.sampleMaterial.findMany({
+    where: { roundId: round.id },
+    orderBy: [{ sequence: 'asc' }, { id: 'asc' }],
+  })
+  return saved.map(bomLineOf)
+}
+
+// ── The making route ─────────────────────────────────────────────────────────
+
+/** A step as an operation of the master gives it, before anyone changes it. */
+function stepOf(o: {
+  id: string
+  name: string
+  kind: SampleRouteStep['kind']
+  departmentId: string
+  defaultExecution: SampleRouteStep['execution']
+  instructions: string | null
+}): SampleRouteStep {
+  return {
+    operationId: o.id,
+    name: o.name,
+    kind: o.kind,
+    departmentId: o.departmentId,
+    execution: o.defaultExecution,
+    contractorId: null,
+    vendorId: null,
+    instructions: o.instructions ?? '',
+  }
+}
+/** The kinds of step a sample usually goes through, in the order it goes through them. */
+const USUAL_KINDS = ['CUTTING', 'STITCHING', 'FINISHING', 'QC'] as const
+/**
+ * The route a sample is usually made on, from the Operation master: for each
+ * of cutting, stitching, finishing and the check, the process in use listed
+ * first (lowest sort order, then code). A kind with no process in use is left
+ * out. Where each is done is the process's own default.
+ */
+export async function routeTemplate(tx: Tx): Promise<SampleRouteStep[]> {
+  const ops = await tx.operation.findMany({
+    where: { isActive: true, kind: { in: [...USUAL_KINDS] }, department: { isActive: true } },
+    orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+    select: {
+      id: true,
+      name: true,
+      kind: true,
+      departmentId: true,
+      defaultExecution: true,
+      instructions: true,
+    },
+  })
+  return USUAL_KINDS.flatMap((kind) => {
+    const op = ops.find((o) => o.kind === kind)
+    return op ? [stepOf(op)] : []
+  })
+}
+/**
+ * A routing's steps as a sample's route, for a merchandiser who wants the
+ * style's production route: no rates. A step given to an outside unit takes
+ * that unit when the routing names a job-work workstation of one.
+ */
+export async function routingAsRoute(tx: Tx, routingId: string): Promise<SampleRouteStep[]> {
+  const routing = await tx.routing.findFirst({
+    where: { id: routingId, isActive: true },
+    select: {
+      steps: {
+        orderBy: { sequence: 'asc' },
+        select: {
+          operationId: true,
+          departmentId: true,
+          contractorId: true,
+          execution: true,
+          instructions: true,
+          operation: { select: { name: true, kind: true, departmentId: true, instructions: true } },
+          workstation: { select: { type: true, supplierId: true } },
+        },
+      },
+    },
+  })
+  if (!routing) throw new AppError('That routing is not in use.', 404, 'NOT_FOUND')
+  return routing.steps.map((s) => {
+    const outside = s.execution === 'OUTSOURCED'
+    return {
+      operationId: s.operationId,
+      name: s.operation.name,
+      kind: s.operation.kind,
+      // The process's own department, which a sample step keeps (fitRoute);
+      // the same as the routing's unless the process has moved since.
+      departmentId: s.operation.departmentId,
+      execution: s.execution,
+      // A step done outside has no floor contractor on a sample's route.
+      contractorId: outside ? null : s.contractorId,
+      vendorId:
+        outside && s.workstation?.type === 'JOB_WORK' ? (s.workstation.supplierId ?? null) : null,
+      instructions: s.instructions ?? s.operation.instructions ?? '',
+    }
+  })
+}
+/**
+ * A route checked against the masters and filled in from them: each step
+ * takes its process's kind and department, and its name unless the
+ * merchandiser gave another. A process, department, contractor or unit picked
+ * must still be in use, and a step is done by its process's own department and
+ * a contractor who takes the process, by the routing master's own rules
+ * (assertRoutingRefsExist, assertContractorsFit): the route becomes a routing
+ * at handover, and the floor books its work by department. Only a step with no
+ * process yet (an old round's, or one being filled in) names a department of
+ * its own. Steps not yet complete pass here; sampleSpecGaps says what they lack.
+ */
+async function fitRoute(tx: Tx, steps: SampleRouteStep[]): Promise<SampleRouteStep[]> {
+  const ids = (pick: (s: SampleRouteStep) => string | null) => [
+    ...new Set(steps.map(pick).filter((x): x is string => !!x)),
+  ]
+  const opIds = ids((s) => s.operationId)
+  const ops = new Map(
+    (opIds.length
+      ? await tx.operation.findMany({
+          where: { id: { in: opIds } },
+          select: { id: true, name: true, kind: true, departmentId: true, isActive: true },
+        })
+      : []
+    ).map((o) => [o.id, o])
+  )
+  const deptIds = [
+    ...new Set([...ids((s) => s.departmentId), ...[...ops.values()].map((o) => o.departmentId)]),
+  ]
+  const vendorIds = ids((s) => s.vendorId)
+  const contractorIds = ids((s) => s.contractorId)
+  const [depts, vendors, contractors] = await Promise.all([
+    deptIds.length
+      ? tx.department.findMany({
+          where: { id: { in: deptIds } },
+          select: { id: true, name: true, isActive: true },
+        })
+      : [],
+    // Any supplier in use can take job work, as the floor's job-work orders allow.
+    vendorIds.length
+      ? tx.supplier.findMany({
+          where: { id: { in: vendorIds }, isActive: true },
+          select: { id: true },
+        })
+      : [],
+    contractorIds.length
+      ? tx.contractor.findMany({
+          where: { id: { in: contractorIds }, isActive: true },
+          select: { id: true },
+        })
+      : [],
+  ])
+  const live = (list: Array<{ id: string }>) => new Set(list.map((x) => x.id))
+  const [deptOk, vendorOk, contractorOk] = [
+    live(depts.filter((d) => d.isActive)),
+    live(vendors),
+    live(contractors),
+  ]
+  const deptName = new Map(depts.map((d) => [d.id, d.name]))
+  const route = steps.map((s, i): SampleRouteStep => {
+    const at = `Step ${i + 1}:`
+    const op = s.operationId ? ops.get(s.operationId) : undefined
+    if (s.operationId && !op?.isActive)
+      fail(`${at} pick a process that is still in use.`, 'BAD_OPERATION')
+    // In the routing master's words (routing.service assertRoutingRefsExist).
+    if (op && s.departmentId && s.departmentId !== op.departmentId)
+      fail(
+        `${at} ${op.name} is a ${deptName.get(op.departmentId) ?? 'different department'} operation, not ${deptName.get(s.departmentId) ?? 'this department'}. Pick the department it belongs to, or another operation.`,
+        'STEP_DEPARTMENT_MISMATCH'
+      )
+    const departmentId = op ? op.departmentId : s.departmentId || ''
+    if (departmentId && !deptOk.has(departmentId))
+      fail(`${at} pick a department that is still in use.`, 'BAD_DEPARTMENT')
+    if (s.vendorId && !vendorOk.has(s.vendorId))
+      fail(`${at} that unit is not an active supplier.`, 'BAD_VENDOR')
+    if (s.contractorId && !contractorOk.has(s.contractorId))
+      fail(`${at} pick a contractor who is still in use.`, 'BAD_CONTRACTOR')
+    return {
+      operationId: s.operationId,
+      name: s.name.trim() || op?.name || '',
+      kind: op?.kind ?? s.kind,
+      departmentId,
+      execution: s.execution,
+      contractorId: s.contractorId || null,
+      vendorId: s.vendorId || null,
+      instructions: s.instructions.trim(),
+    }
+  })
+  // A contractor is checked against the step's process once one is picked.
+  await assertContractorsFit(
+    tx,
+    route.map((s) => ({
+      operationId: s.operationId,
+      contractorId: s.operationId ? s.contractorId : null,
+    }))
+  )
+  return route
+}
+
+/**
+ * A specification complete enough to save as complete, or to release: the
+ * same shape as a draft, with nothing missing (sampleSpecGaps, the list the
+ * screen shows) and a route every routing would accept (checkRouteSteps:
+ * cutting first, and only once). Returns the route's warnings, such as no
+ * quality check, which do not stop it.
+ */
+async function assertComplete(tx: Tx, s: SampleSpecification, customerId: string | null) {
+  const style = await tx.style.findUnique({
+    where: { id: s.styleId },
+    select: {
+      colors: true,
+      sizeGroup: { select: { sizes: { select: { id: true, code: true } } } },
+    },
+  })
+  const sizes = style?.sizeGroup?.sizes ?? []
+  const gaps = sampleSpecGaps(s, {
+    style: style ? { colors: style.colors, sizeIds: sizes.map((z) => z.id) } : null,
+    sizes,
+    hasBuyer: !!customerId,
+  })
+  if (gaps.length)
+    throw new AppError(
+      gaps.length === 1
+        ? gaps[0].message
+        : `Still to finish: ${gaps.map((g) => g.message).join(' ')}`,
+      400,
+      'SPEC_INCOMPLETE'
+    )
+  return checkRouteSteps(
+    tx,
+    s.route.map((step) => ({ operationId: step.operationId }))
+  )
+}
+/** SAVE_SPEC and RELEASE: the whole specification checked, its BOM rows written. */
+async function completeSpec(
+  tx: Tx,
+  round: { id: string; materials: MaterialRow[] },
+  raw: unknown,
+  owner: { brandId: string; customerId: string | null; styleId: string | null }
+) {
+  const parsed = sampleSpecificationSchema.parse(raw)
+  await shareStyle(tx, parsed.styleId)
+  const s = await validateSpec(tx, parsed, owner)
+  const full: SampleSpecification = { ...s, route: await fitRoute(tx, s.route) }
+  const warnings = await assertComplete(tx, full, owner.customerId)
+  const materials = await syncBomRows(tx, round, full, full.materials, {
+    draft: false,
+    customerId: owner.customerId,
+  })
+  return { spec: { ...full, materials }, warnings }
 }
 function held(m: {
   issuedQty: unknown
@@ -306,16 +804,27 @@ const STORED_FILE_NAME = /^[a-z0-9]{1,8}-[A-Za-z0-9_.-]{1,80}$/
 
 /**
  * A draft specification moved onto another style, or off one. What still fits
- * is kept; a colour, size or measurement the new style does not have is
- * cleared, as the specification form clears it when the style is changed.
+ * is kept; a colour the new style does not have goes with its sizes and its
+ * own material lines, and a size outside the new run goes with its
+ * measurements, as the specification form clears them when the style is
+ * changed. Lines for every colour stay, their quantities worked out again for
+ * what is left. Drafts have nothing issued, so no line is held back. Says
+ * what each draft lost, for the event.
  */
 async function refitDrafts(
   tx: Tx,
-  rounds: Array<{ id: string; state: string; specification: unknown }>,
-  style: { id: string; colors: string[]; sizeGroupId: string | null } | null
+  rounds: Array<{
+    id: string
+    revision: number
+    state: string
+    specification: SampleSpecification
+    materials: MaterialRow[]
+  }>,
+  style: { id: string; colors: string[]; sizeGroupId: string | null } | null,
+  customerId: string | null
 ) {
   const drafts = rounds.filter((x) => x.state === 'DRAFT')
-  if (!drafts.length) return
+  if (!drafts.length) return undefined
   const sizeIds = new Set(
     style?.sizeGroupId
       ? (
@@ -327,18 +836,46 @@ async function refitDrafts(
       : []
   )
   const fits = (sizeId: string) => !sizeId || sizeIds.has(sizeId)
+  const report = []
   for (const draft of drafts) {
-    const s = draft.specification as SampleSpecification
-    const colour = style?.colors.find((c) => c.toLowerCase() === s.color.trim().toLowerCase())
-    const next: SampleSpecification = {
-      ...s,
-      styleId: style?.id ?? '',
-      color: colour ?? '',
-      sizes: s.sizes.filter((x) => fits(x.sizeId)),
-      measurements: s.measurements.filter((x) => fits(x.sizeId)),
-    }
-    await tx.sampleRound.update({ where: { id: draft.id }, data: { specification: json(next) } })
+    const s = draft.specification
+    let coloursDropped = 0
+    let sizesDropped = 0
+    const colours = s.colours.flatMap((row) => {
+      const asked = row.colour.trim()
+      // A row whose colour is not picked yet stays, as it was.
+      const own = asked ? style?.colors.find((c) => c.toLowerCase() === asked.toLowerCase()) : ''
+      if (own === undefined) {
+        coloursDropped++
+        return []
+      }
+      const sizes = row.sizes.filter((x) => fits(x.sizeId))
+      sizesDropped += row.sizes.length - sizes.length
+      return [{ colour: own, sizes }]
+    })
+    const measurements = s.measurements.filter((x) => fits(x.sizeId))
+    const next: SampleSpecification = { ...s, styleId: style?.id ?? '', colours, measurements }
+    const kept = new Set(colours.map((c) => c.colour.toLowerCase()).filter(Boolean))
+    const before = currentLines(draft)
+    const lines = before.filter((l) => !l.colour?.trim() || kept.has(l.colour.trim().toLowerCase()))
+    const materials = await syncBomRows(tx, draft, next, lines, {
+      draft: true,
+      copy: true,
+      customerId,
+    })
+    await tx.sampleRound.update({
+      where: { id: draft.id },
+      data: { specification: json({ ...next, materials }) },
+    })
+    report.push({
+      revision: draft.revision,
+      coloursDropped,
+      sizesDropped,
+      measurementsDropped: s.measurements.length - measurements.length,
+      materialsDropped: before.length - lines.length,
+    })
   }
+  return report
 }
 
 /** A size run the style can be made in: switched on, with sizes in it. */
@@ -438,6 +975,8 @@ export interface SampleAfterCommit {
   eventRoundId?: string | null
   /** A style made or changed from the request: a masters record, audited as one. */
   styleAudit?: { action: 'CREATE' | 'UPDATE'; styleId: string; before?: unknown; after: unknown }
+  /** What the action allowed but the screen should say, such as a route with no check. */
+  warnings?: string[]
 }
 /** Actions on the request as a whole, which name no round of their own. */
 const REQUEST_ACTIONS = [
@@ -470,7 +1009,7 @@ export async function actOnSample(
   )
     fail('Only the latest sample round can be changed.')
   const round = r!
-  const spec = round?.specification as unknown as SampleSpecification
+  const spec = round?.specification
   const approver = ['RELEASE', 'QC', 'DECIDE', 'HANDOVER', 'CANCEL'].includes(cmd.action)
   grant(actor, 'sampling', approver ? 'approve' : 'edit')
   if (
@@ -507,7 +1046,7 @@ export async function actOnSample(
         for (const draft of request.rounds)
           await validateSpec(
             tx,
-            draft.specification as unknown as SampleSpecification,
+            draft.specification,
             { brandId: d.brandId, customerId: d.customerId, styleId: request.styleId },
             true
           )
@@ -550,38 +1089,57 @@ export async function actOnSample(
       if (round.state !== 'DRAFT')
         fail('Released specifications are frozen. Make a new round to change them.')
       const patch = sampleDraftPatchSchema.parse(cmd.data)
-      const s = sampleDraftSchema.parse({ ...spec, ...patch })
-      await validateSpec(tx, s, owner, true)
-      await tx.sampleRound.update({ where: { id: round.id }, data: { specification: json(s) } })
-      detail = { specification: s }
+      // A patch without its materials leaves the lines as the rows have them,
+      // and works their quantities out again for the grid as it now is.
+      const draft = sampleDraftSchema.parse({
+        ...spec,
+        ...patch,
+        materials: patch.materials ?? currentLines(round),
+      })
+      const s = await validateSpec(tx, draft, owner, true)
+      const route = await fitRoute(tx, s.route)
+      const materials = await syncBomRows(tx, round, s, s.materials, {
+        draft: true,
+        customerId: request.customerId,
+      })
+      const saved: SampleSpecification = { ...s, route, materials }
+      await tx.sampleRound.update({ where: { id: round.id }, data: { specification: json(saved) } })
+      detail = { specification: saved }
       break
     }
     case 'SAVE_SPEC': {
       if (round.state !== 'DRAFT')
         fail('Released specifications are frozen. Make a new round to change them.')
-      const s = sampleSpecificationSchema.parse(cmd.data)
-      await shareStyle(tx, s.styleId)
-      await validateSpec(tx, s, owner)
+      const { spec: s, warnings } = await completeSpec(tx, round, cmd.data, owner)
       await tx.sampleRound.update({ where: { id: round.id }, data: { specification: json(s) } })
+      after.warnings = warnings
+      detail = { specification: s }
       break
     }
     case 'RELEASE': {
       if (round.state !== 'DRAFT') fail('Only a draft round can be released.')
-      const s = sampleSpecificationSchema.parse(
-        cmd.data && typeof cmd.data === 'object' && 'styleId' in cmd.data ? cmd.data : spec
+      // The specification sent with the release, or the saved draft with its rows.
+      const sent = cmd.data && typeof cmd.data === 'object' && 'styleId' in cmd.data
+      const { spec: s, warnings } = await completeSpec(
+        tx,
+        round,
+        sent ? cmd.data : { ...spec, materials: currentLines(round) },
+        owner
       )
-      await shareStyle(tx, s.styleId)
-      await validateSpec(tx, s, owner)
+      after.warnings = warnings
+      // The route as released: each step's process, department and who does it.
       await tx.sampleStage.createMany({
-        data: s.stages.map((name, i) => ({ roundId: round.id, sequence: i + 1, name })),
-      })
-      await tx.sampleMaterial.createMany({
-        data: s.materials.map((m) => ({
+        data: s.route.map((st, i) => ({
           roundId: round.id,
-          itemId: m.itemId,
-          warehouseId: m.warehouseId,
-          ownership: m.ownership,
-          plannedQty: m.qty,
+          sequence: i + 1,
+          name: st.name,
+          operationId: st.operationId,
+          kind: st.kind,
+          departmentId: st.departmentId || null,
+          execution: st.execution,
+          contractorId: st.contractorId,
+          vendorId: st.vendorId,
+          instructions: st.instructions || null,
         })),
       })
       await tx.sampleRound.update({
@@ -612,19 +1170,48 @@ export async function actOnSample(
         m = round.materials.find((x) => x.id === d.materialId)
       if (!m) fail('This material is not on the round.')
       const material = m!
+      if (!material.itemId)
+        fail('This line has no material picked, so nothing can be issued against it.', 'NO_ITEM')
+      // One store per line: named at the first issue, then every issue and
+      // return goes through it, so what the line holds is in one place.
+      const store = material.warehouse?.name ?? 'another store'
+      if (
+        (d.kind === 'ISSUE' || d.kind === 'RETURN') &&
+        material.warehouseId &&
+        d.warehouseId &&
+        d.warehouseId !== material.warehouseId
+      )
+        fail(
+          d.kind === 'RETURN'
+            ? `This material was issued from ${store}. Return it there.`
+            : n(material.issuedQty) > 0
+              ? `This material was issued from ${store}. Issue the rest from there.`
+              : `This material is planned from ${store}. Issue it from there.`,
+          'OTHER_STORE'
+        )
+      // Ours when we buy it; the buyer's when they send it.
+      const ownership = material.source === 'BUYER_SUPPLIED' ? 'CUSTOMER_OWNED' : 'OWNED'
       const key = {
-        itemId: material.itemId,
-        warehouseId: material.warehouseId,
-        ownership: material.ownership,
-        ownerCustomerId: material.ownership === 'CUSTOMER_OWNED' ? request.customerId : null,
-      }
+        itemId: material.itemId!,
+        warehouseId: material.warehouseId ?? '',
+        ownership,
+        ownerCustomerId: ownership === 'CUSTOMER_OWNED' ? request.customerId : null,
+      } as const
       if (d.kind === 'ISSUE') {
         if (round.state !== 'RELEASED' || round.stages.some((x) => x.completedAt))
           fail('Issue materials before making starts; extra needs require a new round.')
         if (round3(n(material.issuedQty) + d.qty) > n(material.plannedQty))
           fail('Do not issue more than the frozen material plan.')
+        const firstStore = !material.warehouseId
+        if (firstStore) {
+          if (!d.warehouseId)
+            throw new AppError('Pick the store to issue this material from.', 400, 'STORE_REQUIRED')
+          if (!(await tx.warehouse.findFirst({ where: { id: d.warehouseId, isActive: true } })))
+            fail('Pick an active store.')
+        }
         const movement = await recordMovement(tx, {
           ...key,
+          warehouseId: material.warehouseId ?? d.warehouseId!,
           direction: 'OUT',
           qty: d.qty,
           transactionType: 'ISSUE',
@@ -635,6 +1222,7 @@ export async function actOnSample(
         await tx.sampleMaterial.update({
           where: { id: material.id },
           data: {
+            ...(firstStore ? { warehouseId: d.warehouseId } : {}),
             issuedQty: { increment: d.qty },
             issuedValue: { increment: round2(d.qty * movement.unitRate) },
           },
@@ -670,7 +1258,7 @@ export async function actOnSample(
                 : { wasteQty: { increment: d.qty } },
           })
       }
-      detail = { ...d, item: material.item.name }
+      detail = { ...d, item: material.item?.name ?? null }
       break
     }
     case 'STAGE': {
@@ -687,13 +1275,16 @@ export async function actOnSample(
         round.materials.some((m) => round3(n(m.issuedQty) - n(m.returnedQty)) < n(m.plannedQty))
       )
         fail('Keep the planned material issued until the first making step is recorded.')
+      // The first step takes every piece of the grid, every colour and size.
       const input =
         stage!.sequence === 1
-          ? spec.sizes.reduce((t, z) => t + z.qty, 0)
+          ? totalPieces(spec)
           : round.stages.find((x) => x.sequence === stage!.sequence - 1)!.doneQty!
-      if (spec.sizes.length > 1 && d.rejectedQty > 0)
+      // Rejected pieces of a set could be of any colour or size, and nothing
+      // here could say which; a set goes through whole.
+      if (cellCount(spec) > 1 && d.rejectedQty > 0)
         fail(
-          'For a partially rejected size set, use separate size rounds so each size stays traceable in this pilot.'
+          'With several colours or sizes in one round, record the whole set here; take rejected pieces out in a new round.'
         )
       if (d.doneQty + d.rejectedQty !== input)
         fail(`Done plus rejected must equal the ${input} pieces received by this step.`)
@@ -715,9 +1306,9 @@ export async function actOnSample(
       if (round.state !== 'RELEASED' || round.stages.some((x) => !x.completedAt))
         fail('Complete the making route before recording QC.')
       const d = sampleQcSchema.parse(cmd.data)
-      if (spec.sizes.length > 1 && d.passedQty !== round.stages.at(-1)!.doneQty!)
+      if (cellCount(spec) > 1 && d.passedQty !== round.stages.at(-1)!.doneQty!)
         fail(
-          'Inspect the complete size set; use separate size rounds for partial size rejection in this pilot.'
+          'With several colours or sizes in one round, inspect and pass the whole set; take rejected pieces out in a new round.'
         )
       if (d.passedQty > round.stages.at(-1)!.doneQty!)
         fail('QC cannot pass more pieces than finishing produced.')
@@ -742,8 +1333,8 @@ export async function actOnSample(
     case 'SUBMIT': {
       if (round.state !== 'QC_PASSED') fail('Pass internal QC before submitting to the buyer.')
       const d = sampleSubmissionSchema.parse(cmd.data)
-      if (spec.sizes.length > 1 && d.qty !== (round.qc as { passedQty: number }).passedQty)
-        fail('Submit the complete inspected size set so approval covers every size.')
+      if (cellCount(spec) > 1 && d.qty !== (round.qc as { passedQty: number }).passedQty)
+        fail('Submit the whole inspected set so the approval covers every colour and size.')
       if (d.qty > (round.qc as { passedQty: number }).passedQty)
         fail('Do not send more pieces than passed QC.')
       await tx.sampleRound.update({
@@ -781,8 +1372,26 @@ export async function actOnSample(
           where: { id: round.id },
           data: { state: 'CHANGES_REQUIRED' },
         })
-      await tx.sampleRound.create({
-        data: { requestId: id, revision: round.revision + 1, specification: json(spec) },
+      // The next round starts from this one's specification, its BOM lines
+      // copied into rows of its own (new ids, nothing issued, the store
+      // chosen again at the first issue), their quantities worked out for
+      // the grid it carries over.
+      const next = await tx.sampleRound.create({
+        data: {
+          requestId: id,
+          revision: round.revision + 1,
+          specification: json({ ...spec, materials: [] }),
+        },
+      })
+      const copied = currentLines(round).map(({ id: _was, ...line }) => line)
+      const materials = await syncBomRows(tx, { id: next.id, materials: [] }, spec, copied, {
+        draft: true,
+        copy: true,
+        customerId: request.customerId,
+      })
+      await tx.sampleRound.update({
+        where: { id: next.id },
+        data: { specification: json({ ...spec, materials }) },
       })
       // A request released before requests named their style has none, and
       // the new draft could not be prepared or released without one: it takes
@@ -798,6 +1407,7 @@ export async function actOnSample(
       detail = {
         fromRevision: round.revision,
         reason,
+        materials: materials.length,
         ...(filled ? { styleId: filled.id } : {}),
       }
       break
@@ -823,8 +1433,10 @@ export async function actOnSample(
         where: { id: d.bomId, styleId: spec.styleId, isActive: true, status: 'APPROVED' },
         include: { lines: { include: { sizes: true } } },
       })
-      if (!bom || (bom.color && bom.color.toLowerCase() !== spec.color.toLowerCase()))
-        fail('Pick an approved production BOM for this style and colour.')
+      // A BOM for every colour, or for one of the colours the round made.
+      const madeIn = spec.colours.map((c) => c.colour.trim().toLowerCase()).filter(Boolean)
+      if (!bom || (bom.color && !madeIn.includes(bom.color.trim().toLowerCase())))
+        fail('Pick an approved production BOM for this style in one of the round’s colours.')
       const routing = await tx.routing.findFirst({
         where: { id: d.routingId, isActive: true },
         include: { steps: { orderBy: { sequence: 'asc' } }, style: { select: { code: true } } },
@@ -1036,8 +1648,14 @@ export async function actOnSample(
         brandType: brand.type,
       })
       await tx.sampleRequest.update({ where: { id }, data: { styleId: style.id } })
-      await refitDrafts(tx, request.rounds, style)
-      detail = { styleId: style.id, code: style.code, stage: style.stage, ...styleFacts(style) }
+      const refit = await refitDrafts(tx, request.rounds, style, request.customerId)
+      detail = {
+        styleId: style.id,
+        code: style.code,
+        stage: style.stage,
+        ...styleFacts(style),
+        ...(refit ? { refit } : {}),
+      }
       after.styleAudit = {
         action: 'CREATE',
         styleId: style.id,
@@ -1085,10 +1703,10 @@ export async function actOnSample(
           )
       }
       await tx.sampleRequest.update({ where: { id }, data: { styleId: style?.id ?? null } })
-      await refitDrafts(tx, request.rounds, style)
+      const refit = await refitDrafts(tx, request.rounds, style, request.customerId)
       const named = (x: { id: string; code: string; stage: string } | null) =>
         x ? { id: x.id, code: x.code, stage: x.stage } : null
-      detail = { before: named(request.style), after: named(style) }
+      detail = { before: named(request.style), after: named(style), ...(refit ? { refit } : {}) }
       eventRoundId = undefined
       break
     }
@@ -1130,9 +1748,13 @@ export async function actOnSample(
       }
       if (d.colors) {
         const kept = new Set(d.colors.map((c) => c.toLowerCase()))
+        // Read in today's shape, so a round released before the colour grid
+        // still holds on to the colour it was made in.
         const made = new Set(
-          madeIn.map((x) =>
-            String((x.specification as unknown as SampleSpecification).color ?? '').toLowerCase()
+          madeIn.flatMap((x) =>
+            normaliseSpec(x.specification)
+              .colours.map((r) => r.colour.trim().toLowerCase())
+              .filter(Boolean)
           )
         )
         const lost = style.colors.filter(
@@ -1154,12 +1776,13 @@ export async function actOnSample(
           ...(d.sizeGroupId !== undefined ? { sizeGroupId: d.sizeGroupId } : {}),
         },
       })
-      await refitDrafts(tx, request.rounds, updated)
+      const refit = await refitDrafts(tx, request.rounds, updated, request.customerId)
       detail = {
         styleId: style.id,
         code: style.code,
         before: styleFacts(style),
         after: styleFacts(updated),
+        ...(refit ? { refit } : {}),
       }
       after.styleAudit = { action: 'UPDATE', styleId: style.id, before: style, after: updated }
       eventRoundId = undefined
@@ -1204,11 +1827,9 @@ export async function sampleLookups(tx: Tx) {
       orderBy: { sequence: 'asc' },
     }),
     tx.item.findMany({
-      where: {
-        isActive: true,
-        type: { in: ['RAW_MATERIAL', 'TRIM', 'CONSUMABLE', 'PACKING_MATERIAL'] },
-      },
-      select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
+      where: { isActive: true, type: { in: [...SAMPLE_MATERIAL_TYPES] } },
+      select: sampleItemSelect,
+      orderBy: { name: 'asc' },
     }),
     tx.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
     tx.bOM.findMany({
@@ -1226,5 +1847,123 @@ export async function sampleLookups(tx: Tx) {
     select: { id: true, name: true },
     orderBy: { name: 'asc' },
   })
-  return { customers, brands, styles, sizes, items, warehouses, boms, routings, sizeGroups }
+  // What the specification's route and BOM are made of.
+  const [operations, departments, contractors, jobWorkers, itemCategories, uoms] =
+    await Promise.all([
+      tx.operation.findMany({
+        where: { isActive: true },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          kind: true,
+          departmentId: true,
+          defaultExecution: true,
+          instructions: true,
+          sortOrder: true,
+        },
+        orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+      }),
+      tx.department.findMany({
+        where: { isActive: true },
+        select: { id: true, code: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
+      tx.contractor.findMany({
+        where: { isActive: true },
+        select: { id: true, code: true, name: true, operationIds: true },
+        orderBy: { name: 'asc' },
+      }),
+      // Any supplier in use can take job work, as the floor's job-work orders
+      // allow; service suppliers (embroidery, washing units) are listed first.
+      tx.supplier.findMany({
+        where: { isActive: true },
+        select: { id: true, code: true, name: true, category: true },
+        orderBy: { name: 'asc' },
+      }),
+      // For adding a material that is not in the masters yet.
+      tx.itemCategory.findMany({
+        where: { isActive: true },
+        select: { id: true, name: true, parentId: true, departmentId: true },
+        orderBy: { name: 'asc' },
+      }),
+      tx.uOM.findMany({
+        where: { isActive: true },
+        select: { id: true, name: true, symbol: true },
+        orderBy: { name: 'asc' },
+      }),
+    ])
+  const opName = new Map(operations.map((o) => [o.id, o.name]))
+  return {
+    customers,
+    brands,
+    styles,
+    sizes,
+    items: items.map(sampleItemOption),
+    warehouses,
+    boms,
+    routings,
+    sizeGroups,
+    operations,
+    departments,
+    // With the processes each one takes, by name, for the step's contractor list.
+    contractors: contractors.map((c) => ({
+      ...c,
+      operations: c.operationIds.flatMap((id) =>
+        opName.has(id) ? [{ id, name: opName.get(id)! }] : []
+      ),
+    })),
+    jobWorkers: [...jobWorkers].sort(
+      (a, b) => Number(b.category === 'SERVICE') - Number(a.category === 'SERVICE')
+    ),
+    itemCategories,
+    uoms,
+  }
+}
+
+// ── Items for the sample BOM ─────────────────────────────────────────────────
+
+/** An item as the BOM's picker shows it. A unit has no code of its own, so its symbol is its code. */
+export function sampleItemOption(i: {
+  id: string
+  code: string
+  name: string
+  type: string
+  departmentId: string | null
+  standardRate: unknown
+  uom: { id: string; name: string; symbol: string } | null
+}): SampleItemOption {
+  return {
+    id: i.id,
+    code: i.code,
+    name: i.name,
+    type: i.type as SampleMaterialType,
+    uom: i.uom
+      ? { id: i.uom.id, code: i.uom.symbol, name: i.uom.name, symbol: i.uom.symbol }
+      : null,
+    departmentId: i.departmentId,
+    standardRate:
+      i.standardRate === null || i.standardRate === undefined ? null : n(i.standardRate),
+  }
+}
+/** Materials in use whose name or code has the words typed, for the BOM's picker. */
+export async function searchSampleItems(tx: Tx, q: string, limit: number) {
+  const rows = await tx.item.findMany({
+    where: {
+      isActive: true,
+      type: { in: [...SAMPLE_MATERIAL_TYPES] },
+      ...(q
+        ? {
+            OR: [
+              { name: { contains: q, mode: 'insensitive' as const } },
+              { code: { contains: q, mode: 'insensitive' as const } },
+            ],
+          }
+        : {}),
+    },
+    select: sampleItemSelect,
+    orderBy: { name: 'asc' },
+    take: limit,
+  })
+  return rows.map(sampleItemOption)
 }

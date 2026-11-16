@@ -20,7 +20,7 @@ import { writeAuditLog } from '../lib/audit'
 import { findHsn, loadHsnIndex, withHsnRates } from '../lib/hsn'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
-import { assertItemStyleColorValid, rethrowItemStyleColorClash } from '../lib/itemStyleColor'
+import { itemBeforeSave, itemInclude, ITEM_UNIQUE_FIELDS } from '../lib/itemMaster'
 import { styleInDevelopment } from '../lib/styleStage'
 import {
   bomPriceSchema,
@@ -97,7 +97,10 @@ const noneOr = (field: string) => (values: string[]) => {
  * Everything that can point at a department, and what deleting the
  * department does to it. An item or a BOM line may have no department, so
  * it is left blank. The rest must have one (a requisition has to say who
- * asked), so they move to the department the person picks.
+ * asked), so they move to the department the person picks. A sample's
+ * making step and material line keep the department they were planned and
+ * made with: the record of how the sample was made, which its costing and
+ * handover read later, so a department they name is not deleted.
  */
 const DEPARTMENT_USES: Record<string, DeleteUse> = {
   items: { one: 'item', many: 'items', model: 'item', field: 'departmentId', then: 'blank' },
@@ -110,6 +113,8 @@ const DEPARTMENT_USES: Record<string, DeleteUse> = {
   machines: { one: 'machine', many: 'machines', model: 'machine', field: 'departmentId', then: 'move' },
   routingSteps: { one: 'routing step', many: 'routing steps', model: 'routingStep', field: 'departmentId', then: 'move' },
   productionEntries: { one: 'production entry', many: 'production entries', model: 'productionEntry', field: 'departmentId', then: 'move' },
+  sampleStages: { one: 'sample making step', many: 'sample making steps', then: 'refuse' },
+  sampleMaterials: { one: 'sample material line', many: 'sample material lines', then: 'refuse' },
 }
 
 /*
@@ -605,44 +610,9 @@ router.use(
   }),
 )
 
-/**
- * What an item is sent back with.
- *
- * - taxRate travels with the item so an order form can fill the GST in from
- *   the item itself. Without it the purchase order screen read
- *   `item.taxRate.rate`, found nothing, and left the field blank for someone
- *   to type from memory — and a rate typed from memory is the one thing the
- *   business rules say must never happen. The alternative source, the tax
- *   rate list in Settings, needs a permission a purchase clerk does not have.
- * - The category's parent too, so the form can show a sub-category under the
- *   main one it belongs to.
- * - The style, for a finished good: which garment it is, with the colours it
- *   comes in.
- */
-const itemInclude = {
-  category: { include: { parent: true } },
-  uom: true,
-  taxRate: true,
-  department: { select: { id: true, name: true, code: true } },
-  style: { select: { id: true, code: true, name: true, colors: true } },
-  tdsSection: { select: { id: true, section: true, label: true } },
-}
-
-/*
- * An item's department is its category's: the sub-category's own, or else its
- * main category's. The item form does not ask for it. Worked out when an item
- * is added, and again when its category changes; a department sent on purpose
- * is kept, and so is one an item already has while its category stays.
- */
-async function departmentFromCategory(data: Record<string, unknown>, before?: Record<string, unknown>) {
-  if (data.departmentId !== undefined || typeof data.categoryId !== 'string') return data
-  if (before && before.categoryId === data.categoryId && before.departmentId) return data
-  const category = await prisma.itemCategory.findUnique({
-    where: { id: data.categoryId },
-    select: { departmentId: true, parent: { select: { departmentId: true } } },
-  })
-  return { ...data, departmentId: category?.departmentId ?? category?.parent?.departmentId ?? null }
-}
+// What an item is sent back with, its department from its category, and the
+// finished-good rules live in lib/itemMaster, where a sample's quick-add of a
+// material finds the same rules.
 
 /*
  * The TDS sections, for the "usual TDS section" box on a supplier or an
@@ -739,7 +709,7 @@ router.use(
     createSchema: createItemSchema,
     updateSchema: updateItemSchema,
     // No two with the same name (ignoring capitals and spaces).
-    uniqueFields: ['name'],
+    uniqueFields: ITEM_UNIQUE_FIELDS,
     // Typing "linen" finds linen items by their category as well as their
     // name; "cutting" finds what the cutting floor uses.
     searchFields: [
@@ -775,28 +745,8 @@ router.use(
     // master, in `taxRate` where every order and bill form already looks.
     afterRead: (rows) => withHsnRates(prisma, rows),
     // A finished good is one style in one colour, and the colour must be one
-    // of that style's own. Checked here because it needs the style looked up,
-    // which a schema cannot do. On an edit the saved type, style and colour
-    // stand in for whatever the edit leaves out.
-    beforeSave: async (data, before) => {
-      data = await departmentFromCategory(data, before)
-      const checked = await assertItemStyleColorValid(
-        String(data.type ?? before?.type ?? ''),
-        (data.styleId !== undefined ? data.styleId : before?.styleId) as string | null | undefined,
-        (data.color !== undefined ? data.color : before?.color) as string | null | undefined,
-        before?.id as string | undefined,
-      )
-      return {
-        data: { ...data, styleId: checked.styleId, color: checked.color },
-        // Two people saving the same style and colour at once: the database
-        // catches the second, and this says so in words.
-        onSaveError: (err) => {
-          if (checked.styleName && checked.color) {
-            rethrowItemStyleColorClash(err, checked.styleName, checked.color)
-          }
-        },
-      }
-    },
+    // of that style's own; the department comes from the category.
+    beforeSave: itemBeforeSave,
   }),
 )
 

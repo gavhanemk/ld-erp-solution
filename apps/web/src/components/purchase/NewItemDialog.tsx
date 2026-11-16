@@ -71,25 +71,54 @@ const TYPES: Array<{ value: string; label: string; hint: string }> = [
   { value: 'FINISHED_GOOD', label: 'Finished good', hint: 'Ready to sell' },
 ]
 
-export function NewItemDialog({
+export function NewItemDialog<T = NewItem>({
   categories,
   categoryId: initialCategory,
   subcategoryId: initialSubcategory,
   onClose,
   onCreated,
+  endpoint = '/masters/items',
+  allowedTypes,
+  uoms: givenUoms,
+  initialName = '',
 }: {
   categories: Category[]
   /** Whatever the row had already narrowed to, so the buyer does not repeat it. */
   categoryId?: string
   subcategoryId?: string
   onClose: () => void
-  onCreated: (item: NewItem) => void
+  /** Given the item as `endpoint` answers with it: the master's item, unless told otherwise. */
+  onCreated: (item: T) => void
+  /**
+   * Where the item is added. A sample's material is added through sampling
+   * (/sampling/items), which applies the master's own rules for somebody who
+   * has no masters rights, and answers with the item as the sample BOM's
+   * picker shows it.
+   */
+  endpoint?: string
+  /** The item types this form may add; every type when left out. */
+  allowedTypes?: readonly string[]
+  /** The units, when the form that opens this already has them: no masters list is read. */
+  uoms?: Uom[]
+  /** What was typed in the search that found nothing, as the name to start from. */
+  initialName?: string
 }) {
+  // The types this form offers: all of them, or those it is told to.
+  const types = useMemo(
+    () => (allowedTypes ? TYPES.filter((t) => allowedTypes.includes(t.value)) : TYPES),
+    [allowedTypes]
+  )
   const [categoryId, setCategoryId] = useState(initialCategory ?? '')
   const [subcategoryId, setSubcategoryId] = useState(initialSubcategory ?? '')
-  const [name, setName] = useState('')
+  const [name, setName] = useState(initialName)
+  // Only Masters → Items takes a code typed by hand; anywhere else the server allots it.
+  const codeTyped = endpoint === '/masters/items'
   const [code, setCode] = useState('')
-  const [type, setType] = useState('RAW_MATERIAL')
+  const [type, setType] = useState(() =>
+    types.some((t) => t.value === 'RAW_MATERIAL')
+      ? 'RAW_MATERIAL'
+      : (types[0]?.value ?? 'RAW_MATERIAL')
+  )
   const [uomId, setUomId] = useState('')
   const [hsnCode, setHsnCode] = useState('')
   const [description, setDescription] = useState('')
@@ -98,17 +127,20 @@ export function NewItemDialog({
   const [minStock, setMinStock] = useState('')
   const [maxStock, setMaxStock] = useState('')
 
-  const [uoms, setUoms] = useState<Uom[]>([])
+  const [uoms, setUoms] = useState<Uom[]>(givenUoms ?? [])
   // A unit being added from the list, with what was typed in its search.
   const [newUom, setNewUom] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    if (givenUoms) return
     api
       .get<{ data: Uom[] }>('/masters/uoms?limit=200&active=true')
       .then((r) => setUoms(r.data))
       .catch(() => setError('Could not load the units. Close and try again.'))
+    // Read once, when the form opens, as before.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /** The chosen unit's symbol, so the stock figures say what they count. */
@@ -146,11 +178,11 @@ export function NewItemDialog({
     setSaving(true)
     setError(null)
     try {
-      const res = await api.post<{ data: NewItem }>('/masters/items', {
+      const res = await api.post<{ data: T }>(endpoint, {
         name: name.trim(),
         // Left out entirely when blank, so the server allots one rather than
         // being handed an empty string to validate.
-        ...(code.trim() ? { code: code.trim().toUpperCase() } : {}),
+        ...(codeTyped && code.trim() ? { code: code.trim().toUpperCase() } : {}),
         type,
         // The subcategory is the real filing when there is one; the parent is
         // only how the buyer found it.
@@ -187,6 +219,7 @@ export function NewItemDialog({
     minStock,
     maxStock,
     onCreated,
+    endpoint,
   ])
 
   // Escape closes this window only — not the form behind it.
@@ -299,21 +332,23 @@ export function NewItemDialog({
             </div>
 
             <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div>
-                <label className="form-label" htmlFor="ni-code">
-                  Item code
-                </label>
-                <input
-                  id="ni-code"
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  placeholder="Allotted on save"
-                  className="form-input font-mono"
-                />
-                {/* Left blank on purpose. Two people typing codes by hand is how
-                  a master ends up holding FAB-COT-3 and FAB-COT-003. */}
-                <p className="form-help">Leave empty unless it already has one.</p>
-              </div>
+              {codeTyped && (
+                <div>
+                  <label className="form-label" htmlFor="ni-code">
+                    Item code
+                  </label>
+                  <input
+                    id="ni-code"
+                    value={code}
+                    onChange={(e) => setCode(e.target.value)}
+                    placeholder="Allotted on save"
+                    className="form-input font-mono"
+                  />
+                  {/* Left blank on purpose. Two people typing codes by hand is how
+                    a master ends up holding FAB-COT-3 and FAB-COT-003. */}
+                  <p className="form-help">Leave empty unless it already has one.</p>
+                </div>
+              )}
               <div>
                 <label className="form-label" htmlFor="ni-type">
                   Item type
@@ -324,14 +359,14 @@ export function NewItemDialog({
                   onChange={(e) => setType(e.target.value)}
                   className="form-input"
                 >
-                  {TYPES.map((t) => (
+                  {types.map((t) => (
                     <option key={t.value} value={t.value}>
                       {t.label}
                     </option>
                   ))}
                 </SmartSelect>
                 {/* Decides which lists it turns up on for everybody else. */}
-                <p className="form-help">{TYPES.find((t) => t.value === type)?.hint}</p>
+                <p className="form-help">{types.find((t) => t.value === type)?.hint}</p>
               </div>
               <div>
                 <label className="form-label" htmlFor="ni-uom">

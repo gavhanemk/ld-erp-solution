@@ -1,23 +1,55 @@
 'use client'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ArrowRight, Check, Clock3, History, Printer, LockKeyhole } from 'lucide-react'
+import {
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  Clock3,
+  History,
+  Printer,
+  LockKeyhole,
+  PackageOpen,
+} from 'lucide-react'
 import { api, ApiError, apiErrorMessage, can } from '@/lib/api'
-import { formatDate } from '@/lib/utils'
-import { SAMPLE_STATE_LABEL } from '@ld-erp/shared'
+import { formatDate, formatRupees } from '@/lib/utils'
+import {
+  SAMPLE_MATERIAL_SOURCE_LABEL,
+  SAMPLE_STATE_LABEL,
+  lineRequiredQty,
+  type SampleItemOption,
+} from '@ld-erp/shared'
+import { FormFrame } from '@/components/ui/FormFrame'
+import { StepInput } from '@/components/ui/StepInput'
 import { Field, SampleSpecEditor } from './SampleSpecEditor'
-import type { SampleRequest, Lookups, SampleRound } from './types'
+import type { SampleRequest, Lookups, SampleMaterial, SampleRound } from './types'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import {
+  colourGrid,
+  colourSummary,
   developmentHandoverText,
   developmentStyleOf,
   eventLabel,
   eventNote,
+  handoverBoms,
+  isSampleSet,
+  lineColour,
+  lineItem,
   makingBlocker,
+  materialActions,
   materialHeld,
+  measureMatrix,
+  MATERIAL_KIND_LABEL,
+  roundItems,
   sampleFlow,
+  SET_TEXT,
+  stageInput,
+  stepFacts,
+  storeNote,
   withRequestStyle,
+  type MaterialKind,
   type SampleSection,
 } from './samplingFlow'
+import { limitDecimals, materialCost, MATERIAL_COST_LABEL, plural, rateFigure } from './specRules'
 import { SampleRequestEditor } from './SampleRequestEditor'
 import { SampleFiles } from './SampleFiles'
 import { SampleStyleCard } from './SampleStyleCard'
@@ -29,10 +61,13 @@ export function SampleWorkspace({
   initial,
   lookups: loaded,
   back,
+  onItemsFound,
 }: {
   initial: SampleRequest
   lookups: Lookups
   back: () => void
+  /** Materials found or added from the sample BOM, for the page's lists to keep. */
+  onItemsFound: (items: SampleItemOption[]) => void
 }) {
   const [request, setRequest] = useState(initial),
     [selected, setSelected] = useState(initial.rounds[0].id),
@@ -62,18 +97,29 @@ export function SampleWorkspace({
   }, [dirty])
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
-    [message, setMessage] = useState('')
+    [message, setMessage] = useState(''),
+    // What the server allowed but wants said, such as a route with no check.
+    [warnings, setWarnings] = useState<string[]>([])
+  // The material line whose issue, use or return window is open.
+  const [recording, setRecording] = useState('')
   const round = request.rounds.find((x) => x.id === selected) ?? request.rounds[0],
     latest = request.rounds[0].id === round.id
+  // The materials the round's lines name, offered by its editor with the page's list.
+  const ownItems = useMemo(() => roundItems(round), [round])
   const edit = can('sampling', 'edit') && !request.cancelledAt,
     approve = can('sampling', 'approve') && !request.cancelledAt
-  const flow = sampleFlow(request, round)
+  const flow = sampleFlow(request, round, lookups.sizes)
   // The round's style when it was made in sampling: nothing to hand over yet.
   const madeHere = developmentStyleOf(request, round)
+  // The making steps for the side panel: released rows, or the draft's route.
+  const makingSteps = round.stages.length
+    ? round.stages.map((s) => ({ name: s.name, done: !!s.completedAt }))
+    : round.specification.route.map((s) => ({ name: s.name, done: false }))
   const changeRound = (id: string) => {
     if (dirty && !window.confirm('Discard the unsaved specification changes?')) return
     setDirty(false)
     setSelected(id)
+    setRecording('')
     setTab(
       sampleFlow(
         request,
@@ -82,25 +128,25 @@ export function SampleWorkspace({
     )
     setError('')
     setMessage('')
+    setWarnings([])
   }
   /**
-   * One action on the request, with the latest version. Throws a sentence a
-   * clerk can act on; the file panel and the style windows show it where the
+   * One action on the request, with the latest version, and the warnings the
+   * server sends with it. Throws a sentence a clerk can act on; the file
+   * panel, the style windows and the material window show it where the
    * person is working, and `act` below shows it over the page.
    */
-  const post = async (action: string, data: unknown, roundId = round.id) => {
+  const send = async (action: string, data: unknown, roundId = round.id) => {
     try {
-      const res = await api.post<{ data: SampleRequest }>(`/sampling/${request.id}/actions`, {
-        version: versionRef.current,
-        roundId,
-        action,
-        data,
-      })
+      const res = await api.post<{ data: SampleRequest; warnings?: string[] }>(
+        `/sampling/${request.id}/actions`,
+        { version: versionRef.current, roundId, action, data }
+      )
       versionRef.current = res.data.version
       setRequest(res.data)
       if (['CREATE_STYLE', 'LINK_STYLE', 'UPDATE_STYLE'].includes(action))
         setSpecEpoch((n) => n + 1)
-      return res.data
+      return { updated: res.data, warnings: res.warnings ?? [] }
     } catch (e) {
       const stale =
         (e instanceof ApiError && e.code === 'STALE_SAMPLE') ||
@@ -108,12 +154,16 @@ export function SampleWorkspace({
       throw new Error(stale ? STALE_TEXT : apiErrorMessage(e))
     }
   }
+  const post = async (action: string, data: unknown, roundId = round.id) =>
+    (await send(action, data, roundId)).updated
   const act = async (action: string, data: unknown, roundId = round.id) => {
     setBusy(true)
     setError('')
     setMessage('')
+    setWarnings([])
     try {
-      const updated = await post(action, data, roundId)
+      const { updated, warnings: said } = await send(action, data, roundId)
+      setWarnings(said)
       if (['SAVE_DRAFT', 'SAVE_SPEC', 'RELEASE'].includes(action)) setDirty(false)
       if (action === 'NEW_ROUND') {
         setSelected(updated.rounds[0].id)
@@ -130,7 +180,9 @@ export function SampleWorkspace({
           ? 'Draft saved. You can leave this request and finish the specification later.'
           : action === 'UPDATE_REQUEST'
             ? 'Request details updated. The changes are recorded in activity history.'
-            : 'Saved. The next action is shown below.'
+            : action === 'RELEASE'
+              ? 'Released for sampling. The next action is shown below.'
+              : 'Saved. The next action is shown below.'
       )
       return updated
     } catch (e) {
@@ -140,8 +192,26 @@ export function SampleWorkspace({
       setBusy(false)
     }
   }
+  /** One material entry from its window: the window shows a refusal where it was typed. */
+  const recordMaterial = async (
+    m: SampleMaterial,
+    d: { kind: MaterialKind; qty: number; reason: string; warehouseId?: string }
+  ) => {
+    setError('')
+    setMessage('')
+    setWarnings([])
+    await post('MATERIAL', { ...d, materialId: m.id })
+    setRecording('')
+    setMessage(
+      `${MATERIAL_KIND_LABEL[d.kind]}: ${d.qty} ${m.item?.uom?.symbol ?? ''} of ${m.item?.name ?? 'the material'} recorded. The next action is shown below.`
+    )
+  }
   const held = materialHeld
   const handedOver = request.rounds.some((r) => r.handover)
+  // Use, waste and returns can be recorded on any round still holding material.
+  const canRecord = edit && can('inventory', 'edit')
+  const recordingLine = recording ? round.materials.find((m) => m.id === recording) : undefined
+  const showValue = round.materials.some((m) => m.issuedValue !== undefined)
   const sizeRunName = (id: string) => lookups.sizeGroups.find((g) => g.id === id)?.name ?? id
   return (
     <div className="space-y-4">
@@ -188,7 +258,7 @@ export function SampleWorkspace({
             aria-label="Sample round"
           >
             {request.rounds.map((r) => (
-              <option key={r.id} value={r.id}>
+              <option key={r.id} value={r.id} data-sub={colourSummary(r.specification)}>
                 Round {r.revision} · {r.specification.milestone} · {SAMPLE_STATE_LABEL[r.state]}
               </option>
             ))}
@@ -210,12 +280,20 @@ export function SampleWorkspace({
           {message}
         </p>
       )}
+      {warnings.map((w) => (
+        <p key={w} role="status" className="warn-text">
+          {w}
+        </p>
+      ))}
       <div className="grid items-start gap-5 xl:grid-cols-[250px_minmax(0,1fr)]">
         <aside className="glass-card p-3 xl:sticky xl:top-4">
           <p className="text-muted-foreground px-3 pt-2 text-xs font-semibold uppercase tracking-wider">
             Round {round.revision} workflow
           </p>
-          <p className="px-3 py-2 text-sm font-medium">{round.specification.milestone}</p>
+          <p className="px-3 pt-2 text-sm font-medium">{round.specification.milestone}</p>
+          <p className="text-muted-foreground px-3 pb-2 text-xs">
+            {colourSummary(round.specification)}
+          </p>
           <nav aria-label="Sampling stages" className="grid gap-1 sm:grid-cols-2 xl:grid-cols-1">
             {flow.steps.map((step, i) => (
               <button
@@ -237,20 +315,17 @@ export function SampleWorkspace({
                       ? 'Previous round'
                       : step.status}
                     {step.key === 'Making'
-                      ? ` · ${round.stages.filter((s) => s.completedAt).length}/${round.stages.length || round.specification.stages.length} steps`
+                      ? ` · ${makingSteps.filter((s) => s.done).length}/${makingSteps.length} steps`
                       : ''}
                   </span>
                   {step.key === 'Making' && (
                     <span className="border-border mt-2 block space-y-1 border-l pl-2">
-                      {(round.stages.length
-                        ? round.stages
-                        : round.specification.stages.map((name) => ({ name, completedAt: null }))
-                      ).map((stage, j) => (
+                      {makingSteps.map((stage, j) => (
                         <span
                           key={j}
                           className="text-muted-foreground flex items-center gap-1.5 text-xs"
                         >
-                          {stage.completedAt ? (
+                          {stage.done ? (
                             <Check size={11} className="text-primary" />
                           ) : (
                             <span className="h-1 w-1 rounded-full bg-current" />
@@ -394,6 +469,7 @@ export function SampleWorkspace({
                   post={(action, data) => post(action, data)}
                   notify={(text) => {
                     setError('')
+                    setWarnings([])
                     setMessage(text)
                   }}
                 />
@@ -408,6 +484,10 @@ export function SampleWorkspace({
                     lookups={lookups}
                     requestStyle={request.style}
                     onChooseStyle={() => setTab('Brief')}
+                    requestId={request.id}
+                    hasBuyer={!!request.customerId}
+                    roundItems={ownItems}
+                    onItemsFound={onItemsFound}
                     busy={busy}
                     onDirtyChange={setDirty}
                     save={async (s) => {
@@ -418,117 +498,156 @@ export function SampleWorkspace({
                   />
                 </div>
               ) : (
-                <div className="glass-card space-y-3 p-4">
-                  <h2 className="flex items-center gap-2 font-semibold">
-                    <LockKeyhole size={16} />{' '}
-                    {round.state === 'DRAFT' ? 'Specification' : 'Released specification'} · Round{' '}
-                    {round.revision}
-                  </h2>
-                  <p>
-                    {lookups.styles.find((x) => x.id === round.specification.styleId)?.name} ·{' '}
-                    {round.specification.color} · {round.specification.milestone}
-                  </p>
-                  <p>{round.specification.construction}</p>
-                  <p>Tech pack: {round.specification.techPackRef}</p>
-                  <p>Pattern: {round.specification.patternRef}</p>
-                  <p>
-                    Sizes:{' '}
-                    {round.specification.sizes
-                      .map(
-                        (x) =>
-                          `${lookups.sizes.find((z) => z.id === x.sizeId)?.code ?? x.sizeId} × ${x.qty}`
-                      )
-                      .join(', ')}
-                  </p>
-                  <p>Making route: {round.specification.stages.join(' → ')}</p>
-                  <div className="overflow-x-auto">
-                    <table className="data-table w-full">
-                      <caption className="py-2 text-left text-sm font-semibold">
-                        Measurement targets
-                      </caption>
-                      <thead>
-                        <tr>
-                          <th>Size</th>
-                          <th>Measurement</th>
-                          <th>Target</th>
-                          <th>Tolerance</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {round.specification.measurements.map((m, i) => (
-                          <tr key={i}>
-                            <td>{lookups.sizes.find((x) => x.id === m.sizeId)?.code}</td>
-                            <td>{m.name}</td>
-                            <td>
-                              {m.target} {m.unit}
-                            </td>
-                            <td>
-                              ± {m.tolerance} {m.unit}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <p>{round.specification.notes}</p>
-                </div>
+                <SpecView round={round} lookups={lookups} />
               )}
             </div>
             {tab === 'Materials' && (
               <div className="space-y-3">
                 <p className="text-muted-foreground text-sm">
-                  Issue removes material from store stock. Record use or waste against that issue;
-                  it does not deduct stock again. Return unused material to its original store.
+                  Issue removes material from store stock. Each line is issued from one store,
+                  picked at its first issue. Record use or waste against that issue; it does not
+                  deduct stock again. Return unused material to the store it came from.
                 </p>
-                {round.materials.length === 0 && (
-                  <p>Save and release a specification to prepare its material plan.</p>
-                )}
-                {round.materials.map((m) => (
-                  <div key={m.id} className="glass-card space-y-3 p-4">
-                    <h2 className="font-semibold">
-                      {m.item.name} · {m.warehouse.name} ·{' '}
-                      {m.ownership === 'OWNED' ? 'Our material' : 'Buyer’s material'}
-                    </h2>
-                    <div className="bg-muted/40 grid grid-cols-3 gap-3 rounded-lg p-3 sm:grid-cols-6">
-                      {[
-                        ['Planned', m.plannedQty],
-                        ['Issued', m.issuedQty],
-                        ['Used', m.usedQty],
-                        ['Waste', m.wasteQty],
-                        ['Returned', m.returnedQty],
-                        ['Still held', held(m)],
-                      ].map(([label, value]) => (
-                        <div key={label}>
-                          <p className="text-muted-foreground text-xs">{label}</p>
-                          <p className="mt-1 font-semibold tabular-nums">
-                            {+value}{' '}
-                            <span className="text-muted-foreground text-xs font-normal">
-                              {m.item.uom?.symbol}
-                            </span>
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                    {m.issuedValue !== undefined && (
-                      <p className="text-muted-foreground text-sm">
-                        Net material value: ₹{(+m.issuedValue - +(m.returnedValue ?? 0)).toFixed(2)}{' '}
-                        · excludes labour, services and courier
-                      </p>
-                    )}
-                    {edit && can('inventory', 'edit') && !round.handover && (
-                      <MaterialAction
-                        key={`${m.id}-${request.version}`}
-                        issue={
-                          round.state === 'RELEASED' && !round.stages.some((x) => x.completedAt)
-                        }
-                        remaining={Math.max(0, +m.plannedQty - +m.issuedQty)}
-                        held={held(m)}
-                        unit={m.item.uom?.symbol ?? ''}
-                        save={(d) => void act('MATERIAL', { ...d, materialId: m.id })}
-                      />
-                    )}
+                {round.materials.length === 0 ? (
+                  <div className="glass-card flex items-start gap-3 p-5 text-sm">
+                    <PackageOpen size={18} className="text-muted-foreground shrink-0" />
+                    {round.state === 'DRAFT'
+                      ? 'No material lines yet. Add them under Materials in the specification and save the draft; they are issued once the round is released.'
+                      : 'This round has no material lines.'}
                   </div>
-                ))}
+                ) : (
+                  <div className="glass-card overflow-x-auto">
+                    <table className="data-table w-full">
+                      <caption className="px-4 py-2 text-left text-sm font-semibold">
+                        Sample BOM · {plural(round.materials.length, 'line')}
+                        {round.state === 'DRAFT' && (
+                          <span className="text-muted-foreground ml-2 text-xs font-normal">
+                            Issued once the round is released
+                          </span>
+                        )}
+                      </caption>
+                      <thead>
+                        <tr>
+                          <th>Part</th>
+                          <th>Material</th>
+                          <th>Colour</th>
+                          <th>Source</th>
+                          <th className="text-right">Required</th>
+                          <th className="text-right">Issued</th>
+                          <th className="text-right">Used</th>
+                          <th className="text-right">Waste</th>
+                          <th className="text-right">Returned</th>
+                          <th className="text-right">Held</th>
+                          <th>Store</th>
+                          {showValue && <th className="text-right">Net value</th>}
+                          {canRecord && (
+                            <th>
+                              <span className="sr-only">Record</span>
+                            </th>
+                          )}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {round.materials.map((m, i) => {
+                          const allowed = materialActions(round, m)
+                          return (
+                            // A list row of the ERP: ↑/↓ move between lines, Enter issues.
+                            <tr key={m.id} data-row tabIndex={i === 0 ? 0 : -1}>
+                              <td>{m.component || '—'}</td>
+                              <td className="min-w-[10rem]">
+                                {m.item ? (
+                                  <>
+                                    {m.item.name}
+                                    <span className="text-muted-foreground block font-mono text-xs">
+                                      {m.item.code}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className="warn-text">No material picked</span>
+                                    <span className="text-muted-foreground block text-xs">
+                                      Nothing can be issued against this line.
+                                    </span>
+                                  </>
+                                )}
+                              </td>
+                              <td>{lineColour(m.colour)}</td>
+                              <td>
+                                <span
+                                  className={
+                                    m.source === 'BUYER_SUPPLIED' ? 'badge-info' : 'badge-neutral'
+                                  }
+                                >
+                                  {SAMPLE_MATERIAL_SOURCE_LABEL[m.source] ?? m.source}
+                                </span>
+                              </td>
+                              <td className="whitespace-nowrap text-right tabular-nums">
+                                {+m.plannedQty}{' '}
+                                <span className="text-muted-foreground text-xs">
+                                  {m.item?.uom?.symbol}
+                                </span>
+                              </td>
+                              <td className="text-right tabular-nums">{+m.issuedQty}</td>
+                              <td className="text-right tabular-nums">{+m.usedQty}</td>
+                              <td className="text-right tabular-nums">{+m.wasteQty}</td>
+                              <td className="text-right tabular-nums">{+m.returnedQty}</td>
+                              <td className="text-right font-semibold tabular-nums">{held(m)}</td>
+                              <td>
+                                {m.warehouse?.name ?? (
+                                  <span className="text-muted-foreground text-xs">
+                                    Picked at the first issue
+                                  </span>
+                                )}
+                              </td>
+                              {showValue && (
+                                <td className="text-right tabular-nums">
+                                  {m.issuedValue !== undefined
+                                    ? formatRupees(+m.issuedValue - +(m.returnedValue ?? 0))
+                                    : '—'}
+                                </td>
+                              )}
+                              {canRecord && (
+                                <td>
+                                  {allowed.kinds.length ? (
+                                    <button
+                                      type="button"
+                                      className="btn-secondary whitespace-nowrap"
+                                      data-row-open
+                                      onClick={() => {
+                                        setError('')
+                                        setRecording(m.id)
+                                      }}
+                                    >
+                                      {allowed.kinds[0] === 'ISSUE'
+                                        ? 'Issue'
+                                        : 'Record use or return'}
+                                    </button>
+                                  ) : (
+                                    <span className="text-muted-foreground block max-w-xs text-xs">
+                                      {allowed.why}
+                                    </span>
+                                  )}
+                                </td>
+                              )}
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {showValue && (
+                  <p className="text-muted-foreground text-sm">
+                    Net material value:{' '}
+                    {formatRupees(
+                      round.materials.reduce(
+                        (t, m) => t + +(m.issuedValue ?? 0) - +(m.returnedValue ?? 0),
+                        0
+                      )
+                    )}{' '}
+                    · excludes labour, services and courier
+                  </p>
+                )}
               </div>
             )}
             {tab === 'Making' && (
@@ -536,39 +655,71 @@ export function SampleWorkspace({
                 {round.stages.length === 0 && (
                   <p>Release the specification to prepare its making route.</p>
                 )}
-                {round.stages.map((s, i) => (
-                  <div key={s.id} className="glass-card space-y-3 p-4">
-                    <h2 className="font-semibold">
-                      {s.sequence}. {s.name}
-                    </h2>
-                    {s.completedAt ? (
-                      <p>
-                        Done {s.doneQty} · Rejected {s.rejectedQty} · {s.responsible} ·{' '}
-                        {formatDate(s.completedAt)}
-                        <br />
-                        {s.notes}
-                      </p>
-                    ) : edit && latest && round.state === 'RELEASED' && !makingBlocker(round, i) ? (
-                      <StageAction
-                        key={`${s.id}-${request.version}`}
-                        name={s.name}
-                        input={
-                          i === 0
-                            ? round.specification.sizes.reduce((t, z) => t + z.qty, 0)
-                            : (round.stages[i - 1].doneQty ?? 0)
-                        }
-                        save={(d) =>
-                          void act('STAGE', { ...(d as Record<string, unknown>), stageId: s.id })
-                        }
-                      />
-                    ) : (
-                      <p className="text-muted-foreground flex items-center gap-2 text-sm">
-                        <Clock3 size={15} />{' '}
-                        {makingBlocker(round, i) || 'Awaiting completion by the sampling operator.'}
-                      </p>
-                    )}
-                  </div>
-                ))}
+                {round.stages.length > 0 && isSampleSet(round.specification) && (
+                  <p className="bg-muted/40 rounded-lg p-3 text-sm">
+                    <span className="font-medium">{colourSummary(round.specification)}.</span>{' '}
+                    {SET_TEXT.stage}
+                  </p>
+                )}
+                {round.stages.map((s, i) => {
+                  const f = stepFacts(s, lookups)
+                  return (
+                    <div key={s.id} className="glass-card space-y-3 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h2 className="font-semibold">
+                          {s.sequence}. {s.name}
+                        </h2>
+                        {f.process && (
+                          <span className={f.outside ? 'badge-purple' : 'badge-neutral'}>
+                            {f.doneAt}
+                          </span>
+                        )}
+                      </div>
+                      {f.process ? (
+                        <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                          <Fact label="Process" value={f.process} />
+                          <Fact label="Department" value={f.department || 'Not set'} />
+                          <Fact label={f.outside ? 'Outside unit' : 'Contractor'} value={f.who} />
+                          {f.instructions && (
+                            <Fact label="Instructions" value={f.instructions} wide />
+                          )}
+                        </dl>
+                      ) : (
+                        <p className="text-muted-foreground text-xs">
+                          Released before routes named a process: the step’s name is its record.
+                        </p>
+                      )}
+                      {s.completedAt ? (
+                        <p>
+                          Done {s.doneQty} · Rejected {s.rejectedQty} · {s.responsible} ·{' '}
+                          {formatDate(s.completedAt)}
+                          <br />
+                          {s.notes}
+                        </p>
+                      ) : edit &&
+                        latest &&
+                        round.state === 'RELEASED' &&
+                        !makingBlocker(round, i) ? (
+                        <StageAction
+                          key={`${s.id}-${request.version}`}
+                          name={s.name}
+                          input={stageInput(round, i)}
+                          set={isSampleSet(round.specification)}
+                          outside={f.outside}
+                          save={(d) =>
+                            void act('STAGE', { ...(d as Record<string, unknown>), stageId: s.id })
+                          }
+                        />
+                      ) : (
+                        <p className="text-muted-foreground flex items-center gap-2 text-sm">
+                          <Clock3 size={15} />{' '}
+                          {makingBlocker(round, i) ||
+                            'Awaiting completion by the sampling operator.'}
+                        </p>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             )}
             {tab === 'Quality' && (
@@ -620,7 +771,7 @@ export function SampleWorkspace({
             {tab === 'Buyer review' && (
               <div className="space-y-4">
                 <p className="text-muted-foreground text-sm">
-                  Buyer approval covers this round’s style, colour, sizes and specification.
+                  Buyer approval covers this round’s style, colours, sizes and specification.
                   Approval with unresolved conditions stays Changes required. Handover prepares a
                   planning reference; it does not create or release a bulk order.
                 </p>
@@ -648,6 +799,7 @@ export function SampleWorkspace({
                 {edit && latest && round.state === 'QC_PASSED' && (
                   <SubmissionAction
                     available={round.qc?.passedQty ?? 0}
+                    set={isSampleSet(round.specification)}
                     save={(d) => void act('SUBMIT', d)}
                   />
                 )}
@@ -805,7 +957,493 @@ export function SampleWorkspace({
           save={(data) => act('UPDATE_REQUEST', data)}
         />
       )}
+      {recordingLine && (
+        <MaterialWindow
+          key={`${recordingLine.id}-${request.version}`}
+          round={round}
+          line={recordingLine}
+          lookups={lookups}
+          onClose={() => setRecording('')}
+          save={(d) => recordMaterial(recordingLine, d)}
+        />
+      )}
     </div>
+  )
+}
+
+/** A label over its value, for the read-only facts of a round. */
+function Fact({ label, value, wide }: { label: string; value: React.ReactNode; wide?: boolean }) {
+  return (
+    <div className={`min-w-0 ${wide ? 'sm:col-span-2 lg:col-span-3' : ''}`}>
+      <dt className="text-muted-foreground text-xs">{label}</dt>
+      <dd className="mt-0.5 whitespace-pre-wrap break-words text-sm font-medium">{value || '—'}</dd>
+    </div>
+  )
+}
+/** A figure as typed: no trailing zeros, up to four places. */
+const figure = (v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 4 })
+
+/**
+ * A round's specification to read: once released, the record the sample was
+ * made to; a draft is shown like this to anyone who cannot edit it. The grid,
+ * the measurements and the BOM read as the editor and the printed record lay
+ * them out, from the same helpers.
+ */
+function SpecView({ round, lookups }: { round: SampleRound; lookups: Lookups }) {
+  const s = round.specification
+  // The size list is in the run's own order, which the grids follow.
+  const order = lookups.sizes.map((z) => z.id)
+  const code = (id: string) => lookups.sizes.find((z) => z.id === id)?.code ?? 'Unknown size'
+  const style = lookups.styles.find((x) => x.id === s.styleId)
+  const grid = colourGrid(s, order)
+  const matrix = measureMatrix(s, order)
+  const cost = materialCost(s)
+  return (
+    <div className="glass-card space-y-5 p-4">
+      <h2 className="flex items-center gap-2 font-semibold">
+        <LockKeyhole size={16} />{' '}
+        {round.state === 'DRAFT' ? 'Specification' : 'Released specification'} · Round{' '}
+        {round.revision}
+      </h2>
+      <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <Fact
+          label="Style"
+          value={
+            style ? `${style.code} · ${style.name}` : s.styleId ? 'Style no longer in use' : ''
+          }
+        />
+        <Fact label="Milestone" value={s.milestone} />
+        <Fact label="Colours & pieces" value={colourSummary(s)} />
+        <Fact label="Tech pack" value={s.techPackRef} />
+        <Fact label="Pattern" value={s.patternRef} />
+        <Fact label="Construction" value={s.construction} wide />
+        {s.notes.trim() && <Fact label="Notes" value={s.notes} wide />}
+      </dl>
+
+      <div className="overflow-x-auto">
+        <table className="data-table w-full">
+          <caption className="py-2 text-left text-sm font-semibold">Colours and pieces</caption>
+          <thead>
+            <tr>
+              <th>Colour</th>
+              {grid.sizeIds.map((id) => (
+                <th key={id} className="text-right">
+                  {code(id)}
+                </th>
+              ))}
+              <th className="text-right">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {grid.rows.length ? (
+              grid.rows.map((r, i) => (
+                <tr key={`${r.colour}-${i}`}>
+                  <td>{r.colour || 'Colour not picked'}</td>
+                  {grid.sizeIds.map((id) => (
+                    <td key={id} className="text-right tabular-nums">
+                      {r.qty[id] || '—'}
+                    </td>
+                  ))}
+                  <td className="text-right font-semibold tabular-nums">{r.total}</td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={grid.sizeIds.length + 2} className="text-muted-foreground">
+                  No colours yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+          {grid.rows.length > 0 && (
+            <tfoot>
+              <tr className="font-semibold">
+                <td>Total</td>
+                {grid.sizeIds.map((id) => (
+                  <td key={id} className="text-right tabular-nums">
+                    {grid.cols[id]}
+                  </td>
+                ))}
+                <td className="text-right tabular-nums">{grid.total}</td>
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="data-table w-full">
+          <caption className="py-2 text-left text-sm font-semibold">
+            Measurements · the same for every colour
+          </caption>
+          <thead>
+            <tr>
+              <th>Point</th>
+              <th className="text-right">Tolerance</th>
+              {matrix.sizeIds.map((id) => (
+                <th key={id} className="text-right">
+                  {code(id)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.points.length ? (
+              matrix.points.map((p, i) => (
+                <tr key={`${p.name}-${i}`}>
+                  <td>{p.name || 'Point not named'}</td>
+                  <td className="whitespace-nowrap text-right tabular-nums">
+                    ± {figure(p.tolerance)} {p.unit}
+                  </td>
+                  {matrix.sizeIds.map((id) => (
+                    <td key={id} className="text-right tabular-nums">
+                      {id in p.targets ? figure(p.targets[id]) : '—'}
+                    </td>
+                  ))}
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={matrix.sizeIds.length + 2} className="text-muted-foreground">
+                  No measurements yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="data-table w-full">
+          <caption className="py-2 text-left text-sm font-semibold">
+            Materials · {plural(s.materials.length, 'line')}
+          </caption>
+          <thead>
+            <tr>
+              <th>Part</th>
+              <th>Material</th>
+              <th>Colour</th>
+              <th className="text-right">Per piece</th>
+              <th className="text-right">Wastage</th>
+              <th className="text-right">Required</th>
+              <th>Source</th>
+              <th className="text-right">Expected rate</th>
+            </tr>
+          </thead>
+          <tbody>
+            {s.materials.length ? (
+              s.materials.map((l, i) => {
+                const it = lineItem(l, round, lookups.items)
+                return (
+                  <tr key={l.id ?? i}>
+                    <td>{l.component || '—'}</td>
+                    <td className="min-w-[10rem]">
+                      {it.name}
+                      {it.code && (
+                        <span className="text-muted-foreground block font-mono text-xs">
+                          {it.code}
+                        </span>
+                      )}
+                    </td>
+                    <td>{lineColour(l.colour)}</td>
+                    <td className="text-right tabular-nums">
+                      {l.qtyPerPiece ? figure(l.qtyPerPiece) : '—'}
+                    </td>
+                    <td className="text-right tabular-nums">
+                      {l.wastagePct ? `${figure(l.wastagePct)}%` : '—'}
+                    </td>
+                    <td className="whitespace-nowrap text-right tabular-nums">
+                      {figure(lineRequiredQty(l, s))}{' '}
+                      <span className="text-muted-foreground text-xs">{it.uom}</span>
+                      {l.requiredOverride && (
+                        <span className="text-muted-foreground block whitespace-normal text-xs">
+                          Typed by hand{l.overrideReason ? `: ${l.overrideReason}` : ''}
+                        </span>
+                      )}
+                    </td>
+                    <td>{SAMPLE_MATERIAL_SOURCE_LABEL[l.source]}</td>
+                    <td className="text-right tabular-nums">
+                      {/* The buyer's material costs us nothing; see Source. */}
+                      {l.estRate === null || l.source === 'BUYER_SUPPLIED'
+                        ? '—'
+                        : `₹${rateFigure(l.estRate)}`}
+                    </td>
+                  </tr>
+                )
+              })
+            ) : (
+              <tr>
+                <td colSpan={8} className="text-muted-foreground">
+                  No materials yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        {s.materials.length > 0 && (
+          <p className="text-muted-foreground mt-2 text-sm">
+            {MATERIAL_COST_LABEL}: {formatRupees(cost.total)}
+            {cost.unrated ? ` · ${plural(cost.unrated, 'line')} with no expected rate` : ''}
+          </p>
+        )}
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="data-table w-full">
+          <caption className="py-2 text-left text-sm font-semibold">Making route</caption>
+          <thead>
+            <tr>
+              <th className="text-right">#</th>
+              <th>Step</th>
+              <th>Process</th>
+              <th>Department</th>
+              <th>Done at</th>
+              <th>Instructions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {s.route.length ? (
+              s.route.map((step, i) => {
+                const f = stepFacts(step, lookups)
+                return (
+                  <tr key={i}>
+                    <td className="text-right tabular-nums">{i + 1}</td>
+                    <td>{step.name || 'Step not named'}</td>
+                    <td>{f.process || '—'}</td>
+                    <td>{f.department || '—'}</td>
+                    <td>
+                      {f.process ? (
+                        <>
+                          <span className={f.outside ? 'badge-purple' : 'badge-neutral'}>
+                            {f.doneAt}
+                          </span>
+                          <span className="text-muted-foreground block text-xs">{f.who}</span>
+                        </>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td className="whitespace-pre-wrap">{f.instructions || '—'}</td>
+                  </tr>
+                )
+              })
+            ) : (
+              <tr>
+                <td colSpan={6} className="text-muted-foreground">
+                  No steps yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Issue, use, waste or return for one material line, in a window. The first
+ * issue of a line names its store (STORE_REQUIRED); from then on the store
+ * is fixed and shown with the reason (OTHER_STORE). A refusal stays in the
+ * window, by what was typed.
+ */
+function MaterialWindow({
+  round,
+  line,
+  lookups,
+  onClose,
+  save,
+}: {
+  round: SampleRound
+  line: SampleMaterial
+  lookups: Lookups
+  onClose: () => void
+  save: (d: {
+    kind: MaterialKind
+    qty: number
+    reason: string
+    warehouseId?: string
+  }) => Promise<void>
+}) {
+  const allowed = materialActions(round, line)
+  const [kind, setKind] = useState<MaterialKind>(allowed.kinds[0] ?? 'USE')
+  const [qty, setQty] = useState('')
+  const [reason, setReason] = useState('')
+  // Usually every line of a round comes from one store: start from the one already used.
+  const usedStore = round.materials.find(
+    (x) => x.warehouseId && lookups.warehouses.some((w) => w.id === x.warehouseId)
+  )?.warehouseId
+  const [warehouseId, setWarehouseId] = useState(usedStore ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const unit = line.item?.uom?.symbol ?? ''
+  const max = kind === 'ISSUE' ? allowed.remaining : allowed.held
+  const firstIssue = kind === 'ISSUE' && allowed.needsStore
+  const fixed = storeNote(line)
+  const submit = async () => {
+    const n = Number(qty)
+    const problem = !(n > 0)
+      ? 'Enter the quantity.'
+      : n > max
+        ? `No more than ${max} ${unit} for this.`
+        : firstIssue && !warehouseId
+          ? 'Pick the store to issue this material from.'
+          : !reason.trim()
+            ? 'Give the reason or reference.'
+            : ''
+    if (problem) return setError(problem)
+    setBusy(true)
+    setError('')
+    try {
+      await save({ kind, qty: n, reason: reason.trim(), ...(firstIssue ? { warehouseId } : {}) })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : apiErrorMessage(e))
+      setBusy(false)
+    }
+  }
+  const label: Record<MaterialKind, string> = {
+    ISSUE: 'Issue material',
+    USE: 'Record use',
+    WASTE: 'Record waste',
+    RETURN: 'Return to store',
+  }
+  return (
+    <FormFrame
+      icon={PackageOpen}
+      title={kind === 'ISSUE' ? 'Issue material' : 'Record material'}
+      subtitle={`${line.item?.name ?? 'Material'} · ${line.component || 'No part named'} · ${lineColour(line.colour)}`}
+      width="max-w-2xl"
+      primaryInHeader={false}
+      busy={busy}
+      error={error}
+      onClose={onClose}
+      primary={
+        <button
+          type="submit"
+          form="sample-material-form"
+          className="btn-primary"
+          disabled={busy || !allowed.kinds.length}
+        >
+          {busy ? 'Saving…' : label[kind]}
+        </button>
+      }
+      footer={
+        <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+      }
+      footerNote="Issue takes it out of store stock; use and waste are recorded against what was issued."
+    >
+      <form
+        id="sample-material-form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          // Opened over the workspace: the submit stays with this window.
+          e.stopPropagation()
+          void submit()
+        }}
+      >
+        <fieldset disabled={busy} className="space-y-4 p-2">
+          <dl className="bg-muted/40 grid grid-cols-3 gap-3 rounded-lg p-3">
+            {[
+              ['Required', +line.plannedQty],
+              ['Issued', +line.issuedQty],
+              ['Still held', allowed.held],
+            ].map(([what, value]) => (
+              <div key={what}>
+                <dt className="text-muted-foreground text-xs">{what}</dt>
+                <dd className="mt-0.5 font-semibold tabular-nums">
+                  {value} <span className="text-muted-foreground text-xs font-normal">{unit}</span>
+                </dd>
+              </div>
+            ))}
+          </dl>
+          {line.source === 'BUYER_SUPPLIED' && (
+            <p className="text-sm">
+              The buyer sends this material. It is issued from the buyer’s own stock in the store,
+              kept apart from ours.
+            </p>
+          )}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Action" required>
+              <SmartSelect
+                className="form-input"
+                value={kind}
+                onChange={(e) => {
+                  setKind(e.target.value as MaterialKind)
+                  setError('')
+                }}
+              >
+                {allowed.kinds.map((k) => (
+                  <option key={k} value={k}>
+                    {MATERIAL_KIND_LABEL[k]}
+                  </option>
+                ))}
+              </SmartSelect>
+            </Field>
+            {firstIssue ? (
+              <Field
+                label="Store"
+                required
+                hint={
+                  line.source === 'BUYER_SUPPLIED'
+                    ? 'Where the buyer’s material was received. Every later issue and return of this line goes through it.'
+                    : 'Every later issue and return of this line goes through the same store.'
+                }
+              >
+                <SmartSelect
+                  className="form-input"
+                  value={warehouseId}
+                  onChange={(e) => {
+                    setWarehouseId(e.target.value)
+                    setError('')
+                  }}
+                >
+                  <option value="">Pick the store</option>
+                  {lookups.warehouses.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </SmartSelect>
+              </Field>
+            ) : (
+              (kind === 'ISSUE' || kind === 'RETURN') && (
+                <Field label="Store" hint={fixed}>
+                  <span className="form-input bg-muted/40 block cursor-default">
+                    {line.warehouse?.name ?? 'Its store'}
+                  </span>
+                </Field>
+              )
+            )}
+            <Field
+              label={`Quantity${unit ? ` (${unit})` : ''}`}
+              required
+              hint={`${max} ${unit} ${kind === 'ISSUE' ? 'still to issue' : 'held on this line'}`}
+            >
+              <StepInput
+                className="form-input"
+                decimals
+                max={max}
+                value={qty}
+                onValueChange={(v) => {
+                  setQty(limitDecimals(v, 3))
+                  setError('')
+                }}
+              />
+            </Field>
+            <Field label="Reason / reference" required>
+              <input
+                className="form-input"
+                value={reason}
+                maxLength={500}
+                onChange={(e) => setReason(e.target.value)}
+              />
+            </Field>
+          </div>
+        </fieldset>
+      </form>
+    </FormFrame>
   )
 }
 /** What a file or style entry in the activity did, under its heading. */
@@ -820,64 +1458,19 @@ function requestChangeValue(key: string, raw: unknown, lookups: Lookups) {
   if (key === 'brandId') return lookups.brands.find((b) => b.id === value)?.name ?? value ?? '—'
   return value || '—'
 }
-function MaterialAction({
-  issue,
-  remaining,
-  held,
-  unit,
-  save,
-}: {
-  issue: boolean
-  remaining: number
-  held: number
-  unit: string
-  save: (d: { kind: string; qty: number; reason: string }) => void
-}) {
-  const [kind, setKind] = useState(issue && remaining > 0 ? 'ISSUE' : 'USE'),
-    [qty, setQty] = useState(''),
-    [reason, setReason] = useState('')
-  const max = kind === 'ISSUE' ? remaining : held
-  return (
-    <div className="grid items-end gap-4 md:grid-cols-2">
-      <Field label="Action">
-        <select className="form-input" value={kind} onChange={(e) => setKind(e.target.value)}>
-          {issue && remaining > 0 && <option value="ISSUE">Issue from store</option>}
-          <option value="USE">Record material used</option>
-          <option value="WASTE">Record waste</option>
-          <option value="RETURN">Return to store</option>
-        </select>
-      </Field>
-      <Field label={`Quantity (${unit})`} hint={`${max} available for this action`}>
-        <input
-          className="form-input"
-          type="number"
-          min="0.001"
-          step="0.001"
-          max={max}
-          value={qty}
-          onChange={(e) => setQty(e.target.value)}
-        />
-      </Field>
-      <Field label="Reason / reference">
-        <input className="form-input" value={reason} onChange={(e) => setReason(e.target.value)} />
-      </Field>
-      <button
-        className="btn-primary"
-        disabled={!reason.trim() || +qty <= 0 || +qty > max}
-        onClick={() => save({ kind, qty: Number(qty), reason })}
-      >
-        Record material
-      </button>
-    </div>
-  )
-}
 function StageAction({
   input,
   name,
+  set,
+  outside,
   save,
 }: {
   input: number
   name: string
+  /** Several colours or sizes: the whole set goes on, none rejected here (SET_TEXT.stage). */
+  set: boolean
+  /** Done by an outside unit, whose own delivery note is the reference. */
+  outside: boolean
   save: (d: unknown) => void
 }) {
   const [done, setDone] = useState(String(input)),
@@ -885,32 +1478,40 @@ function StageAction({
     [responsible, setResponsible] = useState(''),
     [reference, setReference] = useState(''),
     [notes, setNotes] = useState('')
+  const doneQty = set ? input : Number(done)
+  const rejectedQty = set ? 0 : Number(rejected)
   return (
     <div className="space-y-3">
       <p className="text-muted-foreground text-xs">
-        {input} pieces received. Done plus rejected must account for every piece. Record
-        outside-work references in the notes; this pilot does not issue a statutory challan.
+        {set
+          ? `${input} pieces received: the whole set goes on together.`
+          : `${input} pieces received. Done plus rejected must account for every piece.`}{' '}
+        {outside
+          ? 'Give the outside unit’s delivery note or challan number as the work reference; this pilot does not issue a statutory challan.'
+          : 'Record outside-work references in the notes; this pilot does not issue a statutory challan.'}
       </p>
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Done pieces">
-          <input
-            type="number"
-            min={0}
-            className="form-input"
-            value={done}
-            onChange={(e) => setDone(e.target.value)}
-          />
-        </Field>
-        <Field label="Rejected pieces">
-          <input
-            type="number"
-            min={0}
-            className="form-input"
-            value={rejected}
-            onChange={(e) => setRejected(e.target.value)}
-          />
-        </Field>
-        <Field label="Responsible person / unit">
+        {set ? (
+          <p className="bg-muted/40 rounded-lg p-3 text-sm sm:col-span-2">
+            <span className="font-medium">{input} pieces done</span>, none rejected here.{' '}
+            {SET_TEXT.stage}
+          </p>
+        ) : (
+          <>
+            <Field label="Done pieces">
+              <StepInput className="form-input" max={input} value={done} onValueChange={setDone} />
+            </Field>
+            <Field label="Rejected pieces">
+              <StepInput
+                className="form-input"
+                max={input}
+                value={rejected}
+                onValueChange={setRejected}
+              />
+            </Field>
+          </>
+        )}
+        <Field label={outside ? 'Outside unit / person responsible' : 'Responsible person / unit'}>
           <input
             className="form-input"
             value={responsible}
@@ -925,7 +1526,13 @@ function StageAction({
           />
         </Field>
       </div>
-      <Field label="Work performed / defects / rejected-piece disposition">
+      <Field
+        label={
+          set
+            ? 'Work performed / defects found'
+            : 'Work performed / defects / rejected-piece disposition'
+        }
+      >
         <input className="form-input" value={notes} onChange={(e) => setNotes(e.target.value)} />
       </Field>
       <button
@@ -933,16 +1540,16 @@ function StageAction({
         disabled={
           !responsible.trim() ||
           !notes.trim() ||
-          +done < 0 ||
-          +rejected < 0 ||
-          +done + +rejected !== input ||
-          !Number.isInteger(+done) ||
-          !Number.isInteger(+rejected)
+          doneQty < 0 ||
+          rejectedQty < 0 ||
+          doneQty + rejectedQty !== input ||
+          !Number.isInteger(doneQty) ||
+          !Number.isInteger(rejectedQty)
         }
         onClick={() =>
           save({
-            doneQty: Number(done),
-            rejectedQty: Number(rejected),
+            doneQty,
+            rejectedQty,
             responsible,
             reference,
             notes,
@@ -963,36 +1570,58 @@ function QcAction({
   lookups: Lookups
   save: (d: unknown) => void
 }) {
+  // A set is inspected and passed whole (SET_TEXT.qc): every piece the route finished.
+  const set = isSampleSet(round.specification)
+  const finished = round.stages.at(-1)?.doneQty ?? 0
+  const colours = round.specification.colours.filter((r) => r.colour.trim()).length
   const [actuals, setActuals] = useState<string[]>(round.specification.measurements.map(() => '')),
-    [passed, setPassed] = useState(''),
+    [passed, setPassed] = useState(set ? String(finished) : ''),
     [notes, setNotes] = useState('')
+  const passedQty = set ? finished : Number(passed)
   return (
     <div className="glass-card space-y-3 p-4">
       <h2 className="font-semibold">Measurement inspection</h2>
+      {colours > 1 && (
+        <p className="text-muted-foreground text-xs">
+          Every colour is made to the same targets: enter what one piece of each size measures.
+        </p>
+      )}
       {round.specification.measurements.map((m, i) => (
         <Field
           key={i}
           label={`${lookups.sizes.find((s) => s.id === m.sizeId)?.code} · ${m.name}`}
           hint={`Target ${m.target} ± ${m.tolerance} ${m.unit}${actuals[i] === '' ? '' : Math.abs(+actuals[i] - m.target) <= m.tolerance + 1e-8 ? ' · Within tolerance' : ' · Outside tolerance'}`}
         >
-          <input
-            type="number"
-            step="0.01"
+          <StepInput
             className="form-input"
+            decimals
+            step={0.1}
+            max={10000}
             value={actuals[i]}
-            onChange={(e) => setActuals((a) => a.map((x, j) => (j === i ? e.target.value : x)))}
+            onValueChange={(v) =>
+              setActuals((a) => a.map((x, j) => (j === i ? limitDecimals(v, 2) : x)))
+            }
           />
         </Field>
       ))}
-      <Field label="Pieces passing workmanship inspection">
-        <input
-          className="form-input"
-          type="number"
-          min={1}
-          value={passed}
-          onChange={(e) => setPassed(e.target.value)}
-        />
-      </Field>
+      {set ? (
+        <p className="bg-muted/40 rounded-lg p-3 text-sm">
+          <span className="font-medium">{finished} pieces inspected</span>, the whole set.{' '}
+          {SET_TEXT.qc}
+        </p>
+      ) : (
+        <Field
+          label="Pieces passing workmanship inspection"
+          hint={`${finished} pieces finished the making route.`}
+        >
+          <StepInput
+            className="form-input"
+            max={finished}
+            value={passed}
+            onValueChange={setPassed}
+          />
+        </Field>
+      )}
       <Field label="QC findings and disposition of failed pieces">
         <textarea className="form-input" value={notes} onChange={(e) => setNotes(e.target.value)} />
       </Field>
@@ -1000,14 +1629,15 @@ function QcAction({
         className="btn-primary"
         disabled={
           actuals.some((x) => x === '' || +x < 0) ||
-          +passed < 1 ||
-          +passed > (round.stages.at(-1)?.doneQty ?? 0) ||
+          passedQty < 1 ||
+          passedQty > finished ||
+          !Number.isInteger(passedQty) ||
           !notes.trim()
         }
         onClick={() =>
           save({
             actuals: actuals.some((x) => x === '') ? [] : actuals.map(Number),
-            passedQty: Number(passed),
+            passedQty,
             notes,
           })
         }
@@ -1017,26 +1647,37 @@ function QcAction({
     </div>
   )
 }
-function SubmissionAction({ available, save }: { available: number; save: (d: unknown) => void }) {
-  const [qty, setQty] = useState(''),
+function SubmissionAction({
+  available,
+  set,
+  save,
+}: {
+  available: number
+  /** Several colours or sizes: the whole inspected set is sent (SET_TEXT.submit). */
+  set: boolean
+  save: (d: unknown) => void
+}) {
+  const [typed, setQty] = useState(''),
     [recipient, setRecipient] = useState(''),
     [reference, setReference] = useState(''),
     [notes, setNotes] = useState('')
+  const qty = set ? String(available) : typed
   return (
     <div className="glass-card space-y-3 p-4">
       <h2 className="font-semibold">Submit to buyer</h2>
-      <Field
-        label="Pieces sent"
-        hint={`${available} pieces passed QC and are available to submit.`}
-      >
-        <input
-          type="number"
-          className="form-input"
-          min={1}
-          value={qty}
-          onChange={(e) => setQty(e.target.value)}
-        />
-      </Field>
+      {set ? (
+        <p className="bg-muted/40 rounded-lg p-3 text-sm">
+          <span className="font-medium">{available} pieces sent</span>, every colour and size.{' '}
+          {SET_TEXT.submit}
+        </p>
+      ) : (
+        <Field
+          label="Pieces sent"
+          hint={`${available} pieces passed QC and are available to submit.`}
+        >
+          <StepInput className="form-input" max={available} value={typed} onValueChange={setQty} />
+        </Field>
+      )}
       <Field label="Recipient">
         <input
           className="form-input"
@@ -1162,23 +1803,27 @@ function HandoverAction({
   const [bomId, setBom] = useState(''),
     [routingId, setRouting] = useState(''),
     [notes, setNotes] = useState('')
+  // The server takes a BOM for every colour, or for one of the colours the round made.
+  const boms = handoverBoms(lookups.boms, round.specification)
+  const colours = round.specification.colours.map((c) => c.colour.trim()).filter(Boolean)
   return (
     <div className="glass-card space-y-3 p-4">
       <h2 className="font-semibold">Prepare approved bulk package</h2>
-      <Field label="Approved production BOM">
+      <Field
+        label="Approved production BOM"
+        hint={
+          boms.length
+            ? `This style’s approved BOMs for every colour, or for one of this round’s colours (${colours.join(', ')}).`
+            : `No approved BOM of this style for every colour or for ${colours.join(', ') || 'this round’s colours'} yet.`
+        }
+      >
         <SmartSelect className="form-input" value={bomId} onChange={(e) => setBom(e.target.value)}>
           <option value="">Pick approved BOM</option>
-          {lookups.boms
-            .filter(
-              (x) =>
-                x.styleId === round.specification.styleId &&
-                (!x.color || x.color.toLowerCase() === round.specification.color.toLowerCase())
-            )
-            .map((x) => (
-              <option key={x.id} value={x.id}>
-                Version {x.version} · {x.color || 'All colours'}
-              </option>
-            ))}
+          {boms.map((x) => (
+            <option key={x.id} value={x.id}>
+              Version {x.version} · {x.color || 'All colours'}
+            </option>
+          ))}
         </SmartSelect>
       </Field>
       <Field label="Production routing">

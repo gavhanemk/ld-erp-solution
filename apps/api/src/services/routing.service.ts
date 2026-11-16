@@ -194,9 +194,10 @@ const ordered = <T extends { sequence: number }>(steps: T[]) => [...steps].sort(
  */
 /**
  * A step's contractor must still be there and must do that step's process:
- * a stitching contractor is not picked for cutting.
+ * a stitching contractor is not picked for cutting. A sample round's route
+ * keeps the same rule (sampling.service).
  */
-async function assertContractorsFit(db: Db, steps: Array<{ operationId: string; contractorId?: string | null }>): Promise<void> {
+export async function assertContractorsFit(db: Db, steps: Array<{ operationId: string; contractorId?: string | null }>): Promise<void> {
   const ids = [...new Set(steps.map((s) => s.contractorId).filter(Boolean))] as string[]
   if (!ids.length) return
   const found = await db.contractor.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, operationIds: true } })

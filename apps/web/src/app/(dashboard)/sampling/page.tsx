@@ -19,6 +19,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { Field } from '@/components/sampling/SampleSpecEditor'
 import { SampleWorkspace } from '@/components/sampling/SampleWorkspace'
 import { TechPackFields } from '@/components/sampling/SampleRequestEditor'
+import { mergeItems } from '@/components/sampling/specRules'
 import type { SampleRequest, Lookups } from '@/components/sampling/types'
 import { SAMPLE_STATE_LABEL, STYLE_STAGE_LABEL } from '@ld-erp/shared'
 
@@ -140,6 +141,11 @@ export default function SamplingPage() {
           setSelected(null)
           void load()
         }}
+        // Kept with the page's lists, so a material found or added from one
+        // line stays offered after Back, another round or a style change.
+        onItemsFound={(found) =>
+          setLookups((l) => (l ? { ...l, items: mergeItems(l.items, found) } : l))
+        }
       />
     )
   const rows = data?.data ?? []

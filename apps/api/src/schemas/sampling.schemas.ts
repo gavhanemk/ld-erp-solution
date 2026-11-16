@@ -1,5 +1,14 @@
 import { z } from 'zod'
-import { SAMPLE_ATTACHMENT_KINDS } from '@ld-erp/shared'
+import {
+  PROCESS_KINDS,
+  SAMPLE_ATTACHMENT_KINDS,
+  SAMPLE_MATERIAL_SOURCES,
+  SAMPLE_MEASURE_MAX_ENTRIES,
+  SAMPLE_MEASURE_MAX_POINTS,
+  SAMPLE_ROUTE_MAX_STEPS,
+  SAMPLE_ROUTE_MIN_STEPS,
+  STEP_EXECUTIONS,
+} from '@ld-erp/shared'
 import { MAX_FILE_BYTES } from '../lib/storage'
 const text = (max = 500) => z.string().trim().min(1, 'Fill in this field').max(max)
 // Optional words from the tech pack. Left out on an edit means unchanged; an
@@ -8,126 +17,162 @@ const optionalText = (max: number) =>
   z.string().trim().max(max, `Keep this to ${max} characters`).nullable().optional()
 const id = text(100)
 const qty = z.number().positive().max(999999).multipleOf(0.001)
-// Drafts retain the same JSON shape as released specifications. Blank values and
+// Drafts keep the same JSON shape as released specifications. Blank values and
 // unfinished rows are allowed; bounds and any supplied master IDs remain checked.
-const draftText = (max: number) => z.string().trim().max(max)
-export const sampleDraftSchema = z
-  .object({
-    milestone: draftText(80),
-    styleId: draftText(100),
-    color: draftText(100),
-    construction: draftText(4000),
-    techPackRef: draftText(1000),
-    patternRef: draftText(1000),
-    sizes: z
-      .array(z.object({ sizeId: draftText(100), qty: z.number().int().min(0).max(1000) }))
-      .max(30),
-    measurements: z
-      .array(
-        z.object({
-          name: draftText(100),
-          sizeId: draftText(100),
-          target: z.number().min(0).max(10000),
-          tolerance: z.number().min(0).max(100),
-          unit: z.enum(['cm', 'in']),
-        })
-      )
-      .max(200),
-    stages: z.array(draftText(80)).max(20),
-    materials: z
-      .array(
-        z.object({
-          itemId: draftText(100),
-          warehouseId: draftText(100),
-          qty: z.number().min(0).max(999999).multipleOf(0.001),
-          ownership: z.enum(['OWNED', 'CUSTOMER_OWNED']),
-        })
-      )
-      .max(100),
-    notes: draftText(4000),
-  })
-  .strict()
+const draftText = (max: number) => z.string().trim().max(max, `Keep this to ${max} characters`)
+// A link that may be empty: a blank box is no link.
+const optionalLink = draftText(100)
+  .nullable()
+  .default(null)
+  .transform((v) => v || null)
+
+/** One colour of the round and its pieces by size. */
+const colourRow = z.object({
+  colour: draftText(50),
+  sizes: z
+    .array(
+      z.object({
+        sizeId: draftText(100),
+        qty: z
+          .number()
+          .int('Pieces are whole numbers')
+          .min(0, 'Pieces cannot be negative')
+          .max(1000, 'Up to 1000 pieces of one size'),
+      })
+    )
+    .max(30, 'Up to 30 sizes in one colour'),
+})
+const measurement = z.object({
+  name: draftText(100),
+  sizeId: draftText(100),
+  target: z.number().min(0).max(10000),
+  tolerance: z.number().min(0).max(100),
+  unit: z.enum(['cm', 'in']),
+})
+/**
+ * A step of the making route. Name, kind and department follow the process
+ * when left out. The name may be as long as the process's own (the Operation
+ * master's 200), which fills it; the instructions as long as a routing step's
+ * (500), which the route becomes at handover.
+ */
+const routeStep = z.object({
+  operationId: draftText(100),
+  name: draftText(200).default(''),
+  kind: z.enum(PROCESS_KINDS).default('OTHER'),
+  departmentId: draftText(100).default(''),
+  execution: z
+    .enum(STEP_EXECUTIONS, {
+      errorMap: () => ({ message: 'Say whether the step is done here or outside' }),
+    })
+    .default('IN_HOUSE'),
+  contractorId: optionalLink,
+  vendorId: optionalLink,
+  instructions: draftText(500).default(''),
+})
+/**
+ * A line of the sample BOM, as the screen sends it. requiredQty counts only
+ * when overridden. The part is kept to the production BOM's own 60, as the
+ * line becomes one at handover.
+ */
+const bomLine = z.object({
+  id: draftText(100).optional(),
+  component: draftText(60).default(''),
+  itemId: draftText(100).default(''),
+  colour: draftText(50)
+    .nullable()
+    .default(null)
+    .transform((v) => v || null),
+  departmentId: optionalLink,
+  qtyPerPiece: z
+    .number()
+    .min(0, 'A quantity cannot be negative')
+    .max(99999)
+    .multipleOf(0.0001, 'Up to 4 decimal places')
+    .default(0),
+  wastagePct: z
+    .number()
+    .min(0, 'Wastage cannot be negative')
+    .max(100, 'Wastage is at most 100%')
+    .multipleOf(0.01, 'Up to 2 decimal places')
+    .default(0),
+  requiredQty: z
+    .number()
+    .min(0, 'A quantity cannot be negative')
+    .max(999999)
+    .multipleOf(0.001, 'Up to 3 decimal places')
+    .default(0),
+  requiredOverride: z.boolean().default(false),
+  overrideReason: draftText(500).default(''),
+  source: z
+    .enum(SAMPLE_MATERIAL_SOURCES, {
+      errorMap: () => ({ message: 'Say whether we buy it or the buyer sends it' }),
+    })
+    .default('PURCHASE'),
+  estRate: z
+    .number()
+    .min(0, 'A rate cannot be negative')
+    .max(999999)
+    .multipleOf(0.0001, 'Up to 4 decimal places')
+    .nullable()
+    .default(null),
+  remarks: draftText(500).default(''),
+})
+// One target per point per size: the matrix's points times the sizes made.
+const measurementList = z
+  .array(measurement)
+  .max(
+    SAMPLE_MEASURE_MAX_ENTRIES,
+    `Up to ${SAMPLE_MEASURE_MAX_ENTRIES} measurement targets in one round (points × sizes). Use fewer points or sizes.`
+  )
+// The matrix's points, however many sizes each is measured in.
+const pointsWithin = (list: Array<{ name: string }>) =>
+  new Set(list.map((m) => m.name.trim().toLowerCase())).size <= SAMPLE_MEASURE_MAX_POINTS
+const POINTS_LIMIT = `Up to ${SAMPLE_MEASURE_MAX_POINTS} measurement points in one round.`
+const specFields = {
+  milestone: draftText(80),
+  styleId: draftText(100),
+  construction: draftText(4000),
+  techPackRef: draftText(1000),
+  patternRef: draftText(1000),
+  colours: z.array(colourRow).max(30, 'Up to 30 colours in one round'),
+  measurements: measurementList.refine(pointsWithin, POINTS_LIMIT),
+  route: z
+    .array(routeStep)
+    .max(
+      SAMPLE_ROUTE_MAX_STEPS,
+      `The making route can have up to ${SAMPLE_ROUTE_MAX_STEPS} steps.`
+    ),
+  materials: z.array(bomLine).max(100, 'Up to 100 material lines'),
+  notes: draftText(4000),
+}
+export const sampleDraftSchema = z.object(specFields).strict()
 export const sampleDraftPatchSchema = sampleDraftSchema.partial()
+/**
+ * A complete specification, for SAVE_SPEC and RELEASE: the same shape with the
+ * round's own details filled in and every list started. What each row still
+ * lacks, and how the rows fit together, is sampleSpecGaps (packages/shared),
+ * the same list the screen shows before release.
+ */
 export const sampleSpecificationSchema = z
   .object({
+    ...specFields,
     milestone: text(80),
     styleId: id,
-    color: text(100),
     construction: text(4000),
     techPackRef: text(1000),
     patternRef: text(1000),
-    sizes: z
-      .array(z.object({ sizeId: id, qty: z.number().int().positive().max(1000) }))
-      .min(1)
-      .max(30),
-    measurements: z
-      .array(
-        z.object({
-          name: text(100),
-          sizeId: id,
-          target: z.number().min(0).max(10000),
-          tolerance: z.number().min(0).max(100),
-          unit: z.enum(['cm', 'in']),
-        })
-      )
-      .min(1)
-      .max(200),
-    stages: z.array(text(80)).min(2).max(20),
-    materials: z
-      .array(
-        z.object({
-          itemId: id,
-          warehouseId: id,
-          qty,
-          ownership: z.enum(['OWNED', 'CUSTOMER_OWNED']),
-        })
-      )
-      .min(1)
-      .max(100),
-    notes: z.string().trim().max(4000).default(''),
+    colours: specFields.colours.min(1, 'Add at least one colour to make.'),
+    measurements: measurementList
+      .min(1, 'Add at least one measurement point.')
+      .refine(pointsWithin, POINTS_LIMIT),
+    route: specFields.route.min(
+      SAMPLE_ROUTE_MIN_STEPS,
+      'The making route needs at least two steps, starting with cutting.'
+    ),
+    materials: specFields.materials.min(1, 'Add the materials the sample needs.'),
+    notes: draftText(4000).default(''),
   })
-  .superRefine((s, ctx) => {
-    const unique = (keys: string[], field: string) => {
-      if (new Set(keys).size !== keys.length)
-        ctx.addIssue({ code: 'custom', path: [field], message: 'Each choice must appear once' })
-    }
-    unique(
-      s.sizes.map((x) => x.sizeId),
-      'sizes'
-    )
-    unique(
-      s.stages.map((x) => x.toLowerCase()),
-      'stages'
-    )
-    unique(
-      s.materials.map((x) => [x.itemId, x.warehouseId, x.ownership].join('|')),
-      'materials'
-    )
-    unique(
-      s.measurements.map((x) => [x.name.toLowerCase(), x.sizeId].join('|')),
-      'measurements'
-    )
-    if (s.stages[0].toLowerCase() !== 'cutting')
-      ctx.addIssue({
-        code: 'custom',
-        path: ['stages'],
-        message: 'The making route must start with Cutting',
-      })
-    if (!s.stages.some((x) => x.toLowerCase() === 'stitching'))
-      ctx.addIssue({ code: 'custom', path: ['stages'], message: 'Include Stitching on the route' })
-    if (s.measurements.some((x) => !s.sizes.some((z) => z.sizeId === x.sizeId)))
-      ctx.addIssue({
-        code: 'custom',
-        path: ['measurements'],
-        message: 'Measurements must use the sample sizes',
-      })
-    if (s.sizes.some((x) => !s.measurements.some((z) => z.sizeId === x.sizeId)))
-      ctx.addIssue({
-        code: 'custom',
-        path: ['measurements'],
-        message: 'Add measurements for every sample size',
-      })
-  })
+  .strict()
 export const createSampleSchema = z.object({
   clientKey: z.string().uuid(),
   title: text(150),
@@ -177,6 +222,9 @@ export const sampleMaterialSchema = z.object({
   kind: z.enum(['ISSUE', 'RETURN', 'USE', 'WASTE']),
   qty,
   reason: text(500),
+  // The store it is issued from, needed at the first issue only: the line
+  // keeps it, and every later issue and return goes through it.
+  warehouseId: id.optional(),
 })
 export const sampleStageSchema = z.object({
   stageId: id,
@@ -187,7 +235,13 @@ export const sampleStageSchema = z.object({
   notes: text(1000),
 })
 export const sampleQcSchema = z.object({
-  actuals: z.array(z.number().min(0).max(10000)).max(200),
+  // One reading for each target of the frozen specification (points × sizes).
+  actuals: z
+    .array(z.number().min(0).max(10000))
+    .max(
+      SAMPLE_MEASURE_MAX_ENTRIES,
+      `Up to ${SAMPLE_MEASURE_MAX_ENTRIES} measurements in one check.`
+    ),
   passedQty: z.number().int().positive(),
   notes: text(2000),
 })
@@ -270,3 +324,9 @@ export const sampleUpdateStyleSchema = z
     (d) => Object.values(d).some((v) => v !== undefined),
     'Change at least one detail of the style'
   )
+
+// ── The sample BOM's item picker ─────────────────────────────────────────────
+export const sampleItemSearchSchema = z.object({
+  q: z.string().trim().max(100, 'Keep the search to 100 characters').default(''),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+})

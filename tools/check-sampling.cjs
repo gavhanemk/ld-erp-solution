@@ -116,23 +116,58 @@ async function main() {
   const created = doc
   r = await call('POST', '', payload)
   check('repeated create keeps the same request', () => assert.equal(r.body.data.id, created.id))
+  // The pilot's processes, for making routes. A step names its process; the
+  // server fills in its name, kind and department.
+  const opOf = Object.fromEntries(
+    (
+      await db.operation.findMany({
+        where: { code: { in: ['EX-CUT', 'OP-STI', 'OP-EMB', 'OP-WSH', 'OP-FIN', 'OP-QC'] } },
+      })
+    ).map((o) => [o.code, o])
+  )
+  const step = (code, extra = {}) => ({
+    operationId: opOf[code].id,
+    name: '',
+    kind: opOf[code].kind,
+    departmentId: '',
+    execution: 'IN_HOUSE',
+    contractorId: null,
+    vendorId: null,
+    instructions: '',
+    ...extra,
+  })
+  /** A sample BOM line: 2.5 m of the example cotton a piece, for every colour, bought by us. */
+  const line = (extra = {}) => ({
+    component: 'Body',
+    itemId: 'sample-fabric',
+    colour: null,
+    departmentId: null,
+    qtyPerPiece: 2.5,
+    wastagePct: 0,
+    requiredQty: 0,
+    requiredOverride: false,
+    overrideReason: '',
+    source: 'PURCHASE',
+    estRate: null,
+    remarks: '',
+    ...extra,
+  })
   const spec = {
     milestone: 'Fit sample',
     styleId: 'sample-style',
-    color: 'White',
     construction: 'Straight seam, inspect workmanship.',
     techPackRef: 'EXAMPLE-TECH-v1',
     patternRef: 'EXAMPLE-PATTERN-v1',
-    sizes: [{ sizeId: 'sample-size-M', qty: 2 }],
+    colours: [{ colour: 'White', sizes: [{ sizeId: 'sample-size-M', qty: 2 }] }],
     measurements: [
       { name: 'Chest', sizeId: 'sample-size-M', target: 50, tolerance: 0.5, unit: 'cm' },
     ],
-    stages: ['Cutting', 'Stitching', 'Finishing'],
-    materials: [
-      { itemId: 'sample-fabric', warehouseId: 'sample-store', qty: 5, ownership: 'OWNED' },
-    ],
+    route: [step('EX-CUT'), step('OP-STI'), step('OP-FIN')],
+    // Two pieces at 2.5 m: 5 m planned.
+    materials: [line()],
     notes: 'Fictional local test only',
   }
+  const store = 'sample-store'
   const action = async (action, data = {}, expected = 200, perms, roundId = doc.rounds[0].id) => {
     const before = doc.version
     const result = await call(
@@ -149,34 +184,63 @@ async function main() {
     console.log('PASS ' + action + ' ' + (expected === 200 ? 'accepted' : 'refused atomically'))
     return result
   }
+  /** A version one behind, as a second window would send it: refused, nothing changed. */
+  const staleRefused = async (actionName, data, roundId) => {
+    const before = doc.version
+    const r = await call('POST', `/${doc.id}/actions`, {
+      version: doc.version - 1,
+      ...(roundId ? { roundId } : {}),
+      action: actionName,
+      data,
+    })
+    assert.equal(r.status, 409, `${actionName}: ${JSON.stringify(r.body)}`)
+    assert.equal(r.body.code, 'STALE_SAMPLE')
+    assert.equal((await db.sampleRequest.findUnique({ where: { id: doc.id } })).version, before)
+    passed++
+    console.log('PASS ' + actionName + ' from a stale window refused atomically')
+  }
+  const template = await call('GET', '/route-template', undefined, 'sampling:view')
+  check('a new request starts on the usual route from the Operation master', () => {
+    assert.equal(template.status, 200)
+    assert.deepEqual(
+      template.body.data.map((s) => s.kind),
+      ['CUTTING', 'STITCHING', 'FINISHING', 'QC']
+    )
+    assert.equal(template.body.data[0].operationId, opOf['EX-CUT'].id)
+    assert.deepEqual(created.rounds[0].specification.route, template.body.data)
+    assert.deepEqual(created.rounds[0].specification.colours, [])
+    assert.equal(created.rounds[0].specification.color, undefined)
+  })
   await action('RELEASE', {}, 400)
   await action('SAVE_DRAFT', { construction: 'Work in progress' }, 403, 'sampling:view')
   await action('SAVE_DRAFT', {
     milestone: 'Early fit sample',
     construction: 'Work in progress',
-    materials: [{ itemId: '', warehouseId: '', qty: 0, ownership: 'OWNED' }],
+    materials: [line({ component: '', itemId: '', qtyPerPiece: 0 })],
   })
   await action('SAVE_DRAFT', { techPackRef: 'Draft document reference' })
   r = await call('GET', `/${doc.id}`)
   check('partial draft persists across reopening without discarding earlier fields', () => {
     assert.equal(r.body.data.rounds[0].specification.construction, 'Work in progress')
     assert.equal(r.body.data.rounds[0].specification.techPackRef, 'Draft document reference')
-    assert.equal(r.body.data.rounds[0].specification.materials[0].qty, 0)
+    assert.equal(r.body.data.rounds[0].specification.materials[0].qtyPerPiece, 0)
     assert.equal(r.body.data.rounds[0].state, 'DRAFT')
   })
   await action('RELEASE', {}, 400)
-  check('incomplete drafts create no material or making records', () => {
-    assert.equal(doc.rounds[0].materials.length, 0)
+  check('an incomplete draft keeps its unfinished BOM line as a row, and no making records', () => {
+    assert.equal(doc.rounds[0].materials.length, 1)
+    assert.equal(doc.rounds[0].materials[0].itemId, null)
+    assert.equal(+doc.rounds[0].materials[0].plannedQty, 0)
+    assert.equal(doc.rounds[0].materials[0].id, doc.rounds[0].specification.materials[0].id)
     assert.equal(doc.rounds[0].stages.length, 0)
   })
   await action('SAVE_DRAFT', { styleId: 'missing-style' }, 409)
-  await action(
-    'SAVE_DRAFT',
-    { materials: [{ itemId: 'missing-item', warehouseId: '', qty: 0, ownership: 'OWNED' }] },
-    409
-  )
-  await action('SAVE_DRAFT', { sizes: [{ sizeId: '', qty: -1 }] }, 400)
+  await action('SAVE_DRAFT', { materials: [line({ itemId: 'missing-item' })] }, 409)
+  await action('SAVE_DRAFT', { colours: [{ colour: '', sizes: [{ sizeId: '', qty: -1 }] }] }, 400)
   await action('SAVE_DRAFT', { state: 'APPROVED' }, 400)
+  // The shape before the colour grid is not accepted from a screen any more.
+  await action('SAVE_DRAFT', { color: 'White' }, 400)
+  await staleRefused('SAVE_DRAFT', { notes: 'From a second window' })
   const { clientKey: omittedClientKey, ...requestFields } = payload
   const requestEdit = {
     ...requestFields,
@@ -197,12 +261,71 @@ async function main() {
     assert.equal(doc.events[0].detail.data.after.customerId, null)
     assert.equal(doc.events[0].detail.data.reason, requestEdit.reason)
   })
+  // No buyer on the request now: material the buyer sends cannot be planned.
+  const noBuyer = await action(
+    'SAVE_SPEC',
+    { ...spec, materials: [line({ source: 'BUYER_SUPPLIED' })] },
+    400
+  )
+  check('material the buyer sends needs a buyer on the request', () => {
+    assert.equal(noBuyer.body.code, 'SPEC_INCOMPLETE')
+    assert.match(noBuyer.body.message, /buyer on the request/)
+  })
   await action('UPDATE_REQUEST', requestEdit)
-  await action('SAVE_SPEC', { ...spec, sizes: [...spec.sizes, ...spec.sizes] }, 400)
-  await action('SAVE_SPEC', { ...spec, color: 'Not a style colour' }, 409)
+  const twice = await action(
+    'SAVE_SPEC',
+    {
+      ...spec,
+      colours: [{ colour: 'White', sizes: [...spec.colours[0].sizes, ...spec.colours[0].sizes] }],
+    },
+    400
+  )
+  const notStyle = await action(
+    'SAVE_SPEC',
+    { ...spec, colours: [{ ...spec.colours[0], colour: 'Not a style colour' }] },
+    409
+  )
+  check('a size twice in a colour, or a colour the style lacks, is refused', () => {
+    assert.match(twice.body.message, /same size twice/)
+    assert.equal(notStyle.body.code, 'NOT_STYLE_COLOUR')
+  })
+  await action('SAVE_SPEC', spec, 403, 'sampling:view')
+  await staleRefused('SAVE_SPEC', spec)
   await action('SAVE_SPEC', spec)
   await action('RELEASE', {}, 403, 'sampling:view,sampling:edit')
-  await action('RELEASE')
+  await staleRefused('RELEASE', {})
+  const released = await action('RELEASE')
+  const releasedSpec = doc.rounds[0].specification
+  check('release makes each step from its process, and warns of a route with no check', () => {
+    assert.deepEqual(
+      doc.rounds[0].stages.map((s) => [
+        s.sequence,
+        s.operationId,
+        s.kind,
+        s.departmentId,
+        s.execution,
+      ]),
+      ['EX-CUT', 'OP-STI', 'OP-FIN'].map((c, i) => [
+        i + 1,
+        opOf[c].id,
+        opOf[c].kind,
+        opOf[c].departmentId,
+        'IN_HOUSE',
+      ])
+    )
+    assert.deepEqual(
+      doc.rounds[0].stages.map((s) => s.name),
+      ['EX-CUT', 'OP-STI', 'OP-FIN'].map((c) => opOf[c].name)
+    )
+    assert.deepEqual(
+      releasedSpec.route.map((s) => s.name),
+      ['EX-CUT', 'OP-STI', 'OP-FIN'].map((c) => opOf[c].name)
+    )
+    assert.ok(released.body.warnings.some((w) => /no quality check/.test(w)))
+    assert.equal(+doc.rounds[0].materials[0].plannedQty, 5)
+    assert.equal(doc.rounds[0].materials[0].warehouseId, null)
+    assert.equal(releasedSpec.materials[0].id, doc.rounds[0].materials[0].id)
+  })
   await action('SAVE_DRAFT', { construction: 'Must stay frozen' }, 409)
   await action('UPDATE_REQUEST', { ...requestEdit, customerId: null }, 409)
   await action('UPDATE_REQUEST', { ...requestEdit, brandId: 'different-brand' }, 409)
@@ -213,7 +336,7 @@ async function main() {
   })
   check('administrative edits preserve released technical specification', () => {
     assert.equal(doc.requiredAt, null)
-    assert.deepEqual(doc.rounds[0].specification, spec)
+    assert.deepEqual(doc.rounds[0].specification, releasedSpec)
   })
   await action('SAVE_SPEC', spec, 409)
   let round = doc.rounds[0],
@@ -230,7 +353,11 @@ async function main() {
     },
     409
   )
-  await action('MATERIAL', { materialId: mat.id, kind: 'ISSUE', qty: 6, reason: 'Too much' }, 409)
+  await action(
+    'MATERIAL',
+    { materialId: mat.id, kind: 'ISSUE', qty: 6, reason: 'Too much', warehouseId: store },
+    409
+  )
   await action(
     'MATERIAL',
     { materialId: mat.id, kind: 'ISSUE', qty: 5, reason: 'Issue for sample' },
@@ -265,11 +392,23 @@ async function main() {
     where: { itemId: 'sample-fabric', warehouseId: 'sample-store' },
     _sum: { inQty: true, outQty: true },
   })
-  await action('MATERIAL', {
-    materialId: mat.id,
-    kind: 'ISSUE',
-    qty: 5,
-    reason: 'Issue for sample',
+  // The store is named at the first issue, kept on the line, and no other is taken after it.
+  const issue5 = { materialId: mat.id, kind: 'ISSUE', qty: 5, reason: 'Issue for sample' }
+  const noStore = await action('MATERIAL', issue5, 400)
+  await action('MATERIAL', { ...issue5, warehouseId: 'missing-store' }, 409)
+  await staleRefused('MATERIAL', { ...issue5, warehouseId: store }, round.id)
+  await action('MATERIAL', { ...issue5, warehouseId: store })
+  const otherStore = await action(
+    'MATERIAL',
+    { ...issue5, qty: 0.001, warehouseId: 'sample-room-store' },
+    409
+  )
+  check('the first issue needs its store, keeps it on the line, and refuses another later', () => {
+    assert.equal(noStore.body.code, 'STORE_REQUIRED')
+    assert.equal(doc.rounds[0].materials[0].warehouseId, store)
+    assert.equal(doc.rounds[0].materials[0].warehouse.name, 'Example Store')
+    assert.equal(otherStore.body.code, 'OTHER_STORE')
+    assert.match(otherStore.body.message, /issued from Example Store. Issue the rest from there/)
   })
   const outgoing = await db.stockLedger.findMany({
     where: { referenceType: 'SAMPLING', referenceId: round.id },
@@ -300,6 +439,17 @@ async function main() {
   await action(
     'MATERIAL',
     { materialId: mat.id, kind: 'RETURN', qty: 2, reason: 'Too much return' },
+    409
+  )
+  await action(
+    'MATERIAL',
+    {
+      materialId: mat.id,
+      kind: 'RETURN',
+      qty: 1,
+      reason: 'Wrong store',
+      warehouseId: 'sample-room-store',
+    },
     409
   )
   await action('MATERIAL', { materialId: mat.id, kind: 'RETURN', qty: 1, reason: 'Unused metre' })
@@ -359,22 +509,44 @@ async function main() {
     { bomId: 'sample-bom', routingId: 'sample-route', notes: 'Cannot approve' },
     409
   )
+  await action('NEW_ROUND', 'Revise collar after buyer feedback', 403, 'sampling:view')
+  await staleRefused('NEW_ROUND', 'Revise collar after buyer feedback', oldRound.id)
   await action('NEW_ROUND', 'Revise collar after buyer feedback')
   await action('UPDATE_REQUEST', { ...requestEdit, customerId: null }, 409)
+  const copiedRows = doc.rounds[0].materials
+  const copiedLines = doc.rounds[0].specification.materials
   check('new round preserves prior decision and frozen specification', () => {
     assert.equal(doc.rounds[0].revision, 2)
     assert.equal(doc.rounds[1].decision.conditions, 'Change collar')
-    assert.deepEqual(doc.rounds[1].specification, spec)
+    assert.deepEqual(doc.rounds[1].specification, releasedSpec)
   })
-  await action('SAVE_SPEC', { ...spec, patternRef: 'EXAMPLE-PATTERN-v2' })
+  check('a new round copies the BOM lines into rows of its own, nothing issued, no store', () => {
+    assert.equal(copiedRows.length, 1)
+    assert.notEqual(copiedRows[0].id, oldRound.materials[0].id)
+    assert.deepEqual(
+      copiedLines.map((l) => l.id),
+      copiedRows.map((m) => m.id)
+    )
+    const { id: newId, ...copied } = copiedLines[0]
+    const { id: oldId, ...was } = releasedSpec.materials[0]
+    assert.deepEqual(copied, was)
+    assert.equal(+copiedRows[0].plannedQty, 5)
+    assert.equal(+copiedRows[0].issuedQty, 0)
+    assert.equal(copiedRows[0].warehouseId, null)
+    assert.equal(+oldRound.materials[0].issuedQty, 5)
+  })
+  // Saved again with the copied line's id: the same row, kept.
+  await action('SAVE_SPEC', { ...doc.rounds[0].specification, patternRef: 'EXAMPLE-PATTERN-v2' })
   await action('RELEASE')
   round = doc.rounds[0]
   mat = round.materials[0]
+  check('saving the new round kept its copied row', () => assert.equal(mat.id, copiedRows[0].id))
   await action('MATERIAL', {
     materialId: mat.id,
     kind: 'ISSUE',
     qty: 5,
     reason: 'Second sample round',
+    warehouseId: store,
   })
   for (const stage of round.stages) await action('STAGE', { ...stepData, stageId: stage.id })
   await action('QC', { actuals: [50], passedQty: 2, notes: 'QC accepted' })
@@ -497,18 +669,26 @@ async function main() {
   doc = newRequest.body.data
   await action('SAVE_SPEC', {
     ...spec,
-    materials: spec.materials.map((x) => ({ ...x, ownership: 'CUSTOMER_OWNED' })),
+    materials: spec.materials.map((x) => ({ ...x, source: 'BUYER_SUPPLIED' })),
   })
   await action('RELEASE')
   mat = doc.rounds[0].materials[0]
   await action(
     'MATERIAL',
-    { materialId: mat.id, kind: 'ISSUE', qty: 5, reason: 'Buyer owns no stock here' },
+    {
+      materialId: mat.id,
+      kind: 'ISSUE',
+      qty: 5,
+      reason: 'Buyer owns no stock here',
+      warehouseId: store,
+    },
     400
   )
-  check('buyer-owned issue cannot draw our stock', () =>
+  check('material the buyer sends is the buyer’s stock, and cannot draw ours', () => {
+    assert.equal(doc.rounds[0].materials[0].source, 'BUYER_SUPPLIED')
+    assert.equal(doc.rounds[0].materials[0].ownership, 'CUSTOMER_OWNED')
     assert.equal(+doc.rounds[0].materials[0].issuedQty, 0)
-  )
+  })
   await action('CANCEL', 'No buyer material available; nothing issued')
   const cancelWithStock = await call('POST', '', {
     ...payload,
@@ -523,6 +703,7 @@ async function main() {
     kind: 'ISSUE',
     qty: 5,
     reason: 'Issued to sample room',
+    warehouseId: store,
   })
   await action('CANCEL', 'Cannot cancel while material remains held', 409)
   await action('MATERIAL', {
@@ -547,9 +728,14 @@ async function main() {
   ).body.data
   await action('RELEASE', {
     ...spec,
-    sizes: [
-      { sizeId: 'sample-size-M', qty: 1 },
-      { sizeId: 'sample-size-L', qty: 1 },
+    colours: [
+      {
+        colour: 'White',
+        sizes: [
+          { sizeId: 'sample-size-M', qty: 1 },
+          { sizeId: 'sample-size-L', qty: 1 },
+        ],
+      },
     ],
     measurements: [
       ...spec.measurements,
@@ -563,6 +749,7 @@ async function main() {
     kind: 'ISSUE',
     qty: 5,
     reason: 'Material for size set',
+    warehouseId: store,
   })
   await action(
     'STAGE',
@@ -606,6 +793,99 @@ async function main() {
     setRound.id
   )
   await action('CANCEL', 'Buyer cancelled development; sample garments retained for reference')
+
+  // Two colours in one round go through making, QC and submission as one set.
+  doc = (
+    await call('POST', '', {
+      ...payload,
+      clientKey: crypto.randomUUID(),
+      title: title + ' two colours',
+    })
+  ).body.data
+  await action('RELEASE', {
+    ...spec,
+    colours: [
+      { colour: 'White', sizes: [{ sizeId: 'sample-size-M', qty: 1 }] },
+      { colour: 'blue', sizes: [{ sizeId: 'sample-size-M', qty: 1 }] },
+    ],
+  })
+  const pairRound = doc.rounds[0]
+  check('a two-colour round takes the style’s spelling and plans for both colours', () => {
+    assert.deepEqual(
+      pairRound.specification.colours.map((c) => c.colour),
+      ['White', 'Blue']
+    )
+    assert.equal(+pairRound.materials[0].plannedQty, 5)
+  })
+  await action('MATERIAL', {
+    materialId: pairRound.materials[0].id,
+    kind: 'ISSUE',
+    qty: 5,
+    reason: 'Material for two colours',
+    warehouseId: store,
+  })
+  const pairReject = await action(
+    'STAGE',
+    { ...stepData, stageId: pairRound.stages[0].id, doneQty: 1, rejectedQty: 1 },
+    409
+  )
+  check('a set of colours records no rejected pieces at a step', () =>
+    assert.match(pairReject.body.message, /several colours or sizes/)
+  )
+  for (const stage of pairRound.stages) await action('STAGE', { ...stepData, stageId: stage.id })
+  await action('QC', { actuals: [50], passedQty: 1, notes: 'One colour only' }, 409)
+  await action('QC', { actuals: [50], passedQty: 2, notes: 'Both colours inspected' })
+  await action(
+    'SUBMIT',
+    { qty: 1, recipient: 'Buyer', reference: 'EXAMPLE-PAIR', notes: 'One colour' },
+    409
+  )
+  await action('SUBMIT', {
+    qty: 2,
+    recipient: 'Buyer',
+    reference: 'EXAMPLE-PAIR',
+    notes: 'Both colours',
+  })
+  await action('DECIDE', {
+    result: 'APPROVED',
+    buyerName: 'Example buyer',
+    evidence: 'EXAMPLE-PAIR-EMAIL',
+    conditions: '',
+  })
+  await action('MATERIAL', {
+    materialId: pairRound.materials[0].id,
+    kind: 'USE',
+    qty: 5,
+    reason: 'Both colours made',
+  })
+  // The example BOM is for White, which this round made; one for a colour it
+  // did not make is refused. Checked on a Blue-only round below.
+  await action('CANCEL', 'Local two-colour check complete; pieces kept for reference')
+  doc = (
+    await call('POST', '', {
+      ...payload,
+      clientKey: crypto.randomUUID(),
+      title: title + ' blue only',
+    })
+  ).body.data
+  await action('RELEASE', {
+    ...spec,
+    colours: [{ colour: 'Blue', sizes: [{ sizeId: 'sample-size-M', qty: 2 }] }],
+  })
+  const blueRound = doc.rounds[0]
+  await db.sampleRound.update({ where: { id: blueRound.id }, data: { state: 'APPROVED' } })
+  doc = (await call('GET', `/${doc.id}`)).body.data
+  const blueBom = await action(
+    'HANDOVER',
+    { bomId: 'sample-bom', routingId: 'sample-route', notes: 'White BOM for a blue round' },
+    409
+  )
+  await db.sampleRound.update({ where: { id: blueRound.id }, data: { state: 'RELEASED' } })
+  doc = (await call('GET', `/${doc.id}`)).body.data
+  check('a handover BOM must be for one of the round’s colours', () =>
+    assert.match(blueBom.body.message, /one of the round’s colours/)
+  )
+  await action('CANCEL', 'Local colour check complete; nothing issued')
 
   doc = (
     await call('POST', '', {
@@ -761,20 +1041,6 @@ async function main() {
   // ── Phase 1: the buyer's tech pack, and the style made for a sample ──────────
   const viewOnly = 'sampling:view'
   const merch = merchGrants.join(',')
-  /** A version one behind, as a second window would send it: refused, nothing changed. */
-  const staleRefused = async (actionName, data) => {
-    const before = doc.version
-    const r = await call('POST', `/${doc.id}/actions`, {
-      version: doc.version - 1,
-      action: actionName,
-      data,
-    })
-    assert.equal(r.status, 409, `${actionName}: ${JSON.stringify(r.body)}`)
-    assert.equal(r.body.code, 'STALE_SAMPLE')
-    assert.equal((await db.sampleRequest.findUnique({ where: { id: doc.id } })).version, before)
-    passed++
-    console.log('PASS ' + actionName + ' from a stale window refused atomically')
-  }
   /** The browser's two steps: a link, then the bytes sent straight to it. */
   const upload = async (requestId, fileName, text, extra = {}, perms) => {
     const link = await call(
@@ -922,10 +1188,23 @@ async function main() {
   })
 
   // The round's specification follows the request's style.
+  const thread = line({
+    component: 'Seams',
+    itemId: 'sample-thread',
+    qtyPerPiece: 0.0125,
+    wastagePct: 2.5,
+  })
   await action('SAVE_DRAFT', {
-    color: 'Navy',
-    sizes: [{ sizeId: 'sample-size-M', qty: 2 }],
+    colours: [{ colour: 'navy', sizes: [{ sizeId: 'sample-size-M', qty: 2 }] }],
     measurements: [{ ...spec.measurements[0] }],
+    materials: [line({ colour: 'Navy' }), thread],
+  })
+  check('a draft colour takes the style’s spelling, and its lines their quantities', () => {
+    assert.deepEqual(doc.rounds[0].specification.colours[0].colour, 'Navy')
+    assert.deepEqual(
+      doc.rounds[0].specification.materials.map((l) => l.requiredQty),
+      [5, 0.026]
+    )
   })
   await action('SAVE_DRAFT', { styleId: 'sample-style' }, 409)
 
@@ -939,8 +1218,24 @@ async function main() {
   check('linking a production style for a re-sample clears what no longer fits the draft', () => {
     assert.equal(doc.styleId, 'sample-style')
     assert.equal(doc.rounds[0].specification.styleId, 'sample-style')
-    assert.equal(doc.rounds[0].specification.color, '')
-    assert.deepEqual(doc.rounds[0].specification.sizes, [{ sizeId: 'sample-size-M', qty: 2 }])
+    // Navy is not the shirt's: the colour goes with its own line; the line for
+    // every colour stays, with nothing to make yet. Size M is in the shirt's run.
+    assert.deepEqual(doc.rounds[0].specification.colours, [])
+    assert.equal(doc.rounds[0].specification.measurements.length, 1)
+    assert.deepEqual(
+      doc.rounds[0].specification.materials.map((l) => [l.itemId, l.requiredQty]),
+      [['sample-thread', 0]]
+    )
+    assert.equal(doc.rounds[0].materials.length, 1)
+    assert.deepEqual(doc.events[0].detail.data.refit, [
+      {
+        revision: 1,
+        coloursDropped: 1,
+        sizesDropped: 0,
+        measurementsDropped: 0,
+        materialsDropped: 1,
+      },
+    ])
     assert.deepEqual(doc.events[0].detail.data.before, {
       id: devStyle.id,
       code: devStyle.code,
@@ -954,7 +1249,9 @@ async function main() {
     assert.deepEqual(shirtColours, ['White', 'Blue'])
   })
   await action('LINK_STYLE', { styleId: devStyle.id })
-  await action('SAVE_DRAFT', { color: 'Navy' })
+  await action('SAVE_DRAFT', {
+    colours: [{ colour: 'Navy', sizes: [{ sizeId: 'sample-size-M', qty: 2 }] }],
+  })
 
   // Changing the request's own development style.
   await action('UPDATE_STYLE', { colors: ['Navy', 'Olive'] }, 403, viewOnly)
@@ -973,12 +1270,49 @@ async function main() {
     assert.deepEqual(changedAudit.before.colors, ['Navy'])
     assert.deepEqual(changedAudit.after.colors, ['Navy', 'Olive'])
   })
+  // Olive is planned with a label of its own, then taken off the style.
+  await action('SAVE_DRAFT', {
+    colours: [
+      { colour: 'Navy', sizes: [{ sizeId: 'sample-size-M', qty: 2 }] },
+      { colour: 'Olive', sizes: [{ sizeId: 'sample-size-M', qty: 1 }] },
+    ],
+    materials: [
+      ...doc.rounds[0].specification.materials,
+      line({ component: 'Neck', itemId: 'sample-label', colour: 'Olive', qtyPerPiece: 1 }),
+    ],
+  })
+  const beforeOlive = doc.rounds[0].specification.materials
+  await action('UPDATE_STYLE', { colors: ['Navy'] })
+  const oliveLabel = await db.sampleMaterial.findUnique({ where: { id: beforeOlive[1].id } })
+  check('a colour taken off the style takes its rows with it from the draft', () => {
+    assert.deepEqual(
+      doc.rounds[0].specification.colours.map((c) => c.colour),
+      ['Navy']
+    )
+    assert.deepEqual(
+      doc.rounds[0].specification.materials.map((l) => l.id),
+      [beforeOlive[0].id]
+    )
+    // The thread is worked out again for Navy's two pieces alone.
+    assert.equal(doc.rounds[0].specification.materials[0].requiredQty, 0.026)
+    assert.equal(oliveLabel, null)
+    assert.deepEqual(doc.events[0].detail.data.refit, [
+      {
+        revision: 1,
+        coloursDropped: 1,
+        sizesDropped: 0,
+        measurementsDropped: 0,
+        materialsDropped: 1,
+      },
+    ])
+  })
   await action('UPDATE_STYLE', { sizeGroupId: 'sample-chest-sizes' })
   check('a size run changed before release drops sizes the draft can no longer use', () => {
     assert.equal(doc.style.sizeGroupId, 'sample-chest-sizes')
-    assert.deepEqual(doc.rounds[0].specification.sizes, [])
+    assert.deepEqual(doc.rounds[0].specification.colours, [{ colour: 'Navy', sizes: [] }])
     assert.deepEqual(doc.rounds[0].specification.measurements, [])
-    assert.equal(doc.rounds[0].specification.color, 'Navy')
+    assert.equal(doc.events[0].detail.data.refit[0].sizesDropped, 1)
+    assert.equal(doc.events[0].detail.data.refit[0].measurementsDropped, 1)
   })
   await action('UPDATE_STYLE', { sizeGroupId: 'sample-sizes', name: devStyle.name + ' v2' })
 
@@ -1213,7 +1547,7 @@ async function main() {
   await action('RELEASE', {
     ...spec,
     styleId: doc.styleId,
-    color: 'Navy',
+    colours: [{ colour: 'Navy', sizes: [{ sizeId: 'sample-size-M', qty: 2 }] }],
     techPackRef: 'Buyer tech pack on file',
   })
   await action('LINK_STYLE', { styleId: 'sample-style' }, 409)
@@ -1656,6 +1990,762 @@ async function main() {
     assert.equal(doc.events[0].detail.data.styleId, 'sample-style')
   })
   await action('CANCEL', 'Local legacy check complete; nothing issued')
+
+  // ── Phase 2: the colour x size grid, the sample BOM and the making route ────
+  doc = await openRequest(' grid, BOM and route')
+  await action('LINK_STYLE', { styleId: 'sample-style' })
+  const finishingDept = (await db.department.findUnique({ where: { code: 'FIN' } })).id
+  const grid = [
+    {
+      colour: 'White',
+      sizes: [
+        { sizeId: 'sample-size-M', qty: 2 },
+        { sizeId: 'sample-size-L', qty: 1 },
+      ],
+    },
+    { colour: 'Blue', sizes: [{ sizeId: 'sample-size-M', qty: 2 }] },
+  ]
+  const chest = [
+    { name: 'Chest', sizeId: 'sample-size-M', target: 50, tolerance: 0.5, unit: 'cm' },
+    { name: 'Chest', sizeId: 'sample-size-L', target: 52, tolerance: 0.5, unit: 'cm' },
+  ]
+  const bom = [
+    // Every colour, five pieces: 1.25 m with 5% wastage is 1.3125 m a piece, 6.5625 m in all.
+    line({ qtyPerPiece: 1.25, wastagePct: 5 }),
+    // Blue's two pieces: 7 buttons with 10% spare.
+    line({
+      component: 'Front',
+      itemId: 'sample-button',
+      colour: 'Blue',
+      qtyPerPiece: 7,
+      wastagePct: 10,
+    }),
+    // White's three pieces.
+    line({ component: 'Neck', itemId: 'sample-label', colour: 'White', qtyPerPiece: 1 }),
+    line({ component: 'Seams', itemId: 'sample-thread', qtyPerPiece: 0.0125, wastagePct: 2.5 }),
+    // No department given: Finishing draws polybags.
+    line({ component: 'Packing', itemId: 'sample-polybag', qtyPerPiece: 1 }),
+  ]
+  await action('SAVE_DRAFT', { colours: grid, measurements: chest, materials: bom }, 403, viewOnly)
+  await action('SAVE_DRAFT', { colours: grid, measurements: chest, materials: bom }, 200, merch)
+  const ids1 = doc.rounds[0].specification.materials.map((l) => l.id)
+  check('a multi-colour grid saves, and each line works out its quantity for its colours', () => {
+    assert.deepEqual(doc.rounds[0].specification.colours, grid)
+    assert.deepEqual(
+      doc.rounds[0].specification.materials.map((l) => l.requiredQty),
+      [6.563, 15.4, 3, 0.064, 5]
+    )
+    assert.deepEqual(
+      doc.rounds[0].materials.map((m) => [m.id, +m.plannedQty, m.sequence]),
+      ids1.map((id, i) => [id, [6.563, 15.4, 3, 0.064, 5][i], i + 1])
+    )
+    assert.equal(doc.rounds[0].specification.materials[4].departmentId, finishingDept)
+    assert.equal(doc.rounds[0].specification.materials[0].departmentId, null)
+    assert.ok(ids1.every(Boolean))
+  })
+  // Second save: one line changed, one added. Third: one dropped. Ids stay put.
+  const cur = () => doc.rounds[0].specification.materials
+  await action('SAVE_DRAFT', {
+    materials: [
+      { ...cur()[0], qtyPerPiece: 1.5 },
+      ...cur().slice(1),
+      line({ component: 'Collar', qtyPerPiece: 0.3 }),
+    ],
+  })
+  const ids2 = cur().map((l) => l.id)
+  check('an edited line keeps its row, a new line gets one, and one cloth may go into two parts', () => {
+    assert.deepEqual(ids2.slice(0, 5), ids1)
+    assert.equal(ids2.length, 6)
+    assert.ok(!ids1.includes(ids2[5]))
+    assert.equal(cur()[0].requiredQty, 7.875)
+    assert.equal(cur()[5].requiredQty, 1.5)
+  })
+  const labelId = ids1[2]
+  await action('SAVE_DRAFT', { materials: cur().filter((l) => l.id !== labelId) })
+  const droppedLabel = await db.sampleMaterial.findUnique({ where: { id: labelId } })
+  check('a dropped line loses its row and no other', () => {
+    assert.deepEqual(
+      cur().map((l) => l.id),
+      ids2.filter((id) => id !== labelId)
+    )
+    assert.equal(droppedLabel, null)
+    assert.equal(doc.rounds[0].materials.length, 5)
+  })
+  // A grid change alone works every line out again, rows and all.
+  await action('SAVE_DRAFT', {
+    colours: [
+      {
+        colour: 'White',
+        sizes: [
+          { sizeId: 'sample-size-M', qty: 3 },
+          { sizeId: 'sample-size-L', qty: 1 },
+        ],
+      },
+      grid[1],
+    ],
+  })
+  check('more pieces in the grid raise every line for those colours, ids unchanged', () => {
+    assert.deepEqual(
+      cur().map((l) => l.id),
+      ids2.filter((id) => id !== labelId)
+    )
+    assert.equal(cur()[0].requiredQty, 9.45)
+    assert.equal(cur()[1].requiredQty, 15.4)
+    assert.equal(+doc.rounds[0].materials[0].plannedQty, 9.45)
+  })
+  const foreign = await action(
+    'SAVE_DRAFT',
+    { materials: [{ ...cur()[0], id: handedOver.rounds[0].materials[0].id }] },
+    409
+  )
+  const duplicate = await action(
+    'SAVE_DRAFT',
+    { materials: [...cur(), line({ qtyPerPiece: 2 })] },
+    409
+  )
+  const notRound = await action(
+    'SAVE_DRAFT',
+    { materials: [...cur(), line({ component: 'Sleeve', colour: 'Black' })] },
+    409
+  )
+  const notStyleColour = await action(
+    'SAVE_DRAFT',
+    { colours: [...doc.rounds[0].specification.colours, { colour: 'Green', sizes: [] }] },
+    409
+  )
+  const wrongTailor = await action(
+    'SAVE_DRAFT',
+    { route: [step('EX-CUT', { contractorId: 'sample-tailor' }), step('OP-STI'), step('OP-FIN')] },
+    400
+  )
+  // Body cloth for every colour is already Blue's: a Blue line of it would plan Blue twice,
+  // and so would a line for every colour beside Blue's own buttons.
+  const overlap = await action(
+    'SAVE_DRAFT',
+    { materials: [...cur(), line({ colour: 'Blue', qtyPerPiece: 1.4 })] },
+    409
+  )
+  const overlapBack = await action(
+    'SAVE_DRAFT',
+    { materials: [...cur(), line({ component: 'Front', itemId: 'sample-button', qtyPerPiece: 7 })] },
+    409
+  )
+  // A step is done by its process's own department, as every routing is.
+  const wrongDept = await action(
+    'SAVE_DRAFT',
+    {
+      route: [
+        step('EX-CUT'),
+        step('OP-STI'),
+        step('OP-EMB', { departmentId: finishingDept }),
+        step('OP-FIN'),
+      ],
+    },
+    409
+  )
+  check('a line of another round, a line twice, a colour off the grid or the style: refused', () => {
+    assert.equal(foreign.body.code, 'NOT_THIS_ROUND')
+    assert.equal(foreign.body.message, 'That material line is not on this round.')
+    assert.equal(duplicate.body.code, 'DUPLICATE_MATERIAL')
+    assert.equal(
+      duplicate.body.message,
+      'Line 6: Each material appears once for each part and colour.'
+    )
+    assert.equal(notRound.body.code, 'NOT_ROUND_COLOUR')
+    assert.match(notRound.body.message, /^Line 6: Black is not one of this round/)
+    assert.equal(notStyleColour.body.code, 'NOT_STYLE_COLOUR')
+    assert.equal(wrongTailor.body.code, 'STEP_CONTRACTOR_MISMATCH')
+  })
+  check('a line for every colour and one for a colour of the same part and material: refused', () => {
+    assert.equal(overlap.body.code, 'DUPLICATE_MATERIAL')
+    assert.match(
+      overlap.body.message,
+      /^Line 6: The line for every colour already gives Blue this material for this part\./
+    )
+    assert.equal(overlapBack.body.code, 'DUPLICATE_MATERIAL')
+    assert.match(overlapBack.body.message, /^Line 6: Blue already has its own line of this material/)
+  })
+  check('a step given another department than its process’s is refused, as a routing is', () => {
+    assert.equal(wrongDept.body.code, 'STEP_DEPARTMENT_MISMATCH')
+    assert.match(wrongDept.body.message, /^Step 3: Embroidery is an? .*operation, not Finishing\./)
+  })
+  // Typed by hand: a draft may leave the reason for later; release may not.
+  await action('SAVE_DRAFT', {
+    materials: [
+      ...cur(),
+      line({
+        component: 'Spare',
+        itemId: 'sample-fabric-2',
+        requiredOverride: true,
+        requiredQty: 1.5,
+      }),
+    ],
+  })
+  check('a quantity typed by hand is kept as typed', () => {
+    assert.equal(cur()[5].requiredQty, 1.5)
+    assert.equal(cur()[5].requiredOverride, true)
+    assert.equal(+doc.rounds[0].materials[5].plannedQty, 1.5)
+  })
+  const details = {
+    construction: 'Two colours, one set',
+    techPackRef: 'EX-TP-2',
+    patternRef: 'EX-PT-2',
+  }
+  const full = (over = {}) => ({ ...doc.rounds[0].specification, ...details, ...over })
+  const refused = async (label, over, code, pattern) => {
+    const res = await action('RELEASE', full(over), 400)
+    check(label, () => {
+      assert.equal(res.body.code, code, JSON.stringify(res.body))
+      if (pattern) assert.match(res.body.message, pattern)
+    })
+  }
+  await refused(
+    'a quantity typed by hand needs its reason at release',
+    {},
+    'SPEC_INCOMPLETE',
+    /typed by hand/
+  )
+  const withReason = cur().map((l, i) =>
+    i === 5 ? { ...l, overrideReason: 'Buyer asked for a spare length' } : l
+  )
+  await refused(
+    'a colour with no pieces is refused at release',
+    {
+      materials: withReason,
+      colours: [
+        doc.rounds[0].specification.colours[0],
+        { colour: 'Blue', sizes: [{ sizeId: 'sample-size-M', qty: 0 }] },
+      ],
+    },
+    'SPEC_INCOMPLETE',
+    /Blue has no pieces/
+  )
+  await refused(
+    'a size made with no measurement is refused',
+    { materials: withReason, measurements: [chest[0]] },
+    'SPEC_INCOMPLETE',
+    /Add measurements for size L/
+  )
+  await refused(
+    'a measurement of a size not made is refused',
+    {
+      materials: withReason,
+      measurements: [...chest, { ...chest[0], sizeId: 'sample-size-S' }],
+    },
+    'SPEC_INCOMPLETE',
+    /size S, which this round does not make/
+  )
+  await refused(
+    'a quantity typed by hand still says how much one piece takes',
+    { materials: withReason.map((l, i) => (i === 5 ? { ...l, qtyPerPiece: 0 } : l)) },
+    'SPEC_INCOMPLETE',
+    /Line 6: enter how much one piece takes/
+  )
+  await refused(
+    'a line for every colour beside one for a colour is a gap at release',
+    { materials: [...withReason, line({ colour: 'Blue', qtyPerPiece: 1.4 })] },
+    'SPEC_INCOMPLETE',
+    /Line 7: The line for every colour already gives Blue/
+  )
+  const withMaterials = (route) => ({ materials: withReason, route })
+  await refused(
+    'a route that does not start with cutting is refused',
+    withMaterials([step('OP-STI'), step('EX-CUT'), step('OP-FIN')]),
+    'CUTTING_FIRST'
+  )
+  await refused(
+    'a route that cuts twice is refused',
+    withMaterials([step('EX-CUT'), step('OP-STI'), step('EX-CUT', { name: 'Recut' })]),
+    'ONE_CUTTING'
+  )
+  await refused(
+    'a route with no stitching is refused',
+    withMaterials([step('EX-CUT'), step('OP-FIN')]),
+    'SPEC_INCOMPLETE',
+    /stitching/
+  )
+  await refused(
+    'a step done outside needs its unit',
+    withMaterials([
+      step('EX-CUT'),
+      step('OP-STI'),
+      step('OP-EMB', { execution: 'OUTSOURCED' }),
+      step('OP-FIN'),
+    ]),
+    'SPEC_INCOMPLETE',
+    /done outside\. Pick the unit/
+  )
+  await refused(
+    'a contractor who does not take the process is refused',
+    withMaterials([
+      step('EX-CUT', { contractorId: 'sample-tailor' }),
+      step('OP-STI'),
+      step('OP-FIN'),
+    ]),
+    'STEP_CONTRACTOR_MISMATCH'
+  )
+  const routeOut = [
+    step('EX-CUT'),
+    step('OP-STI', { contractorId: 'sample-tailor', instructions: 'Single needle' }),
+    step('OP-EMB', { execution: 'OUTSOURCED', vendorId: 'sample-embroidery-unit' }),
+    step('OP-FIN'),
+  ]
+  const draftIds = cur().map((l) => l.id)
+  const gridRelease = await action('RELEASE', full(withMaterials(routeOut)))
+  const out = doc.rounds[0]
+  const stageOf = (s) => [
+    s.operationId,
+    s.kind,
+    s.departmentId,
+    s.execution,
+    s.contractorId,
+    s.vendorId,
+  ]
+  check('release makes the route’s steps with who does each, and keeps the BOM rows', () => {
+    assert.ok(gridRelease.body.warnings.some((w) => /no quality check/.test(w)))
+    const dept = (c) => opOf[c].departmentId
+    assert.deepEqual(out.stages.map(stageOf), [
+      [opOf['EX-CUT'].id, 'CUTTING', dept('EX-CUT'), 'IN_HOUSE', null, null],
+      [opOf['OP-STI'].id, 'STITCHING', dept('OP-STI'), 'IN_HOUSE', 'sample-tailor', null],
+      [opOf['OP-EMB'].id, 'OTHER', dept('OP-EMB'), 'OUTSOURCED', null, 'sample-embroidery-unit'],
+      [opOf['OP-FIN'].id, 'FINISHING', dept('OP-FIN'), 'IN_HOUSE', null, null],
+    ])
+    assert.equal(out.stages[1].instructions, 'Single needle')
+    assert.deepEqual(
+      out.materials.map((m) => m.id),
+      draftIds
+    )
+    assert.equal(out.specification.materials[5].overrideReason, 'Buyer asked for a spare length')
+  })
+  await action('SAVE_DRAFT', { notes: 'Frozen now' }, 409)
+
+  // A department a released step or a BOM line names is kept: Masters refuses
+  // to delete it and says why, rather than blank the record.
+  const spareDept = await db.department.create({
+    data: {
+      code: 'EX-DEL-' + stamp,
+      name: 'Example department to delete ' + stamp,
+      companyId: company.id,
+    },
+  })
+  const [madeStep, madeLine] = [out.stages[0], out.materials[0]]
+  await db.sampleStage.update({ where: { id: madeStep.id }, data: { departmentId: spareDept.id } })
+  await db.sampleMaterial.update({ where: { id: madeLine.id }, data: { departmentId: spareDept.id } })
+  const deptUses = await (
+    await fetch(`${origin}/masters/departments/${spareDept.id}/delete-check`)
+  ).json()
+  const deptDelete = await fetch(`${origin}/masters/departments/${spareDept.id}?permanent=true`, {
+    method: 'DELETE',
+  })
+  const deptRefusal = await deptDelete.json()
+  const keptStep = await db.sampleStage.findUnique({ where: { id: madeStep.id } })
+  const keptLine = await db.sampleMaterial.findUnique({ where: { id: madeLine.id } })
+  await db.sampleStage.update({
+    where: { id: madeStep.id },
+    data: { departmentId: madeStep.departmentId },
+  })
+  await db.sampleMaterial.update({
+    where: { id: madeLine.id },
+    data: { departmentId: madeLine.departmentId },
+  })
+  const unusedDelete = await fetch(`${origin}/masters/departments/${spareDept.id}?permanent=true`, {
+    method: 'DELETE',
+  })
+  check('a department a sample step or material line names is not deleted, and says why', () => {
+    assert.deepEqual(deptUses.data.refuse, ['1 sample making step', '1 sample material line'])
+    assert.equal(deptDelete.status, 409)
+    assert.equal(deptRefusal.code, 'IN_USE')
+    assert.match(deptRefusal.message, /1 sample making step/)
+    assert.match(deptRefusal.message, /1 sample material line/)
+    assert.equal(keptStep.departmentId, spareDept.id)
+    assert.equal(keptLine.departmentId, spareDept.id)
+    // Once nothing names it, it goes.
+    assert.equal(unusedDelete.status, 200)
+  })
+
+  // The routings the request's style could take, and one of them as route rows.
+  r = await call('GET', `/${doc.id}/routings`, undefined, viewOnly)
+  const fullRouting = r.body.data.find((x) => x.id === 'sample-route-full')
+  const rows = await call('GET', `/${doc.id}/routings/sample-route-full/steps`, undefined, viewOnly)
+  const noRouting = await call('GET', `/${doc.id}/routings/missing-routing/steps`)
+  const notAllowed = await call('GET', `/${doc.id}/routings`, undefined, 'inventory:view')
+  check('the style’s routings are offered, and one comes back as route rows without rates', () => {
+    assert.equal(r.status, 200)
+    assert.equal(fullRouting.applies, 'STYLE')
+    assert.equal(fullRouting.problem, null)
+    assert.equal(fullRouting.steps, 5)
+    assert.ok(r.body.data.some((x) => x.id === 'sample-route'))
+    assert.deepEqual(
+      rows.body.data.map((s) => s.kind),
+      ['CUTTING', 'STITCHING', 'OTHER', 'FINISHING', 'QC']
+    )
+    assert.equal(rows.body.data[1].contractorId, 'sample-tailor')
+    assert.equal(rows.body.data[2].execution, 'OUTSOURCED')
+    assert.equal(rows.body.data[2].vendorId, 'sample-embroidery-unit')
+    assert.equal(rows.body.data[0].name, opOf['EX-CUT'].name)
+    assert.equal(
+      rows.body.data.some((s) => 'ratePerPiece' in s),
+      false
+    )
+    assert.equal(noRouting.status, 404)
+    assert.equal(notAllowed.status, 403)
+  })
+  await action('CANCEL', 'Local grid check complete; nothing issued')
+
+  // A round saved before the colour grid, put back as it was by raw SQL.
+  doc = await openRequest(' saved before the colour grid')
+  const legacy = {
+    milestone: 'Old fit sample',
+    styleId: 'sample-style',
+    color: 'White',
+    construction: 'As before',
+    techPackRef: 'OLD-TP',
+    patternRef: 'OLD-PT',
+    sizes: [{ sizeId: 'sample-size-M', qty: 2 }],
+    measurements: spec.measurements,
+    stages: ['Cutting', 'Stitching', 'Finishing'],
+    materials: [
+      { itemId: 'sample-fabric', warehouseId: 'sample-store', qty: 5, ownership: 'OWNED' },
+    ],
+    notes: '',
+  }
+  const legacyRoundId = doc.rounds[0].id
+  await db.$executeRaw`UPDATE ld_erp.sample_rounds SET specification = ${JSON.stringify(
+    legacy
+  )}::jsonb WHERE id = ${legacyRoundId}`
+  doc = (await call('GET', `/${doc.id}`)).body.data
+  const printedLegacy = (await call('GET', `/${doc.id}/print`, undefined, viewOnly)).body.data
+  const readBack = doc.rounds[0].specification
+  check('a round saved before the colour grid reads in the new shape', () => {
+    assert.deepEqual(readBack.colours, [{ colour: 'White', sizes: legacy.sizes }])
+    assert.deepEqual(
+      readBack.route.map((s) => [s.name, s.kind, s.operationId]),
+      [
+        ['Cutting', 'CUTTING', ''],
+        ['Stitching', 'STITCHING', ''],
+        ['Finishing', 'FINISHING', ''],
+      ]
+    )
+    assert.deepEqual(readBack.materials, [
+      {
+        component: '',
+        itemId: 'sample-fabric',
+        colour: null,
+        departmentId: null,
+        qtyPerPiece: 0,
+        wastagePct: 0,
+        requiredQty: 5,
+        requiredOverride: true,
+        overrideReason: 'Planned before the material table',
+        source: 'PURCHASE',
+        estRate: null,
+        remarks: '',
+      },
+    ])
+    assert.equal(readBack.color, undefined)
+    assert.deepEqual(printedLegacy.request.rounds[0].specification, readBack)
+  })
+  await action('RELEASE', {}, 400)
+  await action('SAVE_DRAFT', { notes: 'Opened after the colour grid' })
+  const rewritten = (await db.sampleRound.findUnique({ where: { id: legacyRoundId } }))
+    .specification
+  const legacyRows = await db.sampleMaterial.findMany({ where: { roundId: legacyRoundId } })
+  check('and is saved in the new shape, its material becoming a row', () => {
+    for (const old of ['color', 'sizes', 'stages']) assert.equal(old in rewritten, false, old)
+    assert.deepEqual(rewritten.colours, readBack.colours)
+    assert.equal(legacyRows.length, 1)
+    assert.equal(rewritten.materials[0].id, legacyRows[0].id)
+    assert.equal(+legacyRows[0].plannedQty, 5)
+    assert.equal(legacyRows[0].requiredOverride, true)
+    assert.equal(legacyRows[0].warehouseId, null)
+    assert.equal(rewritten.notes, 'Opened after the colour grid')
+  })
+  await action('CANCEL', 'Local legacy-shape check complete; nothing issued')
+
+  // A material the tech pack names that we have never bought, added from the request.
+  const quick = {
+    name: 'Shell button 15L ' + stamp,
+    type: 'TRIM',
+    categoryId: 'sample-category-trims',
+    uomId: pcs.id,
+    standardRate: 2.5,
+  }
+  const quickViewOnly = await call('POST', '/items', quick, viewOnly)
+  const quickPart = await call('POST', '/items', { ...quick, type: 'SEMI_FINISHED' }, merch)
+  // A code typed by hand, or the item sent switched off, is ignored here.
+  const quickMade = await call('POST', '/items', { ...quick, code: 'MY-OWN-1', isActive: false }, merch)
+  const quickRow = await db.item.findUnique({
+    where: { id: quickMade.body.data?.id ?? '' },
+    select: { code: true, isActive: true },
+  })
+  const quickTwice = await call(
+    'POST',
+    '/items',
+    { ...quick, name: ' ' + quick.name.toUpperCase() },
+    merch
+  )
+  const quickAudit = await db.auditLog.findFirst({
+    where: { entityType: 'Item', entityId: quickMade.body.data?.id },
+  })
+  check('a merchandiser adds a trim by the item master’s rules, coded from its category', () => {
+    assert.equal(quickViewOnly.status, 403)
+    assert.equal(quickPart.status, 400)
+    assert.equal(quickPart.body.code, 'ITEM_TYPE_NOT_ALLOWED')
+    assert.equal(quickMade.status, 201, JSON.stringify(quickMade.body))
+    const made = quickMade.body.data
+    assert.match(made.code, /^SAM-\d{3,}$/)
+    assert.equal(quickRow.code, made.code)
+    assert.equal(quickRow.isActive, true)
+    assert.deepEqual(
+      {
+        type: made.type,
+        uom: made.uom,
+        standardRate: made.standardRate,
+        departmentId: made.departmentId,
+      },
+      {
+        type: 'TRIM',
+        uom: { id: pcs.id, code: 'pcs', name: pcs.name, symbol: 'pcs' },
+        standardRate: 2.5,
+        departmentId: null,
+      }
+    )
+    assert.equal(quickTwice.status, 400)
+    assert.match(quickTwice.body.message, /already exists/)
+    assert.equal(quickAudit.module, 'masters')
+    assert.equal(quickAudit.action, 'CREATE')
+    assert.equal(quickAudit.after.code, made.code)
+  })
+  const found = await call(
+    'GET',
+    `/items/search?q=${encodeURIComponent('shell BUTTON 15l ' + stamp)}`,
+    undefined,
+    viewOnly
+  )
+  const listed = await call('GET', '/items/search?limit=50', undefined, viewOnly)
+  check('the BOM picker finds it, and lists only materials, trims, packing and consumables', () => {
+    assert.deepEqual(
+      found.body.data.map((x) => x.id),
+      [quickMade.body.data.id]
+    )
+    assert.ok(listed.body.data.length > 0)
+    for (const x of listed.body.data)
+      assert.ok(['RAW_MATERIAL', 'TRIM', 'PACKING_MATERIAL', 'CONSUMABLE'].includes(x.type), x.type)
+  })
+  // Masters → Items adds by the same rules, and answers as it always has.
+  res = await fetch(`${origin}/masters/items`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...quick, name: 'Masters trim ' + stamp }),
+  })
+  const mastersMade = await res.json()
+  const mastersTwice = await fetch(`${origin}/masters/items`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...quick, name: 'masters TRIM ' + stamp }),
+  })
+  check('Masters → Items still adds an item with its category, unit and code', () => {
+    assert.equal(res.status, 201, JSON.stringify(mastersMade))
+    assert.match(mastersMade.data.code, /^SAM-\d{3,}$/)
+    assert.equal(mastersMade.data.category.name, 'Sample Trims')
+    assert.equal(mastersMade.data.uom.symbol, 'pcs')
+    assert.ok('taxRate' in mastersMade.data)
+    assert.equal(mastersTwice.status, 400)
+  })
+
+  // ── Phase 2 review fixes ────────────────────────────────────────────────────
+  // The limits a round's text and chart keep, read from the schema itself.
+  const schemas = require('../apps/api/src/schemas/sampling.schemas.ts')
+  const firstIssue = (r) => (r.success ? '' : r.error.issues[0].message)
+  const longPart = schemas.sampleDraftPatchSchema.safeParse({
+    materials: [{ component: 'P'.repeat(61) }],
+  })
+  const longWords = schemas.sampleDraftPatchSchema.safeParse({
+    route: [{ operationId: '', instructions: 'W'.repeat(501) }],
+  })
+  const longName = schemas.sampleDraftPatchSchema.safeParse({
+    route: [{ operationId: '', name: 'N'.repeat(200) }],
+  })
+  const overChart = schemas.sampleDraftPatchSchema.safeParse({
+    measurements: Array.from({ length: 6001 }, (_, i) => ({
+      name: `P${i % 150}`,
+      sizeId: `s${i}`,
+      target: 1,
+      tolerance: 0,
+      unit: 'cm',
+    })),
+  })
+  const overPoints = schemas.sampleDraftPatchSchema.safeParse({
+    measurements: Array.from({ length: 201 }, (_, i) => ({
+      name: `P${i}`,
+      sizeId: 'm',
+      target: 1,
+      tolerance: 0,
+      unit: 'cm',
+    })),
+  })
+  const overQc = schemas.sampleQcSchema.safeParse({
+    actuals: Array(6001).fill(1),
+    passedQty: 1,
+    notes: 'Too many readings',
+  })
+  check('a round’s text keeps to the masters it becomes, and its chart limits are plain', () => {
+    assert.equal(firstIssue(longPart), 'Keep this to 60 characters')
+    assert.equal(firstIssue(longWords), 'Keep this to 500 characters')
+    assert.equal(longName.success, true)
+    assert.equal(
+      firstIssue(overChart),
+      'Up to 6000 measurement targets in one round (points × sizes). Use fewer points or sizes.'
+    )
+    assert.equal(firstIssue(overPoints), 'Up to 200 measurement points in one round.')
+    assert.equal(firstIssue(overQc), 'Up to 6000 measurements in one check.')
+  })
+
+  // A full chart (101 points in two sizes: 202 targets) and a process named at
+  // more than a step name used to take: saved, released and checked.
+  const longOp = await db.operation.create({
+    data: {
+      code: 'EX-LONG-' + stamp,
+      name:
+        'Enzyme stone wash with silicone softener, tumble dry and hand finish for denim shirts ' +
+        stamp,
+      kind: 'OTHER',
+      defaultExecution: 'IN_HOUSE',
+      departmentId: opOf['OP-EMB'].departmentId,
+      sortOrder: 990,
+    },
+  })
+  const twoSizes = ['sample-size-M', 'sample-size-L']
+  const bigChart = Array.from({ length: 101 }, (_, i) =>
+    twoSizes.map((sizeId) => ({
+      name: `Point ${i + 1}`,
+      sizeId,
+      target: 50,
+      tolerance: 1,
+      unit: 'cm',
+    }))
+  ).flat()
+  const longStep = {
+    operationId: longOp.id,
+    name: '',
+    kind: 'OTHER',
+    departmentId: '',
+    execution: 'IN_HOUSE',
+    contractorId: null,
+    vendorId: null,
+    instructions: '',
+  }
+  const chartGrid = [{ colour: 'White', sizes: twoSizes.map((sizeId) => ({ sizeId, qty: 1 })) }]
+  doc = await openRequest(' full chart and a long process name')
+  await action('LINK_STYLE', { styleId: 'sample-style' })
+  await action('SAVE_DRAFT', {
+    colours: chartGrid,
+    measurements: bigChart,
+    route: [step('EX-CUT'), step('OP-STI'), longStep, step('OP-FIN')],
+    materials: [line()],
+  })
+  // The step took the process's own long name; this save sends it back.
+  await action('SAVE_DRAFT', { notes: 'Saved again with the long step name' })
+  const chartDraft = doc.rounds[0].specification
+  check('a chart of more than 200 targets and a long process name save as a draft', () => {
+    assert.ok(longOp.name.length > 80)
+    assert.equal(chartDraft.measurements.length, 202)
+    assert.equal(chartDraft.route[2].name, longOp.name)
+    assert.equal(chartDraft.notes, 'Saved again with the long step name')
+  })
+  await action('RELEASE', {
+    ...spec,
+    colours: chartGrid,
+    measurements: chartDraft.measurements,
+    route: chartDraft.route,
+    materials: chartDraft.materials,
+  })
+  const chartRound = doc.rounds[0]
+  await action('MATERIAL', {
+    materialId: chartRound.materials[0].id,
+    kind: 'ISSUE',
+    qty: 5,
+    reason: 'Material for the full chart',
+    warehouseId: store,
+  })
+  for (const stage of chartRound.stages)
+    await action('STAGE', { ...stepData, stageId: stage.id })
+  await action('QC', {
+    actuals: chartDraft.measurements.map((m) => m.target),
+    passedQty: 2,
+    notes: 'Every point of the chart measured',
+  })
+  check('it is released with the long step name, and QC takes a reading for every target', () => {
+    assert.equal(chartRound.stages[2].name, longOp.name)
+    assert.equal(doc.rounds[0].state, 'QC_PASSED')
+    assert.equal(doc.rounds[0].qc.results.length, 202)
+  })
+  await action('MATERIAL', {
+    materialId: chartRound.materials[0].id,
+    kind: 'RETURN',
+    qty: 5,
+    reason: 'Chart check: material back to the store',
+  })
+  await action('CANCEL', 'Local full-chart check complete; nothing kept')
+  await db.operation.update({ where: { id: longOp.id }, data: { isActive: false } })
+
+  // Masters switched off since they were picked: each save names the line,
+  // and a new round clears a dead department back to the item's own.
+  const offDept = await db.department.create({
+    data: {
+      code: 'EX-OFF-' + stamp,
+      name: 'Example department switched off ' + stamp,
+      companyId: company.id,
+    },
+  })
+  const offTrim = (await call('POST', '/items', { ...quick, name: 'Trim switched off ' + stamp }, merch))
+    .body.data
+  doc = await openRequest(' masters switched off')
+  await action('LINK_STYLE', { styleId: 'sample-style' })
+  await action('SAVE_DRAFT', {
+    colours: [{ colour: 'White', sizes: [{ sizeId: 'sample-size-M', qty: 2 }] }],
+    materials: [
+      line(),
+      line({
+        component: 'Packing',
+        itemId: 'sample-polybag',
+        qtyPerPiece: 1,
+        departmentId: offDept.id,
+      }),
+      line({ component: 'Front', itemId: offTrim.id, qtyPerPiece: 6 }),
+    ],
+  })
+  await db.department.update({ where: { id: offDept.id }, data: { isActive: false } })
+  await db.item.update({ where: { id: offTrim.id }, data: { isActive: false } })
+  const offDeptSave = await action('SAVE_DRAFT', { notes: 'Only the notes changed' }, 409)
+  const deptCleared = doc.rounds[0].specification.materials.map((l, i) =>
+    i === 1 ? { ...l, departmentId: null } : l
+  )
+  const offItemSave = await action('SAVE_DRAFT', { materials: deptCleared }, 409)
+  check('a department or material switched off since is refused by its line', () => {
+    assert.equal(offDeptSave.body.code, 'BAD_DEPARTMENT')
+    assert.match(offDeptSave.body.message, /^Line 2: pick a department that is still in use/)
+    assert.equal(offItemSave.body.code, 'ITEM_NOT_IN_USE')
+    assert.match(offItemSave.body.message, /^Line 3: the material for Front is no longer in use/)
+  })
+  await db.sampleRound.update({
+    where: { id: doc.rounds[0].id },
+    data: { state: 'CHANGES_REQUIRED' },
+  })
+  doc = (await call('GET', `/${doc.id}`)).body.data
+  await action('NEW_ROUND', 'Buyer asked for another fit')
+  const carried = doc.rounds[0].specification.materials
+  check('a new round takes the item’s own department for one switched off since', () => {
+    assert.equal(doc.rounds[0].revision, 2)
+    assert.equal(carried[1].departmentId, finishingDept)
+    assert.equal(
+      doc.rounds[0].materials.find((m) => m.id === carried[1].id).departmentId,
+      finishingDept
+    )
+    // The material is carried as it was, for the editor to flag and the next save to refuse.
+    assert.equal(carried[2].itemId, offTrim.id)
+  })
+  await action('CANCEL', 'Local masters check complete; nothing issued')
 
   console.log(`\n${passed} checks passed on local lderp_sampling. Shared database never accessed.`)
 }

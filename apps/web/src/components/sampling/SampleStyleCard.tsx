@@ -9,7 +9,7 @@ import { SuggestInput } from '@/components/ui/SuggestInput'
 import { NextStyleCode } from '@/components/masters/NextStyleCode'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { Field } from './SampleSpecEditor'
-import { addColours, distinctValues, draftLoss, styleRules } from './samplingFlow'
+import { addColours, distinctValues, draftLoss, refitText, styleRules } from './samplingFlow'
 import type { Lookups, SampleRequest } from './types'
 
 /** In sampling reads as waiting (amber), production as done (green), as the badge colours mean. */
@@ -75,7 +75,10 @@ export function SampleStyleCard({
     try {
       const updated = await post(action, data)
       setOpened(null)
-      notify(said(updated))
+      // What the refit cleared from the draft, as the server counted it in the new event.
+      const latestEvent = updated.events.find((e) => e.action === action)
+      const cleared = refitText(latestEvent?.detail.data?.refit)
+      notify(cleared ? `${said(updated)} ${cleared}` : said(updated))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save the style. Try again.')
     } finally {
@@ -442,7 +445,7 @@ function StyleWindow({
       footerNote={
         mode === 'create'
           ? 'Made in sampling for this request. It reaches orders and production only after its sample is approved and handed over.'
-          : 'The draft specification keeps what still fits the style; a colour or size it no longer has is cleared.'
+          : 'The draft specification keeps what still fits the style; a colour or size it no longer has is cleared, with the material lines for that colour only.'
       }
     >
       <form
@@ -567,7 +570,7 @@ function StyleWindow({
       {pending && (
         <ReasonDialog
           title="Clear part of the draft specification?"
-          description={`${pending.loss} The style as saved does not have them.`}
+          description={`${pending.loss} The style as saved does not have those colours or sizes.`}
           confirmLabel={mode === 'create' ? 'Create and clear them' : 'Save and clear them'}
           cancelLabel="Go back"
           danger
@@ -760,7 +763,7 @@ function LinkWindow({
           )}
         </>
       }
-      footerNote="The draft keeps its colour, sizes and measurements where the style has them; anything else is cleared, after you confirm."
+      footerNote="The draft keeps its colours, sizes, measurements and material lines where the style has them; anything else is cleared, after you confirm."
     >
       <form
         id="sample-link-style"
@@ -842,7 +845,7 @@ function LinkWindow({
       {pending && (
         <ReasonDialog
           title="Clear part of the draft specification?"
-          description={`${pending.loss} ${pending.styleId ? 'The style chosen does not have them.' : 'Without a style the draft cannot keep a colour, sizes or measurements.'}`}
+          description={`${pending.loss} ${pending.styleId ? 'The style chosen does not have those colours or sizes.' : 'Without a style the draft cannot keep its colours, sizes, measurements or the material lines for one colour.'}`}
           confirmLabel={pending.styleId ? 'Use this style and clear them' : 'Take the style off'}
           cancelLabel="Go back"
           danger

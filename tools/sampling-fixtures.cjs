@@ -419,6 +419,72 @@ async function seed() {
     },
   })
 
+  // What a round's own BOM and route are built from (phase 2). A polybag that Finishing
+  // draws, so a BOM line with no department takes the item's own; an outside embroidery
+  // unit set up as a job-work line of its supplier; and the example shirt's full production
+  // route, which a round can start from: cutting, stitching by the sample tailor,
+  // embroidery outside, finishing and the check.
+  const packing = await db.itemCategory.upsert({
+    where: { name: 'Sample Packing' },
+    update: {},
+    create: { id: 'sample-category-packing', name: 'Sample Packing', trackPackages: false },
+  })
+  const deptOf = async (code) => (await db.department.findUnique({ where: { code } })).id
+  await db.item.upsert({
+    where: { code: 'EX-PCK-001' },
+    update: {},
+    create: {
+      id: 'sample-polybag',
+      code: 'EX-PCK-001',
+      name: 'Polybag 12x16',
+      type: 'PACKING_MATERIAL',
+      categoryId: packing.id,
+      uomId: pieces.id,
+      departmentId: await deptOf('FIN'),
+      taxRateId: gst[12].id,
+    },
+  })
+  await db.workstation.upsert({
+    where: { code: 'EX-WS-EMB' },
+    update: {},
+    create: {
+      id: 'sample-embroidery-line',
+      code: 'EX-WS-EMB',
+      name: 'Example embroidery unit',
+      departmentId: await deptOf('EMB'),
+      operationId: ops['OP-EMB'].id,
+      type: 'JOB_WORK',
+      supplierId: 'sample-embroidery-unit',
+    },
+  })
+  const fullRoute = [
+    [op, 'IN_HOUSE', {}],
+    [ops['OP-STI'], 'IN_HOUSE', { contractorId: 'sample-tailor' }],
+    [ops['OP-EMB'], 'OUTSOURCED', { workstationId: 'sample-embroidery-line' }],
+    [ops['OP-FIN'], 'IN_HOUSE', {}],
+    [ops['OP-QC'], 'IN_HOUSE', { isQcStep: true }],
+  ]
+  await db.routing.upsert({
+    where: { code: 'EX-ROUTE-FULL' },
+    update: {},
+    create: {
+      id: 'sample-route-full',
+      code: 'EX-ROUTE-FULL',
+      name: 'Example shirt full route',
+      styleId: 'sample-style',
+      steps: {
+        create: fullRoute.map(([operation, execution, extra], i) => ({
+          sequence: i + 1,
+          operationId: operation.id,
+          departmentId: operation.departmentId,
+          execution,
+          skip: i === 0 ? 'NEVER' : 'WITH_APPROVAL',
+          ...extra,
+        })),
+      },
+    },
+  })
+
   // Orders, receipts, bills, enquiries, job work, requisitions and store transfers. As in
   // seed-core, a type that already has a series of any year keeps it, so no second run starts.
   for (const docType of ['PO', 'GRN', 'PB', 'ENQ', 'JW', 'MR', 'STN']) {

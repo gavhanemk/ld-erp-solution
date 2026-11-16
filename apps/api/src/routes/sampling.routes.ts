@@ -7,11 +7,13 @@ import { writeAuditLog } from '../lib/audit'
 import { samplingPilotEnabled } from '../lib/pilot'
 import { removeObject, signedDownloadUrl, signedUploadUrl, storagePathFor } from '../lib/storage'
 import { nextStyleCode } from '../lib/masterCode'
-import { SAMPLE_ATTACHMENT_KIND_LABEL } from '@ld-erp/shared'
+import { createItemRecord } from '../lib/itemMaster'
+import { SAMPLE_ATTACHMENT_KIND_LABEL, SAMPLE_MATERIAL_TYPES } from '@ld-erp/shared'
 import {
   createSampleSchema,
   sampleActionSchema,
   sampleAttachmentListSchema,
+  sampleItemSearchSchema,
   sampleUploadUrlSchema,
 } from '../schemas/sampling.schemas'
 import {
@@ -20,10 +22,15 @@ import {
   attachmentLock,
   createSample,
   fileLimitProblem,
+  routeTemplate,
+  routingAsRoute,
   sampleDetail,
+  sampleItemOption,
   sampleLookups,
+  searchSampleItems,
   type SampleAfterCommit,
 } from '../services/sampling.service'
+import { routingsFor } from '../services/route.service'
 
 const router = Router()
 /**
@@ -64,6 +71,39 @@ function visible(row: Awaited<ReturnType<typeof sampleDetail>>, req: AuthRequest
 router.get('/lookups', async (_req, res) =>
   res.json({ success: true, data: await prisma.$transaction(sampleLookups, T) })
 )
+/** The usual making route from the Operation master, for a round's route to start from. */
+router.get('/route-template', async (_req, res) =>
+  res.json({ success: true, data: await routeTemplate(prisma) })
+)
+
+// ── Materials for the sample BOM ─────────────────────────────────────────────
+//
+// The BOM's picker searches the materials in use; one the buyer's tech pack
+// names that we have never bought is added here, by the item master's own
+// rules (lib/itemMaster), without masters rights.
+
+router.get('/items/search', async (req, res) => {
+  const q = sampleItemSearchSchema.parse(req.query)
+  res.json({ success: true, data: await searchSampleItems(prisma, q.q, q.limit) })
+})
+router.post('/items', requirePermission('sampling', 'edit'), async (req: AuthRequest, res) => {
+  // A material added from a sample is always coded from its category and in
+  // use: typing a code of one's own, or adding one switched off, is for
+  // somebody with masters rights.
+  const body = { ...((req.body ?? {}) as Record<string, unknown>) }
+  delete body.code
+  delete body.isActive
+  const created = await createItemRecord(body, { types: SAMPLE_MATERIAL_TYPES })
+  // An item is a masters record wherever it is made, audited as Masters → Items audits one.
+  await writeAuditLog(req, {
+    module: 'masters',
+    action: 'CREATE',
+    entityType: 'Item',
+    entityId: created.id,
+    after: created,
+  })
+  res.status(201).json({ success: true, data: sampleItemOption(created) })
+})
 router.get('/', async (req: AuthRequest, res) => {
   const q = z
     .object({
@@ -301,6 +341,42 @@ router.get(
     })
   }
 )
+/**
+ * The production routings the request's style could take, best fit first
+ * (routingsFor, as an order is offered them), for a round's route to start
+ * from. Read only; the round's route is saved with its specification.
+ */
+router.get('/:id/routings', async (req, res) => {
+  const request = await prisma.sampleRequest.findUnique({
+    where: { id: req.params.id },
+    select: { styleId: true },
+  })
+  if (!request) throw new AppError('Sample request not found', 404, 'NOT_FOUND')
+  const routings = request.styleId ? await routingsFor(prisma, [request.styleId]) : []
+  res.json({
+    success: true,
+    data: routings.map((r) => ({
+      id: r.id,
+      code: r.code,
+      name: r.name,
+      version: r.version,
+      style: r.style,
+      category: r.category,
+      applies: r.applies,
+      problem: r.problem,
+      steps: r.steps.length,
+    })),
+  })
+})
+/** One routing's steps as a round's route rows, without rates. */
+router.get('/:id/routings/:routingId/steps', async (req, res) => {
+  const request = await prisma.sampleRequest.findUnique({
+    where: { id: req.params.id },
+    select: { id: true },
+  })
+  if (!request) throw new AppError('Sample request not found', 404, 'NOT_FOUND')
+  res.json({ success: true, data: await routingAsRoute(prisma, req.params.routingId) })
+})
 router.get('/:id', async (req: AuthRequest, res) =>
   res.json({
     success: true,
@@ -336,6 +412,7 @@ router.post('/:id/actions', async (req: AuthRequest, res) => {
       before: after.styleAudit.before,
       after: after.styleAudit.after,
     })
-  res.json({ success: true, data: visible(row, req) })
+  // What the action allowed but the screen should say: a route with no check.
+  res.json({ success: true, data: visible(row, req), warnings: after.warnings ?? [] })
 })
 export default router

@@ -1,9 +1,18 @@
 import {
   SAMPLE_ATTACHMENT_KINDS,
   SAMPLE_ATTACHMENT_KIND_LABEL,
+  SAMPLE_MATERIAL_TYPES,
+  cellCount,
+  piecesFor,
+  sizesInUse,
+  totalPieces,
   type SampleAttachment,
   type SampleAttachmentKind,
+  type SampleItemOption,
+  type SampleMaterialType,
   type SampleRequestStyle,
+  type SampleSpecContext,
+  type SampleSpecification,
 } from '@ld-erp/shared'
 import type {
   Lookups,
@@ -13,6 +22,7 @@ import type {
   SampleRequest,
   SampleRound,
 } from './types'
+import { gapsByTab, joinAnd, plural, pointsOf, releaseGaps, SPEC_TABS } from './specRules'
 
 export const SAMPLE_SECTIONS = [
   {
@@ -40,23 +50,83 @@ export const SAMPLE_SECTIONS = [
   { key: 'Handover', title: 'Production handover', description: 'Approved package and acceptance' },
 ] as const
 export type SampleSection = (typeof SAMPLE_SECTIONS)[number]['key'] | 'History'
+const round3 = (v: number) => Math.round(v * 1000) / 1000
 export const materialHeld = (m: SampleMaterial) =>
-  Math.round((+m.issuedQty - +m.usedQty - +m.wasteQty - +m.returnedQty) * 1000) / 1000
+  round3(+m.issuedQty - +m.usedQty - +m.wasteQty - +m.returnedQty)
+/**
+ * The lines still short of their plan before making step `index`: not all
+ * issued, or, before the first step, given back to the store since. The
+ * server holds the steps back on exactly these (STAGE).
+ */
+const shortLines = (round: Pick<SampleRound, 'materials'>, index: number) =>
+  round.materials.filter(
+    (m) =>
+      +m.issuedQty < +m.plannedQty ||
+      (index === 0 && round3(+m.issuedQty - +m.returnedQty) < +m.plannedQty)
+  )
 export function makingBlocker(round: SampleRound, index: number) {
   if (round.state === 'DRAFT') return 'Release the specification before making starts.'
   if (round.stages.slice(0, index).some((s) => !s.completedAt))
     return 'Complete the preceding making step first.'
-  if (
-    round.materials.some(
-      (m) =>
-        +m.issuedQty < +m.plannedQty ||
-        (index === 0 && Math.round((+m.issuedQty - +m.returnedQty) * 1000) / 1000 < +m.plannedQty)
-    )
-  )
+  if (shortLines(round, index).length)
     return 'Issue all planned materials before recording the first making step. Returned material cannot be counted as available.'
   return ''
 }
-export function sampleFlow(request: SampleRequest, round = request.rounds[0]) {
+
+/**
+ * Several colours or sizes in one round make it a set. Nothing on the round
+ * says which colour or size a rejected piece was, so the set goes through
+ * making, QC and the buyer whole, and the server refuses anything less
+ * (STAGE, QC, SUBMIT). The words are the server's own.
+ */
+export const isSampleSet = (spec: Pick<SampleSpecification, 'colours'>) => cellCount(spec) > 1
+export const SET_TEXT = {
+  stage:
+    'With several colours or sizes in one round, record the whole set here; take rejected pieces out in a new round.',
+  qc: 'With several colours or sizes in one round, inspect and pass the whole set; take rejected pieces out in a new round.',
+  submit: 'Submit the whole inspected set so the approval covers every colour and size.',
+} as const
+/** The pieces a making step receives: the whole grid at the first step, then what the step before finished. */
+export const stageInput = (round: Pick<SampleRound, 'specification' | 'stages'>, index: number) =>
+  index === 0 ? totalPieces(round.specification) : (round.stages[index - 1]?.doneQty ?? 0)
+
+/**
+ * What the release check would say of the saved draft, with the request's
+ * style and buyer as they are now: the same list the editor's review shows
+ * (shared gaps and the cutting rules), from the specification last saved.
+ */
+export function specContext(
+  request: Pick<SampleRequest, 'style' | 'customerId'>,
+  sizes: Lookups['sizes']
+): SampleSpecContext {
+  const style = request.style
+  return {
+    // The register sends a style without its colours; nothing is checked against that.
+    style:
+      style && Array.isArray(style.colors)
+        ? {
+            colors: style.colors,
+            sizeIds: style.sizeGroupId
+              ? sizes.filter((z) => z.sizeGroupId === style.sizeGroupId).map((z) => z.id)
+              : [],
+          }
+        : null,
+    sizes,
+    hasBuyer: !!request.customerId,
+  }
+}
+export const draftGaps = (
+  request: Pick<SampleRequest, 'style' | 'customerId'>,
+  round: Pick<SampleRound, 'specification'>,
+  sizes: Lookups['sizes']
+) => releaseGaps(round.specification, specContext(request, sizes))
+
+export function sampleFlow(
+  request: SampleRequest,
+  round = request.rounds[0],
+  /** The size list: with it, a draft says what its saved specification still lacks. */
+  sizes?: Lookups['sizes']
+) {
   let section: SampleSection = 'Technical',
     title = 'Prepare the sample specification'
   let description = 'Work through the four setup sections, then review and release this round.'
@@ -74,17 +144,38 @@ export function sampleFlow(request: SampleRequest, round = request.rounds[0]) {
     title = 'Add the tech pack and set the style'
     description =
       'Attach the buyer’s tech pack, then create a development style for this request or use an existing one. The specification is prepared on that style.'
+  } else if (round.state === 'DRAFT' && sizes) {
+    // The tabs of the editor that still have something to finish, as its review lists them.
+    const byTab = gapsByTab(draftGaps(request, round, sizes))
+    const open = SPEC_TABS.filter((t) => byTab[t.key].length)
+    if (!open.length) {
+      title = `Release round ${round.revision} for sampling`
+      description =
+        'The saved specification has everything a release needs. Review it, then release it: that freezes it and starts material issue and making. Releasing needs sampling approval.'
+    } else
+      description = `The saved draft still has items to finish under ${joinAnd(open.map((t) => `${t.title} (${byTab[t.key].length})`))}. Save as you go, and release once nothing is left.`
   } else if (round.state === 'RELEASED') {
     const index = round.stages.findIndex((s) => !s.completedAt)
+    const set = isSampleSet(round.specification)
     if (index >= 0) {
       const blocker = makingBlocker(round, index)
+      const short = shortLines(round, index)
       section = blocker ? 'Materials' : 'Making'
       title = blocker
         ? 'Prepare material for making'
         : `Record ${round.stages[index].name.toLowerCase()}`
-      description =
-        blocker ||
-        'Record the completed quantity, rejected pieces and responsible person for this step.'
+      description = blocker
+        ? [
+            blocker,
+            `${short.length} of ${plural(round.materials.length, 'material line')} ${short.length === 1 ? 'is' : 'are'} not fully issued yet.`,
+            // Each line's store is named at its first issue (STORE_REQUIRED).
+            short.some((m) => !m.warehouseId) ? 'Pick the store at each line’s first issue.' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')
+        : set
+          ? `Record who did this step and the pieces done. ${SET_TEXT.stage}`
+          : 'Record the completed quantity, rejected pieces and responsible person for this step.'
     } else if (round.stages.length && round.stages.at(-1)?.doneQty === 0) {
       section = 'History'
       title = 'No sample pieces remain for QC'
@@ -96,12 +187,16 @@ export function sampleFlow(request: SampleRequest, round = request.rounds[0]) {
       description =
         round.qc?.passed === false
           ? 'Record a corrected inspection or start a new round. The failed inspection stays in the history.'
-          : 'Enter actual measurements and confirm workmanship before sending the sample to the buyer.'
+          : set
+            ? 'Enter actual measurements and confirm workmanship of the whole set, every colour and size, before sending it to the buyer.'
+            : 'Enter actual measurements and confirm workmanship before sending the sample to the buyer.'
     }
   } else if (round.state === 'QC_PASSED') {
     section = 'Buyer review'
     title = 'Submit the sample to the buyer'
-    description = 'Record the pieces sent, recipient and courier or handover reference.'
+    description = isSampleSet(round.specification)
+      ? `${SET_TEXT.submit} Record the recipient and the courier or handover reference.`
+      : 'Record the pieces sent, recipient and courier or handover reference.'
   } else if (round.state === 'SUBMITTED') {
     section = 'Buyer review'
     title = 'Awaiting buyer feedback'
@@ -121,7 +216,7 @@ export function sampleFlow(request: SampleRequest, round = request.rounds[0]) {
         : 'Prepare the approved production package'
     description = round.handover?.acceptedAt
       ? 'The approved sample record is ready for production planning.'
-      : 'Link the approved BOM and production route, then record production acceptance.'
+      : 'Link an approved BOM of this style, for every colour or for one of this round’s colours, and the production route, then record production acceptance.'
     const madeHere = developmentStyleOf(request, round)
     if (!round.handover && madeHere) {
       title = 'Keep the approved round as the record'
@@ -209,12 +304,14 @@ export function styleRules(request: Pick<SampleRequest, 'rounds' | 'style' | 'ca
   const sampled = style
     ? request.rounds.filter((r) => r.state !== 'DRAFT' && r.specification.styleId === style.id)
     : []
+  // Every colour row of a released round, as UPDATE_STYLE counts them (pieces or not).
   const sampledColours: string[] = []
-  for (const r of sampled) {
-    const colour = r.specification.color.trim()
-    if (colour && !sampledColours.some((c) => c.toLowerCase() === colour.toLowerCase()))
-      sampledColours.push(colour)
-  }
+  for (const r of sampled)
+    for (const row of r.specification.colours) {
+      const colour = row.colour.trim()
+      if (colour && !sampledColours.some((c) => c.toLowerCase() === colour.toLowerCase()))
+        sampledColours.push(colour)
+    }
   // Released before requests named their style: the style the first released
   // round was made in is the one LINK_STYLE still accepts.
   const firstReleased = style
@@ -355,38 +452,301 @@ export function filesFullText(
 
 /**
  * What the draft round would lose if the request moved to this style (null:
- * no style): its colour when the style lacks it, the sizes outside the
- * style's size run, and the measurement points taken on them. The server
- * clears exactly these when the style changes, so the screen asks first.
- * '' when nothing would be lost.
+ * no style), as the server's refit clears it (refitDrafts): each colour the
+ * style lacks, with its pieces and the material lines for that colour only;
+ * the sizes outside the style's size run in the colours that stay, and the
+ * measurements taken on those sizes. Lines for every colour stay, their
+ * quantities worked out again. The screen asks first. '' when nothing would
+ * be lost.
  */
 export function draftLoss(
   request: Pick<SampleRequest, 'rounds'>,
   style: { colors: string[]; sizeGroupId: string | null } | null,
-  sizes: Array<{ id: string; sizeGroupId: string }>
+  sizes: Array<{ id: string; sizeGroupId: string; code?: string }>
 ) {
   const draft = request.rounds.find((r) => r.state === 'DRAFT')
   if (!draft) return ''
   const s = draft.specification
   const run = new Set(
-    style?.sizeGroupId ? sizes.filter((z) => z.sizeGroupId === style.sizeGroupId).map((z) => z.id) : []
+    style?.sizeGroupId
+      ? sizes.filter((z) => z.sizeGroupId === style.sizeGroupId).map((z) => z.id)
+      : []
   )
   const fits = (sizeId: string) => !sizeId || run.has(sizeId)
-  const colour = s.color.trim()
-  const lostColour =
-    colour && !style?.colors.some((c) => c.toLowerCase() === colour.toLowerCase()) ? colour : ''
-  const lostSizes = s.sizes.filter((x) => !fits(x.sizeId)).length
-  const lostPoints = s.measurements.filter((x) => !fits(x.sizeId)).length
-  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+  const own = (colour: string) =>
+    !!style?.colors.some((c) => c.toLowerCase() === colour.toLowerCase())
+  // A row whose colour is not picked yet stays, as the server keeps it.
+  const lostRows = s.colours.filter((r) => r.colour.trim() && !own(r.colour.trim()))
+  const keptRows = s.colours.filter((r) => !lostRows.includes(r))
+  const lostColours = lostRows.map((r) => r.colour.trim())
+  const lostPieces = piecesFor({ colours: lostRows }, null)
+  // A lost colour's sizes go with it; these are the ones the colours that stay lose.
+  const lostSizeIds = [
+    ...new Set(keptRows.flatMap((r) => r.sizes.map((z) => z.sizeId)).filter((id) => !fits(id))),
+  ]
+  const lostTargets = s.measurements.filter((m) => !fits(m.sizeId)).length
+  const kept = new Set(keptRows.map((r) => r.colour.trim().toLowerCase()).filter(Boolean))
+  // The rows decide once the round has any, as the server reads them.
+  const lines: Array<{ colour: string | null }> = draft.materials.length
+    ? draft.materials
+    : s.materials
+  const lostLines = lines.filter(
+    (l) => l.colour?.trim() && !kept.has(l.colour.trim().toLowerCase())
+  ).length
+  const code = (id: string) => sizes.find((z) => z.id === id)?.code
   const parts = [
-    lostColour && `colour ${lostColour}`,
-    lostSizes && plural(lostSizes, 'size'),
-    lostPoints && plural(lostPoints, 'measurement point'),
+    lostColours.length &&
+      `${lostColours.length === 1 ? 'colour' : 'colours'} ${joinAnd(lostColours)}${lostPieces ? ` (${plural(lostPieces, 'piece')})` : ''}`,
+    lostSizeIds.length &&
+      (lostSizeIds.every(code)
+        ? `${lostSizeIds.length === 1 ? 'size' : 'sizes'} ${joinAnd(lostSizeIds.map((id) => code(id)!))}`
+        : plural(lostSizeIds.length, 'size')),
+    lostTargets && plural(lostTargets, 'measurement'),
+    lostLines &&
+      `${plural(lostLines, 'material line')} for ${lostColours.length ? joinAnd(lostColours) : 'a colour no longer on the round'}`,
   ].filter((x): x is string => !!x)
   if (!parts.length) return ''
-  const list =
-    parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`
-  return `Round ${draft.revision}’s ${list} will be cleared.`
+  // Semicolons between the parts: each part may name several colours or sizes itself.
+  return `Round ${draft.revision}’s draft will lose ${parts.join('; ')}.`
+}
+
+/**
+ * What a style change cleared from each draft, from its event (detail.refit,
+ * the server's own count), in words; '' when nothing was. The server counts
+ * a size once for each colour it was entered in.
+ */
+export function refitText(refit: unknown) {
+  if (!Array.isArray(refit)) return ''
+  return refit
+    .flatMap((r) => {
+      const n = (key: string) => Number((r as Record<string, unknown> | null)?.[key]) || 0
+      const sizes = n('sizesDropped')
+      const parts = [
+        n('coloursDropped') && plural(n('coloursDropped'), 'colour'),
+        sizes && `${sizes} ${sizes === 1 ? 'size quantity' : 'size quantities'}`,
+        n('measurementsDropped') && plural(n('measurementsDropped'), 'measurement'),
+        n('materialsDropped') && plural(n('materialsDropped'), 'material line'),
+      ].filter((x): x is string => !!x)
+      return parts.length ? [`Round ${n('revision')}’s draft lost ${joinAnd(parts)}.`] : []
+    })
+    .join(' ')
+}
+
+// ── A round's specification, read only: the workspace and the printed record ──
+
+const inOrder = (ids: string[], order: string[]) => {
+  const rank = (id: string) => {
+    const at = order.indexOf(id)
+    return at < 0 ? order.length : at
+  }
+  return [...ids].sort((a, b) => rank(a) - rank(b))
+}
+/** The round's colours and pieces in a line: "Navy, White · 12 pcs". */
+export function colourSummary(spec: Pick<SampleSpecification, 'colours'>) {
+  const colours = spec.colours.map((r) => r.colour.trim()).filter(Boolean)
+  return colours.length
+    ? `${colours.join(', ')} · ${plural(totalPieces(spec), 'pc')}`
+    : 'No colours yet'
+}
+/**
+ * The colour × size grid with its totals: the sizes the round makes, in the
+ * size run's order (`sizeOrder`, the size list's own), a row per colour.
+ */
+export function colourGrid(spec: Pick<SampleSpecification, 'colours'>, sizeOrder: string[] = []) {
+  const sizeIds = inOrder(sizesInUse(spec), sizeOrder)
+  const rows = spec.colours
+    .map((r) => {
+      const qty: Record<string, number> = {}
+      for (const z of r.sizes)
+        if (z.sizeId) qty[z.sizeId] = (qty[z.sizeId] ?? 0) + (Number(z.qty) || 0)
+      return { colour: r.colour.trim(), qty, total: piecesFor({ colours: [r] }, null) }
+    })
+    .filter((r) => r.colour || r.total > 0)
+  const cols: Record<string, number> = {}
+  for (const id of sizeIds) cols[id] = rows.reduce((t, r) => t + (r.qty[id] ?? 0), 0)
+  return { sizeIds, rows, cols, total: totalPieces(spec) }
+}
+/**
+ * The measurements as points × sizes, one target a size, as the editor
+ * shows them (pointsOf). The columns are the sizes made and any size
+ * measured, so a made size with no targets shows as an empty column.
+ */
+export function measureMatrix(
+  spec: Pick<SampleSpecification, 'colours' | 'measurements'>,
+  sizeOrder: string[] = []
+) {
+  const measured = spec.measurements.map((m) => m.sizeId).filter(Boolean)
+  const sizeIds = inOrder([...new Set([...sizesInUse(spec), ...measured])], sizeOrder)
+  const points = pointsOf(spec.measurements).map((p) => ({
+    name: p.name,
+    tolerance: Number(p.tolerance) || 0,
+    unit: p.unit,
+    targets: Object.fromEntries(Object.entries(p.targets).map(([id, v]) => [id, Number(v)])),
+  }))
+  return { sizeIds, points }
+}
+/**
+ * The materials the round's own lines name that are still in use, as the
+ * BOM's picker lists them: one added after the page read its list (by someone
+ * else, or in another window) is then offered and named like any other.
+ */
+export function roundItems(round: Pick<SampleRound, 'materials'>): SampleItemOption[] {
+  const out: SampleItemOption[] = []
+  for (const m of round.materials) {
+    const it = m.item
+    if (!m.itemId || !it || it.isActive !== true || out.some((x) => x.id === m.itemId)) continue
+    if (!SAMPLE_MATERIAL_TYPES.includes(it.type as SampleMaterialType)) continue
+    out.push({
+      id: m.itemId,
+      code: it.code,
+      name: it.name,
+      type: it.type as SampleMaterialType,
+      uom: it.uom
+        ? {
+            id: it.uom.id ?? '',
+            code: it.uom.symbol,
+            name: it.uom.name ?? it.uom.symbol,
+            symbol: it.uom.symbol,
+          }
+        : null,
+      departmentId: it.departmentId ?? null,
+      standardRate:
+        it.standardRate === null || it.standardRate === undefined ? null : Number(it.standardRate),
+    })
+  }
+  return out
+}
+/**
+ * A BOM line's material as the round shows it: its own row's item (which
+ * names one switched off since), else the item list's, else why there is none.
+ */
+export function lineItem(
+  line: { id?: string; itemId: string },
+  round: Pick<SampleRound, 'materials'>,
+  items: Lookups['items']
+) {
+  const row =
+    (line.id && round.materials.find((m) => m.id === line.id)) ||
+    (line.itemId ? round.materials.find((m) => m.itemId === line.itemId) : undefined)
+  if (row?.item)
+    return { name: row.item.name, code: row.item.code, uom: row.item.uom?.symbol ?? '' }
+  const item = line.itemId ? items.find((i) => i.id === line.itemId) : undefined
+  if (item) return { name: item.name, code: item.code, uom: item.uom?.symbol ?? '' }
+  return {
+    name: line.itemId ? 'Material no longer in use' : 'No material picked',
+    code: '',
+    uom: '',
+  }
+}
+/** A line's colour in words: null is a line every colour uses. */
+export const lineColour = (colour: string | null | undefined) => colour?.trim() || 'All colours'
+
+/** Where a step is done, in the routing master's words. */
+export const DONE_AT_LABEL = { IN_HOUSE: 'Our floor', OUTSOURCED: 'Outside unit' } as const
+/**
+ * A route step in words: its process, department, where it is done and who
+ * does it. A step released before routes named a process has only its name.
+ */
+export function stepFacts(
+  step: {
+    operationId: string | null
+    departmentId: string | null
+    execution: keyof typeof DONE_AT_LABEL
+    contractorId: string | null
+    vendorId: string | null
+    instructions: string | null
+  },
+  lookups: Pick<Lookups, 'operations' | 'departments' | 'contractors' | 'jobWorkers'>
+) {
+  const op = step.operationId
+    ? lookups.operations.find((o) => o.id === step.operationId)
+    : undefined
+  const outside = step.execution === 'OUTSOURCED'
+  return {
+    /** '' for a step with no process (released before routes named one). */
+    process: step.operationId ? (op?.name ?? 'Process no longer in use') : '',
+    department: step.departmentId
+      ? (lookups.departments.find((d) => d.id === step.departmentId)?.name ??
+        'Department no longer in use')
+      : '',
+    outside,
+    doneAt: DONE_AT_LABEL[outside ? 'OUTSOURCED' : 'IN_HOUSE'],
+    /** The outside unit of a step done outside; the contractor, if named, of one on our floor. */
+    who: outside
+      ? step.vendorId
+        ? (lookups.jobWorkers.find((v) => v.id === step.vendorId)?.name ?? 'Unit no longer in use')
+        : 'No unit named'
+      : step.contractorId
+        ? (lookups.contractors.find((c) => c.id === step.contractorId)?.name ??
+          'Contractor no longer in use')
+        : 'Any contractor',
+    instructions: step.instructions?.trim() ?? '',
+  }
+}
+
+// ── Material on a released round ──────────────────────────────────────────────
+
+/** Said for a line with no material picked: the server's own words (NO_ITEM). */
+export const NO_ITEM_TEXT = 'This line has no material picked, so nothing can be issued against it.'
+export type MaterialKind = 'ISSUE' | 'USE' | 'WASTE' | 'RETURN'
+export const MATERIAL_KIND_LABEL: Record<MaterialKind, string> = {
+  ISSUE: 'Issue from store',
+  USE: 'Record material used',
+  WASTE: 'Record waste',
+  RETURN: 'Return to store',
+}
+/**
+ * What can be recorded against one line now, by the rules MATERIAL applies:
+ * an issue up to the plan while the round is released and making has not
+ * started; use, waste or a return of what the line still holds. `why` says
+ * why nothing can, for the line's row; `needsStore` that this issue is the
+ * line's first and names its store.
+ */
+export function materialActions(
+  round: Pick<SampleRound, 'state' | 'stages' | 'handover'>,
+  m: SampleMaterial
+) {
+  const remaining = round3(Math.max(0, +m.plannedQty - +m.issuedQty))
+  const held = materialHeld(m)
+  const issueOpen = round.state === 'RELEASED' && !round.stages.some((s) => s.completedAt)
+  const kinds: MaterialKind[] = []
+  if (!round.handover) {
+    if (m.itemId && issueOpen && remaining > 0) kinds.push('ISSUE')
+    if (held > 0) kinds.push('USE', 'WASTE', 'RETURN')
+  }
+  const why = kinds.length
+    ? ''
+    : round.handover
+      ? 'This round is handed over; its material record is frozen.'
+      : !m.itemId
+        ? NO_ITEM_TEXT
+        : round.state === 'DRAFT'
+          ? 'Issued once the round is released.'
+          : remaining > 0
+            ? 'Issue materials before making starts; extra needs require a new round.'
+            : 'Issued in full and accounted for.'
+  return { kinds, remaining, held, why, needsStore: kinds.includes('ISSUE') && !m.warehouseId }
+}
+/**
+ * The store a line is tied to once its first issue named it, and why, in the
+ * words the server refuses another store with (OTHER_STORE); '' before.
+ */
+export function storeNote(m: SampleMaterial) {
+  if (!m.warehouseId) return ''
+  const store = m.warehouse?.name ?? 'its store'
+  return +m.issuedQty > 0
+    ? `This material was issued from ${store}. Issue the rest from there, and return it there.`
+    : `This material is planned from ${store}. Issue it from there.`
+}
+/** Approved BOMs the round can be handed over with: this style's, for every colour or one the round made. */
+export function handoverBoms(
+  boms: Lookups['boms'],
+  spec: Pick<SampleSpecification, 'styleId' | 'colours'>
+) {
+  const made = new Set(spec.colours.map((c) => c.colour.trim().toLowerCase()).filter(Boolean))
+  return boms.filter(
+    (b) => b.styleId === spec.styleId && (!b.color || made.has(b.color.trim().toLowerCase()))
+  )
 }
 
 /** History lines in words rather than action codes. */
@@ -442,8 +802,9 @@ export function styleChanges(
 }
 
 /**
- * The detail line under a history entry for the file and style actions; null
- * for actions whose entry says enough on its own or is drawn elsewhere.
+ * The detail line under a history entry for the file, style and new-round
+ * actions; null for actions whose entry says enough on its own or is drawn
+ * elsewhere.
  */
 export function eventNote(
   e: SampleEvent,
@@ -461,16 +822,39 @@ export function eventNote(
       return `${text(d.fileName)} · ${kind(d.kind)} · ${fileScope({ roundId: text(d.roundId) || null }, rounds)}`
     case 'DETACH':
       return `${text(d.fileName)} · ${kind(d.kind)} · Reason: ${text(d.reason)}`
+    // A style action refits the draft: what that cleared follows the change.
     case 'CREATE_STYLE':
-      return [text(d.code), text(d.name), Array.isArray(d.colors) ? d.colors.join(', ') : '']
+      return [
+        text(d.code),
+        text(d.name),
+        Array.isArray(d.colors) ? d.colors.join(', ') : '',
+        refitText(d.refit),
+      ]
         .filter(Boolean)
         .join(' · ')
     case 'LINK_STYLE':
-      return `${code(d.before)} → ${code(d.after)}`
+      return [`${code(d.before)} → ${code(d.after)}`, refitText(d.refit)]
+        .filter(Boolean)
+        .join(' · ')
     case 'UPDATE_STYLE': {
       const changes = styleChanges(d.before, d.after, sizeRun)
-      return `${text(d.code)}${changes.length ? `: ${changes.join('; ')}` : ''}`
+      return [
+        `${text(d.code)}${changes.length ? `: ${changes.join('; ')}` : ''}`,
+        refitText(d.refit),
+      ]
+        .filter(Boolean)
+        .join(' · ')
     }
+    case 'NEW_ROUND':
+      return [
+        typeof d.fromRevision === 'number' ? `From round ${d.fromRevision}` : '',
+        typeof d.materials === 'number'
+          ? `${plural(d.materials, 'material line')} carried over`
+          : '',
+        text(d.reason) && `Reason: ${text(d.reason)}`,
+      ]
+        .filter(Boolean)
+        .join(' · ')
     default:
       return null
   }

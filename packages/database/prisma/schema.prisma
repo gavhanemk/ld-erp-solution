@@ -81,6 +81,21 @@ model SampleStage {
   round     SampleRound @relation(fields: [roundId], references: [id])
   sequence  Int
   name      String
+  /// The step as the round's route named it at release. Null on steps
+  /// released before routes named a process; their name is the record.
+  operationId  String?
+  operation    Operation? @relation(fields: [operationId], references: [id])
+  kind         ProcessKind?
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id])
+  execution    StepExecution @default(IN_HOUSE)
+  /// The floor contractor of an in-house step.
+  contractorId String?
+  contractor   Contractor? @relation(fields: [contractorId], references: [id])
+  /// The outside unit a step done outside goes to.
+  vendorId     String?
+  vendor       Supplier? @relation("SampleStageVendor", fields: [vendorId], references: [id])
+  instructions String?
   doneQty   Int?
   rejectedQty Int?
   responsible String?
@@ -91,14 +106,39 @@ model SampleStage {
   @@map("sample_stages")
 }
 
+/// One line of a round's sample BOM, from its first draft save. Rows are
+/// updated in place, never written afresh, so what is linked to a line keeps
+/// it; the round's specification carries a copy of them. plannedQty is the
+/// required quantity. source and ownership agree (sample_material_source_owner).
 model SampleMaterial {
   id          String @id @default(cuid())
   roundId     String
   round       SampleRound @relation(fields: [roundId], references: [id])
-  itemId      String
-  item        Item @relation(fields: [itemId], references: [id])
-  warehouseId String
-  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+  /// The order the lines are listed in.
+  sequence    Int @default(0)
+  /// Which part of the garment it goes into: Body, Collar, Placket.
+  component   String @default("")
+  /// Empty on a draft line whose material is not picked yet.
+  itemId      String?
+  item        Item? @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  /// Null: every colour of the round. Otherwise one of its colours.
+  colour      String?
+  /// Who draws it from the store.
+  departmentId String?
+  department  Department? @relation(fields: [departmentId], references: [id])
+  qtyPerPiece Decimal @default(0) @db.Decimal(10,4)
+  wastagePct  Decimal @default(0) @db.Decimal(5,2)
+  /// plannedQty was typed by hand rather than worked out, with the reason.
+  requiredOverride Boolean @default(false)
+  overrideReason String?
+  /// PURCHASE or BUYER_SUPPLIED (sample_material_source).
+  source      String @default("PURCHASE")
+  /// What one unit is expected to cost, before anything is bought.
+  estRate     Decimal? @db.Decimal(10,4)
+  remarks     String @default("")
+  /// The store it is issued from: chosen at the first issue, then kept.
+  warehouseId String?
+  warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
   ownership   StockOwnership
   plannedQty  Decimal @db.Decimal(10,3)
   issuedQty   Decimal @default(0) @db.Decimal(10,3)
@@ -1335,6 +1375,7 @@ model Supplier {
   processTransfers ProcessTransfer[] @relation("TransferVendor")
   jobWorkOrders    JobWorkOrder[]    @relation("JobWorkOrderVendor")
   ledger           Ledger?
+  sampleStages     SampleStage[]     @relation("SampleStageVendor")
 }
 
 model Warehouse {
@@ -1399,6 +1440,8 @@ model Department {
   bomLines          BOMLine[]
   bomCostLines      BOMCostLine[]
   moSteps           MOStep[]
+  sampleStages      SampleStage[]
+  sampleMaterials   SampleMaterial[]
 
   @@map("departments")
 }
@@ -1429,6 +1472,7 @@ model Operation {
   moSteps           MOStep[]
   styleStepRuns     StyleStepRun[]
   workstations      Workstation[]
+  sampleStages      SampleStage[]
 
   @@map("operations")
 }
@@ -4956,6 +5000,7 @@ model Contractor {
   routingSteps RoutingStep[]
   moSteps      MOStep[]
   ledger       Ledger?
+  sampleStages SampleStage[]
 
   @@index([operationIds], type: Gin)
   @@map("contractors")
