@@ -106,6 +106,7 @@ export function BomDetail({ bom }: { bom: Bom }) {
             <note.icon size={16} className={cn('mt-0.5 shrink-0', note.iconClass)} />
             <div className="space-y-0.5">
               <p className="text-sm font-semibold text-foreground">{note.title}</p>
+              {bom.copiedFrom && <p className="text-xs text-muted-foreground">Copied from {bom.copiedFrom.style.code} / {bom.copiedFrom.color || 'No colour'} / v{bom.copiedFrom.version}</p>}
               <p className="text-xs text-muted-foreground">{note.body}</p>
               {bom.approvedBy && (
                 <p className="text-xs text-muted-foreground">

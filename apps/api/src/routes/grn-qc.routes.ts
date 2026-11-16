@@ -1,3 +1,4 @@
+import { assertLineQtyFitsUnits, assertQtyFitsUnits } from '../services/unitQuantity.service'
 import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
@@ -217,6 +218,7 @@ router.get('/grn/:grnId', requirePermission(MODULE, 'view'), async (req, res) =>
 
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createQcSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'grnLine', data.lines.map((l) => ({ lineId: l.grnLineId, qty: l.rejectedQty, what: 'Rejected' })))
   const when = data.inspectionDate ?? new Date()
 
   const qc = await prisma.$transaction(async (tx) => {
@@ -657,6 +659,7 @@ const useSchema = z.object({
  */
 router.post('/:id/use', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = useSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'grnLine', [{ lineId: data.grnLineId, qty: data.qty, what: 'Used after all' }])
   const out = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM ld_erp.inward_qc WHERE id = ${req.params.id} FOR UPDATE`
     const row = await tx.inwardQC.findUnique({ where: { id: req.params.id }, include: { grn: { select: { grnNumber: true } } } })

@@ -30,7 +30,7 @@ export function TaxBreakdown({
   /** null while no supplier is chosen: the tax is shown as one GST figure. */
   split: GstSplit | null
 }) {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   const taxed = result.byRate.filter((b) => b.tax > 0 || b.gstRate > 0)
 
   if (split === 'NONE') {
@@ -43,7 +43,7 @@ export function TaxBreakdown({
   if (taxed.length === 0) return null
 
   return (
-    <div className="border-border bg-secondary/40 rounded-lg border px-2.5 py-2">
+    <div className="rounded-lg bg-secondary/30 px-2.5 py-2">
       <button
         type="button"
         className="text-muted-foreground hover:text-foreground flex w-full items-center gap-1 text-xs font-medium"
@@ -51,7 +51,7 @@ export function TaxBreakdown({
         aria-expanded={open}
       >
         {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        How the GST is worked out
+        Tax breakdown
       </button>
       {open && (
         <div className="mt-1.5 space-y-1.5">

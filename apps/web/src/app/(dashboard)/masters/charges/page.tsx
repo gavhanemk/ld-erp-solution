@@ -41,6 +41,7 @@ interface ChargeType extends ChargeMasterConfig {
 function describeTax(c: ChargeType, side: 'sales' | 'purchase') {
   if (!(side === 'sales' ? c.applyOnSale : c.applyOnPurchase)) return <span>-</span>
   const cfg = chargeConfigOf(c, side)
+  if (cfg.gstApplicable === false) return <span>No GST</span>
   const zero = !['TAXABLE', 'UNSPECIFIED'].includes(cfg.taxCategory)
   return <span>{zero ? cfg.taxCategory.replace('_', ' ') : cfg.followsGoodsRate ? "Goods' rates" : cfg.hsnCode ? `${cfg.hsnCode} / ${cfg.ownRate}%` : `${cfg.ownRate}%`}
     <span className="text-muted-foreground"> / {cfg.treatment === 'INCLUSIVE' ? 'GST-inclusive' : 'GST-exclusive'}</span></span>
@@ -119,17 +120,22 @@ const formFields: FormField[] = [
     placeholder: '5',
     help: 'Optional. Offered on a purchase order in one press — never applied on its own',
   },
+  ...(['sales', 'purchase'] as const).map((side): FormField => ({
+    name: `${side}GstApplicability`, label: `${side === 'sales' ? 'Sales' : 'Purchase'} GST`,
+    type: 'select', valueForNew: 'APPLICABLE', required: true,
+    options: [{ value: 'APPLICABLE', label: 'GST Applicable' }, { value: 'NONE', label: 'No GST' }],
+    help: 'Default for new documents. Authorized users can change it for one transaction.',
+  })),
   { name: 'applyOnSale', label: 'On sales', type: 'checkbox', placeholder: 'Offer on invoices' },
   {
     name: 'taxTreatment',
-    label: 'GST on a sale',
+    label: 'Sales amount type',
     type: 'select',
     required: true,
     valueForNew: 'EXCLUSIVE',
     options: [
       { value: 'INCLUSIVE', label: 'GST included in the amount typed' },
       { value: 'EXCLUSIVE', label: 'GST added on top of the amount' },
-      { value: 'NON_TAXABLE', label: 'No GST on it' },
     ],
     help: 'Default amount type for a sales charge — authorized users can override it in Advanced Tax Settings',
   },
@@ -149,7 +155,7 @@ const formFields: FormField[] = [
   },
   {
     name: 'defaultGstMode',
-    label: 'GST on a purchase',
+    label: 'Purchase GST source',
     type: 'select',
     required: true,
     valueForNew: 'MANUAL',
@@ -158,7 +164,6 @@ const formFields: FormField[] = [
       { value: 'HSN', label: 'By HSN / SAC code' },
       { value: 'INHERIT', label: 'Inherit from goods (incidental charge)' },
       { value: 'MANUAL', label: 'A % I set' },
-      { value: 'NONE', label: 'Not applicable' },
     ],
     help: 'How a purchase order or bill starts this charge — authorized users can override it in Advanced Tax Settings',
   },

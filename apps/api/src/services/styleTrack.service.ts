@@ -23,6 +23,7 @@ const person = { select: { id: true, name: true } } as const
 /** What the routing editor and the style's page both need of a routing. */
 export const trackRoutingSelect = {
   id: true,
+  copiedFrom: true,
   code: true,
   name: true,
   styleId: true,
@@ -46,6 +47,8 @@ export const trackRoutingSelect = {
       operationId: true,
       departmentId: true,
       workstationId: true,
+      contractorId: true,
+      contractor: { select: { id: true, name: true } },
       isQcStep: true,
       execution: true,
       skip: true,

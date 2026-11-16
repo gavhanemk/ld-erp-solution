@@ -43,3 +43,12 @@ Local validation does not replace production verification. The actual invoice, p
 ## Migration applied - 14 November 2026
 
 Applied all four pending migrations to the checkout-configured Supabase database, schema `ld_erp`: `20261113140000_purchase_charge_gst_mode`, `20261114120000_charge_type_purchase_default`, `20261114150000_charge_configuration_snapshot`, and `20261114150100_charge_explicit_inheritance`. Prisma reports the schema is up to date; the local Prisma client was regenerated. Before/after checksums across all five charge tables confirm saved amounts, GST rates, CGST, SGST and IGST are unchanged. Application deployment is separate and was not performed in this step.
+
+
+## Optional GST follow-up (not released)
+
+Sales and purchase master defaults now offer GST Applicable / No GST separately from price inclusion and HSN/rate configuration. The shared transaction control restores that default or the saved snapshot. Masters-edit users can change applicability for one transaction; the server enforces permission and snapshots the decision and reason. Turning GST off retains the underlying rate, classification and inclusion settings. No GST does not imply a particular statutory zero-tax classification; unclassified amounts remain visible for review in GST reporting.
+
+Migration `20261114160000_charge_gst_applicability` adds only master columns and maps explicit previous no-tax settings; it does not rewrite historical transactions. It has been applied only to the isolated local test database. This follow-up has not been pushed or merged to main or applied to live. Localhost for this follow-up uses the isolated test database.
+
+Validation: 30 targeted checks and 26 existing pricing regressions pass, including authorized/unauthorized applicability overrides, independent sales/purchase defaults, inclusive extraction when enabled, no tax when disabled, and master preservation. API and web TypeScript checks pass.

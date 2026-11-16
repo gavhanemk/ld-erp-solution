@@ -74,7 +74,7 @@ export function chargesToPrice(rows: SaleChargeDraft[], typeById: Map<string, Sa
         key: c.key,
         amount,
         treatment: config.treatment, followsGoodsRate: config.followsGoodsRate, ownRate: config.ownRate,
-        amountMode: c.amountMode ?? 'FIXED', taxCategory: config.taxCategory,
+        amountMode: c.amountMode ?? 'FIXED', gstApplicable: config.gstApplicable, taxCategory: config.taxCategory,
       },
     ]
   })

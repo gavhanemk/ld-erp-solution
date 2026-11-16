@@ -59,6 +59,8 @@ export const billLineSchema = z.object({
    */
   poLineId: z.string().optional().nullable(),
   description: z.string().max(300).optional().nullable(),
+  /** The pack the supplier billed it in (a box of 20 pcs); empty: the item's own unit. */
+  uomId: z.string().optional().nullable(),
   qty,
   unitPrice: rate,
   discount: percent('Discount').optional(),

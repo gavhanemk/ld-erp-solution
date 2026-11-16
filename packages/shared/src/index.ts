@@ -135,6 +135,8 @@ export interface PriceLineInput {
 export type ChargeTaxCategory = 'TAXABLE' | 'EXEMPT' | 'NIL_RATED' | 'NON_GST' | 'UNSPECIFIED'
 export type ChargeAmountMode = 'FIXED' | 'PERCENT'
 export interface ChargeTaxSnapshot {
+  gstApplicable?: boolean
+  applicabilityOverride?: boolean
   version: 1
   name: string
   treatment: ChargeTaxTreatment
@@ -295,7 +297,7 @@ export function priceDocument(input: PriceInput): PriceResult {
     const p = priceSaleCharge({ key: c.key, amount: c.amount,
       treatment: split === 'NONE' ? 'NON_TAXABLE' : config?.treatment ?? 'EXCLUSIVE',
       followsGoodsRate: config?.followsGoodsRate ?? false, ownRate: config?.ownRate ?? c.gstRate,
-      amountMode: config?.amountMode, taxCategory: config?.taxCategory,
+      gstApplicable: config?.gstApplicable, amountMode: config?.amountMode, taxCategory: config?.taxCategory,
     }, value.map((v, i) => ({ taxable: toRupees(v - share[i]), gstRate: input.lines[i].gstRate })), split === 'CGST_SGST')
     return { key: c.key, amount: toPaise(p.net), gstRate: p.gstRate,
       cgst: toPaise(p.cgst), sgst: toPaise(p.sgst), igst: toPaise(p.igst), tax: toPaise(p.tax),
@@ -504,6 +506,7 @@ export function shareSaleCharge(amount: number, goods: SaleGoods[], fallbackRate
 }
 
 export interface SaleChargeInput {
+  gstApplicable?: boolean
   amountMode?: ChargeAmountMode
   taxCategory?: ChargeTaxCategory
   /** The charge type id, or any key the caller wants back. */
@@ -586,7 +589,7 @@ export function priceSaleCharge(c: SaleChargeInput, goods: SaleGoods[], intra: b
   const basis = goods.reduce((sum, g) => sum + Math.max(0, g.taxable), 0)
   const amount = r2(Math.max(0, Number(c.amount) || 0) * (c.amountMode === 'PERCENT' ? basis / 100 : 1))
   const ownRate = Number(c.ownRate) || 0
-  if (c.treatment === 'NON_TAXABLE' || (c.taxCategory && !['TAXABLE', 'UNSPECIFIED'].includes(c.taxCategory)) || amount === 0) {
+  if (c.gstApplicable === false || c.treatment === 'NON_TAXABLE' || (c.taxCategory && !['TAXABLE', 'UNSPECIFIED'].includes(c.taxCategory)) || amount === 0) {
     return { key: c.key, treatment: c.treatment, amount, net: amount, gstRate: 0, cgst: 0, sgst: 0, igst: 0, tax: 0, payable: amount, parts: [], rateText: '' }
   }
   const shares = c.followsGoodsRate ? shareSaleCharge(amount, goods, ownRate) : [{ amount, gstRate: ownRate }]
@@ -783,6 +786,8 @@ export function priceSale(input: SaleInput): SaleResult {
 
 /** The existing Extra Charges master, including its existing HSN relation. */
 export interface ChargeMasterConfig {
+  salesGstApplicability?: string
+  purchaseGstApplicability?: string
   name: string
   defaultGstRate: number | string | null
   taxTreatment?: ChargeTaxTreatment
@@ -802,8 +807,9 @@ export function chargeConfigOf(t: ChargeMasterConfig, side: 'sales' | 'purchase'
   const followsGoodsRate = sale ? t.followsGoodsRate === true : t.defaultGstMode === 'INHERIT'
   const modeNone = !sale && t.defaultGstMode === 'NONE'
   return { version: 1, name: t.name,
-    treatment: modeNone ? 'NON_TAXABLE' : (sale ? t.taxTreatment : t.purchaseTaxTreatment) ?? 'EXCLUSIVE',
-    followsGoodsRate, ownRate: modeNone ? 0 : Number(hsn?.gstRate ?? t.defaultGstRate),
+    gstApplicable: (sale ? t.salesGstApplicability : t.purchaseGstApplicability) != null ? (sale ? t.salesGstApplicability : t.purchaseGstApplicability) !== 'NONE' : !(modeNone || t.taxTreatment === 'NON_TAXABLE'),
+    treatment: (sale ? t.taxTreatment : t.purchaseTaxTreatment) === 'INCLUSIVE' ? 'INCLUSIVE' : 'EXCLUSIVE',
+    followsGoodsRate, ownRate: Number(hsn?.gstRate ?? t.defaultGstRate),
     hsnCodeId: followsGoodsRate || modeNone ? null : (sale ? t.salesHsnCodeId : t.defaultHsnCodeId) ?? null,
     hsnCode: followsGoodsRate || modeNone ? null : hsn?.code ?? null,
     taxCategory: ((sale ? t.salesTaxCategory : t.purchaseTaxCategory) ?? 'UNSPECIFIED') as ChargeTaxCategory,
@@ -817,3 +823,8 @@ export function savedChargeConfig(c: { taxSnapshot?: unknown; amount: unknown; g
     hsnCodeId: c.hsnCodeId ?? null, hsnCode: null, taxCategory: 'UNSPECIFIED', amountMode: 'FIXED',
     inputAmount: Number(c.amount), basis: 'GOODS_AFTER_DISCOUNT' }
 }
+
+// Quantity precision per unit / item.
+export * from './quantity'
+export * from './bomComparison'
+export * from './routingComparison'

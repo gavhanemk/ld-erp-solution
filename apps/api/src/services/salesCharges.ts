@@ -59,7 +59,7 @@ export async function resolveSaleCharges(
     if (ownMaterial) { config.followsGoodsRate = false; config.treatment = 'EXCLUSIVE' }
     return { key: c.chargeTypeId, chargeTypeId: c.chargeTypeId, amount: c.amount,
       treatment: config.treatment, followsGoodsRate: config.followsGoodsRate, ownRate: config.ownRate,
-      amountMode: config.amountMode, taxCategory: config.taxCategory, config, ownMaterial, sortOrder: i }
+      amountMode: config.amountMode, gstApplicable: config.gstApplicable, taxCategory: config.taxCategory, config, ownMaterial, sortOrder: i }
   })
 }
 

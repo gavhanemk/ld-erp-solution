@@ -1,5 +1,7 @@
 'use client'
 
+import { useQtyRules } from '@/lib/qtyRules'
+import { QtyProblem } from '@/components/ui/QtyProblem'
 import { useEffect, useMemo, useState } from 'react'
 import {
   Loader2,
@@ -159,6 +161,7 @@ export function StockMoveDialog({
   const [lines, setLines] = useState<Line[]>([emptyLine()])
 
   const [saving, setSaving] = useState(false)
+  const qtyRules = useQtyRules()
   const [error, setError] = useState<string | null>(null)
   // What the chosen store holds, by item, owner and size.
   const [held, setHeld] = useState<Held[]>([])
@@ -248,6 +251,9 @@ export function StockMoveDialog({
       return setError('Say why the figure is being changed — one line is enough.')
     }
     if (filled.length === 0) return setError('Add at least one item with a quantity.')
+    // 2.5 cartons (or 0.6 counted): said under its box, and again here.
+    const half = filled.find((l) => qtyRules.placesProblem(l.qty, itemsById.get(l.itemId)))
+    if (half) return setError(`${itemsById.get(half.itemId)?.name ?? 'An item'}: ${qtyRules.placesProblem(half.qty, itemsById.get(half.itemId))}`)
     // A count or an opening sets each line against the book once, so an item
     // entered on two lines would be applied twice. Moves may repeat an item.
     if (mode !== 'transfer') {
@@ -544,11 +550,13 @@ export function StockMoveDialog({
                           value={line.qty}
                           onValueChange={(v) => setLine(i, { qty: v })}
                           aria-label={`${copy.qtyLabel} on line ${i + 1}`}
+                          aria-invalid={!!qtyRules.placesProblem(line.qty, item)}
                         />
                         <span className="text-muted-foreground w-8 text-left text-xs">
                           {item?.uom?.symbol ?? ''}
                         </span>
                       </div>
+                      <QtyProblem className="ml-auto max-w-[14rem] text-right" text={qtyRules.placesProblem(line.qty, item)} />
                     </td>
                     {mode !== 'transfer' && (
                       <td className="px-3 py-2 text-right">

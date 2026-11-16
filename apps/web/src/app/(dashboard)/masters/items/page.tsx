@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, FileSpreadsheet } from 'lucide-react'
 import { ImportItemsDialog } from '@/components/masters/ImportItemsDialog'
+import { BuyUnitsDialog, type BuyUnit } from '@/components/masters/BuyUnitsDialog'
 import { api } from '@/lib/api'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import { ITEM_TYPE_LABEL as TYPE_LABEL, itemFormFields as formFields } from '@/components/masters/itemFormFields'
@@ -32,6 +33,8 @@ interface Item {
   departmentId: string | null
   department?: { id: string; name: string; code: string } | null
   uom: { id: string; name: string; symbol: string } | null
+  /** The packs it is bought in besides its own unit (1 Box = 20 pcs). */
+  buyUnits?: BuyUnit[]
   /** The GST the item is filled in at: its HSN code's rate when the code is listed, else its own. */
   taxRate: { rate: string | number } | null
   taxRateSource: 'HSN' | 'ITEM' | null
@@ -46,7 +49,7 @@ interface Item {
  * with their stock: the warning shows on those and no others. It used to show
  * on every item that had a reorder level, whatever its stock.
  */
-const columnsFor = (toReorder: Map<string, number>): Column<Item>[] => [
+const columnsFor = (toReorder: Map<string, number>, onBuyUnits: (item: Item) => void): Column<Item>[] => [
   // A code is one token; broken over two lines it reads as two.
   {
     key: 'code',
@@ -113,6 +116,33 @@ const columnsFor = (toReorder: Map<string, number>): Column<Item>[] => [
         </span>
       ) : (
         <span className="text-muted-foreground">—</span>
+      ),
+  },
+  // The packs it is bought in (a box of 20 pcs); the store still counts the item's own unit.
+  {
+    key: 'buyUnits',
+    header: 'Bought in',
+    render: (i) =>
+      i.type === 'FINISHED_GOOD' ? (
+        <span className="text-muted-foreground">—</span>
+      ) : (
+        <button
+          type="button"
+          className="text-left text-xs hover:underline"
+          onClick={(e) => {
+            e.stopPropagation()
+            onBuyUnits(i)
+          }}
+          title="The packs it is bought in, and what each holds"
+        >
+          {i.buyUnits?.length ? (
+            <span className="text-foreground">
+              {i.buyUnits.map((u) => `${u.uom.symbol} of ${Number(u.factor).toLocaleString('en-IN')}${u.isDefault ? ' (usual)' : ''}`).join(' · ')}
+            </span>
+          ) : (
+            <span className="text-primary">{i.uom?.symbol ?? 'Own unit'} · add a pack</span>
+          )}
+        </button>
       ),
   },
   { key: 'hsnCode', header: 'HSN', className: 'font-mono text-xs text-muted-foreground' },
@@ -246,7 +276,9 @@ export default function ItemsPage() {
       .then((res) => setToReorder(new Map(res.data.map((r) => [r.itemId, r.onHand]))))
       .catch(() => {})
   }, [])
-  const columns = useMemo(() => columnsFor(toReorder), [toReorder])
+  // The "Bought in" window, for one item's packs.
+  const [packsOf, setPacksOf] = useState<Item | null>(null)
+  const columns = useMemo(() => columnsFor(toReorder, setPacksOf), [toReorder])
 
   // Bringing many items, and today's stock, in from a spreadsheet.
   const [importing, setImporting] = useState(false)
@@ -272,6 +304,16 @@ export default function ItemsPage() {
       searchPlaceholder="Search name, code, HSN, category, department..."
       emptyMessage="No items yet. Add fabric, thread, buttons and other materials here."
     />
+    {packsOf && (
+      <BuyUnitsDialog
+        item={packsOf}
+        onClose={() => setPacksOf(null)}
+        onSaved={() => {
+          setPacksOf(null)
+          setRefreshKey((k) => k + 1)
+        }}
+      />
+    )}
     {importing && (
       <ImportItemsDialog
         onClose={() => setImporting(false)}

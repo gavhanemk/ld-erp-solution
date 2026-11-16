@@ -1,5 +1,6 @@
 'use client'
 
+import { useQtyRules } from '@/lib/qtyRules'
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2, Tags, X } from 'lucide-react'
@@ -45,13 +46,16 @@ export function ChangeStickers({
   const [rows, setRows] = useState<SizeRow[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const qtyRules = useQtyRules()
 
   // Escape closes this window only — not the ones behind it.
   useEscape(() => {
     if (!busy) onClose()
   })
 
-  const qtys = differ ? sizesOf(rows) : splitEvenly(line.qty, Math.floor(Number(count) || 0))
+  // Only its unit symbol is known here: pieces and cartons split whole (10 in 3 is 3, 3, 4).
+  const places = qtyRules.places({ uom: { symbol: line.unit } })
+  const qtys = differ ? sizesOf(rows) : splitEvenly(line.qty, Math.floor(Number(count) || 0), places)
   const total = Math.round(qtys.reduce((s, q) => s + q, 0) * 1000) / 1000
   const off = qtys.length > 0 && Math.abs(total - line.qty) > 0.0005
   const blank = differ && rows.some((r) => !(Number(r.qty) > 0))

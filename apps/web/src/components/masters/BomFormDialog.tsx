@@ -1,4 +1,5 @@
 'use client'
+import { BomReusePanel, type BomReuseHandle } from './BomReusePanel'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -94,6 +95,8 @@ export interface RoutingStepBrief {
 }
 
 export interface Bom {
+  copiedFromId?: string | null
+  copiedFrom?: { id: string; version: string; color: string | null; style: { code: string; name: string } } | null
   id: string
   styleId: string
   /** One BOM per colour. Blank only on BOMs made before colour was recorded. */
@@ -392,6 +395,9 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
 
   // The BOM as the server last returned it. It starts as the record being
   // edited, and becomes the new BOM once the first step has saved one.
+  const reuseRef = useRef<BomReuseHandle>(null)
+  const [copySource, setCopySource] = useState<Bom | null>(null)
+  const [copyVersion, setCopyVersion] = useState(0)
   const [current, setCurrent] = useState<Bom | null>(null)
   const [step, setStep] = useState<Step>(1)
   /** The top of the window's body: each step opens there, not where the last one was scrolled to. */
@@ -442,6 +448,8 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
   useEffect(() => {
     if (!open) return
 
+    setCopySource(null)
+    setCopyVersion(v => v + 1)
     setCurrent(record ?? null)
     setStep(canCost ? startStep : 1)
     setStyleId(record?.styleId ?? '')
@@ -490,7 +498,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
     setFieldErrors({})
 
     void Promise.all([
-      masterResource<StyleOption>('styles').list({ limit: 200, active: true }),
+      fetchEveryPage<StyleOption>(page => `/masters/styles?limit=200&active=true&page=${page}`).then(r => ({ data: r.rows })),
       fetchEveryPage<ItemOption>((page) => `/masters/items?limit=200&active=true&type=${COMPONENT_TYPES}&page=${page}`).then((r) => ({ data: r.rows })),
       masterResource<DepartmentOption>('departments').list({ limit: 200, active: true }),
       masterResource<ProcessOption>('operations')
@@ -835,7 +843,29 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
     return { draft: res.data, from: b.version }
   }
 
-  const saveMaterials = (then: 'close' | 'next') => {
+  const loadSource = (source: Bom) => {
+    setCopySource(source)
+    setItems(previous => {
+      const known = new Set(previous.map(i => i.id))
+      return [...previous, ...(source.lines ?? []).flatMap(l => {
+        if (!l.componentItem || known.has(l.componentItem.id)) return []
+        known.add(l.componentItem.id); return [l.componentItem]
+      })]
+    })
+    setNotes(source.notes ?? '')
+    setLines((source.lines ?? []).map(l => ({ rowKey: nextRowKey++, categoryId: '', subCategoryId: '',
+      componentItemId: l.componentItemId, departmentId: l.departmentId ?? '', qtyPerUnit: String(l.qtyPerUnit),
+      unitCost: l.unitCost == null ? '' : String(l.unitCost), carried: { component: l.component ?? null,
+        wastagePercent: Number(l.wastagePercent ?? 0), notes: l.notes ?? null,
+        sizes: (l.sizes ?? []).map(s => ({ sizeId: s.sizeId, qtyPerUnit: Number(s.qtyPerUnit) })) } })))
+    setCostRows((source.costLines ?? []).map(c => ({ rowKey: nextRowKey++, kind: c.kind, name: c.name,
+      departmentId: c.departmentId ?? '', basis: c.basis, value: plain(c.value) })))
+    setMargin(plain(source.marginPercent)); setPrice(plain(source.sellingPrice)); setPriceSource('margin')
+    setError(null); setNotice(null)
+    setStep(1)
+  }
+
+  const saveMaterials = (then: 'close' | 'next', similarityReviewed = false) => {
     // An approved BOM's components are locked, and the server refuses a save
     // that sends them at all — so only the note goes, which it does allow.
     if (frozen) {
@@ -930,6 +960,11 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       return
     }
 
+    if (!isEdit && !similarityReviewed && reuseRef.current) {
+      void reuseRef.current.checkBeforeSave(() => saveMaterials(then, true))
+      return
+    }
+
     // Version, routing, base size and whether it is offered are not sent. A new
     // BOM starts at version 1.0 with none of the others; an edit keeps whatever
     // it had. Later versions come from editing an approved one, or Copy.
@@ -941,6 +976,9 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
             color: color || null,
             notes,
             lines: payloadLines,
+            ...(copySource ? { copiedFromId: copySource.id,
+              ...(canCost ? { costLines: costRows.map(r => ({ kind: r.kind, name: r.name, departmentId: r.departmentId || null, basis: r.basis, value: Number(r.value) })) } : {}),
+            } : {}),
           })
       setCurrent(res.data)
       onSaved(res.message)
@@ -2001,6 +2039,12 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
         </div>
       )}
 
+      {step === 1 && !current && <BomReusePanel key={copyVersion} ref={reuseRef} styleId={styleId} color={color} source={copySource} disabled={saving} onCopy={loadSource}
+        itemLabels={Object.fromEntries(items.map(i => [i.id, { name: i.name, unit: i.uom?.symbol, category: [i.category?.parent?.name, i.category?.name].filter(Boolean).join(' / ') }]))}
+        processLabels={Object.fromEntries(departments.map(d => [d.id, d.name]))}
+        lines={lines.filter(l => l.componentItemId).map(l => ({ componentItemId: l.componentItemId, departmentId: l.departmentId || null,
+          component: l.carried.component, qtyPerUnit: Number(l.qtyPerUnit) || 0, wastagePercent: l.carried.wastagePercent,
+          unitCost: l.unitCost.trim() !== '' ? Number(l.unitCost) : itemsById.get(l.componentItemId)?.standardRate == null ? null : Number(itemsById.get(l.componentItemId)?.standardRate), sizes: l.carried.sizes }))} />}
       {step === 1 && materialsStep}
       {step === 2 && costingStep}
       {step === 3 && pricingStep}

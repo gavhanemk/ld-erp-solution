@@ -1,3 +1,4 @@
+import { assertQtyFitsUnits, assertRequisitionFitsUnits } from '../unitQuantity.service'
 import { prisma } from '@ld-erp/database'
 import { recordAudit } from '../../lib/audit'
 import { nextDocumentNumber } from '../../lib/docNumber'
@@ -943,6 +944,12 @@ const WRITES: WriteDefinition[] = [
         const item = await findItem(match[1].trim())
         lines.push({ itemId: item.id, name: item.name, code: item.code, qty })
       }
+      // Said before anything is confirmed: no 2.5 cartons, the same rule as the screen.
+      try {
+        await assertQtyFitsUnits(prisma, lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Asked for' })))
+      } catch (e) {
+        throw new Error(e instanceof Error ? e.message : String(e))
+      }
 
       return {
         title: 'Raise a material requisition',
@@ -963,6 +970,7 @@ const WRITES: WriteDefinition[] = [
     commit: async ({ payload }, ctx) => {
       const lines = payload.lines as Array<{ itemId: string; qty: number }>
       const mr = await prisma.$transaction(async (tx) => {
+        await assertQtyFitsUnits(tx, lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Asked for' })))
         const mrNumber = await nextDocumentNumber(tx, 'MR')
         return tx.materialRequisition.create({
           data: {
@@ -1107,6 +1115,8 @@ async function findDocument(number: string) {
         if (mr.status !== 'PENDING') {
           throw new Error(`${mr.mrNumber} is already ${mr.status.toLowerCase()}.`)
         }
+        // As on the requisitions screen: 2.1 cartons is refused, not approved.
+        if (approve) await assertRequisitionFitsUnits(prisma, mr.id)
         return prisma.materialRequisition.update({
           where: { id: mr.id },
           data: approve

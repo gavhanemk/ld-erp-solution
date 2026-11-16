@@ -221,7 +221,9 @@ export async function assertEditKeepsOrdersTrue(
  */
 export function quoteValue(
   lines: Array<{ enquiryLineId: string; quotedRate: unknown; offeredQty?: unknown }>,
-  qtyByLine: Map<string, number>
+  qtyByLine: Map<string, number>,
+  /** What one of each line's pack holds (20 for a box of 20): quantities are in pieces, rates per pack. */
+  packByLine: Map<string, number> = new Map()
 ): { value: number; pricedLines: number } {
   let value = 0
   let pricedLines = 0
@@ -238,7 +240,8 @@ export function quoteValue(
      */
     const asked = qtyByLine.get(l.enquiryLineId) ?? 0
     const supplying = l.offeredQty == null ? asked : Number(l.offeredQty)
-    value += supplying * Number(l.quotedRate)
+    // Pieces at a rate per pack: 40 pcs quoted at ₹99 a box of 20 is ₹198.
+    value += (supplying / (packByLine.get(l.enquiryLineId) ?? 1)) * Number(l.quotedRate)
     pricedLines++
   }
   return { value: Math.round(value * 100) / 100, pricedLines }

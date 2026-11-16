@@ -1,5 +1,7 @@
 'use client'
 
+import { useQtyRules } from '@/lib/qtyRules'
+import { QtyProblem } from '@/components/ui/QtyProblem'
 import { ChargeTaxDetails, taxOverridePayload } from './ChargeTaxDetails'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -45,11 +47,30 @@ import {
   type CashPayment,
 } from '@/components/purchase/CashPaymentSection'
 
+/** A pack a line can be billed in: a box of 20 pcs. */
+export interface BillPack {
+  uomId: string
+  symbol: string
+  factor: number
+  decimalPlaces?: number
+}
+
 export interface BillLine {
   itemId: string
   grnLineId?: string | null
   description?: string | null
   qty: number | string
+  /**
+   * The pack the quantity and price are in (a box of 20 pcs); empty for the
+   * item's own unit. The bill stores pieces and this beside them.
+   */
+  uomId?: string | null
+  /** The receipt's pack, for a line pulled off a receipt: it is billed in that or in pieces. */
+  pack?: BillPack | null
+  /** Saved lines only: what one of its pack holds. */
+  uomFactor?: number | string
+  /** Saved lines only: the pack's symbol. */
+  uom?: { id: string; symbol: string; decimalPlaces?: number } | null
   unitPrice: number | string
   discount: number | string
   gstRate: number | string
@@ -219,6 +240,8 @@ export interface PurchaseBill {
 }
 
 interface Option extends Partial<ChargeMasterConfig> {
+  /** The packs an item is bought in (a box of 20 pcs), the usual one first. */
+  buyUnits?: Array<{ factor: string | number; isDefault: boolean; uom: { id: string; symbol: string; decimalPlaces?: number } }>
   id: string
   code?: string
   name: string
@@ -571,6 +594,7 @@ export function PurchaseBillDialog({
 
   const [pulling, setPulling] = useState(false)
   const [saving, setSaving] = useState(false)
+  const qtyRules = useQtyRules()
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -618,7 +642,10 @@ export function PurchaseBillDialog({
             grnLineId: l.grnLineId ?? null,
             poLineId: l.poLineId ?? null,
             description: l.description ?? '',
-            qty: String(l.qty),
+            // Saved in pieces; reopened in the pack it was billed in.
+            qty: String(Math.round((num(l.qty) / (num(l.uomFactor ?? 1) || 1)) * 1000) / 1000),
+            uomId: l.uomId ?? null,
+            pack: l.uomId && l.uom ? { uomId: l.uomId, symbol: l.uom.symbol, factor: num(l.uomFactor ?? 1) || 1, decimalPlaces: l.uom.decimalPlaces } : null,
             unitPrice: String(l.unitPrice),
             discount: String(l.discount ?? 0),
             gstRate: String(l.gstRate ?? ''),
@@ -950,6 +977,73 @@ export function PurchaseBillDialog({
   }, [open])
 
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
+
+  /**
+   * The packs a line can be in: for a line off a receipt, the receipt's pack
+   * (or pieces); for a line typed by hand, the packs the item is bought in.
+   */
+  const packsOf = (line: BillLine): BillPack[] => {
+    if (line.grnLineId) return line.pack ? [line.pack] : []
+    return (itemById.get(line.itemId)?.buyUnits ?? []).map((u) => ({ uomId: u.uom.id, symbol: u.uom.symbol, factor: Number(u.factor), decimalPlaces: u.uom.decimalPlaces }))
+  }
+  const packOfLine = (line: BillLine) => (line.uomId ? (packsOf(line).find((p) => p.uomId === line.uomId) ?? null) : null)
+  /** The line's quantity in the item's own unit: 2 boxes of 20 is 40 pcs. */
+  const pcsOf = (line: BillLine) => num(line.qty) * (packOfLine(line)?.factor ?? 1)
+  /** 2.5 boxes: checked against the pack it is typed in, else the item's own unit. */
+  const lineQtyProblem = (line: BillLine) => {
+    const p = packOfLine(line)
+    return qtyRules.placesProblem(line.qty, p ? { uom: { symbol: p.symbol, decimalPlaces: p.decimalPlaces ?? null } } : itemById.get(line.itemId))
+  }
+  /**
+   * Switching a line between its pack and pieces converts the quantity and
+   * the price together, so its value stays as it was: 2 boxes at ₹99 become
+   * 40 pcs at ₹4.95.
+   */
+  const switchUnit = (i: number, uomId: string | null) => {
+    const line = lines[i]
+    const from = packOfLine(line)?.factor ?? 1
+    const to = uomId ? (packsOf(line).find((p) => p.uomId === uomId)?.factor ?? 1) : 1
+    const q = num(line.qty)
+    const r = num(line.unitPrice)
+    setLine(i, {
+      uomId,
+      ...(q > 0 ? { qty: String(Math.round(((q * from) / to) * 1000) / 1000) } : {}),
+      ...(r > 0 ? { unitPrice: String(Math.round(((r / from) * to) * 100) / 100) } : {}),
+    })
+  }
+  /** Under a quantity box: the unit it is in — a choice when there is a pack — and what it comes to. */
+  const unitPicker = (line: BillLine, i: number) => {
+    const own = itemById.get(line.itemId)?.uom?.symbol ?? ''
+    const packs = packsOf(line)
+    const pack = packOfLine(line)
+    if (!line.itemId) return null
+    return (
+      <div className="text-muted-foreground mt-0.5 text-right text-[10px]">
+        {packs.length ? (
+          <select
+            className="form-input h-6 w-full py-0 text-[10px]"
+            value={line.uomId ?? ''}
+            onChange={(e) => switchUnit(i, e.target.value || null)}
+            aria-label={`Line ${i + 1} unit`}
+          >
+            <option value="">{own}</option>
+            {packs.map((p) => (
+              <option key={p.uomId} value={p.uomId}>
+                {p.symbol} ({p.factor.toLocaleString('en-IN')})
+              </option>
+            ))}
+          </select>
+        ) : (
+          own
+        )}
+        {pack && num(line.qty) > 0 && (
+          <p>
+            = {Number(pcsOf(line).toFixed(3)).toLocaleString('en-IN')} {own}
+          </p>
+        )}
+      </div>
+    )
+  }
   const supplier = suppliers.find((s) => s.id === supplierId)
   /*
    * Who the supplier box offers. An expense bill lists only service, transport
@@ -1708,6 +1802,7 @@ export function PurchaseBillDialog({
             pendingQty: number
             orderedRate: number
             gstRate: number
+            pack: BillPack | null
           }>
         }
       }>(`/purchase/bills/match/${grnId}`)
@@ -1754,12 +1849,19 @@ export function PurchaseBillDialog({
       poNumbers.current.set(d.po.id, d.po.poNumber)
       setPoId((prev) => (!prev || prev === d.po.id ? d.po.id : ''))
 
-      const pulled = fresh.map((l) => ({
+      const pulled = fresh.map((l) => {
+        // Received in boxes of 20: billed in boxes when what is left divides
+        // (40 pcs: 2 boxes at ₹99), else in pieces at the piece rate (₹4.95).
+        const f = l.pack?.factor ?? 1
+        const whole = !!l.pack && Math.abs(l.pendingQty / f - Math.round(l.pendingQty / f)) < 1e-9
+        return {
         itemId: l.item.id,
         grnLineId: l.grnLineId,
         description: '',
-        qty: String(l.pendingQty),
-        unitPrice: String(l.orderedRate),
+        pack: l.pack,
+        uomId: whole ? l.pack!.uomId : null,
+        qty: String(whole ? Math.round(l.pendingQty / f) : l.pendingQty),
+        unitPrice: String(whole || !l.pack ? l.orderedRate : Math.round((l.orderedRate / f) * 100) / 100),
         discount: '0',
         gstRate: String(l.gstRate),
         acceptedQty: l.acceptedQty,
@@ -1770,7 +1872,8 @@ export function PurchaseBillDialog({
         pendingQty: l.pendingQty,
         orderedRate: l.orderedRate,
         grnNumber: d.grn.grnNumber,
-      }))
+      }
+      })
 
       /*
        * Blank rows typed before the first pull are dropped, and only then.
@@ -1839,6 +1942,8 @@ export function PurchaseBillDialog({
         poLineId: l.poLineId || null,
         description: (l.description as string)?.trim() || null,
         qty: num(l.qty),
+        // The pack the quantity and price are in, or none for the item's own unit.
+        uomId: l.uomId ?? null,
         unitPrice: num(l.unitPrice),
         discount: num(l.discount),
         gstRate: num(l.gstRate),
@@ -1885,7 +1990,7 @@ export function PurchaseBillDialog({
   // Over-billing is shown but not blocked here — the API refuses it, and its
   // message says exactly how much is left on which receipt. A rate mismatch
   // does block, because the answer is a choice only a person can make.
-  const overBilled = lines.filter((l) => l.pendingQty != null && num(l.qty) > l.pendingQty)
+  const overBilled = lines.filter((l) => l.pendingQty != null && pcsOf(l) > l.pendingQty + 1e-9)
   const rateDrift = lines.filter(
     (l) => l.orderedRate != null && Math.abs(num(l.unitPrice) - l.orderedRate) > 0.005
   )
@@ -1918,6 +2023,9 @@ export function PurchaseBillDialog({
     missing.push({ what: 'the date on their bill', focus: 'bill-supplier-date' })
   if (lines.some((l) => !l.itemId)) missing.push({ what: 'an item on every line' })
   if (lines.some((l) => num(l.qty) <= 0)) missing.push({ what: 'a quantity on every line' })
+  // 2.5 cartons: said under its box, and here so Save explains itself.
+  const badQty = lines.findIndex((l) => lineQtyProblem(l))
+  if (badQty >= 0) missing.push({ what: `a whole number on line ${badQty + 1} (${itemById.get(lines[badQty].itemId)?.name ?? 'its item'} is counted whole)` })
   if (expenseMode && tdsChoice && !tdsAuto && tdsTyped.trim() === '')
     missing.push({ what: 'the TDS amount', focus: 'bill-tds-amount' })
   if (payNow && expenseMode && !isEdit) missing.push(...cashPaymentMissing(payment))
@@ -2614,7 +2722,7 @@ export function PurchaseBillDialog({
                 <div className="warn-text space-y-1 text-xs">
                   {overBilled.map((l, i) => (
                     <p key={`o${i}`}>
-                      {itemById.get(l.itemId)?.name ?? 'A line'}: the bill claims {num(l.qty)} but
+                      {itemById.get(l.itemId)?.name ?? 'A line'}: the bill claims {Number(pcsOf(l).toFixed(3))} {itemById.get(l.itemId)?.uom?.symbol ?? ''} but
                       only {l.pendingQty} is left to bill on {l.grnNumber ?? l.poNumber}. Saving this will be
                       refused.
                     </p>
@@ -2859,12 +2967,10 @@ export function PurchaseBillDialog({
                               value={String(line.qty)}
                               onValueChange={(v) => setLine(i, { qty: v })}
                               aria-label={`Line ${i + 1} quantity`}
+                              aria-invalid={!!lineQtyProblem(line)}
                             />
-                            {item?.uom?.symbol && (
-                              <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
-                                {item.uom.symbol}
-                              </p>
-                            )}
+                            {unitPicker(line, i)}
+                            <QtyProblem className="text-right" text={lineQtyProblem(line)} />
                           </td>
                           <td className="w-28 px-3 py-1.5">
                             <StepInput
@@ -3033,12 +3139,10 @@ export function PurchaseBillDialog({
                             value={String(line.qty)}
                             onValueChange={(v) => setLine(i, { qty: v })}
                             aria-label={`Line ${i + 1} quantity`}
+                            aria-invalid={!!lineQtyProblem(line)}
                           />
-                          {item?.uom?.symbol && (
-                            <p className="text-muted-foreground text-right text-[10px]">
-                              {item.uom.symbol}
-                            </p>
-                          )}
+                          {unitPicker(line, i)}
+                          <QtyProblem className="text-right" text={lineQtyProblem(line)} />
                         </div>
                         <div className="space-y-1">
                           <label className={fieldLabel}>Rate</label>

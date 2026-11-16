@@ -310,6 +310,10 @@ export interface AdjustableLine {
   /** What the bill charged. */
   billedQty: number
   billedRate: number
+  /** The pack billedRate is per (quantities are in pieces): a box of 20 is 20. */
+  packUomId: string | null
+  packSymbol: string | null
+  packFactor: number
   billedTaxable: number
   /**
    * The net of every note still standing against this line: reductions less
@@ -379,6 +383,9 @@ export async function adjustableOn(
           hsnCode: true,
           qty: true,
           unitPrice: true,
+          uomId: true,
+          uomFactor: true,
+          uom: { select: { symbol: true } },
           taxableValue: true,
           gstRate: true,
           // So a note raised straight off the receipt, before this bill
@@ -498,6 +505,11 @@ export async function adjustableOn(
       gstRate: Number(l.gstRate),
       billedQty,
       billedRate: Number(l.unitPrice),
+      // The pack the rate is per (a box of 20 pcs): quantities here are in
+      // pieces, so a value is qty ÷ packFactor × billedRate.
+      packUomId: l.uomId,
+      packSymbol: l.uom?.symbol ?? null,
+      packFactor: Number(l.uomFactor) || 1,
       billedTaxable,
       adjustedQty: round3(taken.qty),
       adjustedValue: round2(taken.value),
@@ -538,6 +550,9 @@ export interface AdjustableGrnLine {
   /** What was rejected on this receipt line — never billed, and so the whole of what there is to note. */
   rejectedQty: number
   rejectedRate: number
+  /** The pack rejectedRate is per (quantities are in pieces): a box of 20 is 20. */
+  packSymbol: string | null
+  packFactor: number
   /** What the receipt recorded alongside the rejection, so it can be shown next to it. */
   receivedQty: number
   acceptedQty: number
@@ -567,6 +582,8 @@ export async function adjustableOnGrn(
           receivedQty: true,
           acceptedQty: true,
           unitRate: true,
+          uomFactor: true,
+          uom: { select: { symbol: true } },
           warehouseId: true,
           poLine: { select: { gstRate: true } },
           item: {
@@ -620,6 +637,8 @@ export async function adjustableOnGrn(
       gstRate: Number(l.poLine?.gstRate ?? l.item.taxRate?.rate ?? 0),
       rejectedQty,
       rejectedRate: Number(l.unitRate),
+      packSymbol: l.uom?.symbol ?? null,
+      packFactor: Number(l.uomFactor) || 1,
       receivedQty: round3(Number(l.receivedQty)),
       acceptedQty: round3(Number(l.acceptedQty)),
       notedQty: noted,
@@ -670,6 +689,13 @@ export interface NoteLineInput {
   unitPrice: number
   gstRate: number
   remarks?: string | null
+  /**
+   * The pack the price is per (a box of 20 pcs), copied from the bill or
+   * receipt line it corrects — see `notePacks`. `qty` is always in pieces; the
+   * line is worth qty ÷ uomFactor × unitPrice.
+   */
+  uomId?: string | null
+  uomFactor?: number
 }
 
 export interface PricedNoteLine extends NoteLineInput {
@@ -695,6 +721,29 @@ function splitTax(taxable: number, gstRate: number, isIntraState: boolean) {
  * the split from today's master data would correct a CGST bill with an IGST
  * credit, and the difference would sit on the return unreconciled.
  */
+/**
+ * Each note line with the pack of the bill or receipt line it corrects — the
+ * server's record, never the screen's — so a note is priced per box exactly
+ * as the bill was. A line correcting neither is in the item's own unit.
+ */
+export async function notePacks<L extends { billLineId?: string | null; grnLineId?: string | null }>(
+  db: Prisma.TransactionClient | typeof import('@ld-erp/database').prisma,
+  lines: L[],
+): Promise<Array<L & { uomId: string | null; uomFactor: number }>> {
+  const billIds = lines.map((l) => l.billLineId).filter((v): v is string => !!v)
+  const grnIds = lines.map((l) => l.grnLineId).filter((v): v is string => !!v)
+  const [bills, grns] = await Promise.all([
+    billIds.length ? db.purchaseInvoiceLine.findMany({ where: { id: { in: billIds } }, select: { id: true, uomId: true, uomFactor: true } }) : [],
+    grnIds.length ? db.gRNLine.findMany({ where: { id: { in: grnIds } }, select: { id: true, uomId: true, uomFactor: true } }) : [],
+  ])
+  const bill = new Map(bills.map((b) => [b.id, b]))
+  const grn = new Map(grns.map((g) => [g.id, g]))
+  return lines.map((l) => {
+    const from = (l.billLineId && bill.get(l.billLineId)) || (l.grnLineId && grn.get(l.grnLineId)) || null
+    return { ...l, uomId: from?.uomId ?? null, uomFactor: from ? Number(from.uomFactor) || 1 : 1 }
+  })
+}
+
 export function priceNote(opts: {
   lines: NoteLineInput[]
   isIntraState: boolean
@@ -716,7 +765,8 @@ export function priceNote(opts: {
   const discountAmount = round2(opts.discountAmount ?? 0)
 
   const lines: PricedNoteLine[] = opts.lines.map((l) => {
-    const taxableValue = round2(l.qty * l.unitPrice)
+    // Pieces ÷ what one pack holds × the price per pack: 20 pcs at ₹99 a box of 20 is ₹99.
+    const taxableValue = round2((l.qty / (l.uomFactor || 1)) * l.unitPrice)
     const split = splitTax(taxableValue, l.gstRate, isIntraState)
     return {
       ...l,
@@ -843,6 +893,8 @@ export async function moveNoteStock(
       itemId: string
       qty: Prisma.Decimal | number
       unitPrice: Prisma.Decimal | number
+      /** What one of the pack the price is per holds; stock is valued per piece. */
+      uomFactor?: Prisma.Decimal | number
     }>
   },
   /** POST moves the goods the way the note says; REVERSE puts them back. */
@@ -875,7 +927,7 @@ export async function moveNoteStock(
       qty,
       // Stock going back in is valued at the note's own rate; stock leaving is
       // valued at what it is carried at, which `recordMovement` decides.
-      ...(direction === 'IN' ? { unitRate: round2(Number(line.unitPrice)) } : {}),
+      ...(direction === 'IN' ? { unitRate: round2(Number(line.unitPrice) / (Number(line.uomFactor ?? 1) || 1)) } : {}),
       transactionDate: note.noteDate,
       // Posted or cancelled now, whatever day the note is dated.
       earlierDate: 'move-up',

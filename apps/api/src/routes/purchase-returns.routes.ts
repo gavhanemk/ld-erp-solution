@@ -1,3 +1,4 @@
+import { assertLineQtyFitsUnits, assertQtyFitsUnits } from '../services/unitQuantity.service'
 import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
@@ -81,6 +82,9 @@ const returnInclude = {
       id: true,
       qty: true,
       unitPrice: true,
+      // The bill's pack the price is per; qty is in pieces.
+      uomFactor: true,
+      uom: { select: { id: true, symbol: true } },
       gstRate: true,
       remarks: true,
       reason: true,
@@ -143,7 +147,7 @@ function shape(r: ReturnRow) {
   let taxable = 0
   let gst = 0
   for (const l of r.lines) {
-    const v = Number(l.qty) * Number(l.unitPrice)
+    const v = (Number(l.qty) / (Number(l.uomFactor ?? 1) || 1)) * Number(l.unitPrice)
     taxable += v
     gst += (v * Number(l.gstRate)) / 100
   }
@@ -415,6 +419,7 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
  */
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createReturnSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'billLine', data.lines.map((l) => ({ lineId: l.billLineId, qty: l.qty, what: 'Going back' })))
   const returnDate = data.returnDate ?? new Date()
 
   const result = await prisma.$transaction(async (tx) => {
@@ -433,6 +438,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
             itemId: true,
             qty: true,
             unitPrice: true,
+            uomId: true,
+            uomFactor: true,
             gstRate: true,
             hsnCode: true,
             description: true,
@@ -487,7 +494,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
           'OVER_RETURNED'
         )
       }
-      const value = round2(qty * a.billedRate)
+      // Pieces going back, at the bill's rate per pack: 20 pcs at ₹99 a box of 20 is ₹99.
+      const value = round2((qty / a.packFactor) * a.billedRate)
       if (value > a.remainingValue + 0.005) {
         throw new AppError(
           `${a.itemName} has ₹${a.remainingValue.toLocaleString('en-IN')} left to claim on ${bill.billNumber}, ` +
@@ -543,8 +551,11 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
               itemId: b.itemId,
               billLineId: b.id,
               warehouseId: l.warehouseId,
+              // Pieces going back; the price stays per the bill's pack.
               qty: round3(l.qty),
               unitPrice: b.unitPrice,
+              uomId: b.uomId,
+              uomFactor: b.uomFactor,
               gstRate: b.gstRate,
               remarks: l.remarks,
               reason: reasonOf(l),
@@ -625,6 +636,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         originalRate: Number(b.unitPrice),
         qty: round3(l.qty),
         unitPrice: Number(b.unitPrice),
+        uomId: b.uomId,
+        uomFactor: Number(b.uomFactor) || 1,
         gstRate: Number(b.gstRate),
         // A note has one reason of its own, so on a mixed challan each line
         // says its own — the supplier reads why every row is being charged.
@@ -675,6 +688,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
             originalRate: l.originalRate ?? null,
             qty: l.qty,
             unitPrice: l.unitPrice,
+            uomId: l.uomId ?? null,
+            uomFactor: l.uomFactor ?? 1,
             taxableValue: l.taxableValue,
             gstRate: l.gstRate,
             cgst: l.cgst,

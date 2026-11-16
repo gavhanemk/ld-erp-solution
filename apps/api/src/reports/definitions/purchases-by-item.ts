@@ -137,6 +137,7 @@ export const purchasesByItem: ReportDefinition = {
       select: {
         qty: true,
         unitPrice: true,
+        uomFactor: true,
         discount: true,
         taxableValue: true,
         gstRate: true,
@@ -180,7 +181,8 @@ export const purchasesByItem: ReportDefinition = {
         hsnCode: l.hsnCode ?? l.item.hsnCode ?? '',
         uom: l.item.uom?.symbol ?? '',
         qty: Number(l.qty),
-        rate: Number(l.unitPrice),
+        // Quantities here are in pieces; a line bought in a pack is priced per it, so its rate per piece.
+        rate: Number(l.unitPrice) / (Number(l.uomFactor) || 1),
         // Stored as a whole-number percentage; the workbook's percent columns
         // take a fraction.
         discount: Number(l.discount) / 100,

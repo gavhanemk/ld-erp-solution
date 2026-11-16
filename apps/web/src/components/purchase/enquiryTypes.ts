@@ -34,6 +34,10 @@ export interface EnquiryLine {
   description: string | null
   hsnCode: string | null
   qty: string
+  /** The pack it is asked in (a box of 20 pcs); qty is in the item's own unit. */
+  uomId?: string | null
+  uomFactor?: string | number
+  uom?: { id: string; symbol: string; decimalPlaces?: number } | null
   expectedRate: string | null
   sortOrder: number
   mrLineId: string | null

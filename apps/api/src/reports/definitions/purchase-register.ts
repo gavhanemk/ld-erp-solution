@@ -290,6 +290,7 @@ export const purchaseRegister: ReportDefinition = {
             hsnCode: true,
             qty: true,
             unitPrice: true,
+            uomFactor: true,
             gstRate: true,
             item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
             grnLine: { select: { grn: { select: { grnNumber: true } } } },
@@ -327,7 +328,9 @@ export const purchaseRegister: ReportDefinition = {
         continue
       }
 
-      const gross = lines.map((l) => round2(Number(l.qty) * Number(l.unitPrice)))
+      // Quantities here are in pieces; a line bought in a pack is priced per it, so its rate per piece.
+      const ratePerPiece = (l: (typeof lines)[number]) => Number(l.unitPrice) / (Number(l.uomFactor) || 1)
+      const gross = lines.map((l) => round2(Number(l.qty) * ratePerPiece(l)))
       const grossTotal = round2(gross.reduce((s, g) => s + g, 0))
       const taxable = Number(b.taxableAmount)
       const cgst = Number(b.cgst)
@@ -402,7 +405,7 @@ export const purchaseRegister: ReportDefinition = {
           gstRate: Number(l.gstRate) / 100,
           qty: Number(l.qty),
           unit: l.item.uom?.symbol ?? '',
-          rate: Number(l.unitPrice),
+          rate: round2(ratePerPiece(l)),
           gross: gross[i],
           ...(i === 0 ? totals : {}),
         })

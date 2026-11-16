@@ -30,10 +30,16 @@ export const qtyText = (n: number) => Number(n.toFixed(3)).toLocaleString('en-IN
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000
 
-/** `total` over `n` stickers, all the same but the last, which takes what does not divide: 100 over 3 is 33.333, 33.333, 33.334. */
-export function splitEvenly(total: number, n: number): number[] {
+/**
+ * `total` over `n` stickers, all the same but the last, which takes what does
+ * not divide: 100 metres over 3 is 33.333, 33.333, 33.334. `places` is how
+ * finely the item is counted: pieces and cartons (0) split whole, 10 over 3
+ * being 3, 3 and 4 — never 3.333 of a carton.
+ */
+export function splitEvenly(total: number, n: number, places = 3): number[] {
   if (!(n >= 1) || !(total > 0)) return []
-  const each = Math.floor((total / n) * 1000) / 1000
+  const f = 10 ** places
+  const each = Math.floor((total / n) * f + 1e-9) / f
   return [...Array<number>(n - 1).fill(each), round3(total - each * (n - 1))]
 }
 

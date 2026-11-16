@@ -121,6 +121,7 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
         select: {
           qty: true,
           unitRate: true,
+          uomFactor: true,
           amount: true,
           shortClosed: true,
           item: {
@@ -211,7 +212,8 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
         value: amount,
         qty,
         got,
-        rate: Number(l.unitRate),
+        // Quantities here are in pieces; a line bought in a pack is priced per it, so its rate per piece.
+        rate: Number(l.unitRate) / (Number(l.uomFactor) || 1),
       })
     }
 

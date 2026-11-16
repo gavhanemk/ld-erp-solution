@@ -284,6 +284,26 @@ async function assertRoutingRefsExist(
 // ─── Make, change, delete ─────────────────────────────────────
 
 export async function createRouting(tx: Tx, data: CreateRouting, userId: string) {
+  // Serialize code allocation and request-key lookup within the same transaction.
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('routing-create'))`
+  if (data.creationKey) {
+    const prior = await tx.routing.findUnique({ where: { creationKey: data.creationKey }, include: routingInclude })
+    if (prior) {
+      if (prior.createdById !== userId) throw new AppError('This save reference is already used.', 409, 'SAVE_CONFLICT')
+      if (prior.name !== data.name || prior.styleId !== (data.styleId || null) || prior.category !== (data.category?.trim() || null)
+        || prior.fabricItemId !== (data.fabricItemId || null) || prior.notes !== (data.notes ?? null) || prior.isActive !== (data.isActive ?? true)
+        || stepsSignature(prior.steps.map((s) => ({ ...s, smv: s.smv == null ? null : Number(s.smv), ratePerPiece: s.ratePerPiece == null ? null : Number(s.ratePerPiece) }))) !== stepsSignature(data.steps.map(stepRow))) {
+        throw new AppError('This routing was already saved. Reopen the saved routing to make further changes.', 409, 'SAVE_CONFLICT')
+      }
+      return { routing: prior, message: `${prior.name} saved.`, reused: true }
+    }
+  }
+  if (data.copiedFromId) await tx.$queryRaw`SELECT id FROM routings WHERE id = ${data.copiedFromId} FOR SHARE`
+  const source = data.copiedFromId ? await tx.routing.findUnique({ where: { id: data.copiedFromId } }) : null
+  if (data.copiedFromId && !source) throw new AppError('The source routing was removed. Choose another routing or start a new one.', 409, 'SOURCE_REMOVED')
+  if (source && (source.version !== data.copiedFromVersion || source.updatedAt.toISOString() !== data.copiedFromUpdatedAt)) {
+    throw new AppError('The source routing changed since your preview. Open it again before copying.', 409, 'SOURCE_CHANGED')
+  }
   const styleId = data.styleId || null
   const category = styleId ? null : data.category?.trim() || null
   await assertRoutingRefsExist(tx, data.steps, styleId)
@@ -292,6 +312,8 @@ export async function createRouting(tx: Tx, data: CreateRouting, userId: string)
 
   const routing = await tx.routing.create({
     data: {
+      creationKey: data.creationKey,
+      ...(source ? { copiedFrom: { id: source.id, code: source.code, name: source.name, version: source.version, updatedAt: source.updatedAt.toISOString() } } : {}),
       code: data.code || (await routingCode(tx, { styleId, category })),
       name: data.name,
       styleId,
@@ -305,7 +327,7 @@ export async function createRouting(tx: Tx, data: CreateRouting, userId: string)
     },
     include: routingInclude,
   })
-  return { routing, message: [`${routing.name} saved.`, ...warnings].join(' ') }
+  return { routing, message: [`${routing.name} saved.`, ...warnings].join(' '), reused: false }
 }
 
 export async function updateRouting(tx: Tx, id: string, data: UpdateRouting, userId: string) {

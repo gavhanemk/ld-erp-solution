@@ -499,6 +499,91 @@ async function main() {
     assert.equal(cents(reported.rates.reduce((n, r) => n + r.taxable, 0)), 110000)
     assert.equal(cents(reported.rates.reduce((n, r) => n + r.cgst + r.sgst + r.igst, 0)), 13200)
   })
+  const optional = await api('/masters/charge-types', {
+    name: `Optional GST ${stamp}`,
+    defaultGstRate: 18,
+    applyOnSale: true,
+    applyOnPurchase: true,
+    salesGstApplicability: 'NONE',
+    purchaseGstApplicability: 'APPLICABLE',
+    taxTreatment: 'INCLUSIVE',
+    followsGoodsRate: false,
+  })
+  const noGstSale = await prisma.$transaction((tx) =>
+    priceSalesCharges(tx, [{ chargeTypeId: optional.id, amount: 118 }], false, [
+      { taxable: 1000, gstRate: 5 },
+    ])
+  )
+  check('separate sales No GST default leaves inclusive amount intact', () => {
+    assert.equal(noGstSale[0].netAmount, 118)
+    assert.equal(noGstSale[0].igst, 0)
+  })
+  const toggle = (gstApplicable: boolean) => ({
+    applicabilityOnly: true,
+    gstApplicable,
+    mode: 'MANUAL',
+    treatment: 'INCLUSIVE',
+    gstRate: 18,
+    taxCategory: 'TAXABLE',
+    reason: 'GST applicability changed for this transaction',
+  })
+  await assert.rejects(
+    () =>
+      api(
+        '/purchase/orders',
+        {
+          ...poPayload,
+          charges: [{ chargeTypeId: optional.id, amount: 118, taxOverride: toggle(false) }],
+        },
+        'POST',
+        clerk
+      ),
+    /403/
+  )
+  check('unauthorized applicability-only toggle is rejected', () => {})
+  const noGstPo = await api('/purchase/orders', {
+    ...poPayload,
+    charges: [{ chargeTypeId: optional.id, amount: 118, taxOverride: toggle(false) }],
+  })
+  check('authorized purchase No GST override retains configured rate without tax', () => {
+    assert.equal(Number(noGstPo.charges[0].amount), 118)
+    assert.equal(
+      Number(noGstPo.charges[0].cgst) +
+        Number(noGstPo.charges[0].sgst) +
+        Number(noGstPo.charges[0].igst),
+      0
+    )
+    assert.equal(noGstPo.charges[0].taxSnapshot.ownRate, 18)
+  })
+  const enabled = await prisma.$transaction((tx) =>
+    priceSalesCharges(
+      tx,
+      [
+        {
+          chargeTypeId: optional.id,
+          amount: 118,
+          taxOverride: {
+            ...toggle(true),
+            mode: 'MANUAL',
+            treatment: 'INCLUSIVE',
+            taxCategory: 'TAXABLE',
+          },
+        },
+      ],
+      false,
+      [{ taxable: 1000, gstRate: 5 }],
+      { canOverride: true }
+    )
+  )
+  check('authorized sales GST enable preserves inclusive pricing', () => {
+    assert.equal(enabled[0].netAmount, 100)
+    assert.equal(enabled[0].igst, 18)
+  })
+  const unchangedMaster = await prisma.chargeType.findUniqueOrThrow({ where: { id: optional.id } })
+  check('transaction overrides do not change either master default', () => {
+    assert.equal(unchangedMaster.salesGstApplicability, 'NONE')
+    assert.equal(unchangedMaster.purchaseGstApplicability, 'APPLICABLE')
+  })
   const legacy = await prisma.$transaction((tx) =>
     resolveChargeConfigurations(tx, [{ chargeTypeId: own.id, amount: 100 }], 'purchase', {
       saved: [{ chargeTypeId: own.id, amount: 100, gstRate: 5 }],

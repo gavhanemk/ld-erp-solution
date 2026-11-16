@@ -1,5 +1,8 @@
 'use client'
 
+import { packsFor, packText } from '@ld-erp/shared'
+import { useQtyRules } from '@/lib/qtyRules'
+import { QtyProblem } from '@/components/ui/QtyProblem'
 import { ChargeTaxDetails, taxOverridePayload } from './ChargeTaxDetails'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -80,6 +83,14 @@ export interface PoLine {
   /** The master style that text turned out to be, when it matched one. */
   styleId?: string | null
   qty: number | string
+  /**
+   * The pack the quantity and rate are in (a box of 20 pcs); empty for the
+   * item's own unit. The order stores the quantity in the item's own unit and
+   * this beside it, so a saved line reopens as the boxes it was ordered in.
+   */
+  uomId?: string | null
+  /** What one pack held when saved (a saved line only). */
+  uomFactor?: number | string
   unitRate: number | string
   discount: number | string
   gstRate: number | string
@@ -254,7 +265,16 @@ interface RateHistoryRow {
   qty: string | number
   unitRate: string | number
   amount: string | number
+  /** The pack it was bought in, when it was: the rate is per it. */
+  packSymbol?: string | null
+  packFactor?: number
+  /** The rate per the item's own unit, to compare orders in different packs. */
+  ratePerPiece?: number
 }
+
+/** A past order's rate brought to the unit a line is in now: ₹4.95 a piece is ₹99 for a line in boxes of 20. */
+const rateFor = (h: RateHistoryRow, lineFactor: number) =>
+  Math.round((h.ratePerPiece ?? num(h.unitRate)) * lineFactor * 100) / 100
 
 interface ChargeTypeOption extends ChargeMasterConfig {
   id: string
@@ -286,6 +306,8 @@ interface Option {
   standardRate?: string | number | null
   taxRate?: { rate: string | number } | null
   uom?: { symbol: string } | null
+  /** The packs an item is bought in (a box of 20 pcs), the usual one first. */
+  buyUnits?: Array<{ factor: string | number; isDefault: boolean; uom: { id: string; symbol: string; decimalPlaces?: number } }>
   categoryId?: string | null
   category?: { id: string; name: string } | null
   parentId?: string | null
@@ -717,6 +739,7 @@ export function PurchaseOrderDialog({
   const [dragOver, setDragOver] = useState(false)
 
   const [saving, setSaving] = useState<'draft' | 'send' | 'print' | null>(null)
+  const qtyRules = useQtyRules()
   const [error, setError] = useState<string | null>(null)
   const [mounted, setMounted] = useState(false)
   const firstFieldRef = useRef<HTMLButtonElement | null>(null)
@@ -779,7 +802,9 @@ export function PurchaseOrderDialog({
               // style rather than an empty box.
               styleNo: l.styleNo ?? l.style?.code ?? '',
               styleId: l.styleId ?? '',
-              qty: String(l.qty),
+              // Stored in the item's own unit; reopened in the pack it was ordered in.
+              qty: String(Math.round((Number(l.qty) / (Number(l.uomFactor ?? 1) || 1)) * 1000) / 1000),
+              uomId: l.uomId ?? null,
               unitRate: String(l.unitRate),
               // A stored line holds a percentage, so it reopens as one.
               discount: String(l.discount ?? 0),
@@ -836,7 +861,9 @@ export function PurchaseOrderDialog({
                 description: l.description ?? '',
                 styleNo: '',
                 styleId: '',
-                qty: String(Number(ql?.offeredQty ?? l.qty)),
+                // In the pack the enquiry asked in (pieces ÷ 20: 2 boxes); the quoted rate is per it.
+                qty: String(Math.round((Number(ql?.offeredQty ?? l.qty) / (Number(l.uomFactor ?? 1) || 1)) * 1000) / 1000),
+                uomId: l.uomId ?? null,
                 unitRate: ql?.quotedRate == null ? '' : String(Number(ql.quotedRate)),
                 discount: '0',
                 discountUnit: '%' as const,
@@ -1136,6 +1163,47 @@ export function PurchaseOrderDialog({
   }, [open])
 
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
+
+  /** The pack a line is in (a box of 20 pcs), or null for the item's own unit. */
+  const packOf = (line: PoLine) => {
+    const p = line.uomId ? itemById.get(line.itemId)?.buyUnits?.find((u) => u.uom.id === line.uomId) : undefined
+    return p ? { uomId: p.uom.id, symbol: p.uom.symbol, factor: Number(p.factor), places: { uom: { symbol: p.uom.symbol, decimalPlaces: p.uom.decimalPlaces } } } : null
+  }
+  /** 2.5 boxes: checked against the pack it is typed in, else the item's own unit. */
+  const lineQtyProblem = (line: PoLine) => qtyRules.placesProblem(line.qty, packOf(line)?.places ?? itemById.get(line.itemId))
+  /**
+   * Under a quantity box: the unit it is in — a choice when the item is bought
+   * in packs — and what the boxes come to in the item's own unit.
+   */
+  const unitPicker = (line: PoLine, i: number, align: 'right' | 'left') => {
+    const item = itemById.get(line.itemId)
+    const own = item?.uom?.symbol ?? ''
+    const pack = packOf(line)
+    if (!item) return null
+    return (
+      <div className={`mt-0.5 text-[10px] text-muted-foreground ${align === 'right' ? 'text-right' : ''}`}>
+        {item.buyUnits?.length ? (
+          <select
+            className="form-input h-6 w-full px-1 py-0 text-[10px]"
+            value={line.uomId ?? ''}
+            onChange={(e) => setLine(i, { uomId: e.target.value || null })}
+            aria-label={`Row ${i + 1} unit`}
+            title="The unit this line is ordered in; the rate is per it"
+          >
+            <option value="">{own}</option>
+            {item.buyUnits.map((u) => (
+              <option key={u.uom.id} value={u.uom.id}>
+                {u.uom.symbol} ({Number(u.factor).toLocaleString('en-IN')})
+              </option>
+            ))}
+          </select>
+        ) : (
+          own
+        )}
+        {pack && num(line.qty) > 0 && <p>= {packText(num(line.qty), pack.symbol, pack.factor, own).split(' = ')[1]}</p>}
+      </div>
+    )
+  }
   const supplier = suppliers.find((s) => s.id === supplierId)
 
   /**
@@ -1146,7 +1214,22 @@ export function PurchaseOrderDialog({
    * a row below it. Two sets of controls for one line, and roughly 180px of
    * height spent saying the same thing twice. The row is the only place now.
    */
-  const topCategories = useMemo(() => categories.filter((c) => !c.parentId), [categories])
+  /*
+   * The expense heads — Expenses and what is filed under it: labour, job
+   * charges, repairs. They belong on a service order (which opens its rows on
+   * them) and on an expense bill, not on an order for goods, so a goods order
+   * does not offer them. A row an older order already has on one keeps it.
+   */
+  const expenseCategoryIds = useMemo(() => {
+    const heads = new Set(categories.filter((c) => !c.parentId && /expense/i.test(c.name)).map((c) => c.id))
+    for (const c of categories) if (c.parentId && heads.has(c.parentId)) heads.add(c.id)
+    return heads
+  }, [categories])
+  const offersExpenses = serviceMode || lines.some((l) => expenseCategoryIds.has(l.categoryId ?? ''))
+  const topCategories = useMemo(
+    () => categories.filter((c) => !c.parentId && (offersExpenses || !expenseCategoryIds.has(c.id))),
+    [categories, offersExpenses, expenseCategoryIds]
+  )
 
   /** The children of one category, for that row's second dropdown. */
   const subCategoriesOf = (categoryId?: string | null) =>
@@ -1160,6 +1243,8 @@ export function PurchaseOrderDialog({
   const itemsFor = (line: PoLine) => {
     const childIds = new Set(subCategoriesOf(line.categoryId).map((c) => c.id))
     const inCategory = items.filter((it) => {
+      // A goods order's rows do not list expense heads' items; one already on the row stays.
+      if (!serviceMode && it.id !== line.itemId && expenseCategoryIds.has(it.categoryId ?? '')) return false
       if (line.subcategoryId) return it.categoryId === line.subcategoryId
       if (line.categoryId) {
         return it.categoryId === line.categoryId || childIds.has(it.categoryId ?? '')
@@ -1193,6 +1278,7 @@ export function PurchaseOrderDialog({
     styleNo: '',
     styleId: '',
     qty: '',
+    uomId: null,
     unitRate: '',
     discount: '0',
     discountUnit: '%',
@@ -1540,9 +1626,11 @@ export function PurchaseOrderDialog({
     .map((l) => ({
       name: itemById.get(l.itemId)?.name ?? 'A line',
       noQty: num(l.qty) <= 0,
+      // 2.5 cartons: a whole number for an item counted whole.
+      badQty: !!lineQtyProblem(l),
       noRate: String(l.unitRate).trim() === '',
     }))
-    .filter((r) => r.noQty || r.noRate)
+    .filter((r) => r.noQty || r.badQty || r.noRate)
 
   if (!open || !mounted) return null
 
@@ -1649,6 +1737,8 @@ export function PurchaseOrderDialog({
     setLine(index, {
       itemId,
       codeText: item?.code ?? '',
+      // Starts in the pack it is usually bought in (a box of 20); its own unit when it has none.
+      uomId: item?.buyUnits?.find((u) => u.isDefault)?.uom.id ?? null,
       ...styleFill,
       ...(cat
         ? cat.parentId
@@ -1797,6 +1887,9 @@ export function PurchaseOrderDialog({
       const kept = prev.filter((l) => l.itemId)
       const fresh = picks.map(({ row, qty }) => {
         const cat = categories.find((c) => c.id === itemById.get(row.item.id)?.categoryId)
+        // The indent is in the item's own unit; bought in its usual pack, it is
+        // ordered in whole packs — 30 pcs in boxes of 20 is 2 boxes.
+        const pack = itemById.get(row.item.id)?.buyUnits?.find((u) => u.isDefault)
         return {
           ...blankLine(),
           itemId: row.item.id,
@@ -1806,7 +1899,8 @@ export function PurchaseOrderDialog({
               ? { categoryId: cat.parentId, subcategoryId: cat.id }
               : { categoryId: cat.id, subcategoryId: '' }
             : {}),
-          qty: String(qty),
+          qty: String(pack ? packsFor(qty, Number(pack.factor), pack.uom.decimalPlaces ?? 0) : qty),
+          uomId: pack?.uom.id ?? null,
           gstRate: row.item.taxRate ? String(Number(row.item.taxRate.rate)) : '',
           // The garment the material is for, as the requisition gave it.
           ...(row.styleNo
@@ -2095,6 +2189,8 @@ export function PurchaseOrderDialog({
       mrLineId: l.mrLineId || null,
       enquiryLineId: l.enquiryLineId || null,
       qty: num(l.qty),
+      // The pack the quantity and rate are in; the server knows its size.
+      uomId: l.uomId || null,
       unitRate: num(l.unitRate),
       // A percentage whichever unit it was typed in — see `lineDiscountOf`.
       // Sent unrounded: the column keeps six decimals, so ₹100 off a line of
@@ -3072,12 +3168,10 @@ export function PurchaseOrderDialog({
                               value={String(line.qty)}
                               onValueChange={(v) => setLine(i, { qty: v })}
                               aria-label={`Row ${i + 1} quantity`}
+                              aria-invalid={!!lineQtyProblem(line)}
                             />
-                            {item?.uom?.symbol && (
-                              <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
-                                {item.uom.symbol}
-                              </p>
-                            )}
+                            {unitPicker(line, i, 'right')}
+                            <QtyProblem className="text-right" text={lineQtyProblem(line)} />
                           </td>
 
                           <td className={COL.rate}>
@@ -3102,7 +3196,7 @@ export function PurchaseOrderDialog({
                               would just be a row of noise. */}
                             {lastRate && (
                               <div className="mt-0.5 text-right">
-                                <LastRate rate={num(lastRate.unitRate)} use={String(line.unitRate).trim() === '' ? () => setLine(i, { unitRate: String(num(lastRate.unitRate)) }) : undefined} />
+                                <LastRate rate={rateFor(lastRate, packOf(line)?.factor ?? 1)} use={String(line.unitRate).trim() === '' ? () => setLine(i, { unitRate: String(rateFor(lastRate, packOf(line)?.factor ?? 1)) }) : undefined} />
                                 <button
                                   type="button"
                                   onClick={() => setHistoryFor(line.itemId)}
@@ -3381,10 +3475,10 @@ export function PurchaseOrderDialog({
                             value={String(line.qty)}
                             onValueChange={(v) => setLine(i, { qty: v })}
                             aria-label={`Row ${i + 1} quantity`}
+                            aria-invalid={!!lineQtyProblem(line)}
                           />
-                          {item?.uom?.symbol && (
-                            <p className="text-muted-foreground text-[10px]">{item.uom.symbol}</p>
-                          )}
+                          {unitPicker(line, i, 'left')}
+                          <QtyProblem text={lineQtyProblem(line)} />
                         </div>
                         <div className="space-y-1">
                           <label className={fieldLabel}>Rate</label>
@@ -3398,7 +3492,7 @@ export function PurchaseOrderDialog({
                           />
                           {lastRate && (
                             <div>
-                              <LastRate rate={num(lastRate.unitRate)} use={String(line.unitRate).trim() === '' ? () => setLine(i, { unitRate: String(num(lastRate.unitRate)) }) : undefined} />
+                              <LastRate rate={rateFor(lastRate, packOf(line)?.factor ?? 1)} use={String(line.unitRate).trim() === '' ? () => setLine(i, { unitRate: String(rateFor(lastRate, packOf(line)?.factor ?? 1)) }) : undefined} />
                               <button
                                 type="button"
                                 onClick={() => setHistoryFor(line.itemId)}
@@ -4035,14 +4129,11 @@ export function PurchaseOrderDialog({
                     </p>
                   ) : (
                     <div className="space-y-1.5 pt-0.5">
-                      {totals.chargeRows.length > 0 && (
-                        <p className="text-muted-foreground text-[11px]">
-                          Select a charge and enter its amount. GST follows Extra Charges settings.
-                          Percentages use the goods value after discounts, before GST.
-                        </p>
-                      )}
+                      <div className="flex items-center justify-between border-t border-border/60 pt-3 pb-1">
+                        <span className="text-foreground text-xs font-semibold">Additional charges</span>
+                      </div>
                       {totals.chargeRows.map((c) => (
-                        <div key={c.chargeTypeId}>
+                        <div key={c.chargeTypeId} className="rounded-lg border border-border/60 bg-secondary/20 p-3">
                           <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
                             {/* The name keeps a floor it will not shrink under,
                               so a long one wraps the boxes onto their own line
@@ -4151,7 +4242,7 @@ export function PurchaseOrderDialog({
                           }}
                           aria-label="Add a charge"
                         >
-                          <option value="">+ Add a charge — freight, transport, dyeing…</option>
+                          <option value="">+ Add charge</option>
                           {chargeTypes
                             .filter((t) => !shownCharges.includes(t.id))
                             .map((t) => (
@@ -4224,7 +4315,7 @@ export function PurchaseOrderDialog({
                           .slice(0, 3)
                           .map(
                             (r) =>
-                              `${r.name} (${[r.noQty && 'quantity', r.noRate && 'rate']
+                              `${r.name} (${[r.noQty && 'quantity', r.badQty && 'a whole-number quantity', r.noRate && 'rate']
                                 .filter(Boolean)
                                 .join(' and ')})`
                           )
@@ -4545,7 +4636,9 @@ export function PurchaseOrderDialog({
       {historyFor &&
         (() => {
           const rows = rateHistory[historyFor] ?? []
-          const rates = rows.map((r) => num(r.unitRate))
+          // Orders in different packs compared per piece: last, lowest, highest.
+          const mixed = rows.some((r) => (r.packFactor ?? 1) !== 1)
+          const rates = rows.map((r) => (mixed ? (r.ratePerPiece ?? num(r.unitRate)) : num(r.unitRate)))
           return (
             <div
               className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
@@ -4664,6 +4757,11 @@ export function PurchaseOrderDialog({
                               </td>
                               <td className="px-3 py-2 text-right font-medium tabular-nums">
                                 {inr(num(h.unitRate))}
+                                {h.packSymbol && (h.packFactor ?? 1) !== 1 && (
+                                  <span className="text-muted-foreground block text-[10px] font-normal">
+                                    / {h.packSymbol} of {h.packFactor} · {inr(h.ratePerPiece ?? 0)} each
+                                  </span>
+                                )}
                               </td>
                               <td className="text-muted-foreground px-3 py-2 text-right tabular-nums">
                                 {num(h.qty)}

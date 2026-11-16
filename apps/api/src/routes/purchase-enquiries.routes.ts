@@ -1,3 +1,5 @@
+import { packLines, resolvePacks, toStock } from '../services/unitQuantity.service'
+import { fitsPlaces, placesMessage } from '@ld-erp/shared'
 import { Router } from 'express'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
@@ -94,6 +96,8 @@ const enquiryInclude = {
           uom: { select: { symbol: true } },
         },
       },
+      // The pack it is asked in (qty is in pieces), for showing it.
+      uom: { select: { id: true, symbol: true, decimalPlaces: true } },
       mrLine: { select: { id: true, mr: { select: { id: true, mrNumber: true } } } },
       /*
        * The order lines raised from this one, cancelled ones included.
@@ -178,10 +182,11 @@ type EnquiryRow = Prisma.PurchaseEnquiryGetPayload<{ include: typeof enquiryIncl
  */
 function shape(e: EnquiryRow, orderedByLine?: Map<string, number>) {
   const qtyByLine = new Map(e.lines.map((l) => [l.id, Number(l.qty)]))
+  const packByLine = new Map(e.lines.map((l) => [l.id, Number(l.uomFactor) || 1]))
   const now = Date.now()
 
   const quotes = e.quotes.map((q) => {
-    const { value, pricedLines } = quoteValue(q.lines, qtyByLine)
+    const { value, pricedLines } = quoteValue(q.lines, qtyByLine, packByLine)
     return {
       ...q,
       /** What his rates come to. Separate from `piAmount`, which is his figure. */
@@ -526,10 +531,13 @@ async function buildLines(
     itemId: string
     description?: string | null
     qty: number
+    uomId?: string | null
     expectedRate?: number | null
     mrLineId?: string | null
   }>
 ) {
+  // Each line's pack (2 boxes of 20), its size from the item's list; never 2.5 boxes.
+  const packed = await packLines(tx, lines, ['qty'], 'Asked')
   const items = await tx.item.findMany({
     where: { id: { in: [...new Set(lines.map((l) => l.itemId))] } },
     select: { id: true, hsnCode: true },
@@ -543,7 +551,10 @@ async function buildLines(
       itemId: l.itemId,
       description: l.description ?? null,
       hsnCode: item.hsnCode ?? null,
-      qty: l.qty,
+      // Stored in pieces; the pack it was asked in, and what one holds, beside it.
+      qty: toStock(l.qty, packed[i].pack),
+      uomId: packed[i].pack.uomId,
+      uomFactor: packed[i].pack.factor,
       expectedRate: l.expectedRate ?? null,
       mrLineId: l.mrLineId || null,
       sortOrder: i,
@@ -656,10 +667,12 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
 
   const updated = await prisma.$transaction(async (tx) => {
     if (data.lines) {
+      // In pieces, as the orders raised from it count.
+      const packed = await packLines(tx, data.lines, ['qty'], 'Asked')
       await assertEditKeepsOrdersTrue(
         tx,
         before,
-        data.lines.map((l) => ({ id: l.id ?? null, qty: l.qty }))
+        data.lines.map((l, i) => ({ id: l.id ?? null, qty: toStock(l.qty, packed[i].pack) }))
       )
 
       const rows = await buildLines(tx, data.lines)
@@ -959,6 +972,20 @@ router.patch(
   async (req: AuthRequest, res) => {
     const data = recordQuoteSchema.parse(req.body)
     const quote = await quoteFor(req.params.quoteId)
+    // What the supplier can supply, typed in the pack the line is asked in (2
+    // boxes), checked against that pack and kept in pieces like the line.
+    const offeredLines = await prisma.purchaseEnquiryLine.findMany({
+      where: { id: { in: (data.rates ?? []).map((r) => r.lineId) } },
+      select: { id: true, itemId: true, uomId: true, uomFactor: true },
+    })
+    const offeredPacks = await resolvePacks(prisma, offeredLines.map((l) => ({ itemId: l.itemId, uomId: l.uomId })))
+    const packOfLine = new Map(offeredLines.map((l, i) => [l.id, offeredPacks[i]]))
+    for (const r of data.rates ?? []) {
+      const p = packOfLine.get(r.lineId)
+      if (p && r.offeredQty != null && !fitsPlaces(r.offeredQty, p.places)) {
+        throw new AppError(`Offered: ${r.offeredQty} ${p.symbol}. ${placesMessage(p.places)}`, 400, 'QTY_NOT_IN_UNIT')
+      }
+    }
 
     if (data.validUntil && data.validUntil < data.piDate) {
       throw new AppError(
@@ -991,7 +1018,7 @@ router.patch(
         const patch = {
           quotedRate: r.quotedRate ?? null,
           gstRate: r.gstRate ?? null,
-          offeredQty: r.offeredQty ?? null,
+          offeredQty: r.offeredQty == null ? null : toStock(r.offeredQty, { factor: packOfLine.get(r.lineId)?.factor ?? 1 }),
           remark: r.remark ?? null,
         }
         /*

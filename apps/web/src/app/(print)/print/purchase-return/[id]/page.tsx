@@ -1,5 +1,6 @@
 'use client'
 
+import { ratePer, valueAt } from '@/lib/packs'
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import {
@@ -127,6 +128,9 @@ interface Line {
     } | null
   }
   item: { code: string; name: string; uom: { symbol: string } | null }
+  /** The bill's pack the price is per (a box of 20 pcs); qty is in pieces. */
+  uomFactor?: string | number
+  uom?: { symbol: string } | null
   warehouse: { name: string }
 }
 
@@ -488,12 +492,13 @@ export default function PurchaseReturnPrintPage() {
                     </td>
                     <td style={{ ...TD, textAlign: 'right', color: GREY, ...NUM }}>
                       {money(l.unitPrice)}
+                      {ratePer(l) && <span style={{ color: GREY }}> {ratePer(l)}</span>}
                     </td>
                     <td style={{ ...TD, textAlign: 'right', color: GREY, ...NUM }}>
                       {Number(l.gstRate)}
                     </td>
                     <td style={{ ...TD, paddingRight: 16, textAlign: 'right', ...NUM }}>
-                      {money(Number(l.qty) * Number(l.unitPrice))}
+                      {money(valueAt(l, l.unitPrice))}
                     </td>
                   </tr>
                 ))}

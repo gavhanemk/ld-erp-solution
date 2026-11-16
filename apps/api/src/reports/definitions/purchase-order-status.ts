@@ -180,6 +180,7 @@ export const purchaseOrderStatus: ReportDefinition = {
       select: {
         qty: true,
         unitRate: true,
+        uomFactor: true,
         discount: true,
         shortClosed: true,
         item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
@@ -220,7 +221,8 @@ export const purchaseOrderStatus: ReportDefinition = {
       // Nothing more is coming on a cancelled order or a line closed short.
       const stillComing = OPEN.has(l.po.status) && !l.shortClosed
       const pendingQty = stillComing ? round2(Math.max(0, orderedQty - receivedQty)) : 0
-      const rate = round2(Number(l.unitRate) * (1 - Number(l.discount) / 100))
+      // Quantities here are in pieces; a line bought in a pack is priced per it, so its rate per piece.
+      const rate = round2((Number(l.unitRate) / (Number(l.uomFactor) || 1)) * (1 - Number(l.discount) / 100))
       const wantedBy = l.po.deliveryDate
       const dueDay = wantedBy
         ? new Date(wantedBy.getFullYear(), wantedBy.getMonth(), wantedBy.getDate())
