@@ -242,6 +242,8 @@ const poInclude = {
         },
       },
       shortClosedBy: { select: { id: true, name: true } },
+      // The pack the line was ordered in (a box of 20 pcs); qty is in the item's own unit.
+      uom: { select: { id: true, symbol: true, decimalPlaces: true } },
       item: {
         select: {
           id: true,
@@ -291,6 +293,8 @@ const poReceivingInclude = {
     orderBy: { sortOrder: 'asc' as const },
     include: {
       shortClosedBy: { select: { id: true, name: true } },
+      // The pack the line was ordered in (a box of 20 pcs); qty is in the item's own unit.
+      uom: { select: { id: true, symbol: true, decimalPlaces: true } },
       item: {
         select: {
           id: true,
@@ -4271,6 +4275,8 @@ const billInclude = {
     orderBy: { sortOrder: 'asc' as const },
     include: {
       poLine: { select: { id: true, poId: true, qty: true } },
+      // The pack the line was billed in (qty is in pieces).
+      uom: { select: { id: true, symbol: true, decimalPlaces: true } },
       item: {
         select: {
           id: true,
@@ -4976,6 +4982,8 @@ async function findRateVariances(
     qty: number
     gstRate?: number
     itemId: string
+    /** What one of the unit the bill line is priced in holds (20 for a box of 20, 1 for pieces). */
+    uomFactor?: number
   }>
 ): Promise<RateVariance[]> {
   const grnLineIds = lines
@@ -4986,7 +4994,7 @@ async function findRateVariances(
 
   const receiptLines = await tx.gRNLine.findMany({
     where: { id: { in: grnLineIds } },
-    select: { id: true, unitRate: true, item: { select: { id: true, name: true } } },
+    select: { id: true, unitRate: true, uomFactor: true, item: { select: { id: true, name: true } } },
   })
   const byId = new Map(receiptLines.map((r) => [r.id, r]))
 
@@ -4996,7 +5004,9 @@ async function findRateVariances(
     const receipt = byId.get(line.grnLineId)
     if (!receipt) return
 
-    const poRate = round2(Number(receipt.unitRate))
+    // The order's rate brought to the unit the bill line is priced in: ₹99 a box
+    // of 20 is ₹4.95 a piece when the bill counts pieces.
+    const poRate = round2((Number(receipt.unitRate) / (Number(receipt.uomFactor) || 1)) * (line.uomFactor ?? 1))
     const billedRate = round2(line.unitPrice)
     const difference = round2(billedRate - poRate)
 
@@ -5136,18 +5146,27 @@ async function checkLocation(tx: Prisma.TransactionClient, warehouseId?: string 
  * never left unpaid because the payment half failed.
  */
 /**
- * A bill's lines as typed — each in the pack the supplier billed it in, a line
- * against a receipt always in that receipt's pack — with the same lines in the
- * item's own unit for every check against what was received or ordered.
+ * A bill's lines as typed — each in the pack the supplier billed it in — with
+ * the same lines in the item's own unit for every check against what was
+ * received or ordered. A line against a receipt is in that receipt's pack, or
+ * in the item's own unit for a delivery that came partly loose (25 pcs of
+ * boxes of 20); never some third unit.
  */
 async function packBillLines<L extends { itemId: string; qty: number; grnLineId?: string | null; uomId?: string | null }>(
   tx: Prisma.TransactionClient,
   lines: L[],
 ) {
   const grnIds = lines.map((l) => l.grnLineId).filter((v): v is string => !!v)
-  const receipt = grnIds.length ? await tx.gRNLine.findMany({ where: { id: { in: grnIds } }, select: { id: true, uomId: true } }) : []
-  const packOfReceipt = new Map(receipt.map((r) => [r.id, r.uomId]))
-  const asTyped = lines.map((l) => (l.grnLineId && packOfReceipt.has(l.grnLineId) ? { ...l, uomId: packOfReceipt.get(l.grnLineId) ?? null } : l))
+  const receipt = grnIds.length
+    ? await tx.gRNLine.findMany({ where: { id: { in: grnIds } }, select: { id: true, uomId: true, item: { select: { uomId: true } } } })
+    : []
+  const receiptOf = new Map(receipt.map((r) => [r.id, r]))
+  const asTyped = lines.map((l) => {
+    const r = l.grnLineId ? receiptOf.get(l.grnLineId) : undefined
+    if (!r) return l
+    const own = !l.uomId || l.uomId === r.item.uomId
+    return { ...l, uomId: own ? null : r.uomId }
+  })
   const packed = await packLines(tx, asTyped, ['qty'], 'Billed')
   return { packed, stockLines: lines.map((l, i) => ({ ...l, qty: toStock(l.qty, packed[i].pack) })) }
 }
@@ -5184,7 +5203,7 @@ async function bookBill(
   // The rate half of the match. Quantity was already checked above; this is
   // what stops a supplier billing the goods that did arrive at their own
   // price.
-  const variances = await findRateVariances(tx, data.lines)
+  const variances = await findRateVariances(tx, data.lines.map((l, i) => ({ ...l, uomFactor: packed[i].pack.factor })))
   const { effectiveRates, toDebitNote } = resolveRateVariances(
     variances,
     data.lines,

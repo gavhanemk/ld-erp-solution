@@ -78,6 +78,14 @@ interface OrderLine {
   receivedQty: string | number
   pendingQty: string | number
   unitRate: string | number
+  /**
+   * The pack it was ordered in (a box of 20 pcs) and what one holds. The
+   * quantities above are in the item's own unit; a receipt is typed in the
+   * pack, or loose in pieces.
+   */
+  uomId?: string | null
+  uomFactor?: string | number
+  uom?: { id: string; symbol: string; decimalPlaces?: number } | null
   /** Set once the balance of this line has been written off as not coming. */
   shortClosed?: boolean
   shortCloseReason?: string | null
@@ -119,6 +127,8 @@ interface Alloc {
   sizes?: string
   /** A note on each of those packages, in the same order: "short width". */
   notes?: string[]
+  /** Typed in the item's own unit (a loose delivery), not the pack it was ordered in. */
+  loose?: boolean
 }
 
 /** What one package is, as the receipt asks it. */
@@ -153,6 +163,17 @@ const packWord = (type: string, n: number) =>
  * 500 is five of 100, the last taking what does not divide; typed sizes are
  * taken as they are. Nothing said: none, and the item's own rule applies.
  */
+/** What one of the order line's pack holds: 20 for a box of 20, 1 in the item's own unit. */
+const factorOf = (line: Pick<OrderLine, 'uomId' | 'uomFactor'>) => (line.uomId ? Number(line.uomFactor ?? 1) || 1 : 1)
+/** A row's quantity in the item's own unit: 2 boxes of 20 is 40 pcs; loose pieces as typed. */
+const stockOf = (line: Pick<OrderLine, 'uomId' | 'uomFactor'>, a: Alloc) => num(a.received) * (a.loose ? 1 : factorOf(line))
+/** What a row's quantity is counted in, for its whole-number check: the pack, or the item when loose. */
+const typedIn = (line: OrderLine, a: Alloc) =>
+  line.uomId && !a.loose ? { uom: { symbol: line.uom?.symbol ?? null, decimalPlaces: line.uom?.decimalPlaces ?? null } } : line.item
+/** "= 2 box" beside a quantity in pieces, for a line ordered in packs. */
+const inPacks = (line: OrderLine, pcs: number) =>
+  line.uomId && factorOf(line) !== 1 ? `= ${Number((pcs / factorOf(line)).toFixed(3)).toLocaleString('en-IN')} ${line.uom?.symbol ?? ''}` : null
+
 function packQtysOf(a: Alloc, places = 3): number[] {
   if (a.exact) return parseSizes(a.sizes ?? '')
   // Pieces and cartons split whole: 10 in 3 packages is 3, 3 and 4.
@@ -177,7 +198,7 @@ function PackedAs({
 }) {
   // The Package sizes window, open over the receipt.
   const [sizing, setSizing] = useState(false)
-  const places = useQtyRules().places(line.item)
+  const places = useQtyRules().places(typedIn(line, alloc))
   const pack = line.pack
   if (pack && !pack.tracked) {
     return <span className="text-muted-foreground text-xs">No stickers</span>
@@ -209,7 +230,7 @@ function PackedAs({
       </>
     )
   } else if (received > 0) {
-    hint = pack?.perPack ? `Empty: ${Math.ceil(received / pack.perPack)} stickers` : 'Empty: 1 sticker for all'
+    hint = pack?.perPack ? `Empty: ${Math.ceil(stockOf(line, alloc) / pack.perPack)} stickers` : 'Empty: 1 sticker for all'
   }
 
   return (
@@ -404,6 +425,40 @@ interface EditingGrn {
  */
 const OVER_RECEIPT_ALLOWANCE = 0.1
 
+/**
+ * Under a received box, for a line ordered in packs: what the figure is in -
+ * the order's pack (2 boxes) or, for a loose delivery, pieces - and what it
+ * comes to in pieces. Lines ordered in the item's own unit show nothing here.
+ */
+function ReceivedIn({ line, alloc, disabled, onChange }: { line: OrderLine; alloc: Alloc; disabled: boolean; onChange: (loose: boolean) => void }) {
+  if (!line.uomId || factorOf(line) === 1) return null
+  const own = line.item.uom?.symbol ?? ''
+  const pack = line.uom?.symbol ?? ''
+  const pcs = stockOf(line, alloc)
+  return (
+    <div className="text-muted-foreground mt-0.5 text-right text-[10px]">
+      <select
+        className="form-input h-6 w-full px-1 py-0 text-[10px]"
+        value={alloc.loose ? 'loose' : 'pack'}
+        onChange={(e) => onChange(e.target.value === 'loose')}
+        disabled={disabled}
+        aria-label={`${line.item.name} received in`}
+        title="Counted in the order's pack, or loose in pieces"
+      >
+        <option value="pack">
+          {pack} ({factorOf(line).toLocaleString('en-IN')})
+        </option>
+        <option value="loose">{own} (loose)</option>
+      </select>
+      {!alloc.loose && pcs > 0 && (
+        <p className="whitespace-nowrap">
+          = {Number(pcs.toFixed(3)).toLocaleString('en-IN')} {own}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function wellPastOrder(ordered: number, already: number, taking: number): boolean {
   return ordered > 0 && already + taking > ordered * (1 + OVER_RECEIPT_ALLOWANCE) + 0.0001
 }
@@ -487,7 +542,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
   /* The whole line's share of this delivery, added across its stores — the
      figure that has to fit inside what is still due, and the one the server
      checks. */
-  const lineAccepted = allocs.reduce((sum, a) => sum + num(a.received), 0)
+  const lineAccepted = allocs.reduce((sum, a) => sum + stockOf(line, a), 0)
   const over = lineAccepted > pending + 0.0001
 
   return (
@@ -536,6 +591,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                 </td>
                 <td rowSpan={allocs.length} className="text-right align-top text-sm tabular-nums">
                   {ordered} {unit}
+                  {inPacks(line, ordered) && <div className="text-muted-foreground text-[10px]">{inPacks(line, ordered)}</div>}
                 </td>
                 <td
                   rowSpan={allocs.length}
@@ -547,6 +603,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                   {pending > 0 ? (
                     <span>
                       {Number(pending.toFixed(3))} {unit}
+                      {inPacks(line, pending) && <span className="text-muted-foreground block text-[10px]">{inPacks(line, pending)}</span>}
                     </span>
                   ) : (
                     <span className="badge-success">complete</span>
@@ -566,9 +623,10 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                 aria-label={`Quantity of ${line.item.name} received on this receipt${
                   first ? '' : `, row ${i + 1}`
                 }`}
-                aria-invalid={!!qtyRules.placesProblem(alloc.received, line.item)}
+                aria-invalid={!!qtyRules.placesProblem(alloc.received, typedIn(line, alloc))}
               />
-              <QtyProblem className="text-right" text={qtyRules.placesProblem(alloc.received, line.item)} />
+              <ReceivedIn line={line} alloc={alloc} disabled={done} onChange={(loose) => setAlloc(line.id, alloc.key, { loose })} />
+              <QtyProblem className="text-right" text={qtyRules.placesProblem(alloc.received, typedIn(line, alloc))} />
             </td>
             <td>
               <input
@@ -672,7 +730,7 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
       ? `${category.parent.name} / ${category.name}`
       : category.name
     : null
-  const lineAccepted = allocs.reduce((sum, a) => sum + num(a.received), 0)
+  const lineAccepted = allocs.reduce((sum, a) => sum + stockOf(line, a), 0)
   const over = lineAccepted > pending + 0.0001
   const fieldLabel = 'text-muted-foreground text-[10px] font-semibold uppercase tracking-wider'
 
@@ -714,6 +772,7 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
           <p className="text-sm tabular-nums">
             {ordered} {unit}
           </p>
+          {inPacks(line, ordered) && <p className="text-muted-foreground text-[10px]">{inPacks(line, ordered)}</p>}
         </div>
         <div>
           <p className={fieldLabel}>Received</p>
@@ -778,9 +837,10 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
                   aria-label={`Quantity of ${line.item.name} received on this receipt${
                     first ? '' : `, row ${i + 1}`
                   }`}
-                  aria-invalid={!!qtyRules.placesProblem(alloc.received, line.item)}
+                  aria-invalid={!!qtyRules.placesProblem(alloc.received, typedIn(line, alloc))}
                 />
-                <QtyProblem className="text-right" text={qtyRules.placesProblem(alloc.received, line.item)} />
+                <ReceivedIn line={line} alloc={alloc} disabled={done} onChange={(loose) => setAlloc(line.id, alloc.key, { loose })} />
+                <QtyProblem className="text-right" text={qtyRules.placesProblem(alloc.received, typedIn(line, alloc))} />
               </div>
               <div className="space-y-1">
                 <label className={fieldLabel}>Lot no</label>
@@ -1132,12 +1192,21 @@ export function ReceiveGoodsDialog({
         for (const l of g.lines) {
           if (!l.poLineId) continue
           const arr = byPoLine[l.poLineId] ?? (byPoLine[l.poLineId] = [])
-          const received = String(l.receivedQty)
-          const packQtys = (l.packQtys ?? []).map((q) => round3(Number(q)))
+          // Saved in pieces. A line ordered in packs reopens in its packs when
+          // everything divides (40 pcs, packages of 20: 2 boxes, 1 and 1);
+          // otherwise loose, in pieces, as it was received.
+          const orderLine = detail.lines.find((x) => x.id === l.poLineId)
+          const f = orderLine ? factorOf(orderLine) : 1
+          const savedPcs = (l.packQtys ?? []).map((q) => round3(Number(q)))
+          const divides = (q: number) => Math.abs(q / f - Math.round(q / f)) < 1e-9
+          const loose = f !== 1 && !(divides(Number(l.receivedQty)) && savedPcs.every(divides))
+          const per = loose ? 1 : f
+          const received = String(round3(Number(l.receivedQty) / per))
+          const packQtys = savedPcs.map((q) => round3(q / per))
           // Split evenly, it reads back as a count; otherwise as the sizes typed.
           const even = packQtysOf(
             { key: '', warehouseId: '', received, packs: String(packQtys.length) },
-            qtyRules.places(detail.lines.find((x) => x.id === l.poLineId)?.item),
+            qtyRules.places(orderLine ? typedIn(orderLine, { key: '', warehouseId: '', received, loose }) : undefined),
           )
           const packNotes = (l.packNotes ?? []).slice(0, packQtys.length)
           // Notes on the packages keep it as sizes, so they are seen and kept.
@@ -1146,6 +1215,7 @@ export function ReceiveGoodsDialog({
             key: makeKey(),
             warehouseId: l.warehouseId,
             received,
+            loose,
             lot: l.batchNumber ?? '',
             packType: l.packType ?? '',
             packs: packQtys.length && !exact ? String(packQtys.length) : '',
@@ -1301,7 +1371,12 @@ export function ReceiveGoodsDialog({
         const due = num(line.qty) - num(line.receivedQty)
         const rows = next[line.id] ?? []
         if (due <= 0 || line.shortClosed || !rows.length || rows.some((a) => String(a.received).trim() !== '')) continue
-        next[line.id] = rows.map((a, i) => (i === 0 ? { ...a, received: String(due) } : a))
+        // In the order's pack when what is due is whole packs (2 boxes), else loose pieces.
+        const f = factorOf(line)
+        const whole = f !== 1 && Math.abs(due / f - Math.round(due / f)) < 1e-9
+        next[line.id] = rows.map((a, i) =>
+          i === 0 ? { ...a, received: String(f !== 1 && whole ? Math.round(due / f) : due), loose: f !== 1 && !whole } : a,
+        )
       }
       return next
     })
@@ -1319,7 +1394,7 @@ export function ReceiveGoodsDialog({
     for (const line of order?.lines ?? []) {
       if (line.pack?.tracked === false) continue
       for (const alloc of entries[line.id] ?? []) {
-        const received = num(alloc.received)
+        const received = stockOf(line, alloc)
         if (received <= 0) continue
         const n = packQtysOf(alloc).length || (line.pack?.perPack ? Math.ceil(received / line.pack.perPack) : 1)
         const type = alloc.packType || line.pack?.packType || 'BUNDLE'
@@ -1399,8 +1474,8 @@ export function ReceiveGoodsDialog({
     }
 
     // 2.5 cartons received: said under its box, and again here.
-    const halfReceived = rows.find(({ line, alloc }) => qtyRules.placesProblem(alloc.received, line.item))
-    if (halfReceived) return setError(`${halfReceived.line.item.name}: ${qtyRules.placesProblem(halfReceived.alloc.received, halfReceived.line.item)}`)
+    const halfReceived = rows.find(({ line, alloc }) => qtyRules.placesProblem(alloc.received, typedIn(line, alloc)))
+    if (halfReceived) return setError(`${halfReceived.line.item.name}: ${qtyRules.placesProblem(halfReceived.alloc.received, typedIn(halfReceived.line, halfReceived.alloc))}`)
     const offPacks = rows.find(({ line, alloc }) => {
       if (!alloc.exact || line.pack?.tracked === false) return false
       const qtys = packQtysOf(alloc)
@@ -1448,13 +1523,15 @@ export function ReceiveGoodsDialog({
 
       lines: rows.map(({ line, alloc }) => {
         // How it came packed: a sticker for each package, made on saving.
-        const packQtys = line.pack?.tracked === false ? [] : packQtysOf(alloc, qtyRules.places(line.item))
+        const packQtys = line.pack?.tracked === false ? [] : packQtysOf(alloc, qtyRules.places(typedIn(line, alloc)))
         // A note on each package, lined up with its size.
         const packNotes = alloc.exact ? packQtys.map((_, i) => (alloc.notes?.[i] ?? '').trim()) : []
         return {
           poLineId: line.id,
           warehouseId: alloc.warehouseId,
+          // In the order's pack, or loose in pieces; the server turns it into pieces.
           receivedQty: num(alloc.received),
+          ...(line.uomId ? { inStockUnit: !!alloc.loose } : {}),
           batchNumber: text(alloc.lot ?? ''),
           ...(packQtys.length
             ? { packType: alloc.packType || line.pack?.packType || 'BUNDLE', packQtys, ...(packNotes.some(Boolean) ? { packNotes } : {}) }
@@ -1562,7 +1639,7 @@ export function ReceiveGoodsDialog({
    */
   const booksOverOrder = (order?.lines ?? []).some((line) => {
     const pending = num(line.qty) - num(line.receivedQty)
-    const taking = (entries[line.id] ?? []).reduce((sum, a) => sum + num(a.received), 0)
+    const taking = (entries[line.id] ?? []).reduce((sum, a) => sum + stockOf(line, a), 0)
     return taking > pending
   })
   // A line far enough past its order that the reason stops being optional.
@@ -1570,7 +1647,7 @@ export function ReceiveGoodsDialog({
     wellPastOrder(
       num(line.qty),
       num(line.receivedQty),
-      (entries[line.id] ?? []).reduce((sum, a) => sum + num(a.received), 0)
+      (entries[line.id] ?? []).reduce((sum, a) => sum + stockOf(line, a), 0)
     )
   )
   const needsOverReason = wellOverOrder && overReceiptReason.trim().length < 5

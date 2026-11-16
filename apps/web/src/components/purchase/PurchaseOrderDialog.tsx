@@ -1172,19 +1172,20 @@ export function PurchaseOrderDialog({
     return (
       <div className={`mt-0.5 text-[10px] text-muted-foreground ${align === 'right' ? 'text-right' : ''}`}>
         {item.buyUnits?.length ? (
-          <SmartSelect
-            className="form-input h-6 w-full py-0 text-[10px]"
+          <select
+            className="form-input h-6 w-full px-1 py-0 text-[10px]"
             value={line.uomId ?? ''}
             onChange={(e) => setLine(i, { uomId: e.target.value || null })}
             aria-label={`Row ${i + 1} unit`}
+            title="The unit this line is ordered in; the rate is per it"
           >
             <option value="">{own}</option>
             {item.buyUnits.map((u) => (
               <option key={u.uom.id} value={u.uom.id}>
-                {u.uom.symbol} of {Number(u.factor).toLocaleString('en-IN')} {own}
+                {u.uom.symbol} ({Number(u.factor).toLocaleString('en-IN')})
               </option>
             ))}
-          </SmartSelect>
+          </select>
         ) : (
           own
         )}

@@ -85,12 +85,15 @@ async function main() {
 
   // ── Bill: 2 boxes against the first receipt is more than came (1 box) ──
   const billBody = (lines: unknown[]) => ({ supplierId: supplier.id, supplierInvoiceNo: `ZZB-${stamp}-${Math.random().toString(36).slice(2, 6)}`, supplierInvoiceDate: new Date().toISOString(), lines })
-  const overBill = await call('POST', '/purchase/bills', billBody([{ itemId: item.id, grnLineId: g1l.id, qty: 2, unitPrice: 99, gstRate: 12 }]))
+  const overBill = await call('POST', '/purchase/bills', billBody([{ itemId: item.id, grnLineId: g1l.id, uomId: u('box').id, qty: 2, unitPrice: 99, gstRate: 12 }]))
   check('Bill: 2 boxes against a receipt of 1 box is refused (40 > 20 pcs)', overBill.status >= 400, overBill)
-  const bill = await call('POST', '/purchase/bills', billBody([{ itemId: item.id, grnLineId: g1l.id, qty: 1, unitPrice: 99, gstRate: 12 }]))
+  const bill = await call('POST', '/purchase/bills', billBody([{ itemId: item.id, grnLineId: g1l.id, uomId: u('box').id, qty: 1, unitPrice: 99, gstRate: 12 }]))
   check('Bill: 1 box at ₹99 against that receipt', okay(bill), bill)
   const bl = bill.body?.data?.lines?.[0]
   check('Bill line: 20 pcs in boxes of 20, taxable ₹99', Number(bl?.qty) === 20 && Number(bl?.uomFactor) === 20 && near(Number(bl?.taxableValue), 99), bl)
+  const g2l = g2.body?.data?.lines?.[0]
+  const looseBill = await call('POST', '/purchase/bills', billBody([{ itemId: item.id, grnLineId: g2l?.id, qty: 20, unitPrice: 4.95, gstRate: 12 }]))
+  check('Bill: the 20 loose pcs billed in pieces at ₹4.95 (no rate difference with ₹99 a box)', okay(looseBill) && near(Number(looseBill.body?.data?.lines?.[0]?.taxableValue), 99), looseBill.body?.data?.lines?.[0] ?? looseBill)
   const direct = await call('POST', '/purchase/bills', billBody([{ itemId: item.id, uomId: u('grs').id, qty: 1, unitPrice: 600, gstRate: 12 }]))
   check('Bill without a receipt: 1 gross at ₹600 → 144 pcs, taxable ₹600', okay(direct) && Number(direct.body?.data?.lines?.[0]?.qty) === 144 && near(Number(direct.body?.data?.lines?.[0]?.taxableValue), 600), direct.body?.data?.lines?.[0] ?? direct)
 
