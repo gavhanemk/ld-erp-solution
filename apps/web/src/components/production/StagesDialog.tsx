@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { AlertCircle, ChevronDown, ChevronRight, ExternalLink, Info, Loader2, Lock, RefreshCw, Route, Save } from 'lucide-react'
-import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
+import { RoutingFormDialog } from '@/components/masters/RoutingFormDialog'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
@@ -153,6 +154,8 @@ export function StagesDialog({
   const loaded = !!flow?.steps.length
   const [routings, setRoutings] = useState<RoutingOption[] | null>(null)
   const [routingId, setRoutingId] = useState('')
+  const [creatingRouting, setCreatingRouting] = useState(false)
+  const routingPreset = useMemo(() => ({ styleId: styleIds.length === 1 ? styleIds[0] : undefined }), [styleIds])
   const [rows, setRows] = useState<Row[]>(() => (loaded && flow ? rowsOfFlow(flow) : []))
   const [start, setStart] = useState(() => (loaded && flow ? shape(rowsOfFlow(flow)) : ''))
   const [ops, setOps] = useState<Operation[]>([])
@@ -310,6 +313,7 @@ export function StagesDialog({
             <label className="block">
               <span className="form-label">Routing</span>
               <SmartSelect className="form-input" value={routingId} onChange={(e) => pickRouting(e.target.value)}>
+                {!routingId && <option value="">Pick a routing…</option>}
                 {routings.map((r) => (
                   <option
                     key={r.id}
@@ -324,6 +328,12 @@ export function StagesDialog({
             </label>
           )}
           {fromLine && <p className="text-muted-foreground mt-1.5 text-xs">{fromLine}</p>}
+          {can('masters', 'create') && <button type="button" className="btn-secondary mt-3 text-xs" disabled={saving} onClick={() => setCreatingRouting(true)}>Create from Existing Routing</button>}
+          {creatingRouting && <RoutingFormDialog open onClose={() => setCreatingRouting(false)} preset={routingPreset} onSaved={() => {
+            void api.get<{ data: RoutingOption[] }>(`/production/routings/for?styleIds=${encodeURIComponent(styleIds.join(','))}`)
+              .then((r) => { setRoutings(r.data); setError(null) })
+              .catch(() => setError('Routing saved. Reopen this window to refresh the routing choices.'))
+          }} />}
         </div>
       )}
       {loaded && fromLine && <p className="text-muted-foreground px-1 text-sm">{fromLine}</p>}

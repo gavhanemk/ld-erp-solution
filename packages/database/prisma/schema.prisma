@@ -4773,6 +4773,10 @@ model Workstation {
 /// editing a routing later never changes an order already on the floor.
 model Routing {
   id           String   @id @default(cuid())
+  /// Stable request key prevents duplicate creations after retries or double clicks.
+  creationKey  String?  @unique
+  /// Immutable source ID, reference, name and version. Survives source deletion.
+  copiedFrom   Json?
   /// Made by the system from the style (RT-<style code>) and no longer typed:
   /// orders, BOMs and messages still name a routing by it.
   code         String   @unique
@@ -4839,6 +4843,7 @@ model RoutingStep {
   instructions  String?
 
   @@unique([routingId, sequence])
+  @@index([operationId])
   @@map("routing_steps")
 }
 /// A contractor on the floor: a cutting master, a stitching contractor and
@@ -5124,6 +5129,8 @@ model ChargeType {
   purchaseTaxTreatment ChargeTaxTreatment @default(EXCLUSIVE)
   salesHsnCodeId String?
   salesHsnCode HsnCode? @relation("SalesChargeHsn", fields: [salesHsnCodeId], references: [id])
+  salesGstApplicability String @default("APPLICABLE")
+  purchaseGstApplicability String @default("APPLICABLE")
   salesTaxCategory String @default("TAXABLE")
   purchaseTaxCategory String @default("TAXABLE")
   taxReviewRequired Boolean @default(false)

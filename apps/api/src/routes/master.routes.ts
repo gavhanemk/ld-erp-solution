@@ -1,3 +1,4 @@
+import { compareBomLines, type BomComparableLine } from '@ld-erp/shared'
 import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { z, ZodError } from 'zod'
@@ -5,6 +6,7 @@ import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
 import { nextStyleCode } from '../lib/masterCode'
 import { createRouting, deleteRouting, bomFabrics, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
+import { similarRoutings } from '../services/routingSimilarity.service'
 import { styleOrderStages } from '../services/styleOrders.service'
 import { routingsByStyle } from '../services/routingOverview.service'
 import { deletedRoutings, restoreRouting } from '../services/routingRestore.service'
@@ -35,6 +37,7 @@ import {
   createMachineSchema,
   createOperationSchema,
   createRoutingSchema,
+  routingSimilaritySchema,
   createSizeGroupSchema,
   createSizeSchema,
   createStyleSchema,
@@ -2237,7 +2240,7 @@ router.use(
     include: { defaultHsnCode: { select: { code: true, description: true, gstRate: true } }, salesHsnCode: { select: { code: true, description: true, gstRate: true } } },
     beforeSave: async (data, before) => {
       const merged = { ...before, ...data }
-      if (merged.salesHsnCodeId) {
+      if (merged.salesHsnCodeId && merged.salesGstApplicability !== 'NONE') {
         const hsn = await prisma.hsnCode.findUnique({ where: { id: String(merged.salesHsnCodeId) } })
         if (!hsn?.isActive || hsn.priceLimit != null) throw new AppError('Choose an active sales HSN / SAC with a single charge rate.', 400, 'INVALID_CHARGE_HSN')
       }
@@ -2250,7 +2253,7 @@ router.use(
       }
       const mode = (data.defaultGstMode ?? before?.defaultGstMode) as string | undefined
       const code = data.defaultHsnCodeId !== undefined ? data.defaultHsnCodeId : before?.defaultHsnCodeId
-      if (mode === 'HSN') {
+      if (mode === 'HSN' && merged.purchaseGstApplicability !== 'NONE') {
         if (!code) {
           throw new AppError('Pick an HSN / SAC code for its usual GST, or choose a different way to set it.', 400, 'NO_DEFAULT_HSN')
         }
@@ -2295,6 +2298,9 @@ router.get('/routings', requirePermission(MODULE, 'view'), async (req, res) => {
         { style: { name: { contains: q, mode: 'insensitive' } } },
         { style: { code: { contains: q, mode: 'insensitive' } } },
         { fabric: { name: { contains: q, mode: 'insensitive' } } },
+        { fabric: { code: { contains: q, mode: 'insensitive' } } },
+        { id: { equals: q } },
+        { steps: { some: { operation: { OR: [{ name: { contains: q, mode: 'insensitive' } }, { code: { contains: q, mode: 'insensitive' } }] } } } },
       ],
     })
   }
@@ -2319,6 +2325,11 @@ router.get('/routings', requirePermission(MODULE, 'view'), async (req, res) => {
 })
 
 /** The fabrics a routing can be cut from: fabric items with stock records, and what is on hand. */
+router.post('/routings/similar', requirePermission(MODULE, 'view'), async (req, res) => {
+  const data = routingSimilaritySchema.parse(req.body)
+  res.json({ success: true, data: await similarRoutings(prisma, data) })
+})
+
 router.get('/routings/fabrics', requirePermission(MODULE, 'view'), async (_req, res) => {
   res.json({ success: true, data: await fabricStock(prisma) })
 })
@@ -2367,9 +2378,9 @@ router.post('/routings/deleted/:auditId/restore', requirePermission(MODULE, 'cre
 
 router.post('/routings', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createRoutingSchema.parse(req.body)
-  const { routing, message } = await prisma.$transaction((tx) => createRouting(tx, data, req.user!.id), ROUTING_TX)
+  const { routing, message, reused } = await prisma.$transaction((tx) => createRouting(tx, data, req.user!.id), ROUTING_TX)
 
-  await writeAuditLog(req, {
+  if (!reused) await writeAuditLog(req, {
     module: MODULE,
     action: 'CREATE',
     entityType: 'Routing',
@@ -2452,6 +2463,7 @@ router.patch('/company/:id', requirePermission(MODULE, 'edit'), async (req: Auth
 // ─────────────────────────────────────────────────────────────
 
 const bomInclude = {
+  copiedFrom: { select: { id: true, version: true, color: true, style: { select: { code: true, name: true } } } },
   style: {
     select: { id: true, code: true, name: true, brandType: true, sizeGroupId: true, colors: true },
   },
@@ -2487,7 +2499,7 @@ const bomInclude = {
     orderBy: { sortOrder: 'asc' as const },
     include: {
       componentItem: {
-        select: { id: true, code: true, name: true, standardRate: true, uom: true },
+        select: { id: true, code: true, name: true, standardRate: true, uom: true, category: { include: { parent: true } } },
       },
       department: { select: { id: true, code: true, name: true } },
       sizes: {
@@ -3024,6 +3036,7 @@ function bomListWhere(query: Record<string, unknown>, skip?: BomFacet): Record<s
   if (q) {
     and.push({
       OR: [
+        { id: { contains: q, mode: 'insensitive' } },
         { version: { contains: q, mode: 'insensitive' } },
         { color: { contains: q, mode: 'insensitive' } },
         { style: { name: { contains: q, mode: 'insensitive' } } },
@@ -3125,6 +3138,35 @@ router.get('/bom', requirePermission(MODULE, 'view'), async (req: AuthRequest, r
   })
 })
 
+const similaritySchema = z.object({
+  styleId: z.string().optional(), color: z.string().nullable().optional(), excludeId: z.string().optional(),
+  lines: z.array(z.object({ componentItemId: z.string().min(1), departmentId: z.string().nullable().optional(),
+    component: z.string().nullable().optional(), qtyPerUnit: z.number().finite().min(0),
+    wastagePercent: z.number().finite().min(0).max(100).optional(), unitCost: z.number().finite().min(0).nullable(),
+    sizes: z.array(z.object({ sizeId: z.string(), qtyPerUnit: z.number().finite().min(0) })).optional(),
+  })).max(200),
+})
+router.post('/bom/similar', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
+  const input = similaritySchema.parse(req.body)
+  const ids = [...new Set(input.lines.map(l => l.componentItemId))]
+  // Indexed component lookup ranks candidates before loading their full rows.
+  const overlap = ids.length ? await prisma.$queryRaw<Array<{ bomId: string }>>`
+    SELECT "bomId" FROM bom_lines WHERE "componentItemId" = ANY(${ids}::text[])
+    GROUP BY "bomId" ORDER BY COUNT(DISTINCT "componentItemId") DESC, "bomId" LIMIT 80` : []
+  const sameStyle = input.styleId ? await prisma.bOM.findMany({ where: { styleId: input.styleId, color: input.color || null }, select: { id: true }, take: 40, orderBy: { createdAt: 'desc' } }) : []
+  const candidates = await prisma.bOM.findMany({ where: { id: { in: [...new Set([...overlap.map(r => r.bomId), ...sameStyle.map(r => r.id)])], not: input.excludeId } }, include: bomInclude })
+  const results = candidates.map(bom => {
+    const lines: BomComparableLine[] = bom.lines.map(l => ({ componentItemId: l.componentItemId, departmentId: l.departmentId, component: l.component,
+      qtyPerUnit: Number(l.qtyPerUnit), wastagePercent: Number(l.wastagePercent), unitCost: l.unitCost == null ? null : Number(l.unitCost),
+      sizes: l.sizes.map(s => ({ sizeId: s.sizeId, qtyPerUnit: Number(s.qtyPerUnit) })) }))
+    const comparison = compareBomLines(input.lines, lines)
+    const sameTarget = bom.styleId === input.styleId && (bom.color ?? '') === (input.color ?? '')
+    return { bom: forViewer(req, bom), comparison, kind: comparison.exact ? sameTarget ? 'EXACT' : 'IDENTICAL_COMPONENTS' : comparison.similar ? 'SIMILAR' : 'SAME_TARGET', sameTarget }
+  }).filter(r => r.comparison.similar || r.sameTarget)
+    .sort((a,b) => Number(b.comparison.exact) - Number(a.comparison.exact) || b.comparison.score - a.comparison.score || Number(b.sameTarget) - Number(a.sameTarget))
+  res.json({ success: true, data: results.slice(0, 6), candidateLimit: 80 })
+})
+
 router.get('/bom/:id', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
   const bom = await prisma.bOM.findUnique({ where: { id: req.params.id }, include: bomInclude })
   if (!bom) throw new AppError('BOM not found', 404, 'NOT_FOUND')
@@ -3132,34 +3174,66 @@ router.get('/bom/:id', requirePermission(MODULE, 'view'), async (req: AuthReques
 })
 
 router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const { lines, costLines, styleId, color, version, notes, isActive, routingId, baseSizeId } =
+  const { lines, costLines, styleId, color, version, notes, isActive, copiedFromId, routingId, baseSizeId } =
     createBomSchema.parse(req.body)
+  const source = copiedFromId ? await prisma.bOM.findUnique({ where: { id: copiedFromId }, include: bomInclude }) : null
+  if (copiedFromId && !source) throw new AppError('Source BOM not found', 404, 'NOT_FOUND')
   assertMayCost(req, costLines)
+  let copyBaseSize = baseSizeId ?? (source?.baseSizeId ?? null)
+  const copyRouting = routingId ?? (source?.styleId === styleId ? source.routingId : null)
+  if (source && source.styleId !== styleId) {
+    const target = await prisma.style.findUnique({ where: { id: styleId }, select: { sizeGroupId: true } })
+    const sourceSizes = new Map(source.lines.flatMap(l => l.sizes.map(s => [s.sizeId, s.size.code] as const)))
+    if (source.baseSize) sourceSizes.set(source.baseSize.id, source.baseSize.code)
+    const targetSizes = target?.sizeGroupId ? await prisma.size.findMany({ where: { sizeGroupId: target.sizeGroupId } }) : []
+    const mapSize = (id: string) => {
+      if (targetSizes.some(s => s.id === id)) return id
+      const matched = targetSizes.find(s => s.code === sourceSizes.get(id))
+      if (!matched) throw new AppError(`The target style has no matching size for ${sourceSizes.get(id) ?? id}. Choose a compatible size run before copying.`, 400, 'BOM_COPY_SIZE_MISMATCH')
+      return matched.id
+    }
+    if (copyBaseSize) copyBaseSize = mapSize(copyBaseSize)
+    for (const line of lines) if (line.sizes) line.sizes = line.sizes.map(s => ({ ...s, sizeId: mapSize(s.sizeId) }))
+  }
 
   const colour = color?.trim() || null
-  const style = await assertBomRefsExist(styleId, routingId, lines, baseSizeId, {
+  const style = await assertBomRefsExist(styleId, copyRouting, lines, copyBaseSize, {
     value: colour,
     required: true,
   })
   await assertCostDepartmentsExist(costLines)
   await assertActiveForBom(styleId, lines, new Set(), true)
 
-  const useVersion = version ?? '1.0'
+  let useVersion = version ?? '1.0'
   const typedVersion = version !== undefined
-  await assertVersionFree(styleId, colour, useVersion, style.code, undefined, typedVersion)
 
   const { priced, totalCost, warnings } = await priceBomLines(lines)
-  const costing = costBom(totalCost, costLines ?? [])
+  const costing = costBom(totalCost, costLines ?? (source ? storedCostRows(source.costLines) : []))
 
   let created
   try {
-    created = await prisma.bOM.create({
+    created = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${styleId + ':' + (colour ?? '')}, 0))`
+      const taken = await tx.bOM.findMany({ where: { styleId, color: colour }, select: { version: true } })
+      const versions = new Set(taken.map(b => b.version))
+      if (!version && versions.size) {
+        const numeric = [...versions].map(v => /^(\d+)\.(\d+)$/.exec(v)).filter((v): v is RegExpExecArray => v !== null)
+        const major = Math.max(1, ...numeric.map(v => Number(v[1])))
+        let minor = Math.max(-1, ...numeric.filter(v => Number(v[1]) === major).map(v => Number(v[2]))) + 1
+        useVersion = `${major}.${minor}`
+        while (versions.has(useVersion)) useVersion = `${major}.${++minor}`
+      }
+      if (versions.has(useVersion)) throw versionClash(style.code, colour, useVersion, typedVersion)
+      return tx.bOM.create({
       data: {
         styleId,
+        copiedFromId: source?.id ?? null,
+        status: 'DRAFT',
+        ...(source?.marginPercent != null ? { marginPercent: source.marginPercent, sellingPrice: priceFromMargin(costing.costPerPiece, Number(source.marginPercent)) } : {}),
         color: colour,
         version: useVersion,
-        routingId: routingId ?? null,
-        baseSizeId: baseSizeId ?? null,
+        routingId: copyRouting,
+        baseSizeId: copyBaseSize,
         notes: notes ?? null,
         isActive: isActive ?? true,
         totalCost,
@@ -3170,6 +3244,7 @@ router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest
         ...(costing.rows.length > 0 ? { costLines: { create: costing.rows } } : {}),
       },
       include: bomInclude,
+      })
     })
   } catch (err) {
     rethrowVersionClash(err, style.code, colour, useVersion, typedVersion)

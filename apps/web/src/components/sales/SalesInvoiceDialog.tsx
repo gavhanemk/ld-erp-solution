@@ -335,7 +335,7 @@ export function SalesInvoiceDialog({
         ...(c.ownMaterial ? { followsGoodsRate: false, treatment: 'EXCLUSIVE' as const } : {}) }
       const treatment = config.treatment
       const p = priceSaleCharge(
-        { key: c.key, amount, treatment, followsGoodsRate: config.followsGoodsRate, ownRate: config.ownRate, amountMode: config.amountMode, taxCategory: config.taxCategory }, goods, !!intra)
+        { key: c.key, amount, treatment, followsGoodsRate: config.followsGoodsRate, ownRate: config.ownRate, amountMode: config.amountMode, gstApplicable: config.gstApplicable, taxCategory: config.taxCategory }, goods, !!intra)
       return { ...c, config, type, value: amount, treatment, priced: p, rateText: p.rateText, net: p.net, cgst: p.cgst, sgst: p.sgst, igst: p.igst }
     })
     const live = chargeRows.filter((c) => (c.type || c.sourceChargeId) && c.value > 0)

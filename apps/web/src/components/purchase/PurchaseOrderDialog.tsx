@@ -4129,14 +4129,11 @@ export function PurchaseOrderDialog({
                     </p>
                   ) : (
                     <div className="space-y-1.5 pt-0.5">
-                      {totals.chargeRows.length > 0 && (
-                        <p className="text-muted-foreground text-[11px]">
-                          Select a charge and enter its amount. GST follows Extra Charges settings.
-                          Percentages use the goods value after discounts, before GST.
-                        </p>
-                      )}
+                      <div className="flex items-center justify-between border-t border-border/60 pt-3 pb-1">
+                        <span className="text-foreground text-xs font-semibold">Additional charges</span>
+                      </div>
                       {totals.chargeRows.map((c) => (
-                        <div key={c.chargeTypeId}>
+                        <div key={c.chargeTypeId} className="rounded-lg border border-border/60 bg-secondary/20 p-3">
                           <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
                             {/* The name keeps a floor it will not shrink under,
                               so a long one wraps the boxes onto their own line
@@ -4245,7 +4242,7 @@ export function PurchaseOrderDialog({
                           }}
                           aria-label="Add a charge"
                         >
-                          <option value="">+ Add a charge — freight, transport, dyeing…</option>
+                          <option value="">+ Add charge</option>
                           {chargeTypes
                             .filter((t) => !shownCharges.includes(t.id))
                             .map((t) => (

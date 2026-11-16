@@ -8,11 +8,13 @@ export const chargeEntryFields = {
   amountMode: z.enum(['FIXED', 'PERCENT']).optional(),
   taxOverride: z
     .object({
+      gstApplicable: z.boolean().optional(),
+      applicabilityOnly: z.boolean().optional(),
       mode: z.enum(['HSN', 'MANUAL', 'NONE', 'INHERIT']),
       treatment: z.enum(['INCLUSIVE', 'EXCLUSIVE', 'NON_TAXABLE']),
       hsnCodeId: z.string().nullable().optional(),
       gstRate: z.number().finite().min(0).max(100),
-      taxCategory: z.enum(['TAXABLE', 'EXEMPT', 'NIL_RATED', 'NON_GST']),
+      taxCategory: z.enum(['TAXABLE', 'EXEMPT', 'NIL_RATED', 'NON_GST', 'UNSPECIFIED']),
       reason: z.string().trim().min(5, 'Explain the tax override').max(300),
     })
     .optional(),
@@ -108,7 +110,11 @@ export async function resolveChargeConfigurations(
               },
               side
             )
-      if (!saved && config.hsnCodeId) {
+      if (
+        !saved &&
+        config.hsnCodeId &&
+        (c.taxOverride?.gstApplicable ?? config.gstApplicable) !== false
+      ) {
         const hsn = side === 'sales' ? type.salesHsnCode : type.defaultHsnCode
         if (!hsn?.isActive)
           throw new AppError(
@@ -131,31 +137,50 @@ export async function resolveChargeConfigurations(
             'CHARGE_TAX_FORBIDDEN'
           )
         const o = c.taxOverride
-        if (o.mode === 'NONE' && o.taxCategory === 'TAXABLE')
-          throw new AppError(
-            'Classify a charge without GST as exempt, nil-rated or non-GST.',
-            400,
-            'CHARGE_CLASSIFICATION_REQUIRED'
-          )
-        const hsn =
-          o.mode === 'HSN' && o.hsnCodeId
-            ? await tx.hsnCode.findUnique({ where: { id: o.hsnCodeId } })
-            : null
-        if (o.mode === 'HSN' && (!hsn?.isActive || hsn.priceLimit != null))
-          throw new AppError(
-            'Choose an active HSN / SAC with a single rate.',
-            400,
-            'INVALID_CHARGE_HSN'
-          )
-        config = {
-          ...config,
-          treatment: o.mode === 'NONE' ? 'NON_TAXABLE' : o.treatment,
-          followsGoodsRate: o.mode === 'INHERIT',
-          ownRate: o.mode === 'NONE' ? 0 : Number(hsn?.gstRate ?? o.gstRate),
-          hsnCodeId: hsn?.id ?? null,
-          hsnCode: hsn?.code ?? null,
-          taxCategory: o.taxCategory,
-          overrideReason: o.reason,
+        if (o.applicabilityOnly) {
+          config = {
+            ...config,
+            gstApplicable: o.gstApplicable ?? true,
+            treatment:
+              o.gstApplicable && config.treatment === 'NON_TAXABLE'
+                ? 'EXCLUSIVE'
+                : config.treatment,
+            overrideReason: o.reason,
+          }
+        } else {
+          if (o.taxCategory === 'UNSPECIFIED')
+            throw new AppError(
+              'Choose a tax classification for this override.',
+              400,
+              'CHARGE_CLASSIFICATION_REQUIRED'
+            )
+          if (o.mode === 'NONE' && o.taxCategory === 'TAXABLE')
+            throw new AppError(
+              'Classify a charge without GST as exempt, nil-rated or non-GST.',
+              400,
+              'CHARGE_CLASSIFICATION_REQUIRED'
+            )
+          const hsn =
+            o.mode === 'HSN' && o.hsnCodeId
+              ? await tx.hsnCode.findUnique({ where: { id: o.hsnCodeId } })
+              : null
+          if (o.mode === 'HSN' && (!hsn?.isActive || hsn.priceLimit != null))
+            throw new AppError(
+              'Choose an active HSN / SAC with a single rate.',
+              400,
+              'INVALID_CHARGE_HSN'
+            )
+          config = {
+            ...config,
+            gstApplicable: o.gstApplicable ?? true,
+            treatment: o.mode === 'NONE' ? 'NON_TAXABLE' : o.treatment,
+            followsGoodsRate: o.mode === 'INHERIT',
+            ownRate: o.mode === 'NONE' ? 0 : Number(hsn?.gstRate ?? o.gstRate),
+            hsnCodeId: hsn?.id ?? null,
+            hsnCode: hsn?.code ?? null,
+            taxCategory: o.taxCategory,
+            overrideReason: o.reason,
+          }
         }
       }
       config.amountMode = c.amountMode ?? previous?.amountMode ?? 'FIXED'
