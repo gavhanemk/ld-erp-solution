@@ -55,20 +55,18 @@ export function indexRequisitions<T extends SearchableRequisition>(
 export function searchRequisitions(index: readonly RequisitionSearchEntry[], query: string): Set<string> {
   const term = normalize(query)
   const explicit = /^(mr|mo|so)-/.exec(term)
-  let reference = explicit?.[1] as Reference | undefined
-
-  // A shared financial-year/number suffix otherwise finds an unrelated MR
-  // whose number happens to equal the order number. Resolve its scope across
-  // the COMPLETE dataset, before other filters: MO, then SO, then MR.
-  // An explicit MR-/SO- always overrides that preference.
-  if (!reference && /^\d{2,4}-\d+$/.test(term)) {
-    reference = (['mo', 'so', 'mr'] as const).find((key) => index.some((entry) => entry.references[key].includes(term)))
-  }
+  const reference = explicit?.[1] as Reference | undefined
+  // A bare financial-year/number ("2627-0002") is a document number, never an
+  // item or a note: it finds every requisition whose MR, MO or SO number holds
+  // it, so MO-2627-0002's requisitions and MR-2627-0002 both show. An explicit
+  // MR-/MO-/SO- narrows it to that kind of number alone.
+  const anyNumber = !reference && /^\d{2,4}-\d+$/.test(term)
 
   const words = term.split(' ').filter(Boolean)
   return new Set(index.filter((entry) => {
     if (!term) return true
     if (reference) return entry.references[reference].includes(term)
+    if (anyNumber) return Object.values(entry.references).some((number) => number.includes(term))
     // All words must match one real field; never assemble a match from
     // different items, or from an order reference plus unrelated notes.
     return entry.fields.some((field) => words.every((word) => field.includes(word)))

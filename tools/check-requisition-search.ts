@@ -28,7 +28,7 @@ function check(query: string, expected: string[], source = index) {
 }
 const all = rows.map((r) => r.id)
 const mo2 = ['7', '8', '9', '10', '11']
-check('2627-0002', mo2) // The screenshot: exclude MR-2627-0002 on MO-2627-0001.
+check('2627-0002', ['2', ...mo2]) // A bare number: MO-2627-0002's requisitions and MR-2627-0002 (on MO-0001) both.
 check('mo-2627-0002', mo2)
 check('SO-2627-0002', mo2)
 check('MR-2627-0002', ['2'])
@@ -57,8 +57,7 @@ const nullable = indexRequisitions([{ ...rows[0], mo: null, so: null, lines: [] 
 check('MO-2627-0001', [], nullable)
 check('MR-2627-0001', ['1'], nullable)
 const soOnly = indexRequisitions(rows.map((r) => ({ ...r, mo: null })), (r) => r.label)
-check('2627-0002', mo2, soOnly)
-// Search scope is decided before filters: hiding MO-0002 cannot reveal the unrelated MR-0002.
-assert.deepEqual(rows.filter((r) => searchRequisitions(index, '2627-0002').has(r.id) && r.id === '2'), [])
-passed++
+check('2627-0002', ['2', ...mo2], soOnly) // SO-2627-0002 and MR-2627-0002, with no MO at all.
+check('2627-0001', ['1', '2', '3', '4', '5', '6']) // MO/SO-2627-0001's six, MR-2627-0001 among them.
+check('2627', all) // Every number holds the year.
 console.log(`PASS ${passed} requisition search regressions`)
