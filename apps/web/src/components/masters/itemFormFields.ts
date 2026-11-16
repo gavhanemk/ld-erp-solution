@@ -120,7 +120,8 @@ export const itemFormFields: FormField[] = [
     type: 'select',
     required: true,
     section: 'Identity',
-    optionsFrom: { resource: 'styles' },
+    // A style still in sampling gets its items when its sample is handed over.
+    optionsFrom: { resource: 'styles', filter: (row) => row.stage !== 'DEVELOPMENT' },
     showIf: (v) => v.type === 'FINISHED_GOOD',
     help: 'Which garment this is — the item becomes that style in one colour',
   },

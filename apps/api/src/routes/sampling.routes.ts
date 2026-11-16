@@ -2,14 +2,27 @@ import { Router } from 'express'
 import { prisma } from '@ld-erp/database'
 import { z } from 'zod'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
+import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { samplingPilotEnabled } from '../lib/pilot'
-import { createSampleSchema, sampleActionSchema } from '../schemas/sampling.schemas'
+import { removeObject, signedDownloadUrl, signedUploadUrl, storagePathFor } from '../lib/storage'
+import { nextStyleCode } from '../lib/masterCode'
+import { SAMPLE_ATTACHMENT_KIND_LABEL } from '@ld-erp/shared'
 import {
+  createSampleSchema,
+  sampleActionSchema,
+  sampleAttachmentListSchema,
+  sampleUploadUrlSchema,
+} from '../schemas/sampling.schemas'
+import {
+  SAMPLE_FILE_FOLDER,
   actOnSample,
+  attachmentLock,
   createSample,
+  fileLimitProblem,
   sampleDetail,
   sampleLookups,
+  type SampleAfterCommit,
 } from '../services/sampling.service'
 
 const router = Router()
@@ -32,9 +45,16 @@ router.use((_req, res, next) =>
 router.use(requirePermission('sampling', 'view'))
 const T = { timeout: 60000, maxWait: 15000 }
 function visible(row: Awaited<ReturnType<typeof sampleDetail>>, req: AuthRequest) {
-  if (userCan(req.user, 'accounts', 'view')) return row
+  // Each file says whether it can still be removed, by the rule DETACH applies,
+  // so the screen never offers a removal the server will refuse.
+  const attachments = row.attachments.map((f) => {
+    const lockedReason = attachmentLock(row, f)
+    return { ...f, removable: !lockedReason, lockedReason }
+  })
+  if (userCan(req.user, 'accounts', 'view')) return { ...row, attachments }
   return {
     ...row,
+    attachments,
     rounds: row.rounds.map((r) => ({
       ...r,
       materials: r.materials.map(({ issuedValue, returnedValue, ...m }) => m),
@@ -60,6 +80,10 @@ router.get('/', async (req: AuthRequest, res) => {
           { number: { contains: q.q, mode: 'insensitive' as const } },
           { title: { contains: q.q, mode: 'insensitive' as const } },
           { buyerRef: { contains: q.q, mode: 'insensitive' as const } },
+          // The buyer asks by their own style number; the floor by ours.
+          { buyerStyleRef: { contains: q.q, mode: 'insensitive' as const } },
+          { style: { code: { contains: q.q, mode: 'insensitive' as const } } },
+          { style: { name: { contains: q.q, mode: 'insensitive' as const } } },
         ],
       }
     : {}
@@ -91,6 +115,7 @@ router.get('/', async (req: AuthRequest, res) => {
       include: {
         customer: { select: { name: true } },
         brand: { select: { name: true } },
+        style: { select: { code: true, name: true, stage: true } },
         rounds: {
           orderBy: { revision: 'desc' },
           take: 1,
@@ -145,10 +170,137 @@ router.get('/:id/print', async (req: AuthRequest, res) => {
       }),
       sampleLookups(tx),
     ])
-    return { request: visible(request, req), company, lookups }
+    // Names and kinds only: a printed sheet cannot open a file, and storage
+    // paths are not for paper.
+    const attachments = request.attachments.map((f) => ({
+      id: f.id,
+      roundId: f.roundId,
+      kind: f.kind,
+      kindLabel:
+        SAMPLE_ATTACHMENT_KIND_LABEL[f.kind as keyof typeof SAMPLE_ATTACHMENT_KIND_LABEL] ?? f.kind,
+      fileName: f.fileName,
+      createdAt: f.createdAt,
+    }))
+    return { request: { ...visible(request, req), attachments }, company, lookups }
   }, T)
   res.json({ success: true, data })
 })
+
+// ── Files kept against a request ─────────────────────────────────────────────
+//
+// The buyer's tech pack, patterns, photos, approvals. The same three steps as
+// an order's files: ask for a link, send the file straight to storage, then
+// file it. Filing and removing are the request's own actions (ATTACH and
+// DETACH on /:id/actions), so they take its lock, check its version and leave
+// an event in its history like every other change to a sample.
+
+/** A link that works for a few minutes. The bucket itself stays private. */
+router.get('/attachments/:attachmentId/link', async (req, res) => {
+  const file = await prisma.sampleAttachment.findUnique({
+    where: { id: req.params.attachmentId },
+  })
+  if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
+  res.json({
+    success: true,
+    data: { url: await signedDownloadUrl(file.storagePath), fileName: file.fileName },
+  })
+})
+
+const lockFacts = {
+  cancelledAt: true,
+  rounds: {
+    select: { id: true, revision: true, state: true, releasedAt: true, handover: true },
+  },
+} as const
+
+router.get('/:id/attachments', async (req, res) => {
+  const q = sampleAttachmentListSchema.parse(req.query)
+  const request = await prisma.sampleRequest.findUnique({
+    where: { id: req.params.id },
+    select: lockFacts,
+  })
+  if (!request) throw new AppError('Sample request not found', 404, 'NOT_FOUND')
+  const rows = await prisma.sampleAttachment.findMany({
+    where: {
+      requestId: req.params.id,
+      ...(q.roundId ? { roundId: q.roundId === 'none' ? null : q.roundId } : {}),
+      ...(q.kind ? { kind: q.kind } : {}),
+    },
+    include: { uploadedBy: { select: { id: true, name: true } } },
+    orderBy: { createdAt: 'asc' },
+  })
+  // Whether each can still be removed, by the rule DETACH applies.
+  res.json({
+    success: true,
+    data: rows.map((f) => {
+      const lockedReason = attachmentLock(request, f)
+      return { ...f, removable: !lockedReason, lockedReason }
+    }),
+  })
+})
+
+/** Step one: a one-use link to send the file to. Nothing is recorded yet. */
+router.post(
+  '/:id/attachments/upload-url',
+  requirePermission('sampling', 'edit'),
+  async (req, res) => {
+    const d = sampleUploadUrlSchema.parse(req.body)
+    const request = await prisma.sampleRequest.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, number: true, ...lockFacts },
+    })
+    if (!request) throw new AppError('Sample request not found', 404, 'NOT_FOUND')
+    if (request.cancelledAt) throw new AppError('This request is cancelled.', 409, 'SAMPLE_RULE')
+    if (request.rounds.some((x) => x.handover))
+      throw new AppError(
+        'This request has a production handover. Its details are now frozen.',
+        409,
+        'SAMPLE_RULE'
+      )
+    if (d.roundId && !request.rounds.some((x) => x.id === d.roundId))
+      throw new AppError('That round is not on this request.', 409, 'SAMPLE_RULE')
+    // Refused early so nobody sends a file only to be turned away; ATTACH
+    // counts again under the request's lock, which is the check that holds.
+    if (d.kind) {
+      const roundId = d.roundId || null
+      const here = await prisma.sampleAttachment.findMany({
+        where: { requestId: request.id, kind: d.kind, roundId },
+        select: { roundId: true, kind: true, createdAt: true },
+      })
+      const full = fileLimitProblem(request, here, d.kind, roundId)
+      if (full) throw new AppError(full, 409, 'TOO_MANY_FILES')
+    }
+    const path = storagePathFor(SAMPLE_FILE_FOLDER, request.id, d.fileName)
+    const { uploadUrl } = await signedUploadUrl(path)
+    res.json({ success: true, data: { uploadUrl, storagePath: path, fileName: d.fileName } })
+  }
+)
+/**
+ * The code a style made for this request would get, shown while it is being
+ * made: the brand, garment and season decide it and it never changes, so the
+ * merchandiser sees it before saving. Their own right, not the masters one.
+ */
+router.get(
+  '/:id/next-style-code',
+  requirePermission('sampling', 'edit'),
+  async (req, res) => {
+    const q = z
+      .object({
+        category: z.string().trim().max(100).default(''),
+        season: z.string().trim().max(50).default(''),
+      })
+      .parse(req.query)
+    const request = await prisma.sampleRequest.findUnique({
+      where: { id: req.params.id },
+      select: { brandId: true },
+    })
+    if (!request) throw new AppError('Sample request not found', 404, 'NOT_FOUND')
+    res.json({
+      success: true,
+      data: { code: await nextStyleCode({ brandId: request.brandId, ...q }) },
+    })
+  }
+)
 router.get('/:id', async (req: AuthRequest, res) =>
   res.json({
     success: true,
@@ -157,14 +309,33 @@ router.get('/:id', async (req: AuthRequest, res) =>
 )
 router.post('/:id/actions', async (req: AuthRequest, res) => {
   const cmd = sampleActionSchema.parse(req.body)
-  const row = await prisma.$transaction((tx) => actOnSample(tx, req.params.id, cmd, req.user!), T)
+  const after: SampleAfterCommit = { removeObjects: [] }
+  const row = await prisma.$transaction(
+    (tx) => actOnSample(tx, req.params.id, cmd, req.user!, after),
+    T
+  )
+  // Files whose rows went with the committed action. Best effort: a file left
+  // behind only wastes space, while its row is already gone.
+  for (const path of after.removeObjects) await removeObject(path).catch(() => {})
   await writeAuditLog(req, {
     module: 'sampling',
     action: cmd.action === 'DECIDE' ? 'APPROVE' : 'UPDATE',
     entityType: 'SampleRequest',
     entityId: row.id,
-    after: { version: row.version, action: cmd.action, roundId: cmd.roundId },
+    // The round the event names: for a file, its own round, not the one on screen.
+    after: { version: row.version, action: cmd.action, roundId: after.eventRoundId ?? null },
   })
+  // A style made or changed here is a masters record like any other, and its
+  // history is looked for under its own name, before and after in full.
+  if (after.styleAudit)
+    await writeAuditLog(req, {
+      module: 'masters',
+      action: after.styleAudit.action,
+      entityType: 'Style',
+      entityId: after.styleAudit.styleId,
+      before: after.styleAudit.before,
+      after: after.styleAudit.after,
+    })
   res.json({ success: true, data: visible(row, req) })
 })
 export default router

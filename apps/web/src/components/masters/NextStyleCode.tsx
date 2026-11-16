@@ -11,7 +11,18 @@ import { api } from '@/lib/api'
  * out again when the style is saved, so it is always the next free one even
  * if somebody saved a shirt in between.
  */
-export function NextStyleCode({ brandId, category, season }: { brandId?: unknown; category?: unknown; season?: unknown }) {
+export function NextStyleCode({
+  brandId,
+  category,
+  season,
+  endpoint = '/masters/styles/next-code',
+}: {
+  brandId?: unknown
+  category?: unknown
+  season?: unknown
+  /** Where to ask. A sample request asks its own, which needs only sampling rights. */
+  endpoint?: string
+}) {
   const [code, setCode] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const brand = typeof brandId === 'string' ? brandId : ''
@@ -29,7 +40,7 @@ export function NextStyleCode({ brandId, category, season }: { brandId?: unknown
     const t = setTimeout(() => {
       const qs = new URLSearchParams({ brandId: brand, category: type, season: year })
       api
-        .get<{ data: { code: string } }>(`/masters/styles/next-code?${qs}`)
+        .get<{ data: { code: string } }>(`${endpoint}?${qs}`)
         .then((r) => live && setCode(r.data.code))
         .catch(() => live && setCode(null))
         .finally(() => live && setBusy(false))
@@ -38,7 +49,7 @@ export function NextStyleCode({ brandId, category, season }: { brandId?: unknown
       live = false
       clearTimeout(t)
     }
-  }, [brand, type, year])
+  }, [brand, type, year, endpoint])
 
   if (!brand) return <span className="text-muted-foreground text-sm">Pick the brand: the code follows from it</span>
   return (

@@ -25,6 +25,17 @@ model SampleRequest {
   brandId     String
   brand       Brand @relation(fields: [brandId], references: [id])
   buyerRef    String?
+  /// The buyer's own style number, as printed on their tech pack. Usually
+  /// there is no style of ours yet when the request arrives.
+  buyerStyleRef String?
+  season      String?
+  /// Free text from the tech pack (Shirt, Kurta); the style's category is
+  /// taken from it when the request makes its own style.
+  garmentCategory String?
+  /// The style this request samples: one made for it (DEVELOPMENT), or an
+  /// existing one for a re-sample. Fixed once a round has been released.
+  styleId     String?
+  style       Style? @relation(fields: [styleId], references: [id])
   requiredAt  DateTime?
   owner       String
   brief       String
@@ -37,7 +48,9 @@ model SampleRequest {
   updatedAt   DateTime @updatedAt
   rounds      SampleRound[]
   events      SampleEvent[]
+  attachments SampleAttachment[]
   @@index([state, createdAt])
+  @@index([styleId])
   @@map("sample_requests")
 }
 
@@ -57,6 +70,7 @@ model SampleRound {
   createdAt    DateTime @default(now())
   stages       SampleStage[]
   materials    SampleMaterial[]
+  attachments  SampleAttachment[]
   @@unique([requestId, revision])
   @@map("sample_rounds")
 }
@@ -108,6 +122,31 @@ model SampleEvent {
   createdAt DateTime @default(now())
   @@unique([requestId, version])
   @@map("sample_events")
+}
+
+/// A tech pack, pattern, photo or approval kept against a sample request, or
+/// against one round of it. Written and removed only through the request's
+/// own actions (ATTACH, DETACH), so each file has its event in the history.
+/// Kinds are checked by the sample_attachment_kind constraint.
+model SampleAttachment {
+  id           String @id @default(cuid())
+  requestId    String
+  request      SampleRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  /// Null for a file of the whole request, such as the buyer's tech pack.
+  roundId      String?
+  round        SampleRound? @relation(fields: [roundId], references: [id])
+  kind         String
+  /// What the person called it; never the storage path.
+  fileName     String
+  storagePath  String @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User @relation("SampleAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+  @@index([requestId])
+  @@index([roundId])
+  @@map("sample_attachments")
 }
 
 // ═══════════════════════════════════════════
@@ -441,6 +480,7 @@ model User {
   styleStepsSkipped    StyleStepRun[]              @relation("StyleStepSkippedBy")
   routingsCreated      Routing[]                   @relation("RoutingCreatedBy")
   routingsUpdated      Routing[]                   @relation("RoutingUpdatedBy")
+  uploadedSampleFiles  SampleAttachment[]          @relation("SampleAttachmentUploadedBy")
 
 
   adjustmentsApproved StockAdjustment[] @relation("AdjustmentApprovedBy")
@@ -915,6 +955,12 @@ model Item {
   routings Routing[] @relation("RoutingFabric")
 }
 
+/// Whether a style is still being sampled or may be ordered and made.
+enum StyleStage {
+  DEVELOPMENT
+  PRODUCTION
+}
+
 model Style {
   id          String     @id @default(cuid())
   code        String     @unique
@@ -945,6 +991,10 @@ model Style {
   composition String?
   /// Wash-care symbols for the label, as codes: WASH_30, NO_BLEACH, IRON_MED…
   washCare    String[]   @default([])
+  /// DEVELOPMENT while the style exists only for sampling: kept off order,
+  /// BOM and production screens and refused by them. Becomes PRODUCTION only
+  /// when its sample is handed over; never set from the Styles master.
+  stage       StyleStage @default(PRODUCTION)
   isActive    Boolean    @default(true)
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
@@ -955,9 +1005,11 @@ model Style {
   items    Item[]
   poLines  PurchaseOrderLine[]
   stepRuns StyleStepRun[]
+  sampleRequests SampleRequest[]
 
   @@index([code])
   @@index([brandId])
+  @@index([stage])
   mrLines MaterialRequisitionLine[] @relation("MRLineStyle")
   @@map("styles")
 }

@@ -73,6 +73,16 @@ function config() {
   return { url: url.replace(/\/+$/, ''), key }
 }
 
+/**
+ * A stored path as it goes into a storage URL: each part encoded. Pasted in
+ * whole, a "#" or "?" in a path ends it early ("a.pdf#" reaches a.pdf), so a
+ * path that merely looked different could read, or delete, another file.
+ * Paths storagePathFor makes have nothing to encode and come out the same.
+ */
+function objectKey(path: string): string {
+  return path.split('/').map(encodeURIComponent).join('/')
+}
+
 /** True when the server has been given somewhere to put files. */
 export function storageConfigured(): boolean {
   if (localStorageActive()) return localStorageReady()
@@ -133,7 +143,7 @@ export function storagePathFor(folder: string, documentId: string, fileName: str
  */
 export async function signedUploadUrl(path: string): Promise<{ uploadUrl: string }> {
   if (localStorageActive()) return localSignedUploadUrl(path)
-  const res = await storageFetch(`/object/upload/sign/${BUCKET}/${path}`, { method: 'POST' })
+  const res = await storageFetch(`/object/upload/sign/${BUCKET}/${objectKey(path)}`, { method: 'POST' })
   const body = (await res.json()) as { url?: string }
 
   if (!body.url) {
@@ -147,7 +157,7 @@ export async function signedUploadUrl(path: string): Promise<{ uploadUrl: string
 /** A short-lived link to read one file back. */
 export async function signedDownloadUrl(path: string): Promise<string> {
   if (localStorageActive()) return localSignedDownloadUrl(path)
-  const res = await storageFetch(`/object/sign/${BUCKET}/${path}`, {
+  const res = await storageFetch(`/object/sign/${BUCKET}/${objectKey(path)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ expiresIn: DOWNLOAD_TTL_SECONDS }),
@@ -172,7 +182,7 @@ export async function signedDownloadUrl(path: string): Promise<string> {
 export async function statObject(path: string): Promise<{ sizeBytes: number; mimeType: string | null }> {
   if (localStorageActive()) return localStatObject(path)
   const { url, key } = config()
-  const res = await fetch(`${url}/storage/v1/object/info/${BUCKET}/${path}`, {
+  const res = await fetch(`${url}/storage/v1/object/info/${BUCKET}/${objectKey(path)}`, {
     headers: { apikey: key, Authorization: `Bearer ${key}` },
   })
 
@@ -215,7 +225,7 @@ export async function copyObject(from: string, to: string): Promise<void> {
 /** Removes the file itself. The row is the caller's problem. */
 export async function removeObject(path: string): Promise<void> {
   if (localStorageActive()) return localRemoveObject(path)
-  await storageFetch(`/object/${BUCKET}/${path}`, { method: 'DELETE' })
+  await storageFetch(`/object/${BUCKET}/${objectKey(path)}`, { method: 'DELETE' })
 }
 
 // ── Local disk, for the sampling pilot only ─────────────────────────────────

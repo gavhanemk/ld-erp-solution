@@ -7,6 +7,7 @@ import { AppError } from '../middleware/errorHandler'
 import { assertNotCancelling } from '../services/orderCancel.service'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
+import { assertStylesInProduction } from '../lib/styleStage'
 import { assertStockUnused, recordMovement } from '../services/stock.service'
 import { lockRow } from '../lib/lockRow'
 import { syncMoPacked } from '../services/manufacturing.service'
@@ -327,6 +328,9 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
       }
     }
   })
+
+  // A style still in sampling has no saleable stock; its pieces are samples.
+  await assertStylesInProduction(tx, items.map((i) => i.styleId))
 
   const rates = await fgRates(tx, items)
   for (const item of items) {

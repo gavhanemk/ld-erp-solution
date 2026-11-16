@@ -574,6 +574,34 @@ async function main() {
     }
   )
 
+  // Each part of a path is encoded for cloud storage, so a "#" or "?" in one
+  // stays part of the name and can never cut it short to reach another file.
+  const sent = []
+  await withEnv(
+    { NODE_ENV: 'production', SUPABASE_URL: 'https://storage.example.invalid/', SUPABASE_SERVICE_ROLE_KEY: 'service-key' },
+    async () => {
+      globalThis.fetch = async (url, init) => {
+        sent.push([init?.method ?? 'GET', String(url)])
+        return new Response(JSON.stringify({ size: 3, content_type: 'application/pdf', signedURL: '/object/sign/x?token=t' }), { status: 200 })
+      }
+      try {
+        await storage.statObject('samples/req-1/abc-tp.pdf#')
+        await storage.signedDownloadUrl('samples/req-1/abc-tp.pdf?x')
+        await storage.removeObject('samples/req-1/abc-tp.pdf#')
+        await check('cloud storage paths are encoded part by part: "#" and "?" stay in the name', () => {
+          const at = 'https://storage.example.invalid/storage/v1/object'
+          assert.deepEqual(sent, [
+            ['GET', `${at}/info/ld-erp-documents/samples/req-1/abc-tp.pdf%23`],
+            ['POST', `${at}/sign/ld-erp-documents/samples/req-1/abc-tp.pdf%3Fx`],
+            ['DELETE', `${at}/ld-erp-documents/samples/req-1/abc-tp.pdf%23`],
+          ])
+        })
+      } finally {
+        globalThis.fetch = realFetch
+      }
+    }
+  )
+
   // ── Settings ──────────────────────────────────────────────────────────────
   await withEnv({ LOCAL_STORAGE_SECRET: 'x'.repeat(31) }, async () => {
     await check('secret shorter than 32 characters: nothing is signed', async () => {

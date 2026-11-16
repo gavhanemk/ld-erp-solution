@@ -528,7 +528,8 @@ export function SalesOrderDialog({
             (p) => `/masters/items?type=FINISHED_GOOD&active=true&limit=200&page=${p}&sort=name&order=asc`
           ),
           fetchEveryPage<CategoryOption>((p) => `/masters/item-categories?limit=200&page=${p}`),
-          fetchEveryPage<StyleOption>((p) => `/masters/styles?limit=200&page=${p}`),
+          // Production styles only: one still in sampling cannot be ordered.
+          fetchEveryPage<StyleOption>((p) => `/masters/styles?limit=200&stage=PRODUCTION&page=${p}`),
           fetchEveryPage<SizeGroupOption>((p) => `/masters/size-groups?limit=200&page=${p}`),
           // The charge rows are the charge master's: a failure costs the
           // charges box, not the form.

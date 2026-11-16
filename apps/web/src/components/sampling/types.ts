@@ -1,15 +1,31 @@
-import type { SampleSpecification } from '@ld-erp/shared'
+import type {
+  SampleAttachment,
+  SampleRequestStyle,
+  SampleSpecification,
+  StyleStage,
+} from '@ld-erp/shared'
 export interface Choice {
   id: string
   name: string
+}
+export type LookupStyle = Choice & {
+  code: string
+  brandId: string | null
+  colors: string[]
+  sizeGroupId: string | null
+  stage: StyleStage
+  category: string | null
+  season: string | null
+  /** Open sample requests on the style: one in sampling belongs to the request developing it. */
+  sampleRequests?: Array<{ id: string; number: string }>
 }
 export interface Lookups {
   customers: Choice[]
   brands: Choice[]
   warehouses: Choice[]
-  styles: Array<
-    Choice & { code: string; brandId: string | null; colors: string[]; sizeGroupId: string | null }
-  >
+  styles: LookupStyle[]
+  /** Active size runs, for the style a request makes for itself. */
+  sizeGroups: Choice[]
   sizes: Array<{ id: string; code: string; sizeGroupId: string }>
   items: Array<Choice & { code: string; uom: { symbol: string } | null }>
   boms: Array<{ id: string; styleId: string; color: string | null; version: string }>
@@ -83,22 +99,35 @@ export interface SampleRequest {
   owner: string
   brief: string
   requiredAt: string | null
+  /** From the buyer's tech pack: their own style number, season and garment. */
+  buyerStyleRef: string | null
+  season: string | null
+  garmentCategory: string | null
+  styleId: string | null
+  /** The register sends only code, name and stage; the request itself sends it whole. */
+  style: SampleRequestStyle | null
+  /** Oldest first. The register leaves them out. */
+  attachments?: SampleAttachment[]
   createdAt: string
   version: number
   cancelledAt: string | null
   cancelReason: string | null
   rounds: SampleRound[]
-  events: Array<{
-    id: string
-    action: string
-    createdAt: string
-    detail: {
-      by?: string
-      data?: {
-        reason?: string
-        before?: Record<string, string | null>
-        after?: Record<string, string | null>
-      }
+  events: SampleEvent[]
+}
+export interface SampleEvent {
+  id: string
+  action: string
+  createdAt: string
+  detail: {
+    by?: string
+    roundId?: string
+    data?: {
+      reason?: string
+      // Request edits: field values. Style actions: the style before and after.
+      before?: Record<string, unknown> | null
+      after?: Record<string, unknown> | null
+      [key: string]: unknown
     }
-  }>
+  }
 }

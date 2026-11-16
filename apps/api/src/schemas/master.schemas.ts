@@ -374,6 +374,9 @@ export const WASH_CARE = [
   'NO_DRY_CLEAN',
 ] as const
 
+// No `stage` here, on purpose: a style is made DEVELOPMENT only by sampling and
+// becomes PRODUCTION only when its sample is handed over, so the Styles master
+// can neither make nor promote one. Zod drops a stage sent in the body.
 export const createStyleSchema = z.object({
   // Made by the server from brand, garment type and season (LD-SH-2606);
   // still accepted when given, as an import of existing styles does.

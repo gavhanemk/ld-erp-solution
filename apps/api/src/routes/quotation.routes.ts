@@ -226,7 +226,8 @@ router.get('/bom-price', requirePermission(MODULE, 'view'), async (req, res) => 
  */
 router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
   const styles = await prisma.style.findMany({
-    where: { isActive: true },
+    // A style still in sampling cannot be quoted (prepareOrder refuses it), so it is not offered.
+    where: { isActive: true, stage: 'PRODUCTION' },
     select: {
       id: true,
       code: true,

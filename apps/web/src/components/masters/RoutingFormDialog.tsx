@@ -290,7 +290,8 @@ export function RoutingFormDialog({
       masterResource<Operation>('operations').list({ limit: 300, active: true, sort: 'sortOrder', order: 'asc' }),
       masterResource<Unit>('workstations').list({ limit: 300, active: true }),
       // Every style, page by page: a list stops at 200, and the rest went missing from Style and Category.
-      fetchEveryPage<StyleOption>((page) => `/masters/styles?limit=200&active=true&page=${page}`).then((r) => r.rows),
+      // Production styles only: a routing waits until a style's sample is handed over.
+      fetchEveryPage<StyleOption>((page) => `/masters/styles?limit=200&active=true&stage=PRODUCTION&page=${page}`).then((r) => r.rows),
       api.get<{ data: Fabric[] }>('/masters/routings/fabrics'),
       masterResource<Contractor>('contractors').list({ limit: 500, active: true }),
       // What the BOMs say; without it the lists are simply not narrowed.

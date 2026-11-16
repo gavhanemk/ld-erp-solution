@@ -21,6 +21,7 @@ import { findHsn, loadHsnIndex, withHsnRates } from '../lib/hsn'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { assertItemStyleColorValid, rethrowItemStyleColorClash } from '../lib/itemStyleColor'
+import { styleInDevelopment } from '../lib/styleStage'
 import {
   bomPriceSchema,
   copyBomSchema,
@@ -858,11 +859,40 @@ router.post('/styles/import', requirePermission(MODULE, 'create'), async (req: A
 router.patch('/styles/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, _res, next) => {
   const style = await prisma.style.findUnique({
     where: { id: req.params.id },
-    select: { code: true, sizeGroupId: true, colors: true },
+    select: { code: true, sizeGroupId: true, colors: true, stage: true, brandId: true, brandType: true, isActive: true },
   })
   if (!style) return next()
-  const body = (req.body ?? {}) as { sizeGroupId?: string | null; colors?: unknown }
+  const body = (req.body ?? {}) as {
+    sizeGroupId?: string | null
+    colors?: unknown
+    brandId?: string | null
+    brandType?: unknown
+    isActive?: unknown
+  }
   const live = { styleId: req.params.id, status: { not: 'OBSOLETE' as const } }
+
+  // A style still in sampling is changed from its sample request, where the
+  // request's lock, its rules on what a released round was made in, and its
+  // history all apply. Here only what sampling does not rely on: fabric, fit,
+  // GSM and the like. The full form sends every field, so only a change counts.
+  if (style.stage === 'DEVELOPMENT') {
+    const sameColours = (list: unknown) =>
+      Array.isArray(list) &&
+      JSON.stringify(list.map((c) => String(c).trim()).sort()) === JSON.stringify([...style.colors].sort())
+    const reshaped =
+      (body.brandId !== undefined && (body.brandId || null) !== style.brandId) ||
+      (body.brandType !== undefined && body.brandId === undefined && body.brandType !== style.brandType) ||
+      (body.sizeGroupId !== undefined && (body.sizeGroupId || null) !== style.sizeGroupId) ||
+      (body.colors !== undefined && !sameColours(body.colors))
+    if (reshaped) {
+      throw new AppError(
+        `${style.code} is still in sampling. Change its brand, size run or colours from its sample request.`,
+        409,
+        'STYLE_IN_SAMPLING',
+      )
+    }
+    if (body.isActive === false && style.isActive) await assertNotSampling(req.params.id, style.code)
+  }
 
   if (body.sizeGroupId !== undefined && (body.sizeGroupId || null) !== style.sizeGroupId) {
     const sized = await prisma.bOM.count({
@@ -898,6 +928,30 @@ router.patch('/styles/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       }
     }
   }
+  next()
+})
+
+/*
+ * Switching off a style an open sample request is developing would leave the
+ * request sampling a style it can no longer release. That request is
+ * cancelled instead; once none is open, the style can be switched off here.
+ */
+async function assertNotSampling(styleId: string, code: string) {
+  const open = await prisma.sampleRequest.findFirst({
+    where: { styleId, cancelledAt: null },
+    select: { number: true },
+  })
+  if (open) {
+    throw new AppError(
+      `${code} is still in sampling on ${open.number}. Cancel that request rather than switching the style off.`,
+      409,
+      'STYLE_IN_SAMPLING',
+    )
+  }
+}
+router.delete('/styles/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, _res, next) => {
+  const style = await prisma.style.findUnique({ where: { id: req.params.id }, select: { code: true, stage: true } })
+  if (style?.stage === 'DEVELOPMENT') await assertNotSampling(req.params.id, style.code)
   next()
 })
 
@@ -939,6 +993,13 @@ router.use(
     },
     filters: {
       brandType: { where: (v) => ({ brandType: { in: v } }), facets: ['brandType'] },
+      // DEVELOPMENT (still in sampling) or PRODUCTION. Left out lists both, as
+      // the Styles master does; order, BOM and production pickers ask for
+      // PRODUCTION. A value that is neither matches nothing.
+      stage: {
+        where: (v) => ({ stage: { in: v.filter((x) => x === 'DEVELOPMENT' || x === 'PRODUCTION') } }),
+        facets: ['stage'],
+      },
       category: textFilter('category'),
       season: textFilter('season'),
       fabricType: textFilter('fabricType'),
@@ -965,7 +1026,7 @@ router.use(
         facets: ['colour'],
       },
     },
-    facets: ['brandType', 'category', 'season', 'fabricType', 'fit', 'sizeGroupId', 'colour'],
+    facets: ['brandType', 'stage', 'category', 'season', 'fabricType', 'fit', 'sizeGroupId', 'colour'],
     // Colours are a list on each style, so they are counted one by one: a
     // style in White and Navy counts once under each.
     customFacets: {
@@ -2712,9 +2773,12 @@ async function assertBomRefsExist(
 ): Promise<{ code: string }> {
   const style = await prisma.style.findUnique({
     where: { id: styleId },
-    select: { id: true, code: true, sizeGroupId: true, colors: true },
+    select: { id: true, code: true, sizeGroupId: true, colors: true, stage: true },
   })
   if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')
+  // A production BOM is made when a sample is handed over, never while the
+  // style is still being sampled and can change.
+  if (style.stage === 'DEVELOPMENT') throw styleInDevelopment(style.code)
 
   if (colour) {
     const value = colour.value?.trim() || null

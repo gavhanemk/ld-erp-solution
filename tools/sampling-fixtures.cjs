@@ -138,6 +138,50 @@ async function seed() {
       sizeGroupId: group.id,
     },
   })
+  // A second size run, so a style made for a request can be moved to another
+  // run, and a second brand with a style of its own, which a request of the
+  // first brand must not be able to sample.
+  const chestRun = await db.sizeGroup.upsert({
+    where: { name: 'Sample chest sizes' },
+    update: {},
+    create: { id: 'sample-chest-sizes', name: 'Sample chest sizes' },
+  })
+  for (const [i, code] of ['38', '40', '42'].entries())
+    await db.size.upsert({
+      where: { sizeGroupId_code: { sizeGroupId: chestRun.id, code } },
+      update: {},
+      create: {
+        id: `sample-size-${code}`,
+        sizeGroupId: chestRun.id,
+        code,
+        label: code,
+        sequence: i,
+      },
+    })
+  const otherBrand = await db.brand.upsert({
+    where: { id: 'sample-brand-other' },
+    update: {},
+    create: {
+      id: 'sample-brand-other',
+      companyId: company.id,
+      name: 'Example Outlet',
+      type: 'CUSTOM',
+    },
+  })
+  await db.style.upsert({
+    where: { code: 'EO-TS-2601' },
+    update: {},
+    create: {
+      id: 'sample-style-other',
+      code: 'EO-TS-2601',
+      name: 'Example Outlet Tee',
+      brandId: otherBrand.id,
+      brandType: 'CUSTOM',
+      category: 'T-Shirt',
+      colors: ['Black'],
+      sizeGroupId: group.id,
+    },
+  })
   const uom = await db.uOM.upsert({
     where: { name: 'Sample metres' },
     update: {},

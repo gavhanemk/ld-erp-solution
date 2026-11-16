@@ -1,18 +1,33 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, Check, Clock3, History, Printer, LockKeyhole } from 'lucide-react'
-import { api, apiErrorMessage, can } from '@/lib/api'
+import { api, ApiError, apiErrorMessage, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { SAMPLE_STATE_LABEL } from '@ld-erp/shared'
 import { Field, SampleSpecEditor } from './SampleSpecEditor'
 import type { SampleRequest, Lookups, SampleRound } from './types'
 import { SmartSelect } from '@/components/ui/SmartSelect'
-import { makingBlocker, materialHeld, sampleFlow, type SampleSection } from './samplingFlow'
+import {
+  developmentHandoverText,
+  developmentStyleOf,
+  eventLabel,
+  eventNote,
+  makingBlocker,
+  materialHeld,
+  sampleFlow,
+  withRequestStyle,
+  type SampleSection,
+} from './samplingFlow'
 import { SampleRequestEditor } from './SampleRequestEditor'
+import { SampleFiles } from './SampleFiles'
+import { SampleStyleCard } from './SampleStyleCard'
+
+const STALE_TEXT =
+  'This request changed in another window. Your entries are still here, but have not been saved. Copy any details you need, then reopen the request to review the latest version.'
 
 export function SampleWorkspace({
   initial,
-  lookups,
+  lookups: loaded,
   back,
 }: {
   initial: SampleRequest
@@ -24,6 +39,17 @@ export function SampleWorkspace({
     [tab, setTab] = useState<SampleSection>(() => sampleFlow(initial).section)
   const [dirty, setDirty] = useState(false)
   const [editingRequest, setEditingRequest] = useState(false)
+  // Files being sent: the rest of the request waits, as it does for a save.
+  const [filing, setFiling] = useState(false)
+  // Bumped when the style changes, so the draft specification reopens as the
+  // server refitted it rather than as it was on screen.
+  const [specEpoch, setSpecEpoch] = useState(0)
+  // The version every action is sent with. Read from here, not from the
+  // request on screen: several files are filed one after another, each
+  // moving the version on before the screen has drawn the last.
+  const versionRef = useRef(initial.version)
+  versionRef.current = Math.max(versionRef.current, request.version)
+  const lookups = useMemo(() => withRequestStyle(loaded, request.style), [loaded, request.style])
   useEffect(() => {
     const warn = (e: BeforeUnloadEvent) => {
       if (dirty) {
@@ -42,6 +68,8 @@ export function SampleWorkspace({
   const edit = can('sampling', 'edit') && !request.cancelledAt,
     approve = can('sampling', 'approve') && !request.cancelledAt
   const flow = sampleFlow(request, round)
+  // The round's style when it was made in sampling: nothing to hand over yet.
+  const madeHere = developmentStyleOf(request, round)
   const changeRound = (id: string) => {
     if (dirty && !window.confirm('Discard the unsaved specification changes?')) return
     setDirty(false)
@@ -55,21 +83,40 @@ export function SampleWorkspace({
     setError('')
     setMessage('')
   }
+  /**
+   * One action on the request, with the latest version. Throws a sentence a
+   * clerk can act on; the file panel and the style windows show it where the
+   * person is working, and `act` below shows it over the page.
+   */
+  const post = async (action: string, data: unknown, roundId = round.id) => {
+    try {
+      const res = await api.post<{ data: SampleRequest }>(`/sampling/${request.id}/actions`, {
+        version: versionRef.current,
+        roundId,
+        action,
+        data,
+      })
+      versionRef.current = res.data.version
+      setRequest(res.data)
+      if (['CREATE_STYLE', 'LINK_STYLE', 'UPDATE_STYLE'].includes(action))
+        setSpecEpoch((n) => n + 1)
+      return res.data
+    } catch (e) {
+      const stale =
+        (e instanceof ApiError && e.code === 'STALE_SAMPLE') ||
+        (e instanceof Error && e.message.includes('another window'))
+      throw new Error(stale ? STALE_TEXT : apiErrorMessage(e))
+    }
+  }
   const act = async (action: string, data: unknown, roundId = round.id) => {
     setBusy(true)
     setError('')
     setMessage('')
     try {
-      const res = await api.post<{ data: SampleRequest }>(`/sampling/${request.id}/actions`, {
-        version: request.version,
-        roundId,
-        action,
-        data,
-      })
-      setRequest(res.data)
+      const updated = await post(action, data, roundId)
       if (['SAVE_DRAFT', 'SAVE_SPEC', 'RELEASE'].includes(action)) setDirty(false)
       if (action === 'NEW_ROUND') {
-        setSelected(res.data.rounds[0].id)
+        setSelected(updated.rounds[0].id)
         setTab('Technical')
       }
       if (
@@ -77,7 +124,7 @@ export function SampleWorkspace({
           action
         )
       )
-        setTab(sampleFlow(res.data).section)
+        setTab(sampleFlow(updated).section)
       setMessage(
         action === 'SAVE_DRAFT'
           ? 'Draft saved. You can leave this request and finish the specification later.'
@@ -85,27 +132,24 @@ export function SampleWorkspace({
             ? 'Request details updated. The changes are recorded in activity history.'
             : 'Saved. The next action is shown below.'
       )
-      return res.data
+      return updated
     } catch (e) {
-      setError(apiErrorMessage(e))
-      if (e instanceof Error && e.message.includes('another window')) {
-        setError(
-          'This request changed in another window. Your entries are still here, but have not been saved. Copy any details you need, then reopen the request to review the latest version.'
-        )
-      }
+      setError(e instanceof Error ? e.message : apiErrorMessage(e))
       return null
     } finally {
       setBusy(false)
     }
   }
   const held = materialHeld
+  const handedOver = request.rounds.some((r) => r.handover)
+  const sizeRunName = (id: string) => lookups.sizeGroups.find((g) => g.id === id)?.name ?? id
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <button
             className="btn-ghost"
-            disabled={busy}
+            disabled={busy || filing}
             onClick={() => {
               if (!dirty || window.confirm('Discard the unsaved specification changes?')) back()
             }}
@@ -139,7 +183,7 @@ export function SampleWorkspace({
           <SmartSelect
             className="form-input w-auto"
             value={selected}
-            disabled={busy}
+            disabled={busy || filing}
             onChange={(e) => changeRound(e.target.value)}
             aria-label="Sample round"
           >
@@ -176,7 +220,7 @@ export function SampleWorkspace({
             {flow.steps.map((step, i) => (
               <button
                 key={step.key}
-                disabled={busy}
+                disabled={busy || filing}
                 aria-current={tab === step.key ? 'step' : undefined}
                 onClick={() => setTab(step.key)}
                 className={`flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-colors ${tab === step.key ? 'border-primary/40 bg-primary/10' : 'hover:bg-muted/60 border-transparent'}`}
@@ -221,7 +265,7 @@ export function SampleWorkspace({
             ))}
           </nav>
           <button
-            disabled={busy}
+            disabled={busy || filing}
             className={`border-border mt-3 flex w-full items-center gap-2 border-t px-3 pt-3 text-sm ${tab === 'History' ? 'text-primary' : 'text-muted-foreground'}`}
             onClick={() => setTab('History')}
           >
@@ -255,7 +299,7 @@ export function SampleWorkspace({
                 (tab !== flow.section || selected !== flow.targetRoundId) && (
                   <button
                     className="btn-primary"
-                    disabled={busy}
+                    disabled={busy || filing}
                     onClick={() => {
                       if (selected !== flow.targetRoundId) changeRound(flow.targetRoundId)
                       setTab(flow.section)
@@ -274,10 +318,10 @@ export function SampleWorkspace({
               {flow.steps.find((s) => s.key === tab)?.description}
             </p>
           </div>
-          <fieldset disabled={busy} className="min-w-0">
+          <fieldset disabled={busy || filing} className="min-w-0">
             {tab === 'Brief' && (
               <div className="glass-card space-y-4 p-5">
-                {edit && !request.rounds.some((r) => r.handover) && (
+                {edit && !handedOver && (
                   <div>
                     <button
                       type="button"
@@ -307,6 +351,9 @@ export function SampleWorkspace({
                       request.requiredAt ? formatDate(request.requiredAt) : 'Not set',
                     ],
                     ['Buyer reference', request.buyerRef || 'Not provided'],
+                    ['Buyer style reference', request.buyerStyleRef || 'Not provided'],
+                    ['Season', request.season || 'Not set'],
+                    ['Garment category', request.garmentCategory || 'Not set'],
                   ].map(([label, value]) => (
                     <div key={label}>
                       <p className="text-muted-foreground text-xs">{label}</p>
@@ -320,14 +367,47 @@ export function SampleWorkspace({
                 </div>
               </div>
             )}
+            {tab === 'Brief' && (
+              <div className="mt-4 space-y-4">
+                <SampleFiles
+                  request={request}
+                  canEdit={can('sampling', 'edit')}
+                  closedReason={
+                    request.cancelledAt
+                      ? 'This request is cancelled; its files are kept with it.'
+                      : handedOver
+                        ? 'This request has a production handover; its files are kept with it.'
+                        : ''
+                  }
+                  post={(action, data) => post(action, data)}
+                  onBusyChange={setFiling}
+                />
+                <SampleStyleCard
+                  request={request}
+                  lookups={lookups}
+                  canEdit={edit && !handedOver}
+                  held={
+                    dirty
+                      ? 'Save the technical draft first: changing the style refits the draft specification.'
+                      : ''
+                  }
+                  post={(action, data) => post(action, data)}
+                  notify={(text) => {
+                    setError('')
+                    setMessage(text)
+                  }}
+                />
+              </div>
+            )}
             <div hidden={tab !== 'Technical'}>
               {round.state === 'DRAFT' && edit && latest ? (
                 <div className="space-y-4">
                   <SampleSpecEditor
-                    key={round.id}
+                    key={`${round.id}-${specEpoch}`}
                     initial={round.specification}
                     lookups={lookups}
-                    brandId={request.brandId}
+                    requestStyle={request.style}
+                    onChooseStyle={() => setTab('Brief')}
                     busy={busy}
                     onDirtyChange={setDirty}
                     save={async (s) => {
@@ -612,13 +692,21 @@ export function SampleWorkspace({
                   latest &&
                   round.state === 'APPROVED' &&
                   !round.handover &&
-                  request.rounds.every((r) => r.materials.every((m) => held(m) === 0)) && (
+                  request.rounds.every((r) => r.materials.every((m) => held(m) === 0)) &&
+                  (madeHere ? (
+                    // No BOM or route can be made for a style still in
+                    // sampling, so empty pickers would only send people round.
+                    <div className="glass-card flex gap-3 p-5 text-sm">
+                      <LockKeyhole size={18} className="shrink-0" />
+                      {developmentHandoverText(madeHere.code)}
+                    </div>
+                  ) : (
                     <HandoverAction
                       round={round}
                       lookups={lookups}
                       save={(d) => void act('HANDOVER', d)}
                     />
-                  )}
+                  ))}
                 {round.handover && (
                   <div className="glass-card space-y-3 p-4">
                     <h2 className="font-semibold">Bulk handover</h2>
@@ -657,18 +745,17 @@ export function SampleWorkspace({
                 {request.events.map((e) => (
                   <div key={e.id} className="glass-card p-3">
                     <p>
-                      {e.action === 'SAVE_DRAFT'
-                        ? 'Draft saved'
-                        : e.action === 'UPDATE_REQUEST'
-                          ? 'Request details updated'
-                          : e.action.replaceAll('_', ' ')}{' '}
-                      · {e.detail.by ?? 'User'} · {formatDate(e.createdAt)}
+                      {eventLabel(e.action)} · {e.detail.by ?? 'User'} · {formatDate(e.createdAt)}
                     </p>
+                    <EventNoteLine text={eventNote(e, request.rounds, sizeRunName)} />
                     {e.action === 'UPDATE_REQUEST' && (
                       <div className="mt-2 space-y-2 text-sm">
                         <p>{e.detail.data?.reason}</p>
                         {Object.entries(e.detail.data?.after ?? {})
-                          .filter(([key, value]) => value !== e.detail.data?.before?.[key])
+                          .filter(
+                            ([key, value]) =>
+                              (value || null) !== (e.detail.data?.before?.[key] || null)
+                          )
                           .map(([key, value]) => (
                             <p key={key} className="text-muted-foreground">
                               <span className="font-medium">
@@ -681,6 +768,9 @@ export function SampleWorkspace({
                                     owner: 'Owner',
                                     brief: 'Brief',
                                     requiredAt: 'Required by',
+                                    buyerStyleRef: 'Buyer style reference',
+                                    season: 'Season',
+                                    garmentCategory: 'Garment category',
                                   } as Record<string, string>
                                 )[key] ?? key}
                                 :
@@ -718,7 +808,13 @@ export function SampleWorkspace({
     </div>
   )
 }
-function requestChangeValue(key: string, value: string | null | undefined, lookups: Lookups) {
+/** What a file or style entry in the activity did, under its heading. */
+function EventNoteLine({ text }: { text: string | null }) {
+  return text ? <p className="text-muted-foreground mt-1 text-sm">{text}</p> : null
+}
+function requestChangeValue(key: string, raw: unknown, lookups: Lookups) {
+  // Values are as the event recorded them: text, or nothing.
+  const value = typeof raw === 'string' ? raw : null
   if (key === 'customerId')
     return lookups.customers.find((c) => c.id === value)?.name ?? value ?? 'Internal development'
   if (key === 'brandId') return lookups.brands.find((b) => b.id === value)?.name ?? value ?? '—'

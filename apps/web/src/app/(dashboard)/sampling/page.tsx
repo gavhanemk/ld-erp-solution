@@ -18,8 +18,9 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { Field } from '@/components/sampling/SampleSpecEditor'
 import { SampleWorkspace } from '@/components/sampling/SampleWorkspace'
+import { TechPackFields } from '@/components/sampling/SampleRequestEditor'
 import type { SampleRequest, Lookups } from '@/components/sampling/types'
-import { SAMPLE_STATE_LABEL } from '@ld-erp/shared'
+import { SAMPLE_STATE_LABEL, STYLE_STAGE_LABEL } from '@ld-erp/shared'
 
 export default function SamplingPage() {
   const enabled = process.env.NEXT_PUBLIC_SAMPLING_ENABLED === 'true'
@@ -86,12 +87,26 @@ export default function SamplingPage() {
           .replace(/^[=+@-]/, "'$&")
           .replaceAll('"', '""')}"`
       const csv = [
-        ['Request', 'Title', 'Buyer', 'Brand', 'Owner', 'Required', 'Round', 'State', 'Handover'],
+        [
+          'Request',
+          'Title',
+          'Buyer',
+          'Brand',
+          'Buyer style ref',
+          'Style',
+          'Owner',
+          'Required',
+          'Round',
+          'State',
+          'Handover',
+        ],
         ...rows.map((r) => [
           r.number,
           r.title,
           r.customer?.name ?? 'Internal',
           r.brand.name,
+          r.buyerStyleRef ?? '',
+          r.style ? `${r.style.code} ${r.style.name}` : '',
           r.owner,
           r.requiredAt ?? '',
           r.rounds[0]?.revision,
@@ -162,7 +177,10 @@ export default function SamplingPage() {
         : r.rounds[0]?.handover
           ? 'Await production acceptance'
           : ({
-              DRAFT: 'Prepare the specification',
+              // The specification is prepared on the request's style, so that comes first.
+              DRAFT: r.styleId
+                ? 'Prepare the specification'
+                : 'Add the tech pack and set the style',
               RELEASED: 'Continue materials, making or QC',
               QC_PASSED: 'Submit to the buyer',
               SUBMITTED: 'Record buyer feedback',
@@ -260,7 +278,7 @@ export default function SamplingPage() {
           className="form-input"
           style={{ flex: '1 1 260px', width: 'auto' }}
           aria-label="Search sample requests"
-          placeholder="Search request, title or buyer reference…"
+          placeholder="Search request, title, buyer reference, buyer style ref or style code…"
           data-hotkey="search"
           value={q}
           onChange={(e) => setQ(e.target.value)}
@@ -305,6 +323,21 @@ export default function SamplingPage() {
                   <span className="text-muted-foreground text-xs">
                     {r.customer?.name ?? 'Internal development'} · {r.brand.name}
                   </span>
+                  {(r.buyerStyleRef || r.style) && (
+                    <span className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                      {r.buyerStyleRef && <span>Buyer style {r.buyerStyleRef}</span>}
+                      {r.style && (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="text-foreground font-mono">{r.style.code}</span>
+                          {r.style.stage === 'DEVELOPMENT' && (
+                            <span className="badge-warning">
+                              {STYLE_STAGE_LABEL[r.style.stage]}
+                            </span>
+                          )}
+                        </span>
+                      )}
+                    </span>
+                  )}
                 </td>
                 <td>{r.owner}</td>
                 <td>{r.requiredAt ? formatDate(r.requiredAt) : '—'}</td>
@@ -336,7 +369,7 @@ export default function SamplingPage() {
             </p>
             <p className="text-muted-foreground mt-2 text-sm">
               {search
-                ? 'Try a request number, title or buyer reference.'
+                ? 'Try a request number, title, buyer reference, buyer style reference or style code.'
                 : tab === 'Requests'
                   ? 'Create a request to capture the buyer brief and prepare your first sample.'
                   : 'Requests appear here as they move through the sampling workflow.'}
@@ -397,6 +430,7 @@ function CreateRequest({
     [buyerRef, setBuyerRef] = useState(''),
     [brief, setBrief] = useState(''),
     [requiredAt, setRequired] = useState(''),
+    [techPack, setTechPack] = useState({ buyerStyleRef: '', season: '', garmentCategory: '' }),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('')
   const save = async () => {
@@ -412,6 +446,10 @@ function CreateRequest({
         buyerRef,
         brief,
         requiredAt: requiredAt || null,
+        // Optional words from the tech pack; an empty box is saved as nothing.
+        buyerStyleRef: techPack.buyerStyleRef.trim() || null,
+        season: techPack.season.trim() || null,
+        garmentCategory: techPack.garmentCategory.trim() || null,
       })
       done(r.data)
     } catch (e) {
@@ -424,16 +462,16 @@ function CreateRequest({
     <FormFrame
       icon={FlaskConical}
       title="New sample request"
-      subtitle="Start with the buyer brief. Technical details are added in the next step."
+      subtitle="Start with the buyer brief. The tech pack is attached in the next step."
       width="max-w-3xl"
       primaryInHeader={false}
-      footerNote="Creates the request and opens technical preparation."
+      footerNote="Creates the request and opens Request & tech pack, to attach the tech pack and set up the style."
       busy={busy}
       error={error}
       onClose={close}
       primary={
         <button className="btn-primary" type="submit" form="sample-request-form" disabled={busy}>
-          {busy ? 'Creating…' : 'Create & prepare sample'} <ArrowRight size={15} />
+          {busy ? 'Creating…' : 'Create & add tech pack'} <ArrowRight size={15} />
         </button>
       }
       footer={
@@ -509,6 +547,18 @@ function CreateRequest({
               onChange={(e) => setBuyerRef(e.target.value)}
             />
           </Field>
+          <div className="border-border border-t pt-4 md:col-span-2">
+            <h3 className="font-semibold">From the tech pack</h3>
+            <p className="text-muted-foreground mt-1 text-sm">
+              Optional. The tech pack file itself is attached once the request has been created, on
+              the next screen.
+            </p>
+          </div>
+          <TechPackFields
+            lookups={lookups}
+            value={techPack}
+            onChange={(key, text) => setTechPack((t) => ({ ...t, [key]: text }))}
+          />
           <div className="border-border border-t pt-4 md:col-span-2">
             <h3 className="font-semibold">Responsibility & requirements</h3>
           </div>

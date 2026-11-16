@@ -1,8 +1,8 @@
 'use client'
 
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
-import { Loader2, Paperclip, Trash2, UploadCloud } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { Loader2, LockKeyhole, Paperclip, Trash2, UploadCloud } from 'lucide-react'
+import { api, ApiError, apiErrorMessage } from '@/lib/api'
 
 /**
  * Files kept against a document — a purchase order or a goods receipt.
@@ -26,6 +26,10 @@ export interface Attachment {
   mimeType: string | null
   uploadedBy?: { id: string; name: string } | null
   createdAt: string
+  /** False once the file is kept as part of the record; absent means it can go. */
+  removable?: boolean
+  /** Why it is kept, in words, shown in place of the remove button. */
+  lockedReason?: string | null
 }
 
 export interface AttachmentsBoxHandle {
@@ -78,15 +82,72 @@ export const AttachmentsBox = forwardRef<
      * caller but the enquiry wants.
      */
     filter?: (file: Attachment) => boolean
+    /**
+     * Which of the files shown count against the five, when not all of them
+     * do: a sample request lists every photo but allows five per round.
+     * Absent counts every file shown.
+     */
+    limitFilter?: (file: Attachment) => boolean
+    /*
+     * The props below are for a record whose files are changes to the record
+     * itself — a sample request, where filing or removing a file takes the
+     * request's version and leaves a line in its history. Every one of them is
+     * optional, and a caller that sets none gets the box exactly as before.
+     */
+    /** Extra fields for the one-use link request: what the file is, so a full kind is refused before it is sent. */
+    uploadBody?: Record<string, unknown>
+    /**
+     * The record's files, when the caller already holds them and keeps them
+     * current from its own saves. The box then shows these (through `filter`)
+     * and neither fetches nor keeps a list of its own.
+     */
+    files?: Attachment[]
+    /** Files a file that has reached storage, in place of the box's own POST. */
+    register?: (
+      recordId: string,
+      file: { fileName: string; storagePath: string }
+    ) => Promise<Attachment | void>
+    /** Removes a file in place of the box's own DELETE; the caller asks anything it must first. */
+    remove?: (file: Attachment) => void | Promise<void>
+    /** The files and nothing to change them with: no drop zone, no remove buttons. */
+    readOnly?: boolean
+    /** A second line under a file: what it is filed against, who sent it, when. */
+    describe?: (file: Attachment) => React.ReactNode
+    /** True while files are being sent, so the caller can hold its other actions. */
+    onBusyChange?: (busy: boolean) => void
+    /** What the list says when there is nothing in it. */
+    emptyText?: string
   }
 >(function AttachmentsBox(
-  { basePath, linkBasePath, recordId, onError, onCountChange, extraBody, filter },
+  {
+    basePath,
+    linkBasePath,
+    recordId,
+    onError,
+    onCountChange,
+    extraBody,
+    filter,
+    limitFilter,
+    uploadBody,
+    files,
+    register,
+    remove,
+    readOnly = false,
+    describe,
+    onBusyChange,
+    emptyText = 'Nothing attached yet.',
+  },
   ref
 ) {
-  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [fetched, setAttachments] = useState<Attachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [uploading, setUploading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
+  // The caller's list when it holds one; the box's own otherwise.
+  const controlled = files !== undefined
+  const attachments = files !== undefined ? (filter ? files.filter(filter) : files) : fetched
+  // What counts against the five: every file shown, unless the caller says fewer do.
+  const counted = limitFilter ? attachments.filter(limitFilter) : attachments
 
   // Read inside the imperative handle without making it a dependency of a
   // effect — the handle is stable, the files inside it are not.
@@ -94,10 +155,16 @@ export const AttachmentsBox = forwardRef<
   pendingRef.current = pendingFiles
 
   useEffect(() => {
+    onBusyChange?.(uploading)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- an inline callback on the caller
+  }, [uploading])
+
+  useEffect(() => {
     if (!recordId) {
       setAttachments([])
       return
     }
+    if (controlled) return
     let cancelled = false
     void (async () => {
       try {
@@ -115,10 +182,10 @@ export const AttachmentsBox = forwardRef<
     // inline closure on most callers and would refetch on every render.
   }, [basePath, recordId])
 
-  const uploadOne = async (file: File, id: string): Promise<Attachment> => {
+  const uploadOne = async (file: File, id: string): Promise<Attachment | void> => {
     const signed = await api.post<{ data: { uploadUrl: string; storagePath: string } }>(
       `${basePath}/${id}/attachments/upload-url`,
-      { fileName: file.name, sizeBytes: file.size }
+      { fileName: file.name, sizeBytes: file.size, ...uploadBody }
     )
 
     // The token is in the URL's query string, which is the whole
@@ -132,6 +199,7 @@ export const AttachmentsBox = forwardRef<
       throw new Error(`${file.name} could not be sent. Check your connection and try again.`)
     }
 
+    if (register) return register(id, { fileName: file.name, storagePath: signed.data.storagePath })
     const saved = await api.post<{ data: Attachment }>(`${basePath}/${id}/attachments`, {
       fileName: file.name,
       storagePath: signed.data.storagePath,
@@ -144,7 +212,7 @@ export const AttachmentsBox = forwardRef<
     if (!fileList?.length) return
     const chosen = Array.from(fileList)
 
-    const room = MAX_FILES - attachments.length - pendingFiles.length
+    const room = MAX_FILES - counted.length - pendingFiles.length
     if (chosen.length > room) {
       onError(
         room === 0
@@ -161,6 +229,12 @@ export const AttachmentsBox = forwardRef<
       )
       return
     }
+    // Usually a download that failed: the server would refuse it anyway.
+    const empty = chosen.find((f) => f.size === 0)
+    if (empty) {
+      onError(`${empty.name} is empty. Choose the file again.`)
+      return
+    }
 
     // Sent straight away once the document has an id; held until then
     // otherwise, since a file needs something to belong to.
@@ -168,17 +242,19 @@ export const AttachmentsBox = forwardRef<
     else setPendingFiles((prev) => [...prev, ...chosen])
   }
 
-  const uploadNow = async (files: File[], id: string) => {
+  const uploadNow = async (chosen: File[], id: string) => {
     setUploading(true)
     try {
-      for (const file of files) {
+      for (const file of chosen) {
         const saved = await uploadOne(file, id)
-        setAttachments((prev) => [...prev, saved])
+        if (saved && !controlled) setAttachments((prev) => [...prev, saved])
       }
     } catch (err) {
+      // apiErrorMessage: a refused link's real reason ("That file is empty")
+      // travels in its field errors, under a flat "Validation error".
       onError(
         err instanceof ApiError
-          ? err.message
+          ? apiErrorMessage(err, 'Could not attach that file.')
           : err instanceof Error
             ? err.message
             : 'Could not attach that file.'
@@ -191,13 +267,13 @@ export const AttachmentsBox = forwardRef<
   useImperativeHandle(ref, () => ({
     fileCount: attachments.length + pendingFiles.length,
     uploadPending: async (recordId: string) => {
-      const files = pendingRef.current
-      if (!files.length) return { failed: [] }
+      const waiting = pendingRef.current
+      if (!waiting.length) return { failed: [] }
       const failed: string[] = []
-      for (const file of files) {
+      for (const file of waiting) {
         try {
           const saved = await uploadOne(file, recordId)
-          setAttachments((prev) => [...prev, saved])
+          if (saved && !controlled) setAttachments((prev) => [...prev, saved])
         } catch {
           failed.push(file.name)
         }
@@ -212,21 +288,32 @@ export const AttachmentsBox = forwardRef<
       const res = await api.get<{ data: { url: string } }>(`${linkBasePath}/${id}/link`)
       window.open(res.data.url, '_blank', 'noopener')
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : 'Could not open that file.')
+      onError(apiErrorMessage(err, 'Could not open that file.'))
     }
   }
 
   const removeFile = async (file: Attachment) => {
+    if (remove) {
+      // The caller asks its own question (a reason, say) and refreshes its list.
+      try {
+        await remove(file)
+      } catch (err) {
+        onError(apiErrorMessage(err, 'Could not remove that file.'))
+      }
+      return
+    }
     if (!confirm(`Remove ${file.fileName}?`)) return
     try {
       await api.delete(`${linkBasePath}/${file.id}`)
       setAttachments((prev) => prev.filter((f) => f.id !== file.id))
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : 'Could not remove that file.')
+      onError(apiErrorMessage(err, 'Could not remove that file.'))
     }
   }
 
   const fileCount = attachments.length + pendingFiles.length
+  // Against the limit: what the drop zone counts and stops at.
+  const used = counted.length + pendingFiles.length
 
   useEffect(() => {
     onCountChange?.(fileCount)
@@ -235,86 +322,111 @@ export const AttachmentsBox = forwardRef<
 
   return (
     <div className="space-y-2">
-      <label
-        onDragOver={(e) => {
-          e.preventDefault()
-          if (!uploading && fileCount < MAX_FILES) setDragOver(true)
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => {
-          e.preventDefault()
-          setDragOver(false)
-          if (!uploading && fileCount < MAX_FILES) chooseFiles(e.dataTransfer.files)
-        }}
-        className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-dashed px-3 py-3 ${
-          uploading || fileCount >= MAX_FILES
-            ? 'border-border bg-secondary cursor-not-allowed opacity-70'
-            : dragOver
-              ? 'border-primary bg-primary/10 cursor-pointer'
-              : 'border-border bg-secondary cursor-pointer hover:border-teal-500/40'
-        }`}
-      >
-        <span className="flex min-w-0 items-center gap-2.5">
-          {uploading ? (
-            <Loader2 size={18} className="text-muted-foreground shrink-0 animate-spin" />
-          ) : (
-            <UploadCloud size={18} className="text-muted-foreground shrink-0" />
-          )}
-          <span className="min-w-0">
-            <span className="text-foreground block truncate text-sm">
-              {uploading ? 'Sending...' : 'Choose files'}
-            </span>
-            <span className="text-muted-foreground block whitespace-nowrap text-xs">
-              or drag and drop
+      {!readOnly && (
+        <label
+          onDragOver={(e) => {
+            e.preventDefault()
+            if (!uploading && used < MAX_FILES) setDragOver(true)
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault()
+            setDragOver(false)
+            if (!uploading && used < MAX_FILES) chooseFiles(e.dataTransfer.files)
+          }}
+          // The file box inside is focusable (sr-only, not hidden), so Tab
+          // stops here and Space or Enter opens the chooser; this shows where.
+          className={`focus-within:ring-primary/40 relative flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-dashed px-3 py-3 focus-within:ring-2 ${
+            uploading || used >= MAX_FILES
+              ? 'border-border bg-secondary cursor-not-allowed opacity-70'
+              : dragOver
+                ? 'border-primary bg-primary/10 cursor-pointer'
+                : 'border-border bg-secondary cursor-pointer hover:border-teal-500/40'
+          }`}
+        >
+          <span className="flex min-w-0 items-center gap-2.5">
+            {uploading ? (
+              <Loader2 size={18} className="text-muted-foreground shrink-0 animate-spin" />
+            ) : (
+              <UploadCloud size={18} className="text-muted-foreground shrink-0" />
+            )}
+            <span className="min-w-0">
+              <span className="text-foreground block truncate text-sm">
+                {uploading ? 'Sending...' : 'Choose files'}
+              </span>
+              <span className="text-muted-foreground block whitespace-nowrap text-xs">
+                or drag and drop
+              </span>
             </span>
           </span>
-        </span>
-        <span className="text-muted-foreground ml-auto shrink-0 whitespace-nowrap text-xs">
-          {fileCount}/{MAX_FILES} · {MAX_FILE_MB}MB each
-        </span>
-        <input
-          type="file"
-          multiple
-          className="hidden"
-          disabled={uploading || fileCount >= MAX_FILES}
-          onChange={(e) => {
-            chooseFiles(e.target.files)
-            e.target.value = ''
-          }}
-        />
-      </label>
+          <span className="text-muted-foreground ml-auto shrink-0 whitespace-nowrap text-xs">
+            {used}/{MAX_FILES} · {MAX_FILE_MB}MB each
+          </span>
+          <input
+            type="file"
+            multiple
+            className="sr-only"
+            disabled={uploading || used >= MAX_FILES}
+            onChange={(e) => {
+              chooseFiles(e.target.files)
+              e.target.value = ''
+            }}
+          />
+        </label>
+      )}
 
       {fileCount === 0 ? (
-        <p className="text-muted-foreground text-xs">Nothing attached yet.</p>
+        <p className="text-muted-foreground text-xs">{emptyText}</p>
       ) : (
         <ul className="space-y-1">
-          {attachments.map((f) => (
-            <li
-              key={f.id}
-              className="border-border bg-secondary flex items-center gap-2 rounded-lg border px-3 py-1.5"
-            >
-              <Paperclip size={13} className="text-muted-foreground shrink-0" />
-              <button
-                type="button"
-                className="text-primary min-w-0 flex-1 truncate text-left text-sm underline"
-                onClick={() => void openFile(f.id)}
-                title={`Open ${f.fileName}`}
+          {attachments.map((f) => {
+            const note = describe?.(f)
+            // Kept with the record: shown with its reason, never offered for removal.
+            const kept = f.removable === false
+            return (
+              <li
+                key={f.id}
+                className={`border-border bg-secondary flex items-center gap-2 rounded-lg border px-3 py-1.5 ${note || kept ? 'flex-wrap' : ''}`}
               >
-                {f.fileName}
-              </button>
-              <span className="text-muted-foreground whitespace-nowrap text-[10px]">
-                {(f.sizeBytes / 1024).toFixed(0)} KB
-              </span>
-              <button
-                type="button"
-                className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
-                onClick={() => void removeFile(f)}
-                aria-label={`Remove ${f.fileName}`}
-              >
-                <Trash2 size={13} />
-              </button>
-            </li>
-          ))}
+                <Paperclip size={13} className="text-muted-foreground shrink-0" />
+                <button
+                  type="button"
+                  className="text-primary min-w-0 flex-1 truncate text-left text-sm underline"
+                  onClick={() => void openFile(f.id)}
+                  title={`Open ${f.fileName}`}
+                >
+                  {f.fileName}
+                </button>
+                <span className="text-muted-foreground whitespace-nowrap text-[10px]">
+                  {(f.sizeBytes / 1024).toFixed(0)} KB
+                </span>
+                {kept ? (
+                  <span className="text-muted-foreground p-1" title={f.lockedReason ?? undefined}>
+                    <LockKeyhole size={13} aria-label="Kept with the record" />
+                  </span>
+                ) : (
+                  !readOnly && (
+                    <button
+                      type="button"
+                      className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                      onClick={() => void removeFile(f)}
+                      aria-label={`Remove ${f.fileName}`}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  )
+                )}
+                {(note || kept) && (
+                  <span className="text-muted-foreground basis-full pl-5 text-xs">
+                    {note}
+                    {kept && f.lockedReason && (
+                      <span className="block">Kept: {f.lockedReason}</span>
+                    )}
+                  </span>
+                )}
+              </li>
+            )
+          })}
 
           {/* Chosen but not yet sent. Marked so nobody believes a file is
             safely filed before the document is saved. */}

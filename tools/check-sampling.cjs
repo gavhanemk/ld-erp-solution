@@ -7,11 +7,30 @@ if (!['localhost', '127.0.0.1'].includes(target.hostname) || target.pathname !==
 process.env.DIRECT_URL = process.env.DATABASE_URL
 process.env.SAMPLING_ENABLED = 'true'
 process.env.NODE_ENV = 'test'
+// Sample files go to a fresh folder under .local-sampling/check-files-sampling,
+// removed at the end, through the pilot's local-disk driver. The links are
+// signed with a key made for this run only; LOCAL_STORAGE_BASE_URL is set once
+// the server below knows its port. Nothing can reach cloud storage.
+const fs = require('node:fs')
+const path = require('node:path')
+const nodeCrypto = require('node:crypto')
+delete process.env.SUPABASE_URL
+delete process.env.SUPABASE_SERVICE_ROLE_KEY
+process.env.STORAGE_DRIVER = 'local'
+process.env.LOCAL_STORAGE_SECRET =
+  'check-sampling-only-' + nodeCrypto.randomBytes(24).toString('hex')
+const checkFiles = path.join(__dirname, '..', '.local-sampling', 'check-files-sampling')
+fs.mkdirSync(checkFiles, { recursive: true })
+const fileRoot = fs.mkdtempSync(path.join(checkFiles, 'run-'))
+process.env.LOCAL_STORAGE_DIR = fileRoot
 require('./register-ts.cjs')
 require('express-async-errors')
 const express = require('express')
 const { prisma: db } = require('../packages/database/src/index.ts')
 const routes = require('../apps/api/src/routes/sampling.routes.ts').default
+const localFiles = require('../apps/api/src/routes/localFiles.routes.ts').default
+const masters = require('../apps/api/src/routes/master.routes.ts').default
+const quotations = require('../apps/api/src/routes/quotation.routes.ts').default
 const { ZodError } = require('zod')
 let passed = 0,
   server
@@ -24,6 +43,8 @@ async function main() {
   const [{ db: dbName }] = await db.$queryRaw`SELECT current_database() AS db`
   assert.equal(dbName, 'lderp_sampling')
   const api = express()
+  // Ahead of the JSON parser, as in index.ts: a file is stored as the bytes sent.
+  api.use('/api/local-files', localFiles)
   api.use(express.json())
   api.use((req, res, next) => {
     req.user = {
@@ -42,6 +63,8 @@ async function main() {
     next()
   })
   api.use('/sampling', routes)
+  api.use('/masters', masters)
+  api.use('/quotations', quotations)
   api.use((err, req, res, next) =>
     res
       .status(err.statusCode ?? (err instanceof ZodError ? 400 : 500))
@@ -49,7 +72,9 @@ async function main() {
   )
   server = api.listen(0, '127.0.0.1')
   await new Promise((resolve) => server.once('listening', resolve))
-  const base = `http://127.0.0.1:${server.address().port}/sampling`
+  const origin = `http://127.0.0.1:${server.address().port}`
+  const base = `${origin}/sampling`
+  process.env.LOCAL_STORAGE_BASE_URL = `${origin}/api/local-files`
   const call = async (method, path = '', body, perms) => {
     const r = await fetch(base + path, {
       method,
@@ -391,6 +416,10 @@ async function main() {
   await action('ACCEPT_HANDOVER')
   await action('ACCEPT_HANDOVER', {}, 409)
   await action('NEW_ROUND', 'Another milestone after handover', 409)
+  const handedOver = doc
+  check('a request begun without a style takes the style its first round was released in', () =>
+    assert.equal(handedOver.styleId, 'sample-style')
+  )
   const bulkOrders = await db.manufacturingOrder.count(),
     garments = await db.garment.count()
   check('no manufacturing orders or saleable garments created by sampling', () => {
@@ -729,6 +758,905 @@ async function main() {
     }
   })
 
+  // ── Phase 1: the buyer's tech pack, and the style made for a sample ──────────
+  const viewOnly = 'sampling:view'
+  const merch = merchGrants.join(',')
+  /** A version one behind, as a second window would send it: refused, nothing changed. */
+  const staleRefused = async (actionName, data) => {
+    const before = doc.version
+    const r = await call('POST', `/${doc.id}/actions`, {
+      version: doc.version - 1,
+      action: actionName,
+      data,
+    })
+    assert.equal(r.status, 409, `${actionName}: ${JSON.stringify(r.body)}`)
+    assert.equal(r.body.code, 'STALE_SAMPLE')
+    assert.equal((await db.sampleRequest.findUnique({ where: { id: doc.id } })).version, before)
+    passed++
+    console.log('PASS ' + actionName + ' from a stale window refused atomically')
+  }
+  /** The browser's two steps: a link, then the bytes sent straight to it. */
+  const upload = async (requestId, fileName, text, extra = {}, perms) => {
+    const link = await call(
+      'POST',
+      `/${requestId}/attachments/upload-url`,
+      { fileName, sizeBytes: Buffer.byteLength(text), ...extra },
+      perms
+    )
+    assert.equal(link.status, 200, JSON.stringify(link.body))
+    const sent = await fetch(link.body.data.uploadUrl, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/pdf' },
+      body: text,
+    })
+    assert.equal(sent.status, 200, await sent.text())
+    return link.body.data.storagePath
+  }
+  const onDisk = (storagePath) => fs.existsSync(path.join(fileRoot, ...storagePath.split('/')))
+  const stamp = String(Date.now()).slice(-7)
+  const buyerStyleRef = 'BUYER-ST-' + stamp
+
+  doc = (
+    await call('POST', '', {
+      ...payload,
+      clientKey: crypto.randomUUID(),
+      title: title + ' tech pack intake',
+      buyerStyleRef,
+      season: 'SS-27',
+      garmentCategory: 'Shirt',
+    })
+  ).body.data
+  check('request keeps the tech pack details and starts with no style and no files', () => {
+    assert.equal(doc.buyerStyleRef, buyerStyleRef)
+    assert.equal(doc.season, 'SS-27')
+    assert.equal(doc.garmentCategory, 'Shirt')
+    assert.equal(doc.styleId, null)
+    assert.equal(doc.style, null)
+    assert.deepEqual(doc.attachments, [])
+  })
+  const intakeEdit = {
+    ...requestFields,
+    title: title + ' tech pack intake',
+    buyerStyleRef: buyerStyleRef + 'A',
+    season: 'SS-27',
+    garmentCategory: 'Shirt',
+    reason: 'Buyer revised their style number',
+  }
+  await action('UPDATE_REQUEST', intakeEdit)
+  check('tech pack details are edited with before and after in the history', () => {
+    assert.equal(doc.buyerStyleRef, buyerStyleRef + 'A')
+    assert.equal(doc.events[0].detail.data.before.buyerStyleRef, buyerStyleRef)
+    assert.equal(doc.events[0].detail.data.after.buyerStyleRef, buyerStyleRef + 'A')
+  })
+  const { buyerStyleRef: _ref, season: _season, garmentCategory: _cat, ...olderScreen } = intakeEdit
+  await action('UPDATE_REQUEST', { ...olderScreen, owner: 'Intake owner', reason: 'Owner only' })
+  check('an edit that leaves the tech pack details out keeps them', () => {
+    assert.equal(doc.owner, 'Intake owner')
+    assert.equal(doc.buyerStyleRef, buyerStyleRef + 'A')
+    assert.equal(doc.season, 'SS-27')
+    assert.equal(doc.events[0].detail.data.after.garmentCategory, 'Shirt')
+  })
+  r = await call('GET', `?q=${encodeURIComponent(buyerStyleRef + 'A')}`)
+  check('register finds a request by the buyer’s style number', () => {
+    assert.equal(r.body.pagination.total, 1)
+    assert.equal(r.body.data[0].buyerStyleRef, buyerStyleRef + 'A')
+    assert.equal(r.body.data[0].style, null)
+  })
+  await action('SAVE_DRAFT', { construction: 'Kept through the style change' })
+
+  // The request makes its own style: no masters rights, kept in sampling.
+  const newStyle = {
+    name: 'Buyer camp shirt ' + stamp,
+    sizeGroupId: 'sample-sizes',
+    colors: ['Navy'],
+  }
+  await action('CREATE_STYLE', newStyle, 403, viewOnly)
+  await action('CREATE_STYLE', { ...newStyle, colors: [] }, 400)
+  await action('CREATE_STYLE', { ...newStyle, colors: ['Navy', 'navy'] }, 400)
+  await action('CREATE_STYLE', { ...newStyle, sizeGroupId: 'missing-run' }, 409)
+  await action('CREATE_STYLE', { ...newStyle, stage: 'PRODUCTION' }, 400)
+  // The garment goes into the code for good: a box emptied on purpose is not
+  // filled again from the request, and no garment at all is refused.
+  const noGarment = await action('CREATE_STYLE', { ...newStyle, category: null }, 400)
+  check('a style is not made without its garment, nor with one the person cleared', () =>
+    assert.equal(noGarment.body.code, 'CATEGORY_REQUIRED')
+  )
+  await staleRefused('CREATE_STYLE', newStyle)
+  // The code is shown before saving, to sampling rights alone.
+  const codeAsked = `/${doc.id}/next-style-code?category=Shirt&season=SS-27`
+  const preview = await call('GET', codeAsked, undefined, merch)
+  const previewViewOnly = await call('GET', codeAsked, undefined, viewOnly)
+  const beforeStyle = doc.version
+  await action('CREATE_STYLE', newStyle, 200, merch)
+  const devStyle = await db.style.findUnique({ where: { id: doc.styleId } })
+  check('the merchandiser sees the code the style will get before making it', () => {
+    assert.equal(preview.status, 200, JSON.stringify(preview.body))
+    assert.equal(preview.body.data.code, devStyle.code)
+    assert.equal(previewViewOnly.status, 403)
+  })
+  check('the merchandiser makes a development style for the request', () => {
+    assert.equal(devStyle.stage, 'DEVELOPMENT')
+    assert.match(devStyle.code, /^EX-SH-27\d{2,}$/)
+    assert.equal(devStyle.brandId, 'sample-brand')
+    assert.equal(devStyle.brandType, 'CUSTOM')
+    assert.equal(devStyle.category, 'Shirt')
+    assert.equal(devStyle.season, 'SS-27')
+    assert.equal(devStyle.sizeGroupId, 'sample-sizes')
+    assert.deepEqual(devStyle.colors, ['Navy'])
+    assert.equal(doc.style.code, devStyle.code)
+    assert.equal(doc.style.stage, 'DEVELOPMENT')
+    assert.equal(doc.version, beforeStyle + 1)
+    assert.equal(doc.events[0].action, 'CREATE_STYLE')
+    assert.equal(doc.events[0].detail.data.code, devStyle.code)
+    assert.equal(doc.rounds[0].specification.styleId, devStyle.id)
+    assert.equal(doc.rounds[0].specification.construction, 'Kept through the style change')
+  })
+  const styleAudit = () =>
+    db.auditLog.findMany({
+      where: { entityType: 'Style', entityId: devStyle.id },
+      orderBy: { createdAt: 'asc' },
+    })
+  const madeAudit = await styleAudit()
+  check('the style made from the request is in the Styles audit trail, in full', () => {
+    assert.equal(madeAudit.length, 1)
+    assert.equal(madeAudit[0].module, 'masters')
+    assert.equal(madeAudit[0].action, 'CREATE')
+    assert.equal(madeAudit[0].after.code, devStyle.code)
+    assert.equal(madeAudit[0].after.stage, 'DEVELOPMENT')
+  })
+  await action('CREATE_STYLE', { ...newStyle, name: 'A second style' }, 409)
+  r = await call('GET', `?q=${encodeURIComponent(devStyle.code)}`)
+  check('register finds the request by its style code and shows the style', () => {
+    assert.equal(r.body.pagination.total, 1)
+    assert.deepEqual(r.body.data[0].style, {
+      code: devStyle.code,
+      name: devStyle.name,
+      stage: 'DEVELOPMENT',
+    })
+  })
+  r = await call('GET', '/lookups')
+  check('lookups carry each style’s stage and the size runs a new style can use', () => {
+    assert.equal(r.body.data.styles.find((x) => x.id === devStyle.id).stage, 'DEVELOPMENT')
+    assert.equal(r.body.data.styles.find((x) => x.id === 'sample-style').stage, 'PRODUCTION')
+    assert.ok(r.body.data.sizeGroups.some((x) => x.id === 'sample-chest-sizes'))
+  })
+
+  // The round's specification follows the request's style.
+  await action('SAVE_DRAFT', {
+    color: 'Navy',
+    sizes: [{ sizeId: 'sample-size-M', qty: 2 }],
+    measurements: [{ ...spec.measurements[0] }],
+  })
+  await action('SAVE_DRAFT', { styleId: 'sample-style' }, 409)
+
+  // Linking: same brand only, any stage, and only while nothing is released.
+  await action('LINK_STYLE', { styleId: 'sample-style' }, 403, viewOnly)
+  await action('LINK_STYLE', { styleId: 'sample-style-other' }, 409)
+  await action('LINK_STYLE', { styleId: 'missing-style' }, 409)
+  await action('LINK_STYLE', { styleId: devStyle.id }, 409)
+  await staleRefused('LINK_STYLE', { styleId: 'sample-style' })
+  await action('LINK_STYLE', { styleId: 'sample-style' })
+  check('linking a production style for a re-sample clears what no longer fits the draft', () => {
+    assert.equal(doc.styleId, 'sample-style')
+    assert.equal(doc.rounds[0].specification.styleId, 'sample-style')
+    assert.equal(doc.rounds[0].specification.color, '')
+    assert.deepEqual(doc.rounds[0].specification.sizes, [{ sizeId: 'sample-size-M', qty: 2 }])
+    assert.deepEqual(doc.events[0].detail.data.before, {
+      id: devStyle.id,
+      code: devStyle.code,
+      stage: 'DEVELOPMENT',
+    })
+  })
+  const inProduction = await action('UPDATE_STYLE', { colors: ['White', 'Blue', 'Green'] }, 409)
+  const shirtColours = (await db.style.findUnique({ where: { id: 'sample-style' } })).colors
+  check('a production style is changed in Masters, not from a sample request', () => {
+    assert.equal(inProduction.body.code, 'STYLE_IN_PRODUCTION')
+    assert.deepEqual(shirtColours, ['White', 'Blue'])
+  })
+  await action('LINK_STYLE', { styleId: devStyle.id })
+  await action('SAVE_DRAFT', { color: 'Navy' })
+
+  // Changing the request's own development style.
+  await action('UPDATE_STYLE', { colors: ['Navy', 'Olive'] }, 403, viewOnly)
+  await action('UPDATE_STYLE', {}, 400)
+  await staleRefused('UPDATE_STYLE', { colors: ['Navy', 'Olive'] })
+  await action('UPDATE_STYLE', { colors: ['Navy', 'Olive'] }, 200, merch)
+  check('a colour is added to the development style with before and after', () => {
+    assert.deepEqual(doc.style.colors, ['Navy', 'Olive'])
+    assert.deepEqual(doc.events[0].detail.data.before.colors, ['Navy'])
+    assert.deepEqual(doc.events[0].detail.data.after.colors, ['Navy', 'Olive'])
+  })
+  const changedAudit = (await styleAudit()).at(-1)
+  check('and the change is in the Styles audit trail with the style before and after', () => {
+    assert.equal(changedAudit.module, 'masters')
+    assert.equal(changedAudit.action, 'UPDATE')
+    assert.deepEqual(changedAudit.before.colors, ['Navy'])
+    assert.deepEqual(changedAudit.after.colors, ['Navy', 'Olive'])
+  })
+  await action('UPDATE_STYLE', { sizeGroupId: 'sample-chest-sizes' })
+  check('a size run changed before release drops sizes the draft can no longer use', () => {
+    assert.equal(doc.style.sizeGroupId, 'sample-chest-sizes')
+    assert.deepEqual(doc.rounds[0].specification.sizes, [])
+    assert.deepEqual(doc.rounds[0].specification.measurements, [])
+    assert.equal(doc.rounds[0].specification.color, 'Navy')
+  })
+  await action('UPDATE_STYLE', { sizeGroupId: 'sample-sizes', name: devStyle.name + ' v2' })
+
+  // Files: the tech pack for the whole request, a photo for a round.
+  const techPack = 'Fictional tech pack for a local check only.'
+  await action(
+    'ATTACH',
+    { fileName: 'x.pdf', storagePath: `samples/${doc.id}/x.pdf`, kind: 'TECH_PACK' },
+    403,
+    viewOnly
+  )
+  r = await call(
+    'POST',
+    `/${doc.id}/attachments/upload-url`,
+    { fileName: 'tech.pdf', sizeBytes: 10, kind: 'TECH_PACK' },
+    viewOnly
+  )
+  check('a view-only login cannot ask for an upload link', () => assert.equal(r.status, 403))
+  r = await call('POST', `/${doc.id}/attachments/upload-url`, {
+    fileName: 'tech.pdf',
+    sizeBytes: 10,
+    kind: 'SKETCH',
+  })
+  check('an unknown kind of file is refused', () => assert.equal(r.status, 400))
+  r = await call('POST', `/${doc.id}/attachments/upload-url`, {
+    fileName: 'huge.pdf',
+    sizeBytes: 50 * 1024 * 1024 + 1,
+    kind: 'TECH_PACK',
+  })
+  check('a file over 50MB is refused before it is sent', () => assert.equal(r.status, 400))
+  const techPath = await upload(
+    doc.id,
+    'Buyer tech pack.pdf',
+    techPack,
+    { kind: 'TECH_PACK' },
+    merch
+  )
+  const techFile = { fileName: 'Buyer tech pack.pdf', storagePath: techPath, kind: 'TECH_PACK' }
+  await staleRefused('ATTACH', techFile)
+  await action('ATTACH', { ...techFile, kind: 'SKETCH' }, 400)
+  const neverSent = await action(
+    'ATTACH',
+    { ...techFile, storagePath: `samples/${doc.id}/abc-never-sent.pdf` },
+    400
+  )
+  const replayed = await action(
+    'ATTACH',
+    { ...techFile, storagePath: `samples/${created.id}/abc-tech.pdf` },
+    400
+  )
+  check('a file never sent, or sent for another request, is not filed', () => {
+    assert.equal(neverSent.body.code, 'UPLOAD_NOT_FOUND')
+    assert.equal(replayed.body.code, 'WRONG_DOCUMENT')
+  })
+  await action('ATTACH', { ...techFile, storagePath: `samples/${doc.id}/../abc-tech.pdf` }, 400)
+  await action('ATTACH', { ...techFile, storagePath: `sales-orders/${doc.id}/abc-tech.pdf` }, 400)
+  await action('ATTACH', { ...techFile, roundId: 'missing-round' }, 409)
+  const beforeAttach = doc.version
+  await action('ATTACH', techFile, 200, merch)
+  const filed = doc.attachments[0]
+  check('the tech pack is filed with the size storage measured and an ATTACH event', () => {
+    assert.equal(doc.attachments.length, 1)
+    assert.equal(filed.kind, 'TECH_PACK')
+    assert.equal(filed.roundId, null)
+    assert.equal(filed.sizeBytes, Buffer.byteLength(techPack))
+    assert.equal(filed.mimeType, 'application/pdf')
+    assert.equal(filed.uploadedBy.id, 'sample-user')
+    assert.equal(doc.version, beforeAttach + 1)
+    assert.equal(doc.events[0].action, 'ATTACH')
+    assert.equal(doc.events[0].detail.data.storagePath, techPath)
+    assert.equal(doc.events[0].detail.data.sizeBytes, Buffer.byteLength(techPack))
+  })
+  const attachAudit = await db.auditLog.findFirst({
+    where: { module: 'sampling', entityType: 'SampleRequest', entityId: doc.id },
+    orderBy: { createdAt: 'desc' },
+  })
+  check('the audit row names the file’s own round, not the round on screen', () => {
+    assert.equal(attachAudit.after.action, 'ATTACH')
+    assert.equal(attachAudit.after.roundId, null)
+  })
+  await action('ATTACH', techFile, 409)
+  // Other spellings of a filed path. Cloud storage reads "x.pdf#" and
+  // "x.pdf?x" as x.pdf, and a Windows disk ignores capitals, so each would be a
+  // second row on the kept file, and removing that row would delete the file.
+  const slash = techPath.lastIndexOf('/')
+  const techName = techPath.slice(slash + 1)
+  const dash = techName.indexOf('-')
+  const shouted =
+    techPath.slice(0, slash + 1) + techName.slice(0, dash + 1) + techName.slice(dash + 1).toUpperCase()
+  const aliasOf = (storagePath) => ({ ...techFile, storagePath, kind: 'OTHER' })
+  const fragment = await action('ATTACH', aliasOf(techPath + '#'), 400)
+  const query = await action('ATTACH', aliasOf(techPath + '?x'), 400)
+  const capitals = await action('ATTACH', aliasOf(shouted), 409)
+  check('another spelling of a filed path is refused, and the file stays', () => {
+    assert.equal(fragment.body.code, 'BAD_STORAGE_PATH')
+    assert.equal(query.body.code, 'BAD_STORAGE_PATH')
+    assert.equal(capitals.body.code, 'ALREADY_ATTACHED')
+    assert.equal(doc.attachments.length, 1)
+    assert.equal(onDisk(techPath), true)
+  })
+  // A second row on one file, as one could be filed before that was refused:
+  // removing it leaves the file for the row that still names it.
+  const alias = await db.sampleAttachment.create({
+    data: {
+      requestId: doc.id,
+      kind: 'OTHER',
+      fileName: 'alias.pdf',
+      storagePath: shouted,
+      sizeBytes: 1,
+      uploadedById: 'sample-user',
+    },
+  })
+  doc = (await call('GET', `/${doc.id}`)).body.data
+  await action('DETACH', { attachmentId: alias.id, reason: 'Second row on one file' })
+  check('removing a second row on one file does not delete the file', () => {
+    assert.equal(onDisk(techPath), true)
+    assert.deepEqual(
+      doc.attachments.map((x) => x.id),
+      [filed.id]
+    )
+  })
+  r = await call('GET', `/attachments/${filed.id}/link`, undefined, viewOnly)
+  const download = await fetch(r.body.data.url)
+  const downloaded = await download.text()
+  check('a view-only login opens the tech pack through a signed link', () => {
+    assert.equal(r.status, 200)
+    assert.equal(download.status, 200)
+    assert.equal(downloaded, techPack)
+  })
+  r = await call('GET', `/${doc.id}/attachments`)
+  check('the file list says the tech pack can still be removed before release', () => {
+    assert.equal(r.body.data.length, 1)
+    assert.equal(r.body.data[0].removable, true)
+    assert.equal(r.body.data[0].lockedReason, null)
+  })
+  const draftRound = doc.rounds[0]
+  const photoPath = await upload(doc.id, 'first fit.pdf', 'Fictional fit photo', {
+    kind: 'PHOTO',
+    roundId: draftRound.id,
+  })
+  await action('ATTACH', {
+    fileName: 'first fit.pdf',
+    storagePath: photoPath,
+    kind: 'PHOTO',
+    roundId: draftRound.id,
+  })
+  const draftPhoto = doc.attachments.find((x) => x.storagePath === photoPath)
+  r = await call('GET', `/${doc.id}/attachments?roundId=${draftRound.id}&kind=PHOTO`)
+  const requestLevel = await call('GET', `/${doc.id}/attachments?roundId=none`)
+  check('files list by round and kind, and for the whole request', () => {
+    assert.deepEqual(
+      r.body.data.map((x) => x.id),
+      [draftPhoto.id]
+    )
+    assert.deepEqual(
+      requestLevel.body.data.map((x) => x.id),
+      [filed.id]
+    )
+    assert.equal(doc.events[0].detail.roundId, draftRound.id)
+  })
+  await action('DETACH', { attachmentId: draftPhoto.id, reason: 'x' }, 403, viewOnly)
+  await action('DETACH', { attachmentId: draftPhoto.id, reason: '' }, 400)
+  await action('DETACH', { attachmentId: 'missing-file', reason: 'Wrong file' }, 404)
+  await staleRefused('DETACH', { attachmentId: draftPhoto.id, reason: 'Wrong photo' })
+  await action('DETACH', { attachmentId: draftPhoto.id, reason: 'Wrong photo' }, 200, merch)
+  check('a draft round’s file is removed: row, then the file itself, with its reason', () => {
+    assert.equal(
+      doc.attachments.some((x) => x.id === draftPhoto.id),
+      false
+    )
+    assert.equal(onDisk(photoPath), false)
+    assert.equal(doc.events[0].action, 'DETACH')
+    assert.equal(doc.events[0].detail.data.reason, 'Wrong photo')
+  })
+
+  // Five of a kind per request, counted again under the request's lock.
+  const others = []
+  for (let i = 1; i <= 5; i++) {
+    const p = await upload(doc.id, `note ${i}.pdf`, `Fictional note ${i}`, { kind: 'OTHER' })
+    await action('ATTACH', { fileName: `note ${i}.pdf`, storagePath: p, kind: 'OTHER' })
+    others.push(doc.attachments.find((x) => x.storagePath === p))
+  }
+  r = await call('POST', `/${doc.id}/attachments/upload-url`, {
+    fileName: 'note 6.pdf',
+    sizeBytes: 10,
+    kind: 'OTHER',
+  })
+  check('a sixth file of one kind is refused before it is sent', () => {
+    assert.equal(r.status, 409)
+    assert.equal(r.body.code, 'TOO_MANY_FILES')
+  })
+  const sixth = await upload(doc.id, 'note 6.pdf', 'Fictional note 6')
+  const sixthRefused = await action(
+    'ATTACH',
+    { fileName: 'note 6.pdf', storagePath: sixth, kind: 'OTHER' },
+    409
+  )
+  check('and refused again when filed, while other kinds are still allowed', () =>
+    assert.equal(sixthRefused.body.code, 'TOO_MANY_FILES')
+  )
+  // Five for the whole request, and five for each round.
+  r = await call('POST', `/${doc.id}/attachments/upload-url`, {
+    fileName: 'note 6.pdf',
+    sizeBytes: 10,
+    kind: 'OTHER',
+    roundId: draftRound.id,
+  })
+  await action('ATTACH', {
+    fileName: 'note 6.pdf',
+    storagePath: sixth,
+    kind: 'OTHER',
+    roundId: draftRound.id,
+  })
+  const roundNote = doc.attachments.find((x) => x.storagePath === sixth)
+  check('the sixth of a kind is filed against a round, which counts its own five', () => {
+    assert.equal(r.status, 200, JSON.stringify(r.body))
+    assert.equal(roundNote.roundId, draftRound.id)
+  })
+  const patternPath = await upload(doc.id, 'pattern v1.pdf', 'Fictional pattern', {
+    kind: 'PATTERN',
+    roundId: draftRound.id,
+  })
+  await action('ATTACH', {
+    fileName: 'pattern v1.pdf',
+    storagePath: patternPath,
+    kind: 'PATTERN',
+    roundId: draftRound.id,
+  })
+  const releasedPattern = doc.attachments.find((x) => x.storagePath === patternPath)
+
+  // Release freezes the files the round had, and the tech pack it followed.
+  await action('RELEASE', {
+    ...spec,
+    styleId: doc.styleId,
+    color: 'Navy',
+    techPackRef: 'Buyer tech pack on file',
+  })
+  await action('LINK_STYLE', { styleId: 'sample-style' }, 409)
+  await action('LINK_STYLE', { styleId: null }, 409)
+  await action('CREATE_STYLE', newStyle, 409)
+  const kept = await action(
+    'DETACH',
+    { attachmentId: filed.id, reason: 'Buyer sent a newer one' },
+    409
+  )
+  const keptPattern = await action(
+    'DETACH',
+    { attachmentId: releasedPattern.id, reason: 'Pattern changed' },
+    409
+  )
+  check('the tech pack and the round’s pattern stay once it is released, file and all', () => {
+    assert.equal(kept.body.code, 'FILE_KEPT')
+    assert.equal(keptPattern.body.code, 'FILE_KEPT')
+    assert.equal(onDisk(techPath), true)
+    assert.equal(onDisk(patternPath), true)
+  })
+  const releasedRound = doc.rounds[0]
+  const fitPath = await upload(doc.id, 'released fit.pdf', 'Fictional fit photo 2', {
+    kind: 'PHOTO',
+    roundId: releasedRound.id,
+  })
+  await action('ATTACH', {
+    fileName: 'released fit.pdf',
+    storagePath: fitPath,
+    kind: 'PHOTO',
+    roundId: releasedRound.id,
+  })
+  const releasedPhoto = doc.attachments.find((x) => x.storagePath === fitPath)
+  const newerPath = await upload(doc.id, 'Buyer tech pack v2.pdf', 'Fictional tech pack v2', {
+    kind: 'TECH_PACK',
+  })
+  await action('ATTACH', {
+    fileName: 'Buyer tech pack v2.pdf',
+    storagePath: newerPath,
+    kind: 'TECH_PACK',
+  })
+  const newerTech = doc.attachments.find((x) => x.storagePath === newerPath)
+  r = await call('GET', `/${doc.id}/attachments`)
+  check('what a round was released with is kept; a file added after it can still go', () => {
+    const byId = Object.fromEntries(r.body.data.map((x) => [x.id, x]))
+    assert.equal(byId[filed.id].removable, false)
+    assert.match(byId[filed.id].lockedReason, /tech pack/)
+    assert.equal(byId[releasedPattern.id].removable, false)
+    assert.equal(byId[roundNote.id].removable, false)
+    assert.equal(byId[releasedPhoto.id].removable, true)
+    assert.equal(byId[newerTech.id].removable, true)
+    assert.equal(byId[others[1].id].removable, true)
+    // The request itself carries the same answer, so no second call is needed.
+    assert.equal(doc.attachments.find((x) => x.id === filed.id).removable, false)
+    assert.equal(doc.attachments.find((x) => x.id === others[1].id).lockedReason, null)
+  })
+  await action(
+    'DETACH',
+    { attachmentId: releasedPhoto.id, reason: 'Another buyer’s photo' },
+    200,
+    merch
+  )
+  check('a wrong photo filed after release is removed, file and all', () => {
+    assert.equal(
+      doc.attachments.some((x) => x.id === releasedPhoto.id),
+      false
+    )
+    assert.equal(onDisk(fitPath), false)
+  })
+  await action('DETACH', { attachmentId: others[0].id, reason: 'Duplicate note' })
+
+  // What a released round was made in stays true of the style.
+  await action('UPDATE_STYLE', { colors: ['Olive'] }, 409)
+  await action('UPDATE_STYLE', { sizeGroupId: 'sample-chest-sizes' }, 409)
+  await action('UPDATE_STYLE', { colors: ['Navy'] })
+  await action('UPDATE_STYLE', { colors: ['Navy', 'Sand'] })
+  check('after release a colour can be added, or one never sampled taken off', () =>
+    assert.deepEqual(doc.style.colors, ['Navy', 'Sand'])
+  )
+  r = await call('GET', `/${doc.id}/print`, undefined, viewOnly)
+  check('the printed record names the style and lists files by name and kind only', () => {
+    assert.equal(r.body.data.request.style.code, devStyle.code)
+    const printed = r.body.data.request.attachments.find((x) => x.id === filed.id)
+    assert.equal(printed.fileName, 'Buyer tech pack.pdf')
+    assert.equal(printed.kindLabel, 'Tech pack')
+    assert.equal(printed.storagePath, undefined)
+  })
+
+  // Masters: the stage filter, and no way to set the stage by hand.
+  const styleList = async (query) => {
+    const res = await fetch(`${origin}/masters/styles?${query}`)
+    return res.json()
+  }
+  const q = `q=${encodeURIComponent(devStyle.code)}`
+  const inSampling = await styleList(`${q}&stage=DEVELOPMENT`)
+  const forOrders = await styleList(`${q}&stage=PRODUCTION`)
+  const everything = await styleList(q)
+  const shirt = await styleList('q=EX-SH-2601&stage=PRODUCTION')
+  check('the Styles list filters by stage, and lists both when no stage is asked', () => {
+    assert.equal(inSampling.pagination.total, 1)
+    assert.equal(inSampling.data[0].stage, 'DEVELOPMENT')
+    assert.equal(forOrders.pagination.total, 0)
+    assert.equal(everything.pagination.total, 1)
+    assert.equal(shirt.data[0].stage, 'PRODUCTION')
+  })
+  let res = await fetch(`${origin}/masters/styles/${devStyle.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ stage: 'PRODUCTION' }),
+  })
+  const stillSampling = await db.style.findUnique({ where: { id: devStyle.id } })
+  check('the Styles master cannot promote a style out of sampling', () => {
+    assert.equal(res.status, 200)
+    assert.equal(stillSampling.stage, 'DEVELOPMENT')
+  })
+  // What sampling relies on is changed from the request, where its rules,
+  // lock and history apply; the master edits only the rest.
+  const editStyle = async (method, body) => {
+    const sent = await fetch(`${origin}/masters/styles/${devStyle.id}`, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    })
+    return { status: sent.status, body: await sent.json() }
+  }
+  const mastersRefused = [
+    await editStyle('PATCH', { colors: ['Navy'] }),
+    await editStyle('PATCH', { sizeGroupId: 'sample-chest-sizes' }),
+    await editStyle('PATCH', { brandId: 'sample-brand-other' }),
+    await editStyle('PATCH', { isActive: false }),
+    await editStyle('DELETE'),
+  ]
+  // The full form sends every field: unchanged ones are no change.
+  const cosmetic = await editStyle('PATCH', {
+    fit: 'Relaxed',
+    colors: stillSampling.colors,
+    sizeGroupId: stillSampling.sizeGroupId,
+    brandId: stillSampling.brandId,
+    isActive: true,
+  })
+  const afterMasters = await db.style.findUnique({ where: { id: devStyle.id } })
+  check('the Styles master leaves brand, size run, colours and switching off to the request', () => {
+    for (const x of mastersRefused) {
+      assert.equal(x.status, 409, JSON.stringify(x.body))
+      assert.equal(x.body.code, 'STYLE_IN_SAMPLING')
+    }
+    assert.equal(cosmetic.status, 200, JSON.stringify(cosmetic.body))
+    assert.equal(afterMasters.fit, 'Relaxed')
+    assert.deepEqual(afterMasters.colors, stillSampling.colors)
+    assert.equal(afterMasters.sizeGroupId, 'sample-sizes')
+    assert.equal(afterMasters.brandId, 'sample-brand')
+    assert.equal(afterMasters.isActive, true)
+  })
+  res = await fetch(`${origin}/masters/styles`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Hand-made style ' + stamp,
+      brandId: 'sample-brand',
+      category: 'Shirt',
+      stage: 'DEVELOPMENT',
+    }),
+  })
+  const handMade = (await res.json()).data
+  check('nor make a style that is in sampling', () => {
+    assert.equal(res.status, 201)
+    assert.equal(handMade.stage, 'PRODUCTION')
+  })
+  await db.style.delete({ where: { id: handMade.id } })
+
+  // Production refuses a style still in sampling.
+  const pcs = await db.uOM.findUnique({ where: { symbol: 'pcs' } })
+  const itemsBefore = await db.item.count({ where: { styleId: devStyle.id } })
+  res = await fetch(`${origin}/masters/items`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Sampling style garment ' + stamp,
+      type: 'FINISHED_GOOD',
+      categoryId: 'sample-category',
+      uomId: pcs.id,
+      styleId: devStyle.id,
+      color: 'Navy',
+    }),
+  })
+  const itemRefusal = await res.json()
+  check('a finished-goods item cannot be made for a style in sampling', () => {
+    assert.equal(res.status, 409, JSON.stringify(itemRefusal))
+    assert.equal(itemRefusal.code, 'STYLE_IN_DEVELOPMENT')
+    assert.match(itemRefusal.message, /still in sampling/)
+  })
+  res = await fetch(`${origin}/masters/bom`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      styleId: devStyle.id,
+      color: 'Navy',
+      lines: [{ componentItemId: 'sample-fabric', qtyPerUnit: 2 }],
+    }),
+  })
+  const bomRefusal = await res.json()
+  const madeForIt = {
+    items: await db.item.count({ where: { styleId: devStyle.id } }),
+    boms: await db.bOM.count({ where: { styleId: devStyle.id } }),
+  }
+  check('nor a production BOM, and nothing is saved for it', () => {
+    assert.equal(res.status, 409, JSON.stringify(bomRefusal))
+    assert.equal(bomRefusal.code, 'STYLE_IN_DEVELOPMENT')
+    assert.deepEqual(madeForIt, { items: itemsBefore, boms: 0 })
+  })
+  const { createRouting } = require('../apps/api/src/services/routing.service.ts')
+  const cutting = await db.operation.findUnique({ where: { code: 'EX-CUT' } })
+  const routeRefusal = await db
+    .$transaction((tx) =>
+      createRouting(
+        tx,
+        {
+          name: 'Sampling style route ' + stamp,
+          styleId: devStyle.id,
+          steps: [
+            {
+              sequence: 1,
+              operationId: cutting.id,
+              departmentId: cutting.departmentId,
+              execution: 'IN_HOUSE',
+              skip: 'NEVER',
+            },
+          ],
+        },
+        'sample-user'
+      )
+    )
+    .catch((e) => e)
+  check('nor a production routing', () => assert.equal(routeRefusal.code, 'STYLE_IN_DEVELOPMENT'))
+  const { routingsByStyle } = require('../apps/api/src/services/routingOverview.service.ts')
+  const waitingForRoutes = await routingsByStyle(db, { q: devStyle.code, page: 1, limit: 10 })
+  res = await fetch(`${origin}/quotations/styles`)
+  const quotable = (await res.json()).data
+  check('production pickers leave out a style still in sampling', () => {
+    assert.equal(waitingForRoutes.total, 0)
+    assert.equal(
+      quotable.some((x) => x.id === devStyle.id),
+      false
+    )
+    assert.ok(quotable.some((x) => x.id === 'sample-style'))
+  })
+  // A style number typed on a line, for a garment item with no style of its own.
+  const { prepareOrder } = require('../apps/api/src/routes/sales.routes.ts')
+  const styleless = await db.item.create({
+    data: {
+      code: 'EX-FG-T' + stamp,
+      name: 'Styleless garment ' + stamp,
+      type: 'FINISHED_GOOD',
+      categoryId: 'sample-category',
+      uomId: pcs.id,
+    },
+  })
+  const typedRefusal = await db
+    .$transaction((tx) =>
+      prepareOrder(tx, {
+        customerId: 'sample-buyer',
+        brandId: 'sample-brand',
+        orderDate: new Date(),
+        lines: [
+          {
+            itemId: styleless.id,
+            styleCode: ' ' + devStyle.code.toLowerCase(),
+            totalQty: 1,
+            unitPrice: 100,
+          },
+        ],
+      })
+    )
+    .catch((e) => e)
+  await db.item.delete({ where: { id: styleless.id } })
+  check('an order or quotation line cannot name a style in sampling by its typed code', () => {
+    assert.equal(typedRefusal.code, 'STYLE_IN_DEVELOPMENT', String(typedRefusal))
+    assert.match(typedRefusal.message, new RegExp(devStyle.code))
+  })
+  // An approved round of a style made in sampling has nothing to hand over yet.
+  await db.sampleRound.update({ where: { id: releasedRound.id }, data: { state: 'APPROVED' } })
+  doc = (await call('GET', `/${doc.id}`)).body.data
+  const noHandover = await action(
+    'HANDOVER',
+    { bomId: 'sample-bom', routingId: 'sample-route', notes: 'Bulk package' },
+    409
+  )
+  await db.sampleRound.update({ where: { id: releasedRound.id }, data: { state: 'RELEASED' } })
+  doc = (await call('GET', `/${doc.id}`)).body.data
+  check('a style made in sampling is not handed over, and the refusal says why', () => {
+    assert.equal(noHandover.body.code, 'STYLE_IN_DEVELOPMENT')
+    assert.match(noHandover.body.message, /later update/)
+  })
+
+  // A style in sampling belongs to the open request developing it.
+  const intake = doc
+  doc = (
+    await call('POST', '', {
+      ...payload,
+      clientKey: crypto.randomUUID(),
+      title: title + ' second request on a developing style',
+    })
+  ).body.data
+  const taken = await action('LINK_STYLE', { styleId: devStyle.id }, 409)
+  check('another request cannot take a style a request is still developing', () => {
+    assert.equal(taken.body.code, 'STYLE_TAKEN')
+    assert.match(taken.body.message, new RegExp(intake.number))
+  })
+  await action('CANCEL', 'Local check: style belongs to another request; nothing issued')
+  doc = intake
+
+  // A cancelled request keeps its files and takes no more.
+  await action('CANCEL', 'Buyer dropped the style; no material issued')
+  r = await call('POST', `/${doc.id}/attachments/upload-url`, {
+    fileName: 'late.pdf',
+    sizeBytes: 10,
+    kind: 'OTHER',
+  })
+  check('a cancelled request gives no upload link', () => assert.equal(r.status, 409))
+  await action('ATTACH', { ...techFile, storagePath: sixth }, 409)
+  await action('DETACH', { attachmentId: others[1].id, reason: 'Tidy up' }, 409)
+  await action('UPDATE_STYLE', { colors: ['Navy', 'Sand', 'Rust'] }, 409)
+  check('cancelling keeps every file on the request', () => {
+    // Tech pack and its newer version, four notes, the round's note and pattern.
+    assert.equal(doc.attachments.length, 8)
+    assert.equal(onDisk(techPath), true)
+  })
+  const intakeEvents = await db.sampleEvent.findMany({
+    where: { requestId: doc.id },
+    orderBy: { version: 'asc' },
+  })
+  check('every intake action left one event, in order', () =>
+    assert.deepEqual(
+      intakeEvents.map((e) => e.version),
+      Array.from({ length: doc.version }, (_, i) => i + 1)
+    )
+  )
+
+  // A handed-over request is frozen for files and style alike.
+  doc = (await call('GET', `/${handedOver.id}`)).body.data
+  r = await call('POST', `/${doc.id}/attachments/upload-url`, {
+    fileName: 'late.pdf',
+    sizeBytes: 10,
+    kind: 'OTHER',
+  })
+  check('a handed-over request gives no upload link', () => assert.equal(r.status, 409))
+  await action(
+    'ATTACH',
+    { fileName: 'late.pdf', storagePath: `samples/${doc.id}/abc-late.pdf`, kind: 'OTHER' },
+    409
+  )
+  await action('UPDATE_STYLE', { colors: ['White'] }, 409)
+
+  // Brand, unlinking, and a style whose own request was cancelled.
+  const openRequest = async (suffix) =>
+    (
+      await call('POST', '', {
+        ...payload,
+        clientKey: crypto.randomUUID(),
+        title: title + suffix,
+      })
+    ).body.data
+  doc = await openRequest(' re-sample')
+  await action('LINK_STYLE', { styleId: null }, 409)
+  await action('LINK_STYLE', { styleId: devStyle.id })
+  check('once the request developing it is cancelled, its style can be linked', () =>
+    assert.equal(doc.style.stage, 'DEVELOPMENT')
+  )
+  // Two open requests on one style in sampling, as could happen before only
+  // one could link it: neither may change it while the other is open.
+  const resample = doc
+  const earlier = await openRequest(' linked before the rule')
+  await db.sampleRequest.update({ where: { id: earlier.id }, data: { styleId: devStyle.id } })
+  const shared = await action('UPDATE_STYLE', { colors: [...doc.style.colors, 'Teal'] }, 409)
+  check('a style two open requests sample is changed from neither', () => {
+    assert.equal(shared.body.code, 'STYLE_SHARED')
+    assert.match(shared.body.message, new RegExp(earlier.number))
+  })
+  doc = (await call('GET', `/${earlier.id}`)).body.data
+  await action('CANCEL', 'Local check: second request on one style; nothing issued')
+  doc = (await call('GET', `/${resample.id}`)).body.data
+  await action('UPDATE_STYLE', { colors: [...doc.style.colors, 'Teal'] })
+  check('with the other request closed, the one left changes the style', () =>
+    assert.ok(doc.style.colors.includes('Teal'))
+  )
+  await action('UPDATE_REQUEST', { ...requestEdit, brandId: 'sample-brand-other' }, 409)
+  await action('LINK_STYLE', { styleId: null })
+  check('taking the style off clears it from the draft', () => {
+    assert.equal(doc.styleId, null)
+    assert.equal(doc.rounds[0].specification.styleId, '')
+  })
+  await action('UPDATE_REQUEST', {
+    ...requestEdit,
+    brandId: 'sample-brand-other',
+    reason: 'Buyer moved the style to their outlet label',
+  })
+  await action('LINK_STYLE', { styleId: 'sample-style-other' })
+  check('with no style, the brand can change and a style of the new brand is linked', () => {
+    assert.equal(doc.brandId, 'sample-brand-other')
+    assert.equal(doc.style.code, 'EO-TS-2601')
+  })
+  await action('CANCEL', 'Local re-sample check complete; nothing issued')
+
+  // A request released before requests named their own style (phase 0).
+  doc = await openRequest(' released before it named its style')
+  await action('SAVE_SPEC', spec)
+  await action('RELEASE')
+  const legacyRound = doc.rounds[0]
+  const forgetStyle = () =>
+    db.sampleRequest.update({ where: { id: doc.id }, data: { styleId: null } })
+  await forgetStyle()
+  const backfill = fs.readFileSync(
+    path.join(
+      __dirname,
+      '..',
+      'packages/database/prisma/migrations/20261116110000_sampling_request_style_backfill/migration.sql'
+    ),
+    'utf8'
+  )
+  await db.$executeRawUnsafe(backfill)
+  const backfilled = await db.sampleRequest.findUnique({ where: { id: doc.id } })
+  check('the backfill gives such a request the style its released round was made in', () =>
+    assert.equal(backfilled.styleId, 'sample-style')
+  )
+  await forgetStyle()
+  doc = (await call('GET', `/${doc.id}`)).body.data
+  const otherStyle = await action('LINK_STYLE', { styleId: devStyle.id }, 409)
+  await action('LINK_STYLE', { styleId: 'sample-style' })
+  check('it may still take the style its rounds were made in, and no other', () => {
+    assert.equal(otherStyle.body.code, 'STYLE_FIXED')
+    assert.equal(doc.styleId, 'sample-style')
+  })
+  await forgetStyle()
+  await db.sampleRound.update({ where: { id: legacyRound.id }, data: { state: 'CHANGES_REQUIRED' } })
+  doc = (await call('GET', `/${doc.id}`)).body.data
+  await action('NEW_ROUND', 'Buyer asked for a longer sleeve')
+  check('its next round gives it that style, so the round can be prepared', () => {
+    assert.equal(doc.styleId, 'sample-style')
+    assert.equal(doc.rounds[0].specification.styleId, 'sample-style')
+    assert.equal(doc.events[0].detail.data.styleId, 'sample-style')
+  })
+  await action('CANCEL', 'Local legacy check complete; nothing issued')
+
   console.log(`\n${passed} checks passed on local lderp_sampling. Shared database never accessed.`)
 }
 main()
@@ -739,4 +1667,5 @@ main()
   .finally(async () => {
     if (server) await new Promise((resolve) => server.close(resolve))
     await db.$disconnect()
+    fs.rmSync(fileRoot, { recursive: true, force: true })
   })

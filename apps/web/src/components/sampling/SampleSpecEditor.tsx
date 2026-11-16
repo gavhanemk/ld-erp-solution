@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import {
   ArrowDown,
+  ArrowRight,
   ArrowUp,
   CheckCircle2,
   ChevronLeft,
@@ -10,7 +11,11 @@ import {
   Plus,
   Trash2,
 } from 'lucide-react'
-import type { SampleSpecification } from '@ld-erp/shared'
+import {
+  STYLE_STAGE_LABEL,
+  type SampleRequestStyle,
+  type SampleSpecification,
+} from '@ld-erp/shared'
 import type { Lookups } from './types'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
@@ -45,21 +50,40 @@ export function Field({
 export function SampleSpecEditor({
   initial,
   lookups,
-  brandId,
   save,
   release,
   busy,
   onDirtyChange,
+  requestStyle,
+  onChooseStyle,
 }: {
   initial: SampleSpecification
   lookups: Lookups
-  brandId: string
   save: (value: SampleSpecification) => Promise<SampleSpecification | null>
   release?: (value: SampleSpecification) => void
   busy: boolean
   onDirtyChange: (dirty: boolean) => void
+  /** Every round samples the request's own style, set in Request & tech pack. */
+  requestStyle: SampleRequestStyle | null
+  /** Opens Request & tech pack, where the style is made or chosen. */
+  onChooseStyle: () => void
 }) {
-  const [s, setS] = useState<SampleSpecification>(() => structuredClone(initial))
+  const [s, setS] = useState<SampleSpecification>(() => {
+    const draft = structuredClone(initial)
+    // The server fits drafts to the request's style when the style is set, so
+    // this only catches a draft saved before that: it takes the request's style.
+    if (requestStyle && draft.styleId !== requestStyle.id) {
+      const sizeIds = new Set(
+        lookups.sizes.filter((z) => z.sizeGroupId === requestStyle.sizeGroupId).map((z) => z.id)
+      )
+      draft.styleId = requestStyle.id
+      draft.color =
+        requestStyle.colors.find((c) => c.toLowerCase() === draft.color.toLowerCase()) ?? ''
+      draft.sizes = draft.sizes.filter((z) => !z.sizeId || sizeIds.has(z.sizeId))
+      draft.measurements = draft.measurements.filter((m) => !m.sizeId || sizeIds.has(m.sizeId))
+    }
+    return draft
+  })
   const [step, setStep] = useState(initial.styleId && initial.techPackRef ? 3 : 0)
   const saveDraft = async () => {
     const saved = await save(s)
@@ -77,7 +101,7 @@ export function SampleSpecEditor({
   const gaps = [
     [
       !s.milestone.trim() && 'Name the sample milestone',
-      !s.styleId && 'Choose a style',
+      !requestStyle && 'Create or choose the style in Request & tech pack',
       !s.color && 'Choose a colour',
       !s.techPackRef.trim() && 'Add the tech-pack reference',
       !s.patternRef.trim() && 'Add the pattern reference',
@@ -119,7 +143,8 @@ export function SampleSpecEditor({
   const ready = gaps.every((g) => !g.length)
   const set = <K extends keyof SampleSpecification>(k: K, v: SampleSpecification[K]) =>
     setS((x) => ({ ...x, [k]: v }))
-  const style = lookups.styles.find((x) => x.id === s.styleId)
+  // Colours and sizes come from the request's style only, never another one.
+  const style = requestStyle ? lookups.styles.find((x) => x.id === requestStyle.id) : undefined
   const sizes = lookups.sizes.filter((x) => x.sizeGroupId === style?.sizeGroupId)
   const input = (
     k: 'milestone' | 'construction' | 'techPackRef' | 'patternRef' | 'notes',
@@ -185,36 +210,55 @@ export function SampleSpecEditor({
           </p>
         </div>
         <div hidden={step !== 0} className="space-y-4">
+          {!requestStyle && (
+            <div className="border-primary/25 bg-primary/5 rounded-lg border p-4">
+              <p className="font-medium">Create or choose the style in Request & tech pack first</p>
+              <p className="text-muted-foreground mt-1 text-sm">
+                Every round samples the request’s own style; its colours and size run fill the
+                choices below. If you have typed anything here, save the draft first.
+              </p>
+              <button type="button" className="btn-secondary mt-3" onClick={onChooseStyle}>
+                Go to Request & tech pack <ArrowRight size={15} />
+              </button>
+            </div>
+          )}
           <div className="grid gap-3 md:grid-cols-3">
             {input('milestone', 'Sample milestone')}
-            <Field label="Style" required hint="Changing style resets the sizes and measurements.">
-              <SmartSelect
-                className="form-input"
-                value={s.styleId}
-                onChange={(e) =>
-                  setS((x) => ({
-                    ...x,
-                    styleId: e.target.value,
-                    color: '',
-                    sizes: [],
-                    measurements: [],
-                  }))
-                }
-              >
-                <option value="">Pick a style</option>
-                {lookups.styles
-                  .filter((x) => x.brandId === brandId)
-                  .map((x) => (
-                    <option key={x.id} value={x.id}>
-                      {x.code} · {x.name}
-                    </option>
-                  ))}
-              </SmartSelect>
+            <Field
+              label="Style"
+              required
+              hint={
+                requestStyle
+                  ? 'Every round of this request samples this style. It is set in Request & tech pack.'
+                  : 'Not set yet.'
+              }
+            >
+              <span className="form-input flex min-w-0 items-center gap-2">
+                {requestStyle ? (
+                  <>
+                    <span className="truncate">
+                      <span className="font-mono">{requestStyle.code}</span> · {requestStyle.name}
+                    </span>
+                    <span
+                      className={`ml-auto shrink-0 ${requestStyle.stage === 'DEVELOPMENT' ? 'badge-warning' : 'badge-success'}`}
+                    >
+                      {STYLE_STAGE_LABEL[requestStyle.stage]}
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-muted-foreground">No style yet</span>
+                )}
+              </span>
             </Field>
-            <Field label="Colour" required>
+            <Field
+              label="Colour"
+              required
+              hint={requestStyle ? undefined : 'The colours come from the request’s style.'}
+            >
               <SmartSelect
                 className="form-input"
                 value={s.color}
+                disabled={!style}
                 onChange={(e) => set('color', e.target.value)}
               >
                 <option value="">Pick a colour</option>
@@ -288,7 +332,7 @@ export function SampleSpecEditor({
               <p className="border-border text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {style
                   ? 'Add the sizes and piece quantities required for this round.'
-                  : 'Choose a style in step 1 to load its size run.'}
+                  : 'Set the request’s style in Request & tech pack to load its size run.'}
               </p>
             )}
             <button

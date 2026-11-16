@@ -1,5 +1,11 @@
 import { z } from 'zod'
+import { SAMPLE_ATTACHMENT_KINDS } from '@ld-erp/shared'
+import { MAX_FILE_BYTES } from '../lib/storage'
 const text = (max = 500) => z.string().trim().min(1, 'Fill in this field').max(max)
+// Optional words from the tech pack. Left out on an edit means unchanged; an
+// empty box is saved as nothing.
+const optionalText = (max: number) =>
+  z.string().trim().max(max, `Keep this to ${max} characters`).nullable().optional()
 const id = text(100)
 const qty = z.number().positive().max(999999).multipleOf(0.001)
 // Drafts retain the same JSON shape as released specifications. Blank values and
@@ -131,6 +137,9 @@ export const createSampleSchema = z.object({
   owner: text(100),
   brief: text(4000),
   requiredAt: z.string().date().nullable(),
+  buyerStyleRef: optionalText(100),
+  season: optionalText(50),
+  garmentCategory: optionalText(100),
 })
 export const updateSampleRequestSchema = createSampleSchema
   .omit({ clientKey: true })
@@ -155,6 +164,11 @@ export const sampleActionSchema = z.object({
     'HANDOVER',
     'ACCEPT_HANDOVER',
     'CANCEL',
+    'ATTACH',
+    'DETACH',
+    'CREATE_STYLE',
+    'LINK_STYLE',
+    'UPDATE_STYLE',
   ]),
   data: z.unknown(),
 })
@@ -190,3 +204,69 @@ export const sampleDecisionSchema = z.object({
   conditions: z.string().trim().max(2000).default(''),
 })
 export const sampleHandoverSchema = z.object({ bomId: id, routingId: id, notes: text(2000) })
+
+// ── Files and the request's style ─────────────────────────────────────────────
+export const sampleAttachmentKindSchema = z.enum(SAMPLE_ATTACHMENT_KINDS, {
+  errorMap: () => ({
+    message: 'Say what the file is: tech pack, pattern, photo, approval, dispatch slip or other',
+  }),
+})
+/** Step one of a file: the link to send it to. Kind is optional so the shared file box can ask unchanged. */
+export const sampleUploadUrlSchema = z.object({
+  fileName: z.string().trim().min(1, 'The file needs a name').max(255),
+  sizeBytes: z
+    .number()
+    .int()
+    .positive('That file is empty')
+    .max(MAX_FILE_BYTES, `Files have to be ${MAX_FILE_BYTES / 1024 / 1024}MB or smaller`),
+  kind: sampleAttachmentKindSchema.optional(),
+  roundId: id.nullable().optional(),
+})
+/** Step three: the file is in storage, so it is filed against the request. */
+export const sampleAttachSchema = z
+  .object({
+    fileName: z.string().trim().min(1, 'The file needs a name').max(255),
+    storagePath: z.string().min(1).max(1024),
+    kind: sampleAttachmentKindSchema,
+    roundId: id.nullable().optional(),
+  })
+  .strict()
+export const sampleDetachSchema = z.object({ attachmentId: id, reason: text(500) }).strict()
+export const sampleAttachmentListSchema = z.object({
+  // 'none' lists only the files of the whole request.
+  roundId: z.string().trim().max(100).optional(),
+  kind: sampleAttachmentKindSchema.optional(),
+})
+// The same rules the Styles master has for colours: each once, however it is capitalised.
+const styleColors = z
+  .array(z.string().trim().min(1, 'A colour needs a name').max(50))
+  .min(1, 'Add at least one colour')
+  .max(30, 'A style can have up to 30 colours')
+  .refine(
+    (list) => new Set(list.map((c) => c.toLowerCase())).size === list.length,
+    'A colour is listed twice. Each colour once, however it is capitalised.'
+  )
+export const sampleCreateStyleSchema = z
+  .object({
+    name: text(200),
+    category: optionalText(100),
+    sizeGroupId: id,
+    colors: styleColors,
+    season: optionalText(50),
+  })
+  .strict()
+/** Null takes the style off the request, so a draft can move to another brand. */
+export const sampleLinkStyleSchema = z.object({ styleId: id.nullable() }).strict()
+export const sampleUpdateStyleSchema = z
+  .object({
+    name: text(200).optional(),
+    category: optionalText(100),
+    colors: styleColors.optional(),
+    sizeGroupId: id.optional(),
+    season: optionalText(50),
+  })
+  .strict()
+  .refine(
+    (d) => Object.values(d).some((v) => v !== undefined),
+    'Change at least one detail of the style'
+  )

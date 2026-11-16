@@ -3,13 +3,28 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, apiErrorMessage } from '@/lib/api'
-import { StoreSheet, Fact, longDate, qty } from '@/components/print/StoreSheet'
-import { SAMPLE_STATE_LABEL } from '@ld-erp/shared'
+import { StoreSheet, Fact, Panel, longDate, qty } from '@/components/print/StoreSheet'
+import {
+  SAMPLE_ATTACHMENT_KINDS,
+  SAMPLE_STATE_LABEL,
+  STYLE_STAGE_LABEL,
+  type SampleAttachmentKind,
+} from '@ld-erp/shared'
+import { eventLabel, eventNote, fileScope } from '@/components/sampling/samplingFlow'
 import type { Lookups, SampleRequest } from '@/components/sampling/types'
 
+/** A file as the printed record has it: what it is and when it came, never where it is kept. */
+interface PrintedFile {
+  id: string
+  roundId: string | null
+  kind: SampleAttachmentKind
+  kindLabel: string
+  fileName: string
+  createdAt: string
+}
 interface Payload {
   company: Record<string, string | null> | null
-  request: SampleRequest
+  request: Omit<SampleRequest, 'attachments'> & { attachments: PrintedFile[] }
   lookups: Lookups
 }
 
@@ -134,14 +149,23 @@ export default function PrintSample() {
           : 'Acceptance pending'
       )
   }
+  const sizeRun = (id: string) => lookups.sizeGroups?.find((g) => g.id === id)?.name ?? id
   for (const event of [...request.events].reverse()) {
+    const note = eventNote(event, request.rounds, sizeRun)
     add(
       'History',
-      event.action.replaceAll('_', ' '),
-      event.detail.by ?? '',
+      eventLabel(event.action),
+      [event.detail.by ?? '', note].filter(Boolean).join('\n'),
       longDate(event.createdAt) ?? ''
     )
   }
+  const style = request.style
+  // Kinds in their usual order (tech pack first), oldest first within each.
+  const files = [...(request.attachments ?? [])].sort(
+    (a, b) =>
+      SAMPLE_ATTACHMENT_KINDS.indexOf(a.kind) - SAMPLE_ATTACHMENT_KINDS.indexOf(b.kind) ||
+      a.createdAt.localeCompare(b.createdAt)
+  )
   return (
     <StoreSheet
       company={data.company ?? { name: 'Sampling record' }}
@@ -152,6 +176,8 @@ export default function PrintSample() {
       backHref="/sampling"
       backLabel="Sampling"
       banner={request.cancelledAt ? `CANCELLED · ${request.cancelReason}` : null}
+      // Three panels, so each stays wide enough to read: who asked and who
+      // answers for it, the style and its tech-pack details, and the brief.
       panels={[
         {
           title: 'Request',
@@ -161,22 +187,32 @@ export default function PrintSample() {
               <Fact label="Buyer" value={request.customer?.name ?? 'Internal development'} />
               <Fact label="Brand" value={request.brand.name} />
               <Fact label="Buyer ref" value={request.buyerRef} />
+              <Fact label="Owner" value={request.owner} />
+              <Fact label="Required by" value={longDate(request.requiredAt)} />
+              <Fact label="Version" value={request.version} />
+            </>
+          ),
+        },
+        {
+          title: 'Style & tech pack',
+          body: (
+            <>
+              <Fact label="Buyer style" value={request.buyerStyleRef} />
+              <Fact label="Style" value={style ? `${style.code} · ${style.name}` : 'Not set'} />
+              <Fact label="Stage" value={style ? STYLE_STAGE_LABEL[style.stage] : null} />
+              <Fact label="Garment" value={style?.category || request.garmentCategory} />
+              <Fact label="Season" value={style?.season || request.season} />
+              <Fact
+                label="Size run"
+                value={style?.sizeGroupId ? sizeRun(style.sizeGroupId) : null}
+              />
+              <Fact label="Colours" value={style?.colors.join(', ')} />
             </>
           ),
         },
         {
           title: 'Brief',
           body: <div style={{ whiteSpace: 'pre-wrap', fontSize: 10 }}>{request.brief}</div>,
-        },
-        {
-          title: 'Responsibility',
-          body: (
-            <>
-              <Fact label="Owner" value={request.owner} />
-              <Fact label="Required by" value={longDate(request.requiredAt)} />
-              <Fact label="Version" value={request.version} />
-            </>
-          ),
         },
       ]}
       columns={[
@@ -196,6 +232,23 @@ export default function PrintSample() {
           ),
         },
       }))}
+      after={
+        <div style={{ marginTop: '8px' }}>
+          <Panel title="Tech pack files">
+            {files.length ? (
+              files.map((f) => (
+                <Fact
+                  key={f.id}
+                  label={f.kindLabel}
+                  value={`${f.fileName} · ${fileScope(f, request.rounds)} · ${longDate(f.createdAt) ?? ''}`}
+                />
+              ))
+            ) : (
+              <div style={{ fontSize: 10 }}>No files attached.</div>
+            )}
+          </Panel>
+        </div>
+      }
       signatures={[
         { role: 'Sampling owner', who: request.owner },
         { role: 'Technical / QC review' },

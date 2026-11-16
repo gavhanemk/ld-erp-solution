@@ -11,6 +11,7 @@ import { findHsn, gstRateFor, loadHsnIndex } from '../lib/hsn'
 import { closeCheck, orderReconciliation } from '../services/reconciliation.service'
 import { GST_STATES, stateName } from '../lib/gstStates'
 import { amountInWords, getPrintHeader } from '../lib/printData'
+import { styleInDevelopment } from '../lib/styleStage'
 import {
   MAX_FILES_PER_DOCUMENT,
   MAX_FILE_BYTES,
@@ -708,7 +709,7 @@ export async function prepareOrder(
       hsnCode: true,
       color: true,
       taxRate: { select: { rate: true } },
-      style: { select: { code: true, sizeGroupId: true, brandType: true } },
+      style: { select: { code: true, sizeGroupId: true, brandType: true, stage: true } },
     },
   })
   const itemById = new Map(items.map((i) => [i.id, i]))
@@ -737,6 +738,8 @@ export async function prepareOrder(
         'NOT_FINISHED_GOOD',
       )
     }
+    // Orders and quotations alike: nothing is sold of a style still in sampling.
+    if (item.style?.stage === 'DEVELOPMENT') throw styleInDevelopment(item.style.code)
     // The style's own size run when it has one; otherwise any one run the
     // line picks, but only one — sizes from two runs cannot be one garment.
     const runs = new Set<string>()
@@ -755,6 +758,17 @@ export async function prepareOrder(
       throw new AppError(`Line ${i + 1}: ${item.code} is made in sizes. Enter its pieces size by size.`, 400, 'NEEDS_SIZES')
     }
   })
+  // A style number typed on a line is saved with it, and planning and pricing
+  // look the style up by it when the item has none of its own, so a typed
+  // code still in sampling is refused as the item's own style is above.
+  const typedCodes = [...new Set(data.lines.map((l) => l.styleCode?.trim()).filter((c): c is string => Boolean(c)))]
+  if (typedCodes.length) {
+    const sampling = await tx.style.findFirst({
+      where: { stage: 'DEVELOPMENT', OR: typedCodes.map((code) => ({ code: { equals: code, mode: 'insensitive' as const } })) },
+      select: { code: true },
+    })
+    if (sampling) throw styleInDevelopment(sampling.code)
+  }
 
   const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, data.customerId, data.placeOfSupplyCode)
 

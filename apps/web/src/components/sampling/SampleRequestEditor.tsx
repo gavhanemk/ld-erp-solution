@@ -3,7 +3,9 @@ import { useState } from 'react'
 import { Pencil } from 'lucide-react'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { SuggestInput } from '@/components/ui/SuggestInput'
 import { Field } from './SampleSpecEditor'
+import { distinctValues } from './samplingFlow'
 import type { Lookups, SampleRequest } from './types'
 
 export interface RequestEdits {
@@ -14,7 +16,68 @@ export interface RequestEdits {
   owner: string
   brief: string
   requiredAt: string | null
+  // An emptied box is saved as nothing.
+  buyerStyleRef: string
+  season: string
+  garmentCategory: string
   reason: string
+}
+
+/**
+ * The tech-pack details asked for when a request is made and when it is
+ * edited: the buyer's own style number, the season and the garment. Season
+ * and garment suggest what the Styles master already uses, so the same
+ * season is not typed three ways.
+ */
+export function TechPackFields({
+  lookups,
+  value,
+  onChange,
+}: {
+  lookups: Lookups
+  value: { buyerStyleRef: string; season: string; garmentCategory: string }
+  onChange: (key: 'buyerStyleRef' | 'season' | 'garmentCategory', text: string) => void
+}) {
+  return (
+    <>
+      <Field
+        label="Buyer style reference (optional)"
+        hint="The buyer’s own style name or number, as on their tech pack."
+      >
+        <input
+          className="form-input"
+          maxLength={100}
+          placeholder="e.g. BY-SS27-014"
+          value={value.buyerStyleRef}
+          onChange={(e) => onChange('buyerStyleRef', e.target.value)}
+        />
+      </Field>
+      <Field label="Season (optional)">
+        <SuggestInput
+          className="form-input"
+          maxLength={50}
+          placeholder="e.g. SS-27"
+          value={value.season}
+          onValueChange={(text) => onChange('season', text)}
+          suggestions={distinctValues(lookups.styles.map((s) => s.season)).map((v) => ({
+            value: v,
+          }))}
+        />
+      </Field>
+      <Field label="Garment category (optional)" hint="Shirt, trouser, kurta…">
+        <SuggestInput
+          className="form-input"
+          maxLength={100}
+          placeholder="e.g. Shirt"
+          value={value.garmentCategory}
+          onValueChange={(text) => onChange('garmentCategory', text)}
+          suggestions={distinctValues(lookups.styles.map((s) => s.category)).map((v) => ({
+            value: v,
+          }))}
+        />
+      </Field>
+    </>
+  )
 }
 export function SampleRequestEditor({
   request,
@@ -39,12 +102,16 @@ export function SampleRequestEditor({
     owner: request.owner,
     brief: request.brief,
     requiredAt: request.requiredAt?.slice(0, 10) ?? null,
+    buyerStyleRef: request.buyerStyleRef ?? '',
+    season: request.season ?? '',
+    garmentCategory: request.garmentCategory ?? '',
     reason: '',
   })
   const set = <K extends keyof RequestEdits>(key: K, value: RequestEdits[K]) =>
     setDraft((d) => ({ ...d, [key]: value }))
   const identityLocked = request.rounds.some((r) => r.state !== 'DRAFT')
-  const styleSelected = request.rounds.some((r) => !!r.specification.styleId)
+  // A style belongs to one brand, so the brand waits until the style is off.
+  const styleSelected = !!request.styleId || request.rounds.some((r) => !!r.specification.styleId)
   const brands = lookups.brands.some((b) => b.id === request.brandId)
     ? lookups.brands
     : [...lookups.brands, { id: request.brandId, name: request.brand.name }]
@@ -89,7 +156,9 @@ export function SampleRequestEditor({
           <div className="bg-muted/40 text-muted-foreground rounded-lg p-3 text-sm md:col-span-2">
             {identityLocked
               ? 'Buyer and brand are locked because sampling has been released. Other request details can be updated until handover; released technical specifications stay frozen.'
-              : 'Buyer and brand may be corrected before the first release. Clear any selected draft style in Technical preparation before changing the brand.'}
+              : styleSelected
+                ? 'Buyer and brand may be corrected before the first release. The brand stays while the request has a style: take the style off in Style for this sample first.'
+                : 'Buyer and brand may be corrected before the first release.'}
           </div>
           <Field label="Request title" required>
             <input
@@ -137,6 +206,11 @@ export function SampleRequestEditor({
               onChange={(e) => set('buyerRef', e.target.value)}
             />
           </Field>
+          <TechPackFields
+            lookups={lookups}
+            value={draft}
+            onChange={(key, text) => set(key, text)}
+          />
           <Field label="Sampling owner" required>
             <input
               className="form-input"

@@ -80,6 +80,8 @@ export async function routingsByStyle(db: Db, opts: { q?: string; show?: string;
   const styles = await db.style.findMany({
     where: {
       isActive: true,
+      // A style still in sampling gets its route at handover, so it waits for none here.
+      stage: 'PRODUCTION',
       ...(contains
         ? {
             OR: [

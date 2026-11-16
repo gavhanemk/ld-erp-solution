@@ -490,7 +490,8 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
     setFieldErrors({})
 
     void Promise.all([
-      masterResource<StyleOption>('styles').list({ limit: 200, active: true }),
+      // Production styles only: a BOM is made when a style's sample is handed over.
+      masterResource<StyleOption>('styles').list({ limit: 200, active: true, stage: 'PRODUCTION' }),
       fetchEveryPage<ItemOption>((page) => `/masters/items?limit=200&active=true&type=${COMPONENT_TYPES}&page=${page}`).then((r) => ({ data: r.rows })),
       masterResource<DepartmentOption>('departments').list({ limit: 200, active: true }),
       masterResource<ProcessOption>('operations')
