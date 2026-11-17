@@ -2,6 +2,7 @@ import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
+import { samplingPilotEnabled } from '../lib/pilot'
 import { crudRouter, type DeleteUse } from '../lib/crud'
 import { nextStyleCode } from '../lib/masterCode'
 import { createRouting, deleteRouting, bomFabrics, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
@@ -1184,6 +1185,36 @@ router.use(
     defaultSort: { field: 'name', order: 'asc' },
     // Any of it stops a delete; nothing is moved or cleared.
     permanentDelete: WAREHOUSE_USES,
+    beforeSave: async (data, before) => {
+      const purpose = data.purpose as string | undefined
+      if (purpose === 'SAMPLING' && before?.purpose !== 'SAMPLING' && !samplingPilotEnabled()) {
+        throw new AppError(
+          'Sampling is not switched on here, so no store can be a sample store.',
+          400,
+          'SAMPLING_OFF',
+        )
+      }
+      // What a store holds was put there under its old rules: bulk stock in a
+      // sample store would be issued to samples, and a sample's material in a
+      // general store would be drawn by production. Empty it first.
+      if (before && purpose !== undefined && purpose !== before.purpose) {
+        const [held] = await prisma.$queryRaw<Array<{ items: number }>>`
+          SELECT COUNT(*)::int AS items FROM (
+            SELECT 1 FROM ld_erp.stock_ledger
+            WHERE "warehouseId" = ${String(before.id)}
+            GROUP BY "itemId", ownership, "ownerCustomerId", "sizeId", grade
+            HAVING SUM("inQty" - "outQty") <> 0
+          ) AS stock`
+        if ((held?.items ?? 0) > 0) {
+          throw new AppError(
+            `${String(before.name)} still holds stock of ${held.items} ${held.items === 1 ? 'item' : 'items'}. Move it out or use it up before changing what the store is for.`,
+            409,
+            'STORE_HOLDS_STOCK',
+          )
+        }
+      }
+      return { data }
+    },
   }),
 )
 

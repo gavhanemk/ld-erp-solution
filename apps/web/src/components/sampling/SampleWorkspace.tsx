@@ -17,6 +17,7 @@ import {
   SAMPLE_STATE_LABEL,
   lineRequiredQty,
   type SampleItemOption,
+  type SampleNeed,
 } from '@ld-erp/shared'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { StepInput } from '@/components/ui/StepInput'
@@ -34,7 +35,10 @@ import {
   isSampleSet,
   lineColour,
   lineItem,
+  lineSourcing,
   makingBlocker,
+  orderSummary,
+  SOURCING_STATUS_LABEL,
   materialActions,
   materialHeld,
   measureMatrix,
@@ -53,6 +57,8 @@ import { limitDecimals, materialCost, MATERIAL_COST_LABEL, plural, rateFigure } 
 import { SampleRequestEditor } from './SampleRequestEditor'
 import { SampleFiles } from './SampleFiles'
 import { SampleStyleCard } from './SampleStyleCard'
+import { PurchaseOrderDialog } from '@/components/purchase/PurchaseOrderDialog'
+import Link from 'next/link'
 
 const STALE_TEXT =
   'This request changed in another window. Your entries are still here, but have not been saved. Copy any details you need, then reopen the request to review the latest version.'
@@ -102,6 +108,13 @@ export function SampleWorkspace({
     [warnings, setWarnings] = useState<string[]>([])
   // The material line whose issue, use or return window is open.
   const [recording, setRecording] = useState('')
+  // Sourcing: the lines ticked to order together, and the order being raised for them.
+  const [buyTicks, setBuyTicks] = useState<Set<string>>(new Set())
+  const [ordering, setOrdering] = useState<{
+    needs: SampleNeed[]
+    sampleStoreId: string | null
+  } | null>(null)
+  const [preparing, setPreparing] = useState(false)
   const round = request.rounds.find((x) => x.id === selected) ?? request.rounds[0],
     latest = request.rounds[0].id === round.id
   // The materials the round's lines name, offered by its editor with the page's list.
@@ -120,6 +133,7 @@ export function SampleWorkspace({
     setDirty(false)
     setSelected(id)
     setRecording('')
+    setBuyTicks(new Set())
     setTab(
       sampleFlow(
         request,
@@ -207,6 +221,45 @@ export function SampleWorkspace({
     )
   }
   const held = materialHeld
+  /** The request as the server has it now: after an order is raised in Purchase, say. */
+  const reload = async () => {
+    const res = await api.get<{ data: SampleRequest }>(`/sampling/${request.id}`)
+    versionRef.current = Math.max(versionRef.current, res.data.version)
+    setRequest(res.data)
+  }
+  // Buying is open on the latest released round, to whoever may raise purchase orders.
+  const canBuy =
+    can('purchase', 'create') && latest && round.state === 'RELEASED' && !request.cancelledAt
+  const toOrder = round.materials.filter((m) => lineSourcing(m).status === 'TO_ORDER')
+  const ticked = toOrder.filter((m) => buyTicks.has(m.id))
+  /**
+   * Opens a purchase order for the ticked lines: their needs as Purchase reads
+   * them (the item's GST from its HSN, what is still to buy), delivered to the
+   * sample store.
+   */
+  const raiseOrder = async () => {
+    setError('')
+    setMessage('')
+    setPreparing(true)
+    try {
+      const res = await api.get<{
+        data: { needs: SampleNeed[]; sampleStores: Array<{ id: string; name: string }> }
+      }>(`/sampling/needs?requestId=${request.id}`)
+      const needs = res.data.needs.filter((n) => buyTicks.has(n.sampleMaterialId))
+      if (!res.data.sampleStores.length)
+        setError(
+          'No store is set up as a sample store yet. Mark one in Masters → Warehouses, so what is bought for samples is kept apart from bulk stock.'
+        )
+      else if (!needs.length) {
+        setError('Those lines are already on order in full. The list below is up to date now.')
+        await reload()
+      } else setOrdering({ needs, sampleStoreId: res.data.sampleStores[0].id })
+    } catch (e) {
+      setError(apiErrorMessage(e))
+    } finally {
+      setPreparing(false)
+    }
+  }
   const handedOver = request.rounds.some((r) => r.handover)
   // Use, waste and returns can be recorded on any round still holding material.
   const canRecord = edit && can('inventory', 'edit')
@@ -501,6 +554,200 @@ export function SampleWorkspace({
                 <SpecView round={round} lookups={lookups} />
               )}
             </div>
+            {tab === 'Sourcing' && (
+              <div className="space-y-3">
+                <p className="text-muted-foreground text-sm">
+                  Material we buy for this sample is ordered on purchase orders that name this
+                  request, delivered to the sample store, and received there against the order. What
+                  is on order and received is read off those orders. Material the buyer sends comes
+                  in on a customer goods receipt instead.
+                </p>
+                {round.state === 'DRAFT' ? (
+                  <div className="glass-card flex items-start gap-3 p-5 text-sm">
+                    <PackageOpen size={18} className="text-muted-foreground shrink-0" />
+                    Material is bought once the specification is released. Finish the materials in
+                    the specification first.
+                  </div>
+                ) : round.materials.length === 0 ? (
+                  <div className="glass-card flex items-start gap-3 p-5 text-sm">
+                    <PackageOpen size={18} className="text-muted-foreground shrink-0" />
+                    This round has no material lines.
+                  </div>
+                ) : (
+                  <div className="glass-card overflow-x-auto">
+                    <table className="data-table w-full">
+                      <caption className="px-4 py-2 text-left text-sm font-semibold">
+                        What the sample needs · {plural(round.materials.length, 'line')}
+                      </caption>
+                      <thead>
+                        <tr>
+                          {canBuy && (
+                            <th className="w-10">
+                              <span className="sr-only">Order</span>
+                            </th>
+                          )}
+                          <th>Part</th>
+                          <th>Material</th>
+                          <th>Colour</th>
+                          <th className="text-right">Required</th>
+                          <th className="text-right">Ordered</th>
+                          <th className="text-right">Received</th>
+                          <th className="text-right">To buy</th>
+                          <th>Where it stands</th>
+                          <th>Orders</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {round.materials.map((m, i) => {
+                          const s = lineSourcing(m)
+                          const unit = m.item?.uom?.symbol ?? ''
+                          const orderable = canBuy && s.status === 'TO_ORDER'
+                          return (
+                            <tr key={m.id} data-row tabIndex={i === 0 ? 0 : -1}>
+                              {canBuy && (
+                                <td>
+                                  {orderable && (
+                                    <input
+                                      type="checkbox"
+                                      data-row-open
+                                      checked={buyTicks.has(m.id)}
+                                      onChange={() =>
+                                        setBuyTicks((prev) => {
+                                          const next = new Set(prev)
+                                          if (next.has(m.id)) next.delete(m.id)
+                                          else next.add(m.id)
+                                          return next
+                                        })
+                                      }
+                                      aria-label={`Order ${m.item?.name ?? 'this material'}`}
+                                    />
+                                  )}
+                                </td>
+                              )}
+                              <td>{m.component || '—'}</td>
+                              <td className="min-w-[10rem]">
+                                {m.item ? (
+                                  <>
+                                    {m.item.name}
+                                    <span className="text-muted-foreground block font-mono text-xs">
+                                      {m.item.code}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <span className="warn-text">No material picked</span>
+                                )}
+                              </td>
+                              <td>{lineColour(m.colour)}</td>
+                              <td className="whitespace-nowrap text-right tabular-nums">
+                                {s.required}{' '}
+                                <span className="text-muted-foreground text-xs">{unit}</span>
+                              </td>
+                              <td className="text-right tabular-nums">
+                                {s.status === 'BUYER' ? '—' : s.ordered}
+                              </td>
+                              <td className="text-right tabular-nums">
+                                {s.status === 'BUYER' ? '—' : s.received}
+                              </td>
+                              <td className="text-right font-semibold tabular-nums">
+                                {s.status === 'BUYER' || s.status === 'ISSUED' ? '—' : s.toBuy}
+                              </td>
+                              <td>
+                                <span
+                                  className={
+                                    s.status === 'TO_ORDER'
+                                      ? 'badge-warning'
+                                      : s.status === 'RECEIVED' || s.status === 'ISSUED'
+                                        ? 'badge-success'
+                                        : 'badge-info'
+                                  }
+                                >
+                                  {SOURCING_STATUS_LABEL[s.status]}
+                                </span>
+                                {s.status === 'BUYER' && (
+                                  <Link
+                                    href="/inventory/customer-material"
+                                    className="text-primary mt-1 block text-xs hover:underline"
+                                  >
+                                    Receive it from the buyer
+                                  </Link>
+                                )}
+                              </td>
+                              <td className="min-w-[14rem] text-xs">
+                                {(m.orders ?? []).length ? (
+                                  <ul className="space-y-0.5">
+                                    {(m.orders ?? []).map((o) => (
+                                      <li key={o.id}>
+                                        <Link
+                                          href={`/purchase/orders?q=${encodeURIComponent(o.poNumber)}`}
+                                          className="text-primary hover:underline"
+                                        >
+                                          {orderSummary(o, unit)}
+                                        </Link>
+                                        {o.deliveryDate &&
+                                          !o.shortClosed &&
+                                          !o.cancelled &&
+                                          +o.receivedQty < +o.qty && (
+                                            <span className="text-muted-foreground">
+                                              {' '}
+                                              · due {formatDate(String(o.deliveryDate))}
+                                            </span>
+                                          )}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <span className="text-muted-foreground">None yet</span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {canBuy && toOrder.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={!ticked.length || preparing}
+                      onClick={() => void raiseOrder()}
+                    >
+                      {preparing
+                        ? 'Opening…'
+                        : `Raise purchase order${ticked.length ? ` for ${plural(ticked.length, 'line')}` : ''}`}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      onClick={() =>
+                        setBuyTicks(
+                          ticked.length === toOrder.length
+                            ? new Set()
+                            : new Set(toOrder.map((m) => m.id))
+                        )
+                      }
+                    >
+                      {ticked.length === toOrder.length
+                        ? 'Clear the ticks'
+                        : 'Tick every line to order'}
+                    </button>
+                    <p className="text-muted-foreground text-xs">
+                      Tick the lines one supplier sends, then raise their order. The rest stay here
+                      until they are ordered.
+                    </p>
+                  </div>
+                )}
+                {!canBuy && toOrder.length > 0 && latest && !request.cancelledAt && (
+                  <p className="text-muted-foreground text-sm">
+                    {plural(toOrder.length, 'line')} still to order. Raising a purchase order needs
+                    purchase rights; the purchase team can pick these under Select from sample needs
+                    on the order form.
+                  </p>
+                )}
+              </div>
+            )}
             {tab === 'Materials' && (
               <div className="space-y-3">
                 <p className="text-muted-foreground text-sm">
@@ -967,6 +1214,26 @@ export function SampleWorkspace({
           save={(d) => recordMaterial(recordingLine, d)}
         />
       )}
+      {/* The purchase order form itself, opened on the ticked lines: the order is
+        Purchase's document, with Purchase's own rules, and the link back to this
+        sample is on each of its lines. */}
+      {ordering && (
+        <PurchaseOrderDialog
+          open
+          fromSample={ordering}
+          // The form closes itself only when everything went through; a file
+          // that did not attach, or an order left as a draft, keeps it open
+          // with the reason, while what was saved shows here already.
+          onClose={() => setOrdering(null)}
+          onSaved={() => {
+            setBuyTicks(new Set())
+            setMessage(
+              'Purchase order saved. Its lines show here as on order; receive the goods into the sample store when they arrive.'
+            )
+            void reload().catch((e) => setError(apiErrorMessage(e)))
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -1270,9 +1537,14 @@ function MaterialWindow({
   const [qty, setQty] = useState('')
   const [reason, setReason] = useState('')
   // Usually every line of a round comes from one store: start from the one already used.
-  const usedStore = round.materials.find(
-    (x) => x.warehouseId && lookups.warehouses.some((w) => w.id === x.warehouseId)
-  )?.warehouseId
+  // A line bought for the sample was received into the sample store, so it
+  // starts there; any other line from the store the round already uses.
+  const sampleStore = lookups.warehouses.find((w) => w.purpose === 'SAMPLING')?.id
+  const usedStore =
+    ((line.orders ?? []).length ? sampleStore : undefined) ??
+    round.materials.find(
+      (x) => x.warehouseId && lookups.warehouses.some((w) => w.id === x.warehouseId)
+    )?.warehouseId
   const [warehouseId, setWarehouseId] = useState(usedStore ?? '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -1401,7 +1673,11 @@ function MaterialWindow({
                 >
                   <option value="">Pick the store</option>
                   {lookups.warehouses.map((w) => (
-                    <option key={w.id} value={w.id}>
+                    <option
+                      key={w.id}
+                      value={w.id}
+                      data-sub={w.purpose === 'SAMPLING' ? 'Sample store' : undefined}
+                    >
                       {w.name}
                     </option>
                   ))}

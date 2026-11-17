@@ -3,6 +3,7 @@ import type {
   SampleAttachment,
   SampleItemOption,
   SampleMaterialSource,
+  SampleOrderLine,
   SampleRequestStyle,
   SampleSpecification,
   StepExecution,
@@ -26,7 +27,8 @@ export type LookupStyle = Choice & {
 export interface Lookups {
   customers: Choice[]
   brands: Choice[]
-  warehouses: Choice[]
+  /** Stores in use, sample stores first (purpose SAMPLING: material bought for samples). */
+  warehouses: Array<Choice & { purpose?: 'GENERAL' | 'SAMPLING' }>
   styles: LookupStyle[]
   /** Active size runs, for the style a request makes for itself. */
   sizeGroups: Choice[]
@@ -112,6 +114,11 @@ export interface SampleMaterial {
     uom: { id?: string; name?: string; symbol: string } | null
   } | null
   warehouse: { name: string } | null
+  /**
+   * The purchase orders buying it (not cancelled), with what has arrived:
+   * Sourcing sums them with sampleOrdered / sampleReceived. No rates.
+   */
+  orders?: SampleOrderLine[]
 }
 /** A step of a released round's making route (sample_stages). */
 export interface SampleStage {

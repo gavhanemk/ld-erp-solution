@@ -7,6 +7,7 @@ import { writeAuditLog } from '../lib/audit'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, recordMovement } from '../services/stock.service'
+import { assertSampleStoreLines } from '../services/sampleSourcing.service'
 import { lockRow } from '../lib/lockRow'
 import { qcRejectedByGrnLine, qcSummaryOf, REJECTED_GRADE, creditReturn, uncreditReturn } from '../services/grnQc.service'
 import { returnReasonOptions } from '../lib/returnReasons'
@@ -518,6 +519,17 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
     const labelOf = (l: (typeof data.lines)[number]) =>
       l.reasonLabel || REASON_RULES[reasonOf(l)].label
     const mixedReasons = new Set(data.lines.map(labelOf)).size > 1
+
+    // A sample's material goes back from the sample store it was received into,
+    // and nothing else is taken from one.
+    await assertSampleStoreLines(
+      tx,
+      data.lines.map((l) => ({
+        warehouseId: l.warehouseId,
+        billLineId: l.billLineId,
+        itemName: billLine.get(l.billLineId)?.description || 'That item',
+      })),
+    )
 
     const returnNumber = await nextDocumentNumber(tx, SERIES, returnDate)
 

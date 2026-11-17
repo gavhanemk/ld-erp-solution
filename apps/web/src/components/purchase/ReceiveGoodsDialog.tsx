@@ -40,6 +40,13 @@ import { StepInput } from '@/components/ui/StepInput'
 import { parseSizes, splitEvenly } from '@/components/packages/packageTypes'
 import { PackageSizesDialog } from '@/components/purchase/PackageSizesDialog'
 import type { InwardRef } from '@/components/packages/InwardStickers'
+import {
+  defaultStoreFor,
+  isSampleStore,
+  sampleLabelOf,
+  storesForLine,
+  type SampleMaterialRef,
+} from '@/components/purchase/sampleLines'
 
 /**
  * Booking in what arrived against an order.
@@ -80,6 +87,13 @@ interface OrderLine {
   shortClosed?: boolean
   shortCloseReason?: string | null
   shortClosedBy?: { id: string; name: string } | null
+  /**
+   * The sample this line buys for, when it does. Such a line is received into
+   * a sample store and nowhere else — the server refuses it anywhere else,
+   * and refuses every other line in a sample store.
+   */
+  sampleMaterialId?: string | null
+  sampleMaterial?: SampleMaterialRef | null
   item: {
     id: string
     code: string
@@ -419,6 +433,25 @@ function OverNote({ extra, unit, wellOver }: { extra: number; unit: string; well
 const NO_ALLOCS: Alloc[] = []
 
 /**
+ * Under a sample line's item: which sample it is for, and why its Store box
+ * offers only the sample stores. Said, because a store keeper who finds the
+ * main godown missing from one line's list will otherwise think it broken.
+ */
+function SampleNote({ line }: { line: OrderLine }) {
+  if (!line.sampleMaterialId) return null
+  return (
+    <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px]">
+      {line.sampleMaterial && (
+        <span className="text-primary font-mono" title="Bought for this sample">
+          {sampleLabelOf(line.sampleMaterial, line.item.name)}
+        </span>
+      )}
+      <span className="text-muted-foreground">Received into a sample store only</span>
+    </div>
+  )
+}
+
+/**
  * One order line's rows in the What Arrived table.
  *
  * Its own component so it can be memoised: `setAlloc` replaces only the array
@@ -510,6 +543,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                       </>
                     )}
                   </div>
+                  <SampleNote line={line} />
                   {over && (
                     <OverNote
                       extra={lineAccepted - pending}
@@ -685,6 +719,7 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
           </>
         )}
       </div>
+      <SampleNote line={line} />
       {over && (
         <OverNote
           extra={lineAccepted - pending}
@@ -801,6 +836,8 @@ interface Store {
   name: string
   address?: string | null
   isActive?: boolean
+  /** SAMPLING for a sample store, GENERAL (or nothing) for any other. */
+  purpose?: string | null
 }
 
 /**
@@ -929,12 +966,17 @@ export function ReceiveGoodsDialog({
   const makeKey = () => `a${nextKey.current++}`
 
   /*
-   * The store list, built once per set of warehouses.
+   * The store lists, built once per set of warehouses.
    *
    * There is one of these dropdowns on every allocation row, and every
    * keystroke in a quantity box re-renders the whole table — so the full
    * option list was being rebuilt for each dropdown on each character typed.
    * Elements are immutable, so the one array is safe to hand to all of them.
+   *
+   * Two of them now: the sample stores, for a line bought for a sample, and
+   * every other store, for every other line. The server refuses a line in the
+   * wrong kind either way round, so neither list offers a store the save
+   * would only throw back.
    */
   const usedStoreIds = [
     ...Object.values(entries).flatMap((rows) => rows.map((a) => a.warehouseId)),
@@ -944,15 +986,43 @@ export function ReceiveGoodsDialog({
     () => retiredStores.filter((w) => usedStoreIds.split(',').includes(w.id)),
     [retiredStores, usedStoreIds]
   )
-  const storeOptions = useMemo(
-    () =>
-      [...warehouses, ...keptRetired].map((w) => (
+  const allStores = useMemo(() => [...warehouses, ...keptRetired], [warehouses, keptRetired])
+  const storeOptions = useMemo(() => {
+    const optionsOf = (list: Store[]) =>
+      list.map((w) => (
         <option key={w.id} value={w.id}>
           {w.name}
         </option>
+      ))
+    return { general: optionsOf(storesForLine(allStores, false)), sample: optionsOf(storesForLine(allStores, true)) }
+  }, [allStores])
+
+  /*
+   * One line's list. Nearly always one of the two above, untouched, so the
+   * memo on the line's rows holds.
+   *
+   * The exception is a receipt being corrected whose line already sits in a
+   * store of the other kind — booked before the store was made a sample
+   * store, or the other way round. That store is added to this one line's
+   * list, said for what it is, rather than the box coming up blank over a
+   * store the goods are actually in. Saving it there is refused below, with
+   * the reason.
+   */
+  const storeOptionsFor = (line: OrderLine) => {
+    const isSample = Boolean(line.sampleMaterialId)
+    const base = isSample ? storeOptions.sample : storeOptions.general
+    const rows = entries[line.id] ?? NO_ALLOCS
+    const misfits = allStores.filter((w) => isSampleStore(w) !== isSample && rows.some((a) => a.warehouseId === w.id))
+    if (!misfits.length) return base
+    return [
+      ...base,
+      ...misfits.map((w) => (
+        <option key={w.id} value={w.id}>
+          {w.name} {isSample ? '(not a sample store)' : '(sample store)'}
+        </option>
       )),
-    [warehouses, keptRetired]
-  )
+    ]
+  }
 
   // Only orders that have actually been sent can be received against, so those
   // are the only ones offered. A draft in this list would be a door the server
@@ -1049,7 +1119,15 @@ export function ReceiveGoodsDialog({
                 [
                   {
                     key: makeKey(),
-                    warehouseId: fallback,
+                    // Per line, not the one store for all: a sample's line
+                    // starts in a sample store, and an ordinary line on an
+                    // order delivered to the sample store starts in "Store".
+                    warehouseId: defaultStoreFor(
+                      warehouses,
+                      Boolean(l.sampleMaterialId),
+                      detail.deliveryWarehouse?.id ?? null,
+                      defaultStoreId
+                    ),
                     // Blank, not the quantity still due. Pre-filling the full
                     // amount reads as a confirmation that everything ordered
                     // has arrived — the one thing a store keeper is here to
@@ -1140,11 +1218,23 @@ export function ReceiveGoodsDialog({
           })
         }
         // A line this receipt never touched still gets a row — empty, same
-        // as a fresh receipt — so it can be added without reopening later.
+        // as a fresh receipt, in the same store a fresh receipt would start
+        // it in — so it can be added without reopening later.
         const fallback = po.deliveryWarehouse?.id ?? defaultStoreId(warehouses)
         for (const l of po.lines) {
           if (!byPoLine[l.id]) {
-            byPoLine[l.id] = [{ key: makeKey(), warehouseId: fallback, received: '' }]
+            byPoLine[l.id] = [
+              {
+                key: makeKey(),
+                warehouseId: defaultStoreFor(
+                  warehouses,
+                  Boolean(l.sampleMaterialId),
+                  po.deliveryWarehouse?.id ?? null,
+                  defaultStoreId
+                ),
+                received: '',
+              },
+            ]
           }
         }
         setEntries(byPoLine)
@@ -1333,8 +1423,35 @@ export function ReceiveGoodsDialog({
     if (rows.length === 0) {
       return setError('Enter what arrived on at least one line.')
     }
-    if (rows.some(({ alloc }) => !alloc.warehouseId)) {
+    const storeless = rows.find(({ alloc }) => !alloc.warehouseId)
+    if (storeless) {
+      // A sample's line with an empty list has nowhere it could go yet —
+      // telling the store keeper to pick a store would send them hunting
+      // through a dropdown with nothing in it.
+      if (storeless.line.sampleMaterialId && !warehouses.some(isSampleStore)) {
+        return setError(
+          `${storeless.line.item.name} is bought for a sample and can only go into a sample store, and none is set up. Mark one as a sample store under Masters → Warehouses, then receive it.`
+        )
+      }
       return setError('Every row needs a store to go into.')
+    }
+
+    /*
+     * A row in a store of the wrong kind. Only a receipt being corrected can
+     * hold one — the lists offer nothing else — and the server refuses it
+     * either way round, so it is named here before the round trip.
+     */
+    const misplaced = rows.find(({ line, alloc }) => {
+      const store = allStores.find((w) => w.id === alloc.warehouseId)
+      return store != null && isSampleStore(store) !== Boolean(line.sampleMaterialId)
+    })
+    if (misplaced) {
+      const store = allStores.find((w) => w.id === misplaced.alloc.warehouseId)
+      return setError(
+        misplaced.line.sampleMaterialId
+          ? `${misplaced.line.item.name} is bought for a sample and goes into a sample store only. Pick one in its Store box.`
+          : `${misplaced.line.item.name} cannot go into ${store?.name ?? 'that store'} — it is a sample store, kept for samples' material. Pick another store.`
+      )
     }
 
     /*
@@ -2023,7 +2140,7 @@ export function ReceiveGoodsDialog({
                         key={line.id}
                         line={line}
                         allocs={entries[line.id] ?? NO_ALLOCS}
-                        storeOptions={storeOptions}
+                        storeOptions={storeOptionsFor(line)}
                         setAlloc={setAlloc}
                         addAlloc={addAlloc}
                         removeAlloc={removeAlloc}
@@ -2043,7 +2160,7 @@ export function ReceiveGoodsDialog({
                     key={line.id}
                     line={line}
                     allocs={entries[line.id] ?? NO_ALLOCS}
-                    storeOptions={storeOptions}
+                    storeOptions={storeOptionsFor(line)}
                     setAlloc={setAlloc}
                     addAlloc={addAlloc}
                     removeAlloc={removeAlloc}

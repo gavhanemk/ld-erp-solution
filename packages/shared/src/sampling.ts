@@ -609,3 +609,96 @@ export interface SampleRequestStyle {
   colors: string[]
   isActive: boolean
 }
+
+// ── Sourcing: buying for a sample (phase 3) ───────────────────────────────────
+
+/** One purchase order line buying for a sample line, as Sampling and the order form read it. */
+export interface SampleOrderLine {
+  /** The order line's own id. */
+  id: string
+  poId: string
+  poNumber: string
+  /**
+   * The order's status: DRAFT, SENT, PARTIALLY_RECEIVED, COMPLETED, or
+   * CANCELLED for an order called off after some of it arrived (one that
+   * received nothing is left out).
+   */
+  status: string
+  supplierName: string
+  poDate: string | Date | null
+  deliveryDate: string | Date | null
+  qty: number | string
+  /** What has arrived against it, on receipts that are not cancelled. */
+  receivedQty: number | string
+  /** Its balance was written off as not coming: it orders only what arrived. */
+  shortClosed: boolean
+  /** Its order was cancelled after some of it arrived: it, too, orders only what arrived. */
+  cancelled: boolean
+}
+
+/**
+ * What the orders count as bought for a sample line: each line's quantity, or
+ * only what arrived on a line closed short or an order cancelled after part of
+ * it came (the rest is not coming). Deleted orders, and cancelled ones that
+ * received nothing, are never passed in. Summed off the order lines every
+ * time, never kept as a counter.
+ */
+export function sampleOrdered(
+  lines: Array<Pick<SampleOrderLine, 'qty' | 'receivedQty' | 'shortClosed'> & { cancelled?: boolean }>
+) {
+  return round3(
+    lines.reduce((t, l) => t + (l.shortClosed || l.cancelled ? num(l.receivedQty) : num(l.qty)), 0)
+  )
+}
+/** What has arrived for a sample line, on its orders' receipts. */
+export function sampleReceived(lines: Array<Pick<SampleOrderLine, 'receivedQty'>>) {
+  return round3(lines.reduce((t, l) => t + num(l.receivedQty), 0))
+}
+/**
+ * What is still to be ordered for a line that needs `required`: never below
+ * nothing. What has already been issued to the line counts as covered too,
+ * whichever is more — material issued from stock before it was bought for the
+ * sample is not bought again.
+ */
+export function sampleToBuy(
+  required: number | string,
+  lines: Array<Pick<SampleOrderLine, 'qty' | 'receivedQty' | 'shortClosed'> & { cancelled?: boolean }>,
+  issued: number | string = 0
+) {
+  return round3(Math.max(0, num(required) - Math.max(sampleOrdered(lines), num(issued))))
+}
+/** The least a reason for ordering more than a sample line still needs may say. */
+export const SAMPLE_OVER_REASON_MIN = 5
+
+/** A line of a sample's BOM that is bought, and how far its buying has got. */
+export interface SampleNeed {
+  sampleMaterialId: string
+  requestId: string
+  requestNumber: string
+  title: string
+  customerName: string | null
+  buyerStyleRef: string | null
+  style: { id: string; code: string } | null
+  requiredAt: string | Date | null
+  roundId: string
+  revision: number
+  component: string
+  /** Null: every colour of the round. */
+  colour: string | null
+  item: {
+    id: string
+    code: string
+    name: string
+    hsnCode: string | null
+    categoryId: string | null
+    uom: { symbol: string } | null
+    taxRate: { id: string; rate: number | string } | null
+  }
+  requiredQty: number
+  orderedQty: number
+  receivedQty: number
+  toBuy: number
+  /** What the merchandiser expects one unit to cost. */
+  estRate: number | null
+  orders: SampleOrderLine[]
+}

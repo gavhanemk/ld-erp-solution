@@ -289,7 +289,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
     if (rejecting.length && data.rejectWarehouseId) {
       const target = await tx.warehouse.findUnique({
         where: { id: data.rejectWarehouseId ?? '' },
-        select: { id: true, name: true, isActive: true },
+        select: { id: true, name: true, isActive: true, purpose: true },
       })
       if (!target) throw new AppError('That godown does not exist', 400, 'BAD_WAREHOUSE')
       if (!target.isActive) {
@@ -297,6 +297,15 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
           `${target.name} is no longer in use. Pick another godown.`,
           400,
           'WAREHOUSE_CLOSED'
+        )
+      }
+      // A sample store holds only what was bought for a sample, never another
+      // receipt's rejects.
+      if (target.purpose === 'SAMPLING') {
+        throw new AppError(
+          `${target.name} is a sample store. Move rejected goods to a general godown.`,
+          409,
+          'SAMPLE_STORE'
         )
       }
       const same = rejecting.find((l) => l.warehouseId === target.id)

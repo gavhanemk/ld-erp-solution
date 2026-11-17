@@ -4,6 +4,10 @@ import {
   SAMPLE_MATERIAL_TYPES,
   cellCount,
   piecesFor,
+  sampleOrdered,
+  sampleReceived,
+  sampleToBuy,
+  type SampleOrderLine,
   sizesInUse,
   totalPieces,
   type SampleAttachment,
@@ -34,6 +38,11 @@ export const SAMPLE_SECTIONS = [
     key: 'Technical',
     title: 'Technical review & pattern',
     description: 'Style, sizes, measurements and plan',
+  },
+  {
+    key: 'Sourcing',
+    title: 'Sourcing',
+    description: 'Buy what the sample needs, into the sample store',
   },
   {
     key: 'Materials',
@@ -160,11 +169,19 @@ export function sampleFlow(
     if (index >= 0) {
       const blocker = makingBlocker(round, index)
       const short = shortLines(round, index)
-      section = blocker ? 'Materials' : 'Making'
-      title = blocker
-        ? 'Prepare material for making'
-        : `Record ${round.stages[index].name.toLowerCase()}`
-      description = blocker
+      // Before anything can be issued, what is bought has to be ordered and arrive.
+      const buying = blocker ? buyingOpen(round) : []
+      section = buying.length ? 'Sourcing' : blocker ? 'Materials' : 'Making'
+      title = buying.length
+        ? buying.some((m) => lineSourcing(m).status === 'TO_ORDER')
+          ? 'Buy the sample’s material'
+          : 'Receive the sample’s material'
+        : blocker
+          ? 'Prepare material for making'
+          : `Record ${round.stages[index].name.toLowerCase()}`
+      description = buying.length
+        ? sourcingText(buying)
+        : blocker
         ? [
             blocker,
             `${short.length} of ${plural(round.materials.length, 'material line')} ${short.length === 1 ? 'is' : 'are'} not fully issued yet.`,
@@ -237,6 +254,7 @@ export function sampleFlow(
   const completed: Record<string, boolean> = {
     Brief: !!request.styleId || round.state !== 'DRAFT',
     Technical: round.state !== 'DRAFT',
+    Sourcing: round.state !== 'DRAFT' && buyingOpen(round).length === 0,
     Materials:
       round.materials.length > 0 && round.materials.every((m) => +m.issuedQty >= +m.plannedQty),
     Making: round.stages.length > 0 && round.stages.every((s) => !!s.completedAt),
@@ -738,6 +756,87 @@ export function storeNote(m: SampleMaterial) {
     ? `This material was issued from ${store}. Issue the rest from there, and return it there.`
     : `This material is planned from ${store}. Issue it from there.`
 }
+// ── Sourcing (phase 3) ────────────────────────────────────────────────────────
+
+/** Where one line of the sample BOM stands with its buying. */
+export type SourcingStatus = 'BUYER' | 'NO_ITEM' | 'TO_ORDER' | 'ON_ORDER' | 'RECEIVED' | 'ISSUED'
+export const SOURCING_STATUS_LABEL: Record<SourcingStatus, string> = {
+  BUYER: 'Buyer sends it',
+  NO_ITEM: 'No material picked',
+  TO_ORDER: 'To order',
+  ON_ORDER: 'On order',
+  RECEIVED: 'Received',
+  ISSUED: 'Issued',
+}
+/**
+ * How far buying has got for one line, summed off its orders as the server
+ * sums them (sampleOrdered: a line closed short counts only what arrived).
+ * A line already issued in full needs nothing more bought, however it was
+ * stocked.
+ */
+export function lineSourcing(m: Pick<SampleMaterial, 'source' | 'itemId' | 'plannedQty' | 'issuedQty' | 'orders'>) {
+  const orders = m.orders ?? []
+  const required = +m.plannedQty
+  const ordered = sampleOrdered(orders)
+  const received = sampleReceived(orders)
+  const toBuy = sampleToBuy(required, orders, m.issuedQty)
+  const status: SourcingStatus =
+    m.source === 'BUYER_SUPPLIED'
+      ? 'BUYER'
+      : !m.itemId
+        ? 'NO_ITEM'
+        : +m.issuedQty >= required
+          ? 'ISSUED'
+          : received >= required
+            ? 'RECEIVED'
+            : toBuy > 0
+              ? 'TO_ORDER'
+              : 'ON_ORDER'
+  return { required, ordered, received, toBuy, status }
+}
+/** The bought lines of a released round still to order or to arrive. */
+export const buyingOpen = (round: Pick<SampleRound, 'state' | 'materials'>) =>
+  round.state === 'RELEASED'
+    ? round.materials.filter((m) => ['TO_ORDER', 'ON_ORDER'].includes(lineSourcing(m).status))
+    : []
+/** The next-action words for the lines still being bought. */
+export function sourcingText(lines: SampleMaterial[]) {
+  const toOrder = lines.filter((m) => lineSourcing(m).status === 'TO_ORDER').length
+  const onOrder = lines.length - toOrder
+  // An order saved as a draft has not reached the supplier.
+  const drafts = new Set(
+    lines.flatMap((m) => (m.orders ?? []).filter((o) => o.status === 'DRAFT').map((o) => o.poNumber))
+  ).size
+  return [
+    toOrder ? `${plural(toOrder, 'material line')} still to order.` : '',
+    onOrder ? `${plural(onOrder, 'line')} on order, not all received yet.` : '',
+    drafts ? `${plural(drafts, 'order')} still ${drafts === 1 ? 'a draft' : 'drafts'}: send ${drafts === 1 ? 'it' : 'them'} to the supplier from Purchase.` : '',
+    toOrder
+      ? 'Raise a purchase order for what is still to buy; it is delivered to the sample store.'
+      : 'Receive it into the sample store against its purchase order when it arrives.',
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+/**
+ * The orders a line is bought on, as the Sourcing table lists them:
+ * "PO-… · Supplier · 5 of 6 received".
+ */
+export function orderSummary(o: SampleOrderLine, unit = '') {
+  const qty = +o.qty
+  const got = +o.receivedQty
+  const u = unit ? ` ${unit}` : ''
+  return `${o.poNumber} · ${o.supplierName} · ${
+    o.cancelled
+      ? `${got}${u} received, order cancelled`
+      : o.shortClosed
+      ? `${got}${u} received, rest not coming`
+      : got > 0
+        ? `${got} of ${qty}${u} received`
+        : `${qty}${u} on order`
+  }${o.status === 'DRAFT' ? ' · draft, not sent yet' : ''}`
+}
+
 /** Approved BOMs the round can be handed over with: this style's, for every colour or one the round made. */
 export function handoverBoms(
   boms: Lookups['boms'],

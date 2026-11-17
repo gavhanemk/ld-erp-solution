@@ -65,6 +65,7 @@ import { assertOwnersFitOrder } from '../services/ownership.service'
 import { onceFor } from '../lib/onceFor'
 import { CGRN_STATUS_LABEL, HELD, heldByLine, postGrnStock, releaseHeld, reverseGrnStock, takeHeldPackages } from '../services/customerGrn.service'
 import { fillJobCardBlanks } from '../services/jobCard.service'
+import { SAMPLE_STORE_IDS, assertGeneralStores } from '../lib/sampleStore'
 
 const router = Router()
 const MODULE = 'inventory'
@@ -1219,6 +1220,8 @@ async function availableFor(
       WHERE "itemId" IN (${Prisma.join(itemIds)})
         -- Goods a quality check rejected are held apart: never on offer to issue.
         AND grade <> 'R'
+        -- And material bought for samples: it is issued to its sample, not on a requisition.
+        AND "warehouseId" NOT IN (${SAMPLE_STORE_IDS})
       GROUP BY "itemId", ownership, "ownerCustomerId"`,
     prisma.$queryRaw<Array<{ itemId: string; mrLineId: string; qty: number }>>`
       SELECT "itemId", "mrLineId", qty::float8 AS "qty"
@@ -1374,6 +1377,8 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
       WHERE s."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
         AND s.grade <> 'R'
+        -- A sample store's material is never offered to a requisition.
+        AND w.purpose::text <> 'SAMPLING'
       GROUP BY s."itemId", s."warehouseId", w.name, s."ownership", s."ownerCustomerId"
       HAVING SUM(s."inQty" - s."outQty") > 0`,
     // Each order line raised against these lines. Cancelled orders have bought nothing.
@@ -1576,6 +1581,8 @@ export async function createRequisition(
   ])
   if (!department) throw new AppError('That department does not exist', 404, 'NOT_FOUND')
   if (stores.length !== storeIds.length) throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+  // A sample store's material is issued by Sampling to its own sample, never on a requisition.
+  await assertGeneralStores(tx, storeIds, 'Ask for material from a general store; Sampling issues what it bought itself.')
 
   const owners = [...new Set(data.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomerId!))]
   if (owners.length) {
@@ -2540,6 +2547,12 @@ router.post(
       if (mr.status !== 'APPROVED')
         throw new AppError('Stock can be reserved once the requisition is approved.', 400, 'NOT_APPROVED')
       if (mr.issuedAt) throw new AppError(`${mr.mrNumber} is issued in full; there is nothing left to hold.`, 400, 'ALREADY_ISSUED')
+      // Material bought for a sample is not held for anybody else's work.
+      await assertGeneralStores(
+        tx,
+        body.lines.filter((l) => l.qty > 0).map((l) => l.warehouseId),
+        'Hold stock for a requisition in a general store.',
+      )
 
       const stores = new Map(
         (await tx.warehouse.findMany({

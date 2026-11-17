@@ -561,6 +561,20 @@ export const createWarehouseSchema = z.object({
   name,
   address: optionalText,
   isActive,
+  /*
+   * What the store is for: bulk stock, or material bought for samples, kept
+   * apart from it. A sample store is offered only where sampling is switched
+   * on, and a store cannot change over while it holds stock.
+   */
+  // A form that never showed the choice sends it blank: that leaves it as it is.
+  purpose: z.preprocess(
+    (v) => (v === '' || v === null ? undefined : v),
+    z
+      .enum(['GENERAL', 'SAMPLING'], {
+        errorMap: () => ({ message: 'Say whether the store holds bulk stock or sample material' }),
+      })
+      .optional()
+  ),
 })
 export const updateWarehouseSchema = createWarehouseSchema.partial()
 

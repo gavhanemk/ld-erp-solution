@@ -406,16 +406,18 @@ async function seed() {
     },
   })
 
-  // Sample material is received and held here, apart from bulk stock. It is an ordinary
-  // store until the sourcing phase marks it as the sample room's.
+  // Sample material is received and held here, apart from bulk stock (phase 3): only sample
+  // purchases are received into it and only Sampling issues from it. Marked even on a pilot
+  // database made before stores had a purpose; it never holds stock until a sample buys some.
   await db.warehouse.upsert({
     where: { code: 'EX-SAMPLE-STORE' },
-    update: {},
+    update: { purpose: 'SAMPLING' },
     create: {
       id: 'sample-room-store',
       code: 'EX-SAMPLE-STORE',
       name: 'Example Sample Store',
       companyId: company.id,
+      purpose: 'SAMPLING',
     },
   })
 

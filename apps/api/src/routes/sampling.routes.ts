@@ -31,6 +31,9 @@ import {
   type SampleAfterCommit,
 } from '../services/sampling.service'
 import { routingsFor } from '../services/route.service'
+import { sampleNeeds } from '../services/sampleSourcing.service'
+import { activeSampleStores } from '../lib/sampleStore'
+import { withHsnRates } from '../lib/hsn'
 
 const router = Router()
 /**
@@ -71,6 +74,31 @@ function visible(row: Awaited<ReturnType<typeof sampleDetail>>, req: AuthRequest
 router.get('/lookups', async (_req, res) =>
   res.json({ success: true, data: await prisma.$transaction(sampleLookups, T) })
 )
+/**
+ * What still has to be bought for samples (one request with ?requestId=):
+ * the lines "Raise purchase order" puts on an order, with the sample stores
+ * the goods are delivered to. The order form's own "Select from sample needs"
+ * reads the same list (GET /purchase/sample-needs).
+ */
+router.get('/needs', async (req, res) => {
+  const q = z
+    .object({
+      requestId: z.string().trim().max(100).optional(),
+      q: z.string().trim().max(100).default(''),
+      includeDone: z.enum(['true', 'false']).optional(),
+    })
+    .parse(req.query)
+  const [needs, sampleStores] = await Promise.all([
+    sampleNeeds(prisma, { requestId: q.requestId, q: q.q, includeDone: q.includeDone === 'true' }),
+    activeSampleStores(prisma),
+  ])
+  // Each item at its HSN code's GST, as the order form fills a picked line.
+  const items = await withHsnRates(prisma, needs.map((n) => n.item as unknown as Record<string, unknown>))
+  res.json({
+    success: true,
+    data: { needs: needs.map((n, i) => ({ ...n, item: items[i] })), sampleStores },
+  })
+})
 /** The usual making route from the Operation master, for a round's route to start from. */
 router.get('/route-template', async (_req, res) =>
   res.json({ success: true, data: await routeTemplate(prisma) })

@@ -36,6 +36,21 @@ const routeOf = (...names) =>
     vendorId: null,
     instructions: '',
   }))
+// A purchase order line buying for a sample line (phase 3), as the request detail sends it.
+const orderLine = (over = {}) => ({
+  id: 'pol-1',
+  poId: 'po-1',
+  poNumber: 'PO/26-27/0007',
+  status: 'SENT',
+  supplierName: 'Example Fabric Mill',
+  poDate: '2026-11-17',
+  deliveryDate: '2026-11-20',
+  qty: 5,
+  receivedQty: 0,
+  shortClosed: false,
+  cancelled: false,
+  ...over,
+})
 // A saved specification in today's shape (spec v2).
 const specOf = (over = {}) => ({
   milestone: 'Proto',
@@ -1032,6 +1047,8 @@ check(
   'material still to issue says how many lines and that the first issue names the store',
   () => {
     const set = releasedSet()
+    // Bought and received in full (phase 3), so what is left is issuing it.
+    set.materials[0].orders = [orderLine({ qty: 5.2, receivedQty: 5.2 })]
     set.materials.push({
       ...set.materials[0],
       id: 'row-2',
@@ -1453,5 +1470,197 @@ check('the picker keeps what was found or added, and a round’s own materials i
       standardRate: 180,
     },
   ])
+})
+// ── Sourcing (phase 3) ────────────────────────────────────────────────────────
+check('Sourcing comes between the specification and material preparation', () => {
+  assert.deepEqual(
+    SAMPLE_SECTIONS.map((s) => s.key),
+    ['Brief', 'Technical', 'Sourcing', 'Materials', 'Making', 'Quality', 'Buyer review', 'Handover']
+  )
+})
+check('a line’s buying is read off its orders, a line closed short counting what arrived', () => {
+  const bought = { source: 'PURCHASE', itemId: 'fab', plannedQty: '5', issuedQty: '0' }
+  assert.deepEqual(flow.lineSourcing({ ...bought, orders: [] }), {
+    required: 5,
+    ordered: 0,
+    received: 0,
+    toBuy: 5,
+    status: 'TO_ORDER',
+  })
+  assert.equal(flow.lineSourcing({ ...bought, orders: [orderLine({ qty: 3 })] }).status, 'TO_ORDER')
+  assert.equal(flow.lineSourcing({ ...bought, orders: [orderLine({ qty: 6 })] }).status, 'ON_ORDER')
+  const short = flow.lineSourcing({
+    ...bought,
+    orders: [orderLine({ qty: 5, receivedQty: 4, shortClosed: true })],
+  })
+  assert.deepEqual([short.ordered, short.received, short.toBuy, short.status], [4, 4, 1, 'TO_ORDER'])
+  assert.equal(
+    flow.lineSourcing({ ...bought, orders: [orderLine({ qty: 5, receivedQty: 5 })] }).status,
+    'RECEIVED'
+  )
+  assert.equal(flow.lineSourcing({ ...bought, issuedQty: '5', orders: [] }).status, 'ISSUED')
+  assert.equal(flow.lineSourcing({ ...bought, source: 'BUYER_SUPPLIED', orders: [] }).status, 'BUYER')
+  assert.equal(flow.lineSourcing({ ...bought, itemId: null, orders: [] }).status, 'NO_ITEM')
+  // An older reply without orders reads as nothing ordered.
+  assert.equal(flow.lineSourcing(bought).toBuy, 5)
+})
+check('a released round with material to buy opens Sourcing, then Materials once it has arrived', () => {
+  const r = {
+    id: 'buy',
+    revision: 1,
+    state: 'RELEASED',
+    specification: specOf({ colours: [{ colour: 'White', sizes: [{ sizeId: 'm', qty: 2 }] }] }),
+    stages: [{ id: 's1', name: 'Cutting', completedAt: null, doneQty: null }],
+    qc: null,
+    handover: null,
+    materials: [
+      {
+        id: 'fab',
+        source: 'PURCHASE',
+        itemId: 'fab',
+        plannedQty: '5',
+        issuedQty: '0',
+        usedQty: '0',
+        wasteQty: '0',
+        returnedQty: '0',
+        orders: [],
+      },
+      {
+        id: 'btn',
+        source: 'PURCHASE',
+        itemId: 'btn',
+        plannedQty: '12',
+        issuedQty: '0',
+        usedQty: '0',
+        wasteQty: '0',
+        returnedQty: '0',
+        orders: [orderLine({ qty: 12 })],
+      },
+      {
+        id: 'lbl',
+        source: 'BUYER_SUPPLIED',
+        itemId: 'lbl',
+        plannedQty: '2',
+        issuedQty: '0',
+        usedQty: '0',
+        wasteQty: '0',
+        returnedQty: '0',
+        orders: [],
+      },
+    ],
+  }
+  const req = { styleId: 'style-1', rounds: [r], cancelledAt: null }
+  let f = sampleFlow(req)
+  assert.equal(f.section, 'Sourcing')
+  assert.equal(f.title, 'Buy the sample’s material')
+  assert.equal(
+    f.description,
+    '1 material line still to order. 1 line on order, not all received yet. Raise a purchase order for what is still to buy; it is delivered to the sample store.'
+  )
+  assert.deepEqual(flow.buyingOpen(r).map((m) => m.id), ['fab', 'btn'])
+  assert.equal(f.steps.find((s) => s.key === 'Sourcing').status, 'Current')
+  r.materials[0].orders = [orderLine({ qty: 5 })]
+  f = sampleFlow(req)
+  assert.equal(f.title, 'Receive the sample’s material')
+  assert.match(f.description, /^2 lines on order, not all received yet. Receive it into the sample store/)
+  r.materials[0].orders = [orderLine({ qty: 5, receivedQty: 5 })]
+  r.materials[1].orders = [orderLine({ qty: 12, receivedQty: 12 })]
+  f = sampleFlow(req)
+  // What the buyer sends is not bought: with the rest received, preparation is next.
+  assert.equal(f.section, 'Materials')
+  assert.equal(f.steps.find((s) => s.key === 'Sourcing').status, 'Complete')
+  // A draft buys nothing yet.
+  assert.deepEqual(flow.buyingOpen({ ...r, state: 'DRAFT' }), [])
+})
+check('an order is listed with its supplier and how much of it has come', () => {
+  assert.equal(flow.orderSummary(orderLine(), 'm'), 'PO/26-27/0007 · Example Fabric Mill · 5 m on order')
+  assert.equal(
+    flow.orderSummary(orderLine({ receivedQty: 2 }), 'm'),
+    'PO/26-27/0007 · Example Fabric Mill · 2 of 5 m received'
+  )
+  assert.equal(
+    flow.orderSummary(orderLine({ receivedQty: 4, shortClosed: true }), 'm'),
+    'PO/26-27/0007 · Example Fabric Mill · 4 m received, rest not coming'
+  )
+  assert.equal(
+    flow.orderSummary(orderLine({ status: 'CANCELLED', receivedQty: 3, cancelled: true }), 'm'),
+    'PO/26-27/0007 · Example Fabric Mill · 3 m received, order cancelled'
+  )
+  // An order still a draft has not reached the supplier, and says so.
+  assert.equal(
+    flow.orderSummary(orderLine({ status: 'DRAFT' }), 'm'),
+    'PO/26-27/0007 · Example Fabric Mill · 5 m on order · draft, not sent yet'
+  )
+  assert.match(
+    flow.sourcingText([
+      { source: 'PURCHASE', itemId: 'f', plannedQty: '5', issuedQty: '0', orders: [orderLine({ status: 'DRAFT' })] },
+    ]),
+    /1 order still a draft: send it to the supplier from Purchase./
+  )
+  // Material already issued to the line is not bought again.
+  assert.equal(
+    flow.lineSourcing({ source: 'PURCHASE', itemId: 'f', plannedQty: '5', issuedQty: '3', orders: [] }).toBuy,
+    2
+  )
+  // A cancelled order counts for what came before it was called off.
+  assert.equal(
+    flow.lineSourcing({ source: 'PURCHASE', itemId: 'f', plannedQty: '5', issuedQty: '0', orders: [orderLine({ receivedQty: 3, cancelled: true })] }).toBuy,
+    2
+  )
+  assert.equal(flow.SOURCING_STATUS_LABEL.BUYER, 'Buyer sends it')
+})
+// The order form and the receipt: a sample's lines, named and stored apart (phase 3).
+const lines = require('../apps/web/src/components/purchase/sampleLines.ts')
+check('an order line bought for a sample is named by its request, part and colour', () => {
+  assert.equal(
+    lines.sampleLineLabel({ requestNumber: 'SMP-2627-0012', component: 'Body', colour: null, itemName: 'Pique' }),
+    'SMP-2627-0012 · Body'
+  )
+  assert.equal(
+    lines.sampleLineLabel({ requestNumber: 'SMP-2627-0012', component: 'Collar', colour: 'White', itemName: 'Rib' }),
+    'SMP-2627-0012 · Collar (White)'
+  )
+  assert.equal(
+    lines.sampleLineLabel({ requestNumber: 'SMP-1', component: '  ', colour: null, itemName: 'Thread' }),
+    'SMP-1 · Thread'
+  )
+  assert.equal(
+    lines.sampleLabelOf({ component: 'Cuff', colour: 'Navy', round: { request: { number: 'SMP-9' } } }, 'Rib'),
+    'SMP-9 · Cuff (Navy)'
+  )
+})
+check('the order’s reference names each sample once and fits its box', () => {
+  assert.equal(lines.sampleReference([]), '')
+  assert.equal(
+    lines.sampleReference([{ requestNumber: 'SMP-1' }, { requestNumber: 'SMP-1' }, { requestNumber: 'SMP-2' }]),
+    'Sample SMP-1, SMP-2'
+  )
+  const many = Array.from({ length: 12 }, (_, i) => ({ requestNumber: `SMP-2627-${String(i).padStart(4, '0')}` }))
+  const ref = lines.sampleReference(many)
+  assert.ok(ref.length <= 100 && /\+\d+ more$/.test(ref), ref)
+})
+check('a receipt offers a sample line only sample stores, and any other line only the rest', () => {
+  const stores = [
+    { id: 'a', name: 'Store' },
+    { id: 'b', name: 'Fabric', purpose: 'GENERAL' },
+    { id: 'c', name: 'Sample room', purpose: 'SAMPLING' },
+  ]
+  assert.deepEqual(lines.storesForLine(stores, true).map((x) => x.id), ['c'])
+  assert.deepEqual(lines.storesForLine(stores, false).map((x) => x.id), ['a', 'b'])
+  const fallback = (l) => (l.find((w) => w.name === 'Store') ?? l[0])?.id ?? ''
+  assert.equal(lines.defaultStoreFor(stores, true, 'b', fallback), 'c')
+  assert.equal(lines.defaultStoreFor(stores, true, 'c', fallback), 'c')
+  assert.equal(lines.defaultStoreFor(stores, false, 'c', fallback), 'a')
+  assert.equal(lines.defaultStoreFor(stores, false, 'b', fallback), 'b')
+  assert.equal(lines.defaultStoreFor(stores, false, null, fallback), 'a')
+  assert.equal(lines.defaultStoreFor([stores[0]], true, null, fallback), '')
+})
+check('a reason is asked only when more is ordered than the sample still needs', () => {
+  assert.equal(lines.needsOverReason(5, null), false)
+  assert.equal(lines.needsOverReason(5, undefined), false)
+  assert.equal(lines.needsOverReason(5, 5), false)
+  assert.equal(lines.needsOverReason(2.0004, 2), false)
+  assert.equal(lines.needsOverReason(2.001, 2), true)
+  assert.equal(lines.needsOverReason(6, 5), true)
 })
 console.log(`${passed} Sampling UI workflow checks passed.`)

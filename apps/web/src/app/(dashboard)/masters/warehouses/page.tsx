@@ -9,7 +9,12 @@ interface Warehouse {
   name: string
   address: string | null
   isActive: boolean
+  /** GENERAL: bulk stock. SAMPLING: material bought for samples, kept apart from it. */
+  purpose?: 'GENERAL' | 'SAMPLING'
 }
+
+/** A sample store is offered only where sampling is switched on. */
+const samplingOn = process.env.NEXT_PUBLIC_SAMPLING_ENABLED === 'true'
 
 const columns: Column<Warehouse>[] = [
   { key: 'code', header: 'Code', sortable: true, className: 'font-mono text-xs text-teal-400' },
@@ -23,6 +28,20 @@ const columns: Column<Warehouse>[] = [
       </span>
     ),
   },
+  ...(samplingOn
+    ? [
+        {
+          key: 'purpose',
+          header: 'Holds',
+          render: (w: Warehouse) =>
+            w.purpose === 'SAMPLING' ? (
+              <span className="badge-info">Sample material</span>
+            ) : (
+              <span className="text-xs text-muted-foreground">Bulk stock</span>
+            ),
+        } as Column<Warehouse>,
+      ]
+    : []),
   { key: 'isActive', header: 'Status', render: (w) => <ActiveBadge isActive={w.isActive} /> },
 ]
 
@@ -31,6 +50,20 @@ const formFields: FormField[] = [
   { name: 'code', label: 'Warehouse Code', generated: true },
   { name: 'name', label: 'Warehouse Name', required: true, placeholder: 'Fabric Store' },
   { name: 'address', label: 'Address', type: 'textarea', span: 2 },
+  ...(samplingOn
+    ? [
+        {
+          name: 'purpose',
+          label: 'What it holds',
+          type: 'select',
+          options: [
+            { value: 'GENERAL', label: 'Bulk stock' },
+            { value: 'SAMPLING', label: 'Sample material (a sample store)' },
+          ],
+          help: 'A sample store keeps what is bought for samples apart: only sample purchases are received into it and only Sampling issues from it. A store can change over only while it is empty.',
+        } as FormField,
+      ]
+    : []),
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for stock movements' },
 ]
 

@@ -8,6 +8,7 @@ import { MAX_FILE_BYTES, MAX_FILES_PER_DOCUMENT, removeObject, statObject } from
 import { recordMovement } from './stock.service'
 import { checkRouteSteps, routingProblem } from './route.service'
 import { assertContractorsFit } from './routing.service'
+import { liveSampleOrders, sampleOrderLine, sampleOrderSelect } from './sampleSourcing.service'
 import {
   OVERRIDE_REASON_MIN,
   SAMPLE_ATTACHMENT_KIND_LABEL,
@@ -96,6 +97,12 @@ export const sampleInclude = {
           // it was added after the page read its list.
           item: { select: { ...sampleItemSelect, isActive: true } },
           warehouse: { select: { name: true } },
+          // The orders buying it, for Sourcing: no rates, which Sampling does not show.
+          poLines: {
+            where: liveSampleOrders,
+            select: sampleOrderSelect,
+            orderBy: { po: { poDate: 'asc' as const } },
+          },
         },
       },
     },
@@ -113,7 +120,12 @@ export async function sampleDetail(tx: Tx, id: string) {
   // specification in today's shape, however old the round.
   return {
     ...row,
-    rounds: row.rounds.map((r) => ({ ...r, specification: normaliseSpec(r.specification) })),
+    rounds: row.rounds.map((r) => ({
+      ...r,
+      specification: normaliseSpec(r.specification),
+      // Each line's orders as Sourcing lists them (sampleOrdered sums them).
+      materials: r.materials.map(({ poLines, ...m }) => ({ ...m, orders: poLines.map(sampleOrderLine) })),
+    })),
   }
 }
 function grant(actor: Actor, module: string, action: string) {
@@ -1831,7 +1843,12 @@ export async function sampleLookups(tx: Tx) {
       select: sampleItemSelect,
       orderBy: { name: 'asc' },
     }),
-    tx.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
+    // Sample stores first: what a sample bought is received and issued there.
+    tx.warehouse.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true, purpose: true },
+      orderBy: [{ purpose: 'desc' }, { name: 'asc' }],
+    }),
     tx.bOM.findMany({
       where: { isActive: true, status: 'APPROVED' },
       select: { id: true, styleId: true, color: true, version: true },

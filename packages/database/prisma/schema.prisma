@@ -147,6 +147,8 @@ model SampleMaterial {
   wasteQty    Decimal @default(0) @db.Decimal(10,3)
   issuedValue Decimal @default(0) @db.Decimal(14,2)
   returnedValue Decimal @default(0) @db.Decimal(14,2)
+  /// The purchase order lines buying it (PurchaseOrderLine.sampleMaterialId).
+  poLines     PurchaseOrderLine[]
   @@index([roundId])
   @@map("sample_materials")
 }
@@ -1001,6 +1003,12 @@ enum StyleStage {
   PRODUCTION
 }
 
+/// What a store is for (Warehouse.purpose).
+enum WarehousePurpose {
+  GENERAL
+  SAMPLING
+}
+
 model Style {
   id          String     @id @default(cuid())
   code        String     @unique
@@ -1388,6 +1396,10 @@ model Warehouse {
   code      String  @unique
   address   String?
   isActive  Boolean @default(true)
+  /// GENERAL holds bulk stock. SAMPLING holds material bought for samples, kept
+  /// apart from it: only sample purchases are received there, only Sampling
+  /// issues from it, and general documents cannot draw on it (lib/sampleStore).
+  purpose   WarehousePurpose @default(GENERAL)
 
   stockLedger       StockLedger[]
   mrLines           MaterialRequisitionLine[]
@@ -2490,8 +2502,19 @@ model PurchaseOrderLine {
   grnLines  GRNLine[]
   billLines PurchaseInvoiceLine[]
 
+  /// The sample BOM line this buys for, when the material is bought for a
+  /// sample. Received into a sample store only, and what Sampling counts as
+  /// ordered and received for that line. Restrict: a sample line with an
+  /// order against it stays.
+  sampleMaterialId String?
+  sampleMaterial   SampleMaterial? @relation(fields: [sampleMaterialId], references: [id], onDelete: Restrict)
+  /// Why more is ordered than the sample line still needs (a supplier's
+  /// minimum, a full roll). Asked for only then.
+  sampleOverReason String?
+
   @@index([mrLineId])
   @@index([enquiryLineId])
+  @@index([sampleMaterialId])
   @@map("purchase_order_lines")
 }
 
