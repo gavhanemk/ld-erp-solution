@@ -14,8 +14,11 @@ import { api, ApiError, apiErrorMessage, can } from '@/lib/api'
 import { formatDate, formatRupees } from '@/lib/utils'
 import {
   SAMPLE_MATERIAL_SOURCE_LABEL,
+  SAMPLE_CLOSEOUT_LABEL,
+  SAMPLE_REASON_MIN,
   SAMPLE_STATE_LABEL,
   lineRequiredQty,
+  type SampleCloseOutKind,
   type SampleItemOption,
   type SampleNeed,
 } from '@ld-erp/shared'
@@ -33,6 +36,10 @@ import {
   eventNote,
   handoverBoms,
   isSampleSet,
+  closeOutBlocker,
+  coverOf,
+  issueCap,
+  leftovers,
   lineColour,
   lineItem,
   lineSourcing,
@@ -108,6 +115,9 @@ export function SampleWorkspace({
     [warnings, setWarnings] = useState<string[]>([])
   // The material line whose issue, use or return window is open.
   const [recording, setRecording] = useState('')
+  // The line being waived (or its waiver taken off), and the leftover being closed out.
+  const [waiving, setWaiving] = useState('')
+  const [closing, setClosing] = useState<{ itemId: string; warehouseId: string } | null>(null)
   // Sourcing: the lines ticked to order together, and the order being raised for them.
   const [buyTicks, setBuyTicks] = useState<Set<string>>(new Set())
   const [ordering, setOrdering] = useState<{
@@ -230,7 +240,9 @@ export function SampleWorkspace({
   // Buying is open on the latest released round, to whoever may raise purchase orders.
   const canBuy =
     can('purchase', 'create') && latest && round.state === 'RELEASED' && !request.cancelledAt
-  const toOrder = round.materials.filter((m) => lineSourcing(m).status === 'TO_ORDER')
+  const toOrder = round.materials.filter(
+    (m) => lineSourcing(m, coverOf(request, round, m)).status === 'TO_ORDER'
+  )
   const ticked = toOrder.filter((m) => buyTicks.has(m.id))
   /**
    * Opens a purchase order for the ticked lines: their needs as Purchase reads
@@ -262,7 +274,20 @@ export function SampleWorkspace({
   }
   const handedOver = request.rounds.some((r) => r.handover)
   // Use, waste and returns can be recorded on any round still holding material.
-  const canRecord = edit && can('inventory', 'edit')
+  // A sample store is Sampling's own: sampling rights issue from it (phase 4).
+  const canRecord = edit
+  // Leftovers are closed out after a cancellation too.
+  const canClose = can('sampling', 'edit')
+  const closeBlocked = closeOutBlocker(request)
+  const left = leftovers(request)
+  /** An item of the request, named as its lines name it. */
+  const itemNamed = (itemId: string) => {
+    for (const r of request.rounds)
+      for (const m of r.materials) if (m.itemId === itemId && m.item) return m.item
+    return null
+  }
+  const storeNamed = (id: string) => lookups.warehouses.find((w) => w.id === id)?.name ?? 'The sample store'
+  const waivingLine = waiving ? round.materials.find((m) => m.id === waiving) : undefined
   const recordingLine = recording ? round.materials.find((m) => m.id === recording) : undefined
   const showValue = round.materials.some((m) => m.issuedValue !== undefined)
   const sizeRunName = (id: string) => lookups.sizeGroups.find((g) => g.id === id)?.name ?? id
@@ -599,7 +624,7 @@ export function SampleWorkspace({
                       </thead>
                       <tbody>
                         {round.materials.map((m, i) => {
-                          const s = lineSourcing(m)
+                          const s = lineSourcing(m, coverOf(request, round, m))
                           const unit = m.item?.uom?.symbol ?? ''
                           const orderable = canBuy && s.status === 'TO_ORDER'
                           return (
@@ -649,7 +674,9 @@ export function SampleWorkspace({
                                 {s.status === 'BUYER' ? '—' : s.received}
                               </td>
                               <td className="text-right font-semibold tabular-nums">
-                                {s.status === 'BUYER' || s.status === 'ISSUED' ? '—' : s.toBuy}
+                                {s.status === 'BUYER' || s.status === 'ISSUED' || s.status === 'WAIVED'
+                                  ? '—'
+                                  : s.toBuy}
                               </td>
                               <td>
                                 <span
@@ -658,7 +685,9 @@ export function SampleWorkspace({
                                       ? 'badge-warning'
                                       : s.status === 'RECEIVED' || s.status === 'ISSUED'
                                         ? 'badge-success'
-                                        : 'badge-info'
+                                        : s.status === 'WAIVED'
+                                          ? 'badge-neutral'
+                                          : 'badge-info'
                                   }
                                 >
                                   {SOURCING_STATUS_LABEL[s.status]}
@@ -751,9 +780,12 @@ export function SampleWorkspace({
             {tab === 'Materials' && (
               <div className="space-y-3">
                 <p className="text-muted-foreground text-sm">
-                  Issue removes material from store stock. Each line is issued from one store,
-                  picked at its first issue. Record use or waste against that issue; it does not
-                  deduct stock again. Return unused material to the store it came from.
+                  A sample’s material is issued from the sample store, up to what this request
+                  bought and received there (what an earlier round left counts too). Each line
+                  is issued from one store, picked at its first issue. Record use or waste
+                  against that issue; it does not deduct stock again. Return unused material to
+                  the store it came from. A line not needed after all can be waived before making
+                  starts.
                 </p>
                 {round.materials.length === 0 ? (
                   <div className="glass-card flex items-start gap-3 p-5 text-sm">
@@ -817,6 +849,15 @@ export function SampleWorkspace({
                                     </span>
                                   </>
                                 )}
+                                {m.waivedAt && (
+                                  <span className="mt-1 block text-xs">
+                                    <span className="badge-neutral">Not needed</span>{' '}
+                                    <span className="text-muted-foreground">
+                                      {m.waivedReason}
+                                      {m.waivedBy ? ` · ${m.waivedBy}` : ''}
+                                    </span>
+                                  </span>
+                                )}
                               </td>
                               <td>{lineColour(m.colour)}</td>
                               <td>
@@ -855,25 +896,41 @@ export function SampleWorkspace({
                               )}
                               {canRecord && (
                                 <td>
-                                  {allowed.kinds.length ? (
-                                    <button
-                                      type="button"
-                                      className="btn-secondary whitespace-nowrap"
-                                      data-row-open
-                                      onClick={() => {
-                                        setError('')
-                                        setRecording(m.id)
-                                      }}
-                                    >
-                                      {allowed.kinds[0] === 'ISSUE'
-                                        ? 'Issue'
-                                        : 'Record use or return'}
-                                    </button>
-                                  ) : (
-                                    <span className="text-muted-foreground block max-w-xs text-xs">
-                                      {allowed.why}
-                                    </span>
-                                  )}
+                                  <span className="flex flex-wrap items-center gap-2">
+                                    {allowed.kinds.length ? (
+                                      <button
+                                        type="button"
+                                        className="btn-secondary whitespace-nowrap"
+                                        data-row-open
+                                        onClick={() => {
+                                          setError('')
+                                          setRecording(m.id)
+                                        }}
+                                      >
+                                        {allowed.kinds[0] === 'ISSUE'
+                                          ? 'Issue'
+                                          : 'Record use or return'}
+                                      </button>
+                                    ) : (
+                                      <span className="text-muted-foreground block max-w-xs text-xs">
+                                        {allowed.why}
+                                      </span>
+                                    )}
+                                    {latest && (allowed.waive || allowed.unwaive) && (
+                                      <button
+                                        type="button"
+                                        className="btn-ghost whitespace-nowrap text-xs"
+                                        // The row's own action when it has nothing else to record.
+                                        data-row-open={allowed.kinds.length ? undefined : true}
+                                        onClick={() => {
+                                          setError('')
+                                          setWaiving(m.id)
+                                        }}
+                                      >
+                                        {allowed.unwaive ? 'Needed after all' : 'Not needed'}
+                                      </button>
+                                    )}
+                                  </span>
                                 </td>
                               )}
                             </tr>
@@ -894,6 +951,102 @@ export function SampleWorkspace({
                     )}{' '}
                     · excludes labour, services and courier
                   </p>
+                )}
+                {(left.length > 0 || (request.closeOuts ?? []).length > 0) && (
+                  <div className="glass-card space-y-3 p-4">
+                    <h3 className="font-semibold">
+                      {closeBlocked
+                        ? 'In the sample store for this request'
+                        : 'Left in the sample store for this request'}
+                    </h3>
+                    {left.length ? (
+                      <>
+                        <p className="text-muted-foreground text-sm">
+                          {closeBlocked
+                            ? 'Bought and received for this request, not yet issued. It is kept for this round and the next; once the buyer has decided, what is left can be closed out.'
+                            : 'Close out what nobody needs any more: used in the sample, or moved to a general store at what it is carried at.'}
+                        </p>
+                        <div className="overflow-x-auto">
+                        <table className="data-table w-full">
+                          <thead>
+                            <tr>
+                              <th>Material</th>
+                              <th>Sample store</th>
+                              <th className="text-right">Received for it</th>
+                              <th className="text-right">Issued or closed out</th>
+                              <th className="text-right">Left</th>
+                              {canClose && !closeBlocked && (
+                                <th>
+                                  <span className="sr-only">Close out</span>
+                                </th>
+                              )}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {left.map((s, i) => {
+                              const it = itemNamed(s.itemId)
+                              return (
+                                <tr
+                                  key={`${s.itemId}-${s.warehouseId}`}
+                                  data-row
+                                  tabIndex={i === 0 ? 0 : -1}
+                                >
+                                  <td>
+                                    {it?.name ?? 'Material'}
+                                    <span className="text-muted-foreground block font-mono text-xs">
+                                      {it?.code}
+                                    </span>
+                                  </td>
+                                  <td>{storeNamed(s.warehouseId)}</td>
+                                  <td className="text-right tabular-nums">{s.received}</td>
+                                  <td className="text-right tabular-nums">{s.issued + s.closed}</td>
+                                  <td className="text-right font-semibold tabular-nums">
+                                    {s.available}{' '}
+                                    <span className="text-muted-foreground text-xs">
+                                      {it?.uom?.symbol}
+                                    </span>
+                                  </td>
+                                  {canClose && !closeBlocked && (
+                                    <td>
+                                      <button
+                                        type="button"
+                                        className="btn-secondary whitespace-nowrap"
+                                        data-row-open
+                                        onClick={() => {
+                                          setError('')
+                                          setClosing({ itemId: s.itemId, warehouseId: s.warehouseId })
+                                        }}
+                                      >
+                                        Close out
+                                      </button>
+                                    </td>
+                                  )}
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="text-muted-foreground text-sm">Nothing is left.</p>
+                    )}
+                    {(request.closeOuts ?? []).length > 0 && (
+                      <ul className="text-muted-foreground space-y-1 text-xs">
+                        {request.closeOuts!.map((c) => (
+                          <li key={c.id}>
+                            {formatDate(c.createdAt)} · {+c.qty} {c.item.uom?.symbol ?? ''} of{' '}
+                            {c.item.name} from {c.warehouse.name}:{' '}
+                            {c.kind === 'MOVED'
+                              ? `moved to ${c.toWarehouse?.name ?? 'a general store'}`
+                              : 'used in the sample'}
+                            {c.value !== undefined ? ` · ${formatRupees(+c.value)}` : ''} ·{' '}
+                            {c.reason} · {c.createdBy.name}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -1144,7 +1297,7 @@ export function SampleWorkspace({
                 {request.events.map((e) => (
                   <div key={e.id} className="glass-card p-3">
                     <p>
-                      {eventLabel(e.action)} · {e.detail.by ?? 'User'} · {formatDate(e.createdAt)}
+                      {eventLabel(e.action, e.detail.data)} · {e.detail.by ?? 'User'} · {formatDate(e.createdAt)}
                     </p>
                     <EventNoteLine text={eventNote(e, request.rounds, sizeRunName)} />
                     {e.action === 'UPDATE_REQUEST' && (
@@ -1204,12 +1357,49 @@ export function SampleWorkspace({
           save={(data) => act('UPDATE_REQUEST', data)}
         />
       )}
+      {waivingLine && (
+        <WaiveWindow
+          line={waivingLine}
+          onClose={() => setWaiving('')}
+          save={async (reason) => {
+            const undo = !!waivingLine.waivedAt
+            await post('WAIVE_MATERIAL', { materialId: waivingLine.id, reason, undo })
+            setWaiving('')
+            setMessage(
+              undo
+                ? `${waivingLine.item?.name ?? 'The material'} is needed again: issue it before making starts.`
+                : `${waivingLine.item?.name ?? 'The material'} is marked not needed: making does not wait for it.`
+            )
+          }}
+        />
+      )}
+      {closing && (
+        <CloseOutWindow
+          key={`${closing.itemId}-${closing.warehouseId}-${request.version}`}
+          item={itemNamed(closing.itemId)}
+          storeName={storeNamed(closing.warehouseId)}
+          available={
+            left.find((s) => s.itemId === closing.itemId && s.warehouseId === closing.warehouseId)
+              ?.available ?? 0
+          }
+          generalStores={lookups.warehouses.filter((w) => w.purpose !== 'SAMPLING')}
+          onClose={() => setClosing(null)}
+          save={async (d) => {
+            await post('CLOSE_MATERIAL', { ...d, ...closing })
+            setClosing(null)
+            setMessage(
+              `${d.qty} ${itemNamed(closing.itemId)?.uom?.symbol ?? ''} closed out: ${SAMPLE_CLOSEOUT_LABEL[d.kind].toLowerCase()}.`
+            )
+          }}
+        />
+      )}
       {recordingLine && (
         <MaterialWindow
           key={`${recordingLine.id}-${request.version}`}
           round={round}
           line={recordingLine}
           lookups={lookups}
+          request={request}
           onClose={() => setRecording('')}
           save={(d) => recordMaterial(recordingLine, d)}
         />
@@ -1518,12 +1708,15 @@ function MaterialWindow({
   round,
   line,
   lookups,
+  request,
   onClose,
   save,
 }: {
   round: SampleRound
   line: SampleMaterial
   lookups: Lookups
+  /** For what the request holds in the sample stores (its pool). */
+  request: SampleRequest
   onClose: () => void
   save: (d: {
     kind: MaterialKind
@@ -1536,33 +1729,45 @@ function MaterialWindow({
   const [kind, setKind] = useState<MaterialKind>(allowed.kinds[0] ?? 'USE')
   const [qty, setQty] = useState('')
   const [reason, setReason] = useState('')
-  // Usually every line of a round comes from one store: start from the one already used.
-  // A line bought for the sample was received into the sample store, so it
-  // starts there; any other line from the store the round already uses.
-  const sampleStore = lookups.warehouses.find((w) => w.purpose === 'SAMPLING')?.id
+  // Only a sample store is offered. It starts on the one holding this
+  // material for the request, else the one the round's other lines use, else
+  // the only sample store there is.
+  const sampleStores = lookups.warehouses.filter((w) => w.purpose === 'SAMPLING')
   const usedStore =
-    ((line.orders ?? []).length ? sampleStore : undefined) ??
-    round.materials.find(
-      (x) => x.warehouseId && lookups.warehouses.some((w) => w.id === x.warehouseId)
-    )?.warehouseId
-  const [warehouseId, setWarehouseId] = useState(usedStore ?? '')
+    (line.warehouseId && sampleStores.some((w) => w.id === line.warehouseId) && issueCap(request, line, line.warehouseId) > 0
+      ? line.warehouseId
+      : undefined) ??
+    sampleStores.find((w) => issueCap(request, line, w.id) > 0)?.id ??
+    sampleStores.find((w) => round.materials.some((x) => x.warehouseId === w.id))?.id ??
+    (sampleStores.length === 1 ? sampleStores[0].id : '')
+  const [warehouseId, setWarehouseId] = useState(usedStore)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const unit = line.item?.uom?.symbol ?? ''
-  const max = kind === 'ISSUE' ? allowed.remaining : allowed.held
+  // An issue is as much as the request holds in that sample store (what is
+  // planned is a guide, not a ceiling); use, waste and returns what the line holds.
+  const cap = issueCap(request, line, allowed.needsStore ? warehouseId : (line.warehouseId ?? warehouseId))
+  // No store picked yet: nothing to measure the quantity against.
+  const storeMissing = kind === 'ISSUE' && allowed.needsStore && !warehouseId
+  const max = kind === 'ISSUE' ? cap : allowed.held
   const firstIssue = kind === 'ISSUE' && allowed.needsStore
   const fixed = storeNote(line)
   const submit = async () => {
     const n = Number(qty)
-    const problem = !(n > 0)
-      ? 'Enter the quantity.'
-      : n > max
-        ? `No more than ${max} ${unit} for this.`
-        : firstIssue && !warehouseId
-          ? 'Pick the store to issue this material from.'
-          : !reason.trim()
-            ? 'Give the reason or reference.'
-            : ''
+    const problem =
+      firstIssue && !warehouseId
+        ? 'Pick the sample store to issue this material from.'
+        : !(n > 0)
+          ? 'Enter the quantity.'
+          : n > max
+            ? max > 0
+              ? `No more than ${max} ${unit} for this.`
+              : kind === 'ISSUE'
+                ? `None of it is in that store for this request yet. Receive it against its purchase order first.`
+                : `No more than ${max} ${unit} for this.`
+            : !reason.trim()
+              ? 'Give the reason or reference.'
+              : ''
     if (problem) return setError(problem)
     setBusy(true)
     setError('')
@@ -1671,12 +1876,16 @@ function MaterialWindow({
                     setError('')
                   }}
                 >
-                  <option value="">Pick the store</option>
-                  {lookups.warehouses.map((w) => (
+                  <option value="">Pick the sample store</option>
+                  {sampleStores.map((w) => (
                     <option
                       key={w.id}
                       value={w.id}
-                      data-sub={w.purpose === 'SAMPLING' ? 'Sample store' : undefined}
+                      data-sub={
+                        line.source === 'BUYER_SUPPLIED'
+                          ? `${issueCap(request, line, w.id)} ${unit} of the buyer’s here`
+                          : `${issueCap(request, line, w.id)} ${unit} here for this request`
+                      }
                     >
                       {w.name}
                     </option>
@@ -1695,12 +1904,20 @@ function MaterialWindow({
             <Field
               label={`Quantity${unit ? ` (${unit})` : ''}`}
               required
-              hint={`${max} ${unit} ${kind === 'ISSUE' ? 'still to issue' : 'held on this line'}`}
+              hint={
+                storeMissing
+                  ? `Pick the sample store first · ${allowed.remaining} ${unit} still to issue`
+                  : kind === 'ISSUE'
+                  ? line.source === 'BUYER_SUPPLIED'
+                    ? `${max} ${unit} of the buyer’s in this store · ${allowed.remaining} ${unit} still to issue`
+                    : `${max} ${unit} bought for this request in this store · ${allowed.remaining} ${unit} still to issue`
+                  : `${max} ${unit} held on this line`
+              }
             >
               <StepInput
                 className="form-input"
                 decimals
-                max={max}
+                max={storeMissing || max <= 0 ? undefined : max}
                 value={qty}
                 onValueChange={(v) => {
                   setQty(limitDecimals(v, 3))
@@ -2129,5 +2346,217 @@ function HandoverAction({
         Prepare handover
       </button>
     </div>
+  )
+}
+/** A line not needed after all, or needed again: with why, before making starts. */
+function WaiveWindow({
+  line,
+  onClose,
+  save,
+}: {
+  line: SampleMaterial
+  onClose: () => void
+  save: (reason: string) => Promise<void>
+}) {
+  const undo = !!line.waivedAt
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const submit = async () => {
+    if (!undo && reason.trim().length < SAMPLE_REASON_MIN)
+      return setError('Say why this line is not needed — a few words is enough.')
+    setBusy(true)
+    setError('')
+    try {
+      await save(reason.trim())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : apiErrorMessage(e))
+      setBusy(false)
+    }
+  }
+  return (
+    <FormFrame
+      icon={PackageOpen}
+      title={undo ? 'Needed after all' : 'Not needed'}
+      subtitle={`${line.item?.name ?? 'Material'} · ${line.component || 'No part named'} · ${lineColour(line.colour)}`}
+      width="max-w-xl"
+      primaryInHeader={false}
+      busy={busy}
+      error={error}
+      onClose={onClose}
+      primary={
+        <button type="submit" form="sample-waive-form" className="btn-primary" disabled={busy}>
+          {busy ? 'Saving…' : undo ? 'Needed after all' : 'Mark not needed'}
+        </button>
+      }
+      footer={
+        <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+      }
+      footerNote={
+        undo
+          ? 'The line goes back on the list to issue before making starts.'
+          : 'Making can start without it. Anything already bought for it stays in the sample store for this request.'
+      }
+    >
+      <form
+        id="sample-waive-form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          void submit()
+        }}
+      >
+        <fieldset disabled={busy} className="space-y-4 p-2">
+          {undo ? (
+            <p className="text-sm">
+              Marked not needed: {line.waivedReason}
+              {line.waivedBy ? ` (${line.waivedBy})` : ''}.
+            </p>
+          ) : (
+            <Field label="Why it is not needed" required hint="The buyer dropped it, another material does instead…">
+              <textarea
+                className="form-input"
+                value={reason}
+                maxLength={500}
+                autoFocus
+                onChange={(e) => setReason(e.target.value)}
+              />
+            </Field>
+          )}
+        </fieldset>
+      </form>
+    </FormFrame>
+  )
+}
+/**
+ * What is left of the request's own material in a sample store, closed out:
+ * used up in the sample, or moved to a general store at what it is carried at.
+ */
+function CloseOutWindow({
+  item,
+  storeName,
+  available,
+  generalStores,
+  onClose,
+  save,
+}: {
+  item: SampleMaterial['item']
+  storeName: string
+  available: number
+  generalStores: Lookups['warehouses']
+  onClose: () => void
+  save: (d: { kind: SampleCloseOutKind; qty: number; toWarehouseId: string | null; reason: string }) => Promise<void>
+}) {
+  const [kind, setKind] = useState<SampleCloseOutKind>('USED')
+  const [qty, setQty] = useState(String(available))
+  const [to, setTo] = useState('')
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const unit = item?.uom?.symbol ?? ''
+  const submit = async () => {
+    const n = Number(qty)
+    const problem = !(n > 0)
+      ? 'Enter the quantity.'
+      : n > available + 1e-9
+        ? `No more than ${available} ${unit} is left for this request here.`
+        : kind === 'MOVED' && !to
+          ? 'Pick the general store it goes to.'
+          : reason.trim().length < SAMPLE_REASON_MIN
+            ? 'Say why, in a few words.'
+            : ''
+    if (problem) return setError(problem)
+    setBusy(true)
+    setError('')
+    try {
+      await save({ kind, qty: n, toWarehouseId: kind === 'MOVED' ? to : null, reason: reason.trim() })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : apiErrorMessage(e))
+      setBusy(false)
+    }
+  }
+  return (
+    <FormFrame
+      icon={PackageOpen}
+      title="Close out leftover material"
+      subtitle={`${item?.name ?? 'Material'} · ${available} ${unit} left in ${storeName}`}
+      width="max-w-2xl"
+      primaryInHeader={false}
+      busy={busy}
+      error={error}
+      onClose={onClose}
+      primary={
+        <button type="submit" form="sample-closeout-form" className="btn-primary" disabled={busy}>
+          {busy ? 'Saving…' : 'Close out'}
+        </button>
+      }
+      footer={
+        <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+      }
+      footerNote="Used in the sample counts it as consumed by this request. Moved goes to the general store at what it is carried at, and is bulk stock from then on."
+    >
+      <form
+        id="sample-closeout-form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          void submit()
+        }}
+      >
+        <fieldset disabled={busy} className="space-y-4 p-2">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="What happens to it" required>
+              <SmartSelect
+                className="form-input"
+                value={kind}
+                autoFocus
+                onChange={(e) => {
+                  setKind(e.target.value as SampleCloseOutKind)
+                  setError('')
+                }}
+              >
+                {(can('inventory', 'edit') ? (['USED', 'MOVED'] as const) : (['USED'] as const)).map((k) => (
+                  <option key={k} value={k}>
+                    {SAMPLE_CLOSEOUT_LABEL[k]}
+                  </option>
+                ))}
+              </SmartSelect>
+            </Field>
+            <Field label={`Quantity${unit ? ` (${unit})` : ''}`} required hint={`${available} ${unit} left`}>
+              <StepInput className="form-input" decimals max={available} value={qty} onValueChange={setQty} />
+            </Field>
+            {kind === 'MOVED' && (
+              <Field label="General store it goes to" required>
+                <SmartSelect className="form-input" value={to} onChange={(e) => setTo(e.target.value)}>
+                  <option value="">Pick the store</option>
+                  {generalStores.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </SmartSelect>
+              </Field>
+            )}
+          </div>
+          {!can('inventory', 'edit') && (
+            <p className="text-muted-foreground text-xs">
+              Moving it into general stock is for the store, with inventory rights: ask them to close it out that way.
+            </p>
+          )}
+          <Field label="Why" required>
+            <textarea
+              className="form-input"
+              value={reason}
+              maxLength={500}
+              onChange={(e) => setReason(e.target.value)}
+            />
+          </Field>
+        </fieldset>
+      </form>
+    </FormFrame>
   )
 }

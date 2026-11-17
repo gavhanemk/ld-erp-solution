@@ -5,7 +5,8 @@ import { userCan, type AuthRequest } from '../middleware/auth'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { CODE_ATTEMPTS, nextStyleCode } from '../lib/masterCode'
 import { MAX_FILE_BYTES, MAX_FILES_PER_DOCUMENT, removeObject, statObject } from '../lib/storage'
-import { recordMovement } from './stock.service'
+import { lockedBalanceOf, recordMovement, transferStock } from './stock.service'
+import { availableIn, requestPool } from './samplePool.service'
 import { checkRouteSteps, routingProblem } from './route.service'
 import { assertContractorsFit } from './routing.service'
 import { liveSampleOrders, sampleOrderLine, sampleOrderSelect } from './sampleSourcing.service'
@@ -36,6 +37,8 @@ import {
   sampleActionSchema,
   sampleSpecificationSchema,
   sampleMaterialSchema,
+  sampleWaiveSchema,
+  sampleCloseOutSchema,
   sampleStageSchema,
   sampleQcSchema,
   sampleSubmissionSchema,
@@ -96,7 +99,7 @@ export const sampleInclude = {
           // is still in use: the editor offers a line's own material even when
           // it was added after the page read its list.
           item: { select: { ...sampleItemSelect, isActive: true } },
-          warehouse: { select: { name: true } },
+          warehouse: { select: { name: true, purpose: true } },
           // The orders buying it, for Sourcing: no rates, which Sampling does not show.
           poLines: {
             where: liveSampleOrders,
@@ -108,18 +111,39 @@ export const sampleInclude = {
     },
   },
   events: { orderBy: { version: 'desc' as const } },
+  // Leftovers closed out: used up in the sample, or moved to a general store.
+  closeOuts: {
+    orderBy: { createdAt: 'desc' as const },
+    include: {
+      item: { select: { name: true, code: true, uom: { select: { symbol: true } } } },
+      warehouse: { select: { name: true } },
+      toWarehouse: { select: { name: true } },
+      createdBy: { select: { name: true } },
+    },
+  },
   attachments: {
     orderBy: { createdAt: 'asc' as const },
     include: { uploadedBy: { select: { id: true, name: true } } },
   },
 } satisfies Prisma.SampleRequestInclude
-export async function sampleDetail(tx: Tx, id: string) {
+export async function sampleDetail(
+  tx: Tx,
+  id: string,
+  /**
+   * With the request's own material in the sample stores (samplePool): what
+   * the screen shows. Left out for an action's own reading, which works it out
+   * only where it needs it.
+   */
+  opts: { pool?: boolean } = {}
+) {
   const row = await tx.sampleRequest.findUnique({ where: { id }, include: sampleInclude })
   if (!row) throw new AppError('Sample request not found', 404, 'NOT_FOUND')
+  const pool = opts.pool ? await requestPool(tx, id) : null
   // Every reader (the request, its print, every action) sees each round's
   // specification in today's shape, however old the round.
   return {
     ...row,
+    pool,
     rounds: row.rounds.map((r) => ({
       ...r,
       specification: normaliseSpec(r.specification),
@@ -145,9 +169,15 @@ async function event(
     orderBy: { revision: 'desc' },
     select: { state: true },
   })
+  // A cancelled request stays cancelled whatever is recorded on it after
+  // (leftover material closed out).
+  const cancelled = await tx.sampleRequest.findUnique({ where: { id }, select: { cancelledAt: true } })
   await tx.sampleRequest.update({
     where: { id },
-    data: { version: version + 1, state: action === 'CANCEL' ? 'CANCELLED' : latest.state },
+    data: {
+      version: version + 1,
+      state: action === 'CANCEL' || cancelled?.cancelledAt ? 'CANCELLED' : latest.state,
+    },
   })
   await tx.sampleEvent.create({
     data: {
@@ -161,7 +191,7 @@ async function event(
 }
 export async function createSample(tx: Tx, data: z.infer<typeof createSampleSchema>, actor: Actor) {
   const old = await tx.sampleRequest.findUnique({ where: { clientKey: data.clientKey } })
-  if (old) return sampleDetail(tx, old.id)
+  if (old) return sampleDetail(tx, old.id, { pool: true })
   const brand = await tx.brand.findFirst({ where: { id: data.brandId, isActive: true } })
   if (!brand) fail('Pick an active brand.')
   if (
@@ -198,7 +228,7 @@ export async function createSample(tx: Tx, data: z.infer<typeof createSampleSche
     data: { requestId: request.id, revision: 1, specification: json(specification) },
   })
   await event(tx, request.id, 0, 'CREATE', actor, { number })
-  return sampleDetail(tx, request.id)
+  return sampleDetail(tx, request.id, { pool: true })
 }
 /**
  * The style, colours and sizes of a specification against the masters.
@@ -993,6 +1023,7 @@ export interface SampleAfterCommit {
 /** Actions on the request as a whole, which name no round of their own. */
 const REQUEST_ACTIONS = [
   'CANCEL',
+  'CLOSE_MATERIAL',
   'UPDATE_REQUEST',
   'ATTACH',
   'DETACH',
@@ -1013,7 +1044,8 @@ export async function actOnSample(
   const request = await sampleDetail(tx, id)
   if (request.version !== cmd.version)
     fail('This sample changed in another window. Refresh it before saving.', 'STALE_SAMPLE')
-  if (request.cancelledAt) fail('This request is cancelled.')
+  // Leftover material is closed out after a cancellation too.
+  if (request.cancelledAt && cmd.action !== 'CLOSE_MATERIAL') fail('This request is cancelled.')
   const r = request.rounds.find((x) => x.id === cmd.roundId)
   if (
     !REQUEST_ACTIONS.includes(cmd.action) &&
@@ -1175,7 +1207,8 @@ export async function actOnSample(
       break
     }
     case 'MATERIAL': {
-      grant(actor, 'inventory', 'edit')
+      // A sample store is Sampling's own: sampling rights issue from it, not
+      // inventory rights (MATERIAL issues from sample stores only).
       if (round.state === 'DRAFT' || round.handover)
         fail('Release the round before issuing material; a handed-over round is frozen.')
       const d = sampleMaterialSchema.parse(cmd.data),
@@ -1185,13 +1218,24 @@ export async function actOnSample(
       if (!material.itemId)
         fail('This line has no material picked, so nothing can be issued against it.', 'NO_ITEM')
       // One store per line: named at the first issue, then every issue and
-      // return goes through it, so what the line holds is in one place.
+      // return goes through it, so what the line holds is in one place. A line
+      // with nothing of it out may be issued from another store, which it then
+      // keeps (a later delivery received into another sample store, or a line
+      // issued from a general store before sample stores).
       const store = material.warehouse?.name ?? 'another store'
+      const out = round3(n(material.issuedQty) - n(material.returnedQty))
+      const switching =
+        d.kind === 'ISSUE' &&
+        !!material.warehouseId &&
+        !!d.warehouseId &&
+        d.warehouseId !== material.warehouseId &&
+        out <= 0
       if (
         (d.kind === 'ISSUE' || d.kind === 'RETURN') &&
         material.warehouseId &&
         d.warehouseId &&
-        d.warehouseId !== material.warehouseId
+        d.warehouseId !== material.warehouseId &&
+        !switching
       )
         fail(
           d.kind === 'RETURN'
@@ -1209,21 +1253,80 @@ export async function actOnSample(
         ownership,
         ownerCustomerId: ownership === 'CUSTOMER_OWNED' ? request.customerId : null,
       } as const
+      // Stock put back into a general store is an inventory act (a line issued
+      // from one before sample stores); a sample store is Sampling's own.
+      if (d.kind === 'RETURN' && material.warehouse && material.warehouse.purpose !== 'SAMPLING')
+        grant(actor, 'inventory', 'edit')
       if (d.kind === 'ISSUE') {
         if (round.state !== 'RELEASED' || round.stages.some((x) => x.completedAt))
           fail('Issue materials before making starts; extra needs require a new round.')
-        if (round3(n(material.issuedQty) + d.qty) > n(material.plannedQty))
-          fail('Do not issue more than the frozen material plan.')
+        if (material.waivedAt)
+          fail('This line is waived. Take the waiver off before issuing against it.', 'LINE_WAIVED')
         const firstStore = !material.warehouseId
-        if (firstStore) {
-          if (!d.warehouseId)
-            throw new AppError('Pick the store to issue this material from.', 400, 'STORE_REQUIRED')
-          if (!(await tx.warehouse.findFirst({ where: { id: d.warehouseId, isActive: true } })))
-            fail('Pick an active store.')
+        if (firstStore && !d.warehouseId)
+          throw new AppError('Pick the store to issue this material from.', 400, 'STORE_REQUIRED')
+        const storeId = switching ? d.warehouseId! : (material.warehouseId ?? d.warehouseId!)
+        const picking = firstStore || switching
+        // A sample's material is issued from a sample store, where it was
+        // received for it (or where the buyer's own material was received).
+        const from = await tx.warehouse.findUnique({
+          where: { id: storeId },
+          select: { name: true, isActive: true, purpose: true },
+        })
+        if (!from || (picking && !from.isActive)) fail('Pick an active store.')
+        if (from!.purpose !== 'SAMPLING')
+          fail(
+            picking
+              ? `${from!.name} is a general store. A sample's material is issued from the sample store it was received into.`
+              : `This line was issued from ${from!.name}, a general store, before sample stores kept sample material apart. Return what is out of it there; then it is issued from the sample store. Or mark the rest not needed.`,
+            'NOT_SAMPLE_STORE'
+          )
+        const unit = material.item?.uom?.symbol ?? ''
+        if (material.source === 'PURCHASE') {
+          // No more than this request bought and still holds there (samplePool):
+          // never another sample's material.
+          const pool = await requestPool(tx, id)
+          const free = availableIn(pool, material.itemId!, storeId)
+          if (round3(d.qty) > free + 1e-9) {
+            // Where the rest of it is, if it was received into another sample store.
+            const elsewhere = pool.stores.filter(
+              (s) => s.itemId === material.itemId && s.warehouseId !== storeId && s.available > 0
+            )
+            const names = elsewhere.length
+              ? await tx.warehouse.findMany({
+                  where: { id: { in: elsewhere.map((s) => s.warehouseId) } },
+                  select: { id: true, name: true },
+                })
+              : []
+            const there = elsewhere
+              .map((s) => `${s.available} ${unit} in ${names.find((w) => w.id === s.warehouseId)?.name ?? 'another sample store'}`)
+              .join(' and ')
+            fail(
+              (free > 0
+                ? `Only ${free} ${unit} of ${material.item?.name ?? 'this material'} bought for this request is in ${from!.name}. Issue ${free} or less`
+                : `Nothing of ${material.item?.name ?? 'this material'} bought for this request is in ${from!.name}`) +
+                (there
+                  ? `; ${there} for it. A line is issued from one store: issue from there once nothing of this line is out.`
+                  : free > 0
+                    ? '; buy or receive the rest first.'
+                    : ' yet. Receive it against its purchase order first.'),
+              'POOL_SHORT'
+            )
+          }
+        } else if (round3(out + d.qty) > n(material.plannedQty) + 1e-9) {
+          // The buyer's material is theirs, sent for their samples: no more of
+          // it than this line's plan, so another of their samples keeps its share.
+          const left = round3(Math.max(0, n(material.plannedQty) - out))
+          fail(
+            left > 0
+              ? `The buyer sent ${material.item?.name ?? 'this material'} for their samples: issue no more than the ${left} ${unit} this line still needs.`
+              : `This line has all of the buyer's ${material.item?.name ?? 'material'} it plans for.`,
+            'BUYER_PLAN'
+          )
         }
         const movement = await recordMovement(tx, {
           ...key,
-          warehouseId: material.warehouseId ?? d.warehouseId!,
+          warehouseId: storeId,
           direction: 'OUT',
           qty: d.qty,
           transactionType: 'ISSUE',
@@ -1234,7 +1337,7 @@ export async function actOnSample(
         await tx.sampleMaterial.update({
           where: { id: material.id },
           data: {
-            ...(firstStore ? { warehouseId: d.warehouseId } : {}),
+            ...(picking ? { warehouseId: storeId } : {}),
             issuedQty: { increment: d.qty },
             issuedValue: { increment: round2(d.qty * movement.unitRate) },
           },
@@ -1273,10 +1376,118 @@ export async function actOnSample(
       detail = { ...d, item: material.item?.name ?? null }
       break
     }
+    case 'WAIVE_MATERIAL': {
+      // A line not needed after all: making may start without it. Only before
+      // making starts, and only while something of it is still to issue.
+      const d = sampleWaiveSchema.parse(cmd.data)
+      const m = round.materials.find((x) => x.id === d.materialId)
+      if (!m) fail('This material is not on the round.')
+      if (round.state !== 'RELEASED' || round.stages.some((x) => x.completedAt))
+        fail('A line is waived before making starts.')
+      if (d.undo) {
+        if (!m!.waivedAt) fail('This line is not waived.')
+        await tx.sampleMaterial.update({
+          where: { id: m!.id },
+          data: { waivedAt: null, waivedReason: null, waivedBy: null },
+        })
+      } else {
+        if (m!.waivedAt) fail('This line is already waived.')
+        if (round3(n(m!.issuedQty) - n(m!.returnedQty)) >= n(m!.plannedQty))
+          fail('This line is issued in full; there is nothing to waive.')
+        await tx.sampleMaterial.update({
+          where: { id: m!.id },
+          data: { waivedAt: new Date(), waivedReason: d.reason, waivedBy: actor.name },
+        })
+      }
+      detail = { ...d, item: m!.item?.name ?? null, component: m!.component }
+      break
+    }
+    case 'CLOSE_MATERIAL': {
+      // What is left of the request's own material in a sample store, once no
+      // round needs it: used up in the sample, or moved to a general store.
+      const d = sampleCloseOutSchema.parse(cmd.data)
+      const latest = request.rounds[0]
+      const settled =
+        !!request.cancelledAt ||
+        ['APPROVED', 'REJECTED'].includes(latest.state) ||
+        request.rounds.some((x) => x.handover)
+      if (!settled)
+        fail(
+          'Leftover material is closed out once the buyer has decided, or the request is cancelled. Until then it is kept for the next round.',
+          'NOT_SETTLED'
+        )
+      const pool = await requestPool(tx, id)
+      const free = availableIn(pool, d.itemId, d.warehouseId)
+      const item = await tx.item.findUnique({
+        where: { id: d.itemId },
+        select: { name: true, uom: { select: { symbol: true } } },
+      })
+      const from = await tx.warehouse.findUnique({ where: { id: d.warehouseId }, select: { name: true, purpose: true } })
+      if (!item || !from || from.purpose !== 'SAMPLING') fail('That material is not in a sample store.')
+      if (round3(d.qty) > free + 1e-9)
+        fail(
+          `Only ${free} ${item!.uom?.symbol ?? ''} of ${item!.name} is left for this request in ${from!.name}.`,
+          'POOL_SHORT'
+        )
+      const notes = `${request.number}: ${d.reason}`
+      let value = 0
+      if (d.kind === 'USED') {
+        const moved = await recordMovement(tx, {
+          itemId: d.itemId,
+          warehouseId: d.warehouseId,
+          direction: 'OUT',
+          qty: d.qty,
+          transactionType: 'ISSUE',
+          referenceType: 'SAMPLING',
+          referenceId: latest.id,
+          notes: `${notes} (left over, used in the sample)`,
+        })
+        value = round2(d.qty * moved.unitRate)
+      } else {
+        // Into general stock: an inventory act, as a transfer is.
+        grant(actor, 'inventory', 'edit')
+        const to = await tx.warehouse.findUnique({
+          where: { id: d.toWarehouseId! },
+          select: { name: true, isActive: true, purpose: true },
+        })
+        if (!to || !to.isActive || to.purpose === 'SAMPLING')
+          fail('Pick an active general store to move it to.', 'BAD_STORE')
+        // Read under the stock lock the transfer takes, so the rate kept is the one it moves at.
+        const carried = await lockedBalanceOf(tx, { itemId: d.itemId, warehouseId: d.warehouseId })
+        await transferStock(tx, {
+          itemId: d.itemId,
+          fromWarehouseId: d.warehouseId,
+          toWarehouseId: d.toWarehouseId!,
+          qty: d.qty,
+          referenceType: 'SAMPLING',
+          referenceId: latest.id,
+          notes: `${notes} (left over, moved to ${to!.name})`,
+        })
+        value = round2(d.qty * carried.avgRate)
+      }
+      await tx.sampleCloseOut.create({
+        data: {
+          requestId: id,
+          roundId: latest.id,
+          itemId: d.itemId,
+          warehouseId: d.warehouseId,
+          kind: d.kind,
+          toWarehouseId: d.kind === 'MOVED' ? d.toWarehouseId! : null,
+          qty: d.qty,
+          value,
+          reason: d.reason,
+          createdById: actor.id,
+        },
+      })
+      eventRoundId = latest.id
+      detail = { ...d, item: item!.name, from: from!.name }
+      break
+    }
     case 'STAGE': {
       if (round.state !== 'RELEASED') fail('Only a released round can be worked on.')
-      if (round.materials.some((m) => n(m.issuedQty) < n(m.plannedQty)))
-        fail('Issue every planned material before making starts.')
+      // A waived line is not needed; every other is issued in full first.
+      if (round.materials.some((m) => !m.waivedAt && n(m.issuedQty) < n(m.plannedQty)))
+        fail('Issue every planned material, or waive what is not needed, before making starts.')
       const d = sampleStageSchema.parse(cmd.data),
         stage = round.stages.find((x) => x.id === d.stageId)
       if (!stage || stage.completedAt) fail('That step is missing or already recorded.')
@@ -1284,7 +1495,9 @@ export async function actOnSample(
         fail('Complete the preceding step first.')
       if (
         stage!.sequence === 1 &&
-        round.materials.some((m) => round3(n(m.issuedQty) - n(m.returnedQty)) < n(m.plannedQty))
+        round.materials.some(
+          (m) => !m.waivedAt && round3(n(m.issuedQty) - n(m.returnedQty)) < n(m.plannedQty)
+        )
       )
         fail('Keep the planned material issued until the first making step is recorded.')
       // The first step takes every piece of the grid, every colour and size.
@@ -1803,7 +2016,7 @@ export async function actOnSample(
   }
   after.eventRoundId = eventRoundId ?? null
   await event(tx, id, request.version, cmd.action, actor, { roundId: eventRoundId, data: detail })
-  return sampleDetail(tx, id)
+  return sampleDetail(tx, id, { pool: true })
 }
 
 export async function sampleLookups(tx: Tx) {

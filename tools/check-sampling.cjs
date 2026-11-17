@@ -31,6 +31,7 @@ const routes = require('../apps/api/src/routes/sampling.routes.ts').default
 const localFiles = require('../apps/api/src/routes/localFiles.routes.ts').default
 const masters = require('../apps/api/src/routes/master.routes.ts').default
 const quotations = require('../apps/api/src/routes/quotation.routes.ts').default
+const purchase = require('../apps/api/src/routes/purchase.routes.ts').default
 const { ZodError } = require('zod')
 let passed = 0,
   server
@@ -65,6 +66,7 @@ async function main() {
   api.use('/sampling', routes)
   api.use('/masters', masters)
   api.use('/quotations', quotations)
+  api.use('/purchase', purchase)
   api.use((err, req, res, next) =>
     res
       .status(err.statusCode ?? (err instanceof ZodError ? 400 : 500))
@@ -167,7 +169,50 @@ async function main() {
     materials: [line()],
     notes: 'Fictional local test only',
   }
-  const store = 'sample-store'
+  // A sample's material is bought for it and issued from the sample store (phase 4).
+  const store = 'sample-room-store'
+  const generalStore = 'sample-store'
+  /** Any route of the test server, by its full path. */
+  const callAt = async (method, url, body) => {
+    const r = await fetch(origin + url, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    })
+    return { status: r.status, body: await r.json() }
+  }
+  let paperNo = 0
+  /**
+   * Buys what the latest round still needs (its needs, after anything an
+   * earlier round left) and receives it into the sample store, at ₹100 a unit:
+   * a sample issues only what it bought.
+   */
+  const stockSample = async () => {
+    const needs = (await call('GET', `/needs?requestId=${doc.id}`)).body.data.needs
+    if (!needs.length) return
+    const po = await callAt('POST', '/purchase/orders', {
+      supplierId: 'sample-fabric-mill',
+      poType: 'NONE',
+      deliveryWarehouseId: store,
+      lines: needs.map((n) => ({
+        itemId: n.item.id,
+        qty: n.toBuy,
+        unitRate: 100,
+        gstRate: 5,
+        sampleMaterialId: n.sampleMaterialId,
+      })),
+    })
+    assert.equal(po.status, 201, JSON.stringify(po.body))
+    assert.equal((await callAt('PATCH', `/purchase/orders/${po.body.data.id}/send`)).status, 200)
+    const grn = await callAt('POST', '/purchase/grn', {
+      poId: po.body.data.id,
+      challanNo: `CH-SMP-${Date.now()}-${++paperNo}`,
+      challanDate: new Date().toISOString().slice(0, 10),
+      lines: po.body.data.lines.map((l) => ({ poLineId: l.id, warehouseId: store, receivedQty: +l.qty })),
+    })
+    assert.equal(grn.status, 201, JSON.stringify(grn.body))
+    doc = (await call('GET', `/${doc.id}`)).body.data
+  }
   const action = async (action, data = {}, expected = 200, perms, roundId = doc.rounds[0].id) => {
     const before = doc.version
     const result = await call(
@@ -339,6 +384,7 @@ async function main() {
     assert.deepEqual(doc.rounds[0].specification, releasedSpec)
   })
   await action('SAVE_SPEC', spec, 409)
+  await stockSample()
   let round = doc.rounds[0],
     mat = round.materials[0]
   await action(
@@ -353,16 +399,25 @@ async function main() {
     },
     409
   )
-  await action(
+  const tooMuch = await action(
     'MATERIAL',
     { materialId: mat.id, kind: 'ISSUE', qty: 6, reason: 'Too much', warehouseId: store },
     409
   )
+  check('no more is issued than the request bought and holds in the sample store', () => {
+    assert.equal(tooMuch.body.code, 'POOL_SHORT')
+    assert.match(tooMuch.body.message, /Only 5 mtr of Example Cotton bought for this request is in Example Sample Store/)
+    assert.deepEqual(
+      doc.pool.stores.map((s) => [s.itemId, s.warehouseId, s.received, s.issued, s.available]),
+      [['sample-fabric', store, 5, 0, 5]]
+    )
+    assert.deepEqual(doc.pool.lines[mat.id], { remaining: 5, fromPool: 5, awaited: 0, toBuy: 0 })
+  })
   await action(
     'MATERIAL',
     { materialId: mat.id, kind: 'ISSUE', qty: 5, reason: 'Issue for sample' },
     403,
-    'sampling:view,sampling:edit'
+    'sampling:view'
   )
   // Pilot roles as the fixtures made them, read from the database.
   const grantsOf = async (name) =>
@@ -376,39 +431,40 @@ async function main() {
       .sort()
   const merchGrants = await grantsOf('Merchandiser'),
     storeGrants = await grantsOf('Local Store')
-  // Issuing needs inventory edit as well as sampling edit, and no desk below
-  // Admin holds both, so until issuing from the Sample Store is reworked
-  // (phase 4) only Admin issues sample material. Recorded here so the gap is
-  // known rather than found in testing, and so a change to it is deliberate.
+  // A sample store is Sampling's own (phase 4): sampling rights issue from it,
+  // so the merchandiser does; the store login, with no sampling rights, does not.
   const issueForSample = { materialId: mat.id, kind: 'ISSUE', qty: 5, reason: 'Issue for sample' }
-  const merchIssue = await action('MATERIAL', issueForSample, 403, merchGrants.join(','))
+  const merchIssue = await action('MATERIAL', issueForSample, 400, merchGrants.join(','))
   const storeIssue = await action('MATERIAL', issueForSample, 403, storeGrants.join(','))
-  check('until phase 4 neither merchandiser nor store login can issue sample material', () => {
-    assert.equal(merchIssue.body.code, 'FORBIDDEN')
-    assert.match(merchIssue.body.message, /inventory edit/)
+  check('the merchandiser issues sample material; the store login cannot', () => {
+    // Past the permission check, stopped only for the store it has not named.
+    assert.equal(merchIssue.body.code, 'STORE_REQUIRED')
     assert.equal(storeIssue.status, 403)
   })
   const stock = await db.stockLedger.aggregate({
-    where: { itemId: 'sample-fabric', warehouseId: 'sample-store' },
+    where: { itemId: 'sample-fabric', warehouseId: store },
     _sum: { inQty: true, outQty: true },
   })
   // The store is named at the first issue, kept on the line, and no other is taken after it.
   const issue5 = { materialId: mat.id, kind: 'ISSUE', qty: 5, reason: 'Issue for sample' }
   const noStore = await action('MATERIAL', issue5, 400)
   await action('MATERIAL', { ...issue5, warehouseId: 'missing-store' }, 409)
+  const fromGeneral = await action('MATERIAL', { ...issue5, warehouseId: generalStore }, 409)
   await staleRefused('MATERIAL', { ...issue5, warehouseId: store }, round.id)
   await action('MATERIAL', { ...issue5, warehouseId: store })
   const otherStore = await action(
     'MATERIAL',
-    { ...issue5, qty: 0.001, warehouseId: 'sample-room-store' },
+    { ...issue5, qty: 0.001, warehouseId: generalStore },
     409
   )
-  check('the first issue needs its store, keeps it on the line, and refuses another later', () => {
+  check('the first issue needs its sample store, keeps it on the line, and refuses another later', () => {
     assert.equal(noStore.body.code, 'STORE_REQUIRED')
+    assert.equal(fromGeneral.body.code, 'NOT_SAMPLE_STORE')
+    assert.match(fromGeneral.body.message, /Example Store is a general store/)
     assert.equal(doc.rounds[0].materials[0].warehouseId, store)
-    assert.equal(doc.rounds[0].materials[0].warehouse.name, 'Example Store')
+    assert.equal(doc.rounds[0].materials[0].warehouse.name, 'Example Sample Store')
     assert.equal(otherStore.body.code, 'OTHER_STORE')
-    assert.match(otherStore.body.message, /issued from Example Store. Issue the rest from there/)
+    assert.match(otherStore.body.message, /issued from Example Sample Store. Issue the rest from there/)
   })
   const outgoing = await db.stockLedger.findMany({
     where: { referenceType: 'SAMPLING', referenceId: round.id },
@@ -448,13 +504,13 @@ async function main() {
       kind: 'RETURN',
       qty: 1,
       reason: 'Wrong store',
-      warehouseId: 'sample-room-store',
+      warehouseId: generalStore,
     },
     409
   )
   await action('MATERIAL', { materialId: mat.id, kind: 'RETURN', qty: 1, reason: 'Unused metre' })
   const stockAfter = await db.stockLedger.aggregate({
-    where: { itemId: 'sample-fabric', warehouseId: 'sample-store' },
+    where: { itemId: 'sample-fabric', warehouseId: store },
     _sum: { inQty: true, outQty: true },
   })
   check('use is not deducted again; return restores original value', () => {
@@ -541,6 +597,11 @@ async function main() {
   round = doc.rounds[0]
   mat = round.materials[0]
   check('saving the new round kept its copied row', () => assert.equal(mat.id, copiedRows[0].id))
+  // Round 1 gave back a metre to the sample store: round 2 buys only the other four.
+  check('what an earlier round left in the sample store serves the next', () => {
+    assert.deepEqual(doc.pool.lines[mat.id], { remaining: 5, fromPool: 1, awaited: 0, toBuy: 4 })
+  })
+  await stockSample()
   await action('MATERIAL', {
     materialId: mat.id,
     kind: 'ISSUE',
@@ -684,6 +745,17 @@ async function main() {
     },
     400
   )
+  await action(
+    'MATERIAL',
+    {
+      materialId: mat.id,
+      kind: 'ISSUE',
+      qty: 5,
+      reason: 'Not from a general store either',
+      warehouseId: generalStore,
+    },
+    409
+  )
   check('material the buyer sends is the buyer’s stock, and cannot draw ours', () => {
     assert.equal(doc.rounds[0].materials[0].source, 'BUYER_SUPPLIED')
     assert.equal(doc.rounds[0].materials[0].ownership, 'CUSTOMER_OWNED')
@@ -697,6 +769,7 @@ async function main() {
   })
   doc = cancelWithStock.body.data
   await action('RELEASE', spec)
+  await stockSample()
   mat = doc.rounds[0].materials[0]
   await action('MATERIAL', {
     materialId: mat.id,
@@ -717,6 +790,64 @@ async function main() {
   check('cancellation does not delete material or event history', () =>
     assert.equal(doc.rounds[0].materials.length, 1)
   )
+  // What it bought is still in the sample store: closed out after the cancellation.
+  const leftBefore = await db.stockLedger.aggregate({
+    where: { itemId: 'sample-fabric', warehouseId: generalStore },
+    _sum: { inQty: true, outQty: true },
+  })
+  const closeTooMuch = await action(
+    'CLOSE_MATERIAL',
+    { itemId: 'sample-fabric', warehouseId: store, qty: 6, kind: 'USED', reason: 'All of it' },
+    409
+  )
+  const closeToSample = await action(
+    'CLOSE_MATERIAL',
+    {
+      itemId: 'sample-fabric',
+      warehouseId: store,
+      qty: 2,
+      kind: 'MOVED',
+      toWarehouseId: store,
+      reason: 'Not into a sample store',
+    },
+    409
+  )
+  await action('CLOSE_MATERIAL', {
+    itemId: 'sample-fabric',
+    warehouseId: store,
+    qty: 2,
+    kind: 'MOVED',
+    toWarehouseId: generalStore,
+    reason: 'Good for bulk',
+  })
+  await action('CLOSE_MATERIAL', {
+    itemId: 'sample-fabric',
+    warehouseId: store,
+    qty: 3,
+    kind: 'USED',
+    reason: 'Cut-offs used for trials',
+  })
+  const leftAfter = await db.stockLedger.aggregate({
+    where: { itemId: 'sample-fabric', warehouseId: generalStore },
+    _sum: { inQty: true, outQty: true },
+  })
+  check('leftovers are closed out after a cancellation: moved to a general store, or used', () => {
+    assert.equal(closeTooMuch.body.code, 'POOL_SHORT')
+    assert.equal(closeToSample.body.code, 'BAD_STORE')
+    assert.equal(doc.state, 'CANCELLED')
+    assert.deepEqual(
+      doc.pool.stores.map((s) => [s.received, s.issued, s.closed, s.available]),
+      [[5, 0, 5, 0]]
+    )
+    assert.deepEqual(
+      doc.closeOuts.map((c) => [c.kind, +c.qty, c.toWarehouseId]),
+      [
+        ['USED', 3, null],
+        ['MOVED', 2, generalStore],
+      ]
+    )
+    assert.equal(+leftAfter._sum.inQty - +leftBefore._sum.inQty, 2)
+  })
 
   // A size-set approval must cover every size; old rounds still need material reconciliation.
   doc = (
@@ -742,6 +873,7 @@ async function main() {
       { ...spec.measurements[0], sizeId: 'sample-size-L', target: 51 },
     ],
   })
+  await stockSample()
   const setRound = doc.rounds[0]
   mat = setRound.materials[0]
   await action('MATERIAL', {
@@ -817,6 +949,7 @@ async function main() {
     )
     assert.equal(+pairRound.materials[0].plannedQty, 5)
   })
+  await stockSample()
   await action('MATERIAL', {
     materialId: pairRound.materials[0].id,
     kind: 'ISSUE',
@@ -2660,6 +2793,7 @@ async function main() {
     route: chartDraft.route,
     materials: chartDraft.materials,
   })
+  await stockSample()
   const chartRound = doc.rounds[0]
   await action('MATERIAL', {
     materialId: chartRound.materials[0].id,

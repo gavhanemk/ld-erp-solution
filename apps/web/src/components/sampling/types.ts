@@ -4,6 +4,8 @@ import type {
   SampleItemOption,
   SampleMaterialSource,
   SampleOrderLine,
+  SamplePool,
+  SampleCloseOutKind,
   SampleRequestStyle,
   SampleSpecification,
   StepExecution,
@@ -113,12 +115,17 @@ export interface SampleMaterial {
     standardRate?: string | number | null
     uom: { id?: string; name?: string; symbol: string } | null
   } | null
-  warehouse: { name: string } | null
+  /** Its store; purpose SAMPLING for a sample store. */
+  warehouse: { name: string; purpose?: 'GENERAL' | 'SAMPLING' } | null
   /**
    * The purchase orders buying it (not cancelled), with what has arrived:
    * Sourcing sums them with sampleOrdered / sampleReceived. No rates.
    */
   orders?: SampleOrderLine[]
+  /** Not needed after all: making may start without it (WAIVE_MATERIAL). */
+  waivedAt?: string | null
+  waivedReason?: string | null
+  waivedBy?: string | null
 }
 /** A step of a released round's making route (sample_stages). */
 export interface SampleStage {
@@ -202,6 +209,30 @@ export interface SampleRequest {
   cancelReason: string | null
   rounds: SampleRound[]
   events: SampleEvent[]
+  /**
+   * The request's own material in the sample stores, and how it covers the
+   * round being made (samplePool). Sent with the request itself; the register
+   * leaves it out.
+   */
+  pool?: SamplePool | null
+  /** Leftovers closed out, newest first. The value only to those who see accounts. */
+  closeOuts?: SampleCloseOut[]
+}
+export interface SampleCloseOut {
+  id: string
+  roundId: string
+  itemId: string
+  warehouseId: string
+  kind: SampleCloseOutKind
+  toWarehouseId: string | null
+  qty: string
+  value?: string
+  reason: string
+  createdAt: string
+  item: { name: string; code: string; uom: { symbol: string } | null }
+  warehouse: { name: string }
+  toWarehouse: { name: string } | null
+  createdBy: { name: string }
 }
 export interface SampleEvent {
   id: string

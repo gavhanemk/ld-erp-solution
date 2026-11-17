@@ -30,6 +30,7 @@ import {
   sampleNeeds,
 } from '../services/sampleSourcing.service'
 import { activeSampleStores } from '../lib/sampleStore'
+import { assertPoolsHold, lockRequests, requestsOfGrnLines } from '../services/samplePool.service'
 import { samplingPilotEnabled } from '../lib/pilot'
 import { lockRow } from '../lib/lockRow'
 import { rateFor, sectionTermsOn, tdsOn } from '../services/tds.service'
@@ -3674,6 +3675,9 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       include: { lines: true },
     })
     if (!before) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+    // A sample that has issued what this receipt brought in keeps it (samplePool).
+    const sampleRequests = await requestsOfGrnLines(tx, before.lines.map((l) => l.id))
+    await lockRequests(tx, sampleRequests)
     if (before.status === 'CANCELLED') {
       throw new AppError(
         `${before.grnNumber} is cancelled — raise a fresh receipt rather than correcting this one.`,
@@ -3985,6 +3989,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     // packed differently has its stickers made again from its packages.
     await trimGrnStickers(tx, before, req.user?.id ?? null)
     await repackGrnStickers(tx, before, repacked, req.user?.id ?? null)
+    await assertPoolsHold(tx, sampleRequests, `Correcting ${before.grnNumber}`)
 
     return tx.gRN.findUniqueOrThrow({ where: { id: before.id }, include: grnInclude })
   })
@@ -4023,6 +4028,9 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
     await lockRow(tx, 'grn', req.params.id)
     const grn = await tx.gRN.findUnique({ where: { id: req.params.id }, include: { lines: true } })
     if (!grn) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+    // Found before its lines go: a sample that issued them keeps them (samplePool).
+    const sampleRequests = await requestsOfGrnLines(tx, grn.lines.map((l) => l.id))
+    await lockRequests(tx, sampleRequests)
 
     // Asked as a question rather than left to the foreign key to answer. The
     // key does refuse — `PurchaseInvoiceLine.grnLineId` is Restrict — but it
@@ -4075,6 +4083,7 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
     }
 
     await syncOrderFromReceipts(tx, grn.poId)
+    await assertPoolsHold(tx, sampleRequests, `Deleting ${grn.grnNumber}`)
 
     return grn
   })
@@ -4255,6 +4264,9 @@ router.patch(
         include: { lines: true },
       })
       if (!before) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+      // A sample that has issued what this receipt brought in keeps it (samplePool).
+      const sampleRequests = await requestsOfGrnLines(tx, before.lines.map((l) => l.id))
+      await lockRequests(tx, sampleRequests)
 
       if (before.status === 'CANCELLED') {
         throw new AppError(`${before.grnNumber} is already cancelled.`, 400, 'ALREADY_CANCELLED')
@@ -4299,6 +4311,7 @@ router.patch(
       })
 
       await syncOrderFromReceipts(tx, before.poId)
+      await assertPoolsHold(tx, sampleRequests, `Cancelling ${before.grnNumber}`)
 
       return cancelled
     })

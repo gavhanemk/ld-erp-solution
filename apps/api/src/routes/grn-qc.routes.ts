@@ -5,6 +5,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { assertStockUnused, balanceOf, recordMovement } from '../services/stock.service'
+import { assertPoolsHold, lockRequests, requestsOfGrnLines } from '../services/samplePool.service'
 import { lockRow } from '../lib/lockRow'
 import { REJECTED_GRADE, heldOf, liveQcOf, readQc, type QcData, type QcLine } from '../services/grnQc.service'
 import { z } from 'zod'
@@ -224,6 +225,10 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
     await lockRow(tx, 'grn', data.grnId)
     const grn = await tx.gRN.findUnique({ where: { id: data.grnId }, select: grnSelect })
     if (!grn) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+    // Samples whose material this receipt brought in: their issues wait, and a
+    // check cannot reject what a sample has already issued (samplePool).
+    const sampleRequests = await requestsOfGrnLines(tx, data.lines.map((l) => l.grnLineId))
+    await lockRequests(tx, sampleRequests)
     if (grn.status === 'CANCELLED') {
       throw new AppError(
         `${grn.grnNumber} is cancelled — there is nothing to check.`,
@@ -389,6 +394,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       })
     }
 
+    await assertPoolsHold(tx, sampleRequests, 'This quality check')
     return { created, grn, rejecting, rejectWarehouseId, hold }
   })
 

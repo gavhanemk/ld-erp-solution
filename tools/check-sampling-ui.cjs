@@ -1609,6 +1609,117 @@ check('an order is listed with its supplier and how much of it has come', () => 
   )
   assert.equal(flow.SOURCING_STATUS_LABEL.BUYER, 'Buyer sends it')
 })
+// ── The request's own material (phase 4) ─────────────────────────────────────
+check('a line of the round being made is read from the request’s pool when the server sends it', () => {
+  const bought = { id: 'fab', source: 'PURCHASE', itemId: 'fab', plannedQty: '5', issuedQty: '0', orders: [] }
+  const r = { id: 'r2', state: 'RELEASED', materials: [bought] }
+  const req = {
+    rounds: [r],
+    pool: {
+      stores: [{ itemId: 'fab', warehouseId: 'w', received: 1, issued: 0, closed: 0, available: 1 }],
+      lines: { fab: { remaining: 5, fromPool: 1, awaited: 0, toBuy: 4 } },
+      buyerStock: { lbl: 3 },
+      buyerStores: [{ itemId: 'lbl', warehouseId: 'w', available: 3 }],
+      toBuyByItem: { fab: 4 },
+    },
+  }
+  assert.deepEqual(flow.coverOf(req, r, bought), { remaining: 5, fromPool: 1, awaited: 0, toBuy: 4 })
+  assert.equal(flow.lineSourcing(bought, flow.coverOf(req, r, bought)).toBuy, 4)
+  assert.equal(flow.lineSourcing(bought, { remaining: 5, fromPool: 5, awaited: 0, toBuy: 0 }).status, 'RECEIVED')
+  assert.equal(flow.lineSourcing(bought, { remaining: 5, fromPool: 2, awaited: 3, toBuy: 0 }).status, 'ON_ORDER')
+  assert.equal(flow.lineSourcing(bought, { remaining: 0, fromPool: 0, awaited: 0, toBuy: 0 }).status, 'ISSUED')
+  assert.equal(flow.lineSourcing({ ...bought, waivedAt: '2026-11-17' }).status, 'WAIVED')
+  assert.equal(flow.SOURCING_STATUS_LABEL.RECEIVED, 'Ready to issue')
+  // An older round is not covered: it is read from its own orders.
+  assert.equal(flow.coverOf({ ...req, rounds: [{ id: 'r3' }, r] }, r, bought), null)
+  // What may be issued: the pool in that store, or the buyer's own stock.
+  assert.equal(flow.issueCap(req, bought, 'w'), 1)
+  assert.equal(flow.issueCap(req, bought, 'other'), 0)
+  assert.equal(flow.issueCap(req, { source: 'BUYER_SUPPLIED', itemId: 'lbl' }, 'w'), 3)
+  assert.equal(flow.issueCap(req, { source: 'BUYER_SUPPLIED', itemId: 'lbl' }, 'other'), 0)
+  assert.deepEqual(flow.buyingOpen(r, req).map((m) => m.id), ['fab'])
+})
+check('a waived line holds nothing back, and is offered to waive only before making', () => {
+  const r = {
+    state: 'RELEASED',
+    stages: [{ completedAt: null }],
+    handover: null,
+    materials: [],
+  }
+  const short = { id: 'm', itemId: 'fab', plannedQty: '5', issuedQty: '0', usedQty: '0', wasteQty: '0', returnedQty: '0' }
+  let a = flow.materialActions(r, short)
+  assert.equal(a.waive, true)
+  assert.equal(a.unwaive, false)
+  a = flow.materialActions(r, { ...short, waivedAt: '2026-11-17', waivedReason: 'Buyer dropped it' })
+  assert.deepEqual(a.kinds, [])
+  assert.equal(a.why, 'Not needed: Buyer dropped it.')
+  assert.equal(a.unwaive, true)
+  assert.equal(flow.materialActions({ ...r, stages: [{ completedAt: '2026-11-17' }] }, short).waive, false)
+  assert.equal(flow.materialActions(r, { ...short, issuedQty: '5' }).waive, false)
+  // The making gate passes a waived line by.
+  const released = { ...r, materials: [{ ...short, waivedAt: '2026-11-17' }] }
+  assert.equal(makingBlocker(released, 0), '')
+  assert.match(makingBlocker({ ...r, materials: [short] }, 0), /waive what is not needed/)
+})
+check('leftovers are closed out once the buyer has decided or the request is cancelled', () => {
+  const pool = {
+    stores: [
+      { itemId: 'fab', warehouseId: 'w', received: 5, issued: 4, closed: 0, available: 1 },
+      { itemId: 'btn', warehouseId: 'w', received: 12, issued: 0, closed: 12, available: 0 },
+    ],
+    lines: {},
+    buyerStock: {},
+    toBuyByItem: {},
+  }
+  assert.deepEqual(flow.leftovers({ pool }).map((s) => s.itemId), ['fab'])
+  assert.match(flow.leftoverText({ pool }), /^1 material bought for this request is still in the sample store/)
+  assert.equal(flow.leftoverText({ pool: null }), '')
+  assert.match(flow.closeOutBlocker({ cancelledAt: null, rounds: [{ state: 'RELEASED', handover: null }] }), /buyer has decided/)
+  assert.equal(flow.closeOutBlocker({ cancelledAt: null, rounds: [{ state: 'APPROVED', handover: null }] }), '')
+  assert.equal(flow.closeOutBlocker({ cancelledAt: '2026-11-17', rounds: [{ state: 'RELEASED', handover: null }] }), '')
+  // An approved round with leftovers says so as its next action.
+  const approved = {
+    id: 'a',
+    revision: 1,
+    state: 'APPROVED',
+    specification: specOf({ colours: [{ colour: 'White', sizes: [{ sizeId: 'm', qty: 2 }] }] }),
+    stages: [],
+    materials: [],
+    qc: { passed: true },
+    handover: null,
+  }
+  // Before the handover it is said alongside the handover; once accepted, it is the next action.
+  let f = sampleFlow({ styleId: 's', rounds: [approved], cancelledAt: null, pool })
+  assert.equal(f.section, 'Handover')
+  assert.match(f.description, /1 material bought for this request is still in the sample store/)
+  f = sampleFlow({
+    styleId: 's',
+    rounds: [{ ...approved, handover: { acceptedAt: '2026-11-17' } }],
+    cancelledAt: null,
+    pool,
+  })
+  assert.equal(f.section, 'Materials')
+  assert.equal(f.title, 'Close out what is left in the sample store')
+  const cancelled = sampleFlow({ styleId: 's', rounds: [approved], cancelledAt: '2026-11-17', cancelReason: 'Dropped', pool })
+  assert.match(cancelled.description, /^Dropped. 1 material bought for this request is still in the sample store/)
+  // A line returned before making is issued again; a waived one counts as prepared.
+  const back = { id: 'm', itemId: 'fab', plannedQty: '5', issuedQty: '5', usedQty: '0', wasteQty: '0', returnedQty: '1' }
+  const open = { state: 'RELEASED', stages: [{ completedAt: null }], handover: null, materials: [] }
+  assert.deepEqual(flow.materialActions(open, back).kinds, ['ISSUE', 'USE', 'WASTE', 'RETURN'])
+  assert.equal(flow.materialActions(open, back).remaining, 1)
+  // A line issued from a general store before sample stores is not issued from it again.
+  const legacy = { ...back, issuedQty: '2', returnedQty: '0', warehouseId: 'g', warehouse: { name: 'Example Store', purpose: 'GENERAL' } }
+  assert.deepEqual(flow.materialActions(open, legacy).kinds, ['USE', 'WASTE', 'RETURN'])
+  assert.match(flow.materialActions(open, { ...legacy, issuedQty: '2', usedQty: '2' }).why, /^Issued from Example Store/)
+  // Once nothing of it is out, it is issued again, from a sample store it picks.
+  const settled = flow.materialActions(open, { ...legacy, returnedQty: '2' })
+  assert.deepEqual([settled.kinds[0], settled.needsStore], ['ISSUE', true])
+  // The buyer's material: no more than this line still plans for, and what is in that store.
+  const buyerReq = { pool: { buyerStores: [{ itemId: 'lbl', warehouseId: 'w', available: 10 }] } }
+  assert.equal(flow.issueCap(buyerReq, { source: 'BUYER_SUPPLIED', itemId: 'lbl', plannedQty: '4', issuedQty: '1', returnedQty: '0' }, 'w'), 3)
+  assert.equal(flow.eventLabel('WAIVE_MATERIAL', { undo: true }), 'Line needed again')
+  assert.equal(flow.eventLabel('CLOSE_MATERIAL'), 'Leftover material closed out')
+})
 // The order form and the receipt: a sample's lines, named and stored apart (phase 3).
 const lines = require('../apps/web/src/components/purchase/sampleLines.ts')
 check('an order line bought for a sample is named by its request, part and colour', () => {

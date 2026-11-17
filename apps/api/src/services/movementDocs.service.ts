@@ -98,6 +98,13 @@ export const MOVEMENT_DOC_JOIN = Prisma.sql`
     SELECT sc."countNumber", NULL, NULL, NULL
       FROM ld_erp.stock_counts sc
       WHERE s."referenceType" = 'STOCK_COUNT' AND sc.id = s."referenceId"
+    UNION ALL
+    -- A sample's issues, returns and leftovers name the request and its buyer.
+    SELECT sr.number, CASE WHEN cu.id IS NULL THEN NULL ELSE 'customer' END, cu.id, cu.name
+      FROM ld_erp.sample_rounds rd
+      JOIN ld_erp.sample_requests sr ON sr.id = rd."requestId"
+      LEFT JOIN ld_erp.customers cu ON cu.id = sr."customerId"
+      WHERE s."referenceType" = 'SAMPLING' AND rd.id = s."referenceId"
     LIMIT 1
   ) p ON TRUE`
 
@@ -138,6 +145,7 @@ export const DOCUMENT_LABEL: Record<string, string> = {
   DELIVERY_CHALLAN_CANCEL: 'Dispatch cancelled',
   CREDIT_NOTE: 'Returned by customer',
   CREDIT_NOTE_CANCEL: 'Customer return cancelled',
+  SAMPLING: 'Sampling',
 }
 
 export const documentLabel = (t: string | null) =>

@@ -702,3 +702,50 @@ export interface SampleNeed {
   estRate: number | null
   orders: SampleOrderLine[]
 }
+
+// ── The request's own material in the sample stores (phase 4) ─────────────────
+
+/** One item of a request in one sample store (samplePool.service). */
+export interface SamplePoolStore {
+  itemId: string
+  warehouseId: string
+  /** What its receipts put there, net of quality-check rejects, returns to the supplier and notes. */
+  received: number
+  /** Issued from there to its lines, net of returns. */
+  issued: number
+  /** Closed out: used up in the sample, or moved to a general store. */
+  closed: number
+  /** What the request may still issue from there. */
+  available: number
+}
+/** How one line of the round being made is covered. */
+export interface SampleLineCover {
+  /** Still to issue for making; 0 for a line of another round, waived, or issued in full. */
+  remaining: number
+  /** Covered by what the request already holds (or, for the buyer's material, by the buyer's stock). */
+  fromPool: number
+  /** Covered by its orders still to arrive. */
+  awaited: number
+  /** Still to buy. */
+  toBuy: number
+}
+export interface SamplePool {
+  stores: SamplePoolStore[]
+  /** By sample line id. */
+  lines: Record<string, SampleLineCover>
+  /** The buyer's own stock of each item in the sample stores, by item id. */
+  buyerStock: Record<string, number>
+  /** The same, store by store: what an issue from one sample store can take. */
+  buyerStores: Array<{ itemId: string; warehouseId: string; available: number }>
+  /** What the round being made still has to buy of each item we buy, by item id (the sum of its lines' toBuy). */
+  toBuyByItem: Record<string, number>
+}
+/** How a request's leftover material is closed out. */
+export const SAMPLE_CLOSEOUT_KINDS = ['USED', 'MOVED'] as const
+export type SampleCloseOutKind = (typeof SAMPLE_CLOSEOUT_KINDS)[number]
+export const SAMPLE_CLOSEOUT_LABEL: Record<SampleCloseOutKind, string> = {
+  USED: 'Used in this sample',
+  MOVED: 'Moved to a general store',
+}
+/** The least a reason for waiving a line, or closing out leftovers, may say. */
+export const SAMPLE_REASON_MIN = 5

@@ -69,6 +69,8 @@ function visible(row: Awaited<ReturnType<typeof sampleDetail>>, req: AuthRequest
       ...r,
       materials: r.materials.map(({ issuedValue, returnedValue, ...m }) => m),
     })),
+    // What leftovers were carried at is a value too.
+    closeOuts: row.closeOuts.map(({ value, ...c }) => c),
   }
 }
 router.get('/lookups', async (_req, res) =>
@@ -209,7 +211,7 @@ router.post('/', requirePermission('sampling', 'create'), async (req: AuthReques
     if ((e as { code?: string }).code !== 'P2002') throw e
     const existing = await prisma.sampleRequest.findUnique({ where: { clientKey: data.clientKey } })
     if (!existing) throw e
-    row = await prisma.$transaction((tx) => sampleDetail(tx, existing.id), T)
+    row = await prisma.$transaction((tx) => sampleDetail(tx, existing.id, { pool: true }), T)
   }
   await writeAuditLog(req, {
     module: 'sampling',
@@ -408,7 +410,10 @@ router.get('/:id/routings/:routingId/steps', async (req, res) => {
 router.get('/:id', async (req: AuthRequest, res) =>
   res.json({
     success: true,
-    data: visible(await prisma.$transaction((tx) => sampleDetail(tx, req.params.id), T), req),
+    data: visible(
+      await prisma.$transaction((tx) => sampleDetail(tx, req.params.id, { pool: true }), T),
+      req
+    ),
   })
 )
 router.post('/:id/actions', async (req: AuthRequest, res) => {

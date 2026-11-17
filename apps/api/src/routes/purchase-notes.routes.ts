@@ -3,6 +3,7 @@ import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { lockRow } from '../lib/lockRow'
+import { assertPoolsHold, lockRequests, requestsOfBillLines, requestsOfGrnLines } from '../services/samplePool.service'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -912,11 +913,24 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
         noteDate: true,
         billId: true,
         returnId: true,
-        lines: { select: { itemId: true, qty: true, unitPrice: true } },
+        lines: { select: { itemId: true, qty: true, unitPrice: true, grnLineId: true, billLineId: true } },
       },
     })
     if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
     assertTransition(before.status, 'POSTED', before.noteNumber)
+    // Samples whose material it writes off: their issues wait, and none may be
+    // left having issued more than it holds (samplePool).
+    const sampleRequests = [
+      ...(await requestsOfGrnLines(
+        tx,
+        before.lines.map((l) => l.grnLineId).filter((x): x is string => !!x)
+      )),
+      ...(await requestsOfBillLines(
+        tx,
+        before.lines.map((l) => l.billLineId).filter((x): x is string => !!x)
+      )),
+    ]
+    await lockRequests(tx, sampleRequests)
 
     /*
      * GST is settled on the note before it touches the bill.
@@ -940,6 +954,7 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
       where: { id: before.id },
       data: { status: 'POSTED', postedById: req.user!.id, postedAt: new Date() },
     })
+    await assertPoolsHold(tx, sampleRequests, `Posting ${before.noteNumber}`)
 
     if (before.billId) await syncBillAdjustments(tx, before.billId)
     await postWithin(tx, 'PURCHASE_NOTE', before.id, req.user!.id)

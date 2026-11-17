@@ -334,7 +334,7 @@ async function main() {
       ]
     )
     expect(secondOver, 400, 'SAMPLE_OVER_ORDER')
-    assert.match(secondOver.body.message, /already on order in full/)
+    assert.match(secondOver.body.message, /covered by what it holds and has on order/)
   })
   const unchanged = (await call('GET', `/sampling/needs?requestId=${doc.id}`)).body.data.needs
   check('a line on order in full drops off the list to buy from', () => assert.equal(unchanged.length, 0))

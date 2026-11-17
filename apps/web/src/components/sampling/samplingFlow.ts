@@ -7,6 +7,7 @@ import {
   sampleOrdered,
   sampleReceived,
   sampleToBuy,
+  type SampleLineCover,
   type SampleOrderLine,
   sizesInUse,
   totalPieces,
@@ -70,15 +71,17 @@ export const materialHeld = (m: SampleMaterial) =>
 const shortLines = (round: Pick<SampleRound, 'materials'>, index: number) =>
   round.materials.filter(
     (m) =>
-      +m.issuedQty < +m.plannedQty ||
-      (index === 0 && round3(+m.issuedQty - +m.returnedQty) < +m.plannedQty)
+      // A waived line is not needed (WAIVE_MATERIAL).
+      !m.waivedAt &&
+      (+m.issuedQty < +m.plannedQty ||
+        (index === 0 && round3(+m.issuedQty - +m.returnedQty) < +m.plannedQty))
   )
 export function makingBlocker(round: SampleRound, index: number) {
   if (round.state === 'DRAFT') return 'Release the specification before making starts.'
   if (round.stages.slice(0, index).some((s) => !s.completedAt))
     return 'Complete the preceding making step first.'
   if (shortLines(round, index).length)
-    return 'Issue all planned materials before recording the first making step. Returned material cannot be counted as available.'
+    return 'Issue all planned materials, or waive what is not needed, before recording the first making step. Returned material cannot be counted as available.'
   return ''
 }
 
@@ -170,17 +173,17 @@ export function sampleFlow(
       const blocker = makingBlocker(round, index)
       const short = shortLines(round, index)
       // Before anything can be issued, what is bought has to be ordered and arrive.
-      const buying = blocker ? buyingOpen(round) : []
+      const buying = blocker ? buyingOpen(round, request) : []
       section = buying.length ? 'Sourcing' : blocker ? 'Materials' : 'Making'
       title = buying.length
-        ? buying.some((m) => lineSourcing(m).status === 'TO_ORDER')
+        ? buying.some((m) => lineSourcing(m, coverOf(request, round, m)).status === 'TO_ORDER')
           ? 'Buy the sample’s material'
           : 'Receive the sample’s material'
         : blocker
           ? 'Prepare material for making'
           : `Record ${round.stages[index].name.toLowerCase()}`
       description = buying.length
-        ? sourcingText(buying)
+        ? sourcingText(buying, request, round)
         : blocker
         ? [
             blocker,
@@ -244,19 +247,30 @@ export function sampleFlow(
       targetRoundId = unreconciled.id
       title = `Reconcile material on round ${unreconciled.revision}`
       description = 'Record used, wasted and returned quantities before preparing the handover.'
+    } else if (round.handover?.acceptedAt && leftovers(request).length) {
+      // Handed over and accepted: what is left is the one thing still open.
+      section = 'Materials'
+      title = 'Close out what is left in the sample store'
+      description = leftoverText(request)
+    } else if (leftovers(request).length) {
+      description = [description, leftoverText(request)].filter(Boolean).join(' ')
     }
   }
   if (request.cancelledAt) {
     section = 'History'
     title = 'Request cancelled'
-    description = request.cancelReason || 'This request is closed.'
+    const reason = (request.cancelReason || 'This request is closed').trim()
+    description = [/[.!?]$/.test(reason) ? reason : `${reason}.`, leftoverText(request)]
+      .filter(Boolean)
+      .join(' ')
   }
   const completed: Record<string, boolean> = {
     Brief: !!request.styleId || round.state !== 'DRAFT',
     Technical: round.state !== 'DRAFT',
-    Sourcing: round.state !== 'DRAFT' && buyingOpen(round).length === 0,
+    Sourcing: round.state !== 'DRAFT' && buyingOpen(round, request).length === 0,
     Materials:
-      round.materials.length > 0 && round.materials.every((m) => +m.issuedQty >= +m.plannedQty),
+      round.materials.length > 0 &&
+      round.materials.every((m) => !!m.waivedAt || +m.issuedQty >= +m.plannedQty),
     Making: round.stages.length > 0 && round.stages.every((s) => !!s.completedAt),
     Quality: !!round.qc?.passed,
     'Buyer review': round.state === 'APPROVED',
@@ -724,26 +738,49 @@ export function materialActions(
   round: Pick<SampleRound, 'state' | 'stages' | 'handover'>,
   m: SampleMaterial
 ) {
-  const remaining = round3(Math.max(0, +m.plannedQty - +m.issuedQty))
+  // Still to issue, net of what came back before making (the server issues
+  // past the plan from the pool; making needs the plan net of returns).
+  const remaining = round3(Math.max(0, +m.plannedQty - (+m.issuedQty - +m.returnedQty)))
   const held = materialHeld(m)
   const issueOpen = round.state === 'RELEASED' && !round.stages.some((s) => s.completedAt)
+  // What is out of the store on this line now; with nothing out, the line
+  // may be issued from another store, which it then keeps (MATERIAL).
+  const out = round3(+m.issuedQty - +m.returnedQty)
+  // A line tied to a general store before sample stores, with some of it out
+  // (NOT_SAMPLE_STORE): it is returned there first.
+  const generalStore = !!m.warehouseId && m.warehouse?.purpose === 'GENERAL' && out > 0
   const kinds: MaterialKind[] = []
   if (!round.handover) {
-    if (m.itemId && issueOpen && remaining > 0) kinds.push('ISSUE')
+    if (m.itemId && issueOpen && remaining > 0 && !m.waivedAt && !generalStore) kinds.push('ISSUE')
     if (held > 0) kinds.push('USE', 'WASTE', 'RETURN')
   }
   const why = kinds.length
     ? ''
     : round.handover
       ? 'This round is handed over; its material record is frozen.'
-      : !m.itemId
+      : m.waivedAt
+        ? `Not needed: ${m.waivedReason ?? 'waived'}.`
+        : generalStore && issueOpen && remaining > 0
+          ? `Issued from ${m.warehouse?.name ?? 'a general store'} before sample stores kept sample material apart. Return what is out there; then it is issued from the sample store. Or mark the rest not needed.`
+          : !m.itemId
         ? NO_ITEM_TEXT
         : round.state === 'DRAFT'
           ? 'Issued once the round is released.'
           : remaining > 0
             ? 'Issue materials before making starts; extra needs require a new round.'
             : 'Issued in full and accounted for.'
-  return { kinds, remaining, held, why, needsStore: kinds.includes('ISSUE') && !m.warehouseId }
+  // Waived only before making starts, and only while some of it is still to issue.
+  const waive = issueOpen && !round.handover && !m.waivedAt && remaining > 0
+  const unwaive = issueOpen && !round.handover && !!m.waivedAt
+  return {
+    kinds,
+    remaining,
+    held,
+    why,
+    needsStore: kinds.includes('ISSUE') && (!m.warehouseId || out <= 0),
+    waive,
+    unwaive,
+  }
 }
 /**
  * The store a line is tied to once its first issue named it, and why, in the
@@ -756,16 +793,80 @@ export function storeNote(m: SampleMaterial) {
     ? `This material was issued from ${store}. Issue the rest from there, and return it there.`
     : `This material is planned from ${store}. Issue it from there.`
 }
+// ── The request's own material (phase 4) ─────────────────────────────────────
+
+/** What is left of the request's own material in the sample stores. */
+export const leftovers = (request: Pick<SampleRequest, 'pool'>) =>
+  (request.pool?.stores ?? []).filter((s) => s.available > 0)
+/** The next-action words when something is left over; '' when nothing is. */
+export function leftoverText(request: Pick<SampleRequest, 'pool'>) {
+  const left = leftovers(request)
+  if (!left.length) return ''
+  return `${plural(left.length, 'material')} bought for this request ${left.length === 1 ? 'is' : 'are'} still in the sample store. Close ${left.length === 1 ? 'it' : 'them'} out under Material preparation: used in the sample, or moved to a general store.`
+}
+/**
+ * Why leftovers cannot be closed out yet, in the words CLOSE_MATERIAL refuses
+ * with; '' once the buyer has decided, the request is handed over or cancelled.
+ */
+export function closeOutBlocker(
+  request: Pick<SampleRequest, 'cancelledAt' | 'rounds'>
+) {
+  const latest = request.rounds[0]
+  const settled =
+    !!request.cancelledAt ||
+    ['APPROVED', 'REJECTED'].includes(latest?.state ?? '') ||
+    request.rounds.some((r) => r.handover)
+  return settled
+    ? ''
+    : 'Leftover material is closed out once the buyer has decided, or the request is cancelled. Until then it is kept for the next round.'
+}
+/**
+ * How much a line may issue now, from a sample store: what the request bought
+ * and still holds there for material we buy (POOL_SHORT refuses more), or the
+ * buyer's own stock in the sample stores for what the buyer sends.
+ */
+export function issueCap(
+  request: Pick<SampleRequest, 'pool'>,
+  m: Pick<SampleMaterial, 'source' | 'itemId'> &
+    Partial<Pick<SampleMaterial, 'plannedQty' | 'issuedQty' | 'returnedQty'>>,
+  warehouseId: string
+) {
+  if (!m.itemId || !warehouseId) return 0
+  if (m.source === 'BUYER_SUPPLIED') {
+    const here =
+      request.pool?.buyerStores?.find((s) => s.itemId === m.itemId && s.warehouseId === warehouseId)
+        ?.available ?? 0
+    // No more of the buyer's than the line still plans for (BUYER_PLAN).
+    const left =
+      m.plannedQty === undefined
+        ? here
+        : round3(Math.max(0, +m.plannedQty - (+(m.issuedQty ?? 0) - +(m.returnedQty ?? 0))))
+    return round3(Math.min(here, left))
+  }
+  return (
+    request.pool?.stores.find((s) => s.itemId === m.itemId && s.warehouseId === warehouseId)
+      ?.available ?? 0
+  )
+}
+
 // ── Sourcing (phase 3) ────────────────────────────────────────────────────────
 
 /** Where one line of the sample BOM stands with its buying. */
-export type SourcingStatus = 'BUYER' | 'NO_ITEM' | 'TO_ORDER' | 'ON_ORDER' | 'RECEIVED' | 'ISSUED'
+export type SourcingStatus =
+  | 'BUYER'
+  | 'NO_ITEM'
+  | 'WAIVED'
+  | 'TO_ORDER'
+  | 'ON_ORDER'
+  | 'RECEIVED'
+  | 'ISSUED'
 export const SOURCING_STATUS_LABEL: Record<SourcingStatus, string> = {
   BUYER: 'Buyer sends it',
   NO_ITEM: 'No material picked',
+  WAIVED: 'Not needed',
   TO_ORDER: 'To order',
   ON_ORDER: 'On order',
-  RECEIVED: 'Received',
+  RECEIVED: 'Ready to issue',
   ISSUED: 'Issued',
 }
 /**
@@ -774,34 +875,76 @@ export const SOURCING_STATUS_LABEL: Record<SourcingStatus, string> = {
  * A line already issued in full needs nothing more bought, however it was
  * stocked.
  */
-export function lineSourcing(m: Pick<SampleMaterial, 'source' | 'itemId' | 'plannedQty' | 'issuedQty' | 'orders'>) {
+export function lineSourcing(
+  m: Pick<SampleMaterial, 'source' | 'itemId' | 'plannedQty' | 'issuedQty' | 'orders'> & {
+    waivedAt?: string | null
+  },
+  /**
+   * How the request's own pool covers the line (samplePool), for a line of the
+   * round being made. Without it the line is read from its own orders alone.
+   */
+  cover?: SampleLineCover | null
+) {
   const orders = m.orders ?? []
   const required = +m.plannedQty
   const ordered = sampleOrdered(orders)
   const received = sampleReceived(orders)
-  const toBuy = sampleToBuy(required, orders, m.issuedQty)
+  const toBuy = cover ? cover.toBuy : sampleToBuy(required, orders, m.issuedQty)
   const status: SourcingStatus =
     m.source === 'BUYER_SUPPLIED'
       ? 'BUYER'
       : !m.itemId
         ? 'NO_ITEM'
-        : +m.issuedQty >= required
-          ? 'ISSUED'
-          : received >= required
-            ? 'RECEIVED'
-            : toBuy > 0
-              ? 'TO_ORDER'
-              : 'ON_ORDER'
+        : m.waivedAt
+          ? 'WAIVED'
+          : cover
+            ? cover.remaining <= 0
+              ? 'ISSUED'
+              : toBuy > 0
+                ? 'TO_ORDER'
+                : cover.awaited > 0
+                  ? 'ON_ORDER'
+                  : 'RECEIVED'
+            : +m.issuedQty >= required
+              ? 'ISSUED'
+              : received >= required
+                ? 'RECEIVED'
+                : toBuy > 0
+                  ? 'TO_ORDER'
+                  : 'ON_ORDER'
   return { required, ordered, received, toBuy, status }
 }
+/** A line's cover from the request's pool, for a line of the latest round while it is being made. */
+export const coverOf = (
+  request: Pick<SampleRequest, 'pool' | 'rounds'>,
+  round: Pick<SampleRound, 'id' | 'state'>,
+  m: Pick<SampleMaterial, 'id'>
+) =>
+  round.state === 'RELEASED' && request.rounds[0]?.id === round.id
+    ? (request.pool?.lines[m.id] ?? null)
+    : null
 /** The bought lines of a released round still to order or to arrive. */
-export const buyingOpen = (round: Pick<SampleRound, 'state' | 'materials'>) =>
+export const buyingOpen = (
+  round: Pick<SampleRound, 'id' | 'state' | 'materials'>,
+  request?: Pick<SampleRequest, 'pool' | 'rounds'>
+) =>
   round.state === 'RELEASED'
-    ? round.materials.filter((m) => ['TO_ORDER', 'ON_ORDER'].includes(lineSourcing(m).status))
+    ? round.materials.filter((m) =>
+        ['TO_ORDER', 'ON_ORDER'].includes(
+          lineSourcing(m, request ? coverOf(request, round, m) : null).status
+        )
+      )
     : []
 /** The next-action words for the lines still being bought. */
-export function sourcingText(lines: SampleMaterial[]) {
-  const toOrder = lines.filter((m) => lineSourcing(m).status === 'TO_ORDER').length
+export function sourcingText(
+  lines: SampleMaterial[],
+  request?: Pick<SampleRequest, 'pool' | 'rounds'>,
+  round?: Pick<SampleRound, 'id' | 'state'>
+) {
+  const toOrder = lines.filter(
+    (m) =>
+      lineSourcing(m, request && round ? coverOf(request, round, m) : null).status === 'TO_ORDER'
+  ).length
   const onOrder = lines.length - toOrder
   // An order saved as a draft has not reached the supplier.
   const drafts = new Set(
@@ -869,9 +1012,13 @@ export const SAMPLE_EVENT_LABEL: Record<string, string> = {
   CREATE_STYLE: 'Development style created',
   LINK_STYLE: 'Style for this sample changed',
   UPDATE_STYLE: 'Style details changed',
+  WAIVE_MATERIAL: 'Line marked not needed',
+  CLOSE_MATERIAL: 'Leftover material closed out',
 }
-export const eventLabel = (action: string) =>
-  SAMPLE_EVENT_LABEL[action] ?? action.replaceAll('_', ' ').toLowerCase()
+export const eventLabel = (action: string, data?: unknown) =>
+  action === 'WAIVE_MATERIAL' && (data as { undo?: boolean } | undefined)?.undo
+    ? 'Line needed again'
+    : (SAMPLE_EVENT_LABEL[action] ?? action.replaceAll('_', ' ').toLowerCase())
 
 const STYLE_FIELDS = [
   ['name', 'Name'],
@@ -917,6 +1064,18 @@ export function eventNote(
   const code = (v: unknown) =>
     v && typeof v === 'object' && 'code' in v ? String((v as { code: unknown }).code) : 'No style'
   switch (e.action) {
+    case 'WAIVE_MATERIAL':
+      return [text(d.item), text(d.component), d.undo ? '' : text(d.reason) && `Reason: ${text(d.reason)}`]
+        .filter(Boolean)
+        .join(' · ')
+    case 'CLOSE_MATERIAL':
+      return [
+        `${typeof d.qty === 'number' ? d.qty : ''} of ${text(d.item)} from ${text(d.from)}`,
+        d.kind === 'MOVED' ? 'moved to a general store' : 'used in the sample',
+        text(d.reason) && `Reason: ${text(d.reason)}`,
+      ]
+        .filter(Boolean)
+        .join(' · ')
     case 'ATTACH':
       return `${text(d.fileName)} · ${kind(d.kind)} · ${fileScope({ roundId: text(d.roundId) || null }, rounds)}`
     case 'DETACH':

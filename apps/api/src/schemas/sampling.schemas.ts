@@ -2,6 +2,8 @@ import { z } from 'zod'
 import {
   PROCESS_KINDS,
   SAMPLE_ATTACHMENT_KINDS,
+  SAMPLE_CLOSEOUT_KINDS,
+  SAMPLE_REASON_MIN,
   SAMPLE_MATERIAL_SOURCES,
   SAMPLE_MEASURE_MAX_ENTRIES,
   SAMPLE_MEASURE_MAX_POINTS,
@@ -214,6 +216,8 @@ export const sampleActionSchema = z.object({
     'CREATE_STYLE',
     'LINK_STYLE',
     'UPDATE_STYLE',
+    'WAIVE_MATERIAL',
+    'CLOSE_MATERIAL',
   ]),
   data: z.unknown(),
 })
@@ -226,6 +230,35 @@ export const sampleMaterialSchema = z.object({
   // keeps it, and every later issue and return goes through it.
   warehouseId: id.optional(),
 })
+/** A line not needed after all, or needed again (undo). */
+export const sampleWaiveSchema = z
+  .object({
+    materialId: id,
+    reason: z.string().trim().max(500).default(''),
+    undo: z.boolean().default(false),
+  })
+  .strict()
+  .refine((d) => d.undo || d.reason.length >= SAMPLE_REASON_MIN, {
+    message: 'Say why this line is not needed — a few words is enough',
+    path: ['reason'],
+  })
+/** Leftover material in a sample store closed out: used in the sample, or moved to a general store. */
+export const sampleCloseOutSchema = z
+  .object({
+    itemId: id,
+    warehouseId: id,
+    qty,
+    kind: z.enum(SAMPLE_CLOSEOUT_KINDS, {
+      errorMap: () => ({ message: 'Say whether it was used in the sample or moved to a general store' }),
+    }),
+    toWarehouseId: id.nullable().optional(),
+    reason: z.string().trim().min(SAMPLE_REASON_MIN, 'Say why, in a few words').max(500),
+  })
+  .strict()
+  .refine((d) => d.kind !== 'MOVED' || !!d.toWarehouseId, {
+    message: 'Pick the general store it goes to',
+    path: ['toWarehouseId'],
+  })
 export const sampleStageSchema = z.object({
   stageId: id,
   doneQty: z.number().int().min(0),

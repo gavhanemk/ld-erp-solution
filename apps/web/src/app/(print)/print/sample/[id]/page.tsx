@@ -169,7 +169,7 @@ export default function PrintSample() {
     const note = eventNote(event, request.rounds, sizeRun)
     add(
       'History',
-      eventLabel(event.action),
+      eventLabel(event.action, event.detail.data),
       [event.detail.by ?? '', note].filter(Boolean).join('\n'),
       longDate(event.createdAt) ?? ''
     )

@@ -49,6 +49,7 @@ model SampleRequest {
   rounds      SampleRound[]
   events      SampleEvent[]
   attachments SampleAttachment[]
+  closeOuts   SampleCloseOut[]
   @@index([state, createdAt])
   @@index([styleId])
   @@map("sample_requests")
@@ -71,6 +72,7 @@ model SampleRound {
   stages       SampleStage[]
   materials    SampleMaterial[]
   attachments  SampleAttachment[]
+  closeOuts    SampleCloseOut[]
   @@unique([requestId, revision])
   @@map("sample_rounds")
 }
@@ -147,10 +149,48 @@ model SampleMaterial {
   wasteQty    Decimal @default(0) @db.Decimal(10,3)
   issuedValue Decimal @default(0) @db.Decimal(14,2)
   returnedValue Decimal @default(0) @db.Decimal(14,2)
+  /// Set when the line is not needed after all (the buyer dropped the trim,
+  /// another material does): making may start without it. With the reason
+  /// and who said so; cleared if it is needed again.
+  waivedAt     DateTime?
+  waivedReason String?
+  waivedBy     String?
   /// The purchase order lines buying it (PurchaseOrderLine.sampleMaterialId).
   poLines     PurchaseOrderLine[]
   @@index([roundId])
   @@map("sample_materials")
+}
+
+/// What was left of a request's own material in a sample store, closed out:
+/// used up in the sample (USED: issued and counted as consumed), or moved to a
+/// general store at what it is carried at (MOVED). Each row is the movement's
+/// record, so the request's pool (samplePool.service) can take it off.
+model SampleCloseOut {
+  id            String @id @default(cuid())
+  requestId     String
+  request       SampleRequest @relation(fields: [requestId], references: [id])
+  /// The round the movement is booked against (the latest when it was closed).
+  roundId       String
+  round         SampleRound @relation(fields: [roundId], references: [id])
+  itemId        String
+  item          Item @relation(fields: [itemId], references: [id])
+  /// The sample store it was in.
+  warehouseId   String
+  warehouse     Warehouse @relation("SampleCloseOutFrom", fields: [warehouseId], references: [id])
+  /// USED or MOVED (sample_closeout_kind).
+  kind          String
+  /// The general store it went to, for MOVED.
+  toWarehouseId String?
+  toWarehouse   Warehouse? @relation("SampleCloseOutTo", fields: [toWarehouseId], references: [id], onDelete: Restrict)
+  qty           Decimal @db.Decimal(10,3)
+  /// What it was carried at when it left the sample store.
+  value         Decimal @default(0) @db.Decimal(14,2)
+  reason        String
+  createdById   String
+  createdBy     User @relation("SampleCloseOutBy", fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
+  @@index([requestId])
+  @@map("sample_closeouts")
 }
 
 model SampleEvent {
@@ -523,6 +563,7 @@ model User {
   routingsCreated      Routing[]                   @relation("RoutingCreatedBy")
   routingsUpdated      Routing[]                   @relation("RoutingUpdatedBy")
   uploadedSampleFiles  SampleAttachment[]          @relation("SampleAttachmentUploadedBy")
+  sampleCloseOuts      SampleCloseOut[]            @relation("SampleCloseOutBy")
 
 
   adjustmentsApproved StockAdjustment[] @relation("AdjustmentApprovedBy")
@@ -909,6 +950,7 @@ model UOM {
 
 model Item {
   sampleMaterials SampleMaterial[]
+  sampleCloseOuts SampleCloseOut[]
 
   id           String       @id @default(cuid())
   code         String       @unique
@@ -1388,6 +1430,8 @@ model Supplier {
 
 model Warehouse {
   sampleMaterials SampleMaterial[]
+  sampleCloseOutsFrom SampleCloseOut[] @relation("SampleCloseOutFrom")
+  sampleCloseOutsTo   SampleCloseOut[] @relation("SampleCloseOutTo")
 
   id        String  @id @default(cuid())
   companyId String

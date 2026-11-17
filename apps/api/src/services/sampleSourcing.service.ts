@@ -1,11 +1,11 @@
 import { Prisma } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { samplingPilotEnabled } from '../lib/pilot'
+import { lockRequests, requestPools } from './samplePool.service'
 import {
   SAMPLE_OVER_REASON_MIN,
   sampleOrdered,
   sampleReceived,
-  sampleToBuy,
   type SampleNeed,
   type SampleOrderLine,
 } from '../../../../packages/shared/src/sampling'
@@ -161,6 +161,18 @@ export async function assertSampleLines(
       400,
       'SAMPLE_LINE_TWICE'
     )
+  // What is still to buy is worked out per request and item, so the requests
+  // are locked (in id order, before their lines, as actOnSample takes them):
+  // two orders raised at once for one sample cannot both take what is left.
+  await lockRequests(
+    tx,
+    (
+      await tx.sampleMaterial.findMany({
+        where: { id: { in: ids } },
+        select: { round: { select: { requestId: true } } },
+      })
+    ).map((r) => r.round.requestId)
+  )
   await tx.$queryRaw`SELECT id FROM ld_erp.sample_materials WHERE id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`
   const rows = await tx.sampleMaterial.findMany({
     where: { id: { in: ids } },
@@ -176,18 +188,13 @@ export async function assertSampleLines(
         select: {
           state: true,
           revision: true,
+          requestId: true,
           request: { select: { number: true, cancelledAt: true } },
         },
       },
-      poLines: {
-        where: {
-          ...liveSampleOrders,
-          ...(opts.exceptPoId ? { poId: { not: opts.exceptPoId } } : {}),
-        },
-        select: { qty: true, receivedQty: true, shortClosed: true, po: { select: { status: true } } },
-      },
     },
   })
+  const groups: Array<{ l: (typeof linked)[number]; m: (typeof rows)[number]; existing: boolean }> = []
   for (const l of linked) {
     const m = rows.find((r) => r.id === l.sampleMaterialId)
     if (!m)
@@ -226,32 +233,47 @@ export async function assertSampleLines(
         409,
         'SAMPLE_NOT_OPEN'
       )
-    // What issued to it covers counts too (sampleToBuy): never bought twice.
-    const open = round3(
-      Number(m.plannedQty) -
-        Math.max(
-          sampleOrdered(
-            m.poLines.map((p) => ({
-              qty: Number(p.qty),
-              receivedQty: Number(p.receivedQty),
-              shortClosed: p.shortClosed,
-              cancelled: p.po.status === 'CANCELLED',
-            }))
-          ),
-          Number(m.issuedQty)
+    groups.push({ l, m, existing: existing && closed })
+  }
+  // What each sample still has to buy of each item after what it holds and
+  // what its other orders will bring (samplePool), the same figure its needs
+  // show. An order may buy that much without a word; more needs a reason on
+  // each of its lines for that item. A line kept on an order whose sample has
+  // closed cannot grow (above), so it is not asked again.
+  const pools = await requestPools(
+    tx,
+    groups.map((g) => g.m.round.requestId),
+    { exceptPoId: opts.exceptPoId }
+  )
+  const byItem = new Map<string, typeof groups>()
+  for (const g of groups) {
+    if (g.existing) {
+      reasons.set(g.m.id, g.l.sampleOverReason?.trim() || null)
+      continue
+    }
+    const key = `${g.m.round.requestId}|${g.m.itemId}`
+    byItem.set(key, [...(byItem.get(key) ?? []), g])
+  }
+  for (const [key, group] of byItem) {
+    const [requestId, itemId] = key.split('|')
+    const open = round3(pools.get(requestId)?.toBuyByItem[itemId] ?? 0)
+    const total = round3(group.reduce((t, g) => t + g.l.qty, 0))
+    const over = total > open + 1e-9
+    const { m } = group[0]
+    const name = m.item?.name ?? 'its material'
+    const unit = m.item?.uom?.symbol ?? ''
+    for (const g of group) {
+      const reason = g.l.sampleOverReason?.trim() ?? ''
+      if (over && reason.length < SAMPLE_OVER_REASON_MIN)
+        throw new AppError(
+          open > 0
+            ? `${name}: ${total} ${unit} ordered for ${m.round.request.number}, which still needs ${open} ${unit} after what it holds and has on order. Say why more is ordered (the supplier's minimum, a full roll), or order ${open} ${unit}.`
+            : `${name} for ${m.round.request.number} is covered by what it holds and has on order. Say why more is ordered (the supplier's minimum, a full roll), or take the sample off this line.`,
+          400,
+          'SAMPLE_OVER_ORDER'
         )
-    )
-    const reason = l.sampleOverReason?.trim() ?? ''
-    const over = round3(l.qty) > Math.max(0, open) + 1e-9
-    if (over && reason.length < SAMPLE_OVER_REASON_MIN)
-      throw new AppError(
-        open > 0
-          ? `${name}: ${round3(l.qty)} ${unit} ordered for ${label}, which still needs ${open} ${unit}. Say why more is ordered (the supplier's minimum, a full roll), or order ${open} ${unit}.`
-          : `${name} for ${label} is already on order in full. Say why more is ordered (the supplier's minimum, a full roll), or take the sample off this line.`,
-        400,
-        'SAMPLE_OVER_ORDER'
-      )
-    reasons.set(m.id, over ? reason : null)
+      reasons.set(g.m.id, over ? reason : null)
+    }
   }
   return reasons
 }
@@ -359,6 +381,8 @@ export async function sampleNeeds(
     // cap here would drop lines still to buy behind ones already on order.
     orderBy: [{ round: { request: { number: 'asc' } } }, { sequence: 'asc' }, { id: 'asc' }],
   })
+  // What each still has to buy, after what it holds and has on order (samplePool).
+  const pools = await requestPools(tx, rows.map((m) => m.round.request.id))
   return rows
     .map((m): SampleNeed => {
       const orders = m.poLines.map(sampleOrderLine)
@@ -385,7 +409,7 @@ export async function sampleNeeds(
         requiredQty,
         orderedQty,
         receivedQty: sampleReceived(orders),
-        toBuy: sampleToBuy(requiredQty, orders, Number(m.issuedQty)),
+        toBuy: pools.get(request.id)?.lines[m.id]?.toBuy ?? 0,
         estRate: m.estRate === null ? null : Number(m.estRate),
         orders,
       }
@@ -402,25 +426,22 @@ export async function sampleNeeds(
  */
 export async function assertSampleReopen(
   tx: Tx,
-  line: { sampleMaterialId: string | null; qty: Prisma.Decimal | number; poId: string }
+  line: { sampleMaterialId: string | null; qty: Prisma.Decimal | number; receivedQty: Prisma.Decimal | number }
 ) {
   if (!line.sampleMaterialId) return
-  await tx.$queryRaw`SELECT id FROM ld_erp.sample_materials WHERE id = ${line.sampleMaterialId} FOR UPDATE`
   const m = await tx.sampleMaterial.findUnique({
     where: { id: line.sampleMaterialId },
     select: {
-      plannedQty: true,
-      issuedQty: true,
+      itemId: true,
       component: true,
       item: { select: { name: true, uom: { select: { symbol: true } } } },
-      round: { select: { state: true, revision: true, request: { select: { number: true, cancelledAt: true } } } },
-      poLines: {
-        where: { ...liveSampleOrders, poId: { not: line.poId } },
-        select: { qty: true, receivedQty: true, shortClosed: true, po: { select: { status: true } } },
+      round: {
+        select: { state: true, revision: true, requestId: true, request: { select: { number: true, cancelledAt: true } } },
       },
     },
   })
-  if (!m) return
+  if (!m || !m.itemId) return
+  await lockRequests(tx, [m.round.requestId])
   const label = sampleLabel(m)
   if (m.round.request.cancelledAt || m.round.state !== 'RELEASED')
     throw new AppError(
@@ -428,24 +449,15 @@ export async function assertSampleReopen(
       409,
       'SAMPLE_NOT_OPEN'
     )
-  const open = round3(
-    Number(m.plannedQty) -
-      Math.max(
-        sampleOrdered(
-          m.poLines.map((p) => ({
-            qty: Number(p.qty),
-            receivedQty: Number(p.receivedQty),
-            shortClosed: p.shortClosed,
-            cancelled: p.po.status === 'CANCELLED',
-          }))
-        ),
-        Number(m.issuedQty)
-      )
-  )
-  if (round3(Number(line.qty)) > Math.max(0, open) + 1e-9) {
+  // While closed it counts only what came, so the pool already holds that and
+  // its balance is not awaited: reopening asks for the balance on top.
+  const pool = (await requestPools(tx, [m.round.requestId])).get(m.round.requestId)
+  const open = round3(pool?.toBuyByItem[m.itemId] ?? 0)
+  const more = round3(Math.max(0, Number(line.qty) - Number(line.receivedQty)))
+  if (more > open + 1e-9) {
     const unit = m.item?.uom?.symbol ?? ''
     throw new AppError(
-      `${label} now needs ${Math.max(0, open)} ${unit} from this order, after its other orders, and this line is for ${round3(Number(line.qty))} ${unit}. Leave it closed, and order what is still missing on a new line.`,
+      `${label} still needs ${open} ${unit} after what it holds and has on order, and reopening this line would wait for ${more} ${unit} more. Leave it closed, and order what is still missing on a new line.`,
       409,
       'SAMPLE_OVER_ORDER'
     )
