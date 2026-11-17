@@ -76,6 +76,7 @@ model SampleRound {
   works        SampleWork[]
   transfers    SampleTransfer[]
   jobWorks     SampleJobWork[]
+  dispatches   SampleDispatch[]
   @@unique([requestId, revision])
   @@map("sample_rounds")
 }
@@ -212,6 +213,41 @@ model SampleJobWork {
   returns      SampleJobReturn[]
   @@index([roundId])
   @@map("sample_job_works")
+}
+
+/// Sample pieces sent to the buyer on a Sample Delivery Challan (the SDC
+/// series): which colours and sizes, how and to whom (DISPATCH). Samples are
+/// not stock and not a sale: nothing moves and nothing is billed. Cancelled
+/// while the buyer has decided on none of its colours (DISPATCH_CANCEL).
+model SampleDispatch {
+  id            String @id @default(cuid())
+  number        String @unique
+  roundId       String
+  round         SampleRound @relation(fields: [roundId], references: [id])
+  /// [{ colour, sizeId, qty }], spelt as the round's grid spells them.
+  cells         Json
+  recipient     String
+  address       String?
+  /// COURIER, HAND or TRANSPORT (sample_dispatch_shape).
+  mode          String
+  courier       String?
+  awb           String?
+  sentOn        DateTime
+  /// The buyer is to send the pieces back, by expectedBack when it is given.
+  returnable    Boolean @default(false)
+  expectedBack  DateTime?
+  /// What the challan declares the pieces worth; none: no commercial value.
+  declaredValue Decimal? @db.Decimal(12,2)
+  /// What sending them cost (₹): a sampling charge.
+  courierCharge Decimal @default(0) @db.Decimal(12,2)
+  notes         String?
+  createdById   String
+  createdAt     DateTime @default(now())
+  cancelledAt   DateTime?
+  cancelledBy   String?
+  cancelReason  String?
+  @@index([roundId])
+  @@map("sample_dispatches")
 }
 
 /// Pieces back from the outside unit on one job-work challan: accepted and

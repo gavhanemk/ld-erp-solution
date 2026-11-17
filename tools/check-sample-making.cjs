@@ -425,7 +425,12 @@ async function main() {
     assert.equal(cellOf(3, 'White', M).here, 1)
     assert.equal(undoWork.body.code, 'UNDO_BLOCKED')
   })
-  const early = await act('QC', { actuals: [50, 50], passedQty: 2, notes: 'Too early' }, 409)
+  // QC (phase 6): each colour read on its finished sizes' points and its pieces passed.
+  const bothM = (notes) => ({
+    notes,
+    colours: ['White', 'Blue'].map((colour) => ({ colour, actuals: [50], cells: [{ sizeId: M, passed: 1 }] })),
+  })
+  const early = await act('QC', bothM('Too early'), 409)
   await act('STEP_WORK', work(press, [{ colour: 'White', sizeId: M, done: 1, rejected: 0 }, { colour: 'Blue', sizeId: M, done: 1, rejected: 0 }]))
   check('the route is done when the last step has worked every piece that reached it', () => {
     assert.match(early.body.message, /Complete the making route/)
@@ -478,7 +483,7 @@ async function main() {
   })
 
   // ── QC closes making ────────────────────────────────────────────────────────
-  await act('QC', { actuals: [50, 50], passedQty: 2, notes: 'Both made pieces inspected' })
+  await act('QC', bothM('Both made pieces inspected'))
   const afterQc = await act('STEP_WORK', work(press, [{ colour: 'White', sizeId: M, done: 1, rejected: 0 }]), 409)
   const undoAfterQc = await act('MAKING_UNDO', { kind: 'WORK', id: doc.rounds[0].works.at(-1).id, reason: 'After QC' }, 409)
   await act('STEP_LABOUR', { stageId: press.id, amount: 120 })
@@ -529,10 +534,14 @@ async function main() {
     data: { doneQty: null, rejectedQty: null, completedAt: null },
   })
   doc = (await call('GET', `/sampling/${doc.id}`)).body.data
-  const nothingMade = await act('QC', { actuals: [50], passedQty: 1, notes: 'Nothing to inspect' }, 409)
+  const nothingMade = await act(
+    'QC',
+    { notes: 'Nothing to inspect', colours: [{ colour: 'White', actuals: [50], cells: [{ sizeId: M, passed: 1 }] }] },
+    409
+  )
   check('steps after a whole step that rejected everything count as done', () => {
     assert.deepEqual(steps().map((s) => s.complete), [true, true, true])
-    assert.match(nothingMade.body.message, /cannot pass more pieces than finishing produced/)
+    assert.match(nothingMade.body.message, /White has no finished pieces to inspect/)
   })
   await act('MATERIAL', { materialId: doc.rounds[0].materials[0].id, kind: 'USE', qty: 5, reason: 'Made into the sample' })
   await act('CANCEL', 'Whole-step check complete')

@@ -489,7 +489,7 @@ async function seed() {
 
   // Orders, receipts, bills, enquiries, job work, requisitions and store transfers. As in
   // seed-core, a type that already has a series of any year keeps it, so no second run starts.
-  for (const docType of ['PO', 'GRN', 'PB', 'ENQ', 'JW', 'MR', 'STN']) {
+  for (const docType of ['PO', 'GRN', 'PB', 'ENQ', 'JW', 'MR', 'STN', 'SDC']) {
     if (await db.numberSeries.findFirst({ where: { companyId: company.id, docType } })) continue
     await db.numberSeries.create({
       data: { companyId: company.id, docType, prefix: docType, financialYear: '2627' },

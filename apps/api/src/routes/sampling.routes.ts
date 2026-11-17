@@ -8,7 +8,13 @@ import { samplingPilotEnabled } from '../lib/pilot'
 import { removeObject, signedDownloadUrl, signedUploadUrl, storagePathFor } from '../lib/storage'
 import { nextStyleCode } from '../lib/masterCode'
 import { createItemRecord } from '../lib/itemMaster'
-import { SAMPLE_ATTACHMENT_KIND_LABEL, SAMPLE_MATERIAL_TYPES, qtyCells, returnCells } from '@ld-erp/shared'
+import {
+  SAMPLE_ATTACHMENT_KIND_LABEL,
+  SAMPLE_MATERIAL_TYPES,
+  normaliseSpec,
+  qtyCells,
+  returnCells,
+} from '@ld-erp/shared'
 import { getPrintHeader } from '../lib/printData'
 import {
   createSampleSchema,
@@ -77,6 +83,8 @@ function visible(row: Awaited<ReturnType<typeof sampleDetail>>, req: AuthRequest
       jobWorks: labour
         ? r.jobWorks
         : r.jobWorks.map((j) => ({ ...j, returns: j.returns.map(({ chargeAmount, ...x }) => x) })),
+      // What sending samples cost is a sampling charge too.
+      dispatches: labour ? r.dispatches : r.dispatches.map(({ courierCharge, ...x }) => x),
     })),
     // What leftovers were carried at is a value too.
     closeOuts: row.closeOuts.map(({ value, ...c }) => c),
@@ -194,7 +202,7 @@ router.get('/', async (req: AuthRequest, res) => {
     })
   }
   const states: Record<string, string[]> = {
-    'Sampling floor': ['RELEASED'],
+    'Sampling floor': ['RELEASED', 'QC_FAILED'],
     Reviews: ['QC_PASSED', 'SUBMITTED'],
     Handover: ['APPROVED'],
   }
@@ -340,6 +348,73 @@ router.get('/job-work/:jobId/print', async (req, res) => {
         ...job,
         cells,
         returns: job.returns.map((r) => ({ ...r, cells: returnCells(r.cells) })),
+      },
+      sizes,
+    },
+  })
+})
+
+/**
+ * The Sample Delivery Challan that goes with samples to the buyer: our number
+ * from its own series, the recipient, the pieces by colour and size, and how
+ * they went. Samples are not stock and not a sale: no value is charged.
+ */
+router.get('/dispatch/:dispatchId/print', async (req, res) => {
+  const dispatch = await prisma.sampleDispatch.findUnique({
+    where: { id: req.params.dispatchId },
+    select: {
+      id: true,
+      number: true,
+      cells: true,
+      recipient: true,
+      address: true,
+      mode: true,
+      courier: true,
+      awb: true,
+      sentOn: true,
+      returnable: true,
+      expectedBack: true,
+      declaredValue: true,
+      notes: true,
+      cancelledAt: true,
+      cancelledBy: true,
+      cancelReason: true,
+      round: {
+        select: {
+          revision: true,
+          specification: true,
+          request: {
+            select: {
+              id: true,
+              number: true,
+              title: true,
+              buyerRef: true,
+              buyerStyleRef: true,
+              season: true,
+              customer: { select: { name: true, gstin: true, phone: true } },
+              style: { select: { code: true, name: true } },
+            },
+          },
+        },
+      },
+    },
+  })
+  if (!dispatch) throw new AppError('That challan does not exist.', 404, 'NOT_FOUND')
+  const cells = qtyCells(dispatch.cells)
+  const sizes = await prisma.size.findMany({
+    where: { id: { in: [...new Set(cells.map((c) => c.sizeId))] } },
+    select: { id: true, code: true, sequence: true },
+  })
+  const { specification, ...round } = dispatch.round
+  const header = await getPrintHeader('SDC')
+  res.json({
+    success: true,
+    data: {
+      ...header,
+      dispatch: {
+        ...dispatch,
+        cells,
+        round: { ...round, milestone: normaliseSpec(specification).milestone },
       },
       sizes,
     },

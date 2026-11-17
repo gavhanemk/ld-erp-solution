@@ -188,8 +188,9 @@ export default function SamplingPage() {
                 ? 'Prepare the specification'
                 : 'Add the tech pack and set the style',
               RELEASED: 'Continue materials, making or QC',
-              QC_PASSED: 'Submit to the buyer',
-              SUBMITTED: 'Record buyer feedback',
+              QC_FAILED: 'Inspect again or start a correction round',
+              QC_PASSED: 'Send samples to the buyer',
+              SUBMITTED: 'Record the buyer’s decision',
               CHANGES_REQUIRED: 'Start a correction round',
               REJECTED: 'Review feedback and next steps',
               APPROVED: 'Reconcile material and prepare handover',

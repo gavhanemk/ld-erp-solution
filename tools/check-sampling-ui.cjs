@@ -173,7 +173,9 @@ check('failed QC requests correction instead of buyer submission', () =>
 )
 round.qc = { passed: true }
 round.state = 'QC_PASSED'
-check('passed QC guides buyer submission', () => assert.match(sampleFlow(request).title, /Submit/))
+check('passed QC guides sending samples to the buyer', () =>
+  assert.equal(sampleFlow(request).title, 'Send the samples to the buyer')
+)
 round.state = 'SUBMITTED'
 check('pending buyer review has a waiting status', () =>
   assert.equal(sampleFlow(request).steps.find((s) => s.key === 'Buyer review').status, 'Waiting')
@@ -219,9 +221,10 @@ round.handover = null
 round.qc = null
 // Every piece rejected at the last step.
 round.works.at(-1).cells = [{ colour: 'White', sizeId: 'm', done: 0, rejected: 2 }]
-check('zero surviving pieces do not prompt an impossible QC action', () =>
-  assert.match(sampleFlow(request).title, /No sample pieces/)
-)
+check('with every piece rejected, QC records that nothing finished', () => {
+  assert.equal(sampleFlow(request).title, 'Nothing finished to inspect')
+  assert.equal(sampleFlow(request).section, 'Quality')
+})
 
 // ── Request & tech pack (phase 1) ──────────────────────────────────────────
 const draft = (styleId = '', colour = '') => ({
@@ -1085,7 +1088,6 @@ check('a set is made colour by colour and size by size, then inspected and sent 
     false
   )
   // The words are the server's own.
-  for (const words of Object.values(flow.SET_TEXT)) assert.ok(serverText.includes(words), words)
   assert.ok(serverText.includes(flow.NO_ITEM_TEXT))
   set.materials[0].issuedQty = '5.2'
   // The first step takes every piece of the grid, cell by cell.
@@ -1159,9 +1161,146 @@ check('a set is made colour by colour and size by size, then inspected and sent 
     cells: [W('m', { done: 1, rejected: 0 }), N({ done: 1, rejected: 0 })],
   })
   assert.ok(flow.makingOf(set).every((s) => s.complete))
-  assert.match(flowOf().description, /whole set/)
+  assert.match(flowOf().description, /Measure each colour on the points of the sizes it finished/)
+  // Inspected colour by colour: White passed both pieces of M, Navy failed.
+  set.qc = {
+    passed: true,
+    passedQty: 1,
+    notes: 'Navy out on chest',
+    results: [],
+    colours: [
+      { colour: 'White', passed: true, results: [], cells: [{ sizeId: 'm', finished: 1, passed: 1 }], notes: '' },
+      { colour: 'Navy', passed: false, results: [], cells: [{ sizeId: 'm', finished: 1, passed: 1 }], notes: '' },
+    ],
+  }
   set.state = 'QC_PASSED'
-  assert.ok(flowOf().description.startsWith(flow.SET_TEXT.submit))
+  set.dispatches = []
+  assert.equal(flowOf().title, 'Send the samples to the buyer')
+  assert.equal(
+    flowOf().description,
+    '1 piece of White passed QC and is still to send, on a Sample Delivery Challan. Navy failed QC and is made again in the next round, unless dropped.'
+  )
+})
+check('each colour stands on its own: QC, what went to the buyer, the buyer’s word', () => {
+  const shared = require('../packages/shared/src/sampleReview.ts')
+  const spec = {
+    colours: [
+      { colour: 'White', sizes: [{ sizeId: 'm', qty: 2 }, { sizeId: 'l', qty: 1 }] },
+      { colour: 'Navy', sizes: [{ sizeId: 'm', qty: 1 }] },
+      { colour: 'Black', sizes: [{ sizeId: 'm', qty: 1 }] },
+    ],
+    measurements: [],
+  }
+  const qcColour = (colour, passed, cells) => ({ colour, passed, results: [], cells, notes: '' })
+  const round = {
+    state: 'SUBMITTED',
+    specification: spec,
+    qc: {
+      passed: true,
+      passedQty: 4,
+      notes: '',
+      results: [],
+      colours: [
+        qcColour('White', true, [{ sizeId: 'm', finished: 2, passed: 2 }, { sizeId: 'l', finished: 1, passed: 1 }]),
+        qcColour('Navy', false, [{ sizeId: 'm', finished: 1, passed: 1 }]),
+        qcColour('Black', true, [{ sizeId: 'm', finished: 1, passed: 1 }]),
+      ],
+    },
+    decision: null,
+    dispatches: [
+      { cells: [{ colour: 'White', sizeId: 'm', qty: 2 }], cancelledAt: null },
+      { cells: [{ colour: 'Black', sizeId: 'm', qty: 1 }], cancelledAt: '2026-11-17' },
+    ],
+  }
+  let o = shared.colourOutcomes(round)
+  assert.deepEqual(o.map((x) => x.status), ['SENT', 'QC_FAILED', 'TO_SEND'])
+  // Navy dropped and Black rejected... once White is decided the round has its verdict.
+  const drop = (colour) => ({ colour, result: 'DROPPED', conditions: 'Not wanted', buyerName: '', evidence: '' })
+  round.decision = { colours: { navy: drop('Navy'), black: drop('Black') } }
+  o = shared.colourOutcomes(round)
+  assert.equal(shared.roundVerdict(o), null)
+  round.decision.colours.white = { colour: 'White', result: 'APPROVED', conditions: '', buyerName: 'B', evidence: 'E' }
+  o = shared.colourOutcomes(round)
+  // Dropped colours count for nothing: White approved approves the round.
+  assert.equal(shared.roundVerdict(o), 'APPROVED')
+  assert.deepEqual(shared.coloursToCarry(o), ['White'])
+  round.decision = null
+  o = shared.colourOutcomes(round)
+  assert.deepEqual(o[0].toSend, [{ colour: 'White', sizeId: 'l', qty: 1 }])
+  assert.equal(shared.roundVerdict(o), null)
+  const word = (colour, result) => ({ colour, result, conditions: '', buyerName: 'B', evidence: 'E' })
+  round.decision = { colours: { white: word('White', 'APPROVED'), black: word('Black', 'REJECTED') } }
+  o = shared.colourOutcomes(round)
+  // Navy failed QC: it is made again, so the round needs changes.
+  assert.equal(shared.roundVerdict(o), 'CHANGES_REQUIRED')
+  assert.deepEqual(shared.coloursToCarry(o), ['Navy'])
+  // Without Navy: an approval and a rejection approve the round, and the next milestone carries White.
+  const two = { ...round, specification: { ...spec, colours: [spec.colours[0], spec.colours[2]] } }
+  two.qc = { ...round.qc, colours: [round.qc.colours[0], round.qc.colours[2]] }
+  o = shared.colourOutcomes(two)
+  assert.equal(shared.roundVerdict(o), 'APPROVED')
+  assert.deepEqual(shared.coloursToCarry(o), ['White'])
+  // A colour that finished nothing is said so, apart from one that failed.
+  const unfinished = { ...round, decision: null, qc: { ...round.qc, colours: [round.qc.colours[0], round.qc.colours[2]] } }
+  assert.equal(shared.colourOutcomes(unfinished)[1].status, 'NOT_FINISHED')
+  // A round inspected, sent and decided whole before colours were: every colour has its word.
+  const old = {
+    state: 'CHANGES_REQUIRED',
+    specification: spec,
+    qc: { passed: true, passedQty: 5, notes: 'Set inspected', results: [{ name: 'Chest', sizeId: 'm', target: 50, tolerance: 1, unit: 'cm', actual: 50, pass: true }] },
+    submission: { qty: 5, recipient: 'Buyer', reference: 'R', notes: '' },
+    decision: { result: 'CHANGES_REQUIRED', buyerName: 'B', evidence: 'E', conditions: 'Fit' },
+  }
+  o = shared.colourOutcomes(old)
+  assert.deepEqual(o.map((x) => x.status), ['CHANGES_REQUIRED', 'CHANGES_REQUIRED', 'CHANGES_REQUIRED'])
+  assert.deepEqual(o[0].sent, [
+    { colour: 'White', sizeId: 'm', qty: 2 },
+    { colour: 'White', sizeId: 'l', qty: 1 },
+  ])
+  assert.equal(shared.normaliseQc(old.qc, spec).colours[1].results.length, 1)
+  assert.equal(shared.normaliseQc(old.qc, spec).whole, true)
+  // What finished, from the making record, caps what passed: White L finished nothing.
+  const finished = [
+    { colour: 'White', sizeId: 'm', qty: 2 },
+    { colour: 'Navy', sizeId: 'm', qty: 1 },
+    { colour: 'Black', sizeId: 'm', qty: 1 },
+  ]
+  assert.deepEqual(shared.normaliseQc(old.qc, spec, finished).colours[0].cells, [
+    { sizeId: 'm', finished: 2, passed: 2 },
+    { sizeId: 'l', finished: 0, passed: 0 },
+  ])
+  // Across rounds, each colour as its latest round left it.
+  const next = { revision: 2, state: 'RELEASED', specification: { colours: [spec.colours[1]], measurements: [] }, qc: null, decision: null }
+  assert.deepEqual(
+    shared.requestColours([next, { ...round, revision: 1 }]).map((c) => [c.colour, c.revision, c.status]),
+    [
+      ['Navy', 2, 'MAKING'],
+      ['White', 1, 'APPROVED'],
+      ['Black', 1, 'REJECTED'],
+    ]
+  )
+})
+check('review events read colour by colour', () => {
+  const note = (action, data) => eventNote({ action, detail: { data } }, [])
+  assert.equal(eventLabel('DISPATCH'), 'Sent to the buyer')
+  assert.equal(
+    note('QC', { notes: 'Navy out', colours: [{ colour: 'White', passed: true, pieces: 3 }, { colour: 'Navy', passed: false, pieces: 1 }] }),
+    'White passed (3 pieces) · Navy failed · Navy out'
+  )
+  assert.equal(
+    note('DISPATCH', { number: 'SDC-1', pieces: 3, recipient: 'Buyer', mode: 'COURIER', courier: 'Example Courier', awb: 'A1' }),
+    'SDC-1 · 3 pieces to Buyer · Courier · Example Courier A1'
+  )
+  assert.equal(
+    note('DECIDE', {
+      buyerName: 'Buyer',
+      colours: [{ colour: 'White', result: 'APPROVED', conditions: '' }, { colour: 'Navy', result: 'CHANGES_REQUIRED', conditions: 'Darker' }],
+      result: 'CHANGES_REQUIRED',
+    }),
+    'White: Approved · Navy: Changes required (Darker) · by Buyer · Round: Changes required'
+  )
+  // A decision recorded before colours were decided one by one says no more than its label.
+  assert.equal(note('DECIDE', { result: 'APPROVED', buyerName: 'Buyer' }), null)
 })
 check('the making ledger sums the records, and says when they cannot add up', () => {
   const shared = require('../packages/shared/src/sampleMaking.ts')
@@ -1347,17 +1486,37 @@ check('what each material line can record, and why not', () => {
     'Issued in full and accounted for.'
   )
 })
-check('the handover offers BOMs for every colour or one of the round’s colours', () => {
+check('the handover offers BOMs for every colour or one the buyer approved', () => {
   const boms = [
     { id: 'b-all', styleId: 'dev', color: null, version: '1' },
     { id: 'b-navy', styleId: 'dev', color: 'navy ', version: '2' },
-    { id: 'b-sky', styleId: 'dev', color: 'Sky', version: '3' },
+    { id: 'b-white', styleId: 'dev', color: 'White', version: '3' },
     { id: 'b-other', styleId: 'other', color: null, version: '1' },
   ]
+  const word = (colour, result) => ({ colour, result, conditions: '', buyerName: 'B', evidence: 'E' })
   assert.deepEqual(
-    flow.handoverBoms(boms, sample()).map((b) => b.id),
+    flow.handoverBoms(boms, 'dev', ['Navy']).map((b) => b.id),
     ['b-all', 'b-navy']
   )
+  // Ready once every colour of the request has ended and one is approved, in whichever round.
+  const shared = require('../packages/shared/src/sampleReview.ts')
+  const decided = (revision, colour, result) => ({
+    revision,
+    state: result === 'APPROVED' ? 'APPROVED' : 'REJECTED',
+    specification: { colours: [{ colour, sizes: [{ sizeId: 'm', qty: 1 }] }], measurements: [] },
+    qc: null,
+    decision: { colours: { [colour.toLowerCase()]: word(colour, result) } },
+  })
+  // Red approved in round 1; Blue made again and rejected in round 2.
+  assert.deepEqual(shared.handoverReady([decided(2, 'Blue', 'REJECTED'), decided(1, 'Red', 'APPROVED')]), {
+    ready: true,
+    approved: ['Red'],
+  })
+  // Blue still with the buyer: not yet.
+  const waiting = { ...decided(2, 'Blue', 'REJECTED'), state: 'SUBMITTED', decision: null }
+  assert.equal(shared.handoverReady([waiting, decided(1, 'Red', 'APPROVED')]).ready, false)
+  // Nothing approved anywhere: nothing to hand over.
+  assert.equal(shared.handoverReady([decided(1, 'Blue', 'REJECTED')]).ready, false)
 })
 check('the record shows the colour × size grid with its totals', () => {
   const grid = flow.colourGrid(sample(), ['s', 'l', 'm'])

@@ -3,6 +3,13 @@ import {
   SAMPLE_ATTACHMENT_KIND_LABEL,
   SAMPLE_MATERIAL_TYPES,
   cellCount,
+  SAMPLE_DECISION_LABEL,
+  SAMPLE_DISPATCH_MODE_LABEL,
+  type SampleDecisionResult,
+  type SampleDispatchMode,
+  colourOutcomes,
+  coloursToCarry,
+  handoverReady,
   makingLedger,
   makingStarted,
   piecesFor,
@@ -91,15 +98,10 @@ export function makingBlocker(round: Pick<SampleRound, 'state' | 'stages' | 'mat
 }
 
 /**
- * Several colours or sizes in one round make it a set. It is made colour by
- * colour and size by size, but inspected and sent to the buyer whole, and the
- * server refuses less (QC, SUBMIT). The words are the server's own.
+ * Several colours or sizes in one round make it a set: made, inspected, sent
+ * and decided colour by colour and size by size.
  */
 export const isSampleSet = (spec: Pick<SampleSpecification, 'colours'>) => cellCount(spec) > 1
-export const SET_TEXT = {
-  qc: 'With several colours or sizes in one round, inspect and pass the whole set; take rejected pieces out in a new round.',
-  submit: 'Submit the whole inspected set so the approval covers every colour and size.',
-} as const
 
 // ── Making, cell by cell (phase 5) ────────────────────────────────────────────
 
@@ -310,36 +312,69 @@ export function sampleFlow(
             .join(' ')
         : (next?.description ??
           'Record the work at each step colour by colour and size by size, and hand what is done on to the next step.')
-    } else if (made.length && made.at(-1)!.total.done === 0) {
-      section = 'History'
-      title = 'No sample pieces remain for QC'
+    } else if (made.length && made.at(-1)!.total.done === 0 && !round.qc) {
+      section = 'Quality'
+      title = 'Nothing finished to inspect'
       description =
-        'Reconcile material, then cancel this request with the rejected-piece disposition. Create a new request if development needs to restart.'
+        'Every piece was rejected in making. Record the inspection as failed, then start a new round to make it again, or cancel the request.'
     } else {
       section = 'Quality'
+      // A failed inspection from before failing had a state of its own.
       title = round.qc?.passed === false ? 'Resolve the QC findings' : 'Inspect the finished sample'
       description =
         round.qc?.passed === false
           ? 'Record a corrected inspection or start a new round. The failed inspection stays in the history.'
           : set
-            ? 'Enter actual measurements and confirm workmanship of the whole set, every colour and size, before sending it to the buyer.'
+            ? 'Measure each colour on the points of the sizes it finished, and pass its pieces size by size. A colour out of tolerance fails on its own; the rest go to the buyer.'
             : 'Enter actual measurements and confirm workmanship before sending the sample to the buyer.'
     }
-  } else if (round.state === 'QC_PASSED') {
+  } else if (round.state === 'QC_FAILED') {
+    section = 'Quality'
+    title = 'Resolve the QC findings'
+    description =
+      'No colour passed QC. Put the pieces right and record a corrected inspection, or start a new round to make them again. The failed inspection stays in the history.'
+  } else if (round.state === 'REJECTED' && handoverReady(request.rounds).ready) {
+    // Rejected here, approved in an earlier round: that colour goes on to handover.
+    section = 'Handover'
+    title = round.handover?.acceptedAt
+      ? 'Handover accepted'
+      : round.handover
+        ? 'Awaiting production acceptance'
+        : 'Prepare the approved production package'
+    description = round.handover
+      ? 'The approved sample record is ready for production planning.'
+      : `${joinAnd(handoverReady(request.rounds).approved)} ${handoverReady(request.rounds).approved.length === 1 ? 'is' : 'are'} approved in an earlier round and every other colour has ended. Link an approved BOM and the production route.`
+  } else if (round.state === 'QC_PASSED' || round.state === 'SUBMITTED') {
+    const outcomes = colourOutcomes(round)
+    const toSend = outcomes.filter((o) => !o.decision && o.toSend.length)
+    const waiting = outcomes.filter((o) => o.qc === 'PASSED' && !o.decision)
+    // Failed QC or finished nothing, and not dropped: made again.
+    const failed = outcomes.filter((o) => o.qc === 'FAILED' && !o.decision)
     section = 'Buyer review'
-    title = 'Submit the sample to the buyer'
-    description = isSampleSet(round.specification)
-      ? `${SET_TEXT.submit} Record the recipient and the courier or handover reference.`
-      : 'Record the pieces sent, recipient and courier or handover reference.'
-  } else if (round.state === 'SUBMITTED') {
-    section = 'Buyer review'
-    title = 'Awaiting buyer feedback'
-    description = 'Record the buyer’s decision and its supporting reference when feedback arrives.'
+    title =
+      round.state === 'QC_PASSED'
+        ? 'Send the samples to the buyer'
+        : waiting.some((o) => o.sent.length)
+          ? 'Record the buyer’s decision'
+          : 'Send the rest to the buyer'
+    description = [
+      toSend.length
+        ? `${joinAnd(toSend.map((o) => `${plural(o.toSend.reduce((t, c) => t + c.qty, 0), 'piece')} of ${o.colour}`))} passed QC and ${toSend.length === 1 && toSend[0].toSend.reduce((t, c) => t + c.qty, 0) === 1 ? 'is' : 'are'} still to send, on a Sample Delivery Challan.`
+        : '',
+      round.state === 'SUBMITTED' && waiting.length
+        ? `The buyer’s word is awaited on ${joinAnd(waiting.map((o) => o.colour))}; record it colour by colour as it comes.`
+        : '',
+      failed.length
+        ? `${joinAnd(failed.map((o) => o.colour))} ${failed.every((o) => o.status === 'NOT_FINISHED') ? 'finished nothing' : 'failed QC'} and ${failed.length === 1 ? 'is' : 'are'} made again in the next round, unless dropped.`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ')
   } else if (['CHANGES_REQUIRED', 'REJECTED'].includes(round.state)) {
+    const carry = coloursToCarry(colourOutcomes(round))
     section = 'Buyer review'
     title = 'Review feedback and start a new round'
-    description =
-      'Keep this round as the record of the buyer’s decision. Carry the specification into a new round for corrections.'
+    description = `Keep this round as the record of the buyer’s decision. A new round makes ${joinAnd(carry)} again, from this round’s specification.`
   } else if (round.state === 'APPROVED') {
     const unreconciled = request.rounds.find((r) => r.materials.some((m) => materialHeld(m) > 0))
     section = 'Handover'
@@ -350,7 +385,7 @@ export function sampleFlow(
         : 'Prepare the approved production package'
     description = round.handover?.acceptedAt
       ? 'The approved sample record is ready for production planning.'
-      : 'Link an approved BOM of this style, for every colour or for one of this round’s colours, and the production route, then record production acceptance.'
+      : 'Link an approved BOM of this style, for every colour or for a colour the buyer approved, and the production route, then record production acceptance.'
     const madeHere = developmentStyleOf(request, round)
     if (!round.handover && madeHere) {
       title = 'Keep the approved round as the record'
@@ -387,7 +422,7 @@ export function sampleFlow(
       round.materials.every((m) => !!m.waivedAt || +m.issuedQty >= +m.plannedQty),
     Making: round.stages.length > 0 && makingOf(round).every((s) => s.complete),
     Quality: !!round.qc?.passed,
-    'Buyer review': round.state === 'APPROVED',
+    'Buyer review': round.state === 'APPROVED' || handoverReady(request.rounds).ready,
     Handover: !!round.handover?.acceptedAt,
   }
   return {
@@ -402,7 +437,8 @@ export function sampleFlow(
           ? 'Complete'
           : 'Closed'
         : s.key === section && !round.handover?.acceptedAt
-          ? round.state === 'SUBMITTED'
+          ? round.state === 'SUBMITTED' &&
+            !colourOutcomes(round).some((o) => !o.decision && o.toSend.length > 0)
             ? 'Waiting'
             : 'Current'
           : completed[s.key]
@@ -1098,13 +1134,11 @@ export function orderSummary(o: SampleOrderLine, unit = '') {
 }
 
 /** Approved BOMs the round can be handed over with: this style's, for every colour or one the round made. */
-export function handoverBoms(
-  boms: Lookups['boms'],
-  spec: Pick<SampleSpecification, 'styleId' | 'colours'>
-) {
-  const made = new Set(spec.colours.map((c) => c.colour.trim().toLowerCase()).filter(Boolean))
+export function handoverBoms(boms: Lookups['boms'], styleId: string, approved: string[]) {
+  // HANDOVER takes a BOM for every colour, or for one the buyer approved (handoverReady).
+  const keys = approved.map((c) => c.trim().toLowerCase())
   return boms.filter(
-    (b) => b.styleId === spec.styleId && (!b.color || made.has(b.color.trim().toLowerCase()))
+    (b) => b.styleId === styleId && (!b.color || keys.includes(b.color.trim().toLowerCase()))
   )
 }
 
@@ -1127,7 +1161,10 @@ export const SAMPLE_EVENT_LABEL: Record<string, string> = {
   MAKING_UNDO: 'Making record taken back',
   QC: 'QC recorded',
   SUBMIT: 'Submitted to the buyer',
+  DISPATCH: 'Sent to the buyer',
+  DISPATCH_CANCEL: 'Delivery challan cancelled',
   DECIDE: 'Buyer decision recorded',
+  DROP_COLOUR: 'Colour dropped',
   NEW_ROUND: 'New round started',
   HANDOVER: 'Handover prepared',
   ACCEPT_HANDOVER: 'Handover accepted',
@@ -1203,6 +1240,43 @@ export function eventNote(
       : ''
   const join = (parts: string[]) => parts.filter(Boolean).join(' · ')
   switch (e.action) {
+    case 'QC':
+      // Colour by colour since phase 6; before, one verdict for the set.
+      return Array.isArray(d.colours)
+        ? join([
+            ...(d.colours as Array<{ colour?: unknown; passed?: unknown; pieces?: unknown }>).map(
+              (c) =>
+                `${text(c.colour)} ${c.passed ? `passed (${plural(count(c.pieces), 'piece')})` : 'failed'}`
+            ),
+            text(d.notes),
+          ])
+        : null
+    case 'DISPATCH':
+      return join([
+        text(d.number),
+        `${plural(count(d.pieces), 'piece')} to ${text(d.recipient)}`,
+        SAMPLE_DISPATCH_MODE_LABEL[text(d.mode) as SampleDispatchMode] ?? '',
+        [text(d.courier), text(d.awb)].filter(Boolean).join(' '),
+      ])
+    case 'DISPATCH_CANCEL':
+      return join([text(d.number), text(d.reason) && `Reason: ${text(d.reason)}`])
+    case 'DROP_COLOUR':
+      return join([
+        text(d.colour),
+        text(d.reason) && `Reason: ${text(d.reason)}`,
+        typeof d.result === 'string' ? `Round: ${SAMPLE_DECISION_LABEL[d.result as SampleDecisionResult]}` : '',
+      ])
+    case 'DECIDE':
+      return Array.isArray(d.colours)
+        ? join([
+            ...(d.colours as Array<{ colour?: unknown; result?: unknown; conditions?: unknown }>).map(
+              (c) =>
+                `${text(c.colour)}: ${SAMPLE_DECISION_LABEL[text(c.result) as SampleDecisionResult] ?? text(c.result)}${text(c.conditions) ? ` (${text(c.conditions)})` : ''}`
+            ),
+            text(d.buyerName) && `by ${text(d.buyerName)}`,
+            typeof d.result === 'string' ? `Round: ${SAMPLE_DECISION_LABEL[d.result as SampleDecisionResult]}` : '',
+          ])
+        : null
     case 'STEP_WORK':
       return join([
         text(d.stage),

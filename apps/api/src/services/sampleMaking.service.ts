@@ -129,7 +129,7 @@ const inputOf = (round: MakingRound): MakingInput => ({
 })
 
 /** Today as it is in the mill, and a day as text, for comparing dates. */
-const dayText = (d: Date) =>
+export const dayText = (d: Date) =>
   new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d)
 const longDay = (d: Date) =>
   d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
@@ -139,7 +139,7 @@ const longDay = (d: Date) =>
  * come, nor before `after` (the round's release, or the hand-on or challan a
  * receipt is against).
  */
-function dayOf(raw: string | undefined, after: Date | null, what: string): Date {
+export function dayOf(raw: string | undefined, after: Date | null, what: string): Date {
   if (!raw) return new Date()
   if (raw > dayText(new Date())) fail(`That date is still to come. Give the day the ${what} happened.`, 'BAD_DATE')
   if (after && raw < dayText(after))
@@ -216,26 +216,19 @@ export interface MakingContext {
   data: unknown
 }
 
-/** One making action. Returns what its event says. */
-export async function actOnMaking(tx: Tx, action: MakingAction, ctx: MakingContext): Promise<unknown> {
-  const { round, actor } = ctx
-  if (round.handover) fail('This round is handed over; its record is frozen.')
-  if (round.state === 'DRAFT') fail('Release the round before making starts.')
-  const grid = gridCells(round.specification)
+/**
+ * A round's grid as an action reads cells against it: each size by its code,
+ * each cell by colour and size, and cells sent in matched to the grid's
+ * spelling (a cell the grid lacks, or one given twice, is refused).
+ */
+export async function gridTools(tx: Tx, spec: Pick<SampleSpecification, 'colours'>) {
+  const grid = gridCells(spec)
   const sizes = await tx.size.findMany({
     where: { id: { in: [...new Set(grid.map((g) => g.sizeId))] } },
     select: { id: true, code: true },
   })
   const sizeName = (id: string) => sizes.find((z) => z.id === id)?.code ?? 'a size no longer in use'
   const cellName = (c: MakingCellKey) => `${c.colour} · ${sizeName(c.sizeId)}`
-  const stages = [...round.stages].sort((a, b) => a.sequence - b.sequence)
-  const stageOf = (stageId: string) => {
-    const s = stages.find((x) => x.id === stageId)
-    if (!s) fail('That step is not on this round’s route.', 'NO_STEP')
-    return s!
-  }
-  const first = stages[0]
-  /** Cells as the grid spells them; a cell the grid lacks, or one given twice, is refused. */
   function onGrid<T extends MakingCellKey>(cells: T[]): T[] {
     const byKey = new Map(grid.map((g) => [cellKey(g), g]))
     const seen = new Set<string>()
@@ -247,6 +240,22 @@ export async function actOnMaking(tx: Tx, action: MakingAction, ctx: MakingConte
       return { ...c, colour: g!.colour, sizeId: g!.sizeId }
     })
   }
+  return { grid, sizeName, cellName, onGrid }
+}
+
+/** One making action. Returns what its event says. */
+export async function actOnMaking(tx: Tx, action: MakingAction, ctx: MakingContext): Promise<unknown> {
+  const { round, actor } = ctx
+  if (round.handover) fail('This round is handed over; its record is frozen.')
+  if (round.state === 'DRAFT') fail('Release the round before making starts.')
+  const { sizeName, cellName, onGrid } = await gridTools(tx, round.specification)
+  const stages = [...round.stages].sort((a, b) => a.sequence - b.sequence)
+  const stageOf = (stageId: string) => {
+    const s = stages.find((x) => x.id === stageId)
+    if (!s) fail('That step is not on this round’s route.', 'NO_STEP')
+    return s!
+  }
+  const first = stages[0]
   const pieces = (cells: Array<{ qty: number }>) => cells.reduce((t, c) => t + c.qty, 0)
   const ledger = makingLedger(inputOf(round))
   const stepAt = (steps: MakingStep[], stageId: string) => steps.find((s) => s.stageId === stageId)!

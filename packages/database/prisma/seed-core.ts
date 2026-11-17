@@ -354,6 +354,8 @@ export async function seedCore(prisma: PrismaClient) {
     { docType: 'PO', prefix: 'PO' },
     { docType: 'MO', prefix: 'MO' },
     { docType: 'SAMPLE', prefix: 'SMP' },
+    // Samples sent to the buyer: their own challan, apart from the sales one.
+    { docType: 'SDC', prefix: 'SDC' },
     { docType: 'GRN', prefix: 'GRN' },
     { docType: 'INV', prefix: 'INV' },
     // Our booking reference for a supplier's bill. The supplier's own invoice

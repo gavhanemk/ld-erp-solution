@@ -9,6 +9,7 @@ export const SAMPLE_DECISIONS = ['APPROVED', 'CHANGES_REQUIRED', 'REJECTED'] as 
 export const SAMPLE_STATES = [
   'DRAFT',
   'RELEASED',
+  'QC_FAILED',
   'QC_PASSED',
   'SUBMITTED',
   ...SAMPLE_DECISIONS,
@@ -16,8 +17,9 @@ export const SAMPLE_STATES = [
 export const SAMPLE_STATE_LABEL: Record<string, string> = {
   DRAFT: 'Draft specification',
   RELEASED: 'Being made',
-  QC_PASSED: 'Ready to submit',
-  SUBMITTED: 'Buyer review',
+  QC_FAILED: 'QC failed',
+  QC_PASSED: 'Ready to send',
+  SUBMITTED: 'With the buyer',
   APPROVED: 'Buyer approved',
   CHANGES_REQUIRED: 'Changes required',
   REJECTED: 'Rejected',

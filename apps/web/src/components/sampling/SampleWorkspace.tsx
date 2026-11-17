@@ -16,6 +16,8 @@ import {
   SAMPLE_CLOSEOUT_LABEL,
   SAMPLE_REASON_MIN,
   SAMPLE_STATE_LABEL,
+  colourOutcomes,
+  handoverReady,
   lineRequiredQty,
   type SampleCloseOutKind,
   type SampleItemOption,
@@ -24,7 +26,7 @@ import {
 import { FormFrame } from '@/components/ui/FormFrame'
 import { StepInput } from '@/components/ui/StepInput'
 import { Field, SampleSpecEditor } from './SampleSpecEditor'
-import type { SampleRequest, Lookups, SampleMaterial, SampleRound } from './types'
+import type { SampleRequest, Lookups, SampleMaterial, SampleRound, SampleDispatch } from './types'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import {
   colourGrid,
@@ -34,7 +36,6 @@ import {
   eventLabel,
   eventNote,
   handoverBoms,
-  isSampleSet,
   makingOf,
   closeOutBlocker,
   coverOf,
@@ -51,7 +52,6 @@ import {
   MATERIAL_KIND_LABEL,
   roundItems,
   sampleFlow,
-  SET_TEXT,
   stepFacts,
   storeNote,
   withRequestStyle,
@@ -63,6 +63,17 @@ import { SampleRequestEditor } from './SampleRequestEditor'
 import { SampleFiles } from './SampleFiles'
 import { SampleStyleCard } from './SampleStyleCard'
 import { SampleMaking } from './SampleMaking'
+import {
+  CancelDispatchWindow,
+  ColourTable,
+  DecisionWindow,
+  DispatchList,
+  DispatchWindow,
+  DropWindow,
+  QcResults,
+  QcWindow,
+  RequestColours,
+} from './SampleReview'
 import { PurchaseOrderDialog } from '@/components/purchase/PurchaseOrderDialog'
 import Link from 'next/link'
 
@@ -114,6 +125,12 @@ export function SampleWorkspace({
     [warnings, setWarnings] = useState<string[]>([])
   // The material line whose issue, use or return window is open.
   const [recording, setRecording] = useState('')
+  // The QC, dispatch, decision or challan-cancel window that is open.
+  const [review, setReview] = useState<
+    | { kind: 'QC' | 'DISPATCH' | 'DECIDE' | 'DROP' }
+    | { kind: 'CANCEL'; dispatch: SampleDispatch }
+    | null
+  >(null)
   // The line being waived (or its waiver taken off), and the leftover being closed out.
   const [waiving, setWaiving] = useState('')
   const [closing, setClosing] = useState<{ itemId: string; warehouseId: string } | null>(null)
@@ -196,7 +213,7 @@ export function SampleWorkspace({
         setTab('Technical')
       }
       if (
-        ['RELEASE', 'QC', 'SUBMIT', 'DECIDE', 'HANDOVER', 'ACCEPT_HANDOVER'].includes(
+        ['RELEASE', 'QC', 'DECIDE', 'HANDOVER', 'ACCEPT_HANDOVER'].includes(
           action
         )
       )
@@ -293,6 +310,47 @@ export function SampleWorkspace({
   const recordingLine = recording ? round.materials.find((m) => m.id === recording) : undefined
   const showValue = round.materials.some((m) => m.issuedValue !== undefined)
   const sizeRunName = (id: string) => lookups.sizeGroups.find((g) => g.id === id)?.name ?? id
+  const sizeName = (id: string) => lookups.sizes.find((z) => z.id === id)?.code ?? 'Size no longer in use'
+  // Each colour of the round: QC, what went to the buyer, the buyer's word (colourOutcomes).
+  const outcomes = colourOutcomes(round)
+  const qcFailed =
+    round.state === 'QC_FAILED' || (round.state === 'RELEASED' && round.qc?.passed === false)
+  // QC once making is done; again while it failed, or passed with nothing sent
+  // on it and no colour decided (QC on the server).
+  const qcOpen =
+    madeAll &&
+    (round.state === 'RELEASED' ||
+      round.state === 'QC_FAILED' ||
+      (round.state === 'QC_PASSED' &&
+        !round.dispatches.some((d) => !d.cancelledAt) &&
+        !outcomes.some((o) => o.decision)))
+  const canSend =
+    edit &&
+    ['QC_PASSED', 'SUBMITTED'].includes(round.state) &&
+    outcomes.some((o) => !o.decision && o.toSend.length > 0)
+  // The buyer decides on what was sent; a colour not to go on with is dropped.
+  const canDecide =
+    approve &&
+    round.state === 'SUBMITTED' &&
+    outcomes.some((o) => o.qc === 'PASSED' && o.sent.length > 0 && o.decision?.result !== 'DROPPED')
+  // Every colour of the request ended, one approved (HANDOVER), with the approved ones.
+  const ready = handoverReady(request.rounds)
+  // The latest round is decided and the request ready (HANDOVER on the server).
+  const handoverOpen = ready.ready && ['APPROVED', 'REJECTED'].includes(round.state) && latest
+  const canDrop =
+    approve &&
+    ['QC_PASSED', 'SUBMITTED'].includes(round.state) &&
+    outcomes.some((o) => !o.decision)
+  /** A review window's action: the window shows a refusal where it was typed. */
+  const review$ = async (action: string, data: unknown, said: string) => {
+    setError('')
+    setMessage('')
+    setWarnings([])
+    const updated = await post(action, data)
+    setReview(null)
+    setMessage(said)
+    if (action === 'QC' || action === 'DECIDE' || action === 'DROP_COLOUR') setTab(sampleFlow(updated).section)
+  }
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1079,34 +1137,20 @@ export function SampleWorkspace({
                     </p>
                   </div>
                 ) : null}
-                {round.qc && (
-                  <div className="glass-card space-y-2 p-4">
-                    <h2 className="font-semibold">
-                      QC: {round.qc.passed ? 'Passed' : 'Corrections required'}
-                    </h2>
-                    {round.qc.results.map((x, i) => (
-                      <p key={i}>
-                        {lookups.sizes.find((s) => s.id === x.sizeId)?.code} · {x.name}: {x.actual}{' '}
-                        {x.unit} · target {x.target} ·{' '}
-                        {x.pass ? 'Within tolerance' : 'Outside tolerance'}
-                      </p>
-                    ))}
-                    <p>{round.qc.notes}</p>
+                <QcResults round={round} sizeName={sizeName} />
+                {approve && latest && qcOpen && (
+                  <div className="glass-card flex flex-wrap items-center justify-between gap-3 p-4">
+                    <p className="text-sm">
+                      {round.qc
+                        ? 'Record the inspection again: it replaces the one above, which stays in the history.'
+                        : 'Measure each colour on the points of the sizes it finished, and pass its pieces size by size.'}
+                    </p>
+                    <button type="button" className="btn-primary" onClick={() => setReview({ kind: 'QC' })}>
+                      {round.qc ? 'Record QC again' : 'Record QC'}
+                    </button>
                   </div>
                 )}
-                {approve &&
-                  latest &&
-                  round.state === 'RELEASED' &&
-                  round.stages.length > 0 &&
-                  madeAll && (
-                    <QcAction
-                      key={`${round.id}-${request.version}`}
-                      round={round}
-                      lookups={lookups}
-                      save={(d) => void act('QC', d)}
-                    />
-                  )}
-                {edit && latest && round.qc?.passed === false && (
+                {edit && latest && qcFailed && (
                   <ReasonAction
                     label="Start a correction round"
                     save={(reason) => void act('NEW_ROUND', reason)}
@@ -1117,10 +1161,43 @@ export function SampleWorkspace({
             {tab === 'Buyer review' && (
               <div className="space-y-4">
                 <p className="text-muted-foreground text-sm">
-                  Buyer approval covers this round’s style, colours, sizes and specification.
-                  Approval with unresolved conditions stays Changes required. Handover prepares a
-                  planning reference; it does not create or release a bulk order.
+                  The buyer decides colour by colour. What passed QC goes on a Sample Delivery
+                  Challan; a colour to change, or that failed QC, is made again in the next round.
+                  Handover prepares a planning reference; it does not create or release a bulk order.
                 </p>
+                <RequestColours request={request} />
+                {round.qc && (
+                  <div className="glass-card space-y-3 p-4">
+                    <h2 className="font-semibold">Colours of round {round.revision}</h2>
+                    <ColourTable outcomes={outcomes} sizeName={sizeName} />
+                    {(edit || approve) && latest && (canSend || canDecide || canDrop) && (
+                      <div className="flex flex-wrap gap-2">
+                        {canSend && (
+                          <button type="button" className="btn-primary" onClick={() => setReview({ kind: 'DISPATCH' })}>
+                            Send samples to the buyer
+                          </button>
+                        )}
+                        {canDecide && (
+                          <button type="button" className="btn-primary" onClick={() => setReview({ kind: 'DECIDE' })}>
+                            Record the buyer’s decision
+                          </button>
+                        )}
+                        {canDrop && (
+                          <button type="button" className="btn-secondary" onClick={() => setReview({ kind: 'DROP' })}>
+                            Drop a colour
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <DispatchList
+                  round={round}
+                  sizeName={sizeName}
+                  outcomes={outcomes}
+                  canCancel={edit && latest && round.state === 'SUBMITTED'}
+                  onCancel={(d) => setReview({ kind: 'CANCEL', dispatch: d })}
+                />
                 {round.submission && (
                   <div className="glass-card p-4">
                     <h2 className="font-semibold">Submission</h2>
@@ -1131,7 +1208,7 @@ export function SampleWorkspace({
                     <p>{round.submission.notes}</p>
                   </div>
                 )}
-                {round.decision && (
+                {round.decision?.result && (
                   <div className="glass-card p-4">
                     <h2 className="font-semibold">
                       Buyer decision · {SAMPLE_STATE_LABEL[round.decision.result]}
@@ -1139,23 +1216,12 @@ export function SampleWorkspace({
                     <p>
                       {round.decision.buyerName}: {round.decision.evidence}
                     </p>
-                    <p>{round.decision.conditions}</p>
+                    <p className="whitespace-pre-wrap">{round.decision.conditions}</p>
                   </div>
-                )}
-                {edit && latest && round.state === 'QC_PASSED' && (
-                  <SubmissionAction
-                    available={round.qc?.passedQty ?? 0}
-                    set={isSampleSet(round.specification)}
-                    save={(d) => void act('SUBMIT', d)}
-                  />
-                )}
-                {approve && latest && round.state === 'SUBMITTED' && (
-                  <DecisionAction save={(d) => void act('DECIDE', d)} />
                 )}
                 {edit &&
                   latest &&
-                  (['APPROVED', 'CHANGES_REQUIRED', 'REJECTED'].includes(round.state) ||
-                    round.qc?.passed === false) &&
+                  (['APPROVED', 'CHANGES_REQUIRED', 'REJECTED'].includes(round.state) || qcFailed) &&
                   !round.handover && (
                     <ReasonAction
                       label="New revision / next milestone"
@@ -1164,21 +1230,22 @@ export function SampleWorkspace({
                   )}
                 {!round.qc?.passed && !round.decision && (
                   <div className="glass-card flex gap-3 p-5 text-sm">
-                    <LockKeyhole size={18} className="shrink-0" /> Pass internal QC to unlock buyer
-                    submission.
+                    <LockKeyhole size={18} className="shrink-0" /> Pass internal QC to unlock sending
+                    samples to the buyer.
                   </div>
                 )}
               </div>
             )}
             {tab === 'Handover' && (
               <div className="space-y-4">
-                {round.state !== 'APPROVED' && (
+                {!handoverOpen && !round.handover && (
                   <div className="glass-card flex gap-3 p-5 text-sm">
-                    <LockKeyhole size={18} className="shrink-0" /> Unconditional buyer approval is
-                    required before preparing the production package.
+                    <LockKeyhole size={18} className="shrink-0" /> Every colour has to end approved,
+                    rejected or dropped, with at least one approved, before preparing the production
+                    package.
                   </div>
                 )}
-                {round.state === 'APPROVED' &&
+                {handoverOpen &&
                   !round.handover &&
                   request.rounds.some((r) => r.materials.some((m) => held(m) > 0)) && (
                     <div className="glass-card p-5 text-sm">
@@ -1188,7 +1255,7 @@ export function SampleWorkspace({
                   )}
                 {approve &&
                   latest &&
-                  round.state === 'APPROVED' &&
+                  handoverOpen &&
                   !round.handover &&
                   request.rounds.every((r) => r.materials.every((m) => held(m) === 0)) &&
                   (madeHere ? (
@@ -1201,6 +1268,7 @@ export function SampleWorkspace({
                   ) : (
                     <HandoverAction
                       round={round}
+                      approved={ready.approved}
                       lookups={lookups}
                       save={(d) => void act('HANDOVER', d)}
                     />
@@ -1301,6 +1369,47 @@ export function SampleWorkspace({
           error={error}
           close={() => setEditingRequest(false)}
           save={(data) => act('UPDATE_REQUEST', data)}
+        />
+      )}
+      {review?.kind === 'QC' && (
+        <QcWindow
+          round={round}
+          sizeName={sizeName}
+          onClose={() => setReview(null)}
+          save={(d) => review$('QC', d, 'QC recorded. The next action is shown below.')}
+        />
+      )}
+      {review?.kind === 'DISPATCH' && (
+        <DispatchWindow
+          request={request}
+          outcomes={outcomes}
+          sizeName={sizeName}
+          showCharge={round.stages.some((x) => x.labourAmount !== undefined)}
+          onClose={() => setReview(null)}
+          save={(d) => review$('DISPATCH', d, 'Sent to the buyer. Print the challan from the list to go with the samples.')}
+        />
+      )}
+      {review?.kind === 'DECIDE' && (
+        <DecisionWindow
+          outcomes={outcomes}
+          onClose={() => setReview(null)}
+          save={(d) => review$('DECIDE', d, 'The buyer’s decision is recorded. The next action is shown below.')}
+        />
+      )}
+      {review?.kind === 'DROP' && (
+        <DropWindow
+          outcomes={outcomes}
+          onClose={() => setReview(null)}
+          save={(d) => review$('DROP_COLOUR', d, `${d.colour} is dropped.`)}
+        />
+      )}
+      {review?.kind === 'CANCEL' && (
+        <CancelDispatchWindow
+          dispatch={review.dispatch}
+          onClose={() => setReview(null)}
+          save={(reason) =>
+            review$('DISPATCH_CANCEL', { dispatchId: review.dispatch.id, reason }, `${review.dispatch.number} cancelled.`)
+          }
         />
       )}
       {waivingLine && (
@@ -1897,206 +2006,6 @@ function requestChangeValue(key: string, raw: unknown, lookups: Lookups) {
   if (key === 'brandId') return lookups.brands.find((b) => b.id === value)?.name ?? value ?? '—'
   return value || '—'
 }
-function QcAction({
-  round,
-  lookups,
-  save,
-}: {
-  round: SampleRound
-  lookups: Lookups
-  save: (d: unknown) => void
-}) {
-  // A set is inspected and passed whole (SET_TEXT.qc): every piece the route finished.
-  const set = isSampleSet(round.specification)
-  // What the last step finished, as the round's records have it (QC checks against it).
-  const finished = makingOf(round).at(-1)?.total.done ?? 0
-  const colours = round.specification.colours.filter((r) => r.colour.trim()).length
-  const [actuals, setActuals] = useState<string[]>(round.specification.measurements.map(() => '')),
-    [passed, setPassed] = useState(set ? String(finished) : ''),
-    [notes, setNotes] = useState('')
-  const passedQty = set ? finished : Number(passed)
-  return (
-    <div className="glass-card space-y-3 p-4">
-      <h2 className="font-semibold">Measurement inspection</h2>
-      {colours > 1 && (
-        <p className="text-muted-foreground text-xs">
-          Every colour is made to the same targets: enter what one piece of each size measures.
-        </p>
-      )}
-      {round.specification.measurements.map((m, i) => (
-        <Field
-          key={i}
-          label={`${lookups.sizes.find((s) => s.id === m.sizeId)?.code} · ${m.name}`}
-          hint={`Target ${m.target} ± ${m.tolerance} ${m.unit}${actuals[i] === '' ? '' : Math.abs(+actuals[i] - m.target) <= m.tolerance + 1e-8 ? ' · Within tolerance' : ' · Outside tolerance'}`}
-        >
-          <StepInput
-            className="form-input"
-            decimals
-            step={0.1}
-            max={10000}
-            value={actuals[i]}
-            onValueChange={(v) =>
-              setActuals((a) => a.map((x, j) => (j === i ? limitDecimals(v, 2) : x)))
-            }
-          />
-        </Field>
-      ))}
-      {set ? (
-        <p className="bg-muted/40 rounded-lg p-3 text-sm">
-          <span className="font-medium">{finished} pieces inspected</span>, the whole set.{' '}
-          {SET_TEXT.qc}
-        </p>
-      ) : (
-        <Field
-          label="Pieces passing workmanship inspection"
-          hint={`${finished} pieces finished the making route.`}
-        >
-          <StepInput
-            className="form-input"
-            max={finished}
-            value={passed}
-            onValueChange={setPassed}
-          />
-        </Field>
-      )}
-      <Field label="QC findings and disposition of failed pieces">
-        <textarea className="form-input" value={notes} onChange={(e) => setNotes(e.target.value)} />
-      </Field>
-      <button
-        className="btn-primary"
-        disabled={
-          actuals.some((x) => x === '' || +x < 0) ||
-          passedQty < 1 ||
-          passedQty > finished ||
-          !Number.isInteger(passedQty) ||
-          !notes.trim()
-        }
-        onClick={() =>
-          save({
-            actuals: actuals.some((x) => x === '') ? [] : actuals.map(Number),
-            passedQty,
-            notes,
-          })
-        }
-      >
-        Record QC
-      </button>
-    </div>
-  )
-}
-function SubmissionAction({
-  available,
-  set,
-  save,
-}: {
-  available: number
-  /** Several colours or sizes: the whole inspected set is sent (SET_TEXT.submit). */
-  set: boolean
-  save: (d: unknown) => void
-}) {
-  const [typed, setQty] = useState(''),
-    [recipient, setRecipient] = useState(''),
-    [reference, setReference] = useState(''),
-    [notes, setNotes] = useState('')
-  const qty = set ? String(available) : typed
-  return (
-    <div className="glass-card space-y-3 p-4">
-      <h2 className="font-semibold">Submit to buyer</h2>
-      {set ? (
-        <p className="bg-muted/40 rounded-lg p-3 text-sm">
-          <span className="font-medium">{available} pieces sent</span>, every colour and size.{' '}
-          {SET_TEXT.submit}
-        </p>
-      ) : (
-        <Field
-          label="Pieces sent"
-          hint={`${available} pieces passed QC and are available to submit.`}
-        >
-          <StepInput className="form-input" max={available} value={typed} onValueChange={setQty} />
-        </Field>
-      )}
-      <Field label="Recipient">
-        <input
-          className="form-input"
-          value={recipient}
-          onChange={(e) => setRecipient(e.target.value)}
-        />
-      </Field>
-      <Field label="Courier / signed handover reference">
-        <input
-          className="form-input"
-          value={reference}
-          onChange={(e) => setReference(e.target.value)}
-        />
-      </Field>
-      <Field label="Submission notes / remaining samples retained by">
-        <input className="form-input" value={notes} onChange={(e) => setNotes(e.target.value)} />
-      </Field>
-      <button
-        className="btn-primary"
-        disabled={
-          +qty < 1 || +qty > available || !recipient.trim() || !reference.trim() || !notes.trim()
-        }
-        onClick={() => save({ qty: Number(qty), recipient, reference, notes })}
-      >
-        Record submission
-      </button>
-    </div>
-  )
-}
-function DecisionAction({ save }: { save: (d: unknown) => void }) {
-  const [result, setResult] = useState('CHANGES_REQUIRED'),
-    [buyerName, setBuyer] = useState(''),
-    [evidence, setEvidence] = useState(''),
-    [conditions, setConditions] = useState('')
-  return (
-    <div className="glass-card space-y-3 p-4">
-      <h2 className="font-semibold">Record buyer feedback</h2>
-      <Field label="Decision">
-        <select className="form-input" value={result} onChange={(e) => setResult(e.target.value)}>
-          {['CHANGES_REQUIRED', 'APPROVED', 'REJECTED'].map((x) => (
-            <option key={x} value={x}>
-              {SAMPLE_STATE_LABEL[x]}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field label="Buyer decision maker">
-        <input
-          className="form-input"
-          value={buyerName}
-          onChange={(e) => setBuyer(e.target.value)}
-        />
-      </Field>
-      <Field label="Evidence / feedback reference">
-        <textarea
-          className="form-input"
-          value={evidence}
-          onChange={(e) => setEvidence(e.target.value)}
-        />
-      </Field>
-      <Field
-        label="Unresolved conditions"
-        hint="If corrections are still needed, choose Changes required. Approval requires this field to be empty."
-      >
-        <textarea
-          className="form-input"
-          value={conditions}
-          onChange={(e) => setConditions(e.target.value)}
-        />
-      </Field>
-      <button
-        className="btn-primary"
-        disabled={
-          !buyerName.trim() || !evidence.trim() || (result === 'APPROVED' && !!conditions.trim())
-        }
-        onClick={() => save({ result, buyerName, evidence, conditions })}
-      >
-        Save buyer decision
-      </button>
-    </div>
-  )
-}
 function ReasonAction({ label, save }: { label: string; save: (s: string) => void }) {
   const [reason, setReason] = useState('')
   return (
@@ -2130,19 +2039,22 @@ function ReasonAction({ label, save }: { label: string; save: (s: string) => voi
 }
 function HandoverAction({
   round,
+  approved,
   lookups,
   save,
 }: {
   round: SampleRound
+  /** The colours the buyer approved, in any round of the request. */
+  approved: string[]
   lookups: Lookups
   save: (d: unknown) => void
 }) {
   const [bomId, setBom] = useState(''),
     [routingId, setRouting] = useState(''),
     [notes, setNotes] = useState('')
-  // The server takes a BOM for every colour, or for one of the colours the round made.
-  const boms = handoverBoms(lookups.boms, round.specification)
-  const colours = round.specification.colours.map((c) => c.colour.trim()).filter(Boolean)
+  // The server takes a BOM for every colour, or for one the buyer approved.
+  const boms = handoverBoms(lookups.boms, round.specification.styleId, approved)
+  const colours = approved
   return (
     <div className="glass-card space-y-3 p-4">
       <h2 className="font-semibold">Prepare approved bulk package</h2>
@@ -2150,8 +2062,8 @@ function HandoverAction({
         label="Approved production BOM"
         hint={
           boms.length
-            ? `This style’s approved BOMs for every colour, or for one of this round’s colours (${colours.join(', ')}).`
-            : `No approved BOM of this style for every colour or for ${colours.join(', ') || 'this round’s colours'} yet.`
+            ? `This style’s approved BOMs for every colour, or for a colour the buyer approved (${colours.join(', ')}).`
+            : `No approved BOM of this style for every colour or for ${colours.join(', ') || 'the approved colours'} yet.`
         }
       >
         <SmartSelect className="form-input" value={bomId} onChange={(e) => setBom(e.target.value)}>

@@ -11,6 +11,8 @@ import {
   SAMPLE_ROUTE_MIN_STEPS,
   STEP_EXECUTIONS,
   SAMPLE_MONEY_MAX,
+  SAMPLE_DECISION_RESULTS,
+  SAMPLE_DISPATCH_MODES,
 } from '@ld-erp/shared'
 import { MAX_FILE_BYTES } from '../lib/storage'
 const text = (max = 500) => z.string().trim().min(1, 'Fill in this field').max(max)
@@ -213,8 +215,10 @@ export const sampleActionSchema = z.object({
     'JOB_CHARGE',
     'MAKING_UNDO',
     'QC',
-    'SUBMIT',
+    'DISPATCH',
+    'DISPATCH_CANCEL',
     'DECIDE',
+    'DROP_COLOUR',
     'NEW_ROUND',
     'HANDOVER',
     'ACCEPT_HANDOVER',
@@ -363,29 +367,92 @@ export const sampleMakingUndoSchema = z
     reason: z.string().trim().min(SAMPLE_REASON_MIN, 'Say why, in a few words').max(500),
   })
   .strict()
-export const sampleQcSchema = z.object({
-  // One reading for each target of the frozen specification (points × sizes).
-  actuals: z
-    .array(z.number().min(0).max(10000))
-    .max(
-      SAMPLE_MEASURE_MAX_ENTRIES,
-      `Up to ${SAMPLE_MEASURE_MAX_ENTRIES} measurements in one check.`
-    ),
-  passedQty: z.number().int().positive(),
-  notes: text(2000),
-})
-export const sampleSubmissionSchema = z.object({
-  qty: z.number().int().positive(),
-  recipient: text(150),
-  reference: text(500),
-  notes: text(2000),
-})
-export const sampleDecisionSchema = z.object({
-  result: z.enum(['APPROVED', 'CHANGES_REQUIRED', 'REJECTED']),
-  buyerName: text(150),
-  evidence: text(2000),
-  conditions: z.string().trim().max(2000).default(''),
-})
+// ── QC, the buyer's samples and the buyer's word, colour by colour (phase 6) ──
+/**
+ * One inspection of the finished round: for each colour that finished
+ * pieces, a reading for each point of each size it finished (in the
+ * specification's order), and the pieces of each size that passed workmanship.
+ */
+export const sampleQcSchema = z
+  .object({
+    colours: z
+      .array(
+        z
+          .object({
+            colour: text(100),
+            actuals: z
+              .array(z.number().min(0, 'A reading cannot be negative').max(10000))
+              .max(SAMPLE_MEASURE_MAX_ENTRIES, `Up to ${SAMPLE_MEASURE_MAX_ENTRIES} readings for one colour.`),
+            cells: z.array(z.object({ sizeId: id, passed: pieces }).strict()).max(MAX_CELLS),
+            notes: note(1000),
+          })
+          .strict()
+      )
+      // None only when nothing finished: the inspection then records that.
+      .max(MAX_CELLS),
+    notes: text(2000),
+  })
+  .strict()
+/** Pieces that passed QC sent to the buyer on a Sample Delivery Challan. */
+export const sampleDispatchSchema = z
+  .object({
+    cells: qtyCells,
+    recipient: text(150),
+    address: note(500),
+    mode: z.enum(SAMPLE_DISPATCH_MODES, {
+      errorMap: () => ({ message: 'Say how it goes: courier, by hand or transport' }),
+    }),
+    courier: note(100),
+    awb: note(60),
+    sentOn: day,
+    returnable: z.boolean().default(false),
+    expectedBack: z.string().date('Give the date as a date').nullable().default(null),
+    declaredValue: money.nullable().default(null),
+    courierCharge: money.default(0),
+    notes: note(1000),
+  })
+  .strict()
+  .refine((d) => d.mode !== 'COURIER' || !!d.courier, {
+    message: 'Name the courier',
+    path: ['courier'],
+  })
+  .refine((d) => d.returnable || !d.expectedBack, {
+    message: 'A date to come back is for samples the buyer returns',
+    path: ['expectedBack'],
+  })
+/** A colour not to go on with: not sent, or failed QC and not to be made again. */
+export const sampleDropColourSchema = z
+  .object({
+    colour: text(100),
+    reason: z.string().trim().min(SAMPLE_REASON_MIN, 'Say why, in a few words').max(500),
+  })
+  .strict()
+/** A challan sent by mistake, before the buyer has decided on any of its colours. */
+export const sampleDispatchCancelSchema = z
+  .object({
+    dispatchId: id,
+    reason: z.string().trim().min(SAMPLE_REASON_MIN, 'Say why, in a few words').max(500),
+  })
+  .strict()
+/** The buyer's word on one or more colours, with who said it and where. */
+export const sampleDecisionSchema = z
+  .object({
+    buyerName: text(150),
+    evidence: text(2000),
+    colours: z
+      .array(
+        z
+          .object({
+            colour: text(100),
+            result: z.enum(SAMPLE_DECISION_RESULTS),
+            conditions: note(2000),
+          })
+          .strict()
+      )
+      .min(1, 'Record the buyer’s word on at least one colour')
+      .max(200),
+  })
+  .strict()
 export const sampleHandoverSchema = z.object({ bomId: id, routingId: id, notes: text(2000) })
 
 // ── Files and the request's style ─────────────────────────────────────────────

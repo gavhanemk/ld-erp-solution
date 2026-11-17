@@ -23,6 +23,10 @@ import {
   SAMPLE_STATE_LABEL,
   STYLE_STAGE_LABEL,
   lineRequiredQty,
+  normaliseDecision,
+  normaliseQc,
+  SAMPLE_COLOUR_RESULT_LABEL,
+  SAMPLE_DISPATCH_MODE_LABEL,
   type SampleAttachmentKind,
 } from '@ld-erp/shared'
 import {
@@ -142,22 +146,53 @@ export default function PrintSample() {
             : 'Pending'
       )
     }
-    if (round.qc) {
+    // The inspection colour by colour, the challans the samples went on, and the buyer's word.
+    const qc = normaliseQc(round.qc, s)
+    if (qc) {
+      const passedColours = qc.colours.filter((c) => c.passed).length
       add(
         round.revision,
         'Latest inspection',
-        round.qc.notes,
-        `${round.qc.passed ? 'Passed' : 'Failed'} · ${round.qc.passedQty} pieces`
+        qc.notes,
+        qc.whole
+          ? `${qc.passed ? 'Passed' : 'Failed'} · ${qc.passedQty} pieces`
+          : `${passedColours} of ${qc.colours.length} colours passed · ${qc.passedQty} pieces`
       )
-      for (const point of round.qc.results) {
+      // Inspected whole before colours were: one set of readings, for the whole set.
+      const blocks = qc.whole
+        ? [{ colour: 'the whole set', passed: qc.passed, results: qc.results, cells: [], notes: '' }]
+        : qc.colours
+      for (const c of blocks) {
         add(
           round.revision,
-          'QC measurement',
-          `${size(point.sizeId)} · ${point.name}: actual ${point.actual}, target ${point.target} ${point.unit}`,
-          point.pass ? 'Within tolerance' : 'Outside tolerance'
+          `QC · ${c.colour}`,
+          [
+            c.cells.map((z) => `${size(z.sizeId)}: ${z.passed} of ${z.finished} passed`).join(' · '),
+            ...c.results.map(
+              (point) =>
+                `${size(point.sizeId)} · ${point.name}: actual ${point.actual}, target ${point.target} ± ${point.tolerance} ${point.unit}${point.pass ? '' : ' (outside tolerance)'}`
+            ),
+            c.notes,
+          ]
+            .filter(Boolean)
+            .join('\n'),
+          c.passed ? 'Passed' : 'Failed'
         )
       }
     }
+    for (const d of round.dispatches ?? [])
+      add(
+        round.revision,
+        `Sent to the buyer · ${d.number}`,
+        [
+          `${d.recipient} · ${SAMPLE_DISPATCH_MODE_LABEL[d.mode]}${d.courier ? ` ${d.courier}` : ''}${d.awb ? ` ${d.awb}` : ''}`,
+          d.cells.map((c) => `${c.colour} ${size(c.sizeId)}: ${c.qty}`).join(' · '),
+          d.cancelledAt ? `Cancelled: ${d.cancelReason}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        `${d.cells.reduce((t, c) => t + c.qty, 0)} pieces · ${longDate(d.sentOn)}`
+      )
     if (round.submission)
       add(
         round.revision,
@@ -165,13 +200,16 @@ export default function PrintSample() {
         `${round.submission.recipient} · ${round.submission.reference}\n${round.submission.notes}`,
         `${round.submission.qty} pieces`
       )
-    if (round.decision)
+    const decision = normaliseDecision(round.decision, s)
+    for (const c of Object.values(decision?.colours ?? {}))
       add(
         round.revision,
-        'Buyer decision',
-        `${round.decision.buyerName}\n${round.decision.evidence}\n${round.decision.conditions}`,
-        SAMPLE_STATE_LABEL[round.decision.result]
+        `Buyer decision · ${c.colour}`,
+        [c.buyerName, c.evidence, c.conditions].filter(Boolean).join('\n'),
+        SAMPLE_COLOUR_RESULT_LABEL[c.result]
       )
+    if (decision?.result)
+      add(round.revision, 'Round decided', decision.conditions ?? '', SAMPLE_STATE_LABEL[decision.result])
     if (round.handover)
       add(
         round.revision,

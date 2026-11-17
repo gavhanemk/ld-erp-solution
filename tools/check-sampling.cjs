@@ -33,6 +33,7 @@ const masters = require('../apps/api/src/routes/master.routes.ts').default
 const quotations = require('../apps/api/src/routes/quotation.routes.ts').default
 const purchase = require('../apps/api/src/routes/purchase.routes.ts').default
 const { makingLedger } = require('../packages/shared/src/sampleMaking.ts')
+const { colourOutcomes, pointsFor } = require('../packages/shared/src/sampleReview.ts')
 const { ZodError } = require('zod')
 let passed = 0,
   server
@@ -250,6 +251,41 @@ async function main() {
    * there is done, then handed on to the next and counted in there; an outside step's
    * pieces go to its unit on a challan and all come back accepted.
    */
+  /**
+   * QC as the inspector records it (phase 6): every colour that finished, every point of
+   * the sizes it finished read (at its target unless `read` says otherwise), every
+   * finished piece passed.
+   */
+  const qcData = (read = (m) => m.target, notes = 'Inspected') => {
+    const r = doc.rounds[0]
+    const last = makingLedger(r).at(-1).cells.filter((c) => c.done > 0)
+    return {
+      notes,
+      colours: [...new Set(last.map((c) => c.colour))].map((colour) => {
+        const cells = last.filter((c) => c.colour === colour)
+        return {
+          colour,
+          actuals: pointsFor(r.specification, cells.map((c) => c.sizeId)).map(read),
+          cells: cells.map((c) => ({ sizeId: c.sizeId, passed: c.done })),
+        }
+      }),
+    }
+  }
+  /** A Sample Delivery Challan for whatever passed QC and is not sent yet. */
+  const sendAll = (extra = {}) => ({
+    cells: colourOutcomes(doc.rounds[0]).flatMap((o) => o.toSend),
+    recipient: 'Example buyer',
+    mode: 'HAND',
+    ...extra,
+  })
+  /** The buyer's word on every colour that passed QC. */
+  const decideAll = (result, conditions = '') => ({
+    buyerName: 'Example buyer',
+    evidence: 'EXAMPLE-EMAIL',
+    colours: colourOutcomes(doc.rounds[0])
+      .filter((o) => o.qc === 'PASSED')
+      .map((o) => ({ colour: o.colour, result, conditions })),
+  })
   const makeAll = async () => {
     const latest = () => doc.rounds[0]
     const ledger = () => makingLedger(latest())
@@ -551,48 +587,22 @@ async function main() {
     assert.equal(+stockAfter._sum.outQty - +stock._sum.outQty, 5)
     assert.equal(+stockAfter._sum.inQty - +stock._sum.inQty, 1)
   })
+  const whiteM = (qty) => [{ colour: 'White', sizeId: 'sample-size-M', qty }]
+  await action('DISPATCH', { ...sendAll(), cells: whiteM(1) }, 409)
   await action(
-    'SUBMIT',
-    { qty: 1, recipient: 'Buyer', reference: 'Signed slip', notes: 'One retained' },
+    'QC',
+    { ...qcData(), colours: qcData().colours.map((c) => ({ ...c, actuals: [] })) },
     409
   )
-  await action('QC', { actuals: [], passedQty: 2, notes: 'Missing measurements' }, 409)
-  await action('QC', { actuals: [52], passedQty: 2, notes: 'Chest outside tolerance' })
-  check('failed measurements do not release sample for submission', () =>
-    assert.equal(doc.rounds[0].state, 'RELEASED')
+  await action('QC', qcData(() => 52, 'Chest outside tolerance'))
+  check('failed measurements leave nothing to send to the buyer', () =>
+    assert.equal(doc.rounds[0].state, 'QC_FAILED')
   )
-  await action('QC', {
-    actuals: [50.2],
-    passedQty: 2,
-    notes: 'Measurements and workmanship accepted',
-  })
-  await action(
-    'SUBMIT',
-    { qty: 3, recipient: 'Buyer', reference: 'Signed slip', notes: 'Too many' },
-    409
-  )
-  await action('SUBMIT', {
-    qty: 1,
-    recipient: 'Buyer',
-    reference: 'EXAMPLE-SUBMISSION',
-    notes: 'One retained by sample room',
-  })
-  await action(
-    'DECIDE',
-    {
-      result: 'APPROVED',
-      buyerName: 'Example buyer',
-      evidence: 'EXAMPLE-EMAIL',
-      conditions: 'Change collar',
-    },
-    409
-  )
-  await action('DECIDE', {
-    result: 'CHANGES_REQUIRED',
-    buyerName: 'Example buyer',
-    evidence: 'EXAMPLE-EMAIL',
-    conditions: 'Change collar',
-  })
+  await action('QC', qcData(() => 50.2, 'Measurements and workmanship accepted'))
+  await action('DISPATCH', { ...sendAll(), cells: whiteM(3) }, 409)
+  await action('DISPATCH', { ...sendAll(), cells: whiteM(1), notes: 'One retained by sample room' })
+  await action('DECIDE', decideAll('APPROVED', 'Change collar'), 409)
+  await action('DECIDE', decideAll('CHANGES_REQUIRED', 'Change collar'))
   const oldRound = doc.rounds[0]
   await action(
     'HANDOVER',
@@ -607,7 +617,7 @@ async function main() {
   const copiedLines = doc.rounds[0].specification.materials
   check('new round preserves prior decision and frozen specification', () => {
     assert.equal(doc.rounds[0].revision, 2)
-    assert.equal(doc.rounds[1].decision.conditions, 'Change collar')
+    assert.equal(doc.rounds[1].decision.conditions, 'White: Change collar')
     assert.deepEqual(doc.rounds[1].specification, releasedSpec)
   })
   check('a new round copies the BOM lines into rows of its own, nothing issued, no store', () => {
@@ -644,19 +654,9 @@ async function main() {
     warehouseId: store,
   })
   await makeAll()
-  await action('QC', { actuals: [50], passedQty: 2, notes: 'QC accepted' })
-  await action('SUBMIT', {
-    qty: 1,
-    recipient: 'Buyer',
-    reference: 'EXAMPLE-SUBMISSION-2',
-    notes: 'One retained',
-  })
-  await action('DECIDE', {
-    result: 'APPROVED',
-    buyerName: 'Example buyer',
-    evidence: 'Unconditional acceptance EXAMPLE-EMAIL-2',
-    conditions: '',
-  })
+  await action('QC', qcData(undefined, 'QC accepted'))
+  await action('DISPATCH', { ...sendAll(), cells: whiteM(1), notes: 'One retained' })
+  await action('DECIDE', decideAll('APPROVED'))
   await action(
     'HANDOVER',
     { bomId: 'sample-bom', routingId: 'sample-route', notes: 'Bulk package' },
@@ -918,25 +918,16 @@ async function main() {
     warehouseId: store,
   })
   await makeAll()
-  await action('QC', { actuals: [50, 51], passedQty: 1, notes: 'Partial size set' }, 409)
-  await action('QC', { actuals: [50, 51], passedQty: 2, notes: 'All sizes inspected' })
+  // Each size is read on its own points: one reading short is refused.
   await action(
-    'SUBMIT',
-    { qty: 1, recipient: 'Buyer', reference: 'EXAMPLE-SET', notes: 'Partial set' },
+    'QC',
+    { ...qcData(), colours: qcData().colours.map((c) => ({ ...c, actuals: c.actuals.slice(1) })) },
     409
   )
-  await action('SUBMIT', {
-    qty: 2,
-    recipient: 'Buyer',
-    reference: 'EXAMPLE-SET',
-    notes: 'Complete set',
-  })
-  await action('DECIDE', {
-    result: 'CHANGES_REQUIRED',
-    buyerName: 'Example buyer',
-    evidence: 'EXAMPLE-FEEDBACK',
-    conditions: 'Revise fit',
-  })
+  await action('QC', qcData(undefined, 'All sizes inspected'))
+  await action('DISPATCH', { ...sendAll(), cells: [{ colour: 'White', sizeId: 'sample-size-L', qty: 2 }] }, 409)
+  await action('DISPATCH', sendAll({ notes: 'Complete set' }))
+  await action('DECIDE', decideAll('CHANGES_REQUIRED', 'Revise fit'))
   await action('NEW_ROUND', 'Revise the complete size set after feedback')
   await action('CANCEL', 'Development stopped; earlier round still holds material', 409)
   await action(
@@ -993,25 +984,11 @@ async function main() {
       doc.rounds[0].stages.map(() => [2, 0, true])
     )
   )
-  await action('QC', { actuals: [50], passedQty: 1, notes: 'One colour only' }, 409)
-  await action('QC', { actuals: [50], passedQty: 2, notes: 'Both colours inspected' })
-  await action(
-    'SUBMIT',
-    { qty: 1, recipient: 'Buyer', reference: 'EXAMPLE-PAIR', notes: 'One colour' },
-    409
-  )
-  await action('SUBMIT', {
-    qty: 2,
-    recipient: 'Buyer',
-    reference: 'EXAMPLE-PAIR',
-    notes: 'Both colours',
-  })
-  await action('DECIDE', {
-    result: 'APPROVED',
-    buyerName: 'Example buyer',
-    evidence: 'EXAMPLE-PAIR-EMAIL',
-    conditions: '',
-  })
+  // Every colour that finished is inspected: one left out is refused.
+  await action('QC', { ...qcData(), colours: qcData().colours.slice(0, 1) }, 409)
+  await action('QC', qcData(undefined, 'Both colours inspected'))
+  await action('DISPATCH', sendAll({ notes: 'Both colours' }))
+  await action('DECIDE', decideAll('APPROVED'))
   await action('MATERIAL', {
     materialId: pairRound.materials[0].id,
     kind: 'USE',
@@ -1033,7 +1010,14 @@ async function main() {
     colours: [{ colour: 'Blue', sizes: [{ sizeId: 'sample-size-M', qty: 2 }] }],
   })
   const blueRound = doc.rounds[0]
-  await db.sampleRound.update({ where: { id: blueRound.id }, data: { state: 'APPROVED' } })
+  // Approved as a whole round was before colours were decided one by one.
+  await db.sampleRound.update({
+    where: { id: blueRound.id },
+    data: {
+      state: 'APPROVED',
+      decision: { result: 'APPROVED', buyerName: 'Example buyer', evidence: 'EXAMPLE', conditions: '' },
+    },
+  })
   doc = (await call('GET', `/${doc.id}`)).body.data
   const blueBom = await action(
     'HANDOVER',
@@ -1041,9 +1025,10 @@ async function main() {
     409
   )
   await db.sampleRound.update({ where: { id: blueRound.id }, data: { state: 'RELEASED' } })
+  await db.$executeRaw`UPDATE ld_erp.sample_rounds SET decision = NULL WHERE id = ${blueRound.id}`
   doc = (await call('GET', `/${doc.id}`)).body.data
-  check('a handover BOM must be for one of the round’s colours', () =>
-    assert.match(blueBom.body.message, /one of the round’s colours/)
+  check('a handover BOM must be for every colour or one the buyer approved', () =>
+    assert.match(blueBom.body.message, /for every colour or for one the buyer approved/)
   )
   await action('CANCEL', 'Local colour check complete; nothing issued')
 
@@ -1988,7 +1973,13 @@ async function main() {
     assert.match(typedRefusal.message, new RegExp(devStyle.code))
   })
   // An approved round of a style made in sampling has nothing to hand over yet.
-  await db.sampleRound.update({ where: { id: releasedRound.id }, data: { state: 'APPROVED' } })
+  await db.sampleRound.update({
+    where: { id: releasedRound.id },
+    data: {
+      state: 'APPROVED',
+      decision: { result: 'APPROVED', buyerName: 'Example buyer', evidence: 'EXAMPLE', conditions: '' },
+    },
+  })
   doc = (await call('GET', `/${doc.id}`)).body.data
   const noHandover = await action(
     'HANDOVER',
@@ -1996,6 +1987,7 @@ async function main() {
     409
   )
   await db.sampleRound.update({ where: { id: releasedRound.id }, data: { state: 'RELEASED' } })
+  await db.$executeRaw`UPDATE ld_erp.sample_rounds SET decision = NULL WHERE id = ${releasedRound.id}`
   doc = (await call('GET', `/${doc.id}`)).body.data
   check('a style made in sampling is not handed over, and the refusal says why', () => {
     assert.equal(noHandover.body.code, 'STYLE_IN_DEVELOPMENT')
@@ -2745,8 +2737,7 @@ async function main() {
     })),
   })
   const overQc = schemas.sampleQcSchema.safeParse({
-    actuals: Array(6001).fill(1),
-    passedQty: 1,
+    colours: [{ colour: 'White', actuals: Array(6001).fill(1), cells: [], notes: '' }],
     notes: 'Too many readings',
   })
   check('a round’s text keeps to the masters it becomes, and its chart limits are plain', () => {
@@ -2758,7 +2749,7 @@ async function main() {
       'Up to 6000 measurement targets in one round (points × sizes). Use fewer points or sizes.'
     )
     assert.equal(firstIssue(overPoints), 'Up to 200 measurement points in one round.')
-    assert.equal(firstIssue(overQc), 'Up to 6000 measurements in one check.')
+    assert.equal(firstIssue(overQc), 'Up to 6000 readings for one colour.')
   })
 
   // A full chart (101 points in two sizes: 202 targets) and a process named at
@@ -2830,11 +2821,7 @@ async function main() {
     warehouseId: store,
   })
   await makeAll()
-  await action('QC', {
-    actuals: chartDraft.measurements.map((m) => m.target),
-    passedQty: 2,
-    notes: 'Every point of the chart measured',
-  })
+  await action('QC', qcData(undefined, 'Every point of the chart measured'))
   check('it is released with the long step name, and QC takes a reading for every target', () => {
     assert.equal(chartRound.stages[2].name, longOp.name)
     assert.equal(doc.rounds[0].state, 'QC_PASSED')

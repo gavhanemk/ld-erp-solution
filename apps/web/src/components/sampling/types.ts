@@ -1,4 +1,7 @@
 import type {
+  SampleDecision,
+  SampleDispatchMode,
+  SampleQc,
   MakingQtyCell,
   MakingReturnCell,
   MakingWorkCell,
@@ -204,6 +207,28 @@ export interface SampleJobReturn {
   undoneBy: string | null
   undoneReason: string | null
 }
+/** Samples sent to the buyer on a Sample Delivery Challan (DISPATCH). */
+export interface SampleDispatch {
+  id: string
+  number: string
+  cells: MakingQtyCell[]
+  recipient: string
+  address: string | null
+  mode: SampleDispatchMode
+  courier: string | null
+  awb: string | null
+  sentOn: string
+  returnable: boolean
+  expectedBack: string | null
+  declaredValue: string | null
+  /** What sending them cost (₹): to those who record sampling, and to accounts. */
+  courierCharge?: string
+  notes: string | null
+  createdAt: string
+  cancelledAt: string | null
+  cancelledBy: string | null
+  cancelReason: string | null
+}
 /** Pieces given to a step's outside unit on a job-work challan (JOB_SEND). */
 export interface SampleJobWork {
   id: string
@@ -235,7 +260,12 @@ export interface SampleRound {
   transfers: SampleTransfer[]
   jobWorks: SampleJobWork[]
   materials: SampleMaterial[]
+  /**
+   * The latest inspection: colour by colour since phase 6 (colours), or one
+   * of the whole set before. normaliseQc reads either in today's shape.
+   */
   qc: {
+    /** At least one colour passed. */
     passed: boolean
     passedQty: number
     notes: string
@@ -246,10 +276,27 @@ export interface SampleRound {
       target: number
       unit: string
       pass: boolean
+      colour?: string
     }>
+    colours?: SampleQc['colours']
+    by?: string
+    at?: string
   } | null
+  /** Sent to the buyer whole, before Sample Delivery Challans. */
   submission: { qty: number; recipient: string; reference: string; notes: string } | null
-  decision: { result: string; buyerName: string; evidence: string; conditions: string } | null
+  /**
+   * The buyer's word: colour by colour since phase 6 (colours), the round's
+   * verdict once every colour has one. normaliseDecision reads either.
+   */
+  decision: {
+    result?: string
+    buyerName?: string
+    evidence?: string
+    conditions?: string
+    colours?: SampleDecision['colours']
+  } | null
+  /** Samples sent to the buyer on Sample Delivery Challans, oldest first. */
+  dispatches: SampleDispatch[]
   handover: {
     bomId: string
     bomVersion: string
@@ -268,7 +315,19 @@ export interface SampleRequest {
   buyerRef: string | null
   brandId: string
   customerId: string | null
-  customer: { name: string } | null
+  /** With where samples go, sent with the request itself. */
+  customer: {
+    name: string
+    phone?: string | null
+    shippingAddress?: string | null
+    shippingCity?: string | null
+    shippingState?: string | null
+    shippingPincode?: string | null
+    billingAddress?: string | null
+    billingCity?: string | null
+    billingState?: string | null
+    billingPincode?: string | null
+  } | null
   brand: { name: string }
   owner: string
   brief: string

@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import { Clock3, Factory, Printer } from 'lucide-react'
+import { Clock3, Factory, Printer, type LucideIcon } from 'lucide-react'
 import {
   cellKey,
   jobOutstanding,
@@ -52,7 +52,7 @@ type Open =
   | { kind: 'UNDO'; undo: UndoKind; id: string; what: string }
 
 /** Today as the date box shows it. */
-const today = () => new Date().toLocaleDateString('en-CA')
+export const today = () => new Date().toLocaleDateString('en-CA')
 const pieces = (n: number) => plural(n, 'piece')
 
 export function SampleMaking({
@@ -683,7 +683,7 @@ const undoWord = (o: Open) => (o.kind === 'UNDO' && o.undo === 'JOB_SEND' ? 'Can
 // ── Windows ───────────────────────────────────────────────────────────────────
 
 /** A making window: fields first, the main button in its footer, Ctrl+S to save. */
-function MakingWindow({
+export function MakingWindow({
   id,
   title,
   subtitle,
@@ -694,6 +694,8 @@ function MakingWindow({
   onClose,
   onSubmit,
   width = 'max-w-3xl',
+  icon = Factory,
+  closeLabel = 'Cancel',
   children,
 }: {
   id: string
@@ -706,11 +708,14 @@ function MakingWindow({
   onClose: () => void
   onSubmit: () => void
   width?: string
+  icon?: LucideIcon
+  /** The footer's close button; 'Keep it' where Cancel would be the window's own action. */
+  closeLabel?: string
   children: React.ReactNode
 }) {
   return (
     <FormFrame
-      icon={Factory}
+      icon={icon}
       title={title}
       subtitle={subtitle}
       width={width}
@@ -725,7 +730,7 @@ function MakingWindow({
       }
       footer={
         <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>
-          Cancel
+          {closeLabel}
         </button>
       }
       footerNote={note}
@@ -747,7 +752,7 @@ function MakingWindow({
 }
 
 /** Saving a window: busy while it goes, the server's sentence where it was typed. */
-function useSave() {
+export function useSave() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const run = async (problem: string, go: () => Promise<void>) => {
@@ -765,7 +770,7 @@ function useSave() {
 }
 
 /** One row per colour and size, with a number box for each column. */
-function CellInputs({
+export function CellInputs({
   rows,
   columns,
   values,
@@ -814,14 +819,14 @@ function CellInputs({
     </div>
   )
 }
-const num = (v: string | undefined) => (v === undefined || v === '' ? 0 : Number(v))
-const whole = (v: number) => Number.isInteger(v) && v >= 0
+export const num = (v: string | undefined) => (v === undefined || v === '' ? 0 : Number(v))
+export const whole = (v: number) => Number.isInteger(v) && v >= 0
 /**
  * The boxes of a window, cell by cell. With `split`, what is typed as rejected
  * comes off the first column (done, accepted) up to the cell's pieces, so the
  * two never add up to more than are there.
  */
-function useGrid(
+export function useGrid(
   initial: Record<string, Record<string, string>>,
   split?: { from: string; rejected: string; max: (row: string) => number }
 ) {
@@ -835,7 +840,7 @@ function useGrid(
     })
   return { values, set }
 }
-const DateField = ({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) => (
+export const DateField = ({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) => (
   <Field label={label} required>
     <input className="form-input" type="date" max={today()} value={value} onChange={(e) => onChange(e.target.value)} />
   </Field>

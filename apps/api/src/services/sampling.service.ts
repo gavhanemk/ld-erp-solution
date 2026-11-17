@@ -13,6 +13,13 @@ import { liveSampleOrders, sampleOrderLine, sampleOrderSelect } from './sampleSo
 import { MAKING_COST_ACTIONS, actOnMaking, syncMaking } from './sampleMaking.service'
 import { jobOutstanding, makingStarted } from '../../../../packages/shared/src/sampleMaking'
 import {
+  colourKey,
+  colourOutcomes,
+  coloursToCarry,
+  handoverReady,
+} from '../../../../packages/shared/src/sampleReview'
+import { actOnReview } from './sampleReview.service'
+import {
   OVERRIDE_REASON_MIN,
   SAMPLE_ATTACHMENT_KIND_LABEL,
   SAMPLE_MATERIAL_TYPES,
@@ -21,6 +28,7 @@ import {
   normaliseSpec,
   repeatedBomLines,
   sampleSpecGaps,
+  sizesInUse,
   type SampleAttachmentKind,
   type SampleBomLine,
   type SampleItemOption,
@@ -40,9 +48,6 @@ import {
   sampleMaterialSchema,
   sampleWaiveSchema,
   sampleCloseOutSchema,
-  sampleQcSchema,
-  sampleSubmissionSchema,
-  sampleDecisionSchema,
   sampleHandoverSchema,
   sampleDraftSchema,
   sampleDraftPatchSchema,
@@ -83,7 +88,22 @@ export const sampleItemSelect = {
   uom: { select: { id: true, name: true, symbol: true } },
 } satisfies Prisma.ItemSelect
 export const sampleInclude = {
-  customer: { select: { id: true, name: true } },
+  // With where its samples go, for the delivery challan's address.
+  customer: {
+    select: {
+      id: true,
+      name: true,
+      phone: true,
+      shippingAddress: true,
+      shippingCity: true,
+      shippingState: true,
+      shippingPincode: true,
+      billingAddress: true,
+      billingCity: true,
+      billingState: true,
+      billingPincode: true,
+    },
+  },
   brand: { select: { id: true, name: true } },
   style: { select: sampleStyleSelect },
   rounds: {
@@ -101,6 +121,8 @@ export const sampleInclude = {
           returns: { orderBy: { createdAt: 'asc' as const } },
         },
       },
+      // Samples sent to the buyer on Sample Delivery Challans.
+      dispatches: { orderBy: { createdAt: 'asc' as const } },
       materials: {
         // As the merchandiser listed them; the id breaks a tie between lines
         // released before lines were numbered.
@@ -1069,7 +1091,7 @@ export async function actOnSample(
     fail('Only the latest sample round can be changed.')
   const round = r!
   const spec = round?.specification
-  const approver = ['RELEASE', 'QC', 'DECIDE', 'HANDOVER', 'CANCEL'].includes(cmd.action)
+  const approver = ['RELEASE', 'QC', 'DECIDE', 'DROP_COLOUR', 'HANDOVER', 'CANCEL'].includes(cmd.action)
   grant(actor, 'sampling', approver ? 'approve' : 'edit')
   if (
     ['ATTACH', 'DETACH', 'CREATE_STYLE', 'LINK_STYLE', 'UPDATE_STYLE'].includes(cmd.action) &&
@@ -1518,100 +1540,63 @@ export async function actOnSample(
       })
       break
     }
-    case 'QC': {
-      if (round.state !== 'RELEASED') fail('Complete the making route before recording QC.')
-      // As the round's records have it (sampleMaking), each step's figures written back.
-      const made = await syncMaking(tx, round)
-      if (!made.length || made.some((s) => !s.complete))
-        fail('Complete the making route before recording QC.')
-      const finished = made.at(-1)!.total.done
-      const d = sampleQcSchema.parse(cmd.data)
-      if (cellCount(spec) > 1 && d.passedQty !== finished)
-        fail(
-          'With several colours or sizes in one round, inspect and pass the whole set; take rejected pieces out in a new round.'
-        )
-      if (d.passedQty > finished)
-        fail('QC cannot pass more pieces than finishing produced.')
-      if (d.actuals.length !== spec.measurements.length)
-        fail('Measure every point in the frozen specification.')
-      const results = spec.measurements.map((m, i) => ({
-        ...m,
-        actual: d.actuals[i],
-        pass: Math.abs(d.actuals[i] - m.target) <= m.tolerance + 1e-8,
-      }))
-      const passed = results.every((x) => x.pass)
-      await tx.sampleRound.update({
-        where: { id: round.id },
-        data: {
-          qc: json({ ...d, results, passed, by: actor.name, at: new Date() }),
-          state: passed ? 'QC_PASSED' : 'RELEASED',
-        },
-      })
-      detail = { ...d, passed }
-      break
-    }
-    case 'SUBMIT': {
-      if (round.state !== 'QC_PASSED') fail('Pass internal QC before submitting to the buyer.')
-      const d = sampleSubmissionSchema.parse(cmd.data)
-      if (cellCount(spec) > 1 && d.qty !== (round.qc as { passedQty: number }).passedQty)
-        fail('Submit the whole inspected set so the approval covers every colour and size.')
-      if (d.qty > (round.qc as { passedQty: number }).passedQty)
-        fail('Do not send more pieces than passed QC.')
-      await tx.sampleRound.update({
-        where: { id: round.id },
-        data: { state: 'SUBMITTED', submission: json({ ...d, at: new Date(), by: actor.name }) },
-      })
-      break
-    }
-    case 'DECIDE': {
-      if (round.state !== 'SUBMITTED') fail('Only a submitted round can receive a buyer decision.')
-      const d = sampleDecisionSchema.parse(cmd.data)
-      if (d.result === 'APPROVED' && d.conditions)
-        fail(
-          'Resolve conditions before approving for bulk. Record Changes required while conditions remain.'
-        )
-      await tx.sampleRound.update({
-        where: { id: round.id },
-        data: { state: d.result, decision: json({ ...d, at: new Date(), recordedBy: actor.name }) },
-      })
+    // QC, the buyer's samples and the buyer's word, colour by colour (sampleReview.service).
+    case 'QC':
+    case 'DISPATCH':
+    case 'DISPATCH_CANCEL':
+    case 'DECIDE':
+    case 'DROP_COLOUR': {
+      detail = await actOnReview(tx, cmd.action, { round, actor, data: cmd.data })
       break
     }
     case 'NEW_ROUND': {
       if (round.handover)
         fail('A handed-over round is frozen; raise a separate request for new development.')
-      if (
-        !['APPROVED', 'REJECTED', 'CHANGES_REQUIRED'].includes(round.state) &&
-        !(round.qc && (round.qc as { passed: boolean }).passed === false)
-      )
+      // A failed QC recorded before failing had a state of its own was left being made.
+      const qcFailed =
+        round.state === 'QC_FAILED' ||
+        (round.state === 'RELEASED' && !!round.qc && (round.qc as { passed: boolean }).passed === false)
+      if (!['APPROVED', 'REJECTED', 'CHANGES_REQUIRED'].includes(round.state) && !qcFailed)
         fail('Finish the buyer review before beginning another round.')
       const reason = String(cmd.data ?? '').trim()
       if (reason.length < 5 || reason.length > 2000)
         fail('Say why a revision or next milestone is needed (5–2000 characters).')
       if (round.state === 'RELEASED')
-        await tx.sampleRound.update({
-          where: { id: round.id },
-          data: { state: 'CHANGES_REQUIRED' },
-        })
+        await tx.sampleRound.update({ where: { id: round.id }, data: { state: 'QC_FAILED' } })
+      // The colours the next round makes: those to make again (the buyer wants
+      // them changed, or they failed QC); after an approval, the approved ones
+      // for the next milestone; else all.
+      const carried = new Set(coloursToCarry(colourOutcomes(round)).map(colourKey))
+      const colours = spec.colours.filter((r) => carried.has(colourKey(r.colour)))
+      const sizes = sizesInUse({ colours })
+      const nextSpec = {
+        ...spec,
+        colours,
+        // Measured for the sizes it still makes.
+        measurements: spec.measurements.filter((m) => sizes.includes(m.sizeId)),
+      }
       // The next round starts from this one's specification, its BOM lines
       // copied into rows of its own (new ids, nothing issued, the store
       // chosen again at the first issue), their quantities worked out for
-      // the grid it carries over.
+      // the grid it carries over; a line for a colour it does not make is left.
       const next = await tx.sampleRound.create({
         data: {
           requestId: id,
           revision: round.revision + 1,
-          specification: json({ ...spec, materials: [] }),
+          specification: json({ ...nextSpec, materials: [] }),
         },
       })
-      const copied = currentLines(round).map(({ id: _was, ...line }) => line)
-      const materials = await syncBomRows(tx, { id: next.id, materials: [] }, spec, copied, {
+      const copied = currentLines(round)
+        .filter((l) => !l.colour || carried.has(colourKey(l.colour)))
+        .map(({ id: _was, ...line }) => line)
+      const materials = await syncBomRows(tx, { id: next.id, materials: [] }, nextSpec, copied, {
         draft: true,
         copy: true,
         customerId: request.customerId,
       })
       await tx.sampleRound.update({
         where: { id: next.id },
-        data: { specification: json({ ...spec, materials }) },
+        data: { specification: json({ ...nextSpec, materials }) },
       })
       // A request released before requests named their style has none, and
       // the new draft could not be prepared or released without one: it takes
@@ -1627,13 +1612,17 @@ export async function actOnSample(
       detail = {
         fromRevision: round.revision,
         reason,
+        colours: colours.map((r) => r.colour),
         materials: materials.length,
         ...(filled ? { styleId: filled.id } : {}),
       }
       break
     }
     case 'HANDOVER': {
-      if (round.state !== 'APPROVED' || round.handover)
+      // Every colour the request sampled has ended (approved, rejected or
+      // dropped), in whichever round, and at least one is approved.
+      const ready = handoverReady(request.rounds)
+      if (!ready.ready || !['APPROVED', 'REJECTED'].includes(round.state) || round.handover)
         fail('Handover requires buyer approval and can only be prepared once.')
       if (request.rounds.some((x) => x.materials.some((m) => held(m) > 0.0005)))
         fail('Account for used, wasted and returned material on every round before handover.')
@@ -1653,10 +1642,10 @@ export async function actOnSample(
         where: { id: d.bomId, styleId: spec.styleId, isActive: true, status: 'APPROVED' },
         include: { lines: { include: { sizes: true } } },
       })
-      // A BOM for every colour, or for one of the colours the round made.
-      const madeIn = spec.colours.map((c) => c.colour.trim().toLowerCase()).filter(Boolean)
-      if (!bom || (bom.color && !madeIn.includes(bom.color.trim().toLowerCase())))
-        fail('Pick an approved production BOM for this style in one of the round’s colours.')
+      // A BOM for every colour, or for a colour the buyer approved, in any round.
+      const approved = ready.approved.map(colourKey)
+      if (!bom || (bom.color && !approved.includes(colourKey(bom.color))))
+        fail('Pick an approved production BOM for this style, for every colour or for one the buyer approved.')
       const routing = await tx.routing.findFirst({
         where: { id: d.routingId, isActive: true },
         include: { steps: { orderBy: { sequence: 'asc' } }, style: { select: { code: true } } },
@@ -1702,6 +1691,7 @@ export async function actOnSample(
             },
             specification: spec,
             decision: round.decision,
+            approvedColours: ready.approved,
             preparedBy: actor.name,
             preparedAt: new Date(),
           }),
