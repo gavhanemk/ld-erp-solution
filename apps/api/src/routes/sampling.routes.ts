@@ -8,7 +8,8 @@ import { samplingPilotEnabled } from '../lib/pilot'
 import { removeObject, signedDownloadUrl, signedUploadUrl, storagePathFor } from '../lib/storage'
 import { nextStyleCode } from '../lib/masterCode'
 import { createItemRecord } from '../lib/itemMaster'
-import { SAMPLE_ATTACHMENT_KIND_LABEL, SAMPLE_MATERIAL_TYPES } from '@ld-erp/shared'
+import { SAMPLE_ATTACHMENT_KIND_LABEL, SAMPLE_MATERIAL_TYPES, qtyCells, returnCells } from '@ld-erp/shared'
+import { getPrintHeader } from '../lib/printData'
 import {
   createSampleSchema,
   sampleActionSchema,
@@ -61,17 +62,39 @@ function visible(row: Awaited<ReturnType<typeof sampleDetail>>, req: AuthRequest
     const lockedReason = attachmentLock(row, f)
     return { ...f, removable: !lockedReason, lockedReason }
   })
-  if (userCan(req.user, 'accounts', 'view')) return { ...row, attachments }
+  const values = userCan(req.user, 'accounts', 'view')
+  // A step's labour and an outside unit's charge: for whoever records them,
+  // and for accounts.
+  const labour = values || userCan(req.user, 'sampling', 'edit')
+  if (values) return { ...row, attachments }
   return {
     ...row,
     attachments,
     rounds: row.rounds.map((r) => ({
       ...r,
       materials: r.materials.map(({ issuedValue, returnedValue, ...m }) => m),
+      stages: labour ? r.stages : r.stages.map(({ labourAmount, labourNote, ...s }) => s),
+      jobWorks: labour
+        ? r.jobWorks
+        : r.jobWorks.map((j) => ({ ...j, returns: j.returns.map(({ chargeAmount, ...x }) => x) })),
     })),
     // What leftovers were carried at is a value too.
     closeOuts: row.closeOuts.map(({ value, ...c }) => c),
+    // The history says what labour and charges were, to the same people.
+    events: labour ? row.events : row.events.map(withoutAmounts),
   }
+}
+/**
+ * What a making event says of money, left out: the amounts, and a labour
+ * note, which says who was paid and how (STEP_LABOUR, JOB_RETURN, JOB_CHARGE).
+ */
+function withoutAmounts<E extends { action: string; detail: unknown }>(e: E): E {
+  if (!['STEP_LABOUR', 'JOB_RETURN', 'JOB_CHARGE'].includes(e.action)) return e
+  const detail = (e.detail ?? {}) as { data?: Record<string, unknown> }
+  if (!detail.data || typeof detail.data !== 'object') return e
+  const { amount, was, charge, ...data } = detail.data
+  if (e.action === 'STEP_LABOUR') delete data.note
+  return { ...e, detail: { ...detail, data } }
 }
 router.get('/lookups', async (_req, res) =>
   res.json({ success: true, data: await prisma.$transaction(sampleLookups, T) })
@@ -254,6 +277,73 @@ router.get('/:id/print', async (req: AuthRequest, res) => {
     return { request: { ...visible(request, req), attachments }, company, lookups }
   }, T)
   res.json({ success: true, data })
+})
+
+/**
+ * The job-work challan that goes with sample pieces to an outside unit: our
+ * number from the job-work series, the unit as consignee, the pieces by
+ * colour and size, and what has come back on it. Sample pieces are not
+ * stock, and nothing is charged on the challan.
+ */
+router.get('/job-work/:jobId/print', async (req, res) => {
+  const job = await prisma.sampleJobWork.findUnique({
+    where: { id: req.params.jobId },
+    include: {
+      vendor: {
+        select: {
+          name: true,
+          code: true,
+          gstin: true,
+          phone: true,
+          address: true,
+          city: true,
+          state: true,
+          stateCode: true,
+          pincode: true,
+        },
+      },
+      stage: { select: { name: true, sequence: true } },
+      round: {
+        select: {
+          revision: true,
+          request: {
+            select: {
+              id: true,
+              number: true,
+              title: true,
+              buyerStyleRef: true,
+              customer: { select: { name: true } },
+              style: { select: { code: true, name: true } },
+            },
+          },
+        },
+      },
+      returns: {
+        where: { undoneAt: null },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true, cells: true, receivedOn: true, theirChallanNo: true, receivedBy: true },
+      },
+    },
+  })
+  if (!job) throw new AppError('That challan does not exist.', 404, 'NOT_FOUND')
+  const cells = qtyCells(job.cells)
+  const sizes = await prisma.size.findMany({
+    where: { id: { in: [...new Set(cells.map((c) => c.sizeId))] } },
+    select: { id: true, code: true, sequence: true },
+  })
+  const header = await getPrintHeader('JW')
+  res.json({
+    success: true,
+    data: {
+      ...header,
+      job: {
+        ...job,
+        cells,
+        returns: job.returns.map((r) => ({ ...r, cells: returnCells(r.cells) })),
+      },
+      sizes,
+    },
+  })
 })
 
 // ── Files kept against a request ─────────────────────────────────────────────

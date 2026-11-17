@@ -10,6 +10,7 @@ import {
   SAMPLE_ROUTE_MAX_STEPS,
   SAMPLE_ROUTE_MIN_STEPS,
   STEP_EXECUTIONS,
+  SAMPLE_MONEY_MAX,
 } from '@ld-erp/shared'
 import { MAX_FILE_BYTES } from '../lib/storage'
 const text = (max = 500) => z.string().trim().min(1, 'Fill in this field').max(max)
@@ -203,7 +204,14 @@ export const sampleActionSchema = z.object({
     'SAVE_SPEC',
     'RELEASE',
     'MATERIAL',
-    'STAGE',
+    'STEP_WORK',
+    'STEP_SEND',
+    'STEP_RECEIVE',
+    'JOB_SEND',
+    'JOB_RETURN',
+    'STEP_LABOUR',
+    'JOB_CHARGE',
+    'MAKING_UNDO',
     'QC',
     'SUBMIT',
     'DECIDE',
@@ -259,14 +267,102 @@ export const sampleCloseOutSchema = z
     message: 'Pick the general store it goes to',
     path: ['toWarehouseId'],
   })
-export const sampleStageSchema = z.object({
-  stageId: id,
-  doneQty: z.number().int().min(0),
-  rejectedQty: z.number().int().min(0),
-  responsible: text(100),
-  reference: z.string().trim().max(300).default(''),
-  notes: text(1000),
-})
+// ── Making, cell by cell (phase 5) ────────────────────────────────────────────
+//
+// A cell is one colour and size of the round's grid, named as the grid names
+// it; the server matches the colour as the grid compares colours. Pieces are
+// whole numbers. A date left out is today; the server refuses one still to come.
+const pieces = z
+  .number()
+  .int('Pieces are whole numbers')
+  .min(0, 'Pieces cannot be negative')
+  .max(100000, 'That is more pieces than a sample has')
+// As long as any round's colour may be: rounds of the first pilot took 100.
+const cell = { colour: text(100), sizeId: id }
+const qtyCell = z.object({ ...cell, qty: pieces }).strict()
+const MAX_CELLS = 900
+const qtyCells = z.array(qtyCell).min(1, 'Say how many pieces').max(MAX_CELLS)
+const person = text(100)
+const day = z.string().date('Give the date as a date').optional()
+const note = (max: number) => z.string().trim().max(max, `Keep this to ${max} characters`).default('')
+/** Rupees, to the paisa. */
+const money = z
+  .number()
+  .min(0, 'An amount cannot be negative')
+  .max(SAMPLE_MONEY_MAX, 'That amount is too large')
+  .multipleOf(0.01, 'Rupees to two places of paise')
+/** Work at a step on our own floor: done and rejected, cell by cell. */
+export const sampleWorkSchema = z
+  .object({
+    stageId: id,
+    cells: z
+      .array(z.object({ ...cell, done: pieces, rejected: pieces }).strict())
+      .min(1, 'Say how many pieces')
+      .max(MAX_CELLS),
+    doneBy: person,
+    workedOn: day,
+    notes: note(1000),
+  })
+  .strict()
+/** Done pieces handed on to the next step on our floor. */
+export const sampleSendSchema = z
+  .object({ fromStageId: id, cells: qtyCells, sentBy: person, sentOn: day, notes: note(500) })
+  .strict()
+/** Pieces counted in from the step before: a cell left out came to nothing. */
+export const sampleReceiveSchema = z
+  .object({
+    transferId: id,
+    cells: z.array(qtyCell).max(MAX_CELLS),
+    receivedBy: person,
+    receivedOn: day,
+    shortReason: note(500),
+  })
+  .strict()
+/** Pieces given to a step's outside unit on a job-work challan. */
+export const sampleJobSendSchema = z
+  .object({
+    stageId: id,
+    vendorId: id,
+    cells: qtyCells,
+    sentBy: person,
+    sentOn: day,
+    expectedBack: z.string().date('Give the date as a date').nullable().default(null),
+    vehicleNo: note(30),
+    declaredValue: money.nullable().default(null),
+    notes: note(500),
+  })
+  .strict()
+/** What came back on a challan, accepted and rejected, and what the unit charged. */
+export const sampleJobReturnSchema = z
+  .object({
+    jobWorkId: id,
+    cells: z
+      .array(z.object({ ...cell, accepted: pieces, rejected: pieces }).strict())
+      .min(1, 'Say how many pieces')
+      .max(MAX_CELLS),
+    receivedBy: person,
+    receivedOn: day,
+    theirChallanNo: note(50),
+    chargeAmount: money.default(0),
+    notes: note(1000),
+  })
+  .strict()
+/** A unit's charge on one receipt, put right once its bill is known; the pieces stay as they are. */
+export const sampleJobChargeSchema = z
+  .object({ returnId: id, chargeAmount: money, reason: note(300) })
+  .strict()
+/** A step's labour, as the merchandiser has it (₹). */
+export const sampleLabourSchema = z
+  .object({ stageId: id, amount: money, note: note(300) })
+  .strict()
+/** A making record taken back: entered by mistake. */
+export const sampleMakingUndoSchema = z
+  .object({
+    kind: z.enum(['WORK', 'TRANSFER', 'JOB_SEND', 'JOB_RETURN']),
+    id,
+    reason: z.string().trim().min(SAMPLE_REASON_MIN, 'Say why, in a few words').max(500),
+  })
+  .strict()
 export const sampleQcSchema = z.object({
   // One reading for each target of the frozen specification (points × sizes).
   actuals: z

@@ -32,6 +32,7 @@ const localFiles = require('../apps/api/src/routes/localFiles.routes.ts').defaul
 const masters = require('../apps/api/src/routes/master.routes.ts').default
 const quotations = require('../apps/api/src/routes/quotation.routes.ts').default
 const purchase = require('../apps/api/src/routes/purchase.routes.ts').default
+const { makingLedger } = require('../packages/shared/src/sampleMaking.ts')
 const { ZodError } = require('zod')
 let passed = 0,
   server
@@ -244,6 +245,51 @@ async function main() {
     passed++
     console.log('PASS ' + actionName + ' from a stale window refused atomically')
   }
+  /**
+   * Makes the latest round through its whole route (phase 5): at each step every piece
+   * there is done, then handed on to the next and counted in there; an outside step's
+   * pieces go to its unit on a challan and all come back accepted.
+   */
+  const makeAll = async () => {
+    const latest = () => doc.rounds[0]
+    const ledger = () => makingLedger(latest())
+    const cellsOf = (list, pick) =>
+      list.filter((c) => pick(c) > 0).map((c) => ({ colour: c.colour, sizeId: c.sizeId, qty: pick(c) }))
+    for (let i = 0; i < latest().stages.length; i++) {
+      const st = latest().stages[i]
+      if (st.execution === 'OUTSOURCED') {
+        const out = cellsOf(ledger()[i].cells, (c) => c.toSend)
+        if (out.length) {
+          await action('JOB_SEND', {
+            stageId: st.id,
+            vendorId: st.vendorId ?? 'sample-embroidery-unit',
+            cells: out,
+            sentBy: 'Example operator',
+          })
+          const job = latest().jobWorks.at(-1)
+          await action('JOB_RETURN', {
+            jobWorkId: job.id,
+            cells: out.map(({ qty, ...c }) => ({ ...c, accepted: qty, rejected: 0 })),
+            receivedBy: 'Example operator',
+          })
+        }
+      } else {
+        for (const t of latest().transfers.filter((x) => x.toStageId === st.id && !x.receivedOn && !x.undoneAt))
+          await action('STEP_RECEIVE', { transferId: t.id, cells: t.cells, receivedBy: 'Example operator' })
+        const here = cellsOf(ledger()[i].cells, (c) => c.here)
+        if (here.length)
+          await action('STEP_WORK', {
+            stageId: st.id,
+            cells: here.map(({ qty, ...c }) => ({ ...c, done: qty, rejected: 0 })),
+            doneBy: 'Example operator',
+          })
+      }
+      const next = latest().stages[i + 1]
+      const ready = cellsOf(ledger()[i].cells, (c) => c.ready)
+      if (next && next.execution !== 'OUTSOURCED' && ready.length)
+        await action('STEP_SEND', { fromStageId: st.id, cells: ready, sentBy: 'Example operator' })
+    }
+  }
   const template = await call('GET', '/route-template', undefined, 'sampling:view')
   check('a new request starts on the usual route from the Operation master', () => {
     assert.equal(template.status, 200)
@@ -387,18 +433,12 @@ async function main() {
   await stockSample()
   let round = doc.rounds[0],
     mat = round.materials[0]
-  await action(
-    'STAGE',
-    {
-      stageId: round.stages[0].id,
-      doneQty: 2,
-      rejectedQty: 0,
-      responsible: 'Cutter',
-      reference: '',
-      notes: 'Test cutting',
-    },
-    409
-  )
+  const cutWhite = (stage, done) => ({
+    stageId: stage.id,
+    cells: [{ colour: 'White', sizeId: 'sample-size-M', done, rejected: 0 }],
+    doneBy: 'Cutter',
+  })
+  await action('STEP_WORK', cutWhite(round.stages[0], 2), 409)
   const tooMuch = await action(
     'MATERIAL',
     { materialId: mat.id, kind: 'ISSUE', qty: 6, reason: 'Too much', warehouseId: store },
@@ -481,16 +521,10 @@ async function main() {
     data: { materialId: mat.id, kind: 'ISSUE', qty: 5, reason: 'Retry' },
   })
   check('stale retry cannot issue twice', () => assert.equal(stale.status, 409))
-  const stepData = {
-    doneQty: 2,
-    rejectedQty: 0,
-    responsible: 'Example operator',
-    reference: 'Test work',
-    notes: 'All pieces accounted for',
-  }
-  await action('STAGE', { ...stepData, stageId: round.stages[1].id }, 409)
-  await action('STAGE', { ...stepData, stageId: round.stages[0].id, doneQty: 3 }, 409)
-  for (const stage of round.stages) await action('STAGE', { ...stepData, stageId: stage.id })
+  // Nothing has reached stitching yet; cutting has two pieces, not three.
+  await action('STEP_WORK', cutWhite(round.stages[1], 2), 409)
+  await action('STEP_WORK', cutWhite(round.stages[0], 3), 409)
+  await makeAll()
   await action('MATERIAL', { materialId: mat.id, kind: 'USE', qty: 4, reason: 'Four metres used' })
   await action(
     'MATERIAL',
@@ -609,7 +643,7 @@ async function main() {
     reason: 'Second sample round',
     warehouseId: store,
   })
-  for (const stage of round.stages) await action('STAGE', { ...stepData, stageId: stage.id })
+  await makeAll()
   await action('QC', { actuals: [50], passedQty: 2, notes: 'QC accepted' })
   await action('SUBMIT', {
     qty: 1,
@@ -785,7 +819,7 @@ async function main() {
     qty: 5,
     reason: 'All unused material returned',
   })
-  await action('STAGE', { ...stepData, stageId: doc.rounds[0].stages[0].id }, 409)
+  await action('STEP_WORK', cutWhite(doc.rounds[0].stages[0], 2), 409)
   await action('CANCEL', 'No pieces made; all material returned')
   check('cancellation does not delete material or event history', () =>
     assert.equal(doc.rounds[0].materials.length, 1)
@@ -883,12 +917,7 @@ async function main() {
     reason: 'Material for size set',
     warehouseId: store,
   })
-  await action(
-    'STAGE',
-    { ...stepData, stageId: setRound.stages[0].id, doneQty: 1, rejectedQty: 1 },
-    409
-  )
-  for (const stage of setRound.stages) await action('STAGE', { ...stepData, stageId: stage.id })
+  await makeAll()
   await action('QC', { actuals: [50, 51], passedQty: 1, notes: 'Partial size set' }, 409)
   await action('QC', { actuals: [50, 51], passedQty: 2, notes: 'All sizes inspected' })
   await action(
@@ -957,15 +986,13 @@ async function main() {
     reason: 'Material for two colours',
     warehouseId: store,
   })
-  const pairReject = await action(
-    'STAGE',
-    { ...stepData, stageId: pairRound.stages[0].id, doneQty: 1, rejectedQty: 1 },
-    409
+  await makeAll()
+  check('a two-colour round is made colour by colour through every step', () =>
+    assert.deepEqual(
+      doc.rounds[0].stages.map((s) => [s.doneQty, s.rejectedQty, !!s.completedAt]),
+      doc.rounds[0].stages.map(() => [2, 0, true])
+    )
   )
-  check('a set of colours records no rejected pieces at a step', () =>
-    assert.match(pairReject.body.message, /several colours or sizes/)
-  )
-  for (const stage of pairRound.stages) await action('STAGE', { ...stepData, stageId: stage.id })
   await action('QC', { actuals: [50], passedQty: 1, notes: 'One colour only' }, 409)
   await action('QC', { actuals: [50], passedQty: 2, notes: 'Both colours inspected' })
   await action(
@@ -2802,8 +2829,7 @@ async function main() {
     reason: 'Material for the full chart',
     warehouseId: store,
   })
-  for (const stage of chartRound.stages)
-    await action('STAGE', { ...stepData, stageId: stage.id })
+  await makeAll()
   await action('QC', {
     actuals: chartDraft.measurements.map((m) => m.target),
     passedQty: 2,

@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
-  Clock3,
   History,
   Printer,
   LockKeyhole,
@@ -36,6 +35,7 @@ import {
   eventNote,
   handoverBoms,
   isSampleSet,
+  makingOf,
   closeOutBlocker,
   coverOf,
   issueCap,
@@ -43,7 +43,6 @@ import {
   lineColour,
   lineItem,
   lineSourcing,
-  makingBlocker,
   orderSummary,
   SOURCING_STATUS_LABEL,
   materialActions,
@@ -53,7 +52,6 @@ import {
   roundItems,
   sampleFlow,
   SET_TEXT,
-  stageInput,
   stepFacts,
   storeNote,
   withRequestStyle,
@@ -64,6 +62,7 @@ import { limitDecimals, materialCost, MATERIAL_COST_LABEL, plural, rateFigure } 
 import { SampleRequestEditor } from './SampleRequestEditor'
 import { SampleFiles } from './SampleFiles'
 import { SampleStyleCard } from './SampleStyleCard'
+import { SampleMaking } from './SampleMaking'
 import { PurchaseOrderDialog } from '@/components/purchase/PurchaseOrderDialog'
 import Link from 'next/link'
 
@@ -135,8 +134,11 @@ export function SampleWorkspace({
   // The round's style when it was made in sampling: nothing to hand over yet.
   const madeHere = developmentStyleOf(request, round)
   // The making steps for the side panel: released rows, or the draft's route.
+  // Where the round's making stands, as its records have it (QC reads it so too).
+  const made = makingOf(round)
+  const madeAll = made.length > 0 && made.every((s) => s.complete)
   const makingSteps = round.stages.length
-    ? round.stages.map((s) => ({ name: s.name, done: !!s.completedAt }))
+    ? made.map((s) => ({ name: s.name, done: s.complete }))
     : round.specification.route.map((s) => ({ name: s.name, done: false }))
   const changeRound = (id: string) => {
     if (dirty && !window.confirm('Discard the unsaved specification changes?')) return
@@ -194,7 +196,7 @@ export function SampleWorkspace({
         setTab('Technical')
       }
       if (
-        ['RELEASE', 'STAGE', 'QC', 'SUBMIT', 'DECIDE', 'HANDOVER', 'ACCEPT_HANDOVER'].includes(
+        ['RELEASE', 'QC', 'SUBMIT', 'DECIDE', 'HANDOVER', 'ACCEPT_HANDOVER'].includes(
           action
         )
       )
@@ -1051,80 +1053,24 @@ export function SampleWorkspace({
               </div>
             )}
             {tab === 'Making' && (
-              <div className="space-y-4">
-                {round.stages.length === 0 && (
-                  <p>Release the specification to prepare its making route.</p>
-                )}
-                {round.stages.length > 0 && isSampleSet(round.specification) && (
-                  <p className="bg-muted/40 rounded-lg p-3 text-sm">
-                    <span className="font-medium">{colourSummary(round.specification)}.</span>{' '}
-                    {SET_TEXT.stage}
-                  </p>
-                )}
-                {round.stages.map((s, i) => {
-                  const f = stepFacts(s, lookups)
-                  return (
-                    <div key={s.id} className="glass-card space-y-3 p-4">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <h2 className="font-semibold">
-                          {s.sequence}. {s.name}
-                        </h2>
-                        {f.process && (
-                          <span className={f.outside ? 'badge-purple' : 'badge-neutral'}>
-                            {f.doneAt}
-                          </span>
-                        )}
-                      </div>
-                      {f.process ? (
-                        <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                          <Fact label="Process" value={f.process} />
-                          <Fact label="Department" value={f.department || 'Not set'} />
-                          <Fact label={f.outside ? 'Outside unit' : 'Contractor'} value={f.who} />
-                          {f.instructions && (
-                            <Fact label="Instructions" value={f.instructions} wide />
-                          )}
-                        </dl>
-                      ) : (
-                        <p className="text-muted-foreground text-xs">
-                          Released before routes named a process: the step’s name is its record.
-                        </p>
-                      )}
-                      {s.completedAt ? (
-                        <p>
-                          Done {s.doneQty} · Rejected {s.rejectedQty} · {s.responsible} ·{' '}
-                          {formatDate(s.completedAt)}
-                          <br />
-                          {s.notes}
-                        </p>
-                      ) : edit &&
-                        latest &&
-                        round.state === 'RELEASED' &&
-                        !makingBlocker(round, i) ? (
-                        <StageAction
-                          key={`${s.id}-${request.version}`}
-                          name={s.name}
-                          input={stageInput(round, i)}
-                          set={isSampleSet(round.specification)}
-                          outside={f.outside}
-                          save={(d) =>
-                            void act('STAGE', { ...(d as Record<string, unknown>), stageId: s.id })
-                          }
-                        />
-                      ) : (
-                        <p className="text-muted-foreground flex items-center gap-2 text-sm">
-                          <Clock3 size={15} />{' '}
-                          {makingBlocker(round, i) ||
-                            'Awaiting completion by the sampling operator.'}
-                        </p>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
+              <SampleMaking
+                request={request}
+                round={round}
+                lookups={lookups}
+                latest={latest}
+                canEdit={edit}
+                record={async (action, data) => {
+                  setError('')
+                  setMessage('')
+                  setWarnings([])
+                  return post(action, data)
+                }}
+                say={setMessage}
+              />
             )}
             {tab === 'Quality' && (
               <div className="space-y-4">
-                {!round.stages.length || round.stages.some((s) => !s.completedAt) ? (
+                {!madeAll ? (
                   <div className="glass-card flex items-start gap-3 p-5">
                     <LockKeyhole size={18} className="text-muted-foreground shrink-0" />
                     <p className="text-sm">
@@ -1152,7 +1098,7 @@ export function SampleWorkspace({
                   latest &&
                   round.state === 'RELEASED' &&
                   round.stages.length > 0 &&
-                  round.stages.every((x) => x.completedAt) && (
+                  madeAll && (
                     <QcAction
                       key={`${round.id}-${request.version}`}
                       round={round}
@@ -1951,109 +1897,6 @@ function requestChangeValue(key: string, raw: unknown, lookups: Lookups) {
   if (key === 'brandId') return lookups.brands.find((b) => b.id === value)?.name ?? value ?? '—'
   return value || '—'
 }
-function StageAction({
-  input,
-  name,
-  set,
-  outside,
-  save,
-}: {
-  input: number
-  name: string
-  /** Several colours or sizes: the whole set goes on, none rejected here (SET_TEXT.stage). */
-  set: boolean
-  /** Done by an outside unit, whose own delivery note is the reference. */
-  outside: boolean
-  save: (d: unknown) => void
-}) {
-  const [done, setDone] = useState(String(input)),
-    [rejected, setRejected] = useState('0'),
-    [responsible, setResponsible] = useState(''),
-    [reference, setReference] = useState(''),
-    [notes, setNotes] = useState('')
-  const doneQty = set ? input : Number(done)
-  const rejectedQty = set ? 0 : Number(rejected)
-  return (
-    <div className="space-y-3">
-      <p className="text-muted-foreground text-xs">
-        {set
-          ? `${input} pieces received: the whole set goes on together.`
-          : `${input} pieces received. Done plus rejected must account for every piece.`}{' '}
-        {outside
-          ? 'Give the outside unit’s delivery note or challan number as the work reference; this pilot does not issue a statutory challan.'
-          : 'Record outside-work references in the notes; this pilot does not issue a statutory challan.'}
-      </p>
-      <div className="grid gap-4 sm:grid-cols-2">
-        {set ? (
-          <p className="bg-muted/40 rounded-lg p-3 text-sm sm:col-span-2">
-            <span className="font-medium">{input} pieces done</span>, none rejected here.{' '}
-            {SET_TEXT.stage}
-          </p>
-        ) : (
-          <>
-            <Field label="Done pieces">
-              <StepInput className="form-input" max={input} value={done} onValueChange={setDone} />
-            </Field>
-            <Field label="Rejected pieces">
-              <StepInput
-                className="form-input"
-                max={input}
-                value={rejected}
-                onValueChange={setRejected}
-              />
-            </Field>
-          </>
-        )}
-        <Field label={outside ? 'Outside unit / person responsible' : 'Responsible person / unit'}>
-          <input
-            className="form-input"
-            value={responsible}
-            onChange={(e) => setResponsible(e.target.value)}
-          />
-        </Field>
-        <Field label="Work reference (optional)">
-          <input
-            className="form-input"
-            value={reference}
-            onChange={(e) => setReference(e.target.value)}
-          />
-        </Field>
-      </div>
-      <Field
-        label={
-          set
-            ? 'Work performed / defects found'
-            : 'Work performed / defects / rejected-piece disposition'
-        }
-      >
-        <input className="form-input" value={notes} onChange={(e) => setNotes(e.target.value)} />
-      </Field>
-      <button
-        className="btn-primary"
-        disabled={
-          !responsible.trim() ||
-          !notes.trim() ||
-          doneQty < 0 ||
-          rejectedQty < 0 ||
-          doneQty + rejectedQty !== input ||
-          !Number.isInteger(doneQty) ||
-          !Number.isInteger(rejectedQty)
-        }
-        onClick={() =>
-          save({
-            doneQty,
-            rejectedQty,
-            responsible,
-            reference,
-            notes,
-          })
-        }
-      >
-        Complete {name.toLowerCase()}
-      </button>
-    </div>
-  )
-}
 function QcAction({
   round,
   lookups,
@@ -2065,7 +1908,8 @@ function QcAction({
 }) {
   // A set is inspected and passed whole (SET_TEXT.qc): every piece the route finished.
   const set = isSampleSet(round.specification)
-  const finished = round.stages.at(-1)?.doneQty ?? 0
+  // What the last step finished, as the round's records have it (QC checks against it).
+  const finished = makingOf(round).at(-1)?.total.done ?? 0
   const colours = round.specification.colours.filter((r) => r.colour.trim()).length
   const [actuals, setActuals] = useState<string[]>(round.specification.measurements.map(() => '')),
     [passed, setPassed] = useState(set ? String(finished) : ''),

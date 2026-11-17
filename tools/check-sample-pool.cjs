@@ -218,7 +218,11 @@ async function main() {
   )
 
   // ── A line not needed after all ─────────────────────────────────────────────
-  const stageData = (stage) => ({ stageId: stage.id, doneQty: 2, rejectedQty: 0, responsible: 'Cutter', reference: '', notes: 'Cut' })
+  const stageData = (stage) => ({
+    stageId: stage.id,
+    cells: [{ colour: 'White', sizeId: 'sample-size-M', done: 2, rejected: 0 }],
+    doneBy: 'Cutter',
+  })
   await act('MATERIAL', { materialId: fabric.id, kind: 'ISSUE', qty: 5, reason: 'For the sample', warehouseId: SAMPLE_STORE })
   // Another sample's fabric on the same shelf (put there directly, as if received for it).
   await db.stockLedger.create({
@@ -248,7 +252,7 @@ async function main() {
     assert.match(cancelLast.body.message, new RegExp(`Cancelling ${lastGrn.grnNumber} would take 1 mtr of Example Cotton that ${doc.number} has already issued`))
     expect(cutLast, 409, 'SAMPLE_MATERIAL_USED')
   })
-  const blocked = await act('STAGE', stageData(doc.rounds[0].stages[0]), 409)
+  const blocked = await act('STEP_WORK', stageData(doc.rounds[0].stages[0]), 409)
   const noReason = await act('WAIVE_MATERIAL', { materialId: button.id }, 400)
   const issuedFull = await act('WAIVE_MATERIAL', { materialId: fabric.id, reason: 'Not needed' }, 409)
   await act('WAIVE_MATERIAL', { materialId: button.id, reason: 'Buyer dropped the buttons' })
@@ -273,7 +277,7 @@ async function main() {
     assert.equal(doc.rounds[0].materials.find((m) => m.id === button.id).waivedAt, null)
   )
   await act('WAIVE_MATERIAL', { materialId: button.id, reason: 'Buyer dropped the buttons' })
-  await act('STAGE', stageData(doc.rounds[0].stages[0]))
+  await act('STEP_WORK', stageData(doc.rounds[0].stages[0]))
   const lateUndo = await act('WAIVE_MATERIAL', { materialId: button.id, undo: true }, 409)
   const earlyClose = await act(
     'CLOSE_MATERIAL',

@@ -84,36 +84,85 @@ check('draft opens technical preparation', () =>
 round.state = 'RELEASED'
 round.stages = round.specification.route.map((s, i) => ({
   id: String(i),
+  sequence: i + 1,
   name: s.name,
+  execution: 'IN_HOUSE',
+  departmentId: `dept-${i}`,
+  wholeStep: false,
   completedAt: null,
   doneQty: null,
+  rejectedQty: null,
 }))
+round.works = []
+round.transfers = []
+round.jobWorks = []
 round.materials = [
   { plannedQty: '5', issuedQty: '0', usedQty: '0', wasteQty: '0', returnedQty: '0' },
 ]
-check('released sample opens material preparation before making', () =>
+check('released sample opens material preparation before making', () => {
   assert.equal(sampleFlow(request).section, 'Materials')
-)
-check('future making forms are blocked', () => assert.match(makingBlocker(round, 1), /preceding/))
+  assert.match(makingBlocker(round), /Issue all planned materials/)
+})
 round.materials[0].issuedQty = '5'
 check('issued material unlocks the first making step', () => {
-  assert.equal(makingBlocker(round, 0), '')
-  assert.match(sampleFlow(request).title, /cutting/)
+  assert.equal(makingBlocker(round), '')
+  assert.equal(sampleFlow(request).title, 'Record work at Cutting')
+  assert.equal(sampleFlow(request).description, 'Cutting: 2 pieces here to work on.')
 })
 round.materials[0].returnedQty = '5'
 check('returned material cannot leave cutting available', () =>
   assert.equal(sampleFlow(request).section, 'Materials')
 )
+// Cut, handed on to stitching (another department) and not counted in yet.
 round.materials[0].returnedQty = '1'
+round.works = [
+  { id: 'w1', stageId: '0', cells: [{ colour: 'White', sizeId: 'm', done: 2, rejected: 0 }] },
+]
+round.transfers = [
+  {
+    id: 't1',
+    fromStageId: '0',
+    toStageId: '1',
+    cells: [{ colour: 'White', sizeId: 'm', qty: 2 }],
+    receivedCells: null,
+  },
+]
 round.stages[0].completedAt = '2026-11-14'
 round.stages[0].doneQty = 2
 check('surplus return after cutting does not block stitching', () => {
-  assert.equal(makingBlocker(round, 1), '')
-  assert.match(sampleFlow(request).title, /stitching/)
+  assert.equal(makingBlocker(round), '')
+  assert.equal(sampleFlow(request).title, 'Count in pieces at Stitching')
+  assert.equal(sampleFlow(request).description, 'Stitching: 2 pieces sent from Cutting to count in.')
 })
-round.stages.forEach((s) => {
+round.transfers[0].receivedCells = [{ colour: 'White', sizeId: 'm', qty: 2 }]
+check('pieces counted in are worked at the step', () =>
+  assert.equal(sampleFlow(request).title, 'Record work at Stitching')
+)
+// Each step's figures say done, but stitching's records still have two pieces to work.
+round.stages.slice(1).forEach((s) => {
   s.completedAt = '2026-11-14'
   s.doneQty = 2
+  s.rejectedQty = 0
+})
+check('completion is read from the records, not from a step’s figures alone', () =>
+  assert.equal(sampleFlow(request).section, 'Making')
+)
+round.works.push({
+  id: 'w2',
+  stageId: '1',
+  cells: [{ colour: 'White', sizeId: 'm', done: 2, rejected: 0 }],
+})
+round.transfers.push({
+  id: 't2',
+  fromStageId: '1',
+  toStageId: '2',
+  cells: [{ colour: 'White', sizeId: 'm', qty: 2 }],
+  receivedCells: [{ colour: 'White', sizeId: 'm', qty: 2 }],
+})
+round.works.push({
+  id: 'w3',
+  stageId: '2',
+  cells: [{ colour: 'White', sizeId: 'm', done: 2, rejected: 0 }],
 })
 check('QC opens only after the making route is complete', () =>
   assert.equal(sampleFlow(request).section, 'Quality')
@@ -168,7 +217,8 @@ request.cancelledAt = null
 round.state = 'RELEASED'
 round.handover = null
 round.qc = null
-round.stages.at(-1).doneQty = 0
+// Every piece rejected at the last step.
+round.works.at(-1).cells = [{ colour: 'White', sizeId: 'm', done: 0, rejected: 2 }]
 check('zero surviving pieces do not prompt an impossible QC action', () =>
   assert.match(sampleFlow(request).title, /No sample pieces/)
 )
@@ -204,7 +254,12 @@ check('a draft whose request has its style goes on to the specification', () => 
   assert.equal(flow.steps.find((s) => s.key === 'Brief').status, 'Complete')
 })
 check('a released legacy request without a style is not sent back to the brief', () => {
-  const released = { ...draft('old'), state: 'RELEASED', stages: [{ completedAt: null }] }
+  const released = {
+    ...draft('old'),
+    state: 'RELEASED',
+    specification: specOf({ styleId: 'old', colours: [{ colour: 'White', sizes: [{ sizeId: 'm', qty: 1 }] }] }),
+    stages: [{ id: 's1', sequence: 1, name: 'Cutting', completedAt: null }],
+  }
   released.materials = [{ plannedQty: '1', issuedQty: '0', returnedQty: '0' }]
   assert.equal(
     sampleFlow({ styleId: null, rounds: [released], cancelledAt: null }).section,
@@ -955,9 +1010,16 @@ const releasedSet = () => ({
     id: `st-${i}`,
     sequence: i + 1,
     name: s.name,
+    execution: s.execution,
+    departmentId: `dept-${i}`,
+    vendorId: s.vendorId,
     completedAt: null,
     doneQty: null,
+    rejectedQty: null,
   })),
+  works: [],
+  transfers: [],
+  jobWorks: [],
   materials: [
     {
       id: 'row-1',
@@ -1012,36 +1074,214 @@ check('a draft says what its saved specification still needs, tab by tab', () =>
     /Style & colours/
   )
 })
-check('several colours or sizes go through making, QC and the buyer as one set', () => {
+check('a set is made colour by colour and size by size, then inspected and sent whole', () => {
   const set = releasedSet()
+  const flowOf = () => sampleFlow({ ...v2Request(sample()), rounds: [set] })
+  const W = (sizeId, extra) => ({ colour: 'White', sizeId, ...extra })
+  const N = (extra) => ({ colour: 'Navy', sizeId: 'm', ...extra })
   assert.equal(flow.isSampleSet(set.specification), true)
   assert.equal(
     flow.isSampleSet({ colours: [{ colour: 'White', sizes: [{ sizeId: 'm', qty: 3 }] }] }),
     false
   )
-  // The first step takes every piece of the grid; the next what the step before finished.
-  assert.equal(flow.stageInput(set, 0), 4)
-  Object.assign(set.stages[0], { completedAt: '2026-11-16', doneQty: 4 })
-  assert.equal(flow.stageInput(set, 1), 4)
   // The words are the server's own.
   for (const words of Object.values(flow.SET_TEXT)) assert.ok(serverText.includes(words), words)
   assert.ok(serverText.includes(flow.NO_ITEM_TEXT))
   set.materials[0].issuedQty = '5.2'
-  const making = sampleFlow({ ...v2Request(sample()), rounds: [set] })
-  assert.equal(making.section, 'Making')
-  assert.match(making.title, /Record stitching/)
-  assert.ok(making.description.endsWith(flow.SET_TEXT.stage))
-  set.stages.forEach((s) => {
-    s.completedAt = '2026-11-16'
-    s.doneQty = 4
-  })
-  assert.match(sampleFlow({ ...v2Request(sample()), rounds: [set] }).description, /whole set/)
-  set.state = 'QC_PASSED'
-  assert.ok(
-    sampleFlow({ ...v2Request(sample()), rounds: [set] }).description.startsWith(
-      flow.SET_TEXT.submit
-    )
+  // The first step takes every piece of the grid, cell by cell.
+  let steps = flow.makingOf(set)
+  assert.deepEqual(
+    steps[0].cells.map((c) => [c.colour, c.sizeId, c.here]),
+    [
+      ['White', 'm', 2],
+      ['White', 'l', 1],
+      ['Navy', 'm', 1],
+    ]
   )
+  assert.equal(flowOf().section, 'Making')
+  assert.equal(flowOf().title, 'Record work at Cutting')
+  // White is cut with the L rejected; Navy waits. What is done waits to be handed on.
+  set.works = [
+    { id: 'w1', stageId: 'st-0', cells: [W('m', { done: 2, rejected: 0 }), W('l', { done: 0, rejected: 1 })] },
+  ]
+  steps = flow.makingOf(set)
+  assert.deepEqual(flow.stepTodos(set, steps, 0).map((x) => x.kind), ['WORK', 'SEND'])
+  assert.equal(
+    flowOf().description,
+    'Cutting: 1 piece here to work on. 2 pieces done here to hand on to Stitching.'
+  )
+  assert.equal(flow.stepStatus(steps[0]), 'In progress')
+  // All cut, counted in at stitching and stitched: the embroidery unit is next.
+  set.works.push({ id: 'w2', stageId: 'st-0', cells: [N({ done: 1, rejected: 0 })] })
+  const both = [W('m', { qty: 2 }), N({ qty: 1 })]
+  set.transfers = [
+    { id: 't1', fromStageId: 'st-0', toStageId: 'st-1', cells: both, receivedCells: both },
+  ]
+  set.works.push({
+    id: 'w3',
+    stageId: 'st-1',
+    cells: [W('m', { done: 2, rejected: 0 }), N({ done: 1, rejected: 0 })],
+  })
+  steps = flow.makingOf(set)
+  // Stitching has worked all it got; its done pieces wait to go out.
+  assert.deepEqual([steps[0].complete, steps[1].complete, steps[1].total.ready], [true, true, 3])
+  assert.equal(flowOf().title, 'Send pieces out for Embroidery')
+  assert.deepEqual(flow.stepTodos(set, steps, 2).map((x) => x.kind), ['JOB_SEND'])
+  // Out with the unit: nothing to do but wait for it.
+  set.jobWorks = [
+    {
+      id: 'j1',
+      number: 'JW-1',
+      stageId: 'st-2',
+      vendor: { name: 'Example Embroidery' },
+      cells: both,
+      cancelledAt: null,
+      returns: [],
+    },
+  ]
+  steps = flow.makingOf(set)
+  assert.equal(steps[1].complete, true)
+  assert.equal(flowOf().title, 'Waiting for Example Embroidery')
+  assert.match(flowOf().description, /3 pieces with Example Embroidery/)
+  // Back with one White M spoilt: the rest go on to checking.
+  set.jobWorks[0].returns = [
+    { id: 'r1', cells: [W('m', { accepted: 1, rejected: 1 }), N({ accepted: 1, rejected: 0 })] },
+  ]
+  steps = flow.makingOf(set)
+  assert.deepEqual([steps[2].complete, steps[2].total.ready, steps[2].total.rejected], [true, 2, 1])
+  assert.equal(flowOf().title, 'Hand pieces on to Checking')
+  // Handed on, counted in and checked: done throughout, and QC and the buyer take the whole set.
+  const last = [W('m', { qty: 1 }), N({ qty: 1 })]
+  set.transfers.push({ id: 't2', fromStageId: 'st-2', toStageId: 'st-3', cells: last, receivedCells: last })
+  set.works.push({
+    id: 'w4',
+    stageId: 'st-3',
+    cells: [W('m', { done: 1, rejected: 0 }), N({ done: 1, rejected: 0 })],
+  })
+  assert.ok(flow.makingOf(set).every((s) => s.complete))
+  assert.match(flowOf().description, /whole set/)
+  set.state = 'QC_PASSED'
+  assert.ok(flowOf().description.startsWith(flow.SET_TEXT.submit))
+})
+check('the making ledger sums the records, and says when they cannot add up', () => {
+  const shared = require('../packages/shared/src/sampleMaking.ts')
+  const spec = { colours: [{ colour: 'White', sizes: [{ sizeId: 'm', qty: 2 }] }] }
+  const stage = (id, sequence, extra = {}) => ({
+    id,
+    sequence,
+    name: id,
+    execution: 'IN_HOUSE',
+    departmentId: null,
+    doneQty: null,
+    rejectedQty: null,
+    completedAt: null,
+    ...extra,
+  })
+  const one = (n) => [{ colour: 'White', sizeId: 'm', qty: n }]
+  // A step recorded whole before cells were: its pieces went on with it.
+  let led = shared.makingLedger({
+    specification: spec,
+    stages: [
+      stage('cut', 1, { wholeStep: true, doneQty: 2, rejectedQty: 0, completedAt: '2026-11-10' }),
+      stage('sti', 2),
+    ],
+  })
+  assert.deepEqual([led[0].complete, led[0].total.ready, led[1].total.here], [true, 0, 2])
+  // An outside first step sends from the grid itself; the colour is matched as the grid spells it.
+  led = shared.makingLedger({
+    specification: spec,
+    stages: [stage('emb', 1, { execution: 'OUTSOURCED' })],
+    jobWorks: [
+      { id: 'j', stageId: 'emb', cells: [{ colour: 'white', sizeId: 'm', qty: 1 }], returns: [] },
+      { id: 'x', stageId: 'emb', cells: one(1), cancelledAt: '2026-11-17', returns: [] },
+    ],
+  })
+  assert.deepEqual([led[0].total.toSend, led[0].total.atUnit, led[0].complete], [1, 1, false])
+  // Fewer counted in than sent is short; an undone record counts for nothing.
+  led = shared.makingLedger({
+    specification: spec,
+    stages: [stage('cut', 1), stage('sti', 2)],
+    works: [
+      { id: 'w', stageId: 'cut', cells: [{ colour: 'White', sizeId: 'm', done: 2, rejected: 0 }] },
+      { id: 'u', stageId: 'sti', cells: [{ colour: 'White', sizeId: 'm', done: 1, rejected: 0 }], undoneAt: '2026-11-17' },
+    ],
+    transfers: [{ id: 't', fromStageId: 'cut', toStageId: 'sti', cells: one(2), receivedCells: one(1) }],
+  })
+  assert.deepEqual(
+    [led[1].total.received, led[1].total.short, led[1].total.here, led[1].total.done],
+    [1, 1, 1, 0]
+  )
+  // More worked than arrived is named, with the size as people know it.
+  const bad = {
+    specification: spec,
+    stages: [stage('cut', 1)],
+    works: [{ id: 'w', stageId: 'cut', cells: [{ colour: 'White', sizeId: 'm', done: 3, rejected: 0 }] }],
+  }
+  assert.deepEqual(shared.makingProblems(bad, (id) => id.toUpperCase()), [
+    'cut: more of White · M worked than reached it.',
+  ])
+  assert.deepEqual(
+    shared.jobOutstanding({
+      cells: one(2),
+      returns: [
+        { id: 'r', cells: [{ colour: 'White', sizeId: 'm', accepted: 1, rejected: 0 }] },
+        { id: 'r2', cells: [{ colour: 'White', sizeId: 'm', accepted: 1, rejected: 0 }], undoneAt: '2026-11-17' },
+      ],
+    }),
+    [{ colour: 'White', sizeId: 'm', sent: 2, back: 1, out: 1 }]
+  )
+})
+check('making events read in words, amounts only where they were sent', () => {
+  const note = (action, data) => eventNote({ action, detail: { data } }, [])
+  assert.equal(eventLabel('STEP_WORK'), 'Work recorded')
+  assert.equal(eventLabel('MAKING_UNDO'), 'Making record taken back')
+  assert.equal(
+    note('STEP_WORK', { stage: 'Cutting', done: 3, rejected: 1, doneBy: 'Ramesh', notes: 'Shade band' }),
+    'Cutting · 3 done, 1 rejected · by Ramesh · Shade band'
+  )
+  assert.equal(
+    note('JOB_SEND', { number: 'JW-1', pieces: 2, vendor: 'Example Embroidery', stage: 'Embroidery' }),
+    'JW-1 · 2 pieces to Example Embroidery for Embroidery'
+  )
+  assert.equal(
+    note('JOB_RETURN', { number: 'JW-1', accepted: 1, rejected: 1, theirChallanNo: 'E-7', charge: 150.5 }),
+    'JW-1 · 1 accepted, 1 rejected · their challan E-7 · charged ₹150.50'
+  )
+  assert.equal(note('STEP_LABOUR', { stage: 'Stitching', note: '' }), 'Stitching')
+  assert.equal(
+    note('STEP_LABOUR', { stage: 'Stitching', amount: 600, was: 0, note: 'Tailor' }),
+    'Stitching · ₹0.00 → ₹600.00 · Tailor'
+  )
+  assert.equal(
+    note('MAKING_UNDO', { kind: 'TRANSFER', from: 'Cutting', to: 'Stitching', reason: 'Wrong count' }),
+    'Hand-on taken back · Cutting to Stitching · Reason: Wrong count'
+  )
+  assert.equal(
+    note('MAKING_UNDO', { kind: 'JOB_SEND', number: 'JW-4', stage: 'Embroidery', reason: 'Wrong unit' }),
+    'Challan cancelled · JW-4 · Embroidery · Reason: Wrong unit'
+  )
+  assert.equal(
+    note('JOB_CHARGE', { number: 'JW-4', stage: 'Embroidery', charge: 75.25, was: 0, reason: 'Bill came' }),
+    'JW-4 · Embroidery · ₹0.00 → ₹75.25 · Bill came'
+  )
+  assert.equal(note('JOB_CHARGE', { number: 'JW-4', stage: 'Embroidery', reason: '' }), 'JW-4 · Embroidery')
+})
+check('a step done with pieces still to hand on says so; a line is not waived once making starts', () => {
+  const step = { wholeStep: false, complete: true, started: true, total: { ready: 2 } }
+  assert.equal(flow.stepStatus(step, true), 'Done, to hand on')
+  assert.equal(flow.stepStatus(step, false), 'Done')
+  const short = { id: 'm', itemId: 'fab', plannedQty: '5', issuedQty: '5', usedQty: '0', wasteQty: '0', returnedQty: '1' }
+  const started = {
+    state: 'RELEASED',
+    stages: [{ completedAt: null }],
+    handover: null,
+    works: [{ id: 'w', stageId: 's', cells: [] }],
+    jobWorks: [],
+  }
+  assert.equal(flow.materialActions(started, short).waive, false)
+  assert.equal(flow.materialActions({ ...started, works: [] }, short).waive, true)
+  // Material given back mid-cutting is issued again: said as such.
+  assert.equal(flow.materialActions(started, short).kinds[0], 'ISSUE')
 })
 check(
   'material still to issue says how many lines and that the first issue names the store',
@@ -1658,8 +1898,8 @@ check('a waived line holds nothing back, and is offered to waive only before mak
   assert.equal(flow.materialActions(r, { ...short, issuedQty: '5' }).waive, false)
   // The making gate passes a waived line by.
   const released = { ...r, materials: [{ ...short, waivedAt: '2026-11-17' }] }
-  assert.equal(makingBlocker(released, 0), '')
-  assert.match(makingBlocker({ ...r, materials: [short] }, 0), /waive what is not needed/)
+  assert.equal(makingBlocker(released), '')
+  assert.match(makingBlocker({ ...r, materials: [short] }), /waive what is not needed/)
 })
 check('leftovers are closed out once the buyer has decided or the request is cancelled', () => {
   const pool = {

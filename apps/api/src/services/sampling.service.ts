@@ -10,6 +10,8 @@ import { availableIn, requestPool } from './samplePool.service'
 import { checkRouteSteps, routingProblem } from './route.service'
 import { assertContractorsFit } from './routing.service'
 import { liveSampleOrders, sampleOrderLine, sampleOrderSelect } from './sampleSourcing.service'
+import { MAKING_COST_ACTIONS, actOnMaking, syncMaking } from './sampleMaking.service'
+import { jobOutstanding, makingStarted } from '../../../../packages/shared/src/sampleMaking'
 import {
   OVERRIDE_REASON_MIN,
   SAMPLE_ATTACHMENT_KIND_LABEL,
@@ -19,7 +21,6 @@ import {
   normaliseSpec,
   repeatedBomLines,
   sampleSpecGaps,
-  totalPieces,
   type SampleAttachmentKind,
   type SampleBomLine,
   type SampleItemOption,
@@ -39,7 +40,6 @@ import {
   sampleMaterialSchema,
   sampleWaiveSchema,
   sampleCloseOutSchema,
-  sampleStageSchema,
   sampleQcSchema,
   sampleSubmissionSchema,
   sampleDecisionSchema,
@@ -90,6 +90,17 @@ export const sampleInclude = {
     orderBy: { revision: 'desc' as const },
     include: {
       stages: { orderBy: { sequence: 'asc' as const } },
+      // How the round is being made (sampleMaking): work at each step, the
+      // hand-ons between steps, and outside units' challans with what came back.
+      works: { orderBy: { createdAt: 'asc' as const } },
+      transfers: { orderBy: { createdAt: 'asc' as const } },
+      jobWorks: {
+        orderBy: { createdAt: 'asc' as const },
+        include: {
+          vendor: { select: { id: true, name: true } },
+          returns: { orderBy: { createdAt: 'asc' as const } },
+        },
+      },
       materials: {
         // As the merchandiser listed them; the id breaks a tie between lines
         // released before lines were numbered.
@@ -1049,7 +1060,11 @@ export async function actOnSample(
   const r = request.rounds.find((x) => x.id === cmd.roundId)
   if (
     !REQUEST_ACTIONS.includes(cmd.action) &&
-    (!r || (cmd.action !== 'MATERIAL' && request.rounds[0].id !== r.id))
+    // Material, and making's costs once their bills are known, on any round.
+    (!r ||
+      (cmd.action !== 'MATERIAL' &&
+        !MAKING_COST_ACTIONS.includes(cmd.action) &&
+        request.rounds[0].id !== r.id))
   )
     fail('Only the latest sample round can be changed.')
   const round = r!
@@ -1382,7 +1397,9 @@ export async function actOnSample(
       const d = sampleWaiveSchema.parse(cmd.data)
       const m = round.materials.find((x) => x.id === d.materialId)
       if (!m) fail('This material is not on the round.')
-      if (round.state !== 'RELEASED' || round.stages.some((x) => x.completedAt))
+      // Once anything is worked or sent out, a line given back is issued again,
+      // not waived: what was made took it.
+      if (round.state !== 'RELEASED' || makingStarted(round))
         fail('A line is waived before making starts.')
       if (d.undo) {
         if (!m!.waivedAt) fail('This line is not waived.')
@@ -1483,59 +1500,37 @@ export async function actOnSample(
       detail = { ...d, item: item!.name, from: from!.name }
       break
     }
-    case 'STAGE': {
-      if (round.state !== 'RELEASED') fail('Only a released round can be worked on.')
-      // A waived line is not needed; every other is issued in full first.
-      if (round.materials.some((m) => !m.waivedAt && n(m.issuedQty) < n(m.plannedQty)))
-        fail('Issue every planned material, or waive what is not needed, before making starts.')
-      const d = sampleStageSchema.parse(cmd.data),
-        stage = round.stages.find((x) => x.id === d.stageId)
-      if (!stage || stage.completedAt) fail('That step is missing or already recorded.')
-      if (round.stages.some((x) => x.sequence < stage!.sequence && !x.completedAt))
-        fail('Complete the preceding step first.')
-      if (
-        stage!.sequence === 1 &&
-        round.materials.some(
-          (m) => !m.waivedAt && round3(n(m.issuedQty) - n(m.returnedQty)) < n(m.plannedQty)
-        )
-      )
-        fail('Keep the planned material issued until the first making step is recorded.')
-      // The first step takes every piece of the grid, every colour and size.
-      const input =
-        stage!.sequence === 1
-          ? totalPieces(spec)
-          : round.stages.find((x) => x.sequence === stage!.sequence - 1)!.doneQty!
-      // Rejected pieces of a set could be of any colour or size, and nothing
-      // here could say which; a set goes through whole.
-      if (cellCount(spec) > 1 && d.rejectedQty > 0)
-        fail(
-          'With several colours or sizes in one round, record the whole set here; take rejected pieces out in a new round.'
-        )
-      if (d.doneQty + d.rejectedQty !== input)
-        fail(`Done plus rejected must equal the ${input} pieces received by this step.`)
-      await tx.sampleStage.update({
-        where: { id: stage!.id },
-        data: {
-          doneQty: d.doneQty,
-          rejectedQty: d.rejectedQty,
-          responsible: d.responsible,
-          reference: d.reference,
-          notes: d.notes,
-          completedAt: new Date(),
-        },
+    // Making, colour by colour and size by size (sampleMaking.service).
+    case 'STEP_WORK':
+    case 'STEP_SEND':
+    case 'STEP_RECEIVE':
+    case 'JOB_SEND':
+    case 'JOB_RETURN':
+    case 'STEP_LABOUR':
+    case 'JOB_CHARGE':
+    case 'MAKING_UNDO': {
+      detail = await actOnMaking(tx, cmd.action, {
+        round,
+        latest: request.rounds[0].id === round.id,
+        handedOver: request.rounds.some((x) => x.handover),
+        actor,
+        data: cmd.data,
       })
-      detail = { ...d, stage: stage!.name }
       break
     }
     case 'QC': {
-      if (round.state !== 'RELEASED' || round.stages.some((x) => !x.completedAt))
+      if (round.state !== 'RELEASED') fail('Complete the making route before recording QC.')
+      // As the round's records have it (sampleMaking), each step's figures written back.
+      const made = await syncMaking(tx, round)
+      if (!made.length || made.some((s) => !s.complete))
         fail('Complete the making route before recording QC.')
+      const finished = made.at(-1)!.total.done
       const d = sampleQcSchema.parse(cmd.data)
-      if (cellCount(spec) > 1 && d.passedQty !== round.stages.at(-1)!.doneQty!)
+      if (cellCount(spec) > 1 && d.passedQty !== finished)
         fail(
           'With several colours or sizes in one round, inspect and pass the whole set; take rejected pieces out in a new round.'
         )
-      if (d.passedQty > round.stages.at(-1)!.doneQty!)
+      if (d.passedQty > finished)
         fail('QC cannot pass more pieces than finishing produced.')
       if (d.actuals.length !== spec.measurements.length)
         fail('Measure every point in the frozen specification.')
@@ -1727,10 +1722,19 @@ export async function actOnSample(
       break
     }
     case 'CANCEL': {
-      if (request.rounds.some((x) => x.materials.some((m) => held(m) > 0.0005)))
-        fail('Return or account for material held by every round before cancelling.')
       if (request.rounds.some((x) => x.handover))
         fail('This request has a production handover and cannot be cancelled.')
+      // A challan with pieces still out stays answerable: they come back, or it is cancelled, first.
+      const out = request.rounds
+        .flatMap((x) => x.jobWorks)
+        .find((j) => !j.cancelledAt && jobOutstanding(j).some((c) => c.out > 0))
+      if (out)
+        fail(
+          `Pieces are still with ${out.vendor?.name ?? 'an outside unit'} on ${out.number}. Record them back, or cancel the challan, before cancelling the request.`,
+          'PIECES_OUT'
+        )
+      if (request.rounds.some((x) => x.materials.some((m) => held(m) > 0.0005)))
+        fail('Return or account for material held by every round before cancelling.')
       const reason = String(cmd.data ?? '').trim()
       if (reason.length < 5 || reason.length > 2000)
         fail('Record the reason and disposition of any samples already made (5–2000 characters).')

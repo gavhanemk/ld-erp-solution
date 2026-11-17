@@ -115,13 +115,31 @@ export default function PrintSample() {
         )
       }
     for (const stage of round.stages) {
+      // Who did the work, the outside units' challans, and the labour where it is shown.
+      const by = [
+        ...new Set((round.works ?? []).filter((w) => w.stageId === stage.id && !w.undoneAt).map((w) => w.doneBy)),
+      ]
+      const challans = (round.jobWorks ?? [])
+        .filter((j) => j.stageId === stage.id && !j.cancelledAt)
+        .map((j) => `${j.number} · ${j.vendor?.name ?? 'outside unit'}`)
+      const detail = stage.wholeStep
+        ? [stage.responsible, stage.reference, stage.notes]
+        : [
+            by.length ? `Done by ${by.join(', ')}` : '',
+            challans.length ? `Job work: ${challans.join('; ')}` : '',
+            stage.labourAmount !== undefined && Number(stage.labourAmount) > 0
+              ? `Labour ₹${money(stage.labourAmount)}`
+              : '',
+          ]
       add(
         round.revision,
         `${stage.sequence}. ${stage.name}`,
-        `${stage.responsible ?? ''}\n${stage.reference ?? ''}\n${stage.notes ?? ''}`,
+        detail.filter(Boolean).join('\n'),
         stage.completedAt
           ? `${stage.doneQty} done / ${stage.rejectedQty} rejected · ${longDate(stage.completedAt)}`
-          : 'Pending'
+          : stage.doneQty !== null || stage.rejectedQty !== null
+            ? `In progress: ${stage.doneQty ?? 0} done / ${stage.rejectedQty ?? 0} rejected so far`
+            : 'Pending'
       )
     }
     if (round.qc) {

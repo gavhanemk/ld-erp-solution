@@ -73,6 +73,9 @@ model SampleRound {
   materials    SampleMaterial[]
   attachments  SampleAttachment[]
   closeOuts    SampleCloseOut[]
+  works        SampleWork[]
+  transfers    SampleTransfer[]
+  jobWorks     SampleJobWork[]
   @@unique([requestId, revision])
   @@map("sample_rounds")
 }
@@ -98,14 +101,141 @@ model SampleStage {
   vendorId     String?
   vendor       Supplier? @relation("SampleStageVendor", fields: [vendorId], references: [id])
   instructions String?
+  /// What the step's own records add up to (done, rejected, when every piece
+  /// was accounted for), kept up to date by each making action from its
+  /// work, hand-ons and job work (sampleMaking ledger). On a whole step they
+  /// are what was recorded.
   doneQty   Int?
   rejectedQty Int?
   responsible String?
   reference String?
   notes     String?
   completedAt DateTime?
+  /// Recorded in one go before work was recorded by colour and size: its
+  /// figures are the whole step's, and its pieces went on with it.
+  wholeStep Boolean @default(false)
+  /// What the step's own labour cost, as the merchandiser typed it (₹,
+  /// STEP_LABOUR); an outside unit's charge is on its job work's returns.
+  labourAmount Decimal @default(0) @db.Decimal(12,2)
+  labourNote   String?
+  works        SampleWork[]
+  transfersOut SampleTransfer[] @relation("SampleTransferFrom")
+  transfersIn  SampleTransfer[] @relation("SampleTransferTo")
+  jobWorks     SampleJobWork[]
   @@unique([roundId, sequence])
   @@map("sample_stages")
+}
+
+/// Pieces worked at a step done on our own floor: done and rejected in each
+/// colour x size cell of the round (STEP_WORK). Rows are kept: one recorded
+/// by mistake is marked undone (MAKING_UNDO) and counts for nothing.
+model SampleWork {
+  id           String @id @default(cuid())
+  roundId      String
+  round        SampleRound @relation(fields: [roundId], references: [id])
+  stageId      String
+  stage        SampleStage @relation(fields: [stageId], references: [id])
+  /// [{ colour, sizeId, done, rejected }], spelt as the round's grid spells them.
+  cells        Json
+  /// Who did the work: the tailor, the contractor's man.
+  doneBy       String
+  workedOn     DateTime
+  notes        String?
+  createdById  String
+  createdAt    DateTime @default(now())
+  undoneAt     DateTime?
+  undoneBy     String?
+  undoneReason String?
+  @@index([roundId])
+  @@map("sample_works")
+}
+
+/// Pieces handed on from one step to the next one on our own floor
+/// (STEP_SEND), and counted in there (STEP_RECEIVE): at once when both steps
+/// are one department's. cells and receivedCells: [{ colour, sizeId, qty }].
+model SampleTransfer {
+  id            String @id @default(cuid())
+  roundId       String
+  round         SampleRound @relation(fields: [roundId], references: [id])
+  fromStageId   String
+  fromStage     SampleStage @relation("SampleTransferFrom", fields: [fromStageId], references: [id])
+  toStageId     String
+  toStage       SampleStage @relation("SampleTransferTo", fields: [toStageId], references: [id])
+  cells         Json
+  sentBy        String
+  sentOn        DateTime
+  /// Null until counted in at the next step.
+  receivedCells Json?
+  receivedBy    String?
+  receivedOn    DateTime?
+  /// Why fewer pieces were counted in than were sent.
+  shortReason   String?
+  notes         String?
+  createdById   String
+  createdAt     DateTime @default(now())
+  undoneAt      DateTime?
+  undoneBy      String?
+  undoneReason  String?
+  @@index([roundId])
+  @@map("sample_transfers")
+}
+
+/// Pieces given to the outside unit of a step done outside, on a job-work
+/// challan numbered from the JW series (JOB_SEND), and what came back
+/// (JOB_RETURN). No stock moves: sample pieces are not stock.
+model SampleJobWork {
+  id           String @id @default(cuid())
+  /// Our challan number, from the job-work series.
+  number       String @unique
+  roundId      String
+  round        SampleRound @relation(fields: [roundId], references: [id])
+  /// The step done outside.
+  stageId      String
+  stage        SampleStage @relation(fields: [stageId], references: [id])
+  vendorId     String
+  vendor       Supplier @relation("SampleJobWorkVendor", fields: [vendorId], references: [id], onDelete: Restrict)
+  /// [{ colour, sizeId, qty }]
+  cells        Json
+  sentBy       String
+  sentOn       DateTime
+  expectedBack DateTime?
+  vehicleNo    String?
+  /// What the challan declares the pieces worth; none: no commercial value.
+  declaredValue Decimal? @db.Decimal(12,2)
+  notes        String?
+  createdById  String
+  createdAt    DateTime @default(now())
+  /// Taken back before anything came back on it; its number stays used.
+  cancelledAt  DateTime?
+  cancelledBy  String?
+  cancelReason String?
+  returns      SampleJobReturn[]
+  @@index([roundId])
+  @@map("sample_job_works")
+}
+
+/// Pieces back from the outside unit on one job-work challan: accepted and
+/// rejected in each cell, with what the unit charged for them.
+model SampleJobReturn {
+  id             String @id @default(cuid())
+  jobWorkId      String
+  jobWork        SampleJobWork @relation(fields: [jobWorkId], references: [id])
+  /// [{ colour, sizeId, accepted, rejected }]
+  cells          Json
+  /// The unit's own challan or delivery note number.
+  theirChallanNo String?
+  receivedBy     String
+  receivedOn     DateTime
+  /// What the unit charged for the pieces back on it (₹).
+  chargeAmount   Decimal @default(0) @db.Decimal(12,2)
+  notes          String?
+  createdById    String
+  createdAt      DateTime @default(now())
+  undoneAt       DateTime?
+  undoneBy       String?
+  undoneReason   String?
+  @@index([jobWorkId])
+  @@map("sample_job_returns")
 }
 
 /// One line of a round's sample BOM, from its first draft save. Rows are
@@ -1426,6 +1556,7 @@ model Supplier {
   jobWorkOrders    JobWorkOrder[]    @relation("JobWorkOrderVendor")
   ledger           Ledger?
   sampleStages     SampleStage[]     @relation("SampleStageVendor")
+  sampleJobWorks   SampleJobWork[]   @relation("SampleJobWorkVendor")
 }
 
 model Warehouse {

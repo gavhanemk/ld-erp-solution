@@ -1,4 +1,7 @@
 import type {
+  MakingQtyCell,
+  MakingReturnCell,
+  MakingWorkCell,
   ProcessKind,
   SampleAttachment,
   SampleItemOption,
@@ -142,12 +145,84 @@ export interface SampleStage {
   /** The outside unit (a supplier) of a step done outside. */
   vendorId: string | null
   instructions: string | null
+  /** What the step's records add up to; on a whole step, what was recorded. */
   doneQty: number | null
   rejectedQty: number | null
   responsible: string | null
   reference: string | null
   notes: string | null
   completedAt: string | null
+  /** Recorded in one go before work was recorded by colour and size. */
+  wholeStep?: boolean
+  /** The step's labour (₹, decimal as text): sent to those who record it, and to accounts. */
+  labourAmount?: string
+  labourNote?: string | null
+}
+/** Work recorded at a step on our own floor (STEP_WORK). */
+export interface SampleWork {
+  id: string
+  stageId: string
+  cells: MakingWorkCell[]
+  doneBy: string
+  workedOn: string
+  notes: string | null
+  createdAt: string
+  undoneAt: string | null
+  undoneBy: string | null
+  undoneReason: string | null
+}
+/** Pieces handed on to the next step (STEP_SEND), and counted in there (STEP_RECEIVE). */
+export interface SampleTransfer {
+  id: string
+  fromStageId: string
+  toStageId: string
+  cells: MakingQtyCell[]
+  sentBy: string
+  sentOn: string
+  receivedCells: MakingQtyCell[] | null
+  receivedBy: string | null
+  receivedOn: string | null
+  shortReason: string | null
+  notes: string | null
+  createdAt: string
+  undoneAt: string | null
+  undoneBy: string | null
+  undoneReason: string | null
+}
+/** What came back from the unit on a challan (JOB_RETURN). */
+export interface SampleJobReturn {
+  id: string
+  cells: MakingReturnCell[]
+  theirChallanNo: string | null
+  receivedBy: string
+  receivedOn: string
+  /** What the unit charged (₹): sent to those who record it, and to accounts. */
+  chargeAmount?: string
+  notes: string | null
+  createdAt: string
+  undoneAt: string | null
+  undoneBy: string | null
+  undoneReason: string | null
+}
+/** Pieces given to a step's outside unit on a job-work challan (JOB_SEND). */
+export interface SampleJobWork {
+  id: string
+  number: string
+  stageId: string
+  vendorId: string
+  vendor: { id: string; name: string } | null
+  cells: MakingQtyCell[]
+  sentBy: string
+  sentOn: string
+  expectedBack: string | null
+  vehicleNo: string | null
+  declaredValue: string | null
+  notes: string | null
+  createdAt: string
+  cancelledAt: string | null
+  cancelledBy: string | null
+  cancelReason: string | null
+  returns: SampleJobReturn[]
 }
 export interface SampleRound {
   id: string
@@ -155,6 +230,10 @@ export interface SampleRound {
   state: string
   specification: SampleSpecification
   stages: SampleStage[]
+  /** How it is being made: work, hand-ons and outside units' challans, oldest first. */
+  works: SampleWork[]
+  transfers: SampleTransfer[]
+  jobWorks: SampleJobWork[]
   materials: SampleMaterial[]
   qc: {
     passed: boolean

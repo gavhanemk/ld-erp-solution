@@ -3,7 +3,10 @@ import {
   SAMPLE_ATTACHMENT_KIND_LABEL,
   SAMPLE_MATERIAL_TYPES,
   cellCount,
+  makingLedger,
+  makingStarted,
   piecesFor,
+  type MakingStep,
   sampleOrdered,
   sampleReceived,
   sampleToBuy,
@@ -50,7 +53,11 @@ export const SAMPLE_SECTIONS = [
     title: 'Material preparation',
     description: 'Issue, consumption and returns',
   },
-  { key: 'Making', title: 'Sample making', description: 'Cutting, stitching and finishing' },
+  {
+    key: 'Making',
+    title: 'Sample making',
+    description: 'Each step by colour and size, outside units and labour',
+  },
   { key: 'Quality', title: 'QC & measurements', description: 'Workmanship and tolerance checks' },
   {
     key: 'Buyer review',
@@ -64,43 +71,145 @@ const round3 = (v: number) => Math.round(v * 1000) / 1000
 export const materialHeld = (m: SampleMaterial) =>
   round3(+m.issuedQty - +m.usedQty - +m.wasteQty - +m.returnedQty)
 /**
- * The lines still short of their plan before making step `index`: not all
- * issued, or, before the first step, given back to the store since. The
- * server holds the steps back on exactly these (STAGE).
+ * The lines short of their plan while the first step is being made: not all
+ * issued, or given back to the store since. The server holds the first step
+ * back on exactly these (STEP_WORK, JOB_SEND).
  */
-const shortLines = (round: Pick<SampleRound, 'materials'>, index: number) =>
+const shortLines = (round: Pick<SampleRound, 'materials'>) =>
   round.materials.filter(
     (m) =>
       // A waived line is not needed (WAIVE_MATERIAL).
       !m.waivedAt &&
-      (+m.issuedQty < +m.plannedQty ||
-        (index === 0 && round3(+m.issuedQty - +m.returnedQty) < +m.plannedQty))
+      (+m.issuedQty < +m.plannedQty || round3(+m.issuedQty - +m.returnedQty) < +m.plannedQty)
   )
-export function makingBlocker(round: SampleRound, index: number) {
+/** Why the round cannot be made yet: '' once it can. Only the first step waits on material. */
+export function makingBlocker(round: Pick<SampleRound, 'state' | 'stages' | 'materials'>) {
   if (round.state === 'DRAFT') return 'Release the specification before making starts.'
-  if (round.stages.slice(0, index).some((s) => !s.completedAt))
-    return 'Complete the preceding making step first.'
-  if (shortLines(round, index).length)
-    return 'Issue all planned materials, or waive what is not needed, before recording the first making step. Returned material cannot be counted as available.'
+  if (!round.stages[0]?.completedAt && shortLines(round).length)
+    return 'Issue all planned materials, or waive what is not needed, before the first step is made. Material given back cannot be counted.'
   return ''
 }
 
 /**
- * Several colours or sizes in one round make it a set. Nothing on the round
- * says which colour or size a rejected piece was, so the set goes through
- * making, QC and the buyer whole, and the server refuses anything less
- * (STAGE, QC, SUBMIT). The words are the server's own.
+ * Several colours or sizes in one round make it a set. It is made colour by
+ * colour and size by size, but inspected and sent to the buyer whole, and the
+ * server refuses less (QC, SUBMIT). The words are the server's own.
  */
 export const isSampleSet = (spec: Pick<SampleSpecification, 'colours'>) => cellCount(spec) > 1
 export const SET_TEXT = {
-  stage:
-    'With several colours or sizes in one round, record the whole set here; take rejected pieces out in a new round.',
   qc: 'With several colours or sizes in one round, inspect and pass the whole set; take rejected pieces out in a new round.',
   submit: 'Submit the whole inspected set so the approval covers every colour and size.',
 } as const
-/** The pieces a making step receives: the whole grid at the first step, then what the step before finished. */
-export const stageInput = (round: Pick<SampleRound, 'specification' | 'stages'>, index: number) =>
-  index === 0 ? totalPieces(round.specification) : (round.stages[index - 1]?.doneQty ?? 0)
+
+// ── Making, cell by cell (phase 5) ────────────────────────────────────────────
+
+type MakingRoundView = Pick<SampleRound, 'specification' | 'stages'> &
+  Partial<Pick<SampleRound, 'works' | 'transfers' | 'jobWorks'>>
+/** Where every colour and size of every step stands, summed as the server sums it. */
+export const makingOf = (round: MakingRoundView) =>
+  makingLedger({
+    specification: round.specification,
+    stages: round.stages,
+    works: round.works ?? [],
+    transfers: round.transfers ?? [],
+    jobWorks: round.jobWorks ?? [],
+  })
+const pieces = (n: number) => plural(n, 'piece')
+/** The units a step's pieces are with now, by their challans. */
+function unitsHolding(round: MakingRoundView, stageId: string) {
+  const names = (round.jobWorks ?? [])
+    .filter((j) => j.stageId === stageId && !j.cancelledAt)
+    .map((j) => j.vendor?.name ?? 'the outside unit')
+  return joinAnd([...new Set(names)]) || 'the outside unit'
+}
+export type MakingTodoKind = 'RECEIVE' | 'WORK' | 'SEND' | 'JOB_SEND' | 'JOB_WAIT'
+/**
+ * What there is to do at one step now, most pressing first: pieces to count
+ * in, to work on, to hand on or send out, or with the unit. Empty when the
+ * step has nothing waiting on it.
+ */
+export function stepTodos(
+  round: MakingRoundView,
+  steps: MakingStep[],
+  i: number
+): Array<{ kind: MakingTodoKind; text: string }> {
+  const step = steps[i]
+  const before = round.stages[i - 1]
+  const next = round.stages[i + 1]
+  const t = step.total
+  const out: Array<{ kind: MakingTodoKind; text: string }> = []
+  if (step.wholeStep) return out
+  if (step.outside) {
+    if (t.toSend > 0)
+      out.push({
+        kind: 'JOB_SEND',
+        text: before
+          ? `${pieces(t.toSend)} done at ${before.name} to send out to the unit.`
+          : `${pieces(t.toSend)} to send out to the unit.`,
+      })
+    if (t.atUnit > 0)
+      out.push({
+        kind: 'JOB_WAIT',
+        text: `${pieces(t.atUnit)} with ${unitsHolding(round, step.stageId)}: receive them when they come back.`,
+      })
+  } else {
+    if (t.coming > 0)
+      out.push({
+        kind: 'RECEIVE',
+        text: `${pieces(t.coming)} sent from ${before?.name ?? 'the step before'} to count in.`,
+      })
+    if (t.here > 0) out.push({ kind: 'WORK', text: `${pieces(t.here)} here to work on.` })
+  }
+  if (t.ready > 0 && next)
+    out.push(
+      next.execution === 'OUTSOURCED'
+        ? { kind: 'JOB_SEND', text: `${pieces(t.ready)} done here to send out for ${next.name}.` }
+        : { kind: 'SEND', text: `${pieces(t.ready)} done here to hand on to ${next.name}.` }
+    )
+  return out
+}
+/**
+ * A step's state in a word or two, for its badge. Done when every piece that
+ * reached it is worked; while some of those still wait to go on, it says so.
+ */
+export function stepStatus(step: MakingStep, hasNext = false) {
+  if (step.wholeStep) return step.complete ? 'Recorded whole' : 'Not started'
+  if (step.complete) return hasNext && step.total.ready > 0 ? 'Done, to hand on' : 'Done'
+  return step.started ? 'In progress' : 'Not started'
+}
+/** The next thing to do on the route: the first step with something waiting on it. */
+export function makingNext(round: MakingRoundView, steps = makingOf(round)) {
+  for (let i = 0; i < steps.length; i++) {
+    // Pieces with a unit wait; anything else on the route comes first.
+    const doable = stepTodos(round, steps, i).filter((x) => x.kind !== 'JOB_WAIT')
+    if (!doable.length) continue
+    const name = round.stages[i].name
+    const next = round.stages[i + 1]
+    const kind = doable[0].kind
+    return {
+      title:
+        kind === 'RECEIVE'
+          ? `Count in pieces at ${name}`
+          : kind === 'WORK'
+            ? `Record work at ${name}`
+            : kind === 'SEND'
+              ? `Hand pieces on to ${next?.name ?? 'the next step'}`
+              : `Send pieces out for ${steps[i].outside ? name : (next?.name ?? 'the next step')}`,
+      description: `${name}: ${doable.map((x) => x.text).join(' ')}`,
+    }
+  }
+  const waiting = steps.findIndex((_, i) =>
+    stepTodos(round, steps, i).some((x) => x.kind === 'JOB_WAIT')
+  )
+  if (waiting >= 0)
+    return {
+      title: `Waiting for ${unitsHolding(round, steps[waiting].stageId)}`,
+      description: `${round.stages[waiting].name}: ${stepTodos(round, steps, waiting)
+        .map((x) => x.text)
+        .join(' ')}`,
+    }
+  return null
+}
 
 /**
  * What the release check would say of the saved draft, with the request's
@@ -167,11 +276,15 @@ export function sampleFlow(
     } else
       description = `The saved draft still has items to finish under ${joinAnd(open.map((t) => `${t.title} (${byTab[t.key].length})`))}. Save as you go, and release once nothing is left.`
   } else if (round.state === 'RELEASED') {
-    const index = round.stages.findIndex((s) => !s.completedAt)
+    // Where the round's records have it, as QC reads it (a step recorded whole
+    // that rejected everything leaves the steps after it nothing to record).
+    const made = makingOf(round)
+    const index = made.findIndex((s) => !s.complete)
     const set = isSampleSet(round.specification)
     if (index >= 0) {
-      const blocker = makingBlocker(round, index)
-      const short = shortLines(round, index)
+      const blocker = makingBlocker(round)
+      const short = shortLines(round)
+      const next = blocker ? null : makingNext(round)
       // Before anything can be issued, what is bought has to be ordered and arrive.
       const buying = blocker ? buyingOpen(round, request) : []
       section = buying.length ? 'Sourcing' : blocker ? 'Materials' : 'Making'
@@ -181,22 +294,23 @@ export function sampleFlow(
           : 'Receive the sample’s material'
         : blocker
           ? 'Prepare material for making'
-          : `Record ${round.stages[index].name.toLowerCase()}`
+          : (next?.title ?? `Record ${round.stages[index].name.toLowerCase()}`)
       description = buying.length
         ? sourcingText(buying, request, round)
         : blocker
         ? [
             blocker,
-            `${short.length} of ${plural(round.materials.length, 'material line')} ${short.length === 1 ? 'is' : 'are'} not fully issued yet.`,
+            short.every((m) => +m.issuedQty < +m.plannedQty)
+              ? `${short.length} of ${plural(round.materials.length, 'material line')} ${short.length === 1 ? 'is' : 'are'} not fully issued yet.`
+              : `${short.length} of ${plural(round.materials.length, 'material line')} ${short.length === 1 ? 'is' : 'are'} short of the plan: issue again what was given back.`,
             // Each line's store is named at its first issue (STORE_REQUIRED).
             short.some((m) => !m.warehouseId) ? 'Pick the store at each line’s first issue.' : '',
           ]
             .filter(Boolean)
             .join(' ')
-        : set
-          ? `Record who did this step and the pieces done. ${SET_TEXT.stage}`
-          : 'Record the completed quantity, rejected pieces and responsible person for this step.'
-    } else if (round.stages.length && round.stages.at(-1)?.doneQty === 0) {
+        : (next?.description ??
+          'Record the work at each step colour by colour and size by size, and hand what is done on to the next step.')
+    } else if (made.length && made.at(-1)!.total.done === 0) {
       section = 'History'
       title = 'No sample pieces remain for QC'
       description =
@@ -271,7 +385,7 @@ export function sampleFlow(
     Materials:
       round.materials.length > 0 &&
       round.materials.every((m) => !!m.waivedAt || +m.issuedQty >= +m.plannedQty),
-    Making: round.stages.length > 0 && round.stages.every((s) => !!s.completedAt),
+    Making: round.stages.length > 0 && makingOf(round).every((s) => s.complete),
     Quality: !!round.qc?.passed,
     'Buyer review': round.state === 'APPROVED',
     Handover: !!round.handover?.acceptedAt,
@@ -735,7 +849,8 @@ export const MATERIAL_KIND_LABEL: Record<MaterialKind, string> = {
  * line's first and names its store.
  */
 export function materialActions(
-  round: Pick<SampleRound, 'state' | 'stages' | 'handover'>,
+  round: Pick<SampleRound, 'state' | 'stages' | 'handover'> &
+    Partial<Pick<SampleRound, 'works' | 'jobWorks'>>,
   m: SampleMaterial
 ) {
   // Still to issue, net of what came back before making (the server issues
@@ -770,8 +885,10 @@ export function materialActions(
             ? 'Issue materials before making starts; extra needs require a new round.'
             : 'Issued in full and accounted for.'
   // Waived only before making starts, and only while some of it is still to issue.
-  const waive = issueOpen && !round.handover && !m.waivedAt && remaining > 0
-  const unwaive = issueOpen && !round.handover && !!m.waivedAt
+  // A line is waived only before anything is made (WAIVE_MATERIAL).
+  const waiveOpen = round.state === 'RELEASED' && !makingStarted(round)
+  const waive = waiveOpen && !round.handover && !m.waivedAt && remaining > 0
+  const unwaive = waiveOpen && !round.handover && !!m.waivedAt
   return {
     kinds,
     remaining,
@@ -1000,6 +1117,14 @@ export const SAMPLE_EVENT_LABEL: Record<string, string> = {
   RELEASE: 'Released for sampling',
   MATERIAL: 'Material recorded',
   STAGE: 'Making step recorded',
+  STEP_WORK: 'Work recorded',
+  STEP_SEND: 'Pieces handed on',
+  STEP_RECEIVE: 'Pieces counted in',
+  JOB_SEND: 'Sent to an outside unit',
+  JOB_RETURN: 'Back from an outside unit',
+  STEP_LABOUR: 'Labour entered',
+  JOB_CHARGE: 'Unit’s charge corrected',
+  MAKING_UNDO: 'Making record taken back',
   QC: 'QC recorded',
   SUBMIT: 'Submitted to the buyer',
   DECIDE: 'Buyer decision recorded',
@@ -1015,6 +1140,13 @@ export const SAMPLE_EVENT_LABEL: Record<string, string> = {
   WAIVE_MATERIAL: 'Line marked not needed',
   CLOSE_MATERIAL: 'Leftover material closed out',
 }
+/** What a making record taken back was (MAKING_UNDO). */
+export const MAKING_UNDO_LABEL = {
+  WORK: 'Work',
+  TRANSFER: 'Hand-on',
+  JOB_SEND: 'Challan',
+  JOB_RETURN: 'Receipt from the unit',
+} as const
 export const eventLabel = (action: string, data?: unknown) =>
   action === 'WAIVE_MATERIAL' && (data as { undo?: boolean } | undefined)?.undo
     ? 'Line needed again'
@@ -1063,7 +1195,67 @@ export function eventNote(
     SAMPLE_ATTACHMENT_KIND_LABEL[v as SampleAttachmentKind] ?? (text(v) || 'File')
   const code = (v: unknown) =>
     v && typeof v === 'object' && 'code' in v ? String((v as { code: unknown }).code) : 'No style'
+  const count = (v: unknown) => (typeof v === 'number' ? v : 0)
+  // Amounts are sent only to those who may see them; left out, nothing is said.
+  const rupees = (v: unknown) =>
+    typeof v === 'number'
+      ? `₹${v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : ''
+  const join = (parts: string[]) => parts.filter(Boolean).join(' · ')
   switch (e.action) {
+    case 'STEP_WORK':
+      return join([
+        text(d.stage),
+        `${count(d.done)} done${count(d.rejected) ? `, ${count(d.rejected)} rejected` : ''}`,
+        text(d.doneBy) && `by ${text(d.doneBy)}`,
+        text(d.notes),
+      ])
+    case 'STEP_SEND':
+      return join([
+        `${plural(count(d.pieces), 'piece')} from ${text(d.from)} to ${text(d.to)}`,
+        d.received ? 'one department: counted in with it' : '',
+        text(d.sentBy) && `by ${text(d.sentBy)}`,
+      ])
+    case 'STEP_RECEIVE':
+      return join([
+        `${plural(count(d.pieces), 'piece')} counted in at ${text(d.to)}`,
+        count(d.short) ? `${count(d.short)} short: ${text(d.shortReason)}` : '',
+        text(d.receivedBy) && `by ${text(d.receivedBy)}`,
+      ])
+    case 'JOB_SEND':
+      return join([
+        text(d.number),
+        `${plural(count(d.pieces), 'piece')} to ${text(d.vendor)} for ${text(d.stage)}`,
+      ])
+    case 'JOB_RETURN':
+      return join([
+        text(d.number),
+        `${count(d.accepted)} accepted${count(d.rejected) ? `, ${count(d.rejected)} rejected` : ''}`,
+        text(d.theirChallanNo) && `their challan ${text(d.theirChallanNo)}`,
+        count(d.charge) ? `charged ${rupees(d.charge)}` : '',
+      ])
+    case 'JOB_CHARGE':
+      return join([
+        text(d.number),
+        text(d.stage),
+        typeof d.charge === 'number' ? `${rupees(d.was)} → ${rupees(d.charge)}` : '',
+        text(d.reason),
+      ])
+    case 'STEP_LABOUR':
+      return join([
+        text(d.stage),
+        typeof d.amount === 'number' ? `${rupees(d.was)} → ${rupees(d.amount)}` : '',
+        text(d.note),
+      ])
+    case 'MAKING_UNDO':
+      return join([
+        d.kind === 'JOB_SEND'
+          ? 'Challan cancelled'
+          : `${MAKING_UNDO_LABEL[text(d.kind) as keyof typeof MAKING_UNDO_LABEL] ?? 'Record'} taken back`,
+        text(d.number),
+        text(d.stage) || (text(d.from) && `${text(d.from)} to ${text(d.to)}`),
+        text(d.reason) && `Reason: ${text(d.reason)}`,
+      ])
     case 'WAIVE_MATERIAL':
       return [text(d.item), text(d.component), d.undo ? '' : text(d.reason) && `Reason: ${text(d.reason)}`]
         .filter(Boolean)

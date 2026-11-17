@@ -743,3 +743,4 @@ export function priceSale(input: SaleInput): SaleResult {
 }
 
 export * from './sampling'
+export * from './sampleMaking'
