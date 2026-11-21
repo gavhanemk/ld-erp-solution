@@ -1,6 +1,7 @@
 import type { FormField } from '@/components/masters/MasterFormDialog'
 import { createUomFrom, QTY_PLACES_OPTIONS } from '@/components/masters/uomFormFields'
 import { createHsnFrom } from '@/components/masters/hsnFormFields'
+import { groupOfType } from '@ld-erp/shared'
 
 /*
  * The Items master's form, in one place: Masters → Items shows it, and a BOM
@@ -66,6 +67,11 @@ export const itemFormFields: FormField[] = [
     required: true,
     section: 'Identity',
     options: Object.entries(ITEM_TYPE_LABEL).map(([value, v]) => ({ value, label: v.label })),
+    // The category list follows the type's tab of Items & Products, so a
+    // category from another tab is cleared; a raw material becoming a trim
+    // keeps its category.
+    resets: ['mainCategoryId', 'subCategoryId'],
+    resetsWhen: (before, after) => groupOfType(String(before.type ?? '')) !== groupOfType(String(after.type ?? '')),
   },
   {
     name: 'uomId',
@@ -85,7 +91,12 @@ export const itemFormFields: FormField[] = [
     section: 'Identity',
     sendAs: 'categoryId',
     resets: ['subCategoryId'],
-    optionsFrom: { resource: 'item-categories', filter: isMain },
+    // Main categories of the type's tab: a finished good is never offered Fabric.
+    optionsFrom: {
+      resource: 'item-categories',
+      filter: (row, values) =>
+        isMain(row) && (!values.type || !row.itemGroup || row.itemGroup === groupOfType(String(values.type))),
+    },
     initial: (r) => {
       const c = r.category as { parentId?: string | null } | null
       return c?.parentId ?? r.categoryId
