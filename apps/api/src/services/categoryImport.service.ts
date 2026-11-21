@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
+import { defaultGroupForName, MAIN_CATEGORIES, mainNameAllowed } from './itemGroups.service'
 import { addDropdowns, addHowToSheet, addTemplateSheet, readSheetRows, type SheetColumn } from '../lib/sheet'
 
 /**
@@ -168,6 +169,11 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
       problems.push(`Row ${sheetMain.row} makes ${mainName} a sub-category, so it cannot also be a main category.`)
       continue
     }
+    // There are three main categories; anything else goes under one of them.
+    if (!main && !sheetMain && !mainNameAllowed(mainName)) {
+      problems.push(`${mainName} is not one of the categories: ${MAIN_CATEGORIES.join(', ')}. Put one of those in Category and ${mainName} in Sub-category.`)
+      continue
+    }
     res.mainKey = main ? `id:${main.id}` : `new:${low(mainName)}`
     const mainIsNew = !main && !sheetMain
 
@@ -260,8 +266,9 @@ export async function runImport(plans: Resolved[]) {
       // Main categories first, so their sub-categories have somewhere to go.
       for (const p of plans) {
         if (!p.newMain || !p.mainKey || idOf.has(p.mainKey)) continue
+        // Its tab of Items & Products follows from its name, as one made on screen does.
         const c = await tx.itemCategory.create({
-          data: { name: p.newMain.name, departmentId: p.newMain.departmentId },
+          data: { name: p.newMain.name, departmentId: p.newMain.departmentId, itemGroup: defaultGroupForName(p.newMain.name) },
           select: { id: true, name: true },
         })
         idOf.set(p.mainKey, c.id)
@@ -271,8 +278,10 @@ export async function runImport(plans: Resolved[]) {
       for (const p of plans) {
         if (!p.newSub || !p.mainKey || !p.targetKey) continue
         const parentId = p.mainKey.startsWith('id:') ? p.mainKey.slice(3) : idOf.get(p.mainKey)!
+        // A sub-category is under its main category's tab.
+        const parent = await tx.itemCategory.findUniqueOrThrow({ where: { id: parentId }, select: { itemGroup: true } })
         const c = await tx.itemCategory.create({
-          data: { name: p.newSub.name, parentId, departmentId: p.newSub.departmentId },
+          data: { name: p.newSub.name, parentId, departmentId: p.newSub.departmentId, itemGroup: parent.itemGroup },
           select: { id: true, name: true },
         })
         idOf.set(p.targetKey, c.id)

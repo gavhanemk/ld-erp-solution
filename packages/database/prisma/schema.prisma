@@ -38,6 +38,17 @@ enum ItemType {
   TRIM
 }
 
+/// The three tabs of Masters → Items & Products, set on a main category and
+/// taken by everything under it. Raw Materials takes raw materials, trims,
+/// packing and consumables; the other two their own type. EXPENSES is the
+/// expense heads' category, which has a screen of its own.
+enum ItemGroup {
+  RAW_MATERIALS
+  SEMI_FINISHED
+  FINISHED_GOODS
+  EXPENSES
+}
+
 enum CustomerType {
   DOMESTIC
   EXPORT
@@ -710,6 +721,9 @@ model ItemCategory {
   trackPackages Boolean   @default(true)
   /// What one package of these items usually is: a roll of fabric, a box of tape.
   packType      PackType?
+  /// Which tab of Items & Products it is under. Set on a main category; a
+  /// sub-category always carries its main category's, kept equal on save.
+  itemGroup     ItemGroup @default(RAW_MATERIALS)
 
   items Item[]
 

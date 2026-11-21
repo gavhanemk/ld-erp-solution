@@ -37,8 +37,9 @@ async function main() {
 
   const units = (await call('GET', '/masters/uoms?limit=100')).body.data as Array<{ id: string; symbol: string }>
   const u = (s: string) => units.find((x) => x.symbol === s)!
-  const cats = (await call('GET', '/masters/item-categories?limit=200')).body.data as Array<{ id: string; parentId: string | null }>
-  const leaf = cats.find((c) => c.parentId) ?? cats[0]
+  const cats = (await call('GET', '/masters/item-categories?limit=200')).body.data as Array<{ id: string; parentId: string | null; itemGroup?: string; isActive?: boolean }>
+  // A raw-materials sub-category: a trim or a part is refused under Finished Goods.
+  const leaf = cats.find((c) => c.parentId && c.isActive !== false && (c.itemGroup ?? 'RAW_MATERIALS') === 'RAW_MATERIALS') ?? cats[0]
   const stamp = Date.now().toString().slice(-6)
   const item = (await call('POST', '/masters/items', { name: `ZZTEST Button ${stamp}`, type: 'TRIM', categoryId: leaf.id, uomId: u('pcs').id })).body.data as { id: string }
   const store = ((await call('GET', '/masters/warehouses?limit=50')).body.data as Array<{ id: string; name: string }>).find((w) => w.name === 'Store')!

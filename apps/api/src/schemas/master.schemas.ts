@@ -746,6 +746,9 @@ export const createItemCategorySchema = z.object({
   // what one package usually is. A sub-category follows its main category.
   trackPackages: z.boolean().optional(),
   packType: z.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).optional().nullable(),
+  // Which tab of Items & Products a main category is under. A sub-category
+  // takes its main category's, whatever is sent.
+  itemGroup: z.enum(['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS', 'EXPENSES']).optional(),
   isActive,
 })
 export const updateItemCategorySchema = createItemCategorySchema.partial()

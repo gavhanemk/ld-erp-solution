@@ -1,4 +1,5 @@
-import { fitsPlaces, placesMessage, qtyPlaces } from '@ld-erp/shared'
+import { fitsPlaces, placesMessage, qtyPlaces, typeFitsGroup } from '@ld-erp/shared'
+import { typeMismatchMessage } from './itemGroups.service'
 import ExcelJS from 'exceljs'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
@@ -96,7 +97,7 @@ async function loadMasters() {
   const [categories, departments, units, stores, items] = await Promise.all([
     prisma.itemCategory.findMany({
       where: { isActive: true },
-      select: { id: true, name: true, parentId: true, departmentId: true },
+      select: { id: true, name: true, parentId: true, departmentId: true, itemGroup: true },
     }),
     prisma.department.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true } }),
     prisma.uOM.findMany({ where: { isActive: true }, select: { id: true, name: true, symbol: true, decimalPlaces: true } }),
@@ -323,6 +324,10 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
         } else if (children.length > 0) {
           problems.push(`Pick a sub-category of ${main.name}: ${children.map((c) => c.name).join(', ')}.`)
         } else categoryId = main.id
+        // The type has to fit the category's tab, as on the item form.
+        if (type && categoryId && !typeFitsGroup(type, main.itemGroup)) {
+          problems.push(typeMismatchMessage(type, main.name, main.itemGroup))
+        }
       }
 
       // Empty takes the category's own department, as the item form does.

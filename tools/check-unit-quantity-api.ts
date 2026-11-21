@@ -60,8 +60,9 @@ async function main() {
 
   // ── Test items: a carton in boxes (whole), cloth in metres (decimals) ──
   const stamp = Date.now().toString().slice(-6)
-  const cats = (await call('GET', '/masters/item-categories?limit=200')).body.data as Array<{ id: string; name: string; parentId: string | null }>
-  const leaf = cats.find((c) => c.parentId) ?? cats[0]
+  const cats = (await call('GET', '/masters/item-categories?limit=200')).body.data as Array<{ id: string; name: string; parentId: string | null; itemGroup?: string; isActive?: boolean }>
+  // A raw-materials sub-category: a trim or a part is refused under Finished Goods.
+  const leaf = cats.find((c) => c.parentId && c.isActive !== false && (c.itemGroup ?? 'RAW_MATERIALS') === 'RAW_MATERIALS') ?? cats[0]
   const mkItem = async (name: string, uomId: string, type = 'PACKING_MATERIAL') => {
     const r = await call('POST', '/masters/items', { name, type, categoryId: leaf.id, uomId })
     if (!okay(r)) throw new Error(`setup: ${name}: ${JSON.stringify(r.body)}`)

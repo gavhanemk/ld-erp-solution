@@ -4,6 +4,8 @@ import { recordAudit } from '../../lib/audit'
 import { nextDocumentNumber } from '../../lib/docNumber'
 import { withGeneratedCode } from '../../lib/masterCode'
 import { assertItemStyleColorValid } from '../../lib/itemStyleColor'
+import { typeFitsGroup } from '@ld-erp/shared'
+import { groupOfCategory, typeMismatchMessage } from '../itemGroups.service'
 import { logger } from '../../utils/logger'
 import { AppError } from '../../middleware/errorHandler'
 import { approveSalesOrder, rejectSalesOrder } from '../salesOrder.service'
@@ -650,6 +652,9 @@ const WRITES: WriteDefinition[] = [
           `I cannot tell what kind of item goes in "${category.name}". Is it a raw material, a trim, packing material, a consumable, or a finished good?`,
         )
       }
+      // The type has to fit the category's tab of Items & Products, as on screen.
+      const filed = await groupOfCategory(category.id)
+      if (filed && !typeFitsGroup(type, filed.group)) throw new Error(typeMismatchMessage(type, filed.name, filed.group))
 
       // A finished good is one style in one colour. Neither question makes
       // sense until we know it is a finished good, so they are only asked
