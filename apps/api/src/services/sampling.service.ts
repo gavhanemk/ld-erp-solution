@@ -19,6 +19,7 @@ import {
   handoverReady,
 } from '../../../../packages/shared/src/sampleReview'
 import { actOnReview } from './sampleReview.service'
+import { COST_ACTIONS, COST_FINAL_TEXT, actOnCost, changesCost } from './sampleCost.service'
 import {
   OVERRIDE_REASON_MIN,
   SAMPLE_ATTACHMENT_KIND_LABEL,
@@ -144,6 +145,8 @@ export const sampleInclude = {
     },
   },
   events: { orderBy: { version: 'desc' as const } },
+  // Its other costs (testing, pattern, setups, couriers), each round's and the request's own.
+  charges: { orderBy: { createdAt: 'asc' as const } },
   // Leftovers closed out: used up in the sample, or moved to a general store.
   closeOuts: {
     orderBy: { createdAt: 'desc' as const },
@@ -1063,7 +1066,13 @@ const REQUEST_ACTIONS = [
   'CREATE_STYLE',
   'LINK_STYLE',
   'UPDATE_STYLE',
+  ...COST_ACTIONS,
 ]
+/**
+ * Recorded on a cancelled request too: its leftovers closed out, and what it
+ * cost so far (bills arrive after a sample is dropped).
+ */
+const AFTER_CANCEL = ['CLOSE_MATERIAL', 'STEP_LABOUR', 'JOB_CHARGE', ...COST_ACTIONS]
 
 /** Parent row lock + expected version serialize all decisions, quantities and retries. */
 export async function actOnSample(
@@ -1078,7 +1087,15 @@ export async function actOnSample(
   if (request.version !== cmd.version)
     fail('This sample changed in another window. Refresh it before saving.', 'STALE_SAMPLE')
   // Leftover material is closed out after a cancellation too.
-  if (request.cancelledAt && cmd.action !== 'CLOSE_MATERIAL') fail('This request is cancelled.')
+  if (request.cancelledAt && !AFTER_CANCEL.includes(cmd.action)) fail('This request is cancelled.')
+  // Finalised costs stand until reopened: nothing that costs changes meanwhile.
+  if (request.costFinalisedAt && changesCost(cmd.action, cmd.data)) fail(COST_FINAL_TEXT, 'COST_FINAL')
+  // A challan that carried a courier charge, cancelled, takes the charge off the sheet.
+  if (request.costFinalisedAt && cmd.action === 'DISPATCH_CANCEL') {
+    const id = (cmd.data as { dispatchId?: unknown } | null)?.dispatchId
+    const d = request.rounds.flatMap((r) => r.dispatches).find((x) => x.id === id)
+    if (d && Number(d.courierCharge) > 0) fail(COST_FINAL_TEXT, 'COST_FINAL')
+  }
   const r = request.rounds.find((x) => x.id === cmd.roundId)
   if (
     !REQUEST_ACTIONS.includes(cmd.action) &&
@@ -1091,7 +1108,16 @@ export async function actOnSample(
     fail('Only the latest sample round can be changed.')
   const round = r!
   const spec = round?.specification
-  const approver = ['RELEASE', 'QC', 'DECIDE', 'DROP_COLOUR', 'HANDOVER', 'CANCEL'].includes(cmd.action)
+  const approver = [
+    'RELEASE',
+    'QC',
+    'DECIDE',
+    'DROP_COLOUR',
+    'HANDOVER',
+    'CANCEL',
+    'FINALISE_COST',
+    'REOPEN_COST',
+  ].includes(cmd.action)
   grant(actor, 'sampling', approver ? 'approve' : 'edit')
   if (
     ['ATTACH', 'DETACH', 'CREATE_STYLE', 'LINK_STYLE', 'UPDATE_STYLE'].includes(cmd.action) &&
@@ -1446,6 +1472,9 @@ export async function actOnSample(
       // round needs it: used up in the sample, or moved to a general store.
       const d = sampleCloseOutSchema.parse(cmd.data)
       const latest = request.rounds[0]
+      // Booked against the latest round that was made: a round still being
+      // prepared has no cost sheet of its own to carry the material used.
+      const booked = request.rounds.find((x) => x.state !== 'DRAFT') ?? latest
       const settled =
         !!request.cancelledAt ||
         ['APPROVED', 'REJECTED'].includes(latest.state) ||
@@ -1478,7 +1507,7 @@ export async function actOnSample(
           qty: d.qty,
           transactionType: 'ISSUE',
           referenceType: 'SAMPLING',
-          referenceId: latest.id,
+          referenceId: booked.id,
           notes: `${notes} (left over, used in the sample)`,
         })
         value = round2(d.qty * moved.unitRate)
@@ -1499,7 +1528,7 @@ export async function actOnSample(
           toWarehouseId: d.toWarehouseId!,
           qty: d.qty,
           referenceType: 'SAMPLING',
-          referenceId: latest.id,
+          referenceId: booked.id,
           notes: `${notes} (left over, moved to ${to!.name})`,
         })
         value = round2(d.qty * carried.avgRate)
@@ -1507,7 +1536,7 @@ export async function actOnSample(
       await tx.sampleCloseOut.create({
         data: {
           requestId: id,
-          roundId: latest.id,
+          roundId: booked.id,
           itemId: d.itemId,
           warehouseId: d.warehouseId,
           kind: d.kind,
@@ -1518,7 +1547,7 @@ export async function actOnSample(
           createdById: actor.id,
         },
       })
-      eventRoundId = latest.id
+      eventRoundId = booked.id
       detail = { ...d, item: item!.name, from: from!.name }
       break
     }
@@ -1538,6 +1567,15 @@ export async function actOnSample(
         actor,
         data: cmd.data,
       })
+      break
+    }
+    // What the sample cost: charges, a challan's courier charge, finalising (sampleCost.service).
+    case 'ADD_CHARGE':
+    case 'REMOVE_CHARGE':
+    case 'DISPATCH_CHARGE':
+    case 'FINALISE_COST':
+    case 'REOPEN_COST': {
+      detail = await actOnCost(tx, cmd.action, { request, actor, data: cmd.data })
       break
     }
     // QC, the buyer's samples and the buyer's word, colour by colour (sampleReview.service).
@@ -1624,9 +1662,6 @@ export async function actOnSample(
       const ready = handoverReady(request.rounds)
       if (!ready.ready || !['APPROVED', 'REJECTED'].includes(round.state) || round.handover)
         fail('Handover requires buyer approval and can only be prepared once.')
-      if (request.rounds.some((x) => x.materials.some((m) => held(m) > 0.0005)))
-        fail('Account for used, wasted and returned material on every round before handover.')
-      const d = sampleHandoverSchema.parse(cmd.data)
       // A style made in sampling has no BOM or route yet and cannot be given
       // one, so the usual "pick a BOM" would send people round in a circle.
       const madeHere = await tx.style.findUnique({
@@ -1638,6 +1673,12 @@ export async function actOnSample(
           `${madeHere.code} is a new style made in sampling. Handing it over to production comes in a later update; keep the approved round as the record.`,
           'STYLE_IN_DEVELOPMENT'
         )
+      // What the sample cost is settled first: after handover it cannot change.
+      if (!request.costFinalisedAt)
+        fail('Finalise what the sample cost before preparing the handover.', 'COST_NOT_FINAL')
+      if (request.rounds.some((x) => x.materials.some((m) => held(m) > 0.0005)))
+        fail('Account for used, wasted and returned material on every round before handover.')
+      const d = sampleHandoverSchema.parse(cmd.data)
       const bom = await tx.bOM.findFirst({
         where: { id: d.bomId, styleId: spec.styleId, isActive: true, status: 'APPROVED' },
         include: { lines: { include: { sizes: true } } },

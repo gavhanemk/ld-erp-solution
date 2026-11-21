@@ -61,6 +61,7 @@ export function SampleMaking({
   lookups,
   latest,
   canEdit,
+  canCost,
   record,
   say,
 }: {
@@ -71,6 +72,8 @@ export function SampleMaking({
   latest: boolean
   /** Sampling edit permission on an open request. */
   canEdit: boolean
+  /** Sampling edit permission, cancelled or not: labour is recorded either way. */
+  canCost: boolean
   /** One making action; throws the server's sentence when refused. */
   record: (action: string, data: unknown) => Promise<SampleRequest>
   /** What the page says once a record is saved. */
@@ -81,10 +84,14 @@ export function SampleMaking({
   const sizeName = (id: string) => lookups.sizes.find((z) => z.id === id)?.code ?? 'Size no longer in use'
   const cellName = (c: MakingCellKey) => `${c.colour} · ${sizeName(c.sizeId)}`
   // Making is recorded on the latest released round until QC is recorded.
-  const making = canEdit && latest && round.state === 'RELEASED' && !round.qc && !request.cancelledAt
+  // Nothing that costs is recorded while the costs are finalised (COST_FINAL).
+  const costFinal = !!request.costFinalisedAt
+  const making =
+    canEdit && latest && round.state === 'RELEASED' && !round.qc && !request.cancelledAt && !costFinal
   const blocker = makingBlocker(round)
-  // Labour, once its bill is known: on any released round until handover.
-  const costing = canEdit && !request.rounds.some((r) => r.handover) && !request.cancelledAt
+  // Labour, once its bill is known: on any released round until handover,
+  // after a cancellation too (the server allows it), never on final costs.
+  const costing = canCost && !request.rounds.some((r) => r.handover) && !costFinal
   const stageOf = (id: string) => round.stages.find((s) => s.id === id)
   const saved = async (action: string, data: unknown, message: (r: SampleRequest) => string) => {
     const updated = await record(action, data)

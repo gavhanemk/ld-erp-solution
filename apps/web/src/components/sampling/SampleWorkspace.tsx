@@ -63,6 +63,7 @@ import { SampleRequestEditor } from './SampleRequestEditor'
 import { SampleFiles } from './SampleFiles'
 import { SampleStyleCard } from './SampleStyleCard'
 import { SampleMaking } from './SampleMaking'
+import { SampleCosting } from './SampleCost'
 import {
   CancelDispatchWindow,
   ColourTable,
@@ -294,9 +295,16 @@ export function SampleWorkspace({
   const handedOver = request.rounds.some((r) => r.handover)
   // Use, waste and returns can be recorded on any round still holding material.
   // A sample store is Sampling's own: sampling rights issue from it (phase 4).
-  const canRecord = edit
-  // Leftovers are closed out after a cancellation too.
-  const canClose = can('sampling', 'edit')
+  // Nothing that costs is recorded while the costs are finalised (COST_FINAL).
+  const costFinal = !!request.costFinalisedAt
+  const canRecord = edit && !costFinal
+  // Leftovers are closed out after a cancellation too. Once the costs are
+  // final, used in the sample would change them: only a move to a general store.
+  const closeKinds: SampleCloseOutKind[] = [
+    ...(costFinal ? [] : (['USED'] as const)),
+    ...(can('inventory', 'edit') ? (['MOVED'] as const) : []),
+  ]
+  const canClose = can('sampling', 'edit') && closeKinds.length > 0
   const closeBlocked = closeOutBlocker(request)
   const left = leftovers(request)
   /** An item of the request, named as its lines name it. */
@@ -847,6 +855,12 @@ export function SampleWorkspace({
                   the store it came from. A line not needed after all can be waived before making
                   starts.
                 </p>
+                {costFinal && edit && round.materials.length > 0 && (
+                  <p className="text-muted-foreground text-sm">
+                    The costs are finalised: material is not issued or recorded until they are reopened in
+                    Costing.
+                  </p>
+                )}
                 {round.materials.length === 0 ? (
                   <div className="glass-card flex items-start gap-3 p-5 text-sm">
                     <PackageOpen size={18} className="text-muted-foreground shrink-0" />
@@ -1024,7 +1038,9 @@ export function SampleWorkspace({
                         <p className="text-muted-foreground text-sm">
                           {closeBlocked
                             ? 'Bought and received for this request, not yet issued. It is kept for this round and the next; once the buyer has decided, what is left can be closed out.'
-                            : 'Close out what nobody needs any more: used in the sample, or moved to a general store at what it is carried at.'}
+                            : costFinal
+                              ? 'The costs are finalised, so what is left can only be moved to a general store, by someone with inventory rights. To count it as used in the sample, reopen the costs first.'
+                              : 'Close out what nobody needs any more: used in the sample, or moved to a general store at what it is carried at.'}
                         </p>
                         <div className="overflow-x-auto">
                         <table className="data-table w-full">
@@ -1117,6 +1133,8 @@ export function SampleWorkspace({
                 lookups={lookups}
                 latest={latest}
                 canEdit={edit}
+                // Labour and a unit's charge are costs: recorded after a cancellation too.
+                canCost={can('sampling', 'edit')}
                 record={async (action, data) => {
                   setError('')
                   setMessage('')
@@ -1221,6 +1239,16 @@ export function SampleWorkspace({
                 )}
                 {edit &&
                   latest &&
+                  costFinal &&
+                  (['APPROVED', 'CHANGES_REQUIRED', 'REJECTED'].includes(round.state) || qcFailed) &&
+                  !round.handover && (
+                    <p className="text-muted-foreground text-sm">
+                      The costs are finalised: reopen them in Costing to start another round.
+                    </p>
+                  )}
+                {edit &&
+                  latest &&
+                  !costFinal &&
                   (['APPROVED', 'CHANGES_REQUIRED', 'REJECTED'].includes(round.state) || qcFailed) &&
                   !round.handover && (
                     <ReasonAction
@@ -1236,6 +1264,22 @@ export function SampleWorkspace({
                 )}
               </div>
             )}
+            {tab === 'Costing' && (
+              <SampleCosting
+                request={request}
+                // Costs are recorded after a cancellation too: bills arrive later.
+                canEdit={can('sampling', 'edit')}
+                canApprove={can('sampling', 'approve')}
+                seesCosts={can('sampling', 'approve') || can('accounts', 'view')}
+                record={async (action, data) => {
+                  setError('')
+                  setMessage('')
+                  setWarnings([])
+                  return post(action, data)
+                }}
+                say={setMessage}
+              />
+            )}
             {tab === 'Handover' && (
               <div className="space-y-4">
                 {!handoverOpen && !round.handover && (
@@ -1243,6 +1287,12 @@ export function SampleWorkspace({
                     <LockKeyhole size={18} className="shrink-0" /> Every colour has to end approved,
                     rejected or dropped, with at least one approved, before preparing the production
                     package.
+                  </div>
+                )}
+                {handoverOpen && !round.handover && !costFinal && !madeHere && (
+                  <div className="glass-card flex gap-3 p-5 text-sm">
+                    <LockKeyhole size={18} className="shrink-0" /> Finalise what the sample cost
+                    first, in Costing: after handover it cannot change.
                   </div>
                 )}
                 {handoverOpen &&
@@ -1258,6 +1308,7 @@ export function SampleWorkspace({
                   handoverOpen &&
                   !round.handover &&
                   request.rounds.every((r) => r.materials.every((m) => held(m) === 0)) &&
+                  (madeHere || costFinal) &&
                   (madeHere ? (
                     // No BOM or route can be made for a style still in
                     // sampling, so empty pickers would only send people round.
@@ -1384,7 +1435,8 @@ export function SampleWorkspace({
           request={request}
           outcomes={outcomes}
           sizeName={sizeName}
-          showCharge={round.stages.some((x) => x.labourAmount !== undefined)}
+          // A courier charge is a cost: not while the costs are finalised.
+          showCharge={round.stages.some((x) => x.labourAmount !== undefined) && !costFinal}
           onClose={() => setReview(null)}
           save={(d) => review$('DISPATCH', d, 'Sent to the buyer. Print the challan from the list to go with the samples.')}
         />
@@ -1438,6 +1490,7 @@ export function SampleWorkspace({
               ?.available ?? 0
           }
           generalStores={lookups.warehouses.filter((w) => w.purpose !== 'SAMPLING')}
+          kinds={closeKinds}
           onClose={() => setClosing(null)}
           save={async (d) => {
             await post('CLOSE_MATERIAL', { ...d, ...closing })
@@ -2195,6 +2248,7 @@ function CloseOutWindow({
   storeName,
   available,
   generalStores,
+  kinds,
   onClose,
   save,
 }: {
@@ -2202,10 +2256,12 @@ function CloseOutWindow({
   storeName: string
   available: number
   generalStores: Lookups['warehouses']
+  /** What it may become: used only while the costs are open, moved only with inventory rights. */
+  kinds: SampleCloseOutKind[]
   onClose: () => void
   save: (d: { kind: SampleCloseOutKind; qty: number; toWarehouseId: string | null; reason: string }) => Promise<void>
 }) {
-  const [kind, setKind] = useState<SampleCloseOutKind>('USED')
+  const [kind, setKind] = useState<SampleCloseOutKind>(kinds[0])
   const [qty, setQty] = useState(String(available))
   const [to, setTo] = useState('')
   const [reason, setReason] = useState('')
@@ -2275,7 +2331,7 @@ function CloseOutWindow({
                   setError('')
                 }}
               >
-                {(can('inventory', 'edit') ? (['USED', 'MOVED'] as const) : (['USED'] as const)).map((k) => (
+                {kinds.map((k) => (
                   <option key={k} value={k}>
                     {SAMPLE_CLOSEOUT_LABEL[k]}
                   </option>

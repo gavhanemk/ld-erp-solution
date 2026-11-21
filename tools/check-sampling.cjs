@@ -657,17 +657,21 @@ async function main() {
   await action('QC', qcData(undefined, 'QC accepted'))
   await action('DISPATCH', { ...sendAll(), cells: whiteM(1), notes: 'One retained' })
   await action('DECIDE', decideAll('APPROVED'))
-  await action(
+  const costFirst = await action(
     'HANDOVER',
     { bomId: 'sample-bom', routingId: 'sample-route', notes: 'Bulk package' },
     409
   )
+  check('handover waits for the costs to be finalised', () => assert.equal(costFirst.body.code, 'COST_NOT_FINAL'))
+  await action('FINALISE_COST', { notes: 'Too early' }, 409)
   await action('MATERIAL', {
     materialId: mat.id,
     kind: 'USE',
     qty: 5,
     reason: 'Accounted sample consumption',
   })
+  await action('FINALISE_COST', { notes: 'Costs agreed' }, 403, 'sampling:view,sampling:edit')
+  await action('FINALISE_COST', { notes: 'Costs agreed' })
   await action(
     'HANDOVER',
     { bomId: 'missing', routingId: 'sample-route', notes: 'Bulk package' },
@@ -1018,12 +1022,15 @@ async function main() {
       decision: { result: 'APPROVED', buyerName: 'Example buyer', evidence: 'EXAMPLE', conditions: '' },
     },
   })
+  // Costs taken as final, so the BOM is what is checked.
+  await db.$executeRaw`UPDATE ld_erp.sample_requests SET "costSheet" = '{}'::jsonb, "costFinalisedAt" = now() WHERE id = ${doc.id}`
   doc = (await call('GET', `/${doc.id}`)).body.data
   const blueBom = await action(
     'HANDOVER',
     { bomId: 'sample-bom', routingId: 'sample-route', notes: 'White BOM for a blue round' },
     409
   )
+  await db.$executeRaw`UPDATE ld_erp.sample_requests SET "costSheet" = NULL, "costFinalisedAt" = NULL WHERE id = ${doc.id}`
   await db.sampleRound.update({ where: { id: blueRound.id }, data: { state: 'RELEASED' } })
   await db.$executeRaw`UPDATE ld_erp.sample_rounds SET decision = NULL WHERE id = ${blueRound.id}`
   doc = (await call('GET', `/${doc.id}`)).body.data

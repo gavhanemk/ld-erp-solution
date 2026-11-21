@@ -1,4 +1,6 @@
 import type {
+  SampleChargeKind,
+  SampleCostSheet,
   SampleDecision,
   SampleDispatchMode,
   SampleQc,
@@ -355,6 +357,28 @@ export interface SampleRequest {
   pool?: SamplePool | null
   /** Leftovers closed out, newest first. The value only to those who see accounts. */
   closeOuts?: SampleCloseOut[]
+  /** Its other costs, oldest first; the amounts to those who record them. Sent with the request itself. */
+  charges?: SampleCharge[]
+  /** Set while the costs are finalised (FINALISE_COST): nothing that costs changes. */
+  costFinalisedAt?: string | null
+  costFinalisedBy?: string | null
+  /** The finalised sheet, to those who see costs (approvers, accounts). */
+  costSheet?: SampleCostSheet | null
+}
+/** A cost besides material and labour (ADD_CHARGE). */
+export interface SampleCharge {
+  id: string
+  roundId: string | null
+  kind: SampleChargeKind
+  description: string
+  /** Decimal as text; to those who record charges, and to accounts. */
+  amount?: string
+  billRef: string | null
+  chargedOn: string
+  createdAt: string
+  removedAt: string | null
+  removedBy: string | null
+  removeReason: string | null
 }
 export interface SampleCloseOut {
   id: string

@@ -37,6 +37,7 @@ import {
   searchSampleItems,
   type SampleAfterCommit,
 } from '../services/sampling.service'
+import { costSheetOf } from '../services/sampleCost.service'
 import { routingsFor } from '../services/route.service'
 import { sampleNeeds } from '../services/sampleSourcing.service'
 import { activeSampleStores } from '../lib/sampleStore'
@@ -69,13 +70,21 @@ function visible(row: Awaited<ReturnType<typeof sampleDetail>>, req: AuthRequest
     return { ...f, removable: !lockedReason, lockedReason }
   })
   const values = userCan(req.user, 'accounts', 'view')
-  // A step's labour and an outside unit's charge: for whoever records them,
-  // and for accounts.
+  // A step's labour, an outside unit's charge and the sample's other charges:
+  // for whoever records them, and for accounts.
   const labour = values || userCan(req.user, 'sampling', 'edit')
-  if (values) return { ...row, attachments }
-  return {
+  // The cost sheet as a whole: for whoever finalises it, and for accounts.
+  const costs = values || userCan(req.user, 'sampling', 'approve')
+  const shown = {
     ...row,
     attachments,
+    costSheet: costs ? row.costSheet : null,
+    charges: labour ? row.charges : row.charges.map(({ amount, ...c }) => c),
+    events: row.events.map((e) => withoutAmounts(e, labour, costs)),
+  }
+  if (values) return shown
+  return {
+    ...shown,
     rounds: row.rounds.map((r) => ({
       ...r,
       materials: r.materials.map(({ issuedValue, returnedValue, ...m }) => m),
@@ -88,19 +97,20 @@ function visible(row: Awaited<ReturnType<typeof sampleDetail>>, req: AuthRequest
     })),
     // What leftovers were carried at is a value too.
     closeOuts: row.closeOuts.map(({ value, ...c }) => c),
-    // The history says what labour and charges were, to the same people.
-    events: labour ? row.events : row.events.map(withoutAmounts),
   }
 }
 /**
- * What a making event says of money, left out: the amounts, and a labour
- * note, which says who was paid and how (STEP_LABOUR, JOB_RETURN, JOB_CHARGE).
+ * What an event says of money, to the people who see it: labour, outside
+ * units' and other charges to those who record them (a labour note says who
+ * was paid and how), the finalised total to those who see the cost sheet.
  */
-function withoutAmounts<E extends { action: string; detail: unknown }>(e: E): E {
-  if (!['STEP_LABOUR', 'JOB_RETURN', 'JOB_CHARGE'].includes(e.action)) return e
+function withoutAmounts<E extends { action: string; detail: unknown }>(e: E, labour: boolean, costs: boolean): E {
+  const charges = ['STEP_LABOUR', 'JOB_RETURN', 'JOB_CHARGE', 'ADD_CHARGE', 'REMOVE_CHARGE', 'DISPATCH_CHARGE']
+  const hidden = (charges.includes(e.action) && !labour) || (e.action === 'FINALISE_COST' && !costs)
+  if (!hidden) return e
   const detail = (e.detail ?? {}) as { data?: Record<string, unknown> }
   if (!detail.data || typeof detail.data !== 'object') return e
-  const { amount, was, charge, ...data } = detail.data
+  const { amount, was, charge, total, perPiece, ...data } = detail.data
   if (e.action === 'STEP_LABOUR') delete data.note
   return { ...e, detail: { ...detail, data } }
 }
@@ -228,7 +238,8 @@ router.get('/', async (req: AuthRequest, res) => {
   ])
   res.json({
     success: true,
-    data,
+    // The finalised cost sheet is for those who see costs, on the request itself.
+    data: data.map(({ costSheet, ...r }) => r),
     pagination: { page: q.page, limit: q.limit, total, pages: Math.ceil(total / q.limit) },
   })
 })
@@ -352,6 +363,58 @@ router.get('/job-work/:jobId/print', async (req, res) => {
       sizes,
     },
   })
+})
+
+/** May see what a sample cost: whoever finalises it, and accounts. */
+const seesCosts = (req: AuthRequest) =>
+  userCan(req.user, 'sampling', 'approve') || userCan(req.user, 'accounts', 'view')
+const COSTS_HIDDEN = 'You need sampling approve or accounts view permission to see what a sample cost.'
+
+/**
+ * What the sample cost, as its records stand now, and as finalised if it is.
+ */
+router.get('/:id/cost', async (req: AuthRequest, res) => {
+  if (!seesCosts(req)) throw new AppError(COSTS_HIDDEN, 403, 'FORBIDDEN')
+  const data = await prisma.$transaction(async (tx) => {
+    const request = await sampleDetail(tx, req.params.id, { pool: true })
+    return {
+      live: await costSheetOf(tx, request),
+      finalised: request.costFinalisedAt
+        ? { sheet: request.costSheet, at: request.costFinalisedAt, by: request.costFinalisedBy }
+        : null,
+    }
+  }, T)
+  res.json({ success: true, data })
+})
+/**
+ * The cost sheet for printing: the internal sheet line by line (kind=sheet),
+ * or the buyer's Sample charges statement (kind=charges). The finalised one
+ * when there is one, else as the records stand, marked provisional.
+ */
+router.get('/:id/cost/print', async (req: AuthRequest, res) => {
+  if (!seesCosts(req)) throw new AppError(COSTS_HIDDEN, 403, 'FORBIDDEN')
+  const kind = req.query.kind === 'charges' ? 'charges' : 'sheet'
+  const data = await prisma.$transaction(async (tx) => {
+    const request = await sampleDetail(tx, req.params.id, { pool: true })
+    const sheet = request.costFinalisedAt ? request.costSheet : await costSheetOf(tx, request)
+    return {
+      sheet,
+      finalised: request.costFinalisedAt
+        ? { at: request.costFinalisedAt, by: request.costFinalisedBy }
+        : null,
+      request: {
+        number: request.number,
+        title: request.title,
+        buyerRef: request.buyerRef,
+        buyerStyleRef: request.buyerStyleRef,
+        season: request.season,
+        customer: request.customer,
+        cancelledAt: request.cancelledAt,
+      },
+    }
+  }, T)
+  const header = await getPrintHeader(kind === 'charges' ? 'SCS' : 'SCOST')
+  res.json({ success: true, data: { ...header, kind, ...data } })
 })
 
 /**

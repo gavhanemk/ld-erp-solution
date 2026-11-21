@@ -13,6 +13,7 @@ import {
   SAMPLE_MONEY_MAX,
   SAMPLE_DECISION_RESULTS,
   SAMPLE_DISPATCH_MODES,
+  SAMPLE_CHARGE_KINDS,
 } from '@ld-erp/shared'
 import { MAX_FILE_BYTES } from '../lib/storage'
 const text = (max = 500) => z.string().trim().min(1, 'Fill in this field').max(max)
@@ -219,6 +220,11 @@ export const sampleActionSchema = z.object({
     'DISPATCH_CANCEL',
     'DECIDE',
     'DROP_COLOUR',
+    'ADD_CHARGE',
+    'REMOVE_CHARGE',
+    'DISPATCH_CHARGE',
+    'FINALISE_COST',
+    'REOPEN_COST',
     'NEW_ROUND',
     'HANDOVER',
     'ACCEPT_HANDOVER',
@@ -350,6 +356,36 @@ export const sampleJobReturnSchema = z
     chargeAmount: money.default(0),
     notes: note(1000),
   })
+  .strict()
+// ── What a sample cost (phase 7) ──────────────────────────────────────────────
+/** A cost besides material, labour and outside units: testing, pattern, a setup, a courier. */
+export const sampleChargeSchema = z
+  .object({
+    /** The round it was for; none: the request as a whole. */
+    roundId: id.nullable().default(null),
+    kind: z.enum(SAMPLE_CHARGE_KINDS, {
+      errorMap: () => ({ message: 'Say what the charge is for' }),
+    }),
+    description: text(300),
+    amount: money.refine((v) => v > 0, 'Give the amount'),
+    billRef: note(100),
+    chargedOn: day,
+  })
+  .strict()
+export const sampleChargeRemoveSchema = z
+  .object({
+    chargeId: id,
+    reason: z.string().trim().min(SAMPLE_REASON_MIN, 'Say why, in a few words').max(500),
+  })
+  .strict()
+/** What sending a challan cost, put right once the courier's bill is known. */
+export const sampleDispatchChargeSchema = z
+  .object({ dispatchId: id, courierCharge: money, reason: note(300) })
+  .strict()
+/** The costs finalised: the sheet as it stands, kept, and nothing that costs changes after. */
+export const sampleFinaliseCostSchema = z.object({ notes: note(1000) }).strict()
+export const sampleReopenCostSchema = z
+  .object({ reason: z.string().trim().min(SAMPLE_REASON_MIN, 'Say why, in a few words').max(500) })
   .strict()
 /** A unit's charge on one receipt, put right once its bill is known; the pieces stay as they are. */
 export const sampleJobChargeSchema = z

@@ -3,6 +3,8 @@ import {
   SAMPLE_ATTACHMENT_KIND_LABEL,
   SAMPLE_MATERIAL_TYPES,
   cellCount,
+  SAMPLE_CHARGE_LABEL,
+  type SampleChargeKind,
   SAMPLE_DECISION_LABEL,
   SAMPLE_DISPATCH_MODE_LABEL,
   type SampleDecisionResult,
@@ -70,6 +72,11 @@ export const SAMPLE_SECTIONS = [
     key: 'Buyer review',
     title: 'Buyer submission & review',
     description: 'Feedback, approval or another round',
+  },
+  {
+    key: 'Costing',
+    title: 'Costing',
+    description: 'Charges, the cost sheet and the buyer’s statement',
   },
   { key: 'Handover', title: 'Production handover', description: 'Approved package and acceptance' },
 ] as const
@@ -333,6 +340,28 @@ export function sampleFlow(
     title = 'Resolve the QC findings'
     description =
       'No colour passed QC. Put the pieces right and record a corrected inspection, or start a new round to make them again. The failed inspection stays in the history.'
+  } else if (
+    round.state === 'REJECTED' &&
+    handoverReady(request.rounds).ready &&
+    !round.handover &&
+    !request.costFinalisedAt
+  ) {
+    // Material accounted for, leftovers closed out, then the costs.
+    const unreconciled = request.rounds.find((r) => r.materials.some((m) => materialHeld(m) > 0))
+    if (unreconciled) {
+      section = 'Materials'
+      targetRoundId = unreconciled.id
+      title = `Reconcile material on round ${unreconciled.revision}`
+      description = 'Record used, wasted and returned quantities before the costs are finalised.'
+    } else if (leftovers(request).length) {
+      section = 'Materials'
+      title = 'Close out what is left in the sample store'
+      description = leftoverText(request)
+    } else {
+      section = 'Costing'
+      title = 'Finalise what the sample cost'
+      description = COSTING_TEXT
+    }
   } else if (round.state === 'REJECTED' && handoverReady(request.rounds).ready) {
     // Rejected here, approved in an earlier round: that colour goes on to handover.
     section = 'Handover'
@@ -396,6 +425,15 @@ export function sampleFlow(
       targetRoundId = unreconciled.id
       title = `Reconcile material on round ${unreconciled.revision}`
       description = 'Record used, wasted and returned quantities before preparing the handover.'
+    } else if (!round.handover && !request.costFinalisedAt && leftovers(request).length) {
+      // Closed out before the costs are final: a leftover used in the sample is a cost.
+      section = 'Materials'
+      title = 'Close out what is left in the sample store'
+      description = leftoverText(request)
+    } else if (!round.handover && !request.costFinalisedAt) {
+      section = 'Costing'
+      title = 'Finalise what the sample cost'
+      description = COSTING_TEXT
     } else if (round.handover?.acceptedAt && leftovers(request).length) {
       // Handed over and accepted: what is left is the one thing still open.
       section = 'Materials'
@@ -423,6 +461,7 @@ export function sampleFlow(
     Making: round.stages.length > 0 && makingOf(round).every((s) => s.complete),
     Quality: !!round.qc?.passed,
     'Buyer review': round.state === 'APPROVED' || handoverReady(request.rounds).ready,
+    Costing: !!request.costFinalisedAt,
     Handover: !!round.handover?.acceptedAt,
   }
   return {
@@ -1143,6 +1182,37 @@ export function handoverBoms(boms: Lookups['boms'], styleId: string, approved: s
 }
 
 /** History lines in words rather than action codes. */
+/** What finalising the costs asks for, before handover. */
+export const COSTING_TEXT =
+  'Add any charges still to come (testing, pattern, couriers), check the cost sheet, then finalise it; finalising needs sampling approval. The buyer’s Sample charges statement prints from it.'
+
+/**
+ * Why the costs cannot be finalised yet, by the rules FINALISE_COST applies;
+ * '' once they can. A cancelled request is costed as it stopped.
+ */
+export function finaliseBlocker(request: SampleRequest) {
+  if (request.costFinalisedAt) return 'The costs are finalised.'
+  if (request.rounds.some((r) => r.handover)) return 'This request is handed over; its costs are frozen.'
+  const latest = request.rounds[0]
+  if (!request.cancelledAt) {
+    if (latest.state === 'DRAFT')
+      return `Round ${latest.revision} is still being prepared: finalise the costs once it is made.`
+    const unmade = request.rounds
+      .filter((r) => r.state !== 'DRAFT')
+      .find((r) => {
+        const steps = makingOf(r)
+        return !steps.length || steps.some((s) => !s.complete)
+      })
+    if (unmade) return `Round ${unmade.revision} is still being made: finalise the costs once every step is done.`
+  }
+  const held = request.rounds.find((r) => r.materials.some((m) => materialHeld(m) > 0))
+  if (held)
+    return `Round ${held.revision} still holds material: record what was used, wasted or returned in Material preparation first.`
+  if (leftovers(request).length)
+    return 'Close out what is left in the sample store first, in Material preparation: once the costs are final, a leftover can no longer be counted as used.'
+  return ''
+}
+
 export const SAMPLE_EVENT_LABEL: Record<string, string> = {
   CREATE: 'Request created',
   UPDATE_REQUEST: 'Request details updated',
@@ -1165,6 +1235,11 @@ export const SAMPLE_EVENT_LABEL: Record<string, string> = {
   DISPATCH_CANCEL: 'Delivery challan cancelled',
   DECIDE: 'Buyer decision recorded',
   DROP_COLOUR: 'Colour dropped',
+  ADD_CHARGE: 'Charge added',
+  REMOVE_CHARGE: 'Charge removed',
+  DISPATCH_CHARGE: 'Courier charge corrected',
+  FINALISE_COST: 'Costs finalised',
+  REOPEN_COST: 'Costs reopened',
   NEW_ROUND: 'New round started',
   HANDOVER: 'Handover prepared',
   ACCEPT_HANDOVER: 'Handover accepted',
@@ -1260,6 +1335,34 @@ export function eventNote(
       ])
     case 'DISPATCH_CANCEL':
       return join([text(d.number), text(d.reason) && `Reason: ${text(d.reason)}`])
+    case 'ADD_CHARGE':
+      return join([
+        SAMPLE_CHARGE_LABEL[text(d.kind) as SampleChargeKind] ?? text(d.kind),
+        text(d.description),
+        typeof d.revision === 'number' ? `round ${d.revision}` : 'whole request',
+        rupees(d.amount),
+      ])
+    case 'REMOVE_CHARGE':
+      return join([
+        SAMPLE_CHARGE_LABEL[text(d.kind) as SampleChargeKind] ?? text(d.kind),
+        text(d.description),
+        rupees(d.amount),
+        text(d.reason) && `Reason: ${text(d.reason)}`,
+      ])
+    case 'DISPATCH_CHARGE':
+      return join([
+        text(d.number),
+        typeof d.charge === 'number' ? `${rupees(d.was)} → ${rupees(d.charge)}` : '',
+        text(d.reason),
+      ])
+    case 'FINALISE_COST':
+      return join([
+        typeof d.total === 'number' ? `Total ${rupees(d.total)}` : '',
+        typeof d.perPiece === 'number' ? `${rupees(d.perPiece)} a piece` : '',
+        text(d.notes),
+      ])
+    case 'REOPEN_COST':
+      return text(d.reason) ? `Reason: ${text(d.reason)}` : null
     case 'DROP_COLOUR':
       return join([
         text(d.colour),

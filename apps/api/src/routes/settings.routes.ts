@@ -1073,6 +1073,7 @@ const DOC_TYPES = [
 /** Printed only where sampling runs (the local pilot until it is rolled out). */
 const SAMPLING_DOC_TYPES = [
   { docType: 'SDC', label: 'Sample Delivery Challan', defaultTitle: 'SAMPLE DELIVERY CHALLAN' },
+  { docType: 'SCS', label: 'Sample Charges', defaultTitle: 'SAMPLE CHARGES' },
 ] as const
 const docTypes = (): ReadonlyArray<{ docType: string; label: string; defaultTitle: string }> =>
   samplingPilotEnabled() ? [...DOC_TYPES, ...SAMPLING_DOC_TYPES] : DOC_TYPES

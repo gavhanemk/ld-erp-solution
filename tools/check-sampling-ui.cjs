@@ -197,9 +197,13 @@ check('handover guidance identifies unreconciled earlier rounds', () => {
   assert.equal(flow.targetRoundId, earlier.id)
 })
 earlier.materials[0].usedQty = '4'
-check('reconciled approval unlocks handover guidance', () =>
+check('reconciled approval asks for the costs to be finalised, then the handover', () => {
+  assert.equal(sampleFlow(request).section, 'Costing')
+  assert.equal(sampleFlow(request).title, 'Finalise what the sample cost')
+  request.costFinalisedAt = '2026-11-21'
   assert.equal(sampleFlow(request).section, 'Handover')
-)
+  assert.equal(sampleFlow(request).steps.find((s) => s.key === 'Costing').status, 'Complete')
+})
 round.handover = { acceptedAt: null }
 check('prepared handover waits for production acceptance', () =>
   assert.match(sampleFlow(request).title, /Awaiting production/)
@@ -384,7 +388,8 @@ check('a request released before it named its style is offered that style back',
 })
 check('an approved round of a style made in sampling is kept, not handed over', () => {
   const approved = { ...draft('dev', 'White'), state: 'APPROVED' }
-  const flow = sampleFlow({ styleId: 'dev', style: devStyle, rounds: [approved], cancelledAt: null })
+  // Costs finalised: what is left is the handover.
+  const flow = sampleFlow({ styleId: 'dev', style: devStyle, rounds: [approved], cancelledAt: null, costFinalisedAt: '2026-11-21' })
   assert.equal(flow.section, 'Handover')
   assert.match(flow.title, /record/)
   assert.match(flow.description, /EX-SH-2701 is a new style made in sampling/)
@@ -393,6 +398,7 @@ check('an approved round of a style made in sampling is kept, not handed over', 
     style: { ...devStyle, stage: 'PRODUCTION' },
     rounds: [approved],
     cancelledAt: null,
+    costFinalisedAt: '2026-11-21',
   })
   assert.match(resample.title, /production package/)
 })
@@ -1280,6 +1286,131 @@ check('each colour stands on its own: QC, what went to the buyer, the buyer’s 
     ]
   )
 })
+check('the cost sheet: material at what the request paid, labour, outside units, charges, a piece', () => {
+  const cost = require('../packages/shared/src/sampleCost.ts')
+  // Two orders for the fabric: 4 m arrived at ₹90, 1 m at ₹120 (one ordered 2, half come).
+  const orders = [
+    { itemId: 'fab', qty: 4, receivedQty: 4, amount: 360 },
+    { itemId: 'fab', qty: 2, receivedQty: 1, amount: 240 },
+    // Nothing arrived yet: no rate of its own (what was used came from elsewhere).
+    { itemId: 'btn', qty: 10, receivedQty: 0, amount: 25 },
+  ]
+  assert.equal(cost.purchaseRate(orders, 'fab'), 96)
+  assert.equal(cost.purchaseRate(orders, 'btn'), null)
+  assert.equal(cost.purchaseRate(orders, 'none'), null)
+  const item = (code, unit = 'm') => ({ code, name: code, uom: { symbol: unit } })
+  const stage = (id, sequence, extra = {}) => ({
+    id,
+    sequence,
+    name: id,
+    execution: 'IN_HOUSE',
+    departmentId: null,
+    wholeStep: true,
+    doneQty: 3,
+    rejectedQty: 0,
+    completedAt: '2026-11-20',
+    labourAmount: '0',
+    ...extra,
+  })
+  const line = (id, itemId, used, waste, extra = {}) => ({
+    id,
+    itemId,
+    component: 'Body',
+    colour: null,
+    source: 'PURCHASE',
+    usedQty: String(used),
+    wasteQty: String(waste),
+    issuedQty: String(used + waste),
+    issuedValue: String((used + waste) * 80),
+    item: item(itemId),
+    ...extra,
+  })
+  const sheet = cost.sampleCostSheet({
+    id: 'req',
+    number: 'SMP-1',
+    title: 'Shirt',
+    customer: { name: 'Buyer' },
+    buyerStyleRef: 'B-1',
+    style: null,
+    rounds: [
+      {
+        id: 'r1',
+        revision: 1,
+        state: 'APPROVED',
+        specification: { milestone: 'Fit', colours: [{ colour: 'White', sizes: [{ sizeId: 'm', qty: 3 }] }] },
+        stages: [stage('Cutting', 1, { labourAmount: '150' }), stage('Embroidery', 2, { execution: 'OUTSOURCED' })],
+        jobWorks: [
+          {
+            id: 'j',
+            stageId: 'Embroidery',
+            cells: [],
+            vendor: { name: 'Unit' },
+            cancelledAt: null,
+            returns: [
+              { id: 'x', cells: [], chargeAmount: '90.5' },
+              { id: 'y', cells: [], chargeAmount: '1000', undoneAt: '2026-11-20' },
+            ],
+          },
+        ],
+        dispatches: [
+          { id: 'd1', number: 'SDC-1', courierCharge: '120', cancelledAt: null },
+          { id: 'd2', number: 'SDC-2', courierCharge: '99', cancelledAt: '2026-11-20' },
+        ],
+        materials: [
+          line('fab-line', 'fab', 4.5, 0.5),
+          // The buyer's own: free.
+          line('lbl-line', 'lbl', 3, 0, { source: 'BUYER_SUPPLIED' }),
+          // Issued from a store before it was bought for the sample: at the store's rate.
+          line('thr-line', 'thr', 1, 0),
+        ],
+      },
+      { id: 'r2', revision: 2, state: 'DRAFT', specification: { milestone: 'PP', colours: [] }, stages: [], materials: [] },
+    ],
+    charges: [
+      { id: 'c1', roundId: 'r1', kind: 'TESTING', description: 'Lab', amount: '350', billRef: 'L-1' },
+      { id: 'c2', roundId: null, kind: 'PATTERN', description: 'CAD', amount: '500', billRef: null },
+      { id: 'c3', roundId: 'r1', kind: 'OTHER', description: 'Mistake', amount: '999', billRef: null, removedAt: '2026-11-20' },
+    ],
+    closeOuts: [{ roundId: 'r1', itemId: 'fab', kind: 'USED', qty: '0.5', value: '40', item: item('fab') }],
+    orders,
+    pool: { stores: [{ itemId: 'fab', available: 1.25 }] },
+  })
+  const r = sheet.rounds[0]
+  assert.equal(sheet.rounds.length, 1)
+  assert.deepEqual(
+    r.materials.map((m) => [m.item.code, m.consumed, m.rate, m.basis, m.amount]),
+    [
+      ['fab', 5, 96, 'PURCHASE', 480],
+      ['lbl', 3, 0, 'BUYER', 0],
+      ['thr', 1, 80, 'STORE', 80],
+      ['fab', 0.5, 96, 'PURCHASE', 48],
+    ]
+  )
+  assert.deepEqual(r.labourLines.map((l) => [l.name, l.kind, l.who, l.amount]), [
+    ['Cutting', 'LABOUR', '', 150],
+    ['Embroidery', 'OUTSIDE', 'Unit', 90.5],
+  ])
+  assert.deepEqual(r.miscLines.map((l) => [l.kind, l.amount, l.fromChallan]), [
+    ['TESTING', 350, false],
+    ['COURIER', 120, true],
+  ])
+  // 608 + 240.5 + 470 = 1318.5 for 3 pieces: 439.5 a piece.
+  assert.deepEqual([r.material, r.labour, r.misc, r.total, r.pieces, r.perPiece], [608, 240.5, 470, 1318.5, 3, 439.5])
+  assert.deepEqual([sheet.misc, sheet.total, sheet.perPiece], [970, 1818.5, 606.17])
+  assert.deepEqual(sheet.notCosted, [{ item: 'fab', qty: 1.25, unit: 'm' }])
+})
+check('cost events read in words, amounts only where they were sent', () => {
+  const note = (action, data) => eventNote({ action, detail: { data } }, [])
+  assert.equal(eventLabel('FINALISE_COST'), 'Costs finalised')
+  assert.equal(
+    note('ADD_CHARGE', { kind: 'TESTING', description: 'Lab', amount: 350, revision: 1 }),
+    'Testing · Lab · round 1 · ₹350.00'
+  )
+  assert.equal(note('ADD_CHARGE', { kind: 'PATTERN', description: 'CAD', revision: null }), 'Pattern / CAD · CAD · whole request')
+  assert.equal(note('FINALISE_COST', { total: 2220, perPiece: 1110, notes: 'Sent' }), 'Total ₹2,220.00 · ₹1,110.00 a piece · Sent')
+  assert.equal(note('FINALISE_COST', { notes: 'Sent' }), 'Sent')
+  assert.equal(note('DISPATCH_CHARGE', { number: 'SDC-1', charge: 150, was: 120, reason: 'Bill' }), 'SDC-1 · ₹120.00 → ₹150.00 · Bill')
+})
 check('review events read colour by colour', () => {
   const note = (action, data) => eventNote({ action, detail: { data } }, [])
   assert.equal(eventLabel('DISPATCH'), 'Sent to the buyer')
@@ -1874,7 +2005,7 @@ check('the picker keeps what was found or added, and a round’s own materials i
 check('Sourcing comes between the specification and material preparation', () => {
   assert.deepEqual(
     SAMPLE_SECTIONS.map((s) => s.key),
-    ['Brief', 'Technical', 'Sourcing', 'Materials', 'Making', 'Quality', 'Buyer review', 'Handover']
+    ['Brief', 'Technical', 'Sourcing', 'Materials', 'Making', 'Quality', 'Buyer review', 'Costing', 'Handover']
   )
 })
 check('a line’s buying is read off its orders, a line closed short counting what arrived', () => {
@@ -2088,9 +2219,22 @@ check('leftovers are closed out once the buyer has decided or the request is can
     handover: null,
   }
   // Before the handover it is said alongside the handover; once accepted, it is the next action.
-  let f = sampleFlow({ styleId: 's', rounds: [approved], cancelledAt: null, pool })
+  let f = sampleFlow({ styleId: 's', rounds: [approved], cancelledAt: null, pool, costFinalisedAt: '2026-11-21' })
   assert.equal(f.section, 'Handover')
   assert.match(f.description, /1 material bought for this request is still in the sample store/)
+  // Costs still open: what is left is closed out first, then the costs.
+  f = sampleFlow({ styleId: 's', rounds: [approved], cancelledAt: null, pool })
+  assert.deepEqual([f.section, f.title], ['Materials', 'Close out what is left in the sample store'])
+  assert.match(flow.finaliseBlocker({ rounds: [approved], cancelledAt: null, pool }), /^Round 1 is still being made/)
+  const made = { ...approved, stages: [{ id: 'cut', sequence: 1, name: 'Cutting', execution: 'IN_HOUSE', wholeStep: true, doneQty: 2, rejectedQty: 0, completedAt: '2026-11-20' }] }
+  assert.match(flow.finaliseBlocker({ rounds: [made], cancelledAt: null, pool }), /^Close out what is left/)
+  assert.equal(flow.finaliseBlocker({ rounds: [made], cancelledAt: null, pool: null }), '')
+  assert.match(flow.finaliseBlocker({ rounds: [{ ...made, state: 'DRAFT' }], cancelledAt: null, pool: null }), /still being prepared/)
+  // Cancelled: costed as it stopped, held material still accounted for first.
+  const holding = { ...approved, materials: [{ id: 'h', itemId: 'fab', issuedQty: '2', usedQty: '1', wasteQty: '0', returnedQty: '0' }] }
+  assert.match(flow.finaliseBlocker({ rounds: [holding], cancelledAt: '2026-11-17', pool: null }), /^Round 1 still holds material/)
+  assert.equal(flow.finaliseBlocker({ rounds: [approved], cancelledAt: '2026-11-17', pool: null }), '')
+  assert.equal(flow.finaliseBlocker({ rounds: [approved], cancelledAt: null, costFinalisedAt: '2026-11-21' }), 'The costs are finalised.')
   f = sampleFlow({
     styleId: 's',
     rounds: [{ ...approved, handover: { acceptedAt: '2026-11-17' } }],

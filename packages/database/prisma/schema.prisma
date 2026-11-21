@@ -43,6 +43,11 @@ model SampleRequest {
   version     Int @default(0)
   cancelledAt DateTime?
   cancelReason String?
+  /// The cost sheet as it stood when the costs were finalised (FINALISE_COST):
+  /// while it is set, nothing that costs can change until it is reopened.
+  costSheet        Json?
+  costFinalisedAt  DateTime?
+  costFinalisedBy  String?
   createdById String
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -50,6 +55,7 @@ model SampleRequest {
   events      SampleEvent[]
   attachments SampleAttachment[]
   closeOuts   SampleCloseOut[]
+  charges     SampleCharge[]
   @@index([state, createdAt])
   @@index([styleId])
   @@map("sample_requests")
@@ -77,6 +83,7 @@ model SampleRound {
   transfers    SampleTransfer[]
   jobWorks     SampleJobWork[]
   dispatches   SampleDispatch[]
+  charges      SampleCharge[]
   @@unique([requestId, revision])
   @@map("sample_rounds")
 }
@@ -213,6 +220,33 @@ model SampleJobWork {
   returns      SampleJobReturn[]
   @@index([roundId])
   @@map("sample_job_works")
+}
+
+/// A cost of a sample other than its material, labour and outside units'
+/// charges (ADD_CHARGE): testing, pattern or CAD, a setup, a courier not on a
+/// challan. Kept, not deleted: one put in by mistake is removed with why
+/// (REMOVE_CHARGE) and counts for nothing.
+model SampleCharge {
+  id           String @id @default(cuid())
+  requestId    String
+  request      SampleRequest @relation(fields: [requestId], references: [id])
+  /// The round it was for; none: the request as a whole.
+  roundId      String?
+  round        SampleRound? @relation(fields: [roundId], references: [id])
+  /// COURIER, TESTING, PATTERN, SETUP or OTHER (sample_charge_shape).
+  kind         String
+  description  String
+  amount       Decimal @db.Decimal(12,2)
+  /// The bill or receipt it is on.
+  billRef      String?
+  chargedOn    DateTime
+  createdById  String
+  createdAt    DateTime @default(now())
+  removedAt    DateTime?
+  removedBy    String?
+  removeReason String?
+  @@index([requestId])
+  @@map("sample_charges")
 }
 
 /// Sample pieces sent to the buyer on a Sample Delivery Challan (the SDC
