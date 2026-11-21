@@ -24,6 +24,17 @@ import { requirePermission, userCan, type AuthRequest } from '../middleware/auth
 import { itemBeforeSave, itemInclude, ITEM_UNIQUE_FIELDS } from '../lib/itemMaster'
 import { styleInDevelopment } from '../lib/styleStage'
 import {
+  assertVersionFree,
+  bomName,
+  costBom,
+  priceBomLines,
+  rethrowVersionClash,
+  round,
+  toLineCreate,
+  type IncomingBomLine,
+  type IncomingCostLine,
+} from '../services/bom.service'
+import {
   bomPriceSchema,
   copyBomSchema,
   createBomSchema,
@@ -2432,168 +2443,6 @@ const BOM_SORT_FIELDS = ['createdAt', 'version', 'color', 'totalCost', 'status',
 const BOM_STATUSES = ['DRAFT', 'APPROVED', 'OBSOLETE']
 
 /**
- * Money is rounded at every step rather than only at the end, so that a clerk
- * checking the screen against a calculator gets the same answer. Quantities
- * keep four places — cloth per garment is measured that finely.
- */
-const round = (value: number, places: number) => Number(value.toFixed(places))
-
-type IncomingBomLineSize = { sizeId: string; qtyPerUnit: number | string }
-
-type IncomingBomLine = {
-  componentItemId: string
-  component?: string | null
-  departmentId?: string | null
-  qtyPerUnit: number | string
-  wastagePercent?: number
-  unitCost?: number | string | null
-  notes?: string | null
-  sortOrder?: number
-  sizes?: IncomingBomLineSize[]
-}
-
-/**
- * Wastage inflates the quantity actually consumed: cutting 1.65 m of fabric per
- * shirt at 5% wastage really draws 1.7325 m. Rates fall back to the item's
- * standard rate so a BOM can be costed before anyone types a price.
- *
- * An item with no rate anywhere now raises a warning instead of costing at
- * zero. A total that quietly leaves a component out looks exactly like a total
- * that is right, which is the worse of the two failures.
- *
- * Sizes are a sparse override: a size with no row of its own consumes what the
- * line consumes. That fallback is what keeps a BOM with no size run behaving
- * exactly as it did before sizes existed.
- */
-async function priceBomLines(lines: IncomingBomLine[]) {
-  const itemIds = [...new Set(lines.map((l) => l.componentItemId))]
-  const items = await prisma.item.findMany({
-    where: { id: { in: itemIds } },
-    select: { id: true, code: true, name: true, standardRate: true },
-  })
-
-  const missing = itemIds.filter((id) => !items.some((i) => i.id === id))
-  if (missing.length > 0) {
-    throw new AppError(`Unknown component item(s): ${missing.join(', ')}`, 400, 'INVALID_ITEM')
-  }
-
-  const byId = new Map(items.map((i) => [i.id, i]))
-  const warnings: Array<{ itemId: string; code: string; name: string }> = []
-
-  const priced = lines.map((line, index) => {
-    const item = byId.get(line.componentItemId)!
-    const qty = Number(line.qtyPerUnit)
-    const wastage = Number(line.wastagePercent ?? 0)
-    const factor = 1 + wastage / 100
-
-    const typed =
-      line.unitCost !== null && line.unitCost !== undefined && line.unitCost !== ''
-        ? Number(line.unitCost)
-        : null
-    const standard = item.standardRate !== null ? Number(item.standardRate) : null
-    const rate = typed ?? standard
-
-    if (rate === null) {
-      warnings.push({ itemId: item.id, code: item.code, name: item.name })
-    }
-
-    const unitCost = round(rate ?? 0, 4)
-    const effectiveQty = round(qty * factor, 4)
-
-    // The line's wastage, not a per-size one: size changes how much cloth a
-    // garment takes, it does not change how badly the cutter wastes it.
-    const sizes = (line.sizes ?? []).map((s) => {
-      const sizeQty = Number(s.qtyPerUnit)
-      const sizeEffective = round(sizeQty * factor, 4)
-      return {
-        sizeId: s.sizeId,
-        qtyPerUnit: sizeQty,
-        effectiveQty: sizeEffective,
-        totalCost: round(sizeEffective * unitCost, 2),
-      }
-    })
-
-    return {
-      componentItemId: line.componentItemId,
-      component: line.component ?? null,
-      departmentId: line.departmentId || null,
-      qtyPerUnit: qty,
-      wastagePercent: wastage,
-      effectiveQty,
-      unitCost,
-      // Worked out from the rounded quantity and the rounded rate, so that
-      // Effective x Rate really does come to Cost on the screen.
-      totalCost: round(effectiveQty * unitCost, 2),
-      notes: line.notes ?? null,
-      sortOrder: line.sortOrder ?? index,
-      sizes,
-    }
-  })
-
-  const totalCost = round(
-    priced.reduce((sum, l) => sum + l.totalCost, 0),
-    2,
-  )
-
-  return { priced, totalCost, warnings }
-}
-
-type IncomingCostLine = {
-  kind: 'LABOUR' | 'OVERHEAD'
-  name: string
-  departmentId?: string | null
-  basis: 'PER_PIECE' | 'PERCENT'
-  value: number
-}
-
-/**
- * The cost of one garment, built up the way a costing sheet is: material, then
- * labour, then overhead — which may be a percentage of the two before it, as
- * "factory overhead 10%" usually is. Rounded to the paisa at every step, so the
- * build-up on screen adds up on a calculator.
- */
-function costBom(material: number, rows: IncomingCostLine[]) {
-  const labourRows = rows
-    .filter((r) => r.kind === 'LABOUR')
-    .map((r) => ({ ...r, amount: round(r.value, 2) }))
-  const labourCost = round(
-    labourRows.reduce((sum, r) => sum + r.amount, 0),
-    2,
-  )
-
-  const base = round(material + labourCost, 2)
-  const overheadRows = rows
-    .filter((r) => r.kind === 'OVERHEAD')
-    .map((r) => ({
-      ...r,
-      amount: r.basis === 'PERCENT' ? round((base * r.value) / 100, 2) : round(r.value, 2),
-    }))
-  const overheadCost = round(
-    overheadRows.reduce((sum, r) => sum + r.amount, 0),
-    2,
-  )
-
-  // Kept in the order they were typed, labour first, so the list reads the
-  // same way the form does.
-  const priced = [...labourRows, ...overheadRows].map((r, index) => ({
-    kind: r.kind,
-    name: r.name,
-    departmentId: r.departmentId || null,
-    basis: r.basis,
-    value: round(r.value, 2),
-    amount: r.amount,
-    sortOrder: index,
-  }))
-
-  return {
-    rows: priced,
-    labourCost,
-    overheadCost,
-    costPerPiece: round(material + labourCost + overheadCost, 2),
-  }
-}
-
-/**
  * Margin is a share of the selling price: at 20%, a ₹473.53 shirt sells for
  * 473.53 ÷ 0.80. Rounded to the paisa first, so a price that divides exactly is
  * not pushed up a rupee by floating-point dust, then up to the next rupee.
@@ -2666,8 +2515,6 @@ function assertMayCost(req: AuthRequest, costLines: unknown) {
   }
 }
 
-type PricedLine = Awaited<ReturnType<typeof priceBomLines>>['priced'][number]
-
 type RateWarning = { itemId: string; code: string; name: string }
 
 /**
@@ -2684,12 +2531,6 @@ const rateWarning = (warnings: RateWarning[]): string => {
     warnings.length === 1 ? 'One component has' : `${warnings.length} components have`
   const them = warnings.length === 1 ? 'it' : 'them'
   return `Saved. ${subject} no rate yet — ${names}. The total leaves ${them} out until a rate is set.`
-}
-
-/** Nests the size rows under their line so both are written in one statement. */
-function toLineCreate(line: PricedLine) {
-  const { sizes, ...rest } = line
-  return { ...rest, ...(sizes.length > 0 ? { sizes: { create: sizes } } : {}) }
 }
 
 /**
@@ -2852,77 +2693,6 @@ async function assertBomRefsExist(
   return { code: style.code }
 }
 
-/** "LD-SH-2601 in Dusty Blue", or just the code for a BOM with no colour. */
-const bomName = (styleCode: string, color: string | null | undefined) =>
-  color ? `${styleCode} in ${color}` : styleCode
-
-/**
- * `typed` is false when no version was sent and 1.0 was assumed. The BOM form
- * no longer asks for a version, so "give this one a different version" would be
- * advice with nowhere to act on it — and a second BOM for one colour is meant
- * to start as a copy anyway.
- */
-const versionClash = (
-  styleCode: string,
-  color: string | null | undefined,
-  version: string,
-  typed = true,
-) =>
-  new AppError(
-    typed
-      ? `${bomName(styleCode, color)} already has a BOM at version ${version}. Give this one a different version, or copy the existing one.`
-      : `${bomName(styleCode, color)} already has a BOM. To start a new version, copy that one from the BOM list.`,
-    409,
-    'BOM_VERSION_EXISTS',
-  )
-
-/**
- * Prisma's own message for a repeated version is "styleId,color,version already
- * exists", which is the database talking to itself. This says what to do.
- */
-function rethrowVersionClash(
-  err: unknown,
-  styleCode: string,
-  color: string | null | undefined,
-  version: string,
-  typed = true,
-): never {
-  const code = (err as { code?: string }).code
-  const target = (err as { meta?: { target?: unknown } }).meta?.target
-  const hitVersion = Array.isArray(target)
-    ? target.includes('version')
-    : String(target ?? '').includes('version')
-
-  if (code === 'P2002' && hitVersion) throw versionClash(styleCode, color, version, typed)
-  throw err
-}
-
-/**
- * The unique constraint catches a repeated colour and version, but Postgres
- * counts two blank colours as different, so two colourless BOMs at one version
- * would both save. Checking first closes that gap, and gives the plain message
- * every time rather than only when the database happens to be the one to catch it.
- */
-async function assertVersionFree(
-  styleId: string,
-  color: string | null | undefined,
-  version: string,
-  styleCode: string,
-  excludeId?: string,
-  typed = true,
-): Promise<void> {
-  const clash = await prisma.bOM.findFirst({
-    where: {
-      styleId,
-      color: color || null,
-      version,
-      ...(excludeId ? { id: { not: excludeId } } : {}),
-    },
-    select: { id: true },
-  })
-  if (clash) throw versionClash(styleCode, color, version, typed)
-}
-
 /** The BOM list's dropdown filters, each a comma list in the query. */
 const BOM_FACETS = ['styles', 'colours', 'brands', 'items', 'priced'] as const
 type BomFacet = (typeof BOM_FACETS)[number]
@@ -3078,9 +2848,9 @@ router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest
 
   const useVersion = version ?? '1.0'
   const typedVersion = version !== undefined
-  await assertVersionFree(styleId, colour, useVersion, style.code, undefined, typedVersion)
+  await assertVersionFree(prisma, styleId, colour, useVersion, style.code, undefined, typedVersion)
 
-  const { priced, totalCost, warnings } = await priceBomLines(lines)
+  const { priced, totalCost, warnings } = await priceBomLines(prisma, lines)
   const costing = costBom(totalCost, costLines ?? [])
 
   let created
@@ -3165,7 +2935,7 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   // changed here — that is what copying to another colour is for — so the check
   // is against the colour the BOM was made for.
   if (version !== undefined && version !== before.version) {
-    await assertVersionFree(before.styleId, before.color, version, before.style.code, before.id)
+    await assertVersionFree(prisma, before.styleId, before.color, version, before.style.code, before.id)
   }
 
   // Lines are replaced wholesale rather than diffed: the header total must stay
@@ -3185,7 +2955,7 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     let material = Number(before.totalCost ?? 0)
 
     if (lines) {
-      const repriced = await priceBomLines(lines)
+      const repriced = await priceBomLines(prisma, lines)
       material = repriced.totalCost
       costs.totalCost = repriced.totalCost
       warnings = repriced.warnings
@@ -3476,7 +3246,7 @@ router.post('/bom/:id/copy', requirePermission(MODULE, 'create'), async (req: Au
     value: targetColour,
     required: true,
   })
-  await assertVersionFree(source.styleId, targetColour, targetVersion, source.style.code)
+  await assertVersionFree(prisma, source.styleId, targetColour, targetVersion, source.style.code)
 
   let created
   try {

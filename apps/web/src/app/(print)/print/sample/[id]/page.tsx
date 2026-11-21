@@ -214,7 +214,21 @@ export default function PrintSample() {
       add(
         round.revision,
         'Production handover',
-        `BOM ${round.handover.bomVersion} · Routing v${round.handover.routingVersion}\nPrepared by ${round.handover.preparedBy}\n${round.handover.notes}`,
+        round.handover.boms
+          ? [
+              round.handover.style?.promoted ? `${round.handover.style.code} made a production style` : '',
+              ...round.handover.boms.map(
+                (b) => `${b.colour}: BOM v${b.version}${b.made ? ` (draft from round ${b.revision})` : ''}`
+              ),
+              round.handover.routing
+                ? `Routing ${round.handover.routing.code} v${round.handover.routing.version}${round.handover.routing.made ? ' (from the sample)' : ''}`
+                : '',
+              `Prepared by ${round.handover.preparedBy}`,
+              round.handover.notes,
+            ]
+              .filter(Boolean)
+              .join('\n')
+          : `BOM ${round.handover.bomVersion} · Routing v${round.handover.routingVersion}\nPrepared by ${round.handover.preparedBy}\n${round.handover.notes}`,
         round.handover.acceptedAt
           ? `Accepted by ${round.handover.acceptedBy} · ${longDate(round.handover.acceptedAt)}`
           : 'Acceptance pending'

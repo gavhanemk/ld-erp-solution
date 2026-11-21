@@ -11,6 +11,7 @@ import {
   type SampleDispatchMode,
   colourOutcomes,
   coloursToCarry,
+  colourKey,
   handoverReady,
   makingLedger,
   makingStarted,
@@ -365,14 +366,15 @@ export function sampleFlow(
   } else if (round.state === 'REJECTED' && handoverReady(request.rounds).ready) {
     // Rejected here, approved in an earlier round: that colour goes on to handover.
     section = 'Handover'
-    title = round.handover?.acceptedAt
-      ? 'Handover accepted'
-      : round.handover
-        ? 'Awaiting production acceptance'
-        : 'Prepare the approved production package'
-    description = round.handover
-      ? 'The approved sample record is ready for production planning.'
-      : `${joinAnd(handoverReady(request.rounds).approved)} ${handoverReady(request.rounds).approved.length === 1 ? 'is' : 'are'} approved in an earlier round and every other colour has ended. Link an approved BOM and the production route.`
+    ;({ title, description } = handoverWords(request, round))
+    const approved = handoverReady(request.rounds).approved
+    if (!round.handover)
+      description = `${joinAnd(approved)} ${approved.length === 1 ? 'is' : 'are'} approved in an earlier round and every other colour has ended. ${HANDOVER_FLOW_TEXT}`
+    if (round.handover?.acceptedAt && leftovers(request).length) {
+      section = 'Materials'
+      title = 'Close out what is left in the sample store'
+      description = leftoverText(request)
+    }
   } else if (round.state === 'QC_PASSED' || round.state === 'SUBMITTED') {
     const outcomes = colourOutcomes(round)
     const toSend = outcomes.filter((o) => !o.decision && o.toSend.length)
@@ -407,19 +409,7 @@ export function sampleFlow(
   } else if (round.state === 'APPROVED') {
     const unreconciled = request.rounds.find((r) => r.materials.some((m) => materialHeld(m) > 0))
     section = 'Handover'
-    title = round.handover?.acceptedAt
-      ? 'Handover accepted'
-      : round.handover
-        ? 'Awaiting production acceptance'
-        : 'Prepare the approved production package'
-    description = round.handover?.acceptedAt
-      ? 'The approved sample record is ready for production planning.'
-      : 'Link an approved BOM of this style, for every colour or for a colour the buyer approved, and the production route, then record production acceptance.'
-    const madeHere = developmentStyleOf(request, round)
-    if (!round.handover && madeHere) {
-      title = 'Keep the approved round as the record'
-      description = developmentHandoverText(madeHere.code)
-    }
+    ;({ title, description } = handoverWords(request, round))
     if (!round.handover && unreconciled) {
       section = 'Materials'
       targetRoundId = unreconciled.id
@@ -495,18 +485,55 @@ export const STYLE_FIXED_TEXT =
   'The style is fixed once a round has been released, as the buyer and brand are. Raise a new request to sample another style.'
 
 /**
- * The round's style when it is one made in sampling: it has no BOM or route
- * and cannot be given one yet, so there is nothing to hand over to production.
+ * The handed-over colours production cannot take yet: no BOM of the style
+ * for them is approved in Masters. A colour the request has no word on yet
+ * counts as waiting. Each says what to do: approve its draft, or, once that
+ * draft is retired or removed, approve another BOM for the colour.
  */
-export function developmentStyleOf(
-  request: Pick<SampleRequest, 'style'>,
-  round: Pick<SampleRound, 'specification'>
+export function handoverWaiting(
+  request: Pick<SampleRequest, 'handoverBoms'>,
+  round: Pick<SampleRound, 'handover'>
 ) {
-  const style = request.style
-  return style?.stage === 'DEVELOPMENT' && style.id === round.specification.styleId ? style : null
+  const boms = round.handover?.boms
+  if (!boms || round.handover?.acceptedAt) return []
+  return boms
+    .map((b) => ({ b, now: (request.handoverBoms ?? []).find((s) => colourKey(s.colour) === colourKey(b.colour)) }))
+    .filter(({ now }) => !now?.approved)
+    .map(({ b, now }) => ({
+      colour: b.colour,
+      version: b.version,
+      gone: now?.status === 'DELETED' || now?.status === 'OBSOLETE',
+    }))
 }
-export const developmentHandoverText = (code: string) =>
-  `${code} is a new style made in sampling. Handing it over to production comes in a later update; keep the approved round as the record.`
+/** "White (v1.0)", or the colour alone once its draft is gone. */
+export const waitingName = (w: { colour: string; version: string; gone: boolean }) =>
+  w.gone ? w.colour : `${w.colour} (v${w.version})`
+
+/** Where a prepared or accepted handover stands, as the flow says it. */
+function handoverWords(request: SampleRequest, round: SampleRound) {
+  const waiting = handoverWaiting(request, round)
+  const h = round.handover
+  return {
+    title: h?.acceptedAt
+      ? 'Handover accepted'
+      : h && waiting.length
+        ? 'Waiting for Masters to approve the BOMs'
+        : h
+          ? 'Awaiting production acceptance'
+          : 'Prepare the approved production package',
+    description: h?.acceptedAt
+      ? 'The approved sample record is ready for production planning.'
+      : h && waiting.length
+        ? `Approve a BOM for ${joinAnd(waiting.map(waitingName))} in Masters → BOMs; production accepts the handover after that.`
+        : h
+          ? 'Production accepts the handover into planning.'
+          : HANDOVER_FLOW_TEXT,
+  }
+}
+
+/** What preparing the handover does, as the flow says it. */
+export const HANDOVER_FLOW_TEXT =
+  'For each colour the buyer approved, make a draft BOM from the sample or pick one Masters has approved, and give the style its routing; a style made in sampling becomes a production style. Production accepts once Masters has approved the BOMs.'
 
 /**
  * What the request's style card may offer, by the rules CREATE_STYLE,
@@ -1172,14 +1199,6 @@ export function orderSummary(o: SampleOrderLine, unit = '') {
   }${o.status === 'DRAFT' ? ' · draft, not sent yet' : ''}`
 }
 
-/** Approved BOMs the round can be handed over with: this style's, for every colour or one the round made. */
-export function handoverBoms(boms: Lookups['boms'], styleId: string, approved: string[]) {
-  // HANDOVER takes a BOM for every colour, or for one the buyer approved (handoverReady).
-  const keys = approved.map((c) => c.trim().toLowerCase())
-  return boms.filter(
-    (b) => b.styleId === styleId && (!b.color || keys.includes(b.color.trim().toLowerCase()))
-  )
-}
 
 /** History lines in words rather than action codes. */
 /** What finalising the costs asks for, before handover. */
@@ -1363,6 +1382,22 @@ export function eventNote(
       ])
     case 'REOPEN_COST':
       return text(d.reason) ? `Reason: ${text(d.reason)}` : null
+    case 'HANDOVER': {
+      // Colour by colour since phase 8; before, one linked BOM and routing.
+      if (!Array.isArray(d.boms)) return text(d.notes) || null
+      const boms = d.boms as Array<{ colour?: unknown; version?: unknown; made?: unknown }>
+      const routing = (d.routing ?? {}) as { code?: unknown; made?: unknown }
+      return join([
+        d.promoted ? `${text(d.style)} made a production style` : '',
+        ...boms.map((b) => `${text(b.colour)} BOM v${text(b.version)}${b.made ? ' (draft from the sample)' : ''}`),
+        text(routing.code) ? `Routing ${text(routing.code)}${routing.made ? ' (from the sample)' : ''}` : '',
+        text(d.notes),
+      ])
+    }
+    case 'ACCEPT_HANDOVER':
+      return Array.isArray(d.boms)
+        ? join((d.boms as Array<{ colour?: unknown; version?: unknown }>).map((b) => `${text(b.colour)} BOM v${text(b.version)}`))
+        : null
     case 'DROP_COLOUR':
       return join([
         text(d.colour),

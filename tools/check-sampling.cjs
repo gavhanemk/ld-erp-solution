@@ -606,7 +606,7 @@ async function main() {
   const oldRound = doc.rounds[0]
   await action(
     'HANDOVER',
-    { bomId: 'sample-bom', routingId: 'sample-route', notes: 'Cannot approve' },
+    { boms: [{ colour: 'White', bomId: 'sample-bom' }], routingId: 'sample-route', notes: 'Cannot approve' },
     409
   )
   await action('NEW_ROUND', 'Revise collar after buyer feedback', 403, 'sampling:view')
@@ -659,7 +659,7 @@ async function main() {
   await action('DECIDE', decideAll('APPROVED'))
   const costFirst = await action(
     'HANDOVER',
-    { bomId: 'sample-bom', routingId: 'sample-route', notes: 'Bulk package' },
+    { boms: [{ colour: 'White', bomId: 'sample-bom' }], routingId: 'sample-route', notes: 'Bulk package' },
     409
   )
   check('handover waits for the costs to be finalised', () => assert.equal(costFirst.body.code, 'COST_NOT_FINAL'))
@@ -674,13 +674,36 @@ async function main() {
   await action('FINALISE_COST', { notes: 'Costs agreed' })
   await action(
     'HANDOVER',
-    { bomId: 'missing', routingId: 'sample-route', notes: 'Bulk package' },
+    { boms: [{ colour: 'White', bomId: 'missing' }], routingId: 'sample-route', notes: 'Bulk package' },
     409
   )
+  // One choice for each approved colour: none left out, none the buyer did not approve.
+  const noColour = await action('HANDOVER', { boms: [{ colour: 'Blue', bomId: null }], routingId: 'sample-route', notes: 'Bulk package' }, 409)
+  const colourTwice = await action(
+    'HANDOVER',
+    { boms: [{ colour: 'White', bomId: 'sample-bom' }, { colour: 'white', bomId: null }], routingId: 'sample-route', notes: 'Bulk package' },
+    409
+  )
+  const badRouting = await action('HANDOVER', { boms: [{ colour: 'White', bomId: 'sample-bom' }], routingId: 'sample-route', routingId: 'missing', notes: 'Bulk package' }, 409)
+  check('the handover names each approved colour once, and a routing that fits', () => {
+    assert.equal(noColour.body.code, 'HANDOVER_COLOURS')
+    assert.match(noColour.body.message, /White/)
+    assert.equal(colourTwice.body.code, 'HANDOVER_COLOURS')
+    assert.equal(badRouting.body.code, 'HANDOVER_ROUTING')
+  })
   await action('HANDOVER', {
-    bomId: 'sample-bom',
-    routingId: 'sample-route',
+    boms: [{ colour: 'White', bomId: 'sample-bom' }], routingId: 'sample-route',
     notes: 'Approved pattern v2 and technical pack v1',
+  })
+  check('a re-sample of a production style goes over with the BOM Masters approved', () => {
+    const h = doc.rounds[0].handover
+    assert.deepEqual(
+      h.boms.map((b) => [b.colour, b.bomId, b.made]),
+      [['White', 'sample-bom', false]]
+    )
+    assert.equal(h.routing.id, 'sample-route')
+    assert.equal(h.style.promoted, false)
+    assert.deepEqual(doc.handoverBoms.map((b) => [b.colour, b.approved && b.approved.id]), [['White', 'sample-bom']])
   })
   await action('UPDATE_REQUEST', requestEdit, 409)
   await action('ACCEPT_HANDOVER', {}, 403, 'sampling:view,sampling:edit')
@@ -1027,7 +1050,7 @@ async function main() {
   doc = (await call('GET', `/${doc.id}`)).body.data
   const blueBom = await action(
     'HANDOVER',
-    { bomId: 'sample-bom', routingId: 'sample-route', notes: 'White BOM for a blue round' },
+    { boms: [{ colour: 'Blue', bomId: 'sample-bom' }], routingId: 'sample-route', notes: 'White BOM for a blue round' },
     409
   )
   await db.$executeRaw`UPDATE ld_erp.sample_requests SET "costSheet" = NULL, "costFinalisedAt" = NULL WHERE id = ${doc.id}`
@@ -1035,7 +1058,7 @@ async function main() {
   await db.$executeRaw`UPDATE ld_erp.sample_rounds SET decision = NULL WHERE id = ${blueRound.id}`
   doc = (await call('GET', `/${doc.id}`)).body.data
   check('a handover BOM must be for every colour or one the buyer approved', () =>
-    assert.match(blueBom.body.message, /for every colour or for one the buyer approved/)
+    assert.equal(blueBom.body.code, 'HANDOVER_BOM', JSON.stringify(blueBom.body))
   )
   await action('CANCEL', 'Local colour check complete; nothing issued')
 
@@ -1990,15 +2013,15 @@ async function main() {
   doc = (await call('GET', `/${doc.id}`)).body.data
   const noHandover = await action(
     'HANDOVER',
-    { bomId: 'sample-bom', routingId: 'sample-route', notes: 'Bulk package' },
+    { boms: [{ colour: 'White', bomId: null }], routingId: null, notes: 'Bulk package' },
     409
   )
   await db.sampleRound.update({ where: { id: releasedRound.id }, data: { state: 'RELEASED' } })
   await db.$executeRaw`UPDATE ld_erp.sample_rounds SET decision = NULL WHERE id = ${releasedRound.id}`
   doc = (await call('GET', `/${doc.id}`)).body.data
-  check('a style made in sampling is not handed over, and the refusal says why', () => {
-    assert.equal(noHandover.body.code, 'STYLE_IN_DEVELOPMENT')
-    assert.match(noHandover.body.message, /later update/)
+  // Handed over like any other since phase 8 (tools/check-sample-handover.cjs), once its costs are final.
+  check('a style made in sampling waits only for its costs to be handed over', () => {
+    assert.equal(noHandover.body.code, 'COST_NOT_FINAL')
   })
 
   // A style in sampling belongs to the open request developing it.

@@ -386,13 +386,35 @@ check('a request released before it named its style is offered that style back',
   // A request with its own style has nothing to be offered back.
   assert.equal(styleRules({ ...legacy, style: devStyle }).releasedStyleId, '')
 })
-check('an approved round of a style made in sampling is kept, not handed over', () => {
+check('an approved round of a style made in sampling is handed over like any other', () => {
   const approved = { ...draft('dev', 'White'), state: 'APPROVED' }
   // Costs finalised: what is left is the handover.
   const flow = sampleFlow({ styleId: 'dev', style: devStyle, rounds: [approved], cancelledAt: null, costFinalisedAt: '2026-11-21' })
   assert.equal(flow.section, 'Handover')
-  assert.match(flow.title, /record/)
-  assert.match(flow.description, /EX-SH-2701 is a new style made in sampling/)
+  assert.match(flow.title, /production package/)
+  assert.match(flow.description, /a style made in sampling becomes a production style/)
+  // Prepared: production waits for Masters to approve the drafts.
+  const waiting = sampleFlow({
+    styleId: 'dev',
+    style: devStyle,
+    rounds: [{ ...approved, handover: { acceptedAt: null, boms: [{ colour: 'White', bomId: 'b', version: '1.0', made: true, lines: [] }] } }],
+    cancelledAt: null,
+    costFinalisedAt: '2026-11-21',
+    handoverBoms: [{ colour: 'white', bomId: 'b', version: '1.0', made: true, status: 'DRAFT', approved: null }],
+  })
+  assert.equal(waiting.title, 'Waiting for Masters to approve the BOMs')
+  assert.match(waiting.description, /Approve a BOM for White \(v1\.0\) in Masters/)
+  const flows = require('../apps/web/src/components/sampling/samplingFlow.ts')
+  // The draft removed in Masters: another BOM for the colour, no version to wait for.
+  const removed = { request: { handoverBoms: [{ colour: 'White', bomId: 'b', version: '1.0', made: true, status: 'DELETED', approved: null }] } }
+  const prepared = { handover: { acceptedAt: null, boms: [{ colour: 'White', bomId: 'b', version: '1.0', made: true, lines: [] }] } }
+  assert.deepEqual(flows.handoverWaiting(removed.request, prepared).map(flows.waitingName), ['White'])
+  // No word from Masters yet counts as waiting; an approved one does not.
+  assert.deepEqual(flows.handoverWaiting({}, prepared).map(flows.waitingName), ['White (v1.0)'])
+  assert.deepEqual(
+    flows.handoverWaiting({ handoverBoms: [{ colour: 'White', status: 'APPROVED', approved: { id: 'b', version: '1.0', color: 'White' } }] }, prepared),
+    []
+  )
   const resample = sampleFlow({
     styleId: 'dev',
     style: { ...devStyle, stage: 'PRODUCTION' },
@@ -1411,6 +1433,104 @@ check('cost events read in words, amounts only where they were sent', () => {
   assert.equal(note('FINALISE_COST', { notes: 'Sent' }), 'Sent')
   assert.equal(note('DISPATCH_CHARGE', { number: 'SDC-1', charge: 150, was: 120, reason: 'Bill' }), 'SDC-1 · ₹120.00 → ₹150.00 · Bill')
 })
+check('a draft BOM is made from the round each colour was approved in, at what the sample paid', () => {
+  const ho = require('../packages/shared/src/sampleHandover.ts')
+  const word = (colour, result) => ({ colour, result, conditions: '', buyerName: 'B', evidence: 'E' })
+  const mat = (id, extra) => ({
+    id,
+    itemId: id,
+    component: 'Body',
+    colour: null,
+    departmentId: null,
+    qtyPerPiece: '2.5',
+    wastagePct: '5',
+    plannedQty: '0',
+    source: 'PURCHASE',
+    item: { code: id, name: id, uom: { symbol: 'm' } },
+    ...extra,
+  })
+  const round = (revision, decisions, materials) => ({
+    id: 'r' + revision,
+    revision,
+    state: 'APPROVED',
+    specification: {
+      colours: [
+        { colour: 'White', sizes: [{ sizeId: 'm', qty: 2 }] },
+        { colour: 'Navy', sizes: [{ sizeId: 'm', qty: 1 }] },
+      ],
+      measurements: [],
+    },
+    qc: null,
+    decision: { colours: Object.fromEntries(decisions.map(([c, r]) => [c.toLowerCase(), word(c, r)])) },
+    materials,
+  })
+  // Round 1: Navy approved, White to change; round 2 made White again and it was approved.
+  const r2 = round(2, [['White', 'APPROVED']], [mat('fab'), mat('btn', { colour: 'White', qtyPerPiece: '0', plannedQty: '12' })])
+  r2.specification.colours = [{ colour: 'White', sizes: [{ sizeId: 'm', qty: 2 }] }]
+  const r1 = round(1, [['White', 'CHANGES_REQUIRED'], ['Navy', 'APPROVED']], [
+    mat('fab'),
+    // Navy's own, waived: not on the BOM.
+    mat('tape', { colour: 'Navy', waivedAt: '2026-11-18' }),
+    // The buyer's own label.
+    mat('lbl', { source: 'BUYER_SUPPLIED', qtyPerPiece: '1', wastagePct: '0' }),
+    mat('none', { qtyPerPiece: '0', plannedQty: '0' }),
+  ])
+  assert.deepEqual(
+    ho.approvedFrom([r2, r1]).map((f) => [f.colour, f.round.revision]),
+    [['White', 2], ['Navy', 1]]
+  )
+  const sheet = {
+    pieces: 3,
+    labour: 800,
+    misc: 120,
+    colours: [{ colour: 'White', pieces: 2 }, { colour: 'Navy', pieces: 1 }],
+    materials: [
+      { materialId: 'fab', consumed: 7.8, rate: 90, basis: 'PURCHASE' },
+      { materialId: 'lbl', consumed: 3, rate: 0, basis: 'BUYER' },
+    ],
+  }
+  const navy = ho.handoverBomLines(r1, 'Navy', sheet)
+  assert.deepEqual(
+    navy.lines.map((l) => [l.componentItemId, l.qtyPerUnit, l.wastagePercent, l.unitCost, l.customerSupplied, l.usedPerPiece]),
+    [
+      ['fab', 2.5, 5, 90, false, 2.6],
+      ['lbl', 1, 0, null, true, 1],
+    ]
+  )
+  assert.deepEqual(navy.skipped, ['none (Body)'])
+  assert.match(navy.lines[0].notes, /^The sample used 2.6 m a piece, waste included$/)
+  assert.match(navy.lines[1].notes, /supplied by the buyer for the sample: price it here/)
+  // A fixed quantity for White's buttons is spread over White's two planned pieces; nothing paid yet.
+  const whiteLines = ho.handoverBomLines(r2, 'white', null).lines
+  // Spread from a fixed quantity, which already holds the waste: no wastage again.
+  assert.deepEqual(whiteLines.map((l) => [l.componentItemId, l.qtyPerUnit, l.wastagePercent, l.unitCost]), [
+    ['fab', 2.5, 5, null],
+    ['btn', 6, 0, null],
+  ])
+  assert.match(whiteLines[1].notes, /no rate was paid on the sample/)
+  // The round's labour and other charges, a piece.
+  assert.deepEqual(ho.handoverCostLines(sheet, 1), [
+    { kind: 'LABOUR', name: 'Sample labour, round 1', basis: 'PER_PIECE', value: 266.67 },
+    { kind: 'OVERHEAD', name: 'Sample charges, round 1', basis: 'PER_PIECE', value: 40 },
+  ])
+  assert.deepEqual(ho.handoverCostLines({ ...sheet, pieces: 0 }, 1), [])
+})
+check('handover events read colour by colour', () => {
+  const note = (action, data) => eventNote({ action, detail: { data } }, [])
+  assert.equal(
+    note('HANDOVER', {
+      style: 'EX-SH-2701',
+      promoted: true,
+      boms: [{ colour: 'White', version: '1.0', made: true }, { colour: 'Navy', version: '3.0', made: false }],
+      routing: { code: 'RT-EX-SH-2701', made: true },
+      notes: 'Pattern v2',
+    }),
+    'EX-SH-2701 made a production style · White BOM v1.0 (draft from the sample) · Navy BOM v3.0 · Routing RT-EX-SH-2701 (from the sample) · Pattern v2'
+  )
+  assert.equal(note('HANDOVER', { bomId: 'b', notes: 'Old pilot' }), 'Old pilot')
+  assert.equal(note('ACCEPT_HANDOVER', { acceptedBy: 'P', boms: [{ colour: 'White', version: '1.0' }] }), 'White BOM v1.0')
+  assert.equal(note('ACCEPT_HANDOVER', { acceptedBy: 'P' }), null)
+})
 check('review events read colour by colour', () => {
   const note = (action, data) => eventNote({ action, detail: { data } }, [])
   assert.equal(eventLabel('DISPATCH'), 'Sent to the buyer')
@@ -1617,18 +1737,8 @@ check('what each material line can record, and why not', () => {
     'Issued in full and accounted for.'
   )
 })
-check('the handover offers BOMs for every colour or one the buyer approved', () => {
-  const boms = [
-    { id: 'b-all', styleId: 'dev', color: null, version: '1' },
-    { id: 'b-navy', styleId: 'dev', color: 'navy ', version: '2' },
-    { id: 'b-white', styleId: 'dev', color: 'White', version: '3' },
-    { id: 'b-other', styleId: 'other', color: null, version: '1' },
-  ]
+check('the handover is ready once every colour has ended and one is approved', () => {
   const word = (colour, result) => ({ colour, result, conditions: '', buyerName: 'B', evidence: 'E' })
-  assert.deepEqual(
-    flow.handoverBoms(boms, 'dev', ['Navy']).map((b) => b.id),
-    ['b-all', 'b-navy']
-  )
   // Ready once every colour of the request has ended and one is approved, in whichever round.
   const shared = require('../packages/shared/src/sampleReview.ts')
   const decided = (revision, colour, result) => ({

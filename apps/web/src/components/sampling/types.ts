@@ -1,6 +1,8 @@
 import type {
   SampleChargeKind,
   SampleCostSheet,
+  SampleHandoverBom,
+  SampleHandoverRouting,
   SampleDecision,
   SampleDispatchMode,
   SampleQc,
@@ -299,15 +301,25 @@ export interface SampleRound {
   } | null
   /** Samples sent to the buyer on Sample Delivery Challans, oldest first. */
   dispatches: SampleDispatch[]
+  /**
+   * The handover to bulk (HANDOVER): each approved colour's BOM and the
+   * style's routing since phase 8; the pilot's single linked BOM before.
+   * Rates and costs a piece only to those who see costs.
+   */
   handover: {
-    bomId: string
-    bomVersion: string
-    routingId: string
-    routingVersion: number
     notes: string
     preparedBy: string
+    preparedAt?: string
     acceptedBy?: string
     acceptedAt?: string
+    style?: { id: string; code: string; name: string; promoted: boolean }
+    boms?: SampleHandoverBom[]
+    routing?: SampleHandoverRouting
+    accepted?: Array<{ colour: string; bomId: string; version: string }>
+    bomId?: string
+    bomVersion?: string
+    routingId?: string
+    routingVersion?: number
   } | null
 }
 export interface SampleRequest {
@@ -364,6 +376,16 @@ export interface SampleRequest {
   costFinalisedBy?: string | null
   /** The finalised sheet, to those who see costs (approvers, accounts). */
   costSheet?: SampleCostSheet | null
+  /** Where each handed-over colour's BOM stands in Masters now. */
+  handoverBoms?: Array<{
+    colour: string
+    bomId: string
+    version: string
+    made: boolean
+    status: 'DRAFT' | 'APPROVED' | 'OBSOLETE' | 'DELETED'
+    /** The BOM production takes: the handed-over one once approved, or another approved for the colour. */
+    approved: { id: string; version: string; color: string | null } | null
+  }>
 }
 /** A cost besides material and labour (ADD_CHARGE). */
 export interface SampleCharge {

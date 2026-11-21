@@ -489,7 +489,28 @@ export const sampleDecisionSchema = z
       .max(200),
   })
   .strict()
-export const sampleHandoverSchema = z.object({ bomId: id, routingId: id, notes: text(2000) })
+/**
+ * For each colour the buyer approved, the BOM it goes to production with: one
+ * Masters has approved, or none to make a draft from the sample. The routing:
+ * one of the style's, or none to make it from the sample's route.
+ */
+export const sampleHandoverSchema = z
+  .object({
+    boms: z
+      .array(
+        z
+          .object({
+            colour: z.string().trim().min(1, 'Name the colour').max(60),
+            bomId: id.nullable(),
+          })
+          .strict()
+      )
+      .min(1, 'Say which BOM each approved colour goes to production with')
+      .max(50),
+    routingId: id.nullable(),
+    notes: text(2000),
+  })
+  .strict()
 
 // ── Files and the request's style ─────────────────────────────────────────────
 export const sampleAttachmentKindSchema = z.enum(SAMPLE_ATTACHMENT_KINDS, {

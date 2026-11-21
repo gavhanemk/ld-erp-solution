@@ -31,11 +31,8 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import {
   colourGrid,
   colourSummary,
-  developmentHandoverText,
-  developmentStyleOf,
   eventLabel,
   eventNote,
-  handoverBoms,
   makingOf,
   closeOutBlocker,
   coverOf,
@@ -64,6 +61,7 @@ import { SampleFiles } from './SampleFiles'
 import { SampleStyleCard } from './SampleStyleCard'
 import { SampleMaking } from './SampleMaking'
 import { SampleCosting } from './SampleCost'
+import { SampleHandoverSection } from './SampleHandover'
 import {
   CancelDispatchWindow,
   ColourTable,
@@ -149,8 +147,6 @@ export function SampleWorkspace({
   const edit = can('sampling', 'edit') && !request.cancelledAt,
     approve = can('sampling', 'approve') && !request.cancelledAt
   const flow = sampleFlow(request, round, lookups.sizes)
-  // The round's style when it was made in sampling: nothing to hand over yet.
-  const madeHere = developmentStyleOf(request, round)
   // The making steps for the side panel: released rows, or the draft's route.
   // Where the round's making stands, as its records have it (QC reads it so too).
   const made = makingOf(round)
@@ -341,10 +337,6 @@ export function SampleWorkspace({
     approve &&
     round.state === 'SUBMITTED' &&
     outcomes.some((o) => o.qc === 'PASSED' && o.sent.length > 0 && o.decision?.result !== 'DROPPED')
-  // Every colour of the request ended, one approved (HANDOVER), with the approved ones.
-  const ready = handoverReady(request.rounds)
-  // The latest round is decided and the request ready (HANDOVER on the server).
-  const handoverOpen = ready.ready && ['APPROVED', 'REJECTED'].includes(round.state) && latest
   const canDrop =
     approve &&
     ['QC_PASSED', 'SUBMITTED'].includes(round.state) &&
@@ -1281,78 +1273,26 @@ export function SampleWorkspace({
               />
             )}
             {tab === 'Handover' && (
-              <div className="space-y-4">
-                {!handoverOpen && !round.handover && (
-                  <div className="glass-card flex gap-3 p-5 text-sm">
-                    <LockKeyhole size={18} className="shrink-0" /> Every colour has to end approved,
-                    rejected or dropped, with at least one approved, before preparing the production
-                    package.
-                  </div>
-                )}
-                {handoverOpen && !round.handover && !costFinal && !madeHere && (
-                  <div className="glass-card flex gap-3 p-5 text-sm">
-                    <LockKeyhole size={18} className="shrink-0" /> Finalise what the sample cost
-                    first, in Costing: after handover it cannot change.
-                  </div>
-                )}
-                {handoverOpen &&
-                  !round.handover &&
-                  request.rounds.some((r) => r.materials.some((m) => held(m) > 0)) && (
-                    <div className="glass-card p-5 text-sm">
-                      Material remains held on a sampling round. Record its use, waste or return in
-                      Material preparation to unlock handover.
-                    </div>
-                  )}
-                {approve &&
-                  latest &&
-                  handoverOpen &&
-                  !round.handover &&
-                  request.rounds.every((r) => r.materials.every((m) => held(m) === 0)) &&
-                  (madeHere || costFinal) &&
-                  (madeHere ? (
-                    // No BOM or route can be made for a style still in
-                    // sampling, so empty pickers would only send people round.
-                    <div className="glass-card flex gap-3 p-5 text-sm">
-                      <LockKeyhole size={18} className="shrink-0" />
-                      {developmentHandoverText(madeHere.code)}
-                    </div>
-                  ) : (
-                    <HandoverAction
-                      round={round}
-                      approved={ready.approved}
-                      lookups={lookups}
-                      save={(d) => void act('HANDOVER', d)}
-                    />
-                  ))}
-                {round.handover && (
-                  <div className="glass-card space-y-3 p-4">
-                    <h2 className="font-semibold">Bulk handover</h2>
-                    <p>
-                      BOM {round.handover.bomVersion} · Routing version{' '}
-                      {round.handover.routingVersion}
-                    </p>
-                    <p>{round.handover.notes}</p>
-                    <p>Prepared by {round.handover.preparedBy}</p>
-                    {round.handover.acceptedAt ? (
-                      <p>
-                        Accepted by {round.handover.acceptedBy} ·{' '}
-                        {formatDate(round.handover.acceptedAt)}
-                      </p>
-                    ) : (
-                      edit &&
-                      latest &&
-                      can('production', 'approve') && (
-                        <button
-                          className="btn-primary"
-                          onClick={() => void act('ACCEPT_HANDOVER', {})}
-                        >
-                          Accept into production planning
-                        </button>
-                      )
-                    )}
-                  </div>
-                )}
-              </div>
+              <SampleHandoverSection
+                request={request}
+                round={round}
+                lookups={lookups}
+                latest={latest}
+                canPrepare={approve && !request.cancelledAt}
+                canAccept={can('sampling', 'edit') && can('production', 'approve')}
+                seesCosts={can('sampling', 'approve') || can('accounts', 'view')}
+                record={async (action, data) => {
+                  setError('')
+                  setMessage('')
+                  setWarnings([])
+                  const { updated, warnings: said } = await send(action, data)
+                  setWarnings(said)
+                  // Where the flow goes next: Masters' approval, or leftovers once accepted.
+                  setTab(sampleFlow(updated).section)
+                  return updated
+                }}
+                say={setMessage}
+              />
             )}
             {tab === 'History' && (
               <div className="space-y-3">
@@ -2086,73 +2026,6 @@ function ReasonAction({ label, save }: { label: string; save: (s: string) => voi
         onClick={() => save(reason)}
       >
         {label}
-      </button>
-    </div>
-  )
-}
-function HandoverAction({
-  round,
-  approved,
-  lookups,
-  save,
-}: {
-  round: SampleRound
-  /** The colours the buyer approved, in any round of the request. */
-  approved: string[]
-  lookups: Lookups
-  save: (d: unknown) => void
-}) {
-  const [bomId, setBom] = useState(''),
-    [routingId, setRouting] = useState(''),
-    [notes, setNotes] = useState('')
-  // The server takes a BOM for every colour, or for one the buyer approved.
-  const boms = handoverBoms(lookups.boms, round.specification.styleId, approved)
-  const colours = approved
-  return (
-    <div className="glass-card space-y-3 p-4">
-      <h2 className="font-semibold">Prepare approved bulk package</h2>
-      <Field
-        label="Approved production BOM"
-        hint={
-          boms.length
-            ? `This style’s approved BOMs for every colour, or for a colour the buyer approved (${colours.join(', ')}).`
-            : `No approved BOM of this style for every colour or for ${colours.join(', ') || 'the approved colours'} yet.`
-        }
-      >
-        <SmartSelect className="form-input" value={bomId} onChange={(e) => setBom(e.target.value)}>
-          <option value="">Pick approved BOM</option>
-          {boms.map((x) => (
-            <option key={x.id} value={x.id}>
-              Version {x.version} · {x.color || 'All colours'}
-            </option>
-          ))}
-        </SmartSelect>
-      </Field>
-      <Field label="Production routing">
-        <SmartSelect
-          className="form-input"
-          value={routingId}
-          onChange={(e) => setRouting(e.target.value)}
-        >
-          <option value="">Pick routing</option>
-          {lookups.routings
-            .filter((x) => !x.styleId || x.styleId === round.specification.styleId)
-            .map((x) => (
-              <option key={x.id} value={x.id}>
-                {x.name} · v{x.version}
-              </option>
-            ))}
-        </SmartSelect>
-      </Field>
-      <Field label="Technical acceptance and handover notes">
-        <textarea className="form-input" value={notes} onChange={(e) => setNotes(e.target.value)} />
-      </Field>
-      <button
-        className="btn-primary"
-        disabled={!bomId || !routingId || !notes.trim()}
-        onClick={() => save({ bomId, routingId, notes })}
-      >
-        Prepare handover
       </button>
     </div>
   )

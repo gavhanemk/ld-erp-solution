@@ -7,7 +7,7 @@ import { CODE_ATTEMPTS, nextStyleCode } from '../lib/masterCode'
 import { MAX_FILE_BYTES, MAX_FILES_PER_DOCUMENT, removeObject, statObject } from '../lib/storage'
 import { lockedBalanceOf, recordMovement, transferStock } from './stock.service'
 import { availableIn, requestPool } from './samplePool.service'
-import { checkRouteSteps, routingProblem } from './route.service'
+import { checkRouteSteps } from './route.service'
 import { assertContractorsFit } from './routing.service'
 import { liveSampleOrders, sampleOrderLine, sampleOrderSelect } from './sampleSourcing.service'
 import { MAKING_COST_ACTIONS, actOnMaking, syncMaking } from './sampleMaking.service'
@@ -16,10 +16,10 @@ import {
   colourKey,
   colourOutcomes,
   coloursToCarry,
-  handoverReady,
 } from '../../../../packages/shared/src/sampleReview'
 import { actOnReview } from './sampleReview.service'
 import { COST_ACTIONS, COST_FINAL_TEXT, actOnCost, changesCost } from './sampleCost.service'
+import { actOnHandover, handoverBomStatus } from './sampleHandover.service'
 import {
   OVERRIDE_REASON_MIN,
   SAMPLE_ATTACHMENT_KIND_LABEL,
@@ -49,7 +49,6 @@ import {
   sampleMaterialSchema,
   sampleWaiveSchema,
   sampleCloseOutSchema,
-  sampleHandoverSchema,
   sampleDraftSchema,
   sampleDraftPatchSchema,
   updateSampleRequestSchema,
@@ -175,11 +174,16 @@ export async function sampleDetail(
   const row = await tx.sampleRequest.findUnique({ where: { id }, include: sampleInclude })
   if (!row) throw new AppError('Sample request not found', 404, 'NOT_FOUND')
   const pool = opts.pool ? await requestPool(tx, id) : null
+  // Where each handed-over colour's BOM stands in Masters, for the screen
+  // to say what production acceptance still waits for.
+  const handedOver = row.rounds.find((r) => r.handover)
+  const handoverBoms = handedOver ? await handoverBomStatus(tx, handedOver.handover) : []
   // Every reader (the request, its print, every action) sees each round's
   // specification in today's shape, however old the round.
   return {
     ...row,
     pool,
+    handoverBoms,
     rounds: row.rounds.map((r) => ({
       ...r,
       specification: normaliseSpec(r.specification),
@@ -1055,6 +1059,8 @@ export interface SampleAfterCommit {
   styleAudit?: { action: 'CREATE' | 'UPDATE'; styleId: string; before?: unknown; after: unknown }
   /** What the action allowed but the screen should say, such as a route with no check. */
   warnings?: string[]
+  /** Masters records a handover made (draft BOMs, a routing), audited as Masters' own. */
+  mastersAudit?: Array<{ action: 'CREATE' | 'UPDATE'; entityType: string; entityId: string; after: unknown }>
 }
 /** Actions on the request as a whole, which name no round of their own. */
 const REQUEST_ACTIONS = [
@@ -1656,100 +1662,10 @@ export async function actOnSample(
       }
       break
     }
-    case 'HANDOVER': {
-      // Every colour the request sampled has ended (approved, rejected or
-      // dropped), in whichever round, and at least one is approved.
-      const ready = handoverReady(request.rounds)
-      if (!ready.ready || !['APPROVED', 'REJECTED'].includes(round.state) || round.handover)
-        fail('Handover requires buyer approval and can only be prepared once.')
-      // A style made in sampling has no BOM or route yet and cannot be given
-      // one, so the usual "pick a BOM" would send people round in a circle.
-      const madeHere = await tx.style.findUnique({
-        where: { id: spec.styleId },
-        select: { code: true, stage: true },
-      })
-      if (madeHere?.stage === 'DEVELOPMENT')
-        fail(
-          `${madeHere.code} is a new style made in sampling. Handing it over to production comes in a later update; keep the approved round as the record.`,
-          'STYLE_IN_DEVELOPMENT'
-        )
-      // What the sample cost is settled first: after handover it cannot change.
-      if (!request.costFinalisedAt)
-        fail('Finalise what the sample cost before preparing the handover.', 'COST_NOT_FINAL')
-      if (request.rounds.some((x) => x.materials.some((m) => held(m) > 0.0005)))
-        fail('Account for used, wasted and returned material on every round before handover.')
-      const d = sampleHandoverSchema.parse(cmd.data)
-      const bom = await tx.bOM.findFirst({
-        where: { id: d.bomId, styleId: spec.styleId, isActive: true, status: 'APPROVED' },
-        include: { lines: { include: { sizes: true } } },
-      })
-      // A BOM for every colour, or for a colour the buyer approved, in any round.
-      const approved = ready.approved.map(colourKey)
-      if (!bom || (bom.color && !approved.includes(colourKey(bom.color))))
-        fail('Pick an approved production BOM for this style, for every colour or for one the buyer approved.')
-      const routing = await tx.routing.findFirst({
-        where: { id: d.routingId, isActive: true },
-        include: { steps: { orderBy: { sequence: 'asc' } }, style: { select: { code: true } } },
-      })
-      const style = await tx.style.findUniqueOrThrow({ where: { id: spec.styleId } })
-      if (!routing || routingProblem(routing, [style]))
-        fail('Pick an active routing that fits this style.')
-      await tx.sampleRound.update({
-        where: { id: round.id },
-        data: {
-          handover: json({
-            ...d,
-            bomVersion: bom.version,
-            bomSnapshot: {
-              id: bom.id,
-              version: bom.version,
-              styleId: bom.styleId,
-              color: bom.color,
-              baseSizeId: bom.baseSizeId,
-              approvedAt: bom.approvedAt,
-              materials: bom.lines.map((l) => ({
-                itemId: l.componentItemId,
-                component: l.component,
-                qtyPerUnit: l.qtyPerUnit,
-                wastagePercent: l.wastagePercent,
-                sizes: l.sizes.map((z) => ({ sizeId: z.sizeId, qtyPerUnit: z.qtyPerUnit })),
-              })),
-            },
-            routingVersion: routing!.version,
-            routingSnapshot: {
-              id: routing!.id,
-              name: routing!.name,
-              version: routing!.version,
-              steps: routing!.steps.map((x) => ({
-                sequence: x.sequence,
-                operationId: x.operationId,
-                departmentId: x.departmentId,
-                workstationId: x.workstationId,
-                contractorId: x.contractorId,
-                execution: x.execution,
-                instructions: x.instructions,
-              })),
-            },
-            specification: spec,
-            decision: round.decision,
-            approvedColours: ready.approved,
-            preparedBy: actor.name,
-            preparedAt: new Date(),
-          }),
-        },
-      })
-      break
-    }
+    // The handover to bulk: BOMs, routing and the style made production (sampleHandover.service).
+    case 'HANDOVER':
     case 'ACCEPT_HANDOVER': {
-      grant(actor, 'production', 'approve')
-      const h = round.handover as Record<string, unknown> | null
-      if (!h || h.acceptedAt)
-        fail('Prepare a handover first; an accepted handover cannot be accepted again.')
-      await tx.sampleRound.update({
-        where: { id: round.id },
-        data: { handover: json({ ...h, acceptedBy: actor.name, acceptedAt: new Date() }) },
-      })
-      detail = { acceptedBy: actor.name }
+      detail = await actOnHandover(tx, cmd.action, { request, round, actor, data: cmd.data, after })
       break
     }
     case 'CANCEL': {

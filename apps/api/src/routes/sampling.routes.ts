@@ -38,6 +38,7 @@ import {
   type SampleAfterCommit,
 } from '../services/sampling.service'
 import { costSheetOf } from '../services/sampleCost.service'
+import { handoverStanding, handoverWithoutMoney } from '../services/sampleHandover.service'
 import { routingsFor } from '../services/route.service'
 import { sampleNeeds } from '../services/sampleSourcing.service'
 import { activeSampleStores } from '../lib/sampleStore'
@@ -79,13 +80,15 @@ function visible(row: Awaited<ReturnType<typeof sampleDetail>>, req: AuthRequest
     ...row,
     attachments,
     costSheet: costs ? row.costSheet : null,
+    // The handover's rates and costs a piece are the cost sheet's.
+    rounds: costs ? row.rounds : row.rounds.map((r) => ({ ...r, handover: handoverWithoutMoney(r.handover) as typeof r.handover })),
     charges: labour ? row.charges : row.charges.map(({ amount, ...c }) => c),
     events: row.events.map((e) => withoutAmounts(e, labour, costs)),
   }
   if (values) return shown
   return {
     ...shown,
-    rounds: row.rounds.map((r) => ({
+    rounds: shown.rounds.map((r) => ({
       ...r,
       materials: r.materials.map(({ issuedValue, returnedValue, ...m }) => m),
       stages: labour ? r.stages : r.stages.map(({ labourAmount, labourNote, ...s }) => s),
@@ -238,8 +241,12 @@ router.get('/', async (req: AuthRequest, res) => {
   ])
   res.json({
     success: true,
-    // The finalised cost sheet is for those who see costs, on the request itself.
-    data: data.map(({ costSheet, ...r }) => r),
+    // The finalised cost sheet is for those who see costs, on the request itself;
+    // of a handover the register shows only whether it is prepared and accepted.
+    data: data.map(({ costSheet, ...r }) => ({
+      ...r,
+      rounds: r.rounds.map((x) => ({ ...x, handover: handoverStanding(x.handover) as typeof x.handover })),
+    })),
     pagination: { page: q.page, limit: q.limit, total, pages: Math.ceil(total / q.limit) },
   })
 })
@@ -672,6 +679,15 @@ router.post('/:id/actions', async (req: AuthRequest, res) => {
       entityId: after.styleAudit.styleId,
       before: after.styleAudit.before,
       after: after.styleAudit.after,
+    })
+  // What a handover made in Masters: draft BOMs and a routing, each under its own name.
+  for (const a of after.mastersAudit ?? [])
+    await writeAuditLog(req, {
+      module: 'masters',
+      action: a.action,
+      entityType: a.entityType,
+      entityId: a.entityId,
+      after: a.after,
     })
   // What the action allowed but the screen should say: a route with no check.
   res.json({ success: true, data: visible(row, req), warnings: after.warnings ?? [] })
