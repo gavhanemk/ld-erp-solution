@@ -1,4 +1,5 @@
 import type { FormField } from '@/components/masters/MasterFormDialog'
+import { processOrChosen } from '@/components/masters/processDepartments'
 
 /*
  * The line form (a table, line, machine or outside unit), shared by Routing
@@ -14,7 +15,9 @@ export const lineFormFields: FormField[] = [
     type: 'select',
     required: true,
     section: 'Workstation',
-    optionsFrom: { resource: 'departments' },
+    // A line works on a process, so only the departments that are processes:
+    // not Accounts, HR & Admin or Store.
+    optionsFrom: { resource: 'departments', filter: processOrChosen('departmentId') },
     placeholder: 'Which department runs it…',
     resets: ['operationId'],
   },

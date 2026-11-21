@@ -1302,6 +1302,26 @@ router.use(
         select: Object.fromEntries(Object.keys(DEPARTMENT_USES).map((k) => [k, true])),
       },
     },
+    // A department is a process when the floor works in it: it has at least
+    // one process in use under Routing Masters → Processes. Accounts, HR &
+    // Admin and Store have none, so no "Process" box offers them. Adding a
+    // process under a department makes it one; nothing else to keep up.
+    afterRead: async (rows) =>
+      rows.map((r) => ({
+        ...r,
+        isProcess: Array.isArray(r.operations) && (r.operations as Array<{ isActive: boolean }>).some((o) => o.isActive),
+      })),
+    filters: {
+      // ?process=true: the departments that are processes; false, the others.
+      process: {
+        where: (v) =>
+          v.includes('true')
+            ? { operations: { some: { isActive: true } } }
+            : v.includes('false')
+              ? { operations: { none: { isActive: true } } }
+              : {},
+      },
+    },
   }),
 )
 

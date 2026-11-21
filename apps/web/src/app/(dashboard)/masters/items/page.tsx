@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 import { ITEM_TYPE_LABEL as TYPE_LABEL, itemFormFields } from '@/components/masters/itemFormFields'
+import { isProcessDepartment } from '@/components/masters/processDepartments'
 
 /*
  * Masters → Items & Products, in three tabs: Raw Materials, Semi-Finished
@@ -308,7 +309,8 @@ function filtersFor(tab: Tab): FilterDef[] {
       label: 'Process',
       facet: 'departmentId',
       noneLabel: 'No process',
-      optionsFrom: { resource: 'departments' },
+      // Processes only: not Accounts, HR & Admin or Store.
+      optionsFrom: { resource: 'departments', filter: isProcessDepartment },
     },
     {
       key: 'uomId',

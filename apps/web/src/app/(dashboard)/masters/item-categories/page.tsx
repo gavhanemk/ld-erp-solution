@@ -33,6 +33,7 @@ import { DeleteDialog } from '@/components/masters/DeleteDialog'
 import { ImportCategoriesDialog } from '@/components/masters/ImportCategoriesDialog'
 import { ITEM_TYPE_LABEL, itemFormFields } from '@/components/masters/itemFormFields'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { processOrChosen } from '@/components/masters/processDepartments'
 
 /**
  * Item categories: the three categories — Raw Materials, Semi-Finished Goods
@@ -130,7 +131,8 @@ const categoryFields: FormField[] = [
     name: 'departmentId',
     label: 'Process',
     type: 'select',
-    optionsFrom: { resource: 'departments' },
+    // Processes only — not Accounts, HR & Admin or Store.
+    optionsFrom: { resource: 'departments', filter: processOrChosen('departmentId') },
     span: 2,
     help: 'The process that normally uses what is filed here. A new item in it starts with this.',
   },
@@ -227,7 +229,8 @@ function ItemCategories() {
   }, [activeOnly, reloadKey])
   useEffect(() => {
     api
-      .get<Paginated<{ id: string; name: string }>>('/masters/departments?limit=200&active=true&sort=name&order=asc')
+      // The processes, for the Process filter: not Accounts, HR & Admin or Store.
+      .get<Paginated<{ id: string; name: string }>>('/masters/departments?limit=200&active=true&process=true&sort=name&order=asc')
       .then((r) => setDepartments(r.data))
       .catch(() => {})
   }, [])

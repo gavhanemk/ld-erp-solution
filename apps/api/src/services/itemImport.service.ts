@@ -99,7 +99,12 @@ async function loadMasters() {
       where: { isActive: true },
       select: { id: true, name: true, parentId: true, departmentId: true, itemGroup: true },
     }),
-    prisma.department.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true } }),
+    // With one of its processes, if it has any: the sheet's dropdown offers
+    // only the departments that are processes, as every Process box does.
+    prisma.department.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true, code: true, operations: { where: { isActive: true }, select: { id: true }, take: 1 } },
+    }),
     prisma.uOM.findMany({ where: { isActive: true }, select: { id: true, name: true, symbol: true, decimalPlaces: true } }),
     prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true } }),
     prisma.item.findMany({
@@ -166,7 +171,8 @@ export async function buildTemplate(withItems: boolean): Promise<Buffer> {
       types: TYPE_LABELS,
       categories: mains.map((c) => c.name).sort(),
       subCategories: [...new Set(subs.map((c) => c.name))].sort(),
-      departments: m.departments.map((d) => d.name).sort(),
+      // Processes only (not Accounts, HR & Admin or Store); a name typed in is still read.
+      departments: m.departments.filter((d) => d.operations.length > 0).map((d) => d.name).sort(),
       units: m.units.map((u) => u.name).sort(),
       stores: m.stores.map((s) => s.name).sort(),
       packTypes: PACK_LABELS,
