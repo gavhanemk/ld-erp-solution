@@ -37,6 +37,8 @@ async function sheetWith(template: ExcelJS.Workbook, rows: Array<Partial<Record<
   const wb = new ExcelJS.Workbook()
   await wb.xlsx.load((await template.xlsx.writeBuffer()) as ExcelJS.Buffer)
   const sheet = wb.getWorksheet('Opening Stock')!
+  // The template's grey example row goes first, as a person deletes it.
+  sheet.spliceRows(2, 1)
   rows.forEach((r, i) => HEADS.forEach((h, c) => { if (r[h] !== undefined) sheet.getCell(i + 2, c + 1).value = r[h] as string | number }))
   return { fileName: `${name}.xlsx`, file: Buffer.from(await wb.xlsx.writeBuffer()).toString('base64') }
 }
@@ -56,7 +58,7 @@ async function main() {
   const template = new ExcelJS.Workbook()
   await template.xlsx.load(Buffer.from(await tpl.arrayBuffer()) as unknown as ExcelJS.Buffer)
   const heads = (template.getWorksheet('Opening Stock')!.getRow(1).values as unknown[]).slice(1).map(String)
-  check('template: the 19 columns, named and ordered as the sheet', JSON.stringify(heads) === JSON.stringify(HEADS), heads)
+  check('template: the 19 columns, named and ordered as the sheet', JSON.stringify(heads.map((h) => h.replace(/\s*\*$/, ''))) === JSON.stringify(HEADS), heads)
 
   // Test items of our own: a fabric, a cut panel, a garment on the test style.
   const cats = (await call('GET', '/masters/item-categories?limit=200&active=true')).body.data as Array<{ id: string; name: string; parentId: string | null }>

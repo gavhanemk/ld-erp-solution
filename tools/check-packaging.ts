@@ -31,6 +31,8 @@ async function rmSheet(rows: Array<Partial<Record<string, string | number>>>, na
   const wb = new ExcelJS.Workbook()
   await wb.xlsx.load(Buffer.from(await res.arrayBuffer()) as unknown as ExcelJS.Buffer)
   const ws = wb.getWorksheet('Raw Materials')!
+  // The template's grey example row goes first, as a person deletes it.
+  ws.spliceRows(2, 1)
   rows.forEach((r, i) => RM.forEach((h, c) => { if (r[h] !== undefined) ws.getCell(i + 2, c + 1).value = r[h] as string | number }))
   return { fileName: `${name}.xlsx`, file: Buffer.from(await wb.xlsx.writeBuffer()).toString('base64') }
 }
@@ -58,7 +60,7 @@ async function main() {
   const twb = new ExcelJS.Workbook()
   await twb.xlsx.load(Buffer.from(await tpl.arrayBuffer()) as unknown as ExcelJS.Buffer)
   const heads = ((twb.getWorksheet('Raw Materials')!.getRow(1).values as unknown[]) ?? []).slice(1).map(String)
-  check('RM template: the packing columns after Location', JSON.stringify(heads) === JSON.stringify(RM), heads)
+  check('RM template: the packing columns after Location', JSON.stringify(heads.map((h) => h.replace(/\s*\*$/, ''))) === JSON.stringify(RM), heads)
 
   // 2. Every way of saying how it is packed.
   const good = [

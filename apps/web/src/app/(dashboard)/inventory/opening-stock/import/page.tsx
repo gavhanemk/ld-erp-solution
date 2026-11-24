@@ -29,6 +29,8 @@ interface RowPlan {
   location: string
   newFloor: boolean
   item: { code: string; name: string } | null
+  /** Not in Items & Products yet: made on import, with its own code. */
+  newItem?: { name: string; category: string; unit: string; type: string; copiedFrom: string | null } | null
   size: string | null
   order: string | null
   lot: string | null
@@ -51,6 +53,8 @@ interface Summary {
   problems: number
   value: number
   floorsToMake: string[]
+  /** Items not in Items & Products yet, made on import. */
+  itemsToMake?: Array<{ name: string; category: string; unit: string }>
   byGroup: Array<{ group: string; label: string; lines: number; value: number }>
   /** Stickers to print; packages keeping their own barcode; rows whose packaging is pending. */
   stickers?: number
@@ -65,6 +69,8 @@ interface Done {
   /** Packages keeping a lot's own barcode: nothing to print for them. */
   kept?: number
   floorsMade: string[]
+  /** Items made on import, with the codes the ERP gave them. */
+  itemsMade?: Array<{ code: string; name: string }>
   again?: boolean
 }
 
@@ -284,6 +290,10 @@ function ImportOpeningStock() {
                       ? "Style / Article No., Process, Colour, Size, Opening Quantity, Rate / Valuation, Department, Location, Order Reference, Batch / Bundle Reference — the process must be on the style's route."
                       : 'Material Category, Item Code, Item Name, Lot / Batch / Roll Number, Bundle / Barcode Number, UOM, Opening Quantity, Unit Rate, Location.'}
               </p>
+              <p className="text-muted-foreground text-xs">
+                Columns marked * must be filled; the rest are optional. Row 2 is an example and is not brought in: add your stock from row 3 on, or delete row 2 first. Item
+                Code can stay empty: an item not in Items &amp; Products yet is made on import, with its own code.
+              </p>
               <button
                 type="button"
                 className="btn-secondary h-9 text-sm"
@@ -352,6 +362,11 @@ function ImportOpeningStock() {
                   </span>
                 ))}
                 {summary.floorsToMake.length > 0 && <span className="badge-warning">Made on import: {summary.floorsToMake.join(', ')}</span>}
+                {(summary.itemsToMake?.length ?? 0) > 0 && (
+                  <span className="badge-warning" title={summary.itemsToMake!.map((i) => `${i.name} — ${i.category}, ${i.unit}`).join('\n')}>
+                    {summary.itemsToMake!.length === 1 ? '1 new item made on import, with its own code' : `${summary.itemsToMake!.length} new items made on import, with their own codes`}
+                  </span>
+                )}
                 {(summary.stickers ?? 0) > 0 && <span className="badge-neutral">{summary.stickers} stickers to print</span>}
                 {(summary.kept ?? 0) > 0 && (
                   <span className="badge-neutral" title="A lot's own barcode stays its package's identity: nothing to print for it">
@@ -434,7 +449,15 @@ function ImportOpeningStock() {
                           </div>
                         </td>
                         <td className="px-2 py-1.5">
-                          <div className="text-foreground">{r.item?.name ?? '—'}</div>
+                          <div className="text-foreground">
+                            {r.item?.name ?? '—'}
+                            {r.newItem && <span className="badge-warning ml-1.5 align-middle text-[10px]">New item</span>}
+                          </div>
+                          {r.newItem && (
+                            <div className="text-muted-foreground">
+                              Made on import: {r.newItem.category} · {r.newItem.unit} · code given by the ERP{r.newItem.copiedFrom ? ` · HSN and GST as ${r.newItem.copiedFrom}` : ''}
+                            </div>
+                          )}
                           <div className="text-muted-foreground">{[r.item?.code, r.order && `Order ${r.order}`, r.lot && `Lot ${r.lot}`, r.bundle && `Bundle ${r.bundle}`].filter(Boolean).join(' · ')}</div>
                         </td>
                         <td className="px-2 py-1.5 font-semibold">{r.size ?? ''}</td>
@@ -525,6 +548,8 @@ function ImportOpeningStock() {
               <p className="text-foreground text-sm" role="status">
                 {done.lines} {done.lines === 1 ? 'line' : 'lines'} of opening stock{summary ? ` · ${money(summary.value)}` : ''} — in stock now, by item, size and place.
                 {done.floorsMade.length > 0 && ` Made ${done.floorsMade.join(', ')}.`}
+                {(done.itemsMade?.length ?? 0) > 0 &&
+                  ` ${done.itemsMade!.length} new ${done.itemsMade!.length === 1 ? 'item' : 'items'} in Items & Products: ${done.itemsMade!.map((i) => `${i.code} ${i.name}`).join(', ')}.`}
                 {(done.kept ?? 0) > 0 && ` ${done.kept} ${done.kept === 1 ? 'package keeps its' : 'packages keep their'} own barcode: nothing to print for ${done.kept === 1 ? 'it' : 'them'}.`}
               </p>
             </div>

@@ -5377,7 +5377,7 @@ async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
   const packs = body.packs ?? {}
   return openingStock.planImport(
     rows.map((r) => (packs[String(r.row)] ? { ...r, pack: packs[String(r.row)] } : r)),
-    { kind: body.kind, labels: openingStock.labelsOf(body.kind) },
+    { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true },
   )
 }
 
@@ -5401,13 +5401,15 @@ router.post('/opening-stock/import', requirePermission(MODULE, 'create'), async 
     action: 'CREATE',
     entityType: 'OpeningStock',
     entityId: done.id,
-    after: { number: done.number, fileName, lines: done.lines, stickers: done.stickers, floorsMade: done.floorsMade },
+    after: { number: done.number, fileName, lines: done.lines, stickers: done.stickers, floorsMade: done.floorsMade, itemsMade: done.itemsMade },
   })
   res.status(201).json({
     success: true,
     message: `${done.number}: ${done.lines} ${done.lines === 1 ? 'line' : 'lines'} of opening stock brought in${
       done.stickers ? `, ${done.stickers} ${done.stickers === 1 ? 'sticker' : 'stickers'} ready to print` : ''
-    }${done.floorsMade.length ? `. Made ${done.floorsMade.join(', ')}` : ''}.`,
+    }${done.itemsMade.length ? `. ${done.itemsMade.length} new ${done.itemsMade.length === 1 ? 'item' : 'items'} made: ${done.itemsMade.map((i) => i.code).join(', ')}` : ''}${
+      done.floorsMade.length ? `. Made ${done.floorsMade.join(', ')}` : ''
+    }.`,
     data: { ...done, summary },
   })
 })
@@ -5425,7 +5427,7 @@ router.post('/opening-stock/import/report', requirePermission(MODULE, 'create'),
     if (!body.openingDate) throw new AppError('Pick the opening date for the sheet.', 400, 'NEEDS_DATE')
     openingStock.asNineteen(rows, body.kind, body.openingDate)
   }
-  const resolved = await openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind) })
+  const resolved = await openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true })
   const buffer = await openingStock.errorReport(raw, resolved, body.kind)
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', `attachment; filename="${body.fileName.replace(/\.xlsx?$/i, '').replace(/[^\w.-]+/g, '-')}-problems.xlsx"`)
