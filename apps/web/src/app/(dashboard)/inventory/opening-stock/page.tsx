@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   AlertCircle,
   Boxes,
@@ -78,6 +78,8 @@ interface LinesData {
   page: number
   limit: number
   kinds: Partial<Record<Kind, { lines: number; value: number }>>
+  /** Each style on the page, with its totals over all its lines. */
+  groups: Array<{ style: string | null; name: string | null; lines: number; value: number; qty: number | null; unit: string | null; continued: boolean }>
 }
 interface Entry {
   id: string
@@ -140,7 +142,9 @@ const how = (fileName: string | null) => (fileName ? `Excel · ${fileName}` : 'E
  * at the left while the table scrolls sideways; what is looked at most —
  * style, colour, size, where, how many — comes next, then the rest.
  */
-const COLUMNS: Array<{ head: string; right?: boolean; pin?: 'code' | 'name'; cell: (l: Line) => ReactNode }> = [
+const styleKey = (l: Line) => l.styleText ?? l.item.style?.code ?? ''
+const COLUMNS: Array<{ head: string; right?: boolean; pin?: 'style' | 'code' | 'name'; cell: (l: Line) => ReactNode }> = [
+  { head: 'Style / Article No.', pin: 'style', cell: (l) => <span className="text-foreground">{styleKey(l) || muted}</span> },
   { head: 'Item Code', pin: 'code', cell: (l) => <span className="font-mono text-teal-400">{l.item.code}</span> },
   {
     head: 'Item Description',
@@ -151,7 +155,6 @@ const COLUMNS: Array<{ head: string; right?: boolean; pin?: 'code' | 'name'; cel
       </span>
     ),
   },
-  { head: 'Style / Article No.', cell: (l) => l.styleText ?? l.item.style?.code ?? muted },
   { head: 'Colour', cell: (l) => l.colour ?? l.item.color ?? muted },
   { head: 'Size', cell: (l) => <span className="font-semibold">{l.size?.code ?? l.sizeText ?? muted}</span> },
   { head: 'Process', cell: (l) => l.department?.name ?? l.processText ?? 'Store' },
@@ -184,8 +187,12 @@ const COLUMNS: Array<{ head: string; right?: boolean; pin?: 'code' | 'name'; cel
   },
   { head: 'Remarks', cell: (l) => <span className="text-muted-foreground">{l.remarks ?? ''}</span> },
 ]
-// The two pinned columns: their widths add up to where the second starts.
-const PIN = { code: 'sticky left-0 w-28 min-w-28 max-w-28', name: 'sticky left-28 w-60 min-w-60 max-w-60 shadow-[1px_0_0_hsl(var(--border))]' }
+// The three frozen columns: each starts where the widths before it end (9rem, then 9 + 7 = 16rem).
+const PIN = {
+  style: 'sticky left-0 w-36 min-w-36 max-w-36 pl-3',
+  code: 'sticky left-36 w-28 min-w-28 max-w-28',
+  name: 'sticky left-64 w-60 min-w-60 max-w-60 shadow-[1px_0_0_hsl(var(--border))]',
+}
 
 export default function OpeningStockPage() {
   const [view, setView] = useState<'lines' | 'entries'>('lines')
@@ -204,7 +211,15 @@ export default function OpeningStockPage() {
   const [notice, setNotice] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const mayAdd = can('inventory', 'create')
+  const toggleGroup = (key: string) =>
+    setCollapsed((c) => {
+      const next = new Set(c)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
 
   useEffect(() => {
     const t = setTimeout(() => setTerm(search.trim()), 300)
@@ -429,6 +444,15 @@ export default function OpeningStockPage() {
                     </button>
                   )}
                 </div>
+                {data && data.groups.length > 1 && (
+                  <button
+                    type="button"
+                    className="text-primary whitespace-nowrap text-xs font-medium hover:underline"
+                    onClick={() => setCollapsed(collapsed.size ? new Set() : new Set(data.groups.map((g) => g.style ?? '')))}
+                  >
+                    {collapsed.size ? 'Expand all styles' : 'Collapse all styles'}
+                  </button>
+                )}
                 {data && (
                   <p className="text-muted-foreground whitespace-nowrap text-sm">
                     <span className="text-foreground font-semibold">{count(data.total, 'line', 'lines')}</span> ·{' '}
@@ -487,17 +511,14 @@ export default function OpeningStockPage() {
                 ) : (
                   <div ref={tableBox} className="overflow-auto" style={{ maxHeight: tableHeight }}>
                     <table className="w-full border-separate border-spacing-0 text-xs">
-                      <thead>
+                      {/* The header row is held at the top by the app's table rule (z 5);
+                          above the frozen cells (z 10) it must sit higher still. */}
+                      <thead style={{ zIndex: 30 }}>
                         <tr className="text-muted-foreground text-left text-[10px] font-semibold uppercase tracking-wide">
                           {COLUMNS.map((c) => (
                             <th
                               key={c.head}
-                              className={cn(
-                                'bg-secondary border-border sticky top-0 z-20 whitespace-nowrap border-b px-2 py-2',
-                                c.right && 'text-right',
-                                c.pin && cn(PIN[c.pin], 'z-30'),
-                                c.pin === 'code' && 'pl-3',
-                              )}
+                              className={cn('bg-secondary border-border whitespace-nowrap border-b px-2 py-2', c.right && 'text-right', c.pin && cn(PIN[c.pin], 'z-10'))}
                             >
                               {c.head}
                             </th>
@@ -505,23 +526,60 @@ export default function OpeningStockPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {(data?.lines ?? []).map((l) => (
-                          <tr key={l.id} className="group">
-                            {COLUMNS.map((c) => (
-                              <td
-                                key={c.head}
-                                className={cn(
-                                  'border-border group-hover:bg-secondary whitespace-nowrap border-b px-2 py-1.5',
-                                  c.right && 'text-right tabular-nums',
-                                  c.pin && cn(PIN[c.pin], 'bg-card z-10'),
-                                  c.pin === 'code' && 'pl-3',
-                                )}
-                              >
-                                {c.cell(l)}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
+                        {(data?.lines ?? []).map((l, i, all) => {
+                          const key = styleKey(l)
+                          const startsGroup = i === 0 || styleKey(all[i - 1]) !== key
+                          const g = startsGroup ? data?.groups.find((x) => (x.style ?? '') === key) : undefined
+                          const shut = collapsed.has(key)
+                          return (
+                            <Fragment key={l.id}>
+                              {startsGroup && g && (
+                                <tr data-group={key || 'none'}>
+                                  <td colSpan={COLUMNS.length} className="bg-secondary/70 border-border border-b p-0">
+                                    {/* The label stays at the left while the table scrolls sideways. */}
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleGroup(key)}
+                                      aria-expanded={!shut}
+                                      className="sticky left-0 flex items-center gap-2 px-3 py-1.5 text-left"
+                                    >
+                                      {shut ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                                      {g.style ? (
+                                        <>
+                                          <span className="font-mono text-xs font-semibold text-teal-400">{g.style}</span>
+                                          {g.name && <span className="text-foreground text-xs font-medium">{g.name}</span>}
+                                        </>
+                                      ) : (
+                                        <span className="text-foreground text-xs font-medium">No style — fabric, trims, packing</span>
+                                      )}
+                                      <span className="text-muted-foreground text-[11px]">
+                                        {count(g.lines, 'line', 'lines')}
+                                        {g.qty !== null && g.unit ? ` · ${num(g.qty)} ${g.unit}` : ''} · {money(g.value)}
+                                        {g.continued ? ' · continued from the page before' : ''}
+                                      </span>
+                                    </button>
+                                  </td>
+                                </tr>
+                              )}
+                              {!shut && (
+                                <tr className="group" data-line={l.id}>
+                                  {COLUMNS.map((c) => (
+                                    <td
+                                      key={c.head}
+                                      className={cn(
+                                        'border-border group-hover:bg-secondary whitespace-nowrap border-b px-2 py-1.5',
+                                        c.right && 'text-right tabular-nums',
+                                        c.pin && cn(PIN[c.pin], 'bg-card z-10'),
+                                      )}
+                                    >
+                                      {c.cell(l)}
+                                    </td>
+                                  ))}
+                                </tr>
+                              )}
+                            </Fragment>
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>

@@ -5619,36 +5619,31 @@ router.get('/opening-stock/filters', requirePermission(MODULE, 'view'), async (_
   })
 })
 
+/*
+ * The lines, style by style: a style's lines together (by item, colour and
+ * size within it), then the lines with no style — fabric, trims, packing. A
+ * page carries the totals of each style on it, counted over all its lines,
+ * so a style that runs on from the page before still says its whole.
+ */
 router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100))
   const where = openingLinesWhere(req.query as Record<string, unknown>)
-  const [lines, total, filtered, kinds, places, ladder] = await Promise.all([
+  const [keys, kinds] = await Promise.all([
     prisma.openingStockLine.findMany({
       where,
-      orderBy: [{ openingStock: { createdAt: 'desc' } }, { rowNo: 'asc' }],
-      skip: (page - 1) * limit,
-      take: limit,
-      include: {
-        openingStock: { select: { id: true, number: true, fileName: true } },
-        item: {
-          select: {
-            code: true,
-            name: true,
-            type: true,
-            color: true,
-            uom: { select: { symbol: true } },
-            style: { select: { code: true } },
-            category: { select: { name: true } },
-          },
-        },
-        warehouse: { select: { id: true, name: true } },
-        department: { select: { name: true } },
-        size: { select: { code: true } },
+      select: {
+        id: true,
+        styleText: true,
+        colour: true,
+        rowNo: true,
+        qty: true,
+        value: true,
+        openingStock: { select: { createdAt: true } },
+        item: { select: { name: true, color: true, style: { select: { code: true, name: true } }, uom: { select: { symbol: true } } } },
+        size: { select: { sequence: true } },
       },
     }),
-    prisma.openingStockLine.count({ where }),
-    prisma.openingStockLine.aggregate({ where, _sum: { value: true } }),
     prisma.$queryRaw<Array<{ kind: string; lines: number; value: number }>>`
       SELECT CASE WHEN l."departmentId" IS NOT NULL THEN 'WIP'
                   WHEN i.type IN ('FINISHED_GOOD', 'SEMI_FINISHED') THEN 'FINISHED'
@@ -5656,27 +5651,78 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
              COUNT(*)::int AS lines, COALESCE(SUM(l.value), 0)::float8 AS value
       FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
       GROUP BY 1`,
-    prisma.$queryRaw<Array<{ id: string; name: string; departmentId: string | null; process: string | null; lines: number; value: number }>>`
-      SELECT w.id, w.name, w."departmentId", d.name AS process, COUNT(*)::int AS lines, COALESCE(SUM(l.value), 0)::float8 AS value
-      FROM ld_erp.opening_stock_lines l
-      JOIN ld_erp.warehouses w ON w.id = l."warehouseId"
-      LEFT JOIN ld_erp.departments d ON d.id = w."departmentId"
-      GROUP BY w.id, w.name, w."departmentId", d.name`,
-    processLadder(),
   ])
-  // Stores first, then the process floors in the order the work goes.
-  const rank = new Map(ladder.map((p, i) => [p.id, i]))
-  places.sort((a, b) => (a.departmentId ? 1 + (rank.get(a.departmentId) ?? 99) : 0) - (b.departmentId ? 1 + (rank.get(b.departmentId) ?? 99) : 0) || a.name.localeCompare(b.name))
+  const styleOf = (k: (typeof keys)[number]) => k.styleText ?? k.item.style?.code ?? null
+  const colourOf = (k: (typeof keys)[number]) => k.colour ?? k.item.color ?? ''
+  keys.sort((a, b) => {
+    const sa = styleOf(a)
+    const sb = styleOf(b)
+    if (sa !== sb) return !sa ? 1 : !sb ? -1 : sa.localeCompare(sb, undefined, { numeric: true })
+    return (
+      a.item.name.localeCompare(b.item.name) ||
+      colourOf(a).localeCompare(colourOf(b)) ||
+      (a.size?.sequence ?? 0) - (b.size?.sequence ?? 0) ||
+      b.openingStock.createdAt.getTime() - a.openingStock.createdAt.getTime() ||
+      a.rowNo - b.rowNo
+    )
+  })
+
+  // Each style's totals; the quantity only when its lines share one unit.
+  const groups = new Map<string, { style: string | null; name: string | null; lines: number; value: number; qty: number; units: Set<string>; first: number }>()
+  keys.forEach((k, i) => {
+    const style = styleOf(k)
+    const g = groups.get(style ?? '') ?? { style, name: k.item.style?.code === style ? k.item.style.name : null, lines: 0, value: 0, qty: 0, units: new Set<string>(), first: i }
+    g.lines += 1
+    g.value += Number(k.value)
+    g.qty += Number(k.qty)
+    g.units.add(k.item.uom?.symbol ?? '')
+    if (!g.name && k.item.style?.code === style) g.name = k.item.style.name
+    groups.set(style ?? '', g)
+  })
+  // A style named only by the sheet (cut panels): its name from Styles.
+  const unnamed = [...groups.values()].filter((g) => g.style && !g.name).map((g) => g.style!)
+  if (unnamed.length) {
+    for (const s of await prisma.style.findMany({ where: { code: { in: unnamed } }, select: { code: true, name: true } })) groups.get(s.code)!.name = s.name
+  }
+
+  const start = (page - 1) * limit
+  const pageKeys = keys.slice(start, start + limit)
+  const full = await prisma.openingStockLine.findMany({
+    where: { id: { in: pageKeys.map((k) => k.id) } },
+    include: {
+      openingStock: { select: { id: true, number: true, fileName: true } },
+      item: {
+        select: {
+          code: true,
+          name: true,
+          type: true,
+          color: true,
+          uom: { select: { symbol: true } },
+          style: { select: { code: true } },
+          category: { select: { name: true } },
+        },
+      },
+      warehouse: { select: { id: true, name: true } },
+      department: { select: { name: true } },
+      size: { select: { code: true } },
+    },
+  })
+  const byId = new Map(full.map((l) => [l.id, l]))
+  const onPage = [...new Set(pageKeys.map((k) => styleOf(k) ?? ''))]
   res.json({
     success: true,
     data: {
-      lines,
-      total,
-      value: Number(filtered._sum.value ?? 0),
+      lines: pageKeys.map((k) => byId.get(k.id)!).filter(Boolean),
+      total: keys.length,
+      value: keys.reduce((t, k) => t + Number(k.value), 0),
       page,
       limit,
       kinds: Object.fromEntries(kinds.map((k) => [k.kind, { lines: k.lines, value: Number(k.value) }])),
-      places: places.map((p) => ({ id: p.id, name: p.name, process: p.process, lines: p.lines, value: Number(p.value) })),
+      groups: onPage.map((key) => {
+        const g = groups.get(key)!
+        const unit = g.units.size === 1 ? [...g.units][0] : null
+        return { style: g.style, name: g.name, lines: g.lines, value: g.value, qty: unit !== null ? g.qty : null, unit, continued: g.first < start }
+      }),
     },
   })
 })
