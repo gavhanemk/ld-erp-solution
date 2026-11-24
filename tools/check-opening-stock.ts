@@ -73,7 +73,8 @@ async function main() {
   if (!garment) garment = (await call('POST', '/masters/items', { name: `ZZTEST Opening Shirt ${stamp}`, type: 'FINISHED_GOOD', categoryId: shirtsCat.id, uomId: unit('pcs').id, styleId: style.id, color: colour })).body.data
   check('test items made', Boolean(fabric?.code && panel?.code && garment?.code), { fabric, panel, garment })
   const order = `ZZ-ORD-${stamp}`
-  const today = new Date().toISOString().slice(0, 10)
+  // Today in India (until 5:30 am there, the UTC date is still yesterday and would not test today).
+  const today = new Date(Date.now() + 330 * 60 * 1000).toISOString().slice(0, 10)
   const base = { 'Opening Date': today, 'Opening Qty': 1, 'Unit Rate': 1, 'Stock Status': 'OK' }
 
   const good = [

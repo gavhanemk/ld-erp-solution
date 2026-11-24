@@ -271,7 +271,10 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
     sizesOfGroup.set(s.sizeGroupId, g)
     sizesByCode.set(squash(s.code), [...(sizesByCode.get(squash(s.code)) ?? []), s])
   }
-  const today = new Date()
+  // The end of today in India: a sheet dated today is never "later than
+  // today", whatever the hour (a day is read as noon, India time).
+  const india = new Date(Date.now() + 330 * 60 * 1000)
+  const endOfToday = Date.UTC(india.getUTCFullYear(), india.getUTCMonth(), india.getUTCDate() + 1) - 330 * 60 * 1000
 
   const out: Resolved[] = []
   for (const { row, raw } of rows) {
@@ -292,7 +295,7 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
     const date = parseDay(raw.date)
     if (date === null) problems.push('Opening Date is empty.')
     else if (date === 'bad') problems.push(`Opening Date "${raw.date}" is not a date: write it as 31-03-2026.`)
-    else if (date.getTime() > today.getTime()) problems.push(`Opening Date ${dmy(date)} is later than today.`)
+    else if (date.getTime() >= endOfToday) problems.push(`Opening Date ${dmy(date)} is later than today.`)
 
     // Process: a store, finished goods in a store, or one of the processes.
     const procText = squash(raw.process)
