@@ -5388,7 +5388,17 @@ router.get('/opening-stock/:id', requirePermission(MODULE, 'view'), async (req, 
       lines: {
         orderBy: { rowNo: 'asc' },
         include: {
-          item: { select: { code: true, name: true, type: true, uom: { select: { symbol: true } } } },
+          item: {
+            select: {
+              code: true,
+              name: true,
+              type: true,
+              color: true,
+              uom: { select: { symbol: true } },
+              style: { select: { code: true } },
+              category: { select: { name: true } },
+            },
+          },
           warehouse: { select: { name: true } },
           department: { select: { name: true } },
           size: { select: { code: true } },

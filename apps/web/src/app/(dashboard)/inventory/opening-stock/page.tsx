@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { AlertCircle, ChevronDown, ChevronRight, FileSpreadsheet, RefreshCw, Upload } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -29,14 +29,29 @@ interface Line {
   openingDate: string
   processText: string | null
   department: { name: string } | null
+  locationText: string | null
   warehouse: { name: string }
   orderNo: string | null
   styleText: string | null
-  item: { code: string; name: string; type: string; uom: { symbol: string } | null }
+  itemCodeText: string | null
+  description: string | null
+  categoryText: string | null
+  fabricText: string | null
+  item: {
+    code: string
+    name: string
+    type: string
+    color: string | null
+    uom: { symbol: string } | null
+    style: { code: string } | null
+    category: { name: string } | null
+  }
   colour: string | null
   size: { code: string } | null
+  sizeText: string | null
   lotNo: string | null
   bundleNo: string | null
+  uomText: string | null
   qty: string | number
   unitRate: string | number
   value: string | number
@@ -194,7 +209,40 @@ export default function OpeningStockPage() {
   )
 }
 
-/** One upload's lines: by process and location first, then row by row. */
+/**
+ * The sheet's 19 columns, in its order and under its names: what each line
+ * went in as. A column left empty on the sheet shows what the ERP filed it
+ * under (the item's name, category, colour, style), so every line reads whole.
+ */
+const COLUMNS: Array<{ head: string; right?: boolean; cell: (l: Line) => ReactNode }> = [
+  { head: 'Opening Date', cell: (l) => day(l.openingDate) },
+  { head: 'Process', cell: (l) => l.department?.name ?? l.processText ?? 'Store' },
+  { head: 'Department / Location', cell: (l) => l.warehouse.name },
+  { head: 'Order No.', cell: (l) => l.orderNo ?? muted },
+  { head: 'Style / Article No.', cell: (l) => l.styleText ?? l.item.style?.code ?? muted },
+  { head: 'Item Code', cell: (l) => <span className="font-mono text-teal-400">{l.item.code}</span> },
+  { head: 'Item Description', cell: (l) => <span className="text-foreground">{l.description ?? l.item.name}</span> },
+  { head: 'Item Category', cell: (l) => l.categoryText ?? l.item.category?.name ?? muted },
+  { head: 'Fabric / Material', cell: (l) => l.fabricText ?? muted },
+  { head: 'Colour', cell: (l) => l.colour ?? l.item.color ?? muted },
+  { head: 'Size', cell: (l) => <span className="font-semibold">{l.size?.code ?? l.sizeText ?? muted}</span> },
+  { head: 'Lot / Batch / Roll No.', cell: (l) => l.lotNo ?? muted },
+  { head: 'Bundle / Barcode No.', cell: (l) => l.bundleNo ?? muted },
+  { head: 'UOM', cell: (l) => l.item.uom?.symbol ?? l.uomText ?? muted },
+  { head: 'Opening Qty', right: true, cell: (l) => num(Number(l.qty)) },
+  { head: 'Unit Rate', right: true, cell: (l) => money(Number(l.unitRate)) },
+  { head: 'Opening Value', right: true, cell: (l) => <span className="font-semibold">{money(Number(l.value))}</span> },
+  {
+    head: 'Stock Status',
+    cell: (l) => {
+      const s = STATUS[l.status] ?? { label: l.status, cls: 'badge-neutral' }
+      return <span className={s.cls}>{s.label}</span>
+    },
+  },
+  { head: 'Remarks', cell: (l) => <span className="text-muted-foreground">{l.remarks ?? ''}</span> },
+]
+
+/** One upload's lines: by process and location first, then row by row, all 19 columns. */
 function UploadLines({ lines }: { lines: Line[] | undefined }) {
   if (!lines) return <p className="text-muted-foreground py-2 text-xs">Loading the lines…</p>
   const places = new Map<string, { label: string; lines: number; value: number }>()
@@ -206,7 +254,9 @@ function UploadLines({ lines }: { lines: Line[] | undefined }) {
     places.set(label, p)
   }
   return (
-    <div className="space-y-3">
+    // No width of its own (w-0, then the cell's full width): the 19 columns
+    // scroll inside this box instead of stretching the list of uploads.
+    <div className="w-0 min-w-full space-y-3">
       <div className="flex flex-wrap gap-2">
         {[...places.values()].map((p) => (
           <span key={p.label} className="badge-neutral">
@@ -218,48 +268,25 @@ function UploadLines({ lines }: { lines: Line[] | undefined }) {
         <table className="w-full text-xs">
           <thead>
             <tr className="text-muted-foreground border-border border-b text-left text-[10px] font-semibold uppercase tracking-wide">
-              <th className="px-2 py-1.5">Row</th>
-              <th className="px-2 py-1.5">Process · Location</th>
-              <th className="px-2 py-1.5">Order</th>
-              <th className="px-2 py-1.5">Item</th>
-              <th className="px-2 py-1.5">Size</th>
-              <th className="px-2 py-1.5">Lot · Bundle</th>
-              <th className="px-2 py-1.5 text-right">Qty</th>
-              <th className="px-2 py-1.5 text-right">Rate</th>
-              <th className="px-2 py-1.5 text-right">Value</th>
-              <th className="px-2 py-1.5">Status</th>
-              <th className="px-2 py-1.5">Remarks</th>
+              <th className="whitespace-nowrap px-2 py-1.5">Row</th>
+              {COLUMNS.map((c) => (
+                <th key={c.head} className={cn('whitespace-nowrap px-2 py-1.5', c.right && 'text-right')}>
+                  {c.head}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {lines.map((l) => {
-              const s = STATUS[l.status] ?? { label: l.status, cls: 'badge-neutral' }
-              return (
-                <tr key={l.id} className="border-border border-t first:border-t-0">
-                  <td className="text-muted-foreground px-2 py-1.5 tabular-nums">{l.rowNo}</td>
-                  <td className="px-2 py-1.5">
-                    <span className="text-foreground">{l.department?.name ?? l.processText ?? 'Store'}</span>
-                    <span className="text-muted-foreground"> · {l.warehouse.name}</span>
+            {lines.map((l) => (
+              <tr key={l.id} className="border-border border-t first:border-t-0">
+                <td className="text-muted-foreground px-2 py-1.5 tabular-nums">{l.rowNo}</td>
+                {COLUMNS.map((c) => (
+                  <td key={c.head} className={cn('whitespace-nowrap px-2 py-1.5', c.right && 'text-right tabular-nums')}>
+                    {c.cell(l)}
                   </td>
-                  <td className="px-2 py-1.5">{l.orderNo ?? muted}</td>
-                  <td className="px-2 py-1.5">
-                    <span className="font-mono text-teal-400">{l.item.code}</span> <span className="text-foreground">{l.item.name}</span>
-                    {(l.styleText || l.colour) && <span className="text-muted-foreground"> · {[l.styleText, l.colour].filter(Boolean).join(' · ')}</span>}
-                  </td>
-                  <td className="px-2 py-1.5 font-semibold">{l.size?.code ?? muted}</td>
-                  <td className="px-2 py-1.5">{[l.lotNo, l.bundleNo].filter(Boolean).join(' · ') || muted}</td>
-                  <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">
-                    {num(Number(l.qty))} {l.item.uom?.symbol ?? ''}
-                  </td>
-                  <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">{money(Number(l.unitRate))}</td>
-                  <td className="whitespace-nowrap px-2 py-1.5 text-right font-semibold tabular-nums">{money(Number(l.value))}</td>
-                  <td className="px-2 py-1.5">
-                    <span className={s.cls}>{s.label}</span>
-                  </td>
-                  <td className="text-muted-foreground px-2 py-1.5">{l.remarks ?? ''}</td>
-                </tr>
-              )
-            })}
+                ))}
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>

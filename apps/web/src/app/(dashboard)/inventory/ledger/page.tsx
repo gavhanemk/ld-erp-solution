@@ -132,6 +132,7 @@ const MOVEMENT: Record<string, { label: string; cls: string }> = {
 /** The document behind a movement, in words. */
 const DOCUMENT: Record<string, string> = {
   OPENING_STOCK: 'Opening stock',
+  OPENING_IMPORT: 'Opening stock',
   GRN: 'Goods receipt',
   GRN_EDITED: 'Goods receipt edited',
   GRN_CANCELLED: 'Goods receipt cancelled',

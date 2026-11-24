@@ -243,6 +243,9 @@ export async function documentNumbers(
   put(h.map((r) => ({ id: r.id, n: r.returnNumber })))
   put(i.map((r) => ({ id: r.id, n: r.returnNumber })))
   put(j.map((r) => ({ id: r.id, n: r.noteNumber })))
+  // Opening stock brought in from the sheet: its OPS number.
+  const ops = ids((t) => t === 'OPENING_IMPORT')
+  if (ops.length) put((await tx.openingStock.findMany({ where: { id: { in: ops } }, select: { id: true, number: true } })).map((r) => ({ id: r.id, n: r.number })))
   return out
 }
 
