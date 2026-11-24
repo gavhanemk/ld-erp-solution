@@ -179,7 +179,9 @@ function AddOpeningStock() {
     if (!draft || step === 'saved') return
     const t = setTimeout(() => {
       try {
+        // Everything removed: nothing is kept, so nothing comes back as an unsaved entry.
         if (draft.garments.length || draft.materials.length) localStorage.setItem(DRAFT(draft.kind), JSON.stringify({ ...draft, savedAt: Date.now() }))
+        else localStorage.removeItem(DRAFT(draft.kind))
       } catch {
         // Not kept on this computer: the entry still saves.
       }
@@ -419,7 +421,7 @@ function AddOpeningStock() {
       {/* 2. Enter, and 3. review. */}
       {kind && draft && options && step !== 'saved' && (
         <>
-          {restored && step === 'enter' && (
+          {restored && step === 'enter' && (draft.garments.length > 0 || draft.materials.length > 0) && (
             <Banner tone="info">
               Your unsaved {k?.label.toLowerCase()} entry is back, as you left it.{' '}
               <button type="button" className="text-primary font-medium hover:underline" onClick={startAgain}>
