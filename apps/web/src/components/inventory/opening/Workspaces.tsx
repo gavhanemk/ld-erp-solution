@@ -439,7 +439,7 @@ function LotRows({ item, lots, problems, onChange }: { item: MaterialOption; lot
               </td>
               <td className="px-2 py-1.5">
                 <StepInput
-                  className={cn('form-input text-right', Number(l.qty || 0) > 0 && !Number(l.rate || 0) && 'border-amber-500')}
+                  className="form-input text-right"
                   value={l.rate}
                   decimals
                   onValueChange={(v) => set(l.key, { rate: v })}

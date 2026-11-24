@@ -97,7 +97,7 @@ async function main() {
     { 'Style / Article No.': style.code, Colour: colour, Size: s1.code, 'Opening Quantity': 1, 'Rate Per Piece': 1, Location: 'Cutting Floor', 'Remarks': 'x' }, // 5: a floor
     { 'Style / Article No.': style.code, Colour: 'Purple', Size: s1.code, 'Opening Quantity': 1, 'Rate Per Piece': 1, Location: 'Store' },                   // 6: not its colour
     { 'Style / Article No.': style.code, Colour: colour, Size: 'XXXXL', 'Opening Quantity': 1, 'Rate Per Piece': 1, Location: 'Store' },                    // 7: not its size
-    { 'Style / Article No.': style.code, Colour: colour, Size: s1.code, 'Opening Quantity': 1, Location: 'Store', 'Stock Status': 'Hold' },                // 8: no rate
+    { 'Style / Article No.': style.code, Colour: colour, Size: s1.code, 'Opening Quantity': 1, Location: 'Store', 'Stock Status': 'Hold' },                // 8: no rate (optional)
   ]
   const noDate = await call('POST', '/inventory/opening-stock/import', { ...(await sheet('FG', fgGood, 'fg-nodate')), kind: 'FG' })
   check('a kind’s sheet needs the opening date from the screen', noDate.status === 400 && /opening date/i.test(noDate.body?.message ?? ''), noDate.body)
@@ -108,9 +108,11 @@ async function main() {
     [5, /Cutting Floor is a process's floor, not a store/, 'a process floor as the store'],
     [6, /No finished item for ZZTEST-SH-01 in Purple/, 'a colour the style does not have'],
     [7, /Size XXXXL is not in the size run/, 'a size not in its run'],
-    [8, /Give the Rate Per Piece\./, 'no rate (named as the template names it)'],
   ]
   for (const [row, re, what] of fgExpect) check(`FG row ${row} refused: ${what}`, re.test(problemsOf(fgCheck, row)), problemsOf(fgCheck, row))
+  // The rate is optional: a row without one comes in valued at nought.
+  const noRate = (fgCheck.body?.data?.rows ?? []).find((r: any) => r.row === 8)
+  check('FG row 8 without a rate: accepted, valued at nought', problemsOf(fgCheck, 8) === '' && noRate?.rate === 0 && noRate?.value === 0, noRate && { p: noRate.problems, rate: noRate.rate, value: noRate.value })
 
   const wrong = await call('POST', '/inventory/opening-stock/import', { ...(await sheet('FG', fgGood, 'fg-as-sfg')), kind: 'SFG', openingDate: today })
   check('the FG template uploaded as SFG: says which template it is', wrong.status === 400 && wrong.body?.code === 'WRONG_TEMPLATE' && /Finished Goods template/.test(wrong.body?.message ?? ''), wrong.body)

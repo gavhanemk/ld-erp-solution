@@ -63,7 +63,7 @@ export const OS_COLUMNS: SheetColumn<OsKey>[] = [
   { key: 'bundle', head: 'Bundle / Barcode No.', width: 18 },
   { key: 'uom', head: 'UOM', width: 8, list: 'units', note: "The item's own unit: checked, never converted." },
   { key: 'qty', head: 'Opening Qty', width: 12 },
-  { key: 'rate', head: 'Unit Rate', width: 12 },
+  { key: 'rate', head: 'Unit Rate', width: 12, note: 'Optional. Empty with no Opening Value: valued at nought.' },
   { key: 'value', head: 'Opening Value', width: 14, note: 'Opening Qty × Unit Rate. Either may be left out: the other is worked out.' },
   { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'OK, Hold, Rejected or B-Grade. Empty is OK.' },
   { key: 'remarks', head: 'Remarks', width: 28 },
@@ -77,7 +77,7 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'colour', head: 'Colour', width: 14, note: "One of the style's colours." },
     { key: 'size', head: 'Size', width: 8, note: "From the style's size run." },
     { key: 'qty', head: 'Opening Quantity', width: 15, note: 'Pieces.' },
-    { key: 'rate', head: 'Rate Per Piece', width: 14 },
+    { key: 'rate', head: 'Rate Per Piece', width: 14, note: 'Optional. Empty: valued at nought.' },
     { key: 'location', head: 'Location', width: 22, list: 'stores', note: 'The finished goods store.' },
     { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'OK, Hold, Rejected or B-Grade. Empty is OK.' },
     { key: 'remarks', head: 'Remarks', width: 24 },
@@ -88,7 +88,7 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'colour', head: 'Colour', width: 14, note: "One of the style's colours." },
     { key: 'size', head: 'Size', width: 8, note: "From the style's size run." },
     { key: 'qty', head: 'Opening Quantity', width: 15, note: 'Pieces.' },
-    { key: 'rate', head: 'Rate / Valuation', width: 15, note: 'What one piece is valued at, at this stage.' },
+    { key: 'rate', head: 'Rate / Valuation', width: 15, note: 'Optional: what one piece is valued at, at this stage. Empty: nought.' },
     { key: 'department', head: 'Department', width: 16, list: 'processes', note: 'May be left empty: the process says it.' },
     { key: 'location', head: 'Location', width: 22, list: 'locations', note: "Empty puts the pieces on the process's own floor; name an outside unit when they are there." },
     { key: 'order', head: 'Order Reference', width: 16, note: 'Optional: SO, MO or old order number.' },
@@ -104,7 +104,7 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'bundle', head: 'Bundle / Barcode Number', width: 20 },
     { key: 'uom', head: 'UOM', width: 8, list: 'units', note: "The item's own unit: checked, never converted." },
     { key: 'qty', head: 'Opening Quantity', width: 15 },
-    { key: 'rate', head: 'Unit Rate', width: 12 },
+    { key: 'rate', head: 'Unit Rate', width: 12, note: 'Optional. Empty: valued at nought.' },
     { key: 'location', head: 'Location', width: 22, list: 'stores', note: 'The store it is in.' },
     { key: 'packType', head: 'Package Type', width: 12, list: 'packTypes', note: 'Optional: Roll, Box, Carton, Bag, Bundle, Packet or Other. Empty: the item’s usual.' },
     { key: 'packCount', head: 'Package Count', width: 12, note: 'Optional: how many packages. With no sizes, the stock comes in and the stickers wait until the sizes are known — equal sizes are never assumed.' },
@@ -486,7 +486,7 @@ export async function buildTemplate(kind?: OsKind): Promise<Buffer> {
     'Item Code must be in Items & Products. A finished garment can instead be found by Style / Article No. and Colour.',
     "Item Category and UOM are checked against the item; the quantity is never converted, so give it in the item's own unit.",
     "Size: for semi-finished and finished goods, from the style's size run (S, M, L…). Raw materials have no size.",
-    'Opening Qty is required. Give Unit Rate or Opening Value, or both: they must agree (Qty × Rate).',
+    'Opening Qty is required. Unit Rate and Opening Value are optional: give either, or both (they must agree, Qty × Rate); with neither the stock comes in at nought.',
     'Stock Status: OK (usable), Hold (held until released), Rejected (held as rejected) or B-Grade (second-quality finished goods). Empty is OK.',
     'Opening Date: the day of the count, not later than today.',
     'Nothing is brought in twice: a row matching an earlier upload, or stock already moving in the ERP at that location, is refused. Correct those with a stock count.',
@@ -554,7 +554,6 @@ export async function planImport(
   const L = (k: OsKey) => opts.labels?.[k] ?? OS_COLUMNS.find((c) => c.key === k)?.head ?? k
   const ruleOf = await packageRules(prisma)
   // Only the 19-column sheet has an Opening Value column.
-  const hasValue = !opts.kind && opts.rowWord !== 'line'
   const departmentById = new Map(m.departments.map((d) => [d.id, d]))
   const styleById = new Map(m.styles.map((st) => [st.id, st]))
   // Each style's route, as an order's stages are offered: its own, its category's, any style's.
@@ -814,7 +813,8 @@ export async function planImport(
       if (qty !== null && !Number.isNaN(qty)) plan.qty = round3(qty)
     }
 
-    // Rate and value: either may be left out; given both, they must agree.
+    // Rate and value: optional — with neither, the stock comes in valued at
+    // nought, to be valued later; given both, they must agree.
     const rate = parseNum(raw.rate)
     const value = parseNum(raw.value)
     if (rate !== null && (Number.isNaN(rate) || rate < 0)) problems.push(`${L('rate')} "${raw.rate}" is not a rate.`)
@@ -829,7 +829,10 @@ export async function planImport(
       } else if (value !== null && !Number.isNaN(value) && value >= 0) {
         plan.rate = round2(value / plan.qty)
         plan.value = round2(value)
-      } else if (rate === null && value === null) problems.push(hasValue ? `Give the ${L('rate')} or the ${L('value')}.` : `Give the ${L('rate')}.`)
+      } else if (rate === null && value === null) {
+        plan.rate = 0
+        plan.value = 0
+      }
     }
 
     // Stock Status.
@@ -839,7 +842,6 @@ export async function planImport(
     else {
       plan.status = STATUS_LABEL[status]
       if (status === 'B_GRADE' && plan.group === 'RAW_MATERIALS') problems.push('B-Grade is for semi-finished and finished goods, not raw materials.')
-      if (status === 'OK' && plan.rate === 0) problems.push(`${L('rate')} is nought: give the rate the stock is valued at.`)
     }
 
     // Its stickers: raw materials of a category labelled by package, kept without sizes.

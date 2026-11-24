@@ -303,7 +303,9 @@ export function StyleGrid({
             <tr className="bg-primary/5" data-grid-row>
               <td className="bg-card border-border sticky left-0 z-10 border-b px-3 py-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-foreground text-xs font-semibold">Rate / pc ₹</span>
+                  <span className="text-foreground text-xs font-semibold">
+                    Rate / pc ₹ <span className="text-muted-foreground font-normal">(optional)</span>
+                  </span>
                   <StepInput
                     className="form-input h-8 w-24 px-2 text-right text-xs"
                     value={allRate}
@@ -405,11 +407,10 @@ export function StyleGrid({
                   </td>
                   {style.sizes.map((s, c) => {
                     const q = Number(qty[cellKey(r.key, s.id)] || 0)
-                    const noRate = q > 0 && !Number(rates[s.id] || 0)
                     return (
                       <td key={s.id} className="group-hover:bg-secondary border-border border-b px-1 py-2">
                         <StepInput
-                          className={cn('form-input h-9 px-2 text-right tabular-nums', !r.item && 'opacity-40', q > 0 && 'border-primary/50 font-semibold', noRate && 'border-amber-500')}
+                          className={cn('form-input h-9 px-2 text-right tabular-nums', !r.item && 'opacity-40', q > 0 && 'border-primary/50 font-semibold')}
                           value={qty[cellKey(r.key, s.id)] ?? ''}
                           disabled={!r.item}
                           onValueChange={(v) => onQty({ ...qty, [cellKey(r.key, s.id)]: v })}
@@ -417,7 +418,6 @@ export function StyleGrid({
                           onPaste={er >= 0 ? onCellPaste(er, c) : undefined}
                           data-cell={er >= 0 ? `${er}:${c}` : undefined}
                           aria-label={`Pieces of ${r.colour || r.item?.code} size ${s.code}`}
-                          title={noRate ? `No rate for size ${s.code} yet` : undefined}
                         />
                       </td>
                     )
