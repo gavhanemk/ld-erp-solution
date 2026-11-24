@@ -7,6 +7,7 @@ import { AlertCircle, ArrowLeft, CheckCircle2, Download, FileSpreadsheet, Loader
 import { api, ApiError, can, tokens } from '@/lib/api'
 import { cn, newRequestId } from '@/lib/utils'
 import { KINDS, money, num, todayInIndia, type Kind } from '@/components/inventory/opening/kinds'
+import { StickersReady } from '@/components/packages/StickersReady'
 
 /*
  * Inventory → Opening Stock → Import from Excel, step by step: what the sheet
@@ -35,6 +36,9 @@ interface RowPlan {
   rate: number | null
   value: number | null
   status: string
+  /** Raw materials labelled by package: what its stickers will be. */
+  packing?: string | null
+  stickers?: number
 }
 interface Summary {
   rows: number
@@ -44,6 +48,9 @@ interface Summary {
   value: number
   floorsToMake: string[]
   byGroup: Array<{ group: string; label: string; lines: number; value: number }>
+  /** Stickers the import makes, and rows coming in without stickers for now. */
+  stickers?: number
+  waiting?: number
 }
 interface Done {
   id: string
@@ -116,6 +123,7 @@ function ImportOpeningStock() {
   const [busy, setBusy] = useState<null | 'template' | 'check' | 'report' | 'import'>(null)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<Done | null>(null)
+  const [printing, setPrinting] = useState(false)
   const input = useRef<HTMLInputElement>(null)
   const mayImport = can('inventory', 'create')
 
@@ -168,6 +176,8 @@ function ImportOpeningStock() {
     try {
       const res = await api.post<{ data: Done }>('/inventory/opening-stock/import', body({ confirm: true, requestKey }))
       setDone(res.data)
+      // Stickers made as it came in: here they are to print.
+      if (res.data.stickers > 0) setPrinting(true)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not import the sheet.')
     } finally {
@@ -327,6 +337,12 @@ function ImportOpeningStock() {
                   </span>
                 ))}
                 {summary.floorsToMake.length > 0 && <span className="badge-warning">Made on import: {summary.floorsToMake.join(', ')}</span>}
+                {(summary.stickers ?? 0) > 0 && <span className="badge-neutral">{summary.stickers} stickers to print</span>}
+                {(summary.waiting ?? 0) > 0 && (
+                  <span className="badge-warning" title="Counted in stock; make their stickers from the opening stock list when the sizes are known">
+                    {summary.waiting} {summary.waiting === 1 ? 'row' : 'rows'} without stickers for now
+                  </span>
+                )}
                 <div className="border-border bg-secondary ml-auto flex rounded-lg border p-0.5 text-xs" role="tablist" aria-label="Rows">
                   {(
                     [
@@ -382,6 +398,7 @@ function ImportOpeningStock() {
                       <th className="px-2 py-1.5 text-right">Rate</th>
                       <th className="px-2 py-1.5 text-right">Value</th>
                       <th className="px-2 py-1.5">Status</th>
+                      <th className="px-2 py-1.5">Stickers</th>
                       <th className="px-2 py-1.5">Problems</th>
                     </tr>
                   </thead>
@@ -407,12 +424,13 @@ function ImportOpeningStock() {
                         <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">{r.rate !== null ? money(r.rate) : '—'}</td>
                         <td className="text-foreground whitespace-nowrap px-2 py-1.5 text-right font-semibold tabular-nums">{r.value !== null ? money(r.value) : '—'}</td>
                         <td className="px-2 py-1.5">{r.status}</td>
+                        <td className="text-muted-foreground px-2 py-1.5">{r.packing ?? '—'}</td>
                         <td className="px-2 py-1.5 text-red-400">{r.problems.join(' · ')}</td>
                       </tr>
                     ))}
                     {listed.length === 0 && (
                       <tr>
-                        <td colSpan={9} className="text-muted-foreground px-2 py-6 text-center">
+                        <td colSpan={10} className="text-muted-foreground px-2 py-6 text-center">
                           No rows here.
                         </td>
                       </tr>
@@ -465,14 +483,15 @@ function ImportOpeningStock() {
               See these lines
             </Link>
             {done.stickers > 0 && (
-              <Link href="/inventory/packages" className="btn-secondary">
+              <button type="button" className="btn-secondary" onClick={() => setPrinting(true)}>
                 <Printer size={15} /> Print {done.stickers} {done.stickers === 1 ? 'sticker' : 'stickers'}
-              </Link>
+              </button>
             )}
             <Link href="/inventory/opening-stock/import" className="btn-secondary">
               Import another sheet
             </Link>
           </div>
+          {printing && <StickersReady source={{ type: 'OPENING', id: done.id }} onClose={() => setPrinting(false)} />}
         </div>
       )}
     </div>

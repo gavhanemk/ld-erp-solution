@@ -11,9 +11,11 @@ import {
   MapPin,
   MoreHorizontal,
   PackageMinus,
+  PencilLine,
   Plus,
   Printer,
   Scissors,
+  ShieldAlert,
   Trash2,
 } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
@@ -22,7 +24,7 @@ import { StepInput } from '@/components/ui/StepInput'
 import { QrCode } from './QrCode'
 import { RackInput } from './RackInput'
 import { FifoOverride, isFifoStop } from './FifoOverride'
-import { STATUS, openPrintTab, packLabel, printLabels, printOutward, qtyText, type OutwardRef, type PackageDetail } from './packageTypes'
+import { PACK_TYPES, STATUS, openPrintTab, packLabel, printLabels, printOutward, qtyText, type OutwardRef, type PackageDetail } from './packageTypes'
 
 /** What an action prints: a label for stock that went out, and the stickers that changed. */
 type Prints = (d: PackageDetail) => { out?: OutwardRef | null; ids: string[] }
@@ -38,6 +40,11 @@ const MOVE_LABEL: Record<string, string> = {
   CORRECTED: 'Quantity corrected',
   VOIDED: 'Label withdrawn',
   RACKED: 'Rack',
+  PRINTED: 'Printed again',
+  RELEASED: 'Taken off hold',
+  MERGED_INTO: 'Put together into another package',
+  MERGED_FROM: 'Made by putting packages together',
+  EDITED: 'Details corrected',
 }
 
 const day = (d: string | null) =>
@@ -63,7 +70,8 @@ export function PackageCard({
   onDone: (message: string) => void
 }) {
   const live = pkg.status === 'IN_STOCK'
-  const [action, setAction] = useState<Action | null>(live ? 'issue' : 'history')
+  const held = Boolean(pkg.held)
+  const [action, setAction] = useState<Action | null>(live && !held ? 'issue' : 'history')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // The rack box, open while the rack is being changed.
@@ -105,8 +113,8 @@ export function PackageCard({
   }
 
   const tabs: Array<{ key: Action; label: string; icon: typeof History; show: boolean }> = [
-    { key: 'issue', label: 'Issue', icon: PackageMinus, show: live && editable },
-    { key: 'move', label: 'Move', icon: ArrowLeftRight, show: live && editable },
+    { key: 'issue', label: 'Issue', icon: PackageMinus, show: live && editable && !held },
+    { key: 'move', label: 'Move', icon: ArrowLeftRight, show: live && editable && !held },
     { key: 'split', label: 'Split / Repack', icon: Scissors, show: live && editable },
     { key: 'history', label: 'History', icon: History, show: true },
     { key: 'more', label: 'More', icon: MoreHorizontal, show: editable && pkg.status !== 'VOID' },
@@ -125,6 +133,16 @@ export function PackageCard({
             <span className={`badge ${st.cls}`}>{st.label}</span>
             <span className="badge badge-neutral">{packLabel(pkg.packType)}</span>
             {pkg.ownerCustomer && <span className="badge badge-purple">Customer material · {pkg.ownerCustomer.name}</span>}
+            {held && live && (
+              <span className="badge badge-warning" title="Rejected at receipt or held: not issued or moved until an approver releases it">
+                <ShieldAlert size={12} className="mr-1 inline" /> Held
+              </span>
+            )}
+            {live && (pkg.changedSincePrint?.length ?? 0) > 0 && (
+              <span className="badge badge-warning" title={`Since its sticker was printed: ${pkg.changedSincePrint!.join(', ')}`}>
+                Reprint: {pkg.changedSincePrint!.join(', ')}
+              </span>
+            )}
           </div>
           <h2 className="text-xl font-semibold leading-tight text-foreground">{pkg.item.name}</h2>
           <p className="text-sm text-muted-foreground">
@@ -163,6 +181,18 @@ export function PackageCard({
                 </Link>
               </Fact>
             )}
+            {(pkg.mergedFrom?.length ?? 0) > 0 && (
+              <Fact label="Put together from">
+                {pkg.mergedFrom!.map((m, i) => (
+                  <span key={m.id}>
+                    {i > 0 && ', '}
+                    <Link href={`/inventory/scan?code=${m.code}`} className="font-mono text-primary hover:underline">
+                      {m.code}
+                    </Link>
+                  </span>
+                ))}
+              </Fact>
+            )}
           </div>
           {rack !== null && (
             <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -189,9 +219,15 @@ export function PackageCard({
             </p>
           )}
         </div>
-        <button type="button" className="btn-secondary shrink-0 self-start" onClick={() => printLabels([pkg.id])}>
-          <Printer size={15} /> Print label
-        </button>
+        {live && (
+          <button
+            type="button"
+            className={`${(pkg.changedSincePrint?.length ?? 0) > 0 ? 'btn-primary' : 'btn-secondary'} shrink-0 self-start`}
+            onClick={() => printLabels([pkg.id])}
+          >
+            <Printer size={15} /> {(pkg.changedSincePrint?.length ?? 0) > 0 ? 'Print again' : 'Print label'}
+          </button>
+        )}
       </div>
 
       {/* The actions this package allows. */}
@@ -228,12 +264,15 @@ export function PackageCard({
             <FifoOverride message={fifo.message} busy={busy} onAllow={fifo.retry} />
           </div>
         )}
-        {!live && action !== 'history' && action !== 'more' && pkg.status === 'SPLIT' && (
-          <p className="text-sm text-muted-foreground">
-            This sticker is retired: its roll was split.{' '}
+        {held && live && action !== 'history' && action !== 'more' && action !== 'split' && (
+          <p className="mb-3 text-sm warn-text">Held: it cannot be issued or moved until an approver releases it.</p>
+        )}
+        {(pkg.status === 'SPLIT' || pkg.status === 'MERGED') && (
+          <p className="mb-3 rounded-lg border border-primary/30 bg-primary/5 p-3 text-sm text-foreground">
+            This sticker is retired: {pkg.status === 'MERGED' ? 'its package was put together with others' : 'its roll was split'}.{' '}
             {pkg.replacedBy?.length ? (
               <>
-                What is left of it now carries{' '}
+                {pkg.status === 'MERGED' ? 'Its stock is now on' : 'What is left of it now carries'}{' '}
                 {pkg.replacedBy.map((r, i) => (
                   <span key={r.code}>
                     {i > 0 && ', '}
@@ -245,12 +284,20 @@ export function PackageCard({
                 ))}
                 . Scan that sticker instead.
               </>
+            ) : pkg.mergedInto ? (
+              <>
+                It went into{' '}
+                <Link href={`/inventory/scan?code=${pkg.mergedInto.code}`} className="font-mono text-primary hover:underline">
+                  {pkg.mergedInto.code}
+                </Link>
+                , which is no longer in stock.
+              </>
             ) : (
               'Nothing of it is left in stock.'
             )}
           </p>
         )}
-        {!live && action !== 'history' && action !== 'more' && pkg.status !== 'SPLIT' && (
+        {!live && action !== 'history' && action !== 'more' && pkg.status !== 'SPLIT' && pkg.status !== 'MERGED' && (
           <p className="text-sm text-muted-foreground">This package has nothing in it, so it cannot be issued, moved or split.</p>
         )}
         {live && action === 'issue' && (
@@ -280,7 +327,7 @@ export function PackageCard({
         )}
         {action === 'history' && <HistoryPanel pkg={pkg} />}
         {action === 'more' && (
-          <MorePanel pkg={pkg} busy={busy} onCorrect={(b) => run('correct', b)} onVoid={(b) => run('void', b)} />
+          <MorePanel pkg={pkg} busy={busy} onCorrect={(b) => run('correct', b)} onVoid={(b) => run('void', b)} onEdit={(b) => run('edit', b)} />
         )}
       </div>
     </div>
@@ -555,17 +602,60 @@ function MorePanel({
   busy,
   onCorrect,
   onVoid,
+  onEdit,
 }: {
   pkg: PackageDetail
   busy: boolean
   onCorrect: (b: { qty: number; reason: string }) => void
   onVoid: (b: { reason: string }) => void
+  onEdit: (b: { lotNo: string | null; packType: string; notes: string | null }) => void
 }) {
   const [qty, setQty] = useState(String(pkg.qty))
   const [reason, setReason] = useState('')
   const [why, setWhy] = useState('')
+  const [lot, setLot] = useState(pkg.lotNo ?? '')
+  const [type, setType] = useState(pkg.packType)
+  const [note, setNote] = useState(pkg.notes ?? '')
+  const edited = lot.trim() !== (pkg.lotNo ?? '') || type !== pkg.packType || note.trim() !== (pkg.notes ?? '')
+  if (pkg.status !== 'IN_STOCK') {
+    return <p className="text-sm text-muted-foreground">This sticker is no longer in stock: nothing on it can be changed.</p>
+  }
   return (
     <div className="grid gap-6 md:grid-cols-2">
+      <div className="space-y-3 md:col-span-2">
+        <h3 className="flex items-center gap-2 font-semibold text-foreground">
+          <PencilLine size={16} /> Edit details
+        </h3>
+        <p className="text-sm text-muted-foreground">A wrong lot, package type or note. The quantity and the stock do not change; the history keeps what it was.</p>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="space-y-1 text-sm">
+            <span className="form-label">Lot / roll no.</span>
+            <input className="form-input w-40" value={lot} maxLength={60} onChange={(e) => setLot(e.target.value)} aria-label="Lot" />
+          </label>
+          <label className="space-y-1 text-sm">
+            <span className="form-label">Package</span>
+            <SmartSelect className="form-input w-32" value={type} onChange={(e) => setType(e.target.value)} aria-label="Package type">
+              {PACK_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </SmartSelect>
+          </label>
+          <label className="min-w-48 flex-1 space-y-1 text-sm">
+            <span className="form-label">Note</span>
+            <input className="form-input" value={note} maxLength={120} onChange={(e) => setNote(e.target.value)} placeholder="e.g. short width" aria-label="Note" />
+          </label>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={busy || !edited}
+            onClick={() => onEdit({ lotNo: lot.trim() || null, packType: type, notes: note.trim() || null })}
+          >
+            Save details
+          </button>
+        </div>
+      </div>
       <div className="space-y-3">
         <h3 className="font-semibold text-foreground">Correct the quantity</h3>
         <p className="text-sm text-muted-foreground">

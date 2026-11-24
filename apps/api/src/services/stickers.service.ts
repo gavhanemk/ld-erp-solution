@@ -112,7 +112,8 @@ export async function labelGroup(
     if (!line || line.itemId !== g.itemId || line.warehouseId !== g.warehouseId) {
       throw new AppError('That GRN line is not for this item in this store.', 400, 'WRONG_LINE')
     }
-    const done = await tx.stockPackage.aggregate({ where: { grnLineId: g.grnLineId, status: { not: 'VOID' } }, _sum: { initialQty: true } })
+    // Each roll once: not the parts split off it, nor one made by putting rolls together.
+    const done = await tx.stockPackage.aggregate({ where: { grnLineId: g.grnLineId, parentId: null, status: { not: 'VOID' }, mergedFrom: { none: {} } }, _sum: { initialQty: true } })
     const left = round3(Number(line.acceptedQty) - Number(done._sum.initialQty ?? 0))
     const total = round3(g.qtys.reduce((s, q) => s + q, 0))
     if (total > left + 1e-9) {
@@ -279,7 +280,7 @@ export async function planStickers(data: InwardQuery) {
     positionsOf(prisma, came.map(spotOf)),
     prisma.stockPackage.groupBy({
       by: ['grnLineId'],
-      where: { grnLineId: { in: came.map((c) => c.grnLineId).filter((x): x is string => !!x) }, status: { not: 'VOID' } },
+      where: { grnLineId: { in: came.map((c) => c.grnLineId).filter((x): x is string => !!x) }, parentId: null, status: { not: 'VOID' }, mergedFrom: { none: {} } },
       _sum: { initialQty: true },
     }),
     prisma.stockPackage.groupBy({
@@ -364,8 +365,8 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
           await lockedBalanceOf(tx, spot)
           const done = await tx.stockPackage.aggregate({
             where: t.grnLineId
-              ? { grnLineId: t.grnLineId, status: { not: 'VOID' } }
-              : { ...spot, grade: t.grade, sourceType: query.sourceType, sourceId: query.sourceId, status: { not: 'VOID' } },
+              ? { grnLineId: t.grnLineId, parentId: null, status: { not: 'VOID' }, mergedFrom: { none: {} } }
+              : { ...spot, grade: t.grade, sourceType: query.sourceType, sourceId: query.sourceId, status: { not: 'VOID' }, mergedFrom: { none: {} } },
             _sum: { initialQty: true },
           })
           const remaining = round3(t.came - Number(done._sum.initialQty ?? 0))
@@ -549,6 +550,11 @@ export async function restickStickers(
   userId: string | null,
   /** A note on each new sticker, in the order of `qtys`. */
   notes?: string[],
+  /**
+   * Stickers for part of the stock, or none: what they do not cover stays in
+   * the store without a sticker (loose), to label later from No stickers.
+   */
+  leaveLoose = false,
 ) {
   const list = await tx.stockPackage.findMany({
     where: { id: { in: ids } },
@@ -570,6 +576,7 @@ export async function restickStickers(
       sourceId: true,
       sourceRef: true,
       grnLineId: true,
+      sourceLineId: true,
       children: { select: { id: true } },
       item: { select: { name: true, uom: { select: { symbol: true } } } },
     },
@@ -584,7 +591,8 @@ export async function restickStickers(
     (p.ownerCustomerId ?? null) === (first.ownerCustomerId ?? null) &&
     p.sourceType === first.sourceType &&
     (p.sourceId ?? null) === (first.sourceId ?? null) &&
-    (p.grnLineId ?? null) === (first.grnLineId ?? null)
+    (p.grnLineId ?? null) === (first.grnLineId ?? null) &&
+    (p.sourceLineId ?? null) === (first.sourceLineId ?? null)
   if (!list.every(sameGroup)) throw new AppError('Those stickers are not all the same item from the same delivery. Change them one line at a time.', 400, 'MIXED')
 
   const spot = { itemId: first.itemId, warehouseId: first.warehouseId, ownership: first.ownership, ownerCustomerId: first.ownerCustomerId }
@@ -598,28 +606,18 @@ export async function restickStickers(
   const total = round3(now.reduce((s, p) => s + Number(p.qty), 0))
   const wanted = qtys.map(round3)
   const sum = round3(wanted.reduce((s, q) => s + q, 0))
-  if (Math.abs(sum - total) > 0.0005) {
-    throw new AppError(`The new stickers add up to ${sum} ${unit}, but these hold ${total} ${unit}. Make them match.`, 400, 'NOT_MATCHING')
+  if (leaveLoose ? sum > total + 0.0005 : Math.abs(sum - total) > 0.0005) {
+    throw new AppError(
+      leaveLoose
+        ? `The new stickers add up to ${sum} ${unit}, more than the ${total} ${unit} these hold.`
+        : `The new stickers add up to ${sum} ${unit}, but these hold ${total} ${unit}. Make them match.`,
+      400,
+      'NOT_MATCHING',
+    )
   }
 
-  for (const p of list) {
-    await tx.stockPackage.update({ where: { id: p.id }, data: { status: 'VOID', qty: 0 } })
-    await tx.stockPackageMove.create({
-      data: {
-        packageId: p.id,
-        type: 'VOIDED',
-        qty: -Number(p.qty),
-        balanceAfter: 0,
-        warehouseId: p.warehouseId,
-        referenceType: p.sourceType,
-        referenceId: p.sourceId,
-        referenceNumber: p.sourceRef,
-        notes: `Stickers changed: ${list.length} made into ${wanted.length}`,
-        createdById: userId,
-      },
-    })
-  }
-  const created = await createPackages(tx, {
+  // The new stickers first, so each old one can say what replaced it.
+  const created = wanted.length ? await createPackages(tx, {
     spot,
     packType: packType ?? first.packType,
     qtys: wanted,
@@ -632,12 +630,32 @@ export async function restickStickers(
     sourceId: first.sourceId,
     sourceRef: first.sourceRef,
     grnLineId: first.grnLineId,
+    sourceLineId: first.sourceLineId,
     userId,
     // The same stock, labelled again: it is not loose, it was in the old stickers.
     fromPackage: true,
     unit,
     itemName: first.item.name,
-  })
+  }) : []
+  const leftLoose = round3(total - sum)
+  const into = created.length ? `${created.length} new: ${created.map((c) => c.code).join(', ')}` : 'none'
+  for (const p of list) {
+    await tx.stockPackage.update({ where: { id: p.id }, data: { status: 'VOID', qty: 0 } })
+    await tx.stockPackageMove.create({
+      data: {
+        packageId: p.id,
+        type: 'VOIDED',
+        qty: -Number(p.qty),
+        balanceAfter: 0,
+        warehouseId: p.warehouseId,
+        referenceType: p.sourceType,
+        referenceId: p.sourceId,
+        referenceNumber: p.sourceRef,
+        notes: `Stickers changed: ${list.length} made into ${into}${leftLoose > 0 ? `; ${leftLoose} ${unit} left without a sticker` : ''}`,
+        createdById: userId,
+      },
+    })
+  }
 
   // Every sticker of a GRN line changed: the receipt says how it came packed.
   if (first.grnLineId) {
@@ -649,7 +667,7 @@ export async function restickStickers(
       await learnPackSize(tx, first.itemId, wanted, packType ?? first.packType)
     }
   }
-  return { created, before: list.map((p) => p.code), unit }
+  return { created, before: list.map((p) => p.code), unit, leftLoose }
 }
 
 /**

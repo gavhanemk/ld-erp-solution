@@ -9,6 +9,8 @@ import { cn, newRequestId } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { KINDS, kindOf, money, num, STATUSES, todayInIndia, cellKey, type FormOptions, type Kind } from '@/components/inventory/opening/kinds'
 import { FinishedGoods, RawMaterials, SemiFinished, type Garment, type Material } from '@/components/inventory/opening/Workspaces'
+import { planOf, type PackValue } from '@/components/packages/PackagingEditor'
+import { StickersReady } from '@/components/packages/StickersReady'
 
 /*
  * Inventory → Opening Stock → Add Opening Stock: a guided entry, one kind at
@@ -44,7 +46,19 @@ interface PlanRow {
   process: string
   location: string
   newFloor: boolean
+  /** Raw materials labelled by package: what its stickers will be. */
+  packing?: string | null
+  stickers?: number
 }
+/** A lot's packing, as the save takes it. */
+interface PackBody {
+  type: string
+  qtys?: number[]
+  refs?: Array<string | null>
+  later?: boolean
+  count?: number
+}
+type EntryLine = Record<string, string | number | PackBody>
 interface Saved {
   id: string
   number: string
@@ -91,7 +105,27 @@ const dropDraft = (k: Kind) => {
 const LABELS: Record<Kind, Record<string, string>> = {
   FG: { date: 'Opening date', location: 'Store', code: 'Item', qty: 'Pieces', rate: 'Rate per piece', status: 'Stock status', style: 'Style' },
   SFG: { date: 'Opening date', process: 'Process', location: 'Location', code: 'Item', qty: 'Pieces', rate: 'Rate per piece', status: 'Stock status', style: 'Style' },
-  RM: { date: 'Opening date', location: 'Store', code: 'Item', qty: 'Opening Qty', rate: 'Unit Rate', status: 'Stock status', uom: 'Unit' },
+  RM: {
+    date: 'Opening date',
+    location: 'Store',
+    code: 'Item',
+    qty: 'Opening Qty',
+    rate: 'Unit Rate',
+    status: 'Stock status',
+    uom: 'Unit',
+    packType: 'Packed in',
+    packCount: 'Packages',
+    packEach: 'Each package holds',
+    packQtys: 'The packages',
+    packRefs: 'Roll no.',
+  },
+}
+
+/** The packing chosen in "Packed as", as the save takes it: sizes worked out here, or none yet. */
+function packBody(v: PackValue, qty: number, unit: string, places: number): PackBody {
+  if (v.method === 'LATER') return { type: v.type, later: true, ...(Number(v.count) >= 1 ? { count: Math.floor(Number(v.count)) } : {}) }
+  const plan = planOf(v, qty, unit, places)
+  return { type: v.type, qtys: plan.qtys, ...(plan.notes.some(Boolean) ? { refs: plan.notes.map((n) => n || null) } : {}) }
 }
 const STEPS = ['What you are entering', 'Enter the stock', 'Review', 'Saved']
 
@@ -123,6 +157,7 @@ function AddOpeningStock() {
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState<Saved | null>(null)
   const [throwing, setThrowing] = useState(false)
+  const [printing, setPrinting] = useState(false)
   const mayAdd = can('inventory', 'create')
 
   const loadOptions = useCallback(async () => {
@@ -175,7 +210,7 @@ function AddOpeningStock() {
 
   // Every line to bring in, as the sheet's columns, and what each belongs to on screen.
   const built = useMemo(() => {
-    const lines: Array<Record<string, string | number>> = []
+    const lines: EntryLine[] = []
     const refs: Array<{ key: string; label: string; style?: string; colour?: string }> = []
     let value = 0
     if (!draft || !options) return { lines, refs, value, pieces: 0 }
@@ -220,7 +255,20 @@ function AddOpeningStock() {
         const q = Number(l.qty || 0)
         if (!(q > 0)) continue
         value += q * Number(l.rate || 0)
-        lines.push({ ...base, process: 'Store', location: storeName, category, code: it.code, uom: it.unit ?? '', qty: q, rate: l.rate, lot: l.lot.trim(), bundle: l.bundle.trim() })
+        lines.push({
+          ...base,
+          process: 'Store',
+          location: storeName,
+          category,
+          code: it.code,
+          uom: it.unit ?? '',
+          qty: q,
+          rate: l.rate,
+          lot: l.lot.trim(),
+          bundle: l.bundle.trim(),
+          // Its packing, when one was chosen; else the save goes by the item's usual.
+          ...(it.tracked && l.pack ? { pack: packBody(l.pack, q, it.unit ?? '', it.decimals) } : {}),
+        })
         refs.push({ key: l.key, label: `${it.code}${l.lot.trim() ? ` lot ${l.lot.trim()}` : ''}${l.bundle.trim() ? ` · ${l.bundle.trim()}` : ''}` })
       }
     }
@@ -269,6 +317,8 @@ function AddOpeningStock() {
       dropDraft(draft.kind)
       setSaved({ ...res.data, message: res.message, value: built.value })
       setStep('saved')
+      // Stickers made as it came in: here they are to print.
+      if (res.data.stickers > 0) setPrinting(true)
       window.scrollTo({ top: 0 })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save the opening stock.')
@@ -287,6 +337,7 @@ function AddOpeningStock() {
     setProblems(new Map())
     setSaved(null)
     setThrowing(false)
+    setPrinting(false)
     setError(null)
   }
 
@@ -539,14 +590,15 @@ function AddOpeningStock() {
               See these lines
             </Link>
             {saved.stickers > 0 && (
-              <Link href="/inventory/packages" className="btn-secondary">
+              <button type="button" className="btn-secondary" onClick={() => setPrinting(true)}>
                 <Printer size={15} /> Print {saved.stickers} {saved.stickers === 1 ? 'sticker' : 'stickers'}
-              </Link>
+              </button>
             )}
             <Link href="/inventory/opening-stock/new" className="btn-ghost">
               Enter another kind
             </Link>
           </div>
+          {printing && <StickersReady source={{ type: 'OPENING', id: saved.id }} onClose={() => setPrinting(false)} />}
         </div>
       )}
     </div>
@@ -565,7 +617,7 @@ function ReviewPanel({
 }: {
   kind: Kind
   plan: PlanRow[]
-  lines: Array<Record<string, string | number>>
+  lines: EntryLine[]
   bad: number
   problems: Map<string, string[]>
   value: number
@@ -596,6 +648,11 @@ function ReviewPanel({
         <span className="badge-success">{plan.length} lines</span>
         {garments && <span className="badge-neutral">{num(pieces)} pcs</span>}
         <span className="badge-info">{money(value)}</span>
+        {!garments && plan.some((r) => r.stickers) && (
+          <span className="badge-neutral">
+            {plan.reduce((t, r) => t + (r.stickers ?? 0), 0)} stickers to print
+          </span>
+        )}
         {[...new Set(plan.map((r) => r.location))].map((l) => (
           <span key={l} className="badge-neutral">
             into {l}
@@ -626,6 +683,7 @@ function ReviewPanel({
               <th className="px-2 py-1.5 text-right">Qty</th>
               <th className="px-2 py-1.5 text-right">Rate</th>
               <th className="px-2 py-1.5 text-right">Value</th>
+              {!garments && <th className="px-2 py-1.5">Stickers</th>}
             </tr>
           </thead>
           <tbody>
@@ -658,6 +716,7 @@ function ReviewPanel({
                   </td>
                   <td className="px-2 py-1 text-right tabular-nums">{money(r.rate ?? 0)}</td>
                   <td className="text-foreground px-2 py-1 text-right font-semibold tabular-nums">{money(r.value ?? 0)}</td>
+                  {!garments && <td className="text-muted-foreground px-2 py-1">{r.packing ?? '—'}</td>}
                 </tr>
               )
             })}

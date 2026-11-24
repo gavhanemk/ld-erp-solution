@@ -7,6 +7,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { StyleGrid, ReloadButton } from './StyleGrid'
 import { cellKey, money, num, type FormOptions, type MaterialOption, type StyleOption } from './kinds'
+import { newPack, packText, PackagingDialog, planOf, type PackValue } from '@/components/packages/PackagingEditor'
 
 /*
  * The three entry screens. Each shows only its own kind's fields, and every
@@ -39,6 +40,8 @@ export interface Lot {
   bundle: string
   qty: string
   rate: string
+  /** How it goes on stickers; none said, the item's usual. */
+  pack?: PackValue | null
 }
 
 let seq = 0
@@ -351,6 +354,7 @@ function LotRows({ item, lots, problems, onChange }: { item: MaterialOption; lot
             <th className="w-40 px-2 py-1.5 text-right">Opening Qty</th>
             <th className="w-32 px-2 py-1.5 text-right">Unit Rate ₹</th>
             <th className="w-32 px-2 py-1.5 text-right">Opening Value</th>
+            {item.tracked && <th className="w-44 px-2 py-1.5">Packed as</th>}
             <th className="w-8" />
           </tr>
         </thead>
@@ -379,6 +383,11 @@ function LotRows({ item, lots, problems, onChange }: { item: MaterialOption; lot
                 />
               </td>
               <td className="text-foreground px-2 py-1.5 text-right font-semibold tabular-nums">{money(Number(l.qty || 0) * Number(l.rate || 0))}</td>
+              {item.tracked && (
+                <td className="px-2 py-1.5">
+                  <PackedAs item={item} lot={l} row={i + 1} onChange={(pack) => set(l.key, { pack })} />
+                </td>
+              )}
               <td className="py-1.5">
                 <button type="button" className="btn-ghost p-1" disabled={lots.length === 1} onClick={() => onChange(lots.filter((x) => x.key !== l.key))} aria-label={`Remove row ${i + 1} of ${item.code}`}>
                   <Trash2 size={14} />
@@ -392,6 +401,49 @@ function LotRows({ item, lots, problems, onChange }: { item: MaterialOption; lot
         <Plus size={12} /> Add another lot or roll of {item.code}
       </button>
     </div>
+  )
+}
+
+/** A lot's "Packed as": what its stickers will be, and the window to change it. */
+function PackedAs({ item, lot, row, onChange }: { item: MaterialOption; lot: Lot; row: number; onChange: (pack: PackValue | null) => void }) {
+  const [open, setOpen] = useState(false)
+  const qty = Number(lot.qty || 0)
+  const unit = item.unit ?? ''
+  const value = lot.pack ?? usualPack(item, lot)
+  const plan = planOf(value, qty, unit, item.decimals)
+  return (
+    <>
+      <button
+        type="button"
+        className={cn('form-input flex h-9 w-full items-center justify-between gap-1 text-left text-sm', plan.problem && qty > 0 && 'border-amber-500')}
+        onClick={() => setOpen(true)}
+        disabled={!(qty > 0)}
+        title={qty > 0 ? 'How it is packed: change it' : 'Enter the quantity first'}
+        aria-label={`Packed as, ${item.code} row ${row}`}
+      >
+        <span className="truncate">{qty > 0 ? packText(plan, value.type, unit) : '—'}</span>
+        <span className="text-muted-foreground shrink-0 text-[10px]">{lot.pack ? 'Change' : 'Usual'}</span>
+      </button>
+      {open && (
+        <PackagingDialog
+          title="How is it packed?"
+          subtitle={`${item.code} ${item.name}${lot.lot.trim() ? ` · lot ${lot.lot.trim()}` : ''} · ${num(qty)} ${unit}`}
+          initial={value}
+          total={qty}
+          unit={unit}
+          places={item.decimals}
+          noteLabel="Roll no. / reference (optional)"
+          countForLater
+          laterText="The stock is counted without stickers. Make them later from Opening Stock → the line's Stickers, when the sizes are known."
+          saveLabel={() => 'Use this'}
+          onSave={(_, v) => {
+            onChange(v)
+            setOpen(false)
+          }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
   )
 }
 
@@ -440,6 +492,18 @@ function Empty({ icon: Icon, text }: { icon: typeof Package; text: string }) {
       {text}
     </div>
   )
+}
+
+/**
+ * A lot's stickers when nothing is said, as the save makes them: one for a
+ * lot with its own barcode, else full packages of the item's usual size, else
+ * none until its sizes are known — never sizes made up.
+ */
+export function usualPack(item: MaterialOption, lot: Pick<Lot, 'bundle'>): PackValue {
+  const type = item.packType ?? 'OTHER'
+  if (lot.bundle.trim()) return newPack(type, 'ONE')
+  if (item.perPack) return { ...newPack(type, 'EACH'), each: String(item.perPack) }
+  return newPack(type, 'LATER')
 }
 
 const totalsText = (pieces: number, value: number) => (pieces ? `${num(pieces)} pcs · ${money(value)}` : '')

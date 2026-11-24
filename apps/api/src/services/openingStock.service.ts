@@ -1,12 +1,12 @@
 import ExcelJS from 'exceljs'
-import type { Prisma } from '@prisma/client'
+import type { PackType, Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { fitsPlaces, groupOfType, ITEM_GROUP_LABEL, placesMessage, qtyPlaces, type ItemGroup } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 import { addDropdowns, addHowToSheet, addTemplateSheet, readSheetRows, type SheetColumn } from '../lib/sheet'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { recordMovement } from './stock.service'
-import { createPackages, packageRules, stickerDefaultsFrom } from './package.service'
+import { createPackages, packageRules, stickerDefaultsFrom, suggestQtys } from './package.service'
 import { floorFor } from './processFloor.service'
 import { withGeneratedCode } from '../lib/masterCode'
 import { trackedRoutings } from './styleTrack.service'
@@ -34,6 +34,8 @@ export type OsKey =
   | 'colour' | 'size' | 'lot' | 'bundle' | 'uom' | 'qty' | 'rate' | 'value' | 'status' | 'remarks'
   /** Only on the Semi Finished Goods template: checked against the process. */
   | 'department'
+  /** Raw Materials template, optional: how the row's stock is packed. */
+  | 'packType' | 'packCount' | 'packEach' | 'packQtys' | 'packRefs'
 
 /**
  * The three kinds opening stock is entered as, each with its own screen and
@@ -104,9 +106,136 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'qty', head: 'Opening Quantity', width: 15 },
     { key: 'rate', head: 'Unit Rate', width: 12 },
     { key: 'location', head: 'Location', width: 22, list: 'stores', note: 'The store it is in.' },
+    { key: 'packType', head: 'Package Type', width: 12, list: 'packTypes', note: 'Optional: Roll, Box, Carton, Bag, Bundle, Packet or Other. Empty: the item’s usual.' },
+    { key: 'packCount', head: 'Package Count', width: 12, note: 'Optional: how many packages. With no sizes, the stock comes in and the stickers wait until the sizes are known — equal sizes are never assumed.' },
+    { key: 'packEach', head: 'Qty per Package', width: 13, note: 'Optional: what one full package holds. 1,200 at 500 is 500 + 500 + 200.' },
+    { key: 'packQtys', head: 'Package Quantities', width: 24, note: 'Optional: each package, separated by commas: 200, 250, 150, 180, 220. Less than the row leaves the rest without stickers.' },
+    { key: 'packRefs', head: 'Package References', width: 22, note: "Optional: each package's own number (the supplier's roll no.), in the same order, separated by commas." },
     { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'OK, Hold or Rejected. Empty is OK.' },
     { key: 'remarks', head: 'Remarks', width: 24 },
   ],
+}
+
+/**
+ * How a row's stock goes on stickers, as given on the screen or the sheet:
+ * each package's quantity, or what one full package holds, or only how many
+ * there are (their sizes to give later) — or that it waits. Nothing given
+ * follows the row's own barcode (one package), else the item's own qty per
+ * sticker; with neither, the stock waits without stickers rather than one
+ * made-up sticker for the lot.
+ */
+export interface PackInput {
+  type?: PackType | null
+  qtys?: number[] | null
+  each?: number | null
+  count?: number | null
+  later?: boolean | null
+  refs?: Array<string | null> | null
+}
+/** What will be made for a row: its stickers' quantities, or none yet. */
+interface PackPlan {
+  packType: PackType
+  qtys: number[]
+  /** Each package's own reference (the supplier's roll no.), in the order of `qtys`. */
+  refs: Array<string | null>
+  later: boolean
+  /** How many packages there are, when their sizes are to be given later. */
+  count: number | null
+  said: string
+}
+const PACK_WORDS: Array<[RegExp, PackType]> = [
+  [/^(roll|rolls|than|thaan|thaans|reel|reels)$/, 'ROLL'],
+  [/^(box|boxes|bx)$/, 'BOX'],
+  [/^(carton|cartons|ctn|ctns)$/, 'CARTON'],
+  [/^(bag|bags|sack|sacks)$/, 'BAG'],
+  [/^(bundle|bundles|bdl|bdls)$/, 'BUNDLE'],
+  [/^(packet|packets|pkt|pkts|pack|packs)$/, 'PACKET'],
+  [/^(other|cone|cones|bale|bales|spool|spools|drum|drums)$/, 'OTHER'],
+]
+const PACK_PLURAL: Record<PackType, [string, string]> = {
+  ROLL: ['roll', 'rolls'],
+  BOX: ['box', 'boxes'],
+  CARTON: ['carton', 'cartons'],
+  BAG: ['bag', 'bags'],
+  BUNDLE: ['bundle', 'bundles'],
+  PACKET: ['packet', 'packets'],
+  OTHER: ['package', 'packages'],
+}
+const packs = (n: number, t: PackType) => `${n} ${PACK_PLURAL[t][n === 1 ? 0 : 1]}`
+
+/** The sheet's packing columns as a plan's input; problems for what cannot be read. */
+function packFromRow(raw: Raw, problems: string[], L: (k: OsKey) => string): PackInput | null {
+  const text = (k: OsKey) => (raw[k] ?? '').trim()
+  if (!['packType', 'packCount', 'packEach', 'packQtys', 'packRefs'].some((k) => text(k as OsKey))) return null
+  const out: PackInput = {}
+  if (text('packType')) {
+    const word = low(text('packType')).replace(/[^a-z]/g, '')
+    const hit = PACK_WORDS.find(([re]) => re.test(word))?.[1] ?? (['ROLL', 'BOX', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER'] as PackType[]).find((t) => t.toLowerCase() === word)
+    if (hit) out.type = hit
+    else problems.push(`${L('packType')} "${text('packType')}" is not one of: Roll, Box, Carton, Bag, Bundle, Packet, Other.`)
+  }
+  if (text('packCount')) {
+    const n = parseNum(text('packCount'))
+    if (n === null || Number.isNaN(n) || !(n >= 1) || !Number.isInteger(n)) problems.push(`${L('packCount')} "${text('packCount')}" is not a whole number of packages.`)
+    else out.count = n
+  }
+  if (text('packEach')) {
+    const n = parseNum(text('packEach'))
+    if (n === null || Number.isNaN(n) || !(n > 0)) problems.push(`${L('packEach')} "${text('packEach')}" is not a quantity.`)
+    else out.each = n
+  }
+  if (text('packQtys')) {
+    const parts = text('packQtys').split(/[,;+\s]+/).filter(Boolean)
+    const nums = parts.map((t) => parseNum(t))
+    if (nums.some((n) => n === null || Number.isNaN(n) || !(n! > 0))) problems.push(`${L('packQtys')} "${text('packQtys')}": give each package's quantity, separated by commas.`)
+    else out.qtys = nums as number[]
+  }
+  if (text('packRefs')) out.refs = text('packRefs').split(/[,;]+/).map((t) => t.trim() || null)
+  return out
+}
+
+/** A row's stickers worked out: what the input says, else the row's barcode, else the item's qty per sticker, else none yet. */
+function planPacks(
+  input: PackInput | null,
+  ctx: { qty: number; unit: string; places: number; packType: PackType; perPack: number | null; bundle: string | null; L: (k: OsKey) => string },
+  problems: string[],
+): PackPlan {
+  const type = input?.type ?? ctx.packType
+  const fits = (q: number) => fitsPlaces(q, ctx.places)
+  const later = (count: number | null, why: string): PackPlan => ({ packType: type, qtys: [], refs: [], later: true, count, said: why })
+  const made = (qtys: number[], refs: Array<string | null>): PackPlan => {
+    const left = round3(ctx.qty - qtys.reduce((t, q) => t + q, 0))
+    const same = qtys.every((q) => Math.abs(q - qtys[0]) < 0.0005)
+    const each = qtys.length === 1 ? `${packs(1, type)} of ${qtys[0]} ${ctx.unit}` : same ? `${packs(qtys.length, type)} × ${qtys[0]} ${ctx.unit}` : `${packs(qtys.length, type)}: ${qtys.join(' + ')} ${ctx.unit}`
+    return { packType: type, qtys, refs, later: false, count: qtys.length, said: left > 0.0005 ? `${each}; ${left} ${ctx.unit} without a sticker for now` : each }
+  }
+  const refsFor = (n: number) => {
+    const refs = input?.refs ?? []
+    if (refs.length && refs.length !== n) problems.push(`${ctx.L('packRefs')}: ${refs.length} given for ${packs(n, type)}.`)
+    return Array.from({ length: n }, (_, i) => refs[i] ?? null)
+  }
+  if (input?.later) return later(input.count ?? null, input.count ? `Without stickers for now: ${packs(input.count, type)}, sizes to give later` : 'Without stickers for now')
+  if (input?.qtys?.length) {
+    const qtys = input.qtys.map(round3)
+    const sum = round3(qtys.reduce((t, q) => t + q, 0))
+    if (sum > ctx.qty + 0.0005) problems.push(`${ctx.L('packQtys')} add up to ${sum} ${ctx.unit}, more than the ${ctx.qty} ${ctx.unit} on the row.`)
+    if (input.count && input.count !== qtys.length) problems.push(`${ctx.L('packCount')} says ${input.count}, but ${qtys.length} quantities are given.`)
+    const bad = qtys.find((q) => !fits(q))
+    if (bad !== undefined) problems.push(`A package of ${bad} ${ctx.unit}: ${placesMessage(ctx.places)}`)
+    return made(qtys, refsFor(qtys.length))
+  }
+  if (input?.each) {
+    const qtys = suggestQtys(ctx.qty, input.each)
+    if (input.count && input.count !== qtys.length) problems.push(`${ctx.qty} ${ctx.unit} at ${input.each} a package is ${packs(qtys.length, type)}, not ${input.count}.`)
+    return made(qtys, refsFor(qtys.length))
+  }
+  if (input?.count) {
+    if (input.count === 1) return made([ctx.qty], refsFor(1))
+    return later(input.count, `Without stickers for now: ${packs(input.count, type)}, sizes to give later`)
+  }
+  if (ctx.bundle) return made([ctx.qty], [null])
+  if (ctx.perPack) return made(suggestQtys(ctx.qty, ctx.perPack), Array.from({ length: suggestQtys(ctx.qty, ctx.perPack).length }, () => null))
+  return later(null, 'Without stickers for now: give its packages when you know them')
 }
 const TYPE_SHEET: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
 
@@ -203,6 +332,10 @@ export interface OsRowPlan {
   rate: number | null
   value: number | null
   status: string
+  /** How its stock goes on stickers, in words; null for a category not labelled by package. */
+  packing: string | null
+  /** Stickers to be made for it now. */
+  stickers: number
 }
 
 /** What posting needs for a row the check passed. */
@@ -223,6 +356,8 @@ interface Ready {
   lotNo: string | null
   bundleNo: string | null
   sticker: boolean
+  /** Its stickers: null for stock not labelled by package (garments by size, untracked categories). */
+  pack: PackPlan | null
   raw: Raw
 }
 type Resolved = { plan: OsRowPlan; ready?: Ready }
@@ -274,7 +409,11 @@ const HOW_TO: Record<OsKind, string[]> = {
     'Item Code must be in Items & Products; Item Name may be left empty.',
     "UOM is the item's own unit: checked, never converted, so give the quantity in it.",
     'Location: the store it is in, as in Masters → Warehouses.',
-    'A sticker is made for each lot or roll where the category is tracked.',
+    'Stickers (where the category is tracked): the five Package columns say how the row is packed — all optional.',
+    'Package Quantities lists each package: 200, 250, 150 makes three stickers. Less than the row leaves the rest without stickers for now.',
+    'Qty per Package makes full packages and one for the rest: 1,200 at 500 is 500 + 500 + 200.',
+    'Package Count alone: the stock comes in and its stickers wait until the sizes are known (Stickers → Make stickers on the line). Equal sizes are never assumed.',
+    "Nothing given: a row with its own Bundle / Barcode Number is one package; otherwise the item's usual package size, if it has one; else the stickers wait.",
     'Stock Status: OK, Hold or Rejected. Empty is OK.',
   ],
 }
@@ -301,6 +440,7 @@ async function buildKindTemplate(kind: OsKind): Promise<Buffer> {
     materials: materials.map((c) => c.name),
     units: m.units.map((u) => u.symbol).sort(),
     statuses: kind === 'RM' ? ['OK', 'Hold', 'Rejected'] : Object.values(STATUS_LABEL),
+    packTypes: ['Roll', 'Box', 'Carton', 'Bag', 'Bundle', 'Packet', 'Other'],
   }
   const used = new Set(columns.map((c) => c.list).filter(Boolean) as string[])
   addDropdowns(wb, sheet, columns, Object.fromEntries(Object.entries(all).filter(([k]) => used.has(k))), MAX_ROWS)
@@ -381,13 +521,14 @@ export const labelsOf = (kind?: OsKind): Partial<Record<OsKey, string>> =>
  * Lines entered by hand on the screen, as sheet rows: the same columns, so
  * they are checked and brought in exactly as an uploaded sheet is.
  */
-export function rowsFromEntry(lines: Array<Record<string, unknown>>): Array<{ row: number; raw: Raw }> {
+export function rowsFromEntry(lines: Array<Record<string, unknown>>): Array<{ row: number; raw: Raw; pack?: PackInput | null }> {
   const keys: OsKey[] = [...OS_COLUMNS.map((c) => c.key), 'department']
   return lines.map((l, i) => ({
     row: i + 1,
     raw: Object.fromEntries(
       keys.map((k) => [k, l[k] === null || l[k] === undefined ? '' : String(l[k]).trim()]),
     ) as Raw,
+    pack: (l.pack as PackInput | null | undefined) ?? null,
   }))
 }
 
@@ -399,11 +540,12 @@ export function rowsFromEntry(lines: Array<Record<string, unknown>>): Array<{ ro
  * template (or the screen) does.
  */
 export async function planImport(
-  rows: Array<{ row: number; raw: Raw }>,
+  rows: Array<{ row: number; raw: Raw; pack?: PackInput | null }>,
   opts: { rowWord?: 'row' | 'line'; kind?: OsKind; labels?: Partial<Record<OsKey, string>> } = {},
 ): Promise<Resolved[]> {
   const m = await loadMasters()
   const L = (k: OsKey) => opts.labels?.[k] ?? OS_COLUMNS.find((c) => c.key === k)?.head ?? k
+  const ruleOf = await packageRules(prisma)
   // Only the 19-column sheet has an Opening Value column.
   const hasValue = !opts.kind && opts.rowWord !== 'line'
   const departmentById = new Map(m.departments.map((d) => [d.id, d]))
@@ -471,13 +613,13 @@ export async function planImport(
   const endOfToday = Date.UTC(india.getUTCFullYear(), india.getUTCMonth(), india.getUTCDate() + 1) - 330 * 60 * 1000
 
   const out: Resolved[] = []
-  for (const { row, raw } of rows) {
+  for (const { row, raw, pack: packGiven } of rows) {
     const problems: string[] = []
     const plan: OsRowPlan = {
       row, skipped: false, problems, group: null, stage: null, process: (raw.process ?? '').trim() || 'Store', location: (raw.location ?? '').trim(),
       newFloor: false, item: null, size: (raw.size ?? '').trim() || null, order: (raw.order ?? '').trim() || null,
       lot: (raw.lot ?? '').trim() || null, bundle: (raw.bundle ?? '').trim() || null, qty: null, unit: null,
-      rate: null, value: null, status: STATUS_LABEL.OK,
+      rate: null, value: null, status: STATUS_LABEL.OK, packing: null, stickers: 0,
     }
     if (Object.values(raw).every((v) => !(v ?? '').trim())) {
       plan.skipped = true
@@ -693,6 +835,22 @@ export async function planImport(
       if (status === 'OK' && plan.rate === 0) problems.push(`${L('rate')} is nought: give the rate the stock is valued at.`)
     }
 
+    // Its stickers: raw materials of a category labelled by package, kept without sizes.
+    let pack: PackPlan | null = null
+    const packInput = packGiven ?? packFromRow(raw, problems, L)
+    if (item && plan.qty && plan.qty > 0 && !sizeId && status !== 'B_GRADE') {
+      const defaults = stickerDefaultsFrom(item, ruleOf(item.categoryId))
+      if (defaults.tracked) {
+        pack = planPacks(
+          packInput,
+          { qty: plan.qty, unit: item.uom?.symbol ?? '', places: qtyPlaces(item), packType: defaults.packType, perPack: defaults.perPack, bundle: plan.bundle, L },
+          problems,
+        )
+        plan.packing = pack.said
+        plan.stickers = pack.qtys.length
+      } else if (packInput) problems.push(`${item.code} is filed under ${item.category?.name}, which is not labelled by package: leave its package columns empty.`)
+    }
+
     const ready =
       !problems.length && item && date instanceof Date && status && plan.qty !== null && plan.rate !== null && (warehouseId || floorOf)
         ? ({
@@ -712,6 +870,7 @@ export async function planImport(
             lotNo: plan.lot,
             bundleNo: plan.bundle,
             sticker: false,
+            pack,
             raw,
           } satisfies Ready)
         : undefined
@@ -835,6 +994,9 @@ export function summarise(resolved: Resolved[]) {
     problems: resolved.filter((r) => r.plan.problems.length).length,
     value: round2(lines.reduce((s, r) => s + (r.plan.value ?? 0), 0)),
     floorsToMake: [...new Set(lines.filter((r) => r.plan.newFloor).map((r) => r.plan.location))],
+    /** Stickers to be made, and the rows whose stock waits without stickers for now. */
+    stickers: lines.reduce((t, r) => t + (r.ready?.pack?.qtys.length ?? 0), 0),
+    waiting: lines.filter((r) => r.ready?.pack?.later).length,
     byGroup: [...byGroup].map(([group, g]) => ({ group, label: ITEM_GROUP_LABEL[group as ItemGroup] ?? group, ...g })),
     byPlace: [...byPlace.values()],
   }
@@ -934,32 +1096,9 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
           stickers: 'caller',
         })
 
-        // One labelled package per row (a roll, a lot, a box), where the
-        // category is labelled by package. Garments by size are not.
-        let packageId: string | null = null
         const item = itemById.get(d.itemId)!
-        const defaults = stickerDefaultsFrom(item, ruleOf(item.categoryId))
-        if (defaults.tracked && !d.sizeId && d.grade !== 'B') {
-          const [pkg] = await createPackages(tx, {
-            spot: { itemId: d.itemId, warehouseId: d.warehouseId!, ownership: 'OWNED', ownerCustomerId: null },
-            packType: defaults.packType,
-            qtys: [d.qty],
-            lotNo: d.lotNo,
-            notes: d.bundleNo ? `Barcode ${d.bundleNo}`.slice(0, 120) : null,
-            sourceType: 'OPENING',
-            sourceId: doc.id,
-            sourceRef: number,
-            userId: opts.userId,
-            unit: item.uom?.symbol ?? '',
-            itemName: item.name,
-            grade: d.grade,
-          })
-          packageId = pkg?.id ?? null
-          if (packageId) stickers += 1
-        }
-
         const raw = d.raw
-        await tx.openingStockLine.create({
+        const line = await tx.openingStockLine.create({
           data: {
             openingStockId: doc.id,
             rowNo: r.plan.row,
@@ -987,10 +1126,34 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
             status: d.status,
             grade: d.grade,
             remarks: (raw.remarks ?? '').trim() || null,
-            packageId,
+            packType: d.pack?.packType ?? null,
+            packCount: d.pack?.count ?? null,
             dedupeKey: dedupeKey(d, d.warehouseId!),
           },
         })
+
+        // Its stickers, as planned, each naming the line it was made for; a
+        // line waiting for its sizes has none yet and its stock stays loose.
+        if (d.pack && d.pack.qtys.length) {
+          const pkgs = await createPackages(tx, {
+            spot: { itemId: d.itemId, warehouseId: d.warehouseId!, ownership: 'OWNED', ownerCustomerId: null },
+            packType: d.pack.packType,
+            qtys: d.pack.qtys,
+            notesEach: d.pack.refs.map((ref) => (ref ? `Ref ${ref}`.slice(0, 120) : null)),
+            lotNo: d.lotNo,
+            notes: d.bundleNo ? `Barcode ${d.bundleNo}`.slice(0, 120) : null,
+            sourceType: 'OPENING',
+            sourceId: doc.id,
+            sourceRef: number,
+            sourceLineId: line.id,
+            userId: opts.userId,
+            unit: item.uom?.symbol ?? '',
+            itemName: item.name,
+            grade: d.grade,
+          })
+          stickers += pkgs.length
+          if (pkgs[0]) await tx.openingStockLine.update({ where: { id: line.id }, data: { packageId: pkgs[0].id } })
+        }
       }
       return { id: doc.id, number, lines: rows.length, stickers, floorsMade: made }
     },
@@ -1113,3 +1276,96 @@ export async function errorReport(rows: Array<{ row: number; raw: Raw }>, resolv
   ])
   return Buffer.from(await wb.xlsx.writeBuffer())
 }
+
+/** The names the stickers window gives its boxes, for a line's problems. */
+const PACK_LABELS: Partial<Record<OsKey, string>> = { packQtys: 'The packages', packCount: 'How many', packRefs: 'The references', packEach: 'Each holds' }
+
+/**
+ * Stickers made for an opening line later — its sizes known now, or more of
+ * its stock packed. Never more than the line brought in and is not yet on its
+ * stickers, nor more than the store holds without one (stickered stock is
+ * never stickered twice), so making them later never adds stock.
+ */
+export async function packLine(lineId: string, input: PackInput, userId: string | null) {
+  return prisma.$transaction(async (tx) => {
+    const line = await tx.openingStockLine.findUnique({
+      where: { id: lineId },
+      include: {
+        openingStock: { select: { id: true, number: true } },
+        item: {
+          select: {
+            id: true, code: true, name: true, categoryId: true, packType: true, packQty: true, decimalPlaces: true,
+            uom: { select: { symbol: true, name: true, decimalPlaces: true } },
+          },
+        },
+      },
+    })
+    if (!line) throw new AppError('That opening stock line does not exist.', 404, 'NOT_FOUND')
+    if (line.sizeId) throw new AppError('Stock kept size by size is not put on package stickers.', 400, 'SIZED')
+    const defaults = stickerDefaultsFrom(line.item, (await packageRules(tx))(line.item.categoryId))
+    if (!defaults.tracked) throw new AppError(`${line.item.code} is not labelled by package.`, 400, 'NOT_TRACKED')
+    const done = await tx.stockPackage.aggregate({ where: stickeredFrom([line.id]), _sum: { initialQty: true } })
+    const unit = line.item.uom?.symbol ?? ''
+    const left = round3(Number(line.qty) - Number(done._sum.initialQty ?? 0))
+    if (!(left > 0.0005)) throw new AppError(`All ${Number(line.qty)} ${unit} of this line is already on stickers.`, 400, 'ALL_PACKED')
+    const problems: string[] = []
+    const plan = planPacks(
+      { ...input, later: false },
+      { qty: left, unit, places: qtyPlaces(line.item), packType: defaults.packType, perPack: defaults.perPack, bundle: null, L: (k) => PACK_LABELS[k] ?? k },
+      problems,
+    )
+    if (problems.length) throw new AppError(problems.join(' '), 400, 'BAD_PACKAGES')
+    if (!plan.qtys.length) throw new AppError(`Give the packages for the ${left} ${unit} not yet on stickers.`, 400, 'NO_PACKAGES')
+    const pkgs = await createPackages(tx, {
+      spot: { itemId: line.itemId, warehouseId: line.warehouseId, ownership: 'OWNED', ownerCustomerId: null },
+      packType: plan.packType,
+      qtys: plan.qtys,
+      notesEach: plan.refs.map((ref) => (ref ? `Ref ${ref}`.slice(0, 120) : null)),
+      lotNo: line.lotNo,
+      notes: line.bundleNo ? `Barcode ${line.bundleNo}`.slice(0, 120) : null,
+      sourceType: 'OPENING',
+      sourceId: line.openingStock.id,
+      sourceRef: line.openingStock.number,
+      sourceLineId: line.id,
+      userId,
+      unit,
+      itemName: line.item.name,
+      grade: line.grade,
+    })
+    await tx.openingStockLine.update({ where: { id: line.id }, data: { packageId: line.packageId ?? pkgs[0].id, packType: plan.packType } })
+    const after = round3(left - plan.qtys.reduce((t, q) => t + q, 0))
+    return { ids: pkgs.map((p) => p.id), said: plan.said, number: line.openingStock.number, left: after, unit }
+  })
+}
+
+/** Each opening line's stickers: how many, what they hold, and what of it still waits. */
+export async function linesPacking(lines: Array<{ id: string; qty: unknown; sizeId: string | null; itemId: string; item: { categoryId: string; packType: PackType | null; packQty: unknown; uom: { symbol: string; name?: string | null } | null } }>) {
+  if (!lines.length) return new Map<string, { tracked: boolean; made: number; qty: number; waiting: number }>()
+  const ids = lines.map((l) => l.id)
+  const [packed, inUse, ruleOf] = await Promise.all([
+    prisma.stockPackage.groupBy({ by: ['sourceLineId'], where: stickeredFrom(ids), _sum: { initialQty: true } }),
+    prisma.stockPackage.groupBy({ by: ['sourceLineId'], where: { sourceLineId: { in: ids }, parentId: null, status: { notIn: ['VOID', 'MERGED'] } }, _count: { _all: true } }),
+    packageRules(prisma),
+  ])
+  const qtyOf = new Map(packed.map((p) => [p.sourceLineId as string, Number(p._sum.initialQty ?? 0)]))
+  const madeOf = new Map(inUse.map((p) => [p.sourceLineId as string, p._count._all]))
+  return new Map(
+    lines.map((l) => {
+      const tracked = !l.sizeId && stickerDefaultsFrom({ ...l.item, packQty: l.item.packQty as number | null }, ruleOf(l.item.categoryId)).tracked
+      const qty = round3(qtyOf.get(l.id) ?? 0)
+      return [l.id, { tracked, made: madeOf.get(l.id) ?? 0, qty, waiting: tracked ? Math.max(0, round3(Number(l.qty) - qty)) : 0 }]
+    }),
+  )
+}
+
+/**
+ * The stickers a line's stock first went on: withdrawn ones left out, and
+ * one made by putting others together too — the ones it replaced still
+ * count, so its stock is counted once.
+ */
+const stickeredFrom = (lineIds: string[]): Prisma.StockPackageWhereInput => ({
+  sourceLineId: { in: lineIds },
+  parentId: null,
+  status: { not: 'VOID' },
+  mergedFrom: { none: {} },
+})

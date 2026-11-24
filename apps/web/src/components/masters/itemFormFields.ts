@@ -224,6 +224,25 @@ export const itemFormFields: FormField[] = [
     showIf: (v) => v.type !== 'FINISHED_GOOD',
     help: 'pcs, m, gross… Empty means pcs',
   },
+  // Two stickers on every carton (one each side): copies of each of its stickers.
+  {
+    name: 'labelCopies',
+    label: 'Sticker Copies',
+    type: 'select',
+    section: 'Costing & Stock',
+    noneLabel: 'As Sticker settings say',
+    options: [
+      { value: '1', label: 'One' },
+      { value: '2', label: 'Two' },
+      { value: '3', label: 'Three' },
+      { value: '4', label: 'Four' },
+      { value: '5', label: 'Five' },
+    ],
+    nullWhenEmpty: true,
+    initial: (r) => (r.labelCopies == null ? '' : String(r.labelCopies)),
+    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    help: 'How many copies of each of its stickers print',
+  },
   // Whether 2.5 of it can be asked for, issued or bought; normally its unit decides.
   {
     name: 'decimalPlaces',

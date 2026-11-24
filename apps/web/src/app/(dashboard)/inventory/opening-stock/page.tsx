@@ -1,6 +1,6 @@
 'use client'
 
-import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createContext, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import {
@@ -16,6 +16,7 @@ import {
   ListChecks,
   Package,
   PackagePlus,
+  Printer,
   RefreshCw,
   Search,
   Shirt,
@@ -25,6 +26,9 @@ import {
 import { api, ApiError, can } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { MultiFilter, type FilterOption } from '@/components/ui/MultiFilter'
+import { useQtyRules } from '@/lib/qtyRules'
+import { newPack, PackagingDialog, sizesText, type PackValue } from '@/components/packages/PackagingEditor'
+import { openPrintTab, printLabels, qtyText } from '@/components/packages/packageTypes'
 
 /*
  * Inventory → Stock → Opening Stock: what the mill had on the day it started
@@ -60,16 +64,23 @@ interface Line {
   value: string | number
   status: string
   remarks: string | null
+  /** How many packages it came in, when the sizes were to follow. */
+  packCount: number | null
+  packType: string | null
   openingStock: { id: string; number: string; fileName: string | null }
   item: {
     code: string
     name: string
     type: string
     color: string | null
+    packType: string | null
+    packQty: string | number | null
     uom: { symbol: string } | null
     style: { code: string } | null
     category: { name: string } | null
   }
+  /** Its stickers: none for stock not labelled by package. */
+  stickers: { tracked: boolean; made: number; qty: number; waiting: number } | null
 }
 interface LinesData {
   lines: Line[]
@@ -170,6 +181,7 @@ const COLUMNS: Array<{ head: string; right?: boolean; pin?: 'style' | 'code' | '
       return <span className={s.cls}>{s.label}</span>
     },
   },
+  { head: 'Stickers', cell: (l) => <StickersCell line={l} /> },
   { head: 'Order No.', cell: (l) => l.orderNo ?? muted },
   { head: 'Item Category', cell: (l) => l.categoryText ?? l.item.category?.name ?? muted },
   { head: 'Fabric / Material', cell: (l) => l.fabricText ?? muted },
@@ -195,6 +207,109 @@ const PIN = {
 }
 
 const KIND_NAME: Record<Kind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
+
+/** What a line's Stickers cell can do on the page: load the lines again, say what happened. */
+const LineActions = createContext<{ reload: () => void; say: (message: string) => void }>({ reload: () => undefined, say: () => undefined })
+
+/**
+ * A line's stickers: how many it has, and what of it still waits for its
+ * sizes — "Make stickers" for that, print for the ones there are.
+ */
+function StickersCell({ line }: { line: Line }) {
+  const { reload, say } = useContext(LineActions)
+  const qtyRules = useQtyRules()
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const s = line.stickers
+  if (!s?.tracked) return muted
+  const unit = line.item.uom?.symbol ?? line.uomText ?? ''
+  const type = line.packType ?? line.item.packType ?? 'OTHER'
+  const perPack = Number(line.item.packQty) || 0
+  // A count given, sizes to follow: a row for each package, to be typed in. Never equal sizes assumed.
+  const initial: PackValue =
+    line.packCount && line.packCount > 1 && !s.made
+      ? { ...newPack(type, 'LIST'), rows: Array.from({ length: Math.min(line.packCount, 1000) }, () => ({ qty: '', note: '' })) }
+      : perPack
+        ? { ...newPack(type, 'EACH'), each: String(perPack) }
+        : newPack(type, 'ONE')
+
+  const print = async () => {
+    // Opened on the click itself, so the browser does not block it as a pop-up.
+    const tab = openPrintTab()
+    try {
+      const got = (await api.get<{ data: { ids: string[] } }>(`/inventory/opening-stock/lines/${line.id}/packages`)).data.ids
+      if (!got.length) {
+        tab?.close()
+        return say('None of its stickers is in stock any more: nothing to print.')
+      }
+      printLabels(got, tab)
+    } catch (err) {
+      tab?.close()
+      say(err instanceof ApiError ? err.message : 'Could not open the stickers.')
+    }
+  }
+  const make = async (qtys: number[], notes: string[], value: PackValue, andPrint: boolean) => {
+    const tab = andPrint ? openPrintTab() : null
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await api.post<{ message: string; data: { ids: string[] } }>(`/inventory/opening-stock/lines/${line.id}/packages`, {
+        pack: { type: value.type, qtys, ...(notes.some(Boolean) ? { refs: notes.map((n) => n || null) } : {}) },
+      })
+      setOpen(false)
+      say(res.message)
+      if (andPrint) printLabels(res.data.ids, tab)
+      reload()
+    } catch (err) {
+      tab?.close()
+      setError(err instanceof ApiError ? err.message : 'Could not make the stickers.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <span className="flex items-center gap-2">
+      {s.made > 0 && (
+        <button type="button" className="text-foreground inline-flex items-center gap-1 hover:underline" onClick={() => void print()} title="Print its stickers" aria-label={`Print the stickers of ${line.item.code}`}>
+          <Printer size={12} className="text-muted-foreground" /> {s.made} {s.made === 1 ? 'sticker' : 'stickers'}
+        </button>
+      )}
+      {s.waiting > 0 && (
+        <>
+          <span className="warn-text" title="Counted in stock, not yet on stickers">
+            {qtyText(s.waiting)} {unit} without
+            {line.packCount && !s.made ? ` · ${line.packCount} ${line.packCount === 1 ? 'package' : 'packages'}` : ''}
+          </span>
+          {can('inventory', 'create') && (
+            <button type="button" className="btn-secondary h-6 px-2 text-[11px]" onClick={() => setOpen(true)}>
+              Make stickers
+            </button>
+          )}
+        </>
+      )}
+      {open && (
+        <PackagingDialog
+          title="Make stickers"
+          subtitle={`${line.item.code} ${line.description ?? line.item.name}${line.lotNo ? ` · lot ${line.lotNo}` : ''} · ${qtyText(s.waiting)} ${unit} without a sticker${line.packCount ? ` · came in ${line.packCount} packages` : ''}`}
+          initial={initial}
+          total={s.waiting}
+          unit={unit}
+          places={qtyRules.places({ uom: { symbol: unit } })}
+          allowLater={false}
+          noteLabel="Roll no. / reference (optional)"
+          busy={busy}
+          error={error}
+          saveLabel={(plan) => (plan.qtys.length ? `Make ${plan.qtys.length} ${plan.qtys.length === 1 ? 'sticker' : 'stickers'}` : 'Make stickers')}
+          onSave={(plan, v) => void make(plan.qtys, plan.notes, v, false)}
+          onSaveAndPrint={(plan, v) => void make(plan.qtys, plan.notes, v, true)}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </span>
+  )
+}
 
 export default function OpeningStockPage() {
   return (
@@ -254,6 +369,7 @@ function OpeningStock() {
       setLoading(false)
     }
   }, [query])
+  const lineActions = useMemo(() => ({ reload: () => void load(), say: (m: string) => setNotice(m) }), [load])
   const wanted = params.get('entry')
   const loadLists = useCallback(async () => {
     try {
@@ -523,6 +639,7 @@ function OpeningStock() {
                           ))}
                         </tr>
                       </thead>
+                      <LineActions.Provider value={lineActions}>
                       <tbody>
                         {(data?.lines ?? []).map((l) => (
                           <tr key={l.id} className="group" data-line={l.id}>
@@ -541,6 +658,7 @@ function OpeningStock() {
                           </tr>
                         ))}
                       </tbody>
+                      </LineActions.Provider>
                     </table>
                   </div>
                 )}

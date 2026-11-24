@@ -823,6 +823,9 @@ model Item {
   /// this only says what is inside, so a sticker can read "1 box · 144 pcs".
   contentQty   Decimal?     @db.Decimal(12, 3)
   contentUnit  String?
+  /// How many copies of each of its stickers to print, when not the package
+  /// type's usual number (a roll labelled at both ends: 2).
+  labelCopies  Int?
   /// This item's own places after the point, when it differs from its unit's
   /// (rolls are measured in parts, but one item's rolls may only go out
   /// whole). Empty means the unit's (UOM.decimalPlaces).
@@ -3008,8 +3011,14 @@ model OpeningStockLine {
   grade          String
   remarks        String?
   /// The sticker made for this row (a roll or a box), when its category is
-  /// labelled by package.
+  /// labelled by package. A row packed in several has its stickers found by
+  /// their sourceLineId.
   packageId      String?
+  /// How the row said its stock is packed: the package type, and how many
+  /// packages there are when their sizes were left to give later — the
+  /// stock comes in either way, its stickers made when the sizes are known.
+  packType       PackType?
+  packCount      Int?
   /// Item, location, size, grade, order, lot and bundle in one: no two opening
   /// lines may share it, on one sheet or across uploads.
   dedupeKey      String       @unique
@@ -6258,6 +6267,9 @@ enum PackageStatus {
   SPLIT
   /// Label withdrawn: printed by mistake, or the package is not on the rack.
   VOID
+  /// Put together with other packages of the same stock into one, which has
+  /// its own label; nothing left in it.
+  MERGED
 }
 
 enum PackageMoveType {
@@ -6274,6 +6286,12 @@ enum PackageMoveType {
   PRINTED
   /// Taken off hold: rejected at receipt, then passed for use.
   RELEASED
+  /// Put into another package with its contents (this one is retired).
+  MERGED_INTO
+  /// Made by putting other packages together.
+  MERGED_FROM
+  /// Its details corrected — lot, package type or note — not its quantity.
+  EDITED
 }
 
 /// One physical package of stock — a roll, a box, a carton — with the QR
@@ -6328,9 +6346,16 @@ model StockPackage {
   printCount      Int            @default(0)
   lastPrintedAt   DateTime?
   grnLineId       String?
+  /// The line of the document it was labelled from, where that is not a GRN
+  /// line: an opening stock line. Tells which line's stock is on stickers.
+  sourceLineId    String?
   parentId        String?
   parent          StockPackage?  @relation("PackageSplit", fields: [parentId], references: [id])
   children        StockPackage[] @relation("PackageSplit")
+  /// Merged into another package: the one that now holds its contents.
+  mergedIntoId    String?
+  mergedInto      StockPackage?  @relation("PackageMerge", fields: [mergedIntoId], references: [id])
+  mergedFrom      StockPackage[] @relation("PackageMerge")
   createdById     String?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
@@ -6341,6 +6366,8 @@ model StockPackage {
   @@index([itemId, warehouseId, status])
   @@index([sourceType, sourceId])
   @@index([parentId])
+  @@index([mergedIntoId])
+  @@index([sourceLineId])
   @@index([warehouseId, rack])
   @@map("stock_packages")
 }

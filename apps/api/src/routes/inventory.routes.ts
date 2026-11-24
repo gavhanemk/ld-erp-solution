@@ -21,7 +21,7 @@ import { MOVEMENT_DOC_JOIN, movementDocs } from '../services/movementDocs.servic
 import { decidePending } from '../services/requisition.service'
 import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
 import { qcByGrnLine } from '../services/grnQc.service'
-import { packageRule, positionOf } from '../services/package.service'
+import { packageRule, packageRules, positionOf, stickerDefaultsFrom } from '../services/package.service'
 import { getPreference } from '../lib/preferences'
 import { createPurchaseNoteIn } from './purchase-notes.routes'
 import { assertNotCancelling, soOfMo } from '../services/orderCancel.service'
@@ -5462,11 +5462,14 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
         type: true,
         categoryId: true,
         decimalPlaces: true,
-        uom: { select: { symbol: true, decimalPlaces: true } },
+        packType: true,
+        packQty: true,
+        uom: { select: { symbol: true, name: true, decimalPlaces: true } },
       },
       orderBy: { name: 'asc' },
     }),
   ])
+  const ruleOf = await packageRules(prisma)
   const routes = await trackedRoutings(prisma, styles.map((st) => ({ id: st.id, category: st.category })))
   const sizesOf = new Map(sizeGroups.map((g) => [g.id, g.sizes]))
   res.json({
@@ -5498,6 +5501,11 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
         categoryId: i.categoryId,
         unit: i.uom?.symbol ?? null,
         decimals: i.decimalPlaces ?? i.uom?.decimalPlaces ?? 0,
+        // Its stickers as they come when nothing else is said.
+        ...(() => {
+          const d = stickerDefaultsFrom(i, ruleOf(i.categoryId))
+          return { tracked: d.tracked, packType: d.packType, perPack: d.perPack }
+        })(),
       })),
     },
   })
@@ -5543,10 +5551,46 @@ router.post('/opening-stock/colour-item', requirePermission('masters', 'create')
 })
 
 /*
+ * Stickers for an opening line made later: its sizes known now, or the rest
+ * of its stock packed. Never more than the line has without stickers.
+ */
+router.post('/opening-stock/lines/:id/packages', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const pack = packInputSchema.parse(req.body?.pack ?? {})
+  const done = await openingStock.packLine(req.params.id, pack, req.user?.id ?? null)
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockPackage', entityId: done.ids[0], after: { openingLine: req.params.id, packages: done.ids.length, said: done.said } })
+  res.status(201).json({
+    success: true,
+    message: `${done.ids.length} ${done.ids.length === 1 ? 'sticker' : 'stickers'} made for ${done.number}: ${done.said}.${done.left > 0 ? ` ${done.left} ${done.unit} still without a sticker.` : ''}`,
+    data: done,
+  })
+})
+
+/** An opening line's stickers still on stock, to print. */
+router.get('/opening-stock/lines/:id/packages', requirePermission(MODULE, 'view'), async (req, res) => {
+  const rows = await prisma.stockPackage.findMany({
+    where: { sourceLineId: req.params.id, status: 'IN_STOCK' },
+    select: { id: true },
+    orderBy: { code: 'asc' },
+  })
+  res.json({ success: true, data: { ids: rows.map((r) => r.id) } })
+})
+
+/*
  * Opening stock entered by hand: the same columns as the sheet, sent as
  * lines, so it is checked and brought in exactly as an upload is. Without
  * confirm it only checks; with it, everything goes in at once or nothing.
  */
+/** How a line's stock goes on stickers, from the screen: see PackInput. */
+const packInputSchema = zod.object({
+  type: zod.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).nullish(),
+  qtys: zod.array(zod.number().positive()).max(1000, 'At most 1000 packages on one line').nullish(),
+  each: zod.number().positive().nullish(),
+  count: zod.number().int().min(1).max(1000).nullish(),
+  later: zod.boolean().nullish(),
+  refs: zod.array(zod.string().trim().max(60).nullable()).max(1000).nullish(),
+})
+const openingEntryLine = zod.object({ pack: packInputSchema.nullish() }).catchall(zod.union([zod.string().max(300), zod.number(), zod.null()]))
+
 const openingEntryBody = zod.object({
   confirm: zod.boolean().optional(),
   kind: osKind.optional(),
@@ -5554,10 +5598,7 @@ const openingEntryBody = zod.object({
   /** The names the screen gives its boxes, for the problems. */
   labels: zod.record(zod.string(), zod.string().max(60)).optional(),
   notes: zod.string().max(500).nullish(),
-  lines: zod
-    .array(zod.record(zod.string(), zod.union([zod.string().max(300), zod.number(), zod.null()])))
-    .min(1, 'Add at least one line')
-    .max(openingStock.MAX_ROWS),
+  lines: zod.array(openingEntryLine).min(1, 'Add at least one line').max(openingStock.MAX_ROWS),
 })
 router.post('/opening-stock/entry', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const { lines, notes, confirm, kind, requestKey, labels } = openingEntryBody.parse(req.body)
@@ -5791,7 +5832,10 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
           name: true,
           type: true,
           color: true,
-          uom: { select: { symbol: true } },
+          categoryId: true,
+          packType: true,
+          packQty: true,
+          uom: { select: { symbol: true, name: true } },
           style: { select: { code: true } },
           category: { select: { name: true } },
         },
@@ -5801,7 +5845,8 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
       size: { select: { code: true } },
     },
   })
-  const byId = new Map(full.map((l) => [l.id, l]))
+  const packing = await openingStock.linesPacking(full)
+  const byId = new Map(full.map((l) => [l.id, { ...l, stickers: packing.get(l.id) ?? null }]))
   res.json({
     success: true,
     data: {

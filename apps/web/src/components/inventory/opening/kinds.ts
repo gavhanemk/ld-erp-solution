@@ -63,6 +63,11 @@ export interface MaterialOption {
   categoryId: string
   unit: string | null
   decimals: number
+  /** Labelled by package: its stickers are made as it comes in. */
+  tracked?: boolean
+  /** Its usual package, and what one holds, when the item says. */
+  packType?: string | null
+  perPack?: number | null
 }
 export interface FormOptions {
   processes: Array<{ id: string; name: string; floor: string | null }>

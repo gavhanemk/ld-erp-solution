@@ -31,6 +31,7 @@ export function PackageRows({
   withNotes = true,
   idPrefix = 'pack',
   max = 500,
+  noteLabel = 'Note (optional)',
 }: {
   rows: SizeRow[]
   onChange: (rows: SizeRow[]) => void
@@ -40,6 +41,8 @@ export function PackageRows({
   /** Keeps the boxes' ids apart when two lists are on one page. */
   idPrefix?: string
   max?: number
+  /** The heading over the notes: "Roll no. / note". */
+  noteLabel?: string
 }) {
   const list = useRef<HTMLDivElement>(null)
   const box = (i: number) => list.current?.querySelector<HTMLInputElement>(`[data-size-row="${i}"]`) ?? null
@@ -67,7 +70,7 @@ export function PackageRows({
             <tr className="bg-secondary">
               <th style={{ width: 44 }}>#</th>
               <th style={{ width: withNotes ? 160 : undefined, textAlign: 'right' }}>Size ({unit})</th>
-              {withNotes && <th>Note (optional)</th>}
+              {withNotes && <th>{noteLabel}</th>}
               <th style={{ width: 44 }} />
             </tr>
           </thead>

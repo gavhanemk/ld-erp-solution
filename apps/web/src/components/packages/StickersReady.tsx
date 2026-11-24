@@ -11,7 +11,7 @@ import { ChangeStickers } from './ChangeStickers'
 
 interface Ready {
   count: number
-  groups: Array<{ key: string; sourceRef: string | null; item: string; store: string; unit: string; qty: number; each?: number | null; packType?: string; ids: string[] }>
+  groups: Array<{ key: string; sourceRef: string | null; item: string; store: string; unit: string; qty: number; each?: number | null; packType?: string; lots?: string[]; ids: string[] }>
 }
 
 /**
@@ -102,6 +102,7 @@ function ReadyWindow({
                 <p className="text-foreground truncate text-sm font-medium">{g.item}</p>
                 <p className="text-muted-foreground text-xs">
                   {stickerLine(g)} · {g.store}
+                  {g.lots?.length ? ` · Lot ${g.lots.join(', ')}` : ''}
                 </p>
               </div>
               <button type="button" className="btn-secondary h-8 shrink-0 px-2.5 text-xs" onClick={() => setChanging(g)}>

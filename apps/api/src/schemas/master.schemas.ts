@@ -312,6 +312,8 @@ export const createItemSchema = z
     // What one unit holds, printed on its stickers: a box of 144 pcs.
     contentQty: nonNegativeDecimal,
     contentUnit: z.preprocess((v) => (v === '' ? null : v), z.string().trim().max(20).optional().nullable()),
+    // How many copies of each of its stickers print. Empty: as Sticker settings say.
+    labelCopies: z.preprocess((v) => (v === '' ? null : v), z.coerce.number().int().min(1, 'At least one copy').max(5, 'At most 5 copies').optional().nullable()),
     // Its own places after the point, when it differs from its unit's. Empty: the unit's.
     decimalPlaces: z.preprocess((v) => (v === '' ? null : v), z.coerce.number().int().min(0).max(3).optional().nullable()),
     imageUrl: z.string().url().optional().nullable(),

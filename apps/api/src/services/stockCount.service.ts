@@ -132,7 +132,7 @@ function shapeScan(s: ScanRow, warehouseId: string) {
       : s.result === 'ELSEWHERE'
         ? `Booked to ${p?.warehouse.name ?? 'another store'}. Move it here with Scan → Move, or take it back where it belongs. It is not counted here.`
         : s.result === 'NOT_IN_STOCK'
-          ? `The system shows it ${p?.status === 'SPLIT' ? 'split into smaller packages' : p?.status === 'VOID' ? 'withdrawn' : 'empty — everything in it was issued'}. Check what is in it; it is not counted.`
+          ? `The system shows it ${p?.status === 'SPLIT' ? 'split into smaller packages' : p?.status === 'MERGED' ? 'put together into another package' : p?.status === 'VOID' ? 'withdrawn' : 'empty — everything in it was issued'}. Check what is in it; it is not counted.`
           : /^G-?\d/i.test(s.code)
             ? 'That is a garment tag. Garments are counted on Garment In / Out.'
             : 'No sticker with this number on the system. Check the label.'

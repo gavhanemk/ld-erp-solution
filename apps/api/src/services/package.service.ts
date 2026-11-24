@@ -1,4 +1,4 @@
-import type { Prisma, PackType, PackageMoveType, StockOwnership } from '@prisma/client'
+import { Prisma, type PackType, type PackageMoveType, type StockOwnership } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { userCan, type AuthRequest } from '../middleware/auth'
 import { balanceOf, lockedBalanceOf } from './stock.service'
@@ -120,7 +120,7 @@ export async function lockPackage(tx: Prisma.TransactionClient, id: string) {
 }
 
 /** What a package was labelled from: a GRN, stock already on the rack, a split, or another inward. */
-export type PackageSource = 'GRN' | 'STOCK' | 'SPLIT' | 'STOCK_IN' | 'OPENING' | 'CUSTOMER_GRN' | 'JOB_WORK_RETURN' | 'MR_RETURN'
+export type PackageSource = 'GRN' | 'STOCK' | 'SPLIT' | 'STOCK_IN' | 'OPENING' | 'CUSTOMER_GRN' | 'JOB_WORK_RETURN' | 'MR_RETURN' | 'MERGE'
 
 export interface StockSpot {
   itemId: string
@@ -382,6 +382,8 @@ export async function createPackages(
     /** The document's number, printed on the sticker. */
     sourceRef?: string | null
     grnLineId?: string | null
+    /** The line of the document it is labelled from, where not a GRN line: an opening stock line. */
+    sourceLineId?: string | null
     parentId?: string | null
     userId: string | null
     /** Skip the loose check: a split re-labels stock that is already in a package. */
@@ -435,6 +437,7 @@ export async function createPackages(
         sourceId: input.sourceId ?? null,
         sourceRef: input.sourceRef ?? null,
         grnLineId: input.grnLineId ?? null,
+        sourceLineId: input.sourceLineId ?? null,
         parentId: input.parentId ?? null,
         grade: input.grade ?? 'A',
         createdById: input.userId,
@@ -469,6 +472,8 @@ type Splittable = {
   sourceId: string | null
   sourceRef: string | null
   grnLineId: string | null
+  /** The opening stock line it was first labelled for: its parts keep it. */
+  sourceLineId?: string | null
   grade: string
 }
 
@@ -506,6 +511,7 @@ export async function splitOff(
     sourceId: pkg.sourceId,
     sourceRef: pkg.sourceRef,
     grnLineId: pkg.grnLineId,
+    sourceLineId: pkg.sourceLineId ?? null,
     parentId: pkg.id,
     userId: why.userId,
     fromPackage: true,
@@ -603,6 +609,7 @@ export async function cutOffForMove(
     sourceId: pkg.sourceId,
     sourceRef: pkg.sourceRef,
     grnLineId: pkg.grnLineId,
+    sourceLineId: pkg.sourceLineId ?? null,
     parentId: pkg.id,
     userId: why.userId,
     fromPackage: true,
@@ -706,11 +713,178 @@ export async function checkFifo(
  * still on stock, followed through later splits.
  */
 export async function replacementsOf(tx: Prisma.TransactionClient, id: string) {
-  const found: Array<{ code: string; qty: number }> = []
-  for (let parents = [id], i = 0; parents.length && i < 20; i++) {
-    const children = await tx.stockPackage.findMany({ where: { parentId: { in: parents } }, select: { id: true, code: true, qty: true, status: true }, orderBy: { code: 'asc' } })
-    children.filter((c) => c.status === 'IN_STOCK').forEach((c) => found.push({ code: c.code, qty: Number(c.qty) }))
-    parents = children.filter((c) => c.status === 'SPLIT').map((c) => c.id)
+  // Down the line of splits and merges, to the stickers still in stock: a
+  // split's pieces, and the package a merged one went into.
+  const found = new Map<string, { code: string; qty: number }>()
+  const pick = { id: true, code: true, qty: true, status: true } as const
+  const seen = new Set<string>([id])
+  for (let frontier = [id], i = 0; frontier.length && i < 20; i++) {
+    const [children, merged] = await Promise.all([
+      tx.stockPackage.findMany({ where: { parentId: { in: frontier } }, select: pick, orderBy: { code: 'asc' } }),
+      tx.stockPackage.findMany({ where: { id: { in: frontier }, status: 'MERGED' }, select: { mergedInto: { select: pick } } }),
+    ])
+    const next = [...children, ...merged.flatMap((m) => (m.mergedInto ? [m.mergedInto] : []))].filter((c) => !seen.has(c.id))
+    next.forEach((c) => seen.add(c.id))
+    next.filter((c) => c.status === 'IN_STOCK').forEach((c) => found.set(c.code, { code: c.code, qty: Number(c.qty) }))
+    frontier = next.filter((c) => c.status === 'SPLIT' || c.status === 'MERGED').map((c) => c.id)
   }
-  return found
+  return [...found.values()].sort((a, b) => a.code.localeCompare(b.code))
+}
+
+/**
+ * Packages of the same stock put together into one, with a label of its own:
+ * two half-rolls wound onto one, loose boxes into a carton. The old ones are
+ * retired (MERGED) and each names the one that holds its contents now, so
+ * scanned again it says where they went. Only what can share a sticker — the
+ * same item, store, owner, lot and hold, every one in stock. The stock does
+ * not change, only how it is packed; the new package keeps the age of the
+ * oldest, so first-in-first-out still goes by when the stock came in.
+ */
+export async function mergePackages(
+  tx: Prisma.TransactionClient,
+  input: { ids: string[]; packType?: PackType | null; notes?: string | null; userId: string | null },
+) {
+  const ids = [...new Set(input.ids)]
+  if (ids.length < 2) throw new AppError('Pick at least two stickers to put together.', 400, 'MERGE_NEEDS_TWO')
+  // Locked in one order, so two merges at once never wait on each other.
+  const pkgs: Array<Awaited<ReturnType<typeof lockPackage>>> = []
+  for (const id of [...ids].sort()) pkgs.push(await lockPackage(tx, id))
+  pkgs.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id))
+  const out = pkgs.filter((p) => p.status !== 'IN_STOCK')
+  if (out.length) {
+    throw new AppError(`${out.map((p) => p.code).join(', ')} ${out.length === 1 ? 'is' : 'are'} no longer in stock, so cannot be put together.`, 400, 'NOT_IN_STOCK')
+  }
+  const first = pkgs[0]
+  const differs = (key: (p: (typeof pkgs)[number]) => string, what: string) => (new Set(pkgs.map(key)).size > 1 ? what : null)
+  const why = [
+    differs((p) => p.itemId, 'item'),
+    differs((p) => p.warehouseId, 'store'),
+    differs((p) => `${p.ownership}|${p.ownerCustomerId ?? ''}`, 'whose stock it is'),
+    differs((p) => (p.lotNo ?? '').trim().toUpperCase(), 'lot'),
+    differs((p) => p.grade, 'hold'),
+  ].filter(Boolean)
+  if (why.length) {
+    throw new AppError(`Only stickers of the same item, store, lot and hold can be put together: these differ in ${why.join(', ')}.`, 400, 'MERGE_MIXED')
+  }
+  const unit = first.item.uom?.symbol ?? ''
+  const qty = round3(pkgs.reduce((t, p) => t + Number(p.qty), 0))
+  const codes = pkgs.map((p) => p.code)
+  const oneOf = <T,>(key: (p: (typeof pkgs)[number]) => T) => (new Set(pkgs.map(key)).size === 1 ? key(first) : null)
+  const sameSource = oneOf((p) => `${p.sourceType}|${p.sourceId ?? ''}`) !== null
+  const code = await nextPackageCode(tx)
+  const merged = await tx.stockPackage.create({
+    data: {
+      code,
+      itemId: first.itemId,
+      warehouseId: first.warehouseId,
+      ownership: first.ownership,
+      ownerCustomerId: first.ownerCustomerId,
+      packType: input.packType ?? first.packType,
+      initialQty: qty,
+      qty,
+      lotNo: first.lotNo,
+      rack: oneOf((p) => p.rack ?? '') || null,
+      notes: input.notes?.trim() || `Put together from ${codes.join(', ')}`,
+      sourceType: sameSource ? first.sourceType : 'MERGE',
+      sourceId: sameSource ? first.sourceId : null,
+      sourceRef: sameSource ? first.sourceRef : null,
+      grnLineId: oneOf((p) => p.grnLineId ?? '') || null,
+      sourceLineId: oneOf((p) => p.sourceLineId ?? '') || null,
+      grade: first.grade,
+      createdById: input.userId,
+      // As old as the oldest it holds: first in, first out still goes by it.
+      createdAt: pkgs.reduce((d, p) => (p.createdAt < d ? p.createdAt : d), first.createdAt),
+    },
+  })
+  for (const p of pkgs) {
+    await tx.stockPackage.update({ where: { id: p.id }, data: { status: 'MERGED', qty: 0, mergedIntoId: merged.id } })
+    await recordPackageMove(tx, {
+      packageId: p.id,
+      type: 'MERGED_INTO',
+      qty: -Number(p.qty),
+      balanceAfter: 0,
+      warehouseId: p.warehouseId,
+      relatedPackageId: merged.id,
+      notes: `Put into ${code} with ${codes.filter((c) => c !== p.code).join(', ')}`,
+      userId: input.userId,
+    })
+  }
+  await recordPackageMove(tx, {
+    packageId: merged.id,
+    type: 'MERGED_FROM',
+    qty,
+    balanceAfter: qty,
+    warehouseId: merged.warehouseId,
+    notes: `From ${codes.map((c, i) => `${c} (${round3(Number(pkgs[i].qty))} ${unit})`).join(', ')}`,
+    userId: input.userId,
+  })
+  return { merged, codes, unit }
+}
+
+/**
+ * A package's details put right — its lot, what kind of package it is, its
+ * note — never its quantity (Correct the quantity does that, against the
+ * stock). Kept in its history with what it was before; a sticker already
+ * printed no longer says the same, so it shows as changed since printed.
+ */
+export async function editPackage(
+  tx: Prisma.TransactionClient,
+  input: { id: string; lotNo?: string | null; packType?: PackType | null; notes?: string | null; userId: string | null },
+) {
+  const pkg = await lockPackage(tx, input.id)
+  if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is no longer in stock, so its details stay as they were.`, 400, 'NOT_IN_STOCK')
+  const clean = (v: string | null | undefined) => (v ?? '').trim() || null
+  const change: Prisma.StockPackageUpdateInput = {}
+  const said: string[] = []
+  if (input.lotNo !== undefined && clean(input.lotNo) !== clean(pkg.lotNo)) {
+    change.lotNo = clean(input.lotNo)
+    said.push(`lot ${pkg.lotNo ?? '—'} → ${clean(input.lotNo) ?? '—'}`)
+  }
+  if (input.packType && input.packType !== pkg.packType) {
+    change.packType = input.packType
+    said.push(`${pkg.packType.toLowerCase()} → ${input.packType.toLowerCase()}`)
+  }
+  if (input.notes !== undefined && clean(input.notes) !== clean(pkg.notes)) {
+    change.notes = clean(input.notes)
+    said.push(`note ${clean(input.notes) ? `"${clean(input.notes)}"` : 'taken off'}`)
+  }
+  if (!said.length) throw new AppError('Nothing was changed.', 400, 'NO_CHANGE')
+  const updated = await tx.stockPackage.update({ where: { id: pkg.id }, data: change })
+  await recordPackageMove(tx, {
+    packageId: pkg.id,
+    type: 'EDITED',
+    qty: 0,
+    balanceAfter: Number(pkg.qty),
+    warehouseId: pkg.warehouseId,
+    notes: said.join('; '),
+    userId: input.userId,
+  })
+  return { pkg: updated, said }
+}
+
+/**
+ * What a printed sticker no longer says: since it was last printed, its
+ * quantity went down or was corrected, it moved store, its lot or kind was
+ * corrected, or it came off hold. Each package so changed, with why — to be
+ * reprinted, or left as it is (scanning always shows what it holds now).
+ */
+export const CHANGED_BY: Partial<Record<PackageMoveType, string>> = {
+  ISSUED: 'issued from',
+  TRANSFERRED: 'moved',
+  CORRECTED: 'quantity corrected',
+  EDITED: 'details corrected',
+  RELEASED: 'taken off hold',
+}
+export async function changedSincePrint(tx: Prisma.TransactionClient, ids?: string[]): Promise<Map<string, string[]>> {
+  if (ids && !ids.length) return new Map()
+  const rows = await tx.$queryRaw<Array<{ id: string; type: string }>>`
+    SELECT DISTINCT p.id, m.type::text AS type
+    FROM ld_erp.stock_packages p
+    JOIN ld_erp.stock_package_moves m ON m."packageId" = p.id
+    WHERE p.status = 'IN_STOCK' AND p."printCount" > 0 AND m."createdAt" > p."lastPrintedAt"
+      AND m.type::text IN ('ISSUED', 'TRANSFERRED', 'CORRECTED', 'EDITED', 'RELEASED')
+      ${ids ? Prisma.sql`AND p.id = ANY(${ids})` : Prisma.empty}`
+  const out = new Map<string, string[]>()
+  for (const r of rows) out.set(r.id, [...(out.get(r.id) ?? []), CHANGED_BY[r.type as PackageMoveType] ?? r.type])
+  return out
 }

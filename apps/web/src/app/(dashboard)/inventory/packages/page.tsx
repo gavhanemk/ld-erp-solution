@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { AlertTriangle, Boxes, CheckCircle2, Printer, RefreshCw, ScanLine, Search, Tags, Warehouse, X } from 'lucide-react'
+import { AlertTriangle, Boxes, CheckCircle2, Printer, RefreshCw, ScanLine, Search, Settings2, Tags, Warehouse, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -11,6 +11,7 @@ import { InwardStickers, type LabelTarget } from '@/components/packages/InwardSt
 import { printLabels, qtyText } from '@/components/packages/packageTypes'
 import { PackageGroups, type PackageGroup } from '@/components/packages/PackageGroups'
 import { ChangeStickers } from '@/components/packages/ChangeStickers'
+import { StickerSettings } from '@/components/packages/StickerSettings'
 
 interface ToLabel {
   tracked: boolean
@@ -66,7 +67,7 @@ function PackagesScreen() {
   // Ready to print first: stickers are made by themselves when stock comes in,
   // and printing them is what somebody comes here to do.
   const tabParam = params.get('tab')
-  const tab: Tab = tabParam === 'label' ? 'label' : tabParam === 'list' ? 'list' : 'ready'
+  const tab: Tab = tabParam === 'label' ? 'label' : tabParam === 'list' ? 'list' : tabParam === 'reprint' ? 'reprint' : 'ready'
   const grnFilter = params.get('grn') ?? ''
   // To label is two lists: what came in on GRNs, and what was already on the racks.
   const fromParam = params.get('from')
@@ -88,10 +89,19 @@ function PackagesScreen() {
   const [lq, setLq] = useState('')
   const [lstore, setLstore] = useState('')
   const [ready, setReady] = useState<ReadyList | null>(null)
+  // Printed, then changed: to print again.
+  const [changed, setChanged] = useState<ChangedRow[] | null>(null)
+  const [settings, setSettings] = useState(false)
 
   const go = (next: Tab, from?: LabelFrom) =>
     router.replace(
-      next === 'label' ? `/inventory/packages?tab=label${from ? `&from=${from}` : ''}` : next === 'list' ? '/inventory/packages?tab=list' : '/inventory/packages',
+      next === 'label'
+        ? `/inventory/packages?tab=label${from ? `&from=${from}` : ''}`
+        : next === 'list'
+          ? '/inventory/packages?tab=list'
+          : next === 'reprint'
+            ? '/inventory/packages?tab=reprint'
+            : '/inventory/packages',
       { scroll: false },
     )
 
@@ -102,15 +112,17 @@ function PackagesScreen() {
       const qs = new URLSearchParams({ status })
       if (q.trim()) qs.set('q', q.trim())
       if (store) qs.set('warehouseId', store)
-      const [list, label, toPrint] = await Promise.all([
+      const [list, label, toPrint, again] = await Promise.all([
         api.get<{ data: PackageGroup[]; summary: typeof summary }>(`/packages/groups?${qs}`),
         api.get<{ data: ToLabel }>(`/packages/to-label${grnFilter ? `?grnId=${grnFilter}` : ''}`),
         api.get<{ data: ReadyList }>('/packages/ready'),
+        api.get<{ data: ChangedRow[] }>('/packages/changed'),
       ])
       setGroups(list.data)
       setSummary(list.summary)
       setTodo(label.data)
       setReady(toPrint.data)
+      setChanged(again.data)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load the packages.')
     } finally {
@@ -166,6 +178,11 @@ function PackagesScreen() {
           tone={summary.mismatches ? 'bad' : undefined}
           title="Items issued without scanning: scan their packages and correct the quantity"
         />
+        {can('inventory', 'edit') && (
+          <button className="btn-ghost h-9" onClick={() => setSettings(true)} title="How each kind of package's sticker prints: size, codes, what it shows, logo, copies">
+            <Settings2 size={15} /> Sticker settings
+          </button>
+        )}
         <button className="btn-ghost h-9" onClick={() => void load()} disabled={loading} title="Refresh">
           <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
         </button>
@@ -204,6 +221,7 @@ function PackagesScreen() {
             {(
               [
                 ['ready', `Ready to print (${ready?.count ?? 0})`],
+                ['reprint', `Reprint needed (${changed?.length ?? 0})`],
                 ['list', `All stickers (${total})`],
                 ['label', `No stickers (${waiting})`],
               ] as const
@@ -236,6 +254,7 @@ function PackagesScreen() {
                 <option value="IN_STOCK">In stock</option>
                 <option value="EMPTY">Empty</option>
                 <option value="SPLIT">Split</option>
+                <option value="MERGED">Put together</option>
                 <option value="VOID">Withdrawn</option>
                 <option value="ALL">All</option>
               </SmartSelect>
@@ -334,10 +353,17 @@ function PackagesScreen() {
             </button>
           </div>
         )}
+        {tab === 'reprint' && <ChangedView rows={changed} loading={loading} />}
         {tab === 'list' && (
           <PackageGroups
             groups={groups}
             filters={{ q, status }}
+            changedIds={new Set((changed ?? []).map((c) => c.id))}
+            onChanged={(m, ids) => {
+              setLastBatch(ids)
+              setMessage(m)
+              void load()
+            }}
             emptyText={
               loading
                 ? 'Loading…'
@@ -349,6 +375,15 @@ function PackagesScreen() {
         )}
       </div>
 
+      {settings && (
+        <StickerSettings
+          onClose={() => setSettings(false)}
+          onSaved={(m) => {
+            setSettings(false)
+            setMessage(m)
+          }}
+        />
+      )}
       {labelling && (
         <InwardStickers
           targets={[labelling]}
@@ -401,7 +436,113 @@ function Figure({
   )
 }
 
-type Tab = 'ready' | 'list' | 'label'
+type Tab = 'ready' | 'reprint' | 'list' | 'label'
+
+/** A sticker printed, then changed: what it holds now, and what changed. */
+interface ChangedRow {
+  id: string
+  code: string
+  packType: string
+  qty: number
+  initialQty: number
+  unit: string
+  lotNo: string | null
+  rack: string | null
+  lastPrintedAt: string | null
+  item: { code: string; name: string }
+  warehouse: { name: string }
+  changed: string[]
+}
+
+/**
+ * Stickers printed, then changed — issued from, moved, corrected, details
+ * edited, taken off hold. The sticker on the roll still says what it held
+ * when printed; print it again, or leave it (a scan always shows what it
+ * holds now). Printing takes it off this list.
+ */
+function ChangedView({ rows, loading }: { rows: ChangedRow[] | null; loading: boolean }) {
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  if (!rows) return <p className="p-6 text-center text-sm text-muted-foreground">{loading ? 'Loading…' : ''}</p>
+  if (!rows.length) {
+    return <p className="p-8 text-center text-sm text-muted-foreground">Every printed sticker still says what its package holds. Nothing to print again.</p>
+  }
+  const chosen = picked.size ? rows.filter((r) => picked.has(r.id)).map((r) => r.id) : rows.map((r) => r.id)
+  const all = rows.every((r) => picked.has(r.id))
+  return (
+    <>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2">
+        <span className="text-sm text-muted-foreground">Changed since their stickers were printed. A scan always shows what a package holds now; print again for the sticker to say so too.</span>
+        <button className="btn-primary h-9" onClick={() => printLabels(chosen)}>
+          <Printer size={15} /> Print {picked.size ? `${picked.size} selected` : `all ${rows.length}`} again
+        </button>
+      </div>
+      <ScrollableTable>
+        <table className="data-table table-compact min-w-full">
+          <thead>
+            <tr className="bg-secondary">
+              <th className="w-8">
+                <input type="checkbox" aria-label="Select all" checked={all} onChange={(e) => setPicked(e.target.checked ? new Set(rows.map((r) => r.id)) : new Set())} />
+              </th>
+              <th>Sticker</th>
+              <th>Item</th>
+              <th>Store</th>
+              <th style={{ textAlign: 'right' }}>Holds now</th>
+              <th>What changed</th>
+              <th>Printed</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td>
+                  <input
+                    type="checkbox"
+                    aria-label={`Select ${r.code}`}
+                    checked={picked.has(r.id)}
+                    onChange={(e) =>
+                      setPicked((p) => {
+                        const n = new Set(p)
+                        if (e.target.checked) n.add(r.id)
+                        else n.delete(r.id)
+                        return n
+                      })
+                    }
+                  />
+                </td>
+                <td className="whitespace-nowrap">
+                  <Link href={`/inventory/scan?code=${r.code}`} className="font-mono text-sm font-semibold text-primary hover:underline">
+                    {r.code}
+                  </Link>
+                  {r.lotNo && <div className="text-xs text-muted-foreground">Lot {r.lotNo}</div>}
+                </td>
+                <td>
+                  <div className="font-medium text-foreground">{r.item.name}</div>
+                  <div className="font-mono text-xs text-muted-foreground">{r.item.code}</div>
+                </td>
+                <td className="whitespace-nowrap text-sm">
+                  {r.warehouse.name}
+                  {r.rack ? <span className="text-muted-foreground"> · {r.rack}</span> : null}
+                </td>
+                <td className="whitespace-nowrap text-right tabular-nums">
+                  <span className="font-semibold">{qtyText(r.qty)}</span> <span className="text-xs text-muted-foreground">{r.unit}</span>
+                  {Math.abs(r.qty - r.initialQty) > 0.0005 && <div className="text-[11px] text-muted-foreground">of {qtyText(r.initialQty)}</div>}
+                </td>
+                <td className="text-sm">{r.changed.join(', ')}</td>
+                <td className="whitespace-nowrap text-sm">{r.lastPrintedAt ? day(r.lastPrintedAt) : '—'}</td>
+                <td className="whitespace-nowrap text-right">
+                  <button className="btn-secondary h-8" onClick={() => printLabels([r.id])}>
+                    <Printer size={14} /> Print again
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </ScrollableTable>
+    </>
+  )
+}
 /** Stickers made by themselves when stock came in, not printed yet: a group a document and item. */
 interface ReadyList {
   count: number
@@ -417,6 +558,7 @@ interface ReadyList {
     /** What each sticker holds, when they all hold the same. */
     each?: number | null
     packType?: string
+    lots?: string[]
     ids: string[]
   }>
 }
@@ -465,7 +607,10 @@ function ReadyView({ ready, loading, onChanged }: { ready: ReadyList | null; loa
                 </td>
                 <td>
                   <div className="font-medium text-foreground">{g.item}</div>
-                  <div className="font-mono text-xs text-muted-foreground">{g.itemCode}</div>
+                  <div className="text-xs text-muted-foreground">
+                    <span className="font-mono">{g.itemCode}</span>
+                    {g.lots?.length ? ` · Lot ${g.lots.join(', ')}` : ''}
+                  </div>
                 </td>
                 <td className="whitespace-nowrap text-sm">{g.store}</td>
                 <td className="whitespace-nowrap text-right text-sm tabular-nums">
