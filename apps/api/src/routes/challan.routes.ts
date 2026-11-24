@@ -13,6 +13,7 @@ import { lockRow } from '../lib/lockRow'
 import { OPEN_ORDER_STATUSES } from '../services/salesOrder.service'
 import { closeCheck } from '../services/reconciliation.service'
 import { afterChallanCancelled, afterChallanDispatched } from '../services/garmentHooks.service'
+import { cartonsAfterCancel, cartonsAfterDispatch, cartonsOnChallan } from '../services/fgCartonHooks.service'
 import { netSizeChanges } from '../services/sizeChanges.service'
 
 /**
@@ -293,6 +294,17 @@ const challanInclude = {
   },
   /** The invoice billing it, if any: a challan is billed once. */
   invoices: { where: { status: { not: 'CANCELLED' } }, select: { id: true, invoiceNumber: true } },
+  /** The cartons loaded on it, for its packing list. */
+  fgCartons: {
+    select: {
+      code: true,
+      lines: {
+        select: { qty: true, grade: true, item: { select: { code: true, name: true, color: true, style: { select: { code: true } } } }, size: { select: { code: true, sequence: true } } },
+        orderBy: [{ item: { code: 'asc' as const } }, { size: { sequence: 'asc' as const } }],
+      },
+    },
+    orderBy: { code: 'asc' as const },
+  },
 } satisfies Prisma.DeliveryChallanInclude
 
 /** GET /api/sales/challans — filters: q, status, customerId, soId, from, to, page, limit. */
@@ -471,6 +483,8 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
         notes: `Dispatched on ${dc.dcNumber}`,
         // A draft dated last week and sent today goes out today in the ledger.
         earlierDate: 'move-up',
+        // Pieces sealed in the cartons loaded on it leave with them.
+        cartonsOn: dc.id,
       })
       if (part.sizeId) {
         await tx.salesOrderLineSize.updateMany({
@@ -508,6 +522,8 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
   })
   // Tagged pieces scanned onto it are gone with it.
   await afterChallanDispatched(tx, dc.id, userId)
+  // And the cartons loaded on it.
+  await cartonsAfterDispatch(tx, dc.id)
 }
 
 /** Writes a challan's header and lines; the number is the caller's. */
@@ -609,6 +625,9 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
       if (!before) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
       if (before.status !== 'DRAFT') throw new AppError(`${before.dcNumber} has gone; it can no longer be changed`, 409, 'NOT_DRAFT')
       if (data.soId !== before.soId) throw new AppError('A challan cannot move to another order', 400, 'ORDER_CHANGED')
+      if (await cartonsOnChallan(tx, before.id)) {
+        throw new AppError(`${before.dcNumber}'s lines come from the cartons loaded on it: change them on Inventory → Finished Goods → Cartons → Dispatch.`, 409, 'HAS_CARTONS')
+      }
       const order = await loadOpenOrder(tx, before.soId)
       await writeChallan(tx, order, data, { id: before.id }, req.user!.id)
       if (data.dispatch) await dispatchChallan(tx, before.id, req.user!.id)
@@ -750,6 +769,8 @@ export async function cancelChallan(tx: Prisma.TransactionClient, dcId: string, 
 
   // Its tagged pieces are back in the store and free for another challan.
   await afterChallanCancelled(tx, before.id, userId)
+  // Its cartons stay sealed in the store, free for another challan.
+  await cartonsAfterCancel(tx, before.id)
   const after = await tx.deliveryChallan.update({
     where: { id: before.id },
     data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId, cancelReason: reason },

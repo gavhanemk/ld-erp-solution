@@ -84,6 +84,11 @@ export interface Movement extends StockKey {
   earlierDate?: 'refuse' | 'move-up'
   /** Requisition lines whose own holds this movement may take: an issue uses up its own reservation. */
   reservedFor?: string[]
+  /**
+   * A delivery challan whose loaded cartons' pieces this movement may take:
+   * pieces sealed in any other carton stay in the store until it is opened.
+   */
+  cartonsOn?: string
   /** A check or a count found it: the stock is what it is, holds or not. */
   ignoreReservations?: boolean
   /**
@@ -357,6 +362,32 @@ export async function recordMovement(
           `Only ${free} ${unit} of ${item?.name ?? 'that item'} in ${warehouse?.name ?? 'that store'} is free: ${held} ${unit} is kept aside for ${whom}. Take ${free} or less, or release the hold on the requisition first.`.replace(/\s+/g, ' '),
           400,
           'RESERVED_STOCK',
+        )
+      }
+    }
+    // Pieces sealed in a carton are not free either: they leave with their
+    // carton on its challan, or the carton is opened first. A check or a count
+    // states a fact, and is not refused for it.
+    if (!m.ignoreReservations && (m.ownership ?? 'OWNED') === 'OWNED' && m.sizeId) {
+      const sealed = await tx.$queryRaw<Array<{ qty: number; codes: string[] | null }>>`
+        SELECT COALESCE(SUM(l.qty), 0)::float8 AS qty, array_agg(DISTINCT c.code ORDER BY c.code) AS codes
+        FROM ld_erp.fg_carton_lines l JOIN ld_erp.fg_cartons c ON c.id = l."cartonId"
+        WHERE c.status::text = 'PACKED' AND l."itemId" = ${m.itemId} AND c."warehouseId" = ${m.warehouseId}
+          AND l."sizeId" = ${m.sizeId} AND l.grade = ${m.grade ?? 'A'}
+          AND (c."dcId" IS NULL OR c."dcId" <> ${m.cartonsOn ?? ''})`
+      const packed = round3(Number(sealed[0]?.qty ?? 0))
+      const free = round3(Math.max(0, before.qty - packed))
+      if (packed > 0 && qty > free + 1e-9) {
+        const [item, warehouse, size] = await Promise.all([
+          tx.item.findUnique({ where: { id: m.itemId }, select: { name: true } }),
+          tx.warehouse.findUnique({ where: { id: m.warehouseId }, select: { name: true } }),
+          tx.size.findUnique({ where: { id: m.sizeId }, select: { code: true } }),
+        ])
+        const codes = (sealed[0]?.codes ?? []).filter(Boolean)
+        throw new AppError(
+          `Only ${free} pcs of ${item?.name ?? 'that item'} size ${size?.code ?? ''} in ${warehouse?.name ?? 'that store'} are loose: ${packed} are sealed in ${codes.length === 1 ? 'carton' : 'cartons'} ${codes.slice(0, 6).join(', ')}${codes.length > 6 ? '…' : ''}. Load the cartons on the challan (Finished Goods → Cartons → Dispatch), or open a carton first.`.replace(/\s+/g, ' '),
+          400,
+          'PACKED_IN_CARTONS',
         )
       }
     }

@@ -142,6 +142,7 @@ export async function addToChallan(
     if (dc.soId !== data.soId) throw new AppError(`${dc.dcNumber} is for another order.`, 400, 'WRONG_ORDER')
     if (g.dcId === dcId) throw new AppError(`${label(g)} is already on ${dc.dcNumber}.`, 409, 'ALREADY_ON')
     if (dc.warehouseId !== g.warehouseId) throw new AppError(`${label(g)} is in ${g.warehouse.name}; ${dc.dcNumber} sends from another store.`, 400, 'WRONG_STORE')
+    if (await tx.fgCarton.count({ where: { dcId } })) throw new AppError(`${dc.dcNumber} is loaded with cartons: scan tagged pieces onto a challan of their own.`, 400, 'MIXED')
   }
   const why = blocker(g)
   if (why) throw new AppError(why, 409, 'CANNOT_DISPATCH')

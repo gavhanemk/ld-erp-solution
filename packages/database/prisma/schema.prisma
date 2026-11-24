@@ -384,6 +384,7 @@ model User {
   fgReceiptsMade       FinishedGoodsReceipt[] @relation("FGRCreatedBy")
   fgReceiptsCancelled  FinishedGoodsReceipt[] @relation("FGRCancelledBy")
   challansMade         DeliveryChallan[]      @relation("DCCreatedBy")
+  fgCartonsPacked      FgCarton[]             @relation("FgCartonPackedBy")
   challansDispatched   DeliveryChallan[]      @relation("DCDispatchedBy")
   challansCancelled    DeliveryChallan[]      @relation("DCCancelledBy")
   mosHeld              ManufacturingOrder[]   @relation("MOHeldBy")
@@ -871,6 +872,7 @@ model Item {
   quoteLines          SalesQuotationLine[]       @relation("QuoteLineItem")
   packages StockPackage[] @relation("ItemPackages")
   garments Garment[] @relation("GarmentItem")
+  cartonLines FgCartonLine[] @relation("FgCartonLineItem")
   routings Routing[] @relation("RoutingFabric")
 }
 
@@ -1286,6 +1288,7 @@ model Warehouse {
   packages StockPackage[] @relation("WarehousePackages")
   stockCounts StockCount[] @relation("WarehouseCounts")
   garments Garment[] @relation("GarmentStore")
+  fgCartons FgCarton[] @relation("FgCartonStore")
 }
 
 model Department {
@@ -1376,6 +1379,8 @@ model Machine {
 model SalesOrder {
   id                String           @id @default(cuid())
   soNumber          String           @unique
+  /// Cartons packed for this order: its buyer and number on their stickers.
+  fgCartons         FgCarton[]       @relation("FgCartonOrder")
   brandId           String
   brand             Brand            @relation(fields: [brandId], references: [id])
   customerId        String
@@ -1687,6 +1692,8 @@ model DeliveryChallan {
   @@index([customerId])
   @@map("delivery_challans")
   garments Garment[] @relation("GarmentChallan")
+  /// Cartons loaded on it, scanned or picked: its lines come from their contents.
+  fgCartons FgCarton[] @relation("FgCartonChallan")
 }
 
 model DeliveryChallanLine {
@@ -5085,6 +5092,7 @@ model Size {
   @@map("sizes")
   garments Garment[] @relation("GarmentSize")
   barcodes RetailBarcode[] @relation("SizeBarcodes")
+  cartonLines FgCartonLine[] @relation("FgCartonLineSize")
 }
 
 model SalesOrderLineSize {
@@ -6553,4 +6561,71 @@ model RetailBarcode {
 
   @@unique([itemId, sizeId])
   @@map("retail_barcodes")
+}
+
+// ═══════════════════════════════════════════
+// FINISHED GOODS CARTONS — packed in the store, dispatched by scanning
+// ═══════════════════════════════════════════
+
+/// A carton of finished garments in a store, with its own sticker (CT-0001):
+/// its pieces by item, size and grade. Packed from the store's finished
+/// stock, which the stock ledger still holds — cartons never hold more than
+/// it. It leaves on a delivery challan by being scanned or picked onto it.
+model FgCarton {
+  id            String           @id @default(cuid())
+  code          String           @unique
+  warehouseId   String
+  warehouse     Warehouse        @relation("FgCartonStore", fields: [warehouseId], references: [id])
+  status        FgCartonStatus   @default(PACKED)
+  /// The order it is packed for: its buyer and order number print on the sticker.
+  soId          String?
+  so            SalesOrder?      @relation("FgCartonOrder", fields: [soId], references: [id])
+  /// The challan it is loaded on (a draft), then left with.
+  dcId          String?
+  dc            DeliveryChallan? @relation("FgCartonChallan", fields: [dcId], references: [id])
+  notes         String?
+  printCount    Int              @default(0)
+  lastPrintedAt DateTime?
+  dispatchedAt  DateTime?
+  /// Opened: its pieces back in the store, loose.
+  openedAt      DateTime?
+  openReason    String?
+  createdById   String?
+  createdBy     User?            @relation("FgCartonPackedBy", fields: [createdById], references: [id])
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  lines FgCartonLine[]
+
+  @@index([warehouseId, status])
+  @@index([dcId])
+  @@index([soId])
+  @@map("fg_cartons")
+}
+
+/// What one carton holds of one item in one size and grade.
+model FgCartonLine {
+  id       String   @id @default(cuid())
+  cartonId String
+  carton   FgCarton @relation(fields: [cartonId], references: [id], onDelete: Cascade)
+  itemId   String
+  item     Item     @relation("FgCartonLineItem", fields: [itemId], references: [id])
+  sizeId   String
+  size     Size     @relation("FgCartonLineSize", fields: [sizeId], references: [id])
+  /// "A" first quality, "B" B-grade.
+  grade    String   @default("A")
+  qty      Int
+
+  @@index([cartonId])
+  @@index([itemId, sizeId])
+  @@map("fg_carton_lines")
+}
+
+enum FgCartonStatus {
+  /// Sealed in its store; on a draft challan until that is dispatched.
+  PACKED
+  /// Gone on its delivery challan.
+  DISPATCHED
+  /// Unpacked: its pieces are loose in the store again.
+  OPENED
 }

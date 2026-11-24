@@ -42,6 +42,7 @@ export const INVENTORY_SECTIONS: InventorySection[] = [
       { label: 'Finished Goods In', href: '/inventory/finished-goods' },
       { label: 'Garment Tags', href: '/inventory/garment-tags' },
       { label: 'Garment In / Out', href: '/inventory/garment-moves' },
+      { label: 'Cartons', href: '/inventory/cartons' },
       { label: 'Track & Trace', href: '/inventory/trace' },
     ],
   },
