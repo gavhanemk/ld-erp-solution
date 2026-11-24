@@ -281,6 +281,7 @@ enum BOMCostBasis {
 
 model User {
   id           String     @id @default(cuid())
+  openingStocks OpeningStock[] @relation("OpeningStockCreatedBy")
   employeeCode String?    @unique
   name         String
   email        String     @unique
@@ -835,6 +836,7 @@ model Item {
   barcodes      RetailBarcode[]           @relation("ItemBarcodes")
   bomComponents BOMLine[]                 @relation("ComponentItem")
   stockLedger   StockLedger[]
+  openingStockLines OpeningStockLine[]    @relation("OpeningStockItem")
   enquiryLines  PurchaseEnquiryLine[]
   poLines       PurchaseOrderLine[]
   soLines       SalesOrderLine[]
@@ -1245,8 +1247,14 @@ model Warehouse {
   code      String  @unique
   address   String?
   isActive  Boolean @default(true)
+  /// Set on a process's own floor (Cutting Floor, Stitching Floor…): the work
+  /// in progress at that process is kept here, size by size. Empty for a store
+  /// or an outside unit. One floor per process.
+  departmentId String?     @unique
+  department   Department? @relation("ProcessFloor", fields: [departmentId], references: [id])
 
   stockLedger       StockLedger[]
+  openingStockLines OpeningStockLine[] @relation("OpeningStockLocation")
   mrLines           MaterialRequisitionLine[]
   grnLines          GRNLine[]
   /// Enquiries that name this store as where the goods are wanted.
@@ -1297,6 +1305,9 @@ model Department {
   bomLines          BOMLine[]
   bomCostLines      BOMCostLine[]
   moSteps           MOStep[]
+  /// The process's own floor, where its work in progress is kept as stock.
+  floor             Warehouse?         @relation("ProcessFloor")
+  openingStockLines OpeningStockLine[] @relation("OpeningStockProcess")
 
   @@map("departments")
 }
@@ -2746,10 +2757,15 @@ model StockLedger {
   /// "A" for first quality, "B" for B-grade finished goods, kept apart from
   /// good ones. Everything that is not a graded garment is "A".
   grade           String          @default("A")
+  /// The order the pieces belong to (SO or MO number, or an order from before
+  /// the ERP), on work in progress and finished goods moved process to process.
+  /// Not part of the balance: it splits a process's size-wise stock by order.
+  orderNo         String?
   @@index([itemId, warehouseId])
   @@index([transactionDate])
   @@index([ownership, ownerCustomerId])
   @@index([itemId, warehouseId, sizeId])
+  @@index([orderNo])
   @@map("stock_ledger")
 }
 
@@ -2925,6 +2941,79 @@ model MaterialRequisitionLine {
   @@map("material_requisition_lines")
 }
 
+/// Opening stock brought in from the mill's 19-column sheet, one per upload,
+/// numbered OPS-2627-0001. Raw materials go into their store, work in progress
+/// onto its process's floor and finished goods into their store, size by size;
+/// each row is kept as typed beside what it was matched to, so every opening
+/// quantity traces back to its line on the sheet.
+model OpeningStock {
+  id          String   @id @default(cuid())
+  number      String   @unique
+  fileName    String?
+  notes       String?
+  createdById String?
+  createdBy   User?    @relation("OpeningStockCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+
+  lines OpeningStockLine[]
+
+  @@map("opening_stocks")
+}
+
+/// One row of the opening-stock sheet: the 19 columns as typed, and the item,
+/// process, location and size they were matched to.
+model OpeningStockLine {
+  id             String       @id @default(cuid())
+  openingStockId String
+  openingStock   OpeningStock @relation(fields: [openingStockId], references: [id], onDelete: Cascade)
+  /// The row on the sheet.
+  rowNo          Int
+  openingDate    DateTime     @db.Date
+  /// Column B as typed, and the process it was matched to (none for a store).
+  processText    String?
+  departmentId   String?
+  department     Department?  @relation("OpeningStockProcess", fields: [departmentId], references: [id])
+  /// Column C as typed, and where the stock was put: a store, an outside unit
+  /// or the process's own floor.
+  locationText   String?
+  warehouseId    String
+  warehouse      Warehouse    @relation("OpeningStockLocation", fields: [warehouseId], references: [id])
+  orderNo        String?
+  styleText      String?
+  itemId         String
+  item           Item         @relation("OpeningStockItem", fields: [itemId], references: [id])
+  itemCodeText   String?
+  description    String?
+  categoryText   String?
+  fabricText     String?
+  colour         String?
+  sizeId         String?
+  size           Size?        @relation("OpeningStockSize", fields: [sizeId], references: [id])
+  sizeText       String?
+  lotNo          String?
+  bundleNo       String?
+  uomText        String?
+  qty            Decimal      @db.Decimal(12, 3)
+  unitRate       Decimal      @db.Decimal(12, 2)
+  value          Decimal      @db.Decimal(14, 2)
+  /// OK, HOLD, REJECTED or B_GRADE, as column R said; `grade` is what the stock
+  /// went in as: A usable, R held (not issued until released), B second quality.
+  status         String
+  grade          String
+  remarks        String?
+  /// The sticker made for this row (a roll or a box), when its category is
+  /// labelled by package.
+  packageId      String?
+  /// Item, location, size, grade, order, lot and bundle in one: no two opening
+  /// lines may share it, on one sheet or across uploads.
+  dedupeKey      String       @unique
+
+  @@index([openingStockId])
+  @@index([itemId, warehouseId])
+  @@index([orderNo])
+  @@map("opening_stock_lines")
+}
+
 /// Moving our own stock from one of our stores to another.
 ///
 /// The movement used to leave nothing behind but ledger rows tagged with the
@@ -2981,6 +3070,11 @@ model StockTransferLine {
   /// A finished garment's size; empty for anything without one.
   sizeId          String?
   size            Size?          @relation("TransferLineSize", fields: [sizeId], references: [id])
+  /// On a move from one process's floor to the next: the order, lot and
+  /// bundle the pieces belong to, so they can be traced from cutting to packing.
+  orderNo         String?
+  lotNo           String?
+  bundleNo        String?
   @@map("stock_transfer_lines")
 }
 
@@ -4960,6 +5054,7 @@ model Size {
   bomLineSizes BOMLineSize[]
   baseSizeBoms BOM[]
   stockLedger  StockLedger[]
+  openingStockLines OpeningStockLine[] @relation("OpeningStockSize")
   fgrLines     FinishedGoodsReceiptLine[]
   challanSizes DeliveryChallanLineSize[]
   creditSizes  CreditNoteLineSize[]

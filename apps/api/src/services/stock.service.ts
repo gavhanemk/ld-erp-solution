@@ -68,6 +68,11 @@ export interface Movement extends StockKey {
   referenceType: string
   referenceId: string
   batchNumber?: string | null
+  /**
+   * The order the pieces belong to, on work in progress and finished goods
+   * moved process to process. Written on the row; not part of the balance.
+   */
+  orderNo?: string | null
   transactionDate?: Date
   notes?: string | null
   /**
@@ -370,6 +375,7 @@ export async function recordMovement(
       referenceType: m.referenceType,
       referenceId: m.referenceId,
       batchNumber: m.batchNumber ?? null,
+      orderNo: m.orderNo ?? null,
       ownership: m.ownership ?? 'OWNED',
       ownerCustomerId: m.ownerCustomerId ?? null,
       sizeId: m.sizeId ?? null,
@@ -573,6 +579,9 @@ export async function transferStock(
     /** A finished garment's size: it moves as that size, and arrives as it. */
     sizeId?: string | null
     grade?: string | null
+    /** The lot and the order travel with the pieces, written on both rows. */
+    batchNumber?: string | null
+    orderNo?: string | null
     transactionDate?: Date
     notes?: string | null
     /** As on a single movement: see `Movement`. Stickers and holds apply to the side it leaves. */
@@ -602,6 +611,8 @@ export async function transferStock(
     ownerCustomerId: args.ownerCustomerId,
     sizeId: args.sizeId,
     grade: args.grade,
+    batchNumber: args.batchNumber,
+    orderNo: args.orderNo,
     transactionDate: args.transactionDate,
     notes: args.notes,
     stickers: args.stickers,
@@ -637,6 +648,8 @@ export async function transferStock(
     ownerCustomerId: args.ownerCustomerId,
     sizeId: args.sizeId,
     grade: args.grade,
+    batchNumber: args.batchNumber,
+    orderNo: args.orderNo,
     transactionDate: args.transactionDate,
     notes: args.notes,
     earlierDate: args.earlierDate,

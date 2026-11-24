@@ -167,7 +167,7 @@ export async function categoryGroupOnSave(data: Record<string, unknown>, before?
  * department on no routing comes after the rest. Kept from the data rather than
  * a fixed list, so a new process finds its own place.
  */
-async function processRanks() {
+export async function processRanks() {
   const steps = await prisma.routingStep.findMany({
     where: { routing: { isActive: true } },
     select: { routingId: true, sequence: true, departmentId: true },

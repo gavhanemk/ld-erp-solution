@@ -27,6 +27,10 @@ import { createPurchaseNoteIn } from './purchase-notes.routes'
 import { assertNotCancelling, soOfMo } from '../services/orderCancel.service'
 import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
+import * as openingStock from '../services/openingStock.service'
+import * as processStock from '../services/processStock.service'
+import { floorFor } from '../services/processFloor.service'
+import { z as zod } from 'zod'
 import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
   stockInSchema,
@@ -5315,5 +5319,130 @@ router.patch(
     })
   },
 )
+
+/*
+ * Opening stock from the mill's 19-column sheet: the template, then check and
+ * import (all or nothing), and the uploads with their lines.
+ */
+router.get('/opening-stock/import-template', requirePermission(MODULE, 'create'), async (_req, res) => {
+  const buffer = await openingStock.buildTemplate()
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', 'attachment; filename="opening-stock-template.xlsx"')
+  res.send(buffer)
+})
+
+router.post('/opening-stock/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = customerMaterialImport.importBody.parse(req.body)
+  const rows = await openingStock.readSheet(Buffer.from(file, 'base64'), fileName)
+  const resolved = await openingStock.planImport(rows)
+  const summary = openingStock.summarise(resolved)
+  if (!confirm) {
+    res.json({ success: true, data: { summary, rows: resolved.map((r) => r.plan) } })
+    return
+  }
+  const done = await openingStock.runImport(resolved, { fileName, userId: req.user?.id ?? null })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'OpeningStock',
+    entityId: done.id,
+    after: { number: done.number, fileName, lines: done.lines, stickers: done.stickers, floorsMade: done.floorsMade },
+  })
+  res.status(201).json({
+    success: true,
+    message: `${done.number}: ${done.lines} ${done.lines === 1 ? 'line' : 'lines'} of opening stock brought in${
+      done.stickers ? `, ${done.stickers} ${done.stickers === 1 ? 'sticker' : 'stickers'} ready to print` : ''
+    }${done.floorsMade.length ? `. Made ${done.floorsMade.join(', ')}` : ''}.`,
+    data: { ...done, summary },
+  })
+})
+
+router.get('/opening-stock', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const docs = await prisma.openingStock.findMany({
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, number: true, fileName: true, createdAt: true, createdBy: { select: { name: true } } },
+  })
+  const totals = await prisma.openingStockLine.groupBy({
+    by: ['openingStockId'],
+    _count: { _all: true },
+    _sum: { value: true },
+    _min: { openingDate: true },
+  })
+  const byDoc = new Map(totals.map((t) => [t.openingStockId, t]))
+  res.json({
+    success: true,
+    data: docs.map((d) => ({
+      ...d,
+      lines: byDoc.get(d.id)?._count._all ?? 0,
+      value: Number(byDoc.get(d.id)?._sum.value ?? 0),
+      openingDate: byDoc.get(d.id)?._min.openingDate ?? null,
+    })),
+  })
+})
+
+router.get('/opening-stock/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  const doc = await prisma.openingStock.findUnique({
+    where: { id: req.params.id },
+    include: {
+      createdBy: { select: { name: true } },
+      lines: {
+        orderBy: { rowNo: 'asc' },
+        include: {
+          item: { select: { code: true, name: true, type: true, uom: { select: { symbol: true } } } },
+          warehouse: { select: { name: true } },
+          department: { select: { name: true } },
+          size: { select: { code: true } },
+        },
+      },
+    },
+  })
+  if (!doc) throw new AppError('That opening stock upload does not exist.', 404, 'NOT_FOUND')
+  res.json({ success: true, data: doc })
+})
+
+/*
+ * Work in progress and finished goods by process and size, and moving pieces
+ * from one process to the next.
+ */
+router.get('/process-stock', requirePermission(MODULE, 'view'), async (req, res) => {
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  const data = await processStock.processStock({ orderNo: text(req.query.orderNo), itemId: text(req.query.itemId), q: text(req.query.q) })
+  res.json({ success: true, data })
+})
+
+router.post('/process-stock/move', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = moveSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: data.itemId, qty: l.qty, what: 'Move' })))
+  if (!data.toWarehouseId && !data.toProcessId) throw new AppError('Pick where the pieces go.', 400, 'NO_DESTINATION')
+  const done = await prisma.$transaction(
+    async (tx) => {
+      const toWarehouseId = data.toWarehouseId ?? (await floorFor(tx, data.toProcessId!)).id
+      return processStock.moveStock(tx, { ...data, toWarehouseId }, req.user?.id ?? null)
+    },
+    { timeout: 60_000, maxWait: 20_000 },
+  )
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockTransfer', entityId: done.id, after: done })
+  res.status(201).json({
+    success: true,
+    message: `${done.transferNumber}: ${done.pieces} moved from ${done.from} to ${done.to}.`,
+    data: done,
+  })
+})
+
+const moveSchema = zod.object({
+  itemId: zod.string().min(1, 'Pick the item'),
+  fromWarehouseId: zod.string().min(1, 'Pick where the pieces are'),
+  // Where they go: a place, or a process whose floor is made if it has none yet.
+  toWarehouseId: zod.string().min(1).optional(),
+  toProcessId: zod.string().min(1).optional(),
+  orderNo: zod.string().max(60).optional().nullable(),
+  lotNo: zod.string().max(60).optional().nullable(),
+  bundleNo: zod.string().max(60).optional().nullable(),
+  date: zod.coerce.date().optional(),
+  notes: zod.string().max(500).optional().nullable(),
+  lines: zod
+    .array(zod.object({ sizeId: zod.string().min(1).nullable(), qty: zod.number().nonnegative() }))
+    .min(1, 'Enter the pieces of at least one size'),
+})
 
 export default router
