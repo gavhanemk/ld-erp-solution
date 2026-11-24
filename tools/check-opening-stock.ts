@@ -106,7 +106,6 @@ async function main() {
     { ...base, Process: 'Store', 'Department / Location': 'Store', 'Item Code': fabric.code, 'Stock Status': 'Maybe', 'Bundle / Barcode No.': 'X6' }, // 17: status
     { ...base, Process: 'Store', 'Department / Location': 'Store', 'Item Code': 'NO-SUCH-CODE' },           // 18: no item
     { ...base, Process: 'Washing', 'Order No.': order, 'Style / Article No.': style.code, 'Item Code': garment.code, Size: 'S', 'Bundle / Barcode No.': 'X7' }, // 19: off the route
-    { ...base, Process: 'Store', 'Department / Location': 'Cutting Floor', 'Item Code': fabric.code, 'Bundle / Barcode No.': 'X8' }, // 20: a floor is not a store
   ]
   const checked = await call('POST', '/inventory/opening-stock/import', await sheetWith(template, [...good, ...bad], 'opening-check'))
   check('the check answers', okay(checked), checked.body)
@@ -126,11 +125,10 @@ async function main() {
     [17, /not one of: OK, Hold, Rejected, B-Grade/, 'an unknown status'],
     [18, /No item with code NO-SUCH-CODE/, 'an unknown item'],
     [19, /Washing is not on ZZTEST-SH-01's route \(Cutting → Stitching → Finishing\)/, "a process off the style's route"],
-    [20, /Cutting Floor is a process's floor, not a store/, 'a process floor given as a store'],
   ]
   for (const [row, re, what] of expect) check(`row ${row} refused: ${what}`, re.test(problemsOf(row)), problemsOf(row))
   const summary = checked.body?.data?.summary
-  check('summary counts lines, problems and value', summary?.lines === 6 && summary?.problems === 13 && summary?.value === 6000 + 4800 + 5000 + 6400 + 600 + 6000, summary)
+  check('summary counts lines, problems and value', summary?.lines === 6 && summary?.problems === 12 && summary?.value === 6000 + 4800 + 5000 + 6400 + 600 + 6000, summary)
   const stage = (g: string) => summary?.byGroup?.find((x: any) => x.group === g)?.lines
   check('summary: 2 raw, 3 work in progress (semi-finished), 1 finished', stage('RAW_MATERIALS') === 2 && stage('SEMI_FINISHED') === 3 && stage('FINISHED_GOODS') === 1, summary?.byGroup)
   const refusedImport = await call('POST', '/inventory/opening-stock/import', { ...(await sheetWith(template, [...good, ...bad], 'opening-bad')), confirm: true })
@@ -150,6 +148,9 @@ async function main() {
   check('finished goods in their store, by size, B-grade', fg?.warehouse.name === 'Store' && fg.grade === 'B' && Number(fg.unitRate) === 300, fg)
   const pkgs = await prisma.stockPackage.findMany({ where: { sourceId: docId }, select: { lotNo: true, notes: true, qty: true, grade: true } })
   check('a sticker per roll, with its lot and roll number', pkgs.length === 2 && pkgs.every((p) => p.lotNo === `LOT-${stamp}`) && pkgs.some((p) => p.notes === `Barcode R-${stamp}-1` && Number(p.qty) === 50) && pkgs.some((p) => p.grade === 'R'), pkgs)
+  // A process floor (made by the import just now, on a fresh demo) is not a store.
+  const floorAsStore = await call('POST', '/inventory/opening-stock/import', await sheetWith(template, [{ ...base, Process: 'Store', 'Department / Location': 'Cutting Floor', 'Item Code': fabric.code, 'Bundle / Barcode No.': `X8-${stamp}` }], 'opening-floor-store'))
+  check('a process floor given as a store is refused', /Cutting Floor is a process's floor, not a store/.test(floorAsStore.body?.data?.rows?.[0]?.problems?.join(' ') ?? ''), floorAsStore.body?.data?.rows?.[0])
   const lines = await prisma.openingStockLine.count({ where: { openingStockId: docId } })
   check('every row kept as typed', lines === 6)
   const list = await call('GET', '/inventory/opening-stock')
