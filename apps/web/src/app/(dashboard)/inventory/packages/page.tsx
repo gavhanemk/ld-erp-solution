@@ -170,7 +170,7 @@ function PackagesScreen() {
         </h1>
         <Figure icon={Boxes} value={summary.packages} label={`stickers · ${summary.items} ${summary.items === 1 ? 'item' : 'items'}`} />
         <Figure icon={Warehouse} value={summary.stores} label={summary.stores === 1 ? 'store' : 'stores'} />
-        <Figure icon={Tags} value={waiting} label="need stickers" tone={waiting ? 'warn' : undefined} onClick={() => go('label')} />
+        <Figure icon={Tags} value={waiting} label="packaging pending" tone={waiting ? 'warn' : undefined} onClick={() => go('label')} />
         <Figure
           icon={AlertTriangle}
           value={summary.mismatches}
@@ -223,7 +223,7 @@ function PackagesScreen() {
                 ['ready', `Ready to print (${ready?.count ?? 0})`],
                 ['reprint', `Reprint needed (${changed?.length ?? 0})`],
                 ['list', `All stickers (${total})`],
-                ['label', `No stickers (${waiting})`],
+                ['label', `Packaging pending (${waiting})`],
               ] as const
             ).map(([key, label]) => (
               <button
@@ -369,7 +369,7 @@ function PackagesScreen() {
                 ? 'Loading…'
                 : q || store || status !== 'IN_STOCK'
                   ? 'No package matches that.'
-                  : 'Nothing has stickers yet. Stock that needs them is under "Needs stickers".'
+                  : 'Nothing has stickers yet. Stock that needs them is under "Packaging pending".'
             }
           />
         )}

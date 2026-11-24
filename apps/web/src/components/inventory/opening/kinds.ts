@@ -45,11 +45,21 @@ export const KINDS: Array<{
 ]
 export const kindOf = (k: string | null | undefined) => KINDS.find((x) => x.key === k)
 
+/** A finished item linked to a style: picked by its code, name or description. */
+export interface StyleItem {
+  id: string
+  code: string
+  name: string
+  description: string | null
+  colour: string | null
+}
 export interface StyleOption {
   id: string
   code: string
   name: string
-  colours: Array<{ colour: string; item: { id: string; code: string } | null }>
+  /** Every finished item linked to the style. */
+  items: StyleItem[]
+  colours: Array<{ colour: string; item: { id: string; code: string; name?: string } | null }>
   sizes: Array<{ id: string; code: string }>
   /** The processes on its route, in order; null when it has none. */
   route: Array<{ id: string; name: string }> | null
@@ -76,6 +86,31 @@ export interface FormOptions {
   styles: StyleOption[]
   categories: Array<{ id: string; name: string; items: number }>
   items: MaterialOption[]
+}
+
+/** One row of a style's grid: a colour of the style with its item (or none yet), or another item linked to the style. */
+export interface StyleRow {
+  key: string
+  colour: string
+  item: StyleItem | null
+}
+
+/**
+ * The rows a style's grid shows: each of its colours, with the item made for
+ * it (or none yet, to make), then every other item linked to the style — one
+ * in a colour the style does not list, or a second item in one colour — so
+ * every item under the style can be entered.
+ */
+export function styleRows(st: StyleOption): StyleRow[] {
+  const items = st.items ?? []
+  const used = new Set<string>()
+  const rows: StyleRow[] = st.colours.map((c) => {
+    const item = c.item ? (items.find((i) => i.id === c.item!.id) ?? { id: c.item.id, code: c.item.code, name: c.item.name ?? '', description: null, colour: c.colour }) : null
+    if (item) used.add(item.id)
+    return { key: c.colour, colour: c.colour, item }
+  })
+  for (const i of items) if (!used.has(i.id)) rows.push({ key: `#${i.id}`, colour: i.colour ?? '', item: i })
+  return rows
 }
 
 export const STATUSES = [

@@ -23,7 +23,7 @@ export type PackMethod = 'ONE' | 'EQUAL' | 'EACH' | 'LIST' | 'LATER'
 export interface PackValue {
   method: PackMethod
   type: string
-  /** Split equally: into how many. No stickers yet: how many there will be, when known. */
+  /** Split equally: into how many. Packaging pending: how many there will be, when known. */
   count: string
   /** Fixed size each: what one full package holds. */
   each: string
@@ -36,7 +36,7 @@ export const PACK_METHODS: Array<{ value: PackMethod; label: string; hint: strin
   { value: 'EQUAL', label: 'Split equally', hint: 'A number of packages of the same size; the last takes what does not divide.' },
   { value: 'EACH', label: 'Fixed size each', hint: 'Full packages of one size, and one more for the rest.' },
   { value: 'LIST', label: 'Different sizes', hint: 'Each package its own size: type them one by one, or paste a packing list.' },
-  { value: 'LATER', label: 'No stickers yet', hint: 'The stock is counted without stickers. Make them later, when the sizes are known.' },
+  { value: 'LATER', label: 'Packaging pending', hint: 'The stock is saved without packages (packaging pending). Configure them later, when the sizes are known.' },
 ]
 
 export const newPack = (type: string, method: PackMethod = 'ONE'): PackValue => ({ method, type, count: '', each: '', rows: [emptyRow()] })
@@ -115,12 +115,34 @@ export function planOf(v: PackValue, total: number, unit: string, places: number
   }
 }
 
-/** "5 rolls", "1 box", "No stickers yet" — and what is left without, when some is. */
+/** "5 rolls", "1 box", "Packaging pending" — and what is left pending, when some is. */
 export function packText(plan: PackPlan, type: string, unit: string) {
   const n = nounsOf(type)
   const count = plan.qtys.length
-  if (!count) return 'No stickers yet'
-  return `${count} ${count === 1 ? n.one : n.many}${plan.loose > 0.0005 ? ` + ${qtyText(plan.loose)} ${unit} without` : ''}`
+  if (!count) return 'Packaging pending'
+  return `${count} ${count === 1 ? n.one : n.many}${plan.loose > 0.0005 ? ` + ${qtyText(plan.loose)} ${unit} pending` : ''}`
+}
+
+/** The packing chosen, as a save or an import takes it: the sizes worked out here, or packaging pending. */
+export interface PackInputBody {
+  type: string
+  qtys?: number[]
+  refs?: Array<string | null>
+  later?: boolean
+  count?: number
+}
+export function packInputOf(v: PackValue, total: number, unit: string, places: number): PackInputBody {
+  if (v.method === 'LATER') return { type: v.type, later: true, ...(Number(v.count) >= 1 ? { count: Math.floor(Number(v.count)) } : {}) }
+  const plan = planOf(v, total, unit, places)
+  return { type: v.type, qtys: plan.qtys, ...(plan.notes.some(Boolean) ? { refs: plan.notes.map((n) => n || null) } : {}) }
+}
+
+/** What a saved plan was, as the editor's value: one package, so many the same, each its own, or pending. */
+export function packValueOf(p: { type: string; qtys: number[]; later: boolean; count: number | null }): PackValue {
+  if (p.later || !p.qtys.length) return { ...newPack(p.type, 'LATER'), count: p.count ? String(p.count) : '' }
+  if (p.qtys.length === 1) return newPack(p.type, 'ONE')
+  if (p.qtys.every((q) => Math.abs(q - p.qtys[0]) < 0.0005)) return { ...newPack(p.type, 'EQUAL'), count: String(p.qtys.length) }
+  return { ...newPack(p.type, 'LIST'), rows: rowsOf(p.qtys) }
 }
 
 /** What each package holds, in a few words: "200 mtr each", "500 + 500 + 200 mtr". */
@@ -158,7 +180,7 @@ export function PackagingEditor({
   part?: boolean
   /** The heading over each package's note: "Roll no. / note". */
   noteLabel?: string
-  /** No stickers yet: ask how many packages there will be. */
+  /** Packaging pending: ask how many packages there will be. */
   countForLater?: boolean
   laterText?: string
   idPrefix?: string
@@ -331,7 +353,7 @@ export function PackagingDialog({
   noteLabel?: string
   countForLater?: boolean
   laterText?: string
-  /** "No stickers yet" offered: not when stickers are being made now. */
+  /** "Packaging pending" offered: not when stickers are being made now. */
   allowLater?: boolean
   busy?: boolean
   error?: string | null

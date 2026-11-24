@@ -136,6 +136,8 @@ export interface PackageDetail {
   mergedFrom?: Array<{ id: string; code: string; initialQty: number | string }>
   /** Held: not issued until released. */
   held?: boolean
+  /** The barcode it already carried when it came in: scanning it finds this package. */
+  barcode?: string | null
   /** Printed, then changed: what changed, to print again. */
   changedSincePrint?: string[]
   printCount?: number

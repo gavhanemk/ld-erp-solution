@@ -1,12 +1,12 @@
 'use client'
 
 import { useMemo, useState, type ReactNode } from 'react'
-import { ExternalLink, Factory, Package, Plus, Shirt, Trash2 } from 'lucide-react'
+import { ExternalLink, Factory, Package, Plus, Search, Shirt, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { StyleGrid, ReloadButton } from './StyleGrid'
-import { cellKey, money, num, type FormOptions, type MaterialOption, type StyleOption } from './kinds'
+import { cellKey, money, num, styleRows, type FormOptions, type MaterialOption, type StyleOption } from './kinds'
 import { newPack, packText, PackagingDialog, planOf, type PackValue } from '@/components/packages/PackagingEditor'
 
 /*
@@ -27,6 +27,8 @@ export interface Garment {
   bundle: string
   rates: Record<string, string>
   qty: Record<string, string>
+  /** The item picked by its code, name or description; empty for all the style's items. */
+  item?: string
 }
 /** A material: one item, with a row for each lot or roll. */
 export interface Material {
@@ -54,12 +56,36 @@ interface Shared {
   mayMakeItems: boolean
   maySetSizeRun: boolean
   onReload: () => Promise<void>
-  onColourMade: (styleId: string, colour: string, item: { id: string; code: string }) => void
+  onColourMade: (styleId: string, colour: string, item: { id: string; code: string; name?: string }) => void
 }
 
 const piecesOf = (g: Garment) => Object.values(g.qty).reduce((n, v) => n + Number(v || 0), 0)
 const valueOf = (g: Garment, st: StyleOption | undefined) =>
-  (st?.colours ?? []).reduce((n, c) => n + (st?.sizes ?? []).reduce((m, s) => m + Number(g.qty[cellKey(c.colour, s.id)] || 0) * Number(g.rates[s.id] || 0), 0), 0)
+  (st ? styleRows(st) : []).reduce((n, r) => n + (st?.sizes ?? []).reduce((m, s) => m + Number(g.qty[cellKey(r.key, s.id)] || 0) * Number(g.rates[s.id] || 0), 0), 0)
+
+/** Every finished item linked to a style, to find its style by: "SHI-007 — Formal Shirt White". */
+function ItemFinder({ options, onPick, label }: { options: FormOptions; onPick: (styleId: string, itemId: string) => void; label: string }) {
+  return (
+    <SmartSelect
+      className="form-input h-9 w-80"
+      value=""
+      onChange={(e) => {
+        const st = options.styles.find((x) => (x.items ?? []).some((i) => i.id === e.target.value))
+        if (st) onPick(st.id, e.target.value)
+      }}
+      aria-label={label}
+    >
+      <option value="">…or find by Item Code / Item Name</option>
+      {options.styles.flatMap((st) =>
+        (st.items ?? []).map((i) => (
+          <option key={i.id} value={i.id} data-sub={[st.code, i.colour, i.description].filter(Boolean).join(' · ')}>
+            {`${i.code} — ${i.name}`}
+          </option>
+        )),
+      )}
+    </SmartSelect>
+  )
+}
 
 // ── Finished Goods: style → its colours → its sizes ─────────────────────
 
@@ -67,9 +93,14 @@ export function FinishedGoods({ garments, onChange, ...shared }: Shared & { garm
   const { options } = shared
   const [pick, setPick] = useState('')
   const taken = new Set(garments.map((g) => g.styleId))
-  const add = (styleId: string) => {
-    if (!styleId || taken.has(styleId)) return
-    onChange([...garments, { key: newKey(), styleId, processId: '', locationId: '', orderNo: '', bundle: '', rates: {}, qty: {} }])
+  const add = (styleId: string, item = '') => {
+    if (!styleId) return
+    // Found by its item: the style's block, already there or added, shows that item.
+    if (taken.has(styleId)) {
+      if (item) onChange(garments.map((g) => (g.styleId === styleId ? { ...g, item } : g)))
+      return
+    }
+    onChange([...garments, { key: newKey(), styleId, processId: '', locationId: '', orderNo: '', bundle: '', rates: {}, qty: {}, item }])
     setPick('')
   }
   return (
@@ -87,6 +118,8 @@ export function FinishedGoods({ garments, onChange, ...shared }: Shared & { garm
               </option>
             ))}
         </SmartSelect>
+        <Search size={14} className="text-muted-foreground" />
+        <ItemFinder options={options} onPick={(styleId, itemId) => add(styleId, itemId)} label="Find by item code or name" />
       </div>
       {garments.length === 0 && <Empty icon={Shirt} text="Pick a style to enter its finished pieces: a box for each of its colours and sizes." />}
       {garments.map((g) => {
@@ -111,6 +144,8 @@ export function FinishedGoods({ garments, onChange, ...shared }: Shared & { garm
               qty={g.qty}
               onRates={(rates) => onChange(garments.map((x) => (x.key === g.key ? { ...x, rates } : x)))}
               onQty={(qty) => onChange(garments.map((x) => (x.key === g.key ? { ...x, qty } : x)))}
+              only={g.item ?? ''}
+              onOnly={(item) => onChange(garments.map((x) => (x.key === g.key ? { ...x, item } : x)))}
               sizeRuns={options.sizeRuns}
               mayMakeItems={shared.mayMakeItems}
               maySetSizeRun={shared.maySetSizeRun}
@@ -129,6 +164,7 @@ export function FinishedGoods({ garments, onChange, ...shared }: Shared & { garm
 export function SemiFinished({ garments, onChange, ...shared }: Shared & { garments: Garment[]; onChange: (g: Garment[]) => void }) {
   const { options } = shared
   const [styleId, setStyleId] = useState('')
+  const [itemId, setItemId] = useState('')
   const [processId, setProcessId] = useState('')
   const [busy, setBusy] = useState(false)
   const style = options.styles.find((x) => x.id === styleId)
@@ -136,7 +172,7 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
   const route = (style?.route ?? []).filter((p) => !garments.some((g) => g.styleId === styleId && g.processId === p.id))
   const add = () => {
     if (!style || !processId) return
-    onChange([...garments, { key: newKey(), styleId: style.id, processId, locationId: '', orderNo: '', bundle: '', rates: {}, qty: {} }])
+    onChange([...garments, { key: newKey(), styleId: style.id, processId, locationId: '', orderNo: '', bundle: '', rates: {}, qty: {}, item: itemId }])
     setProcessId('')
   }
   const reload = async () => {
@@ -161,8 +197,9 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
             className="form-input h-9 w-72"
             value={styleId}
             onChange={(e) => {
-              // A new style: its route, so the process chosen for the last one goes.
+              // A new style: its route and its items, so the process and item chosen for the last one go.
               setStyleId(e.target.value)
+              setItemId('')
               setProcessId('')
             }}
             aria-label="Style"
@@ -171,6 +208,14 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
             {options.styles.map((st) => (
               <option key={st.id} value={st.id} data-sub={st.route ? `${st.name} · ${st.route.map((p) => p.name).join(' → ')}` : `${st.name} · no route yet`}>
                 {st.code}
+              </option>
+            ))}
+          </SmartSelect>
+          <SmartSelect className="form-input h-9 w-64" value={itemId} onChange={(e) => setItemId(e.target.value)} disabled={!style || !(style.items ?? []).length} aria-label="Item (optional)">
+            <option value="">{style ? `All its items (${(style.items ?? []).length})` : 'Item: pick a style first'}</option>
+            {(style?.items ?? []).map((i) => (
+              <option key={i.id} value={i.id} data-sub={[i.name, i.colour, i.description].filter(Boolean).join(' · ')}>
+                {i.code}
               </option>
             ))}
           </SmartSelect>
@@ -249,6 +294,8 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
               qty={g.qty}
               onRates={(rates) => set({ rates })}
               onQty={(qty) => set({ qty })}
+              only={g.item ?? ''}
+              onOnly={(item) => set({ item })}
               sizeRuns={options.sizeRuns}
               mayMakeItems={shared.mayMakeItems}
               maySetSizeRun={shared.maySetSizeRun}
@@ -422,19 +469,19 @@ function PackedAs({ item, lot, row, onChange }: { item: MaterialOption; lot: Lot
         aria-label={`Packed as, ${item.code} row ${row}`}
       >
         <span className="truncate">{qty > 0 ? packText(plan, value.type, unit) : '—'}</span>
-        <span className="text-muted-foreground shrink-0 text-[10px]">{lot.pack ? 'Change' : 'Usual'}</span>
+        <span className="text-muted-foreground shrink-0 text-[10px]">{lot.pack ? 'Change' : lot.bundle.trim() ? 'Own barcode' : item.perPack ? 'Suggested' : 'Set'}</span>
       </button>
       {open && (
         <PackagingDialog
           title="How is it packed?"
-          subtitle={`${item.code} ${item.name}${lot.lot.trim() ? ` · lot ${lot.lot.trim()}` : ''} · ${num(qty)} ${unit}`}
+          subtitle={`${item.code} ${item.name}${lot.lot.trim() ? ` · lot ${lot.lot.trim()}` : ''} · ${num(qty)} ${unit}${lot.bundle.trim() ? ` · its own barcode ${lot.bundle.trim()} stays as one package's identity` : ''}`}
           initial={value}
           total={qty}
           unit={unit}
           places={item.decimals}
           noteLabel="Roll no. / reference (optional)"
           countForLater
-          laterText="The stock is counted without stickers. Make them later from Opening Stock → the line's Stickers, when the sizes are known."
+          laterText="Saved as stock with packaging pending. Configure the packages later — from Stickers → Packaging pending, or the line in Opening Stock."
           saveLabel={() => 'Use this'}
           onSave={(_, v) => {
             onChange(v)
@@ -495,9 +542,9 @@ function Empty({ icon: Icon, text }: { icon: typeof Package; text: string }) {
 }
 
 /**
- * A lot's stickers when nothing is said, as the save makes them: one for a
- * lot with its own barcode, else full packages of the item's usual size, else
- * none until its sizes are known — never sizes made up.
+ * A lot's stickers when nothing is said, as the save makes them: one package
+ * keeping a lot's own barcode, else the item's usual size suggested (to
+ * check and change), else packaging pending — never sizes made up.
  */
 export function usualPack(item: MaterialOption, lot: Pick<Lot, 'bundle'>): PackValue {
   const type = item.packType ?? 'OTHER'

@@ -15,7 +15,7 @@ import {
   cutOffForMove,
   lockPackage,
   normaliseCode,
-  codeCandidates,
+  scannedWhere,
   normaliseRack,
   packageRule,
   positionOf,
@@ -984,7 +984,7 @@ router.post('/put-away', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   if (!rack) throw new AppError('Type the rack first', 400, 'NO_RACK')
   const code = normaliseCode(data.code)
   const out = await prisma.$transaction(async (tx) => {
-    const found = await tx.stockPackage.findFirst({ where: { code: { in: codeCandidates(data.code) } }, select: { id: true } })
+    const found = await tx.stockPackage.findFirst({ where: scannedWhere(data.code), select: { id: true } })
     if (!found) throw new AppError(`No package with the code ${code}. Check the sticker, or type the number under the QR.`, 404, 'NOT_FOUND')
     const pkg = await lockPackage(tx, found.id)
     if (pkg.status !== 'IN_STOCK') {
@@ -1115,7 +1115,7 @@ router.post('/:id/edit', requirePermission(MODULE, 'edit'), async (req: AuthRequ
 router.get('/scan/:code', requirePermission(MODULE, 'view'), async (req, res) => {
   const raw = decodeURIComponent(req.params.code)
   const code = normaliseCode(raw)
-  const pkg = await prisma.stockPackage.findFirst({ where: { code: { in: codeCandidates(raw) } }, select: { id: true } })
+  const pkg = await prisma.stockPackage.findFirst({ where: scannedWhere(raw), select: { id: true } })
   if (!pkg) throw new AppError(`No package with the code ${code}. Check the sticker, or type the number under the QR.`, 404, 'NOT_FOUND')
   res.json({ success: true, data: await detail(pkg.id) })
 })

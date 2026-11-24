@@ -79,10 +79,10 @@ async function main() {
   check('the good rows pass', [2, 3, 4, 5, 6, 7].every((r) => problemsOf(checked, r) === ''), [2, 3, 4, 5, 6, 7].map((r) => problemsOf(checked, r)))
   check('each roll its own sticker: 5 rolls', packingOf(checked, 2)?.stickers === 5 && /5 rolls: 200 \+ 250 \+ 150 \+ 180 \+ 220 mtr/.test(packingOf(checked, 2)?.packing ?? ''), packingOf(checked, 2))
   check('a quantity per package: 500 + 500 + 200', packingOf(checked, 3)?.stickers === 3 && /3 boxes: 500 \+ 500 \+ 200 mtr/.test(packingOf(checked, 3)?.packing ?? ''), packingOf(checked, 3))
-  check('only a count: no stickers yet, equal sizes never assumed', packingOf(checked, 4)?.stickers === 0 && /4 rolls, sizes to give later/.test(packingOf(checked, 4)?.packing ?? ''), packingOf(checked, 4))
-  check('its own barcode: one package', packingOf(checked, 5)?.stickers === 1, packingOf(checked, 5))
-  check('nothing to go by: waits without stickers, none made up', packingOf(checked, 6)?.stickers === 0 && /Without stickers for now/.test(packingOf(checked, 6)?.packing ?? ''), packingOf(checked, 6))
-  check('part of it on a sticker: the rest waits', packingOf(checked, 7)?.stickers === 1 && /40 mtr without a sticker for now/.test(packingOf(checked, 7)?.packing ?? ''), packingOf(checked, 7))
+  check('only a count: packaging pending, equal sizes never assumed', packingOf(checked, 4)?.stickers === 0 && /Packaging pending: 4 rolls, sizes to give later/.test(packingOf(checked, 4)?.packing ?? ''), packingOf(checked, 4))
+  check('its own barcode: one package keeping it, nothing to print', packingOf(checked, 5)?.stickers === 0 && new RegExp(`its own barcode BC-${stamp} kept`).test(packingOf(checked, 5)?.packing ?? ''), packingOf(checked, 5))
+  check('nothing to go by: packaging pending, none made up', packingOf(checked, 6)?.stickers === 0 && /^Packaging pending/.test(packingOf(checked, 6)?.packing ?? ''), packingOf(checked, 6))
+  check('part of it on a sticker: the rest pending', packingOf(checked, 7)?.stickers === 1 && /40 mtr packaging pending/.test(packingOf(checked, 7)?.packing ?? ''), packingOf(checked, 7))
   const expect: Array<[number, RegExp, string]> = [
     [8, /add up to 110 mtr, more than the 100 mtr on the row/, 'packages more than the row'],
     [9, /Package Count says 3, but 2 quantities are given/, 'a count that does not match the list'],
@@ -90,15 +90,35 @@ async function main() {
     [11, /at 30 a package is 4 rolls, not 2/, 'a count that does not match the quantity per package'],
   ]
   for (const [row, re, what] of expect) check(`row ${row} refused: ${what}`, re.test(problemsOf(checked, row)), problemsOf(checked, row))
-  check('the summary counts stickers and what waits', checked.body?.data?.summary?.stickers === 10 && checked.body?.data?.summary?.waiting === 2, checked.body?.data?.summary)
+  check('the summary: 9 stickers to print, 1 keeps its own barcode, 2 pending', checked.body?.data?.summary?.stickers === 9 && checked.body?.data?.summary?.kept === 1 && checked.body?.data?.summary?.waiting === 2, checked.body?.data?.summary)
+  // Changed on the review before the import: row 3 as two boxes of 600.
+  const edited = await call('POST', '/inventory/opening-stock/import', { ...(await rmSheet([...good, ...bad], 'pack-check')), kind: 'RM', openingDate: today, packs: { '3': { type: 'BOX', qtys: [600, 600] } } })
+  check('a row changed on the review: checked again as changed', /2 boxes × 600 mtr/.test(packingOf(edited, 3)?.packing ?? '') && packingOf(edited, 3)?.stickers === 2, packingOf(edited, 3))
+  const twice = await call('POST', '/inventory/opening-stock/import', {
+    ...(await rmSheet([{ ...base, 'Lot / Batch / Roll Number': `T1-${stamp}`, 'Bundle / Barcode Number': `BT-${stamp}`, 'Opening Quantity': 5 }, { ...base, 'Lot / Batch / Roll Number': `T2-${stamp}`, 'Bundle / Barcode Number': `bt-${stamp}`, 'Opening Quantity': 6 }], 'twice')),
+    kind: 'RM',
+    openingDate: today,
+  })
+  check('the same barcode twice in a sheet: the second refused', /is also on row 2: one barcode is one package/.test(problemsOf(twice, 3)), problemsOf(twice, 3))
 
   const done = await call('POST', '/inventory/opening-stock/import', { ...(await rmSheet(good, `pack-${stamp}`)), kind: 'RM', openingDate: today, requestKey: `zz-pack-${stamp}`, confirm: true })
-  check('imported: 10 stickers', done.status === 201 && done.body?.data?.stickers === 10, done.body)
+  check('imported: 9 stickers to print', done.status === 201 && done.body?.data?.stickers === 9, done.body)
   const docId = done.body?.data?.id
   const pkgs = await prisma.stockPackage.findMany({ where: { sourceId: docId }, select: { id: true, code: true, qty: true, notes: true, packType: true, grade: true, sourceLineId: true, lotNo: true }, orderBy: { code: 'asc' } })
   const rolls = pkgs.filter((p) => p.lotNo === `A-${stamp}`)
   check('the rolls keep their own references, and name their line', rolls.length === 5 && rolls.every((p) => p.sourceLineId && /^Ref S\d-/.test(p.notes ?? '')) && new Set(rolls.map((p) => p.sourceLineId)).size === 1, rolls)
   check('the held part is a held sticker', pkgs.some((p) => p.lotNo === `F-${stamp}` && p.grade === 'R' && Number(p.qty) === 60), pkgs.filter((p) => p.lotNo === `F-${stamp}`))
+  const own = pkgs.find((p) => p.lotNo === `D-${stamp}`)!
+  const byBarcode = await call('GET', `/packages/scan/${encodeURIComponent(`bc-${stamp}`)}`)
+  check('scanning its own barcode finds the package', byBarcode.status === 200 && byBarcode.body?.data?.code === own.code && byBarcode.body?.data?.barcode === `BC-${stamp}`, byBarcode.body?.data && { code: byBarcode.body.data.code, barcode: byBarcode.body.data.barcode })
+  const readyNow = (await call('GET', `/packages/ready?sourceType=OPENING&sourceId=${docId}`)).body?.data?.groups ?? []
+  check('a package keeping its own barcode is not waiting to print', !readyNow.some((g: any) => g.ids.includes(own.id)), readyNow.map((g: any) => g.lots))
+  const reused = await call('POST', '/inventory/opening-stock/import', {
+    ...(await rmSheet([{ ...base, 'Lot / Batch / Roll Number': `Z-${stamp}`, 'Bundle / Barcode Number': `BC-${stamp}`, 'Opening Quantity': 5 }], 'again')),
+    kind: 'RM',
+    openingDate: today,
+  })
+  check('a barcode already on a package: refused, naming it', new RegExp(`BC-${stamp} is already on package ${own.code}`).test(problemsOf(reused, 2)), problemsOf(reused, 2))
   const ledger = await prisma.stockLedger.aggregate({ where: { referenceId: docId }, _sum: { inQty: true } })
   check('all the stock is in, stickered or not: 3,455.5 mtr', Math.abs(Number(ledger._sum.inQty) - 3455.5) < 0.001, ledger._sum)
 
@@ -182,7 +202,23 @@ async function main() {
   const ready = (await call('GET', `/packages/ready?sourceType=OPENING&sourceId=${docId}`)).body?.data?.groups ?? []
   check('Ready to print: a group for each line, with its lot', ready.length >= 4 && ready.every((g: any) => g.lots.length <= 1) && ready.some((g: any) => g.lots[0] === `A-${stamp}`), ready.map((g: any) => [g.lots, g.ids.length]))
 
-  // 10. By hand, packed as said.
+  // 10. Labelled from Stickers → Packaging pending: the lines no longer wait.
+  const linesBefore = (await call('GET', `/inventory/opening-stock/lines?entry=${docId}&limit=50`)).body?.data?.lines ?? []
+  const pendingBefore = linesBefore.reduce((t: number, l: any) => t + (l.stickers?.waiting ?? 0), 0)
+  const fabricStore = await prisma.warehouse.findFirstOrThrow({ where: { name: store }, select: { id: true } })
+  const loose = await call('POST', '/packages', { itemId: fabric.id, warehouseId: fabricStore.id, qtys: [pendingBefore], packType: 'ROLL' })
+  const linesAfter = (await call('GET', `/inventory/opening-stock/lines?entry=${docId}&limit=50`)).body?.data?.lines ?? []
+  check(`stickered from Stickers (${pendingBefore} mtr): no line shows packaging pending`, loose.status === 201 && linesAfter.every((l: any) => (l.stickers?.waiting ?? 0) === 0), { made: loose.status, waiting: linesAfter.map((l: any) => [l.lotNo, l.stickers?.waiting]) })
+  const dLine = linesAfter.find((l: any) => l.lotNo === `D-${stamp}`)
+  const dPk = await call('GET', `/inventory/opening-stock/lines/${dLine?.id}/packages`)
+  check("a line's stickers still whole can be changed", dPk.body?.data?.change?.ids?.length === 1 && dPk.body.data.change.qty === 55.5, dPk.body?.data)
+
+  // 11. The entry form: every finished item of a style, by code, name and description.
+  const form = (await call('GET', '/inventory/opening-stock/form')).body?.data
+  const withItems = (form?.styles ?? []).filter((st: any) => st.items?.length)
+  check("each style lists its finished items with code and name", withItems.length > 0 && withItems.every((st: any) => st.items.every((i: any) => i.id && i.code && typeof i.name === 'string' && 'description' in i)) && withItems.every((st: any) => st.colours.every((c: any) => !c.item || st.items.some((i: any) => i.id === c.item.id))), withItems.slice(0, 2).map((st: any) => [st.code, st.items.map((i: any) => i.code)]))
+
+  // 12. By hand, packed as said.
   const hand = await call('POST', '/inventory/opening-stock/entry', {
     kind: 'RM',
     confirm: true,

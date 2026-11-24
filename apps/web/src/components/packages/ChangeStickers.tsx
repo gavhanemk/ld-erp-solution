@@ -74,7 +74,7 @@ export function ChangeStickers({
       total={line.qty}
       unit={line.unit}
       places={places}
-      laterText="Takes these stickers off: the stock stays in the store without stickers until new ones are made (Stickers → No stickers)."
+      laterText="Takes these stickers off: the stock stays in the store with packaging pending until new ones are made (Stickers → Packaging pending)."
       busy={busy}
       error={error}
       saveLabel={(plan) => (plan.qtys.length ? `Make ${plan.qtys.length} ${plan.qtys.length === 1 ? 'sticker' : 'stickers'}` : 'Take the stickers off')}

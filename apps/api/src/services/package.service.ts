@@ -55,6 +55,15 @@ export function codeCandidates(raw: string): string[] {
 }
 
 /**
+ * The package a scanned or typed code is: its own sticker's code, short or
+ * long, or the barcode it already carried when it came in.
+ */
+export function scannedWhere(raw: string): Prisma.StockPackageWhereInput {
+  const typed = raw.trim()
+  return { OR: [{ code: { in: codeCandidates(raw) } }, ...(typed ? [{ barcode: { equals: typed, mode: 'insensitive' as const } }] : [])] }
+}
+
+/**
  * A rack as typed or scanned, tidied so "b-3", "B 3" and "Rack B-3" are one
  * rack: capitals, single spaces, no leading "Rack". Blank is no rack.
  */
@@ -384,6 +393,12 @@ export async function createPackages(
     grnLineId?: string | null
     /** The line of the document it is labelled from, where not a GRN line: an opening stock line. */
     sourceLineId?: string | null
+    /**
+     * The barcode each package already carries, in the order of `qtys`: it
+     * stays its identity (scanning it finds the package), and the package is
+     * labelled already — nothing to print.
+     */
+    barcodesEach?: Array<string | null>
     parentId?: string | null
     userId: string | null
     /** Skip the loose check: a split re-labels stock that is already in a package. */
@@ -419,6 +434,7 @@ export async function createPackages(
   const created = []
   for (const [i, q] of qtys.entries()) {
     const note = input.notesEach?.[i]?.trim() || input.notes || null
+    const barcode = input.barcodesEach?.[i]?.trim() || null
     const code = await nextPackageCode(tx)
     const pkg = await tx.stockPackage.create({
       data: {
@@ -441,6 +457,8 @@ export async function createPackages(
         parentId: input.parentId ?? null,
         grade: input.grade ?? 'A',
         createdById: input.userId,
+        // Its own barcode is already on it: labelled, nothing to print.
+        ...(barcode ? { barcode, printCount: 1, lastPrintedAt: new Date() } : {}),
       },
     })
     await recordPackageMove(tx, {

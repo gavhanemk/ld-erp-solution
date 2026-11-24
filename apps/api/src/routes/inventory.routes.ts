@@ -5351,10 +5351,21 @@ async function sheetIsFor(body: { file: string; fileName: string; kind?: opening
   throw new AppError(`This file is ${name(is)}, but ${name(want)} was picked. Pick ${is === 'ALL' ? 'All in one sheet' : openingStock.KIND_LABEL[is]}, or download ${name(want)}.`, 400, 'WRONG_TEMPLATE')
 }
 
+/** How a line's stock goes on stickers, from the screen: see PackInput. */
+const packInputSchema = zod.object({
+  type: zod.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).nullish(),
+  qtys: zod.array(zod.number().positive()).max(1000, 'At most 1000 packages on one line').nullish(),
+  each: zod.number().positive().nullish(),
+  count: zod.number().int().min(1).max(1000).nullish(),
+  later: zod.boolean().nullish(),
+  refs: zod.array(zod.string().trim().max(60).nullable()).max(1000).nullish(),
+})
 const openingImportBody = customerMaterialImport.importBody.extend({
   kind: osKind.optional(),
   openingDate: zod.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Pick the opening date').optional(),
   requestKey: zod.string().min(8).max(100).optional(),
+  /** Packing changed on the review, by sheet row: it replaces what the sheet's package columns say. */
+  packs: zod.record(zod.string().regex(/^\d+$/), packInputSchema).optional(),
 })
 async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
   await sheetIsFor(body)
@@ -5363,7 +5374,11 @@ async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
     if (!body.openingDate) throw new AppError('Pick the opening date for the sheet.', 400, 'NEEDS_DATE')
     openingStock.asNineteen(rows, body.kind, body.openingDate)
   }
-  return openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind) })
+  const packs = body.packs ?? {}
+  return openingStock.planImport(
+    rows.map((r) => (packs[String(r.row)] ? { ...r, pack: packs[String(r.row)] } : r)),
+    { kind: body.kind, labels: openingStock.labelsOf(body.kind) },
+  )
 }
 
 router.post('/opening-stock/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
@@ -5438,7 +5453,7 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
         category: true,
         colors: true,
         sizeGroupId: true,
-        items: { where: { isActive: true, type: 'FINISHED_GOOD' }, select: { id: true, code: true, color: true } },
+        items: { where: { isActive: true, type: 'FINISHED_GOOD' }, select: { id: true, code: true, name: true, description: true, color: true }, orderBy: { code: 'asc' } },
       },
       orderBy: { code: 'asc' },
     }),
@@ -5482,11 +5497,15 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
         const r = routes.get(st.id)
         const route = new Map<string, string>()
         for (const step of r?.routing.steps ?? []) if (!route.has(step.departmentId)) route.set(step.departmentId, step.department.name)
+        // Every finished item linked to the style, to pick by code, name or
+        // description; each of its colours with the item made for it.
+        const items = st.items.map((i) => ({ id: i.id, code: i.code, name: i.name, description: i.description, colour: i.color }))
         return {
           id: st.id,
           code: st.code,
           name: st.name,
-          colours: st.colors.map((c) => ({ colour: c, item: st.items.find((i) => (i.color ?? '').toLowerCase() === c.toLowerCase()) ?? null })),
+          items,
+          colours: st.colors.map((c) => ({ colour: c, item: items.find((i) => (i.colour ?? '').toLowerCase() === c.toLowerCase()) ?? null })),
           sizes: (st.sizeGroupId && sizesOf.get(st.sizeGroupId)) || [],
           route: r ? [...route.entries()].map(([id, name]) => ({ id, name })) : null,
           routeFrom: r ? { applies: r.applies, code: r.routing.code } : null,
@@ -5565,14 +5584,25 @@ router.post('/opening-stock/lines/:id/packages', requirePermission(MODULE, 'crea
   })
 })
 
-/** An opening line's stickers still on stock, to print. */
+/**
+ * An opening line's stickers still on stock, to print — and the ones still
+ * whole as they were made (nothing issued, moved or split), which can be
+ * changed: packed another way, or part of it left with packaging pending.
+ */
 router.get('/opening-stock/lines/:id/packages', requirePermission(MODULE, 'view'), async (req, res) => {
   const rows = await prisma.stockPackage.findMany({
     where: { sourceLineId: req.params.id, status: 'IN_STOCK' },
-    select: { id: true },
+    select: { id: true, parentId: true, sourceType: true, qty: true, initialQty: true, packType: true, _count: { select: { children: true } } },
     orderBy: { code: 'asc' },
   })
-  res.json({ success: true, data: { ids: rows.map((r) => r.id) } })
+  const whole = rows.filter((r) => !r.parentId && r.sourceType === 'OPENING' && !r._count.children && Math.abs(Number(r.qty) - Number(r.initialQty)) < 1e-9)
+  res.json({
+    success: true,
+    data: {
+      ids: rows.map((r) => r.id),
+      change: whole.length ? { ids: whole.map((r) => r.id), qty: round3(whole.reduce((t, r) => t + Number(r.qty), 0)), packType: whole[0].packType } : null,
+    },
+  })
 })
 
 /*
@@ -5580,15 +5610,6 @@ router.get('/opening-stock/lines/:id/packages', requirePermission(MODULE, 'view'
  * lines, so it is checked and brought in exactly as an upload is. Without
  * confirm it only checks; with it, everything goes in at once or nothing.
  */
-/** How a line's stock goes on stickers, from the screen: see PackInput. */
-const packInputSchema = zod.object({
-  type: zod.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).nullish(),
-  qtys: zod.array(zod.number().positive()).max(1000, 'At most 1000 packages on one line').nullish(),
-  each: zod.number().positive().nullish(),
-  count: zod.number().int().min(1).max(1000).nullish(),
-  later: zod.boolean().nullish(),
-  refs: zod.array(zod.string().trim().max(60).nullable()).max(1000).nullish(),
-})
 const openingEntryLine = zod.object({ pack: packInputSchema.nullish() }).catchall(zod.union([zod.string().max(300), zod.number(), zod.null()]))
 
 const openingEntryBody = zod.object({

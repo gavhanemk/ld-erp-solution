@@ -6,7 +6,7 @@ import { AppError } from '../middleware/errorHandler'
 import { addDropdowns, addHowToSheet, addTemplateSheet, readSheetRows, type SheetColumn } from '../lib/sheet'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { recordMovement } from './stock.service'
-import { createPackages, packageRules, stickerDefaultsFrom, suggestQtys } from './package.service'
+import { createPackages, packageRules, positionsOf, stickerDefaultsFrom, suggestQtys } from './package.service'
 import { floorFor } from './processFloor.service'
 import { withGeneratedCode } from '../lib/masterCode'
 import { trackedRoutings } from './styleTrack.service'
@@ -141,6 +141,8 @@ interface PackPlan {
   later: boolean
   /** How many packages there are, when their sizes are to be given later. */
   count: number | null
+  /** The lot's own barcode, kept as its one package's identity: already labelled, nothing to print. */
+  barcode: string | null
   said: string
 }
 const PACK_WORDS: Array<[RegExp, PackType]> = [
@@ -202,19 +204,22 @@ function planPacks(
 ): PackPlan {
   const type = input?.type ?? ctx.packType
   const fits = (q: number) => fitsPlaces(q, ctx.places)
-  const later = (count: number | null, why: string): PackPlan => ({ packType: type, qtys: [], refs: [], later: true, count, said: why })
+  const later = (count: number | null, why: string): PackPlan => ({ packType: type, qtys: [], refs: [], later: true, count, barcode: null, said: why })
   const made = (qtys: number[], refs: Array<string | null>): PackPlan => {
     const left = round3(ctx.qty - qtys.reduce((t, q) => t + q, 0))
     const same = qtys.every((q) => Math.abs(q - qtys[0]) < 0.0005)
+    // A lot with its own barcode kept as one package: that barcode is the package.
+    const barcode = qtys.length === 1 && ctx.bundle ? ctx.bundle : null
     const each = qtys.length === 1 ? `${packs(1, type)} of ${qtys[0]} ${ctx.unit}` : same ? `${packs(qtys.length, type)} × ${qtys[0]} ${ctx.unit}` : `${packs(qtys.length, type)}: ${qtys.join(' + ')} ${ctx.unit}`
-    return { packType: type, qtys, refs, later: false, count: qtys.length, said: left > 0.0005 ? `${each}; ${left} ${ctx.unit} without a sticker for now` : each }
+    const own = barcode ? `${each}, its own barcode ${barcode} kept` : each
+    return { packType: type, qtys, refs, later: false, count: qtys.length, barcode, said: left > 0.0005 ? `${own}; ${left} ${ctx.unit} packaging pending` : own }
   }
   const refsFor = (n: number) => {
     const refs = input?.refs ?? []
     if (refs.length && refs.length !== n) problems.push(`${ctx.L('packRefs')}: ${refs.length} given for ${packs(n, type)}.`)
     return Array.from({ length: n }, (_, i) => refs[i] ?? null)
   }
-  if (input?.later) return later(input.count ?? null, input.count ? `Without stickers for now: ${packs(input.count, type)}, sizes to give later` : 'Without stickers for now')
+  if (input?.later) return later(input.count ?? null, input.count ? `Packaging pending: ${packs(input.count, type)}, sizes to give later` : 'Packaging pending')
   if (input?.qtys?.length) {
     const qtys = input.qtys.map(round3)
     const sum = round3(qtys.reduce((t, q) => t + q, 0))
@@ -231,11 +236,11 @@ function planPacks(
   }
   if (input?.count) {
     if (input.count === 1) return made([ctx.qty], refsFor(1))
-    return later(input.count, `Without stickers for now: ${packs(input.count, type)}, sizes to give later`)
+    return later(input.count, `Packaging pending: ${packs(input.count, type)}, sizes to give later`)
   }
   if (ctx.bundle) return made([ctx.qty], [null])
   if (ctx.perPack) return made(suggestQtys(ctx.qty, ctx.perPack), Array.from({ length: suggestQtys(ctx.qty, ctx.perPack).length }, () => null))
-  return later(null, 'Without stickers for now: give its packages when you know them')
+  return later(null, 'Packaging pending: give its packages when you know them')
 }
 const TYPE_SHEET: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
 
@@ -334,6 +339,8 @@ export interface OsRowPlan {
   status: string
   /** How its stock goes on stickers, in words; null for a category not labelled by package. */
   packing: string | null
+  /** The same, for the screen to start an edit from. */
+  pack?: { type: PackType; qtys: number[]; later: boolean; count: number | null; barcode: string | null } | null
   /** Stickers to be made for it now. */
   stickers: number
 }
@@ -847,7 +854,11 @@ export async function planImport(
           problems,
         )
         plan.packing = pack.said
-        plan.stickers = pack.qtys.length
+        // Stickers to print: a package keeping its own barcode needs none.
+        plan.stickers = pack.qtys.length - (pack.barcode ? 1 : 0)
+        plan.pack = { type: pack.packType, qtys: pack.qtys, later: pack.later, count: pack.count, barcode: pack.barcode }
+        // A lot's own barcode, not one of the ERP's sticker numbers (checked against other packages after the repeats).
+        if (pack.barcode && /^PK-\d+$/i.test(pack.barcode)) problems.push(`${L('bundle')} ${pack.barcode} is an ERP sticker number, not the lot's own barcode.`)
       } else if (packInput) problems.push(`${item.code} is filed under ${item.category?.name}, which is not labelled by package: leave its package columns empty.`)
     }
 
@@ -877,7 +888,7 @@ export async function planImport(
     out.push({ plan, ready })
   }
 
-  await checkDuplicates(out, opts.rowWord ?? 'row')
+  await checkDuplicates(out, opts.rowWord ?? 'row', L('bundle'))
   return out
 }
 
@@ -891,7 +902,7 @@ const dedupeKey = (r: Ready, warehouseId: string) =>
  * on two rows; a row already brought in by an earlier upload; or stock that
  * is already moving in the ERP at that place, which a count corrects instead.
  */
-async function checkDuplicates(resolved: Resolved[], rowWord: 'row' | 'line') {
+async function checkDuplicates(resolved: Resolved[], rowWord: 'row' | 'line', bundleLabel: string) {
   const seen = new Map<string, number>()
   for (const r of resolved) {
     if (!r.ready) continue
@@ -969,6 +980,28 @@ async function checkDuplicates(resolved: Resolved[], rowWord: 'row' | 'line') {
       r.ready = undefined
     }
   }
+
+  // One barcode, one package: a lot's own barcode is not already on a
+  // package, nor on two rows here. After the repeats, which say it plainer.
+  const barcoded = resolved.filter((r) => r.ready?.pack?.barcode)
+  if (!barcoded.length) return
+  const wanted = [...new Set(barcoded.map((r) => r.ready!.pack!.barcode!.toLowerCase()))]
+  const taken = await prisma.$queryRaw<Array<{ barcode: string; code: string }>>`SELECT lower(barcode) AS barcode, code FROM ld_erp.stock_packages WHERE lower(barcode) = ANY(${wanted})`
+  const onPackage = new Map(taken.map((b) => [b.barcode, b.code]))
+  const firstRow = new Map<string, number>()
+  for (const r of barcoded) {
+    const barcode = r.ready!.pack!.barcode!
+    const k = barcode.toLowerCase()
+    const problem = onPackage.has(k)
+      ? `${bundleLabel} ${barcode} is already on package ${onPackage.get(k)}: one barcode is one package.`
+      : firstRow.has(k)
+        ? `${bundleLabel} ${barcode} is also on ${rowWord} ${firstRow.get(k)}: one barcode is one package.`
+        : null
+    if (problem) {
+      r.plan.problems.push(problem)
+      r.ready = undefined
+    } else firstRow.set(k, r.plan.row)
+  }
 }
 
 export function summarise(resolved: Resolved[]) {
@@ -994,8 +1027,9 @@ export function summarise(resolved: Resolved[]) {
     problems: resolved.filter((r) => r.plan.problems.length).length,
     value: round2(lines.reduce((s, r) => s + (r.plan.value ?? 0), 0)),
     floorsToMake: [...new Set(lines.filter((r) => r.plan.newFloor).map((r) => r.plan.location))],
-    /** Stickers to be made, and the rows whose stock waits without stickers for now. */
-    stickers: lines.reduce((t, r) => t + (r.ready?.pack?.qtys.length ?? 0), 0),
+    /** Stickers to print; packages keeping their own barcode; rows whose packaging is pending. */
+    stickers: lines.reduce((t, r) => t + (r.ready?.pack ? r.ready.pack.qtys.length - (r.ready.pack.barcode ? 1 : 0) : 0), 0),
+    kept: lines.filter((r) => r.ready?.pack?.barcode).length,
     waiting: lines.filter((r) => r.ready?.pack?.later).length,
     byGroup: [...byGroup].map(([group, g]) => ({ group, label: ITEM_GROUP_LABEL[group as ItemGroup] ?? group, ...g })),
     byPlace: [...byPlace.values()],
@@ -1075,6 +1109,8 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
       // Earliest first, so each place's stock is dated in order.
       const ordered = [...rows].sort((a, b) => a.ready!.date.getTime() - b.ready!.date.getTime() || a.plan.row - b.plan.row)
       let stickers = 0
+      // Packages keeping a lot's own barcode: labelled already.
+      let kept = 0
       for (const r of ordered) {
         const d = r.ready!
         const note = [`${number} ${byHand ? 'line' : 'row'} ${r.plan.row}`, d.bundleNo ? `bundle ${d.bundleNo}` : null, (d.raw.remarks ?? '').trim() || null].filter(Boolean).join(' · ')
@@ -1140,6 +1176,7 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
             packType: d.pack.packType,
             qtys: d.pack.qtys,
             notesEach: d.pack.refs.map((ref) => (ref ? `Ref ${ref}`.slice(0, 120) : null)),
+            barcodesEach: [d.pack.barcode],
             lotNo: d.lotNo,
             notes: d.bundleNo ? `Barcode ${d.bundleNo}`.slice(0, 120) : null,
             sourceType: 'OPENING',
@@ -1151,11 +1188,13 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
             itemName: item.name,
             grade: d.grade,
           })
-          stickers += pkgs.length
+          // Stickers to print: a package keeping its own barcode is labelled already.
+          stickers += pkgs.length - (d.pack.barcode ? 1 : 0)
+          if (d.pack.barcode) kept += 1
           if (pkgs[0]) await tx.openingStockLine.update({ where: { id: line.id }, data: { packageId: pkgs[0].id } })
         }
       }
-      return { id: doc.id, number, lines: rows.length, stickers, floorsMade: made }
+      return { id: doc.id, number, lines: rows.length, stickers, kept, floorsMade: made }
     },
     { timeout: 300_000, maxWait: 20_000 },
   )
@@ -1338,14 +1377,23 @@ export async function packLine(lineId: string, input: PackInput, userId: string 
   })
 }
 
-/** Each opening line's stickers: how many, what they hold, and what of it still waits. */
-export async function linesPacking(lines: Array<{ id: string; qty: unknown; sizeId: string | null; itemId: string; item: { categoryId: string; packType: PackType | null; packQty: unknown; uom: { symbol: string; name?: string | null } | null } }>) {
+/**
+ * Each opening line's stickers: how many, what they hold, and what of it
+ * still waits — its packaging pending. Never more than is really without a
+ * sticker in its store: stock labelled from Stickers → Packaging pending, or
+ * issued meanwhile, no longer waits.
+ */
+export async function linesPacking(
+  lines: Array<{ id: string; qty: unknown; sizeId: string | null; itemId: string; warehouseId: string; item: { categoryId: string; packType: PackType | null; packQty: unknown; uom: { symbol: string; name?: string | null } | null } }>,
+) {
   if (!lines.length) return new Map<string, { tracked: boolean; made: number; qty: number; waiting: number }>()
   const ids = lines.map((l) => l.id)
-  const [packed, inUse, ruleOf] = await Promise.all([
+  const spotOf = (l: (typeof lines)[number]) => ({ itemId: l.itemId, warehouseId: l.warehouseId, ownership: 'OWNED' as const, ownerCustomerId: null })
+  const [packed, inUse, ruleOf, positionOf] = await Promise.all([
     prisma.stockPackage.groupBy({ by: ['sourceLineId'], where: stickeredFrom(ids), _sum: { initialQty: true } }),
     prisma.stockPackage.groupBy({ by: ['sourceLineId'], where: { sourceLineId: { in: ids }, parentId: null, status: { notIn: ['VOID', 'MERGED'] } }, _count: { _all: true } }),
     packageRules(prisma),
+    positionsOf(prisma, lines.filter((l) => !l.sizeId).map(spotOf)),
   ])
   const qtyOf = new Map(packed.map((p) => [p.sourceLineId as string, Number(p._sum.initialQty ?? 0)]))
   const madeOf = new Map(inUse.map((p) => [p.sourceLineId as string, p._count._all]))
@@ -1353,7 +1401,8 @@ export async function linesPacking(lines: Array<{ id: string; qty: unknown; size
     lines.map((l) => {
       const tracked = !l.sizeId && stickerDefaultsFrom({ ...l.item, packQty: l.item.packQty as number | null }, ruleOf(l.item.categoryId)).tracked
       const qty = round3(qtyOf.get(l.id) ?? 0)
-      return [l.id, { tracked, made: madeOf.get(l.id) ?? 0, qty, waiting: tracked ? Math.max(0, round3(Number(l.qty) - qty)) : 0 }]
+      const loose = tracked ? Math.max(0, positionOf(spotOf(l)).loose) : 0
+      return [l.id, { tracked, made: madeOf.get(l.id) ?? 0, qty, waiting: tracked ? Math.max(0, round3(Math.min(Number(l.qty) - qty, loose))) : 0 }]
     }),
   )
 }

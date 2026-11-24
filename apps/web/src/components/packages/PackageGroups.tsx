@@ -298,8 +298,8 @@ export function PackageGroups({
                     <td className="whitespace-nowrap text-right font-semibold tabular-nums">
                       {qtyText(g.qty)} <span className="text-xs font-normal text-muted-foreground">{g.unit}</span>
                       {(g.loose ?? 0) > 0.0005 && (
-                        <div className="warn-text text-xs font-normal" title="In this store without a sticker: label it from No stickers">
-                          + {qtyText(g.loose!)} {g.unit} without stickers
+                        <div className="warn-text text-xs font-normal" title="In this store without a sticker: configure its packages from Packaging pending">
+                          + {qtyText(g.loose!)} {g.unit} packaging pending
                         </div>
                       )}
                       {(g.changed ?? 0) > 0 && (

@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { codeCandidates, normaliseCode, normaliseRack, packageRules, round3, setRack } from './package.service'
+import { normaliseCode, normaliseRack, packageRules, round3, scannedWhere, setRack } from './package.service'
 import { afterCountDecided } from './stockCountHooks.service'
 import { createAdjustment } from '../routes/inventory.routes'
 
@@ -164,7 +164,7 @@ export async function scanPackage(tx: Prisma.TransactionClient, countId: string,
   mustBeOpen(c)
   // The sticker's own code, short or from before codes were shortened.
   const pkg = await tx.stockPackage.findFirst({
-    where: { code: { in: codeCandidates(raw) } },
+    where: scannedWhere(raw),
     select: { id: true, code: true, status: true, warehouseId: true, qty: true, rack: true },
   })
   const code = pkg?.code ?? normaliseCode(raw)

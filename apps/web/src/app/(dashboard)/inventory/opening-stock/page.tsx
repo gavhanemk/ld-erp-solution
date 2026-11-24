@@ -27,7 +27,8 @@ import { api, ApiError, can } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { MultiFilter, type FilterOption } from '@/components/ui/MultiFilter'
 import { useQtyRules } from '@/lib/qtyRules'
-import { newPack, PackagingDialog, sizesText, type PackValue } from '@/components/packages/PackagingEditor'
+import { newPack, PackagingDialog, type PackValue } from '@/components/packages/PackagingEditor'
+import { ChangeStickers, type StickerLine } from '@/components/packages/ChangeStickers'
 import { openPrintTab, printLabels, qtyText } from '@/components/packages/packageTypes'
 
 /*
@@ -221,6 +222,8 @@ function StickersCell({ line }: { line: Line }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Its stickers being packed another way: those still whole as they were made.
+  const [changing, setChanging] = useState<StickerLine | null>(null)
   const s = line.stickers
   if (!s?.tracked) return muted
   const unit = line.item.uom?.symbol ?? line.uomText ?? ''
@@ -247,6 +250,16 @@ function StickersCell({ line }: { line: Line }) {
     } catch (err) {
       tab?.close()
       say(err instanceof ApiError ? err.message : 'Could not open the stickers.')
+    }
+  }
+  const change = async () => {
+    try {
+      const res = await api.get<{ data: { change: { ids: string[]; qty: number; packType: string } | null } }>(`/inventory/opening-stock/lines/${line.id}/packages`)
+      const c = res.data.change
+      if (!c) return say('Its stickers have been issued from, moved or split already: change them one at a time from Stickers.')
+      setChanging({ ids: c.ids, item: line.description ?? line.item.name, unit, qty: c.qty, store: line.warehouse.name, sourceRef: line.openingStock.number, packType: c.packType })
+    } catch (err) {
+      say(err instanceof ApiError ? err.message : 'Could not open its stickers.')
     }
   }
   const make = async (qtys: number[], notes: string[], value: PackValue, andPrint: boolean) => {
@@ -276,10 +289,15 @@ function StickersCell({ line }: { line: Line }) {
           <Printer size={12} className="text-muted-foreground" /> {s.made} {s.made === 1 ? 'sticker' : 'stickers'}
         </button>
       )}
+      {s.made > 0 && can('inventory', 'create') && (
+        <button type="button" className="text-primary text-[11px] font-medium hover:underline" onClick={() => void change()} title="Pack it another way: the stock stays as it is">
+          Change
+        </button>
+      )}
       {s.waiting > 0 && (
         <>
-          <span className="warn-text" title="Counted in stock, not yet on stickers">
-            {qtyText(s.waiting)} {unit} without
+          <span className="badge-warning" title="In stock, its packages not yet configured">
+            Packaging pending · {qtyText(s.waiting)} {unit}
             {line.packCount && !s.made ? ` · ${line.packCount} ${line.packCount === 1 ? 'package' : 'packages'}` : ''}
           </span>
           {can('inventory', 'create') && (
@@ -292,7 +310,7 @@ function StickersCell({ line }: { line: Line }) {
       {open && (
         <PackagingDialog
           title="Make stickers"
-          subtitle={`${line.item.code} ${line.description ?? line.item.name}${line.lotNo ? ` · lot ${line.lotNo}` : ''} · ${qtyText(s.waiting)} ${unit} without a sticker${line.packCount ? ` · came in ${line.packCount} packages` : ''}`}
+          subtitle={`${line.item.code} ${line.description ?? line.item.name}${line.lotNo ? ` · lot ${line.lotNo}` : ''} · ${qtyText(s.waiting)} ${unit} with packaging pending${line.packCount ? ` · came in ${line.packCount} packages` : ''}`}
           initial={initial}
           total={s.waiting}
           unit={unit}
@@ -305,6 +323,17 @@ function StickersCell({ line }: { line: Line }) {
           onSave={(plan, v) => void make(plan.qtys, plan.notes, v, false)}
           onSaveAndPrint={(plan, v) => void make(plan.qtys, plan.notes, v, true)}
           onClose={() => setOpen(false)}
+        />
+      )}
+      {changing && (
+        <ChangeStickers
+          line={changing}
+          onClose={() => setChanging(null)}
+          onDone={(message) => {
+            setChanging(null)
+            say(message)
+            reload()
+          }}
         />
       )}
     </span>
@@ -357,16 +386,22 @@ function OpeningStock() {
     return qs.toString()
   }, [page, kind, entry, term, filters, dates])
 
+  // Only the latest answer is shown: an earlier, slower one (all lines, before
+  // the entry asked for was known) must not land on top of it.
+  const latest = useRef(0)
   const load = useCallback(async () => {
+    const id = ++latest.current
     setLoading(true)
     try {
       const l = await api.get<{ data: LinesData }>(`/inventory/opening-stock/lines?${query}`)
+      if (id !== latest.current) return
       setData(l.data)
       setError(null)
     } catch (err) {
+      if (id !== latest.current) return
       setError(err instanceof ApiError ? err.message : 'Could not load the opening stock. Is the API running?')
     } finally {
-      setLoading(false)
+      if (id === latest.current) setLoading(false)
     }
   }, [query])
   const lineActions = useMemo(() => ({ reload: () => void load(), say: (m: string) => setNotice(m) }), [load])

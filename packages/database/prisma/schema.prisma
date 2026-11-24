@@ -6309,6 +6309,10 @@ model StockPackage {
   id              String         @id @default(cuid())
   /// What the QR sticker carries, and what a person reads off it: PK-000123.
   code            String         @unique
+  /// The barcode already on it when it came in (an opening lot's own, from
+  /// the old system): scanning it finds this package, and no second package
+  /// may carry it.
+  barcode         String?        @unique
   itemId          String
   item            Item           @relation("ItemPackages", fields: [itemId], references: [id])
   warehouseId     String

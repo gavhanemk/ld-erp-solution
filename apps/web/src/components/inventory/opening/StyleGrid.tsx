@@ -6,7 +6,7 @@ import { api, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
-import { cellKey, money, num, type FormOptions, type StyleOption } from './kinds'
+import { cellKey, money, num, styleRows, type FormOptions, type StyleOption } from './kinds'
 
 /**
  * One style's pieces: its own sizes across, its own colours down, a rate for
@@ -27,6 +27,8 @@ export function StyleGrid({
   maySetSizeRun,
   onColourMade,
   onReload,
+  only = '',
+  onOnly,
 }: {
   style: StyleOption
   rates: Record<string, string>
@@ -39,6 +41,9 @@ export function StyleGrid({
   onColourMade: (colour: string, item: { id: string; code: string }) => void
   /** Masters were changed: fetch the styles again (the entry stays as it is). */
   onReload: () => Promise<void> | void
+  /** The item picked by its code, name or description; empty shows all the style's items. */
+  only?: string
+  onOnly?: (itemId: string) => void
 }) {
   const [making, setMaking] = useState<string | null>(null)
   const [choose, setChoose] = useState<{ colour: string; categories: Array<{ id: string; name: string }>; categoryId: string } | null>(null)
@@ -47,11 +52,18 @@ export function StyleGrid({
   const [run, setRun] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const pieces = (colour: string) => style.sizes.reduce((n, s) => n + Number(qty[cellKey(colour, s.id)] || 0), 0)
-  const valueOf = (colour: string) => style.sizes.reduce((n, s) => n + Number(qty[cellKey(colour, s.id)] || 0) * Number(rates[s.id] || 0), 0)
-  const sizeTotal = (sizeId: string) => style.colours.reduce((n, c) => n + Number(qty[cellKey(c.colour, sizeId)] || 0), 0)
-  const total = style.colours.reduce((n, c) => n + pieces(c.colour), 0)
-  const totalValue = style.colours.reduce((n, c) => n + valueOf(c.colour), 0)
+  // A row a colour (with its item) or another item of the style; cells keyed by the row.
+  const rows = styleRows(style)
+  const items = style.items ?? []
+  const pieces = (key: string) => style.sizes.reduce((n, s) => n + Number(qty[cellKey(key, s.id)] || 0), 0)
+  const valueOf = (key: string) => style.sizes.reduce((n, s) => n + Number(qty[cellKey(key, s.id)] || 0) * Number(rates[s.id] || 0), 0)
+  const sizeTotal = (sizeId: string) => rows.reduce((n, r) => n + Number(qty[cellKey(r.key, sizeId)] || 0), 0)
+  const total = rows.reduce((n, r) => n + pieces(r.key), 0)
+  const totalValue = rows.reduce((n, r) => n + valueOf(r.key), 0)
+  // The item picked shows; a row with pieces typed in stays in view, so nothing entered is hidden.
+  const picked = items.some((i) => i.id === only) ? only : ''
+  const shown = picked ? rows.filter((r) => r.item?.id === picked || pieces(r.key) > 0) : rows
+  const hidden = rows.length - shown.length
 
   const makeItem = async (colour: string, categoryId?: string) => {
     setMaking(colour)
@@ -101,7 +113,7 @@ export function StyleGrid({
     }
   }
 
-  if (style.colours.length === 0) {
+  if (style.colours.length === 0 && items.length === 0) {
     return (
       <Missing>
         {style.code} has no colours yet. Add them to the style, then reload.
@@ -142,6 +154,37 @@ export function StyleGrid({
 
   return (
     <div className="space-y-2">
+      {/* The style's items, picked by code, name or description: the three move together. */}
+      {items.length > 0 && onOnly && (
+        <div className="flex flex-wrap items-end gap-2" aria-label={`Items of ${style.code}`}>
+          <ItemField label="Item Code" value={picked} onChange={onOnly} style={style.code} all={items.length}>
+            {items.map((i) => (
+              <option key={i.id} value={i.id} data-sub={[i.name, i.colour].filter(Boolean).join(' · ')}>
+                {i.code}
+              </option>
+            ))}
+          </ItemField>
+          <ItemField label="Item Name" value={picked} onChange={onOnly} style={style.code} all={items.length} wide>
+            {items.map((i) => (
+              <option key={i.id} value={i.id} data-sub={[i.code, i.colour].filter(Boolean).join(' · ')}>
+                {i.name}
+              </option>
+            ))}
+          </ItemField>
+          <ItemField label="Item Description" value={picked} onChange={onOnly} style={style.code} all={items.length} wide>
+            {items.map((i) => (
+              <option key={i.id} value={i.id} data-sub={`${i.code} · ${i.name}`}>
+                {i.description || `No description (${i.code})`}
+              </option>
+            ))}
+          </ItemField>
+          {picked && (
+            <button type="button" className="text-primary h-9 text-xs font-medium hover:underline" onClick={() => onOnly('')}>
+              Show all of {style.code}{hidden ? ` (${hidden} more ${hidden === 1 ? 'row' : 'rows'})` : ''}
+            </button>
+          )}
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="subtable text-sm">
           <thead>
@@ -188,12 +231,22 @@ export function StyleGrid({
               ))}
               <td colSpan={2} />
             </tr>
-            {style.colours.map((c) => (
-              <tr key={c.colour} className="border-border border-t">
+            {shown.map((r) => {
+              const c = r
+              return (
+              <tr key={r.key} className="border-border border-t">
                 <td className="py-1.5 pr-3">
-                  <div className="text-foreground font-medium">{c.colour}</div>
-                  {c.item ? (
-                    <div className="text-muted-foreground font-mono text-[11px]">{c.item.code}</div>
+                  <div className="text-foreground font-medium">{c.colour || r.item?.code}</div>
+                  {r.item ? (
+                    <>
+                      <div className="text-muted-foreground font-mono text-[11px]">{r.item.code}</div>
+                      {r.item.name && <div className="text-muted-foreground max-w-56 truncate text-[11px]" title={r.item.name}>{r.item.name}</div>}
+                      {r.item.description && (
+                        <div className="text-muted-foreground max-w-56 truncate text-[11px] italic" title={r.item.description}>
+                          {r.item.description}
+                        </div>
+                      )}
+                    </>
                   ) : choose?.colour === c.colour ? (
                     <div className="mt-1 flex items-center gap-1">
                       <SmartSelect
@@ -227,25 +280,26 @@ export function StyleGrid({
                   )}
                 </td>
                 {style.sizes.map((s) => {
-                  const q = Number(qty[cellKey(c.colour, s.id)] || 0)
+                  const q = Number(qty[cellKey(r.key, s.id)] || 0)
                   const noRate = q > 0 && !Number(rates[s.id] || 0)
                   return (
                     <td key={s.id} className="px-1 py-1.5">
                       <StepInput
-                        className={cn('form-input h-8 text-right', !c.item && 'opacity-40', noRate && 'border-amber-500')}
-                        value={qty[cellKey(c.colour, s.id)] ?? ''}
-                        disabled={!c.item}
-                        onValueChange={(v) => onQty({ ...qty, [cellKey(c.colour, s.id)]: v })}
-                        aria-label={`Pieces of ${c.colour} size ${s.code}`}
+                        className={cn('form-input h-8 text-right', !r.item && 'opacity-40', noRate && 'border-amber-500')}
+                        value={qty[cellKey(r.key, s.id)] ?? ''}
+                        disabled={!r.item}
+                        onValueChange={(v) => onQty({ ...qty, [cellKey(r.key, s.id)]: v })}
+                        aria-label={`Pieces of ${c.colour || r.item?.code} size ${s.code}`}
                         title={noRate ? `No rate for size ${s.code} yet` : undefined}
                       />
                     </td>
                   )
                 })}
-                <td className="text-foreground px-3 py-1.5 text-right font-semibold tabular-nums">{pieces(c.colour) ? num(pieces(c.colour)) : ''}</td>
-                <td className="text-foreground px-3 py-1.5 text-right tabular-nums">{valueOf(c.colour) ? money(valueOf(c.colour)) : ''}</td>
+                <td className="text-foreground px-3 py-1.5 text-right font-semibold tabular-nums">{pieces(r.key) ? num(pieces(r.key)) : ''}</td>
+                <td className="text-foreground px-3 py-1.5 text-right tabular-nums">{valueOf(r.key) ? money(valueOf(r.key)) : ''}</td>
               </tr>
-            ))}
+              )
+            })}
             <tr className="border-border bg-secondary/30 border-t font-semibold">
               <td className="text-foreground py-1.5 pr-3 text-xs">Total</td>
               {style.sizes.map((s) => (
@@ -261,6 +315,35 @@ export function StyleGrid({
       </div>
       {note && <p className={cn('text-xs', note.ok ? 'text-emerald-500' : 'text-red-400')}>{note.text}</p>}
     </div>
+  )
+}
+
+/** One of the three item fields: every item of the style by its code, name or description. */
+function ItemField({
+  label,
+  value,
+  onChange,
+  style,
+  all,
+  wide = false,
+  children,
+}: {
+  label: string
+  value: string
+  onChange: (itemId: string) => void
+  style: string
+  all: number
+  wide?: boolean
+  children: ReactNode
+}) {
+  return (
+    <label className="flex flex-col gap-1 text-xs">
+      <span className="text-muted-foreground font-semibold uppercase tracking-wide">{label}</span>
+      <SmartSelect className={cn('form-input h-9 text-sm', wide ? 'w-72' : 'w-44')} value={value} onChange={(e) => onChange(e.target.value)} aria-label={`${label} of ${style}`}>
+        <option value="">All items ({all})</option>
+        {children}
+      </SmartSelect>
+    </label>
   )
 }
 

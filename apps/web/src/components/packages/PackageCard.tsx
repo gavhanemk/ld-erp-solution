@@ -167,6 +167,7 @@ export function PackageCard({
             <Fact label="Labelled with">
               {qtyText(pkg.initialQty)} {pkg.unit}
             </Fact>
+            {pkg.barcode && <Fact label="Its own barcode">{pkg.barcode}</Fact>}
             {pkg.notes && pkg.sourceType === 'GRN' && <Fact label="Note on receipt">{pkg.notes}</Fact>}
             {pkg.grn && (
               <Fact label="Received on">

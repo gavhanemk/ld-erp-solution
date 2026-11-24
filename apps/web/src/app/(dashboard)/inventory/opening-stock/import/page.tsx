@@ -8,6 +8,8 @@ import { api, ApiError, can, tokens } from '@/lib/api'
 import { cn, newRequestId } from '@/lib/utils'
 import { KINDS, money, num, todayInIndia, type Kind } from '@/components/inventory/opening/kinds'
 import { StickersReady } from '@/components/packages/StickersReady'
+import { PackagingDialog, packInputOf, packValueOf, type PackInputBody } from '@/components/packages/PackagingEditor'
+import { useQtyRules } from '@/lib/qtyRules'
 
 /*
  * Inventory → Opening Stock → Import from Excel, step by step: what the sheet
@@ -39,6 +41,8 @@ interface RowPlan {
   /** Raw materials labelled by package: what its stickers will be. */
   packing?: string | null
   stickers?: number
+  /** The same, to start a change from. */
+  pack?: { type: string; qtys: number[]; later: boolean; count: number | null; barcode: string | null } | null
 }
 interface Summary {
   rows: number
@@ -48,8 +52,9 @@ interface Summary {
   value: number
   floorsToMake: string[]
   byGroup: Array<{ group: string; label: string; lines: number; value: number }>
-  /** Stickers the import makes, and rows coming in without stickers for now. */
+  /** Stickers to print; packages keeping their own barcode; rows whose packaging is pending. */
   stickers?: number
+  kept?: number
   waiting?: number
 }
 interface Done {
@@ -57,6 +62,8 @@ interface Done {
   number: string
   lines: number
   stickers: number
+  /** Packages keeping a lot's own barcode: nothing to print for them. */
+  kept?: number
   floorsMade: string[]
   again?: boolean
 }
@@ -124,6 +131,10 @@ function ImportOpeningStock() {
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<Done | null>(null)
   const [printing, setPrinting] = useState(false)
+  // Packing changed on the review, by sheet row: sent with the check and the import.
+  const [packs, setPacks] = useState<Record<string, PackInputBody>>({})
+  const [packing, setPacking] = useState<RowPlan | null>(null)
+  const qtyRules = useQtyRules()
   const input = useRef<HTMLInputElement>(null)
   const mayImport = can('inventory', 'create')
 
@@ -131,10 +142,11 @@ function ImportOpeningStock() {
     fileName: file?.name,
     file: file?.data,
     ...(choice && choice !== 'ALL' ? { kind: choice, openingDate: date } : {}),
+    ...(Object.keys(packs).length ? { packs } : {}),
     ...extra,
   })
 
-  const check = async (f: { name: string; data: string }, onDate = date) => {
+  const check = async (f: { name: string; data: string }, onDate = date, withPacks = packs) => {
     setBusy('check')
     setError(null)
     setSummary(null)
@@ -144,6 +156,7 @@ function ImportOpeningStock() {
         fileName: f.name,
         file: f.data,
         ...(choice && choice !== 'ALL' ? { kind: choice, openingDate: onDate } : {}),
+        ...(Object.keys(withPacks).length ? { packs: withPacks } : {}),
       })
       setSummary(res.data.summary)
       setRows(res.data.rows)
@@ -161,7 +174,9 @@ function ImportOpeningStock() {
       const f = { name: picked.name, data: await asBase64(picked) }
       setFile(f)
       setRequestKey(newRequestId())
-      await check(f)
+      // A new sheet: changes made on the last one's rows do not carry over.
+      setPacks({})
+      await check(f, date, {})
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The file could not be read.')
     } finally {
@@ -338,9 +353,14 @@ function ImportOpeningStock() {
                 ))}
                 {summary.floorsToMake.length > 0 && <span className="badge-warning">Made on import: {summary.floorsToMake.join(', ')}</span>}
                 {(summary.stickers ?? 0) > 0 && <span className="badge-neutral">{summary.stickers} stickers to print</span>}
+                {(summary.kept ?? 0) > 0 && (
+                  <span className="badge-neutral" title="A lot's own barcode stays its package's identity: nothing to print for it">
+                    {summary.kept} keep their own barcode
+                  </span>
+                )}
                 {(summary.waiting ?? 0) > 0 && (
-                  <span className="badge-warning" title="Counted in stock; make their stickers from the opening stock list when the sizes are known">
-                    {summary.waiting} {summary.waiting === 1 ? 'row' : 'rows'} without stickers for now
+                  <span className="badge-warning" title="In stock with packaging pending: configure the packages later from Stickers or the opening stock list">
+                    {summary.waiting} {summary.waiting === 1 ? 'row' : 'rows'}: packaging pending
                   </span>
                 )}
                 <div className="border-border bg-secondary ml-auto flex rounded-lg border p-0.5 text-xs" role="tablist" aria-label="Rows">
@@ -424,7 +444,14 @@ function ImportOpeningStock() {
                         <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">{r.rate !== null ? money(r.rate) : '—'}</td>
                         <td className="text-foreground whitespace-nowrap px-2 py-1.5 text-right font-semibold tabular-nums">{r.value !== null ? money(r.value) : '—'}</td>
                         <td className="px-2 py-1.5">{r.status}</td>
-                        <td className="text-muted-foreground px-2 py-1.5">{r.packing ?? '—'}</td>
+                        <td className="text-muted-foreground px-2 py-1.5">
+                          {r.packing ?? '—'}
+                          {r.pack && r.qty ? (
+                            <button type="button" className="text-primary ml-1.5 text-[11px] font-medium hover:underline" onClick={() => setPacking(r)} aria-label={`Change the packing of row ${r.row}`}>
+                              {packs[String(r.row)] ? 'Changed · change' : 'Change'}
+                            </button>
+                          ) : null}
+                        </td>
                         <td className="px-2 py-1.5 text-red-400">{r.problems.join(' · ')}</td>
                       </tr>
                     ))}
@@ -463,6 +490,29 @@ function ImportOpeningStock() {
         </>
       )}
 
+      {/* A row's packing changed before the import: checked again with the change. */}
+      {packing?.pack && packing.qty && file && (
+        <PackagingDialog
+          title="How is it packed?"
+          subtitle={`Row ${packing.row} · ${packing.item?.code ?? ''} ${packing.item?.name ?? ''}${packing.lot ? ` · lot ${packing.lot}` : ''} · ${num(packing.qty)} ${packing.unit ?? ''}${packing.pack.barcode ? ` · its own barcode ${packing.pack.barcode} stays as one package's identity` : ''}`}
+          initial={packValueOf(packing.pack)}
+          total={packing.qty}
+          unit={packing.unit ?? ''}
+          places={qtyRules.places({ uom: { symbol: packing.unit ?? '' } })}
+          noteLabel="Roll no. / reference (optional)"
+          countForLater
+          laterText="Saved as stock with packaging pending. Configure the packages later — from Stickers → Packaging pending, or the line in Opening Stock."
+          saveLabel={() => 'Use this'}
+          onSave={(_, v) => {
+            const next = { ...packs, [String(packing.row)]: packInputOf(v, packing.qty!, packing.unit ?? '', qtyRules.places({ uom: { symbol: packing.unit ?? '' } })) }
+            setPacks(next)
+            setPacking(null)
+            void check(file, date, next)
+          }}
+          onClose={() => setPacking(null)}
+        />
+      )}
+
       {/* 4. Imported. */}
       {done && (
         <div className="glass-card space-y-4 p-6">
@@ -475,6 +525,7 @@ function ImportOpeningStock() {
               <p className="text-foreground text-sm" role="status">
                 {done.lines} {done.lines === 1 ? 'line' : 'lines'} of opening stock{summary ? ` · ${money(summary.value)}` : ''} — in stock now, by item, size and place.
                 {done.floorsMade.length > 0 && ` Made ${done.floorsMade.join(', ')}.`}
+                {(done.kept ?? 0) > 0 && ` ${done.kept} ${done.kept === 1 ? 'package keeps its' : 'packages keep their'} own barcode: nothing to print for ${done.kept === 1 ? 'it' : 'them'}.`}
               </p>
             </div>
           </div>

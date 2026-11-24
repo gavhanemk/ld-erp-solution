@@ -7,9 +7,9 @@ import { AlertCircle, ArrowLeft, ArrowRight, CheckCircle2, FileSpreadsheet, Load
 import { api, ApiError, can } from '@/lib/api'
 import { cn, newRequestId } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
-import { KINDS, kindOf, money, num, STATUSES, todayInIndia, cellKey, type FormOptions, type Kind } from '@/components/inventory/opening/kinds'
+import { KINDS, kindOf, money, num, STATUSES, todayInIndia, cellKey, styleRows, type FormOptions, type Kind } from '@/components/inventory/opening/kinds'
 import { FinishedGoods, RawMaterials, SemiFinished, type Garment, type Material } from '@/components/inventory/opening/Workspaces'
-import { planOf, type PackValue } from '@/components/packages/PackagingEditor'
+import { packInputOf } from '@/components/packages/PackagingEditor'
 import { StickersReady } from '@/components/packages/StickersReady'
 
 /*
@@ -50,20 +50,14 @@ interface PlanRow {
   packing?: string | null
   stickers?: number
 }
-/** A lot's packing, as the save takes it. */
-interface PackBody {
-  type: string
-  qtys?: number[]
-  refs?: Array<string | null>
-  later?: boolean
-  count?: number
-}
-type EntryLine = Record<string, string | number | PackBody>
+type EntryLine = Record<string, string | number | ReturnType<typeof packInputOf>>
 interface Saved {
   id: string
   number: string
   lines: number
   stickers: number
+  /** Packages keeping a lot's own barcode: nothing to print for them. */
+  kept?: number
   floorsMade: string[]
   again?: boolean
   message?: string
@@ -121,12 +115,6 @@ const LABELS: Record<Kind, Record<string, string>> = {
   },
 }
 
-/** The packing chosen in "Packed as", as the save takes it: sizes worked out here, or none yet. */
-function packBody(v: PackValue, qty: number, unit: string, places: number): PackBody {
-  if (v.method === 'LATER') return { type: v.type, later: true, ...(Number(v.count) >= 1 ? { count: Math.floor(Number(v.count)) } : {}) }
-  const plan = planOf(v, qty, unit, places)
-  return { type: v.type, qtys: plan.qtys, ...(plan.notes.some(Boolean) ? { refs: plan.notes.map((n) => n || null) } : {}) }
-}
 const STEPS = ['What you are entering', 'Enter the stock', 'Review', 'Saved']
 
 /** The store an entry most likely goes to: the finished goods store, or the raw material one. */
@@ -222,10 +210,10 @@ function AddOpeningStock() {
       if (!st) continue
       const process = draft.kind === 'SFG' ? (options.processes.find((p) => p.id === g.processId) ?? st.route?.find((p) => p.id === g.processId)) : null
       if (draft.kind === 'SFG' && !process) continue
-      for (const c of st.colours) {
+      for (const c of styleRows(st)) {
         if (!c.item) continue
         for (const s of st.sizes) {
-          const q = Number(g.qty[cellKey(c.colour, s.id)] || 0)
+          const q = Number(g.qty[cellKey(c.key, s.id)] || 0)
           if (!(q > 0)) continue
           const rate = g.rates[s.id] ?? ''
           value += q * Number(rate || 0)
@@ -243,7 +231,7 @@ function AddOpeningStock() {
             qty: q,
             rate,
           })
-          refs.push({ key: g.key, label: `${st.code} ${c.colour} ${s.code}${process ? ` at ${process.name}` : ''}`, style: st.code, colour: c.colour })
+          refs.push({ key: g.key, label: `${st.code} ${c.colour || c.item.code} ${s.code}${process ? ` at ${process.name}` : ''}`, style: st.code, colour: c.colour })
         }
       }
     }
@@ -267,7 +255,7 @@ function AddOpeningStock() {
           lot: l.lot.trim(),
           bundle: l.bundle.trim(),
           // Its packing, when one was chosen; else the save goes by the item's usual.
-          ...(it.tracked && l.pack ? { pack: packBody(l.pack, q, it.unit ?? '', it.decimals) } : {}),
+          ...(it.tracked && l.pack ? { pack: packInputOf(l.pack, q, it.unit ?? '', it.decimals) } : {}),
         })
         refs.push({ key: l.key, label: `${it.code}${l.lot.trim() ? ` lot ${l.lot.trim()}` : ''}${l.bundle.trim() ? ` · ${l.bundle.trim()}` : ''}` })
       }
@@ -493,12 +481,23 @@ function AddOpeningStock() {
                 mayMakeItems: can('masters', 'create'),
                 maySetSizeRun: can('masters', 'edit'),
                 onReload: loadOptions,
-                onColourMade: (styleId: string, colour: string, item: { id: string; code: string }) =>
+                onColourMade: (styleId: string, colour: string, item: { id: string; code: string; name?: string }) =>
                   setOptions(
                     (o) =>
                       o && {
                         ...o,
-                        styles: o.styles.map((s) => (s.id === styleId ? { ...s, colours: s.colours.map((c) => (c.colour === colour ? { ...c, item } : c)) } : s)),
+                        styles: o.styles.map((s) =>
+                          s.id === styleId
+                            ? {
+                                ...s,
+                                colours: s.colours.map((c) => (c.colour === colour ? { ...c, item } : c)),
+                                // And it is one of the style's items now, to pick by code or name.
+                                items: (s.items ?? []).some((i) => i.id === item.id)
+                                  ? s.items
+                                  : [...(s.items ?? []), { id: item.id, code: item.code, name: item.name ?? '', description: null, colour }],
+                              }
+                            : s,
+                        ),
                       },
                   ),
               }
@@ -579,6 +578,7 @@ function AddOpeningStock() {
               </p>
               <p className="text-foreground mt-1 text-sm">
                 {saved.lines} {saved.lines === 1 ? 'line' : 'lines'} of {k?.label.toLowerCase()} · {money(saved.value)} — in stock now, by item, size and place.
+                {(saved.kept ?? 0) > 0 && ` ${saved.kept} ${saved.kept === 1 ? 'package keeps its' : 'packages keep their'} own barcode: nothing to print for ${saved.kept === 1 ? 'it' : 'them'}.`}
               </p>
             </div>
           </div>

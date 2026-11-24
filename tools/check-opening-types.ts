@@ -197,7 +197,9 @@ async function main() {
   ]
   for (const [row, re, what] of rmExpect) check(`RM row ${row} refused: ${what}`, re.test(problemsOf(rmCheck, row)), problemsOf(rmCheck, row))
   const rmDone = await call('POST', '/inventory/opening-stock/import', { ...(await sheet('RM', rmGood, `rm-${stamp}`)), kind: 'RM', openingDate: today, requestKey: `zz-rm-${stamp}-key`, confirm: true })
-  check('RM: imported, a sticker per roll', rmDone.status === 201 && rmDone.body?.data?.lines === 2 && rmDone.body?.data?.stickers === 2, rmDone.body)
+  // Each roll has its own barcode: it stays the package's identity, nothing to print.
+  const rolls = await prisma.stockPackage.findMany({ where: { sourceId: rmDone.body?.data?.id }, select: { barcode: true } })
+  check('RM: imported, each roll a package keeping its own barcode', rmDone.status === 201 && rmDone.body?.data?.lines === 2 && rmDone.body?.data?.stickers === 0 && rmDone.body?.data?.summary?.kept === 2 && rolls.length === 2 && rolls.every((r) => /^R-\d+-[12]$/.test(r.barcode ?? '')), { done: rmDone.body?.data && { stickers: rmDone.body.data.stickers, kept: rmDone.body.data.summary?.kept }, rolls })
 
   // 6. By hand, by kind: the same rules; a save sent twice posts once.
   const rmByHand = await call('POST', '/inventory/opening-stock/entry', { kind: 'RM', lines: [{ date: today, process: 'Store', location: 'Store', code: shirt.code, qty: 1, rate: 1 }] })
