@@ -36,6 +36,27 @@ const packageFiles = Object.values(options.paths ?? {})
 const files = [...new Set([...parsed.fileNames, ...packageFiles].map((f) => path.resolve(f)))].filter((f) => !f.endsWith('.d.ts'))
 
 const slash = (p) => p.split(path.sep).join('/')
+
+// The workspace packages are imported by name (`@ld-erp/shared`), and at run
+// time that name leads to the package's TypeScript source. Node strips the
+// types and loads it as an ES module, which works only while the package is a
+// single file: `export * from './quantity'` has no extension, ES modules need
+// one, and the server died on start-up with ERR_MODULE_NOT_FOUND — so every
+// deploy after the shared package grew its first extra file was refused and
+// the old build kept running. Each name is pointed at the package's compiled
+// copy in dist/ instead, by a relative require.
+const aliasTargets = Object.entries(options.paths ?? {})
+  .filter(([name, targets]) => !name.includes('*') && targets.length === 1)
+  .map(([name, [target]]) => [name, path.join(outDir, path.relative(repoRoot, path.resolve(apiDir, target)).replace(/\.ts$/, '.js'))])
+function pointAtBuilt(js, outJs) {
+  for (const [name, target] of aliasTargets) {
+    let rel = slash(path.relative(path.dirname(outJs), target)).replace(/\.js$/, '')
+    if (!rel.startsWith('.')) rel = `./${rel}`
+    js = js.split(`require("${name}")`).join(`require("${rel}")`)
+  }
+  return js
+}
+
 let written = 0
 const problems = []
 for (const file of files) {
@@ -52,7 +73,7 @@ for (const file of files) {
     continue
   }
   fs.mkdirSync(path.dirname(outJs), { recursive: true })
-  fs.writeFileSync(outJs, result.outputText)
+  fs.writeFileSync(outJs, pointAtBuilt(result.outputText, outJs))
   if (result.sourceMapText) {
     // Point the map back at the source the way tsc does: relative to the .js.
     const map = JSON.parse(result.sourceMapText)
