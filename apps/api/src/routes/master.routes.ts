@@ -1,4 +1,4 @@
-import { compareBomLines, type BomComparableLine } from '@ld-erp/shared'
+import { compareBomLines, type BomComparableLine, type ItemGroup } from '@ld-erp/shared'
 import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { z, ZodError } from 'zod'
@@ -12,6 +12,7 @@ import { routingsByStyle } from '../services/routingOverview.service'
 import { deletedRoutings, restoreRouting } from '../services/routingRestore.service'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import * as categoryImport from '../services/categoryImport.service'
+import { assertItemFitsCategory, categoryGroupOnSave, itemGroupTree } from '../services/itemGroups.service'
 import * as styleImport from '../services/styleImport.service'
 import * as customerImport from '../services/customerImport.service'
 import * as supplierImport from '../services/supplierImport.service'
@@ -76,6 +77,8 @@ import {
   gstin,
   stateCode,
 } from '../schemas/master.schemas'
+
+const ITEM_GROUPS = new Set(['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS', 'EXPENSES'])
 
 const ITEM_TYPES = new Set([
   'RAW_MATERIAL',
@@ -814,6 +817,16 @@ router.post('/items/import', requirePermission(MODULE, 'create'), async (req: Au
   })
 })
 
+/*
+ * The tabs of Items & Products: how many items each holds, and its categories
+ * in the order the floor uses them, each with its process and sub-categories,
+ * counted. Ahead of the CRUD, whose GET /:id would take "groups" for an id.
+ */
+router.get('/items/groups', requirePermission(MODULE, 'view'), async (req, res) => {
+  const data = await itemGroupTree({ activeOnly: req.query.active === 'true' })
+  res.json({ success: true, data })
+})
+
 router.use(
   '/items',
   crudRouter({
@@ -851,6 +864,10 @@ router.use(
       subCategoryId: { where: (v) => ({ categoryId: { in: v } }), facets: ['categoryId'] },
       departmentId: { where: noneOr('departmentId'), facets: ['departmentId'] },
       uomId: { where: (v) => ({ uomId: { in: v } }), facets: ['uomId'] },
+      // The tab of Items & Products: by the category the item is filed under.
+      group: {
+        where: (v) => ({ category: { itemGroup: { in: v.filter((g) => ITEM_GROUPS.has(g)) as ItemGroup[] } } }),
+      },
     },
     facets: ['type', 'categoryId', 'departmentId', 'uomId'],
     defaultSort: { field: 'name', order: 'asc' },
@@ -864,6 +881,8 @@ router.use(
     // stand in for whatever the edit leaves out.
     beforeSave: async (data, before) => {
       data = await departmentFromCategory(data, before)
+      // A finished good is never filed under Fabric, nor a button under Finished Goods.
+      await assertItemFitsCategory(data, before)
       const checked = await assertItemStyleColorValid(
         String(data.type ?? before?.type ?? ''),
         (data.styleId !== undefined ? data.styleId : before?.styleId) as string | null | undefined,
@@ -1283,6 +1302,26 @@ router.use(
         select: Object.fromEntries(Object.keys(DEPARTMENT_USES).map((k) => [k, true])),
       },
     },
+    // A department is a process when the floor works in it: it has at least
+    // one process in use under Routing Masters → Processes. Accounts, HR &
+    // Admin and Store have none, so no "Process" box offers them. Adding a
+    // process under a department makes it one; nothing else to keep up.
+    afterRead: async (rows) =>
+      rows.map((r) => ({
+        ...r,
+        isProcess: Array.isArray(r.operations) && (r.operations as Array<{ isActive: boolean }>).some((o) => o.isActive),
+      })),
+    filters: {
+      // ?process=true: the departments that are processes; false, the others.
+      process: {
+        where: (v) =>
+          v.includes('true')
+            ? { operations: { some: { isActive: true } } }
+            : v.includes('false')
+              ? { operations: { none: { isActive: true } } }
+              : {},
+      },
+    },
   }),
 )
 
@@ -1636,11 +1675,20 @@ router.use(
     uniqueFields: ['name'],
     // "fabric" finds Fabric's sub-categories too.
     searchFields: ['name', 'parent.name'],
+    // A main category's tab is picked or follows from its name; a sub-category
+    // takes its main category's. Changing it moves the sub-categories along,
+    // and is refused while items filed there would not fit the new tab.
+    beforeSave: async (data, before) => ({ data: await categoryGroupOnSave(data, before) }),
     filters: {
       // A main category, with everything under it.
       categoryId: {
         where: (v) => ({ OR: [{ id: { in: v } }, { parentId: { in: v } }] }),
         facets: ['parentId'],
+      },
+      // The tab of Items & Products it is under.
+      itemGroup: {
+        where: (v) => ({ itemGroup: { in: v.filter((g) => ITEM_GROUPS.has(g)) as ItemGroup[] } }),
+        facets: ['itemGroup'],
       },
       level: {
         where: (v) =>
@@ -1666,7 +1714,7 @@ router.use(
         facets: ['departmentId'],
       },
     },
-    facets: ['parentId', 'departmentId'],
+    facets: ['parentId', 'departmentId', 'itemGroup'],
     /*
      * Deleting for good. An item must have a category, so its items move to
      * the one the person picks. A main category with sub-categories under it

@@ -10,6 +10,8 @@ import { PackageCard } from '@/components/packages/PackageCard'
 import { RackInput, useRacks } from '@/components/packages/RackInput'
 import { qtyText, type PackageDetail } from '@/components/packages/packageTypes'
 import { GarmentCard, looksLikeGarment, type GarmentDetail } from '@/components/packages/GarmentCard'
+import { CartonCard, looksLikeCarton } from '@/components/inventory/cartons/CartonCard'
+import type { Carton } from '@/components/inventory/cartons/cartonTypes'
 import { StickerStock } from '@/components/packages/StickerStock'
 
 /** A sticker just scanned onto a rack. */
@@ -41,6 +43,7 @@ function ScanScreen() {
   const [pkg, setPkg] = useState<PackageDetail | null>(null)
   // A garment's own tag (G-…) rather than a package of stock (PK-…).
   const [garment, setGarment] = useState<GarmentDetail | null>(null)
+  const [carton, setCarton] = useState<Carton | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
@@ -66,20 +69,29 @@ function ScanScreen() {
           setGarment(null)
           setPutAway((p) => [res.data, ...p.filter((x) => x.id !== res.data.id)].slice(0, 50))
           setMessage(res.message)
+        } else if (looksLikeCarton(code)) {
+          const res = await api.get<{ data: Carton }>(`/fg-cartons/scan/${encodeURIComponent(code)}`)
+          setPkg(null)
+          setGarment(null)
+          setCarton(res.data)
+          router.replace(`/inventory/scan?code=${res.data.code}`, { scroll: false })
         } else if (looksLikeGarment(code)) {
           const res = await api.get<{ data: GarmentDetail }>(`/garments/scan/${encodeURIComponent(code)}`)
           setPkg(null)
+          setCarton(null)
           setGarment(res.data)
           router.replace(`/inventory/scan?code=${res.data.code}`, { scroll: false })
         } else {
           const res = await api.get<{ data: PackageDetail }>(`/packages/scan/${encodeURIComponent(code)}`)
           setGarment(null)
+          setCarton(null)
           setPkg(res.data)
           router.replace(`/inventory/scan?code=${res.data.code}`, { scroll: false })
         }
       } catch (err) {
         setPkg(null)
         setGarment(null)
+        setCarton(null)
         setError(err instanceof ApiError ? err.message : 'Could not look that up. Is the API running?')
         if (onRack) navigator.vibrate?.([80, 60, 80])
       } finally {
@@ -92,7 +104,7 @@ function ScanScreen() {
   // Opened from a link to one package.
   const linked = params.get('code')
   useEffect(() => {
-    if (linked && linked !== pkg?.code && linked !== garment?.code) void find(linked)
+    if (linked && linked !== pkg?.code && linked !== garment?.code && linked !== carton?.code) void find(linked)
     // Only when the link changes, not after every action on the package.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [linked])
@@ -214,6 +226,8 @@ function ScanScreen() {
             </div>
           </div>
         )
+      ) : carton ? (
+        <CartonCard key={carton.id} c={carton} />
       ) : garment ? (
         <GarmentCard key={garment.id} g={garment} onChange={setGarment} onDone={setMessage} />
       ) : pkg ? (

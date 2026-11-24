@@ -179,6 +179,8 @@ interface DepartmentOption {
   id: string
   code: string
   name: string
+  /** Has a process under Routing Masters: the floor works in it. Accounts or Store do not. */
+  isProcess?: boolean
 }
 
 /** A routing as the list returns it, with the steps "Fill from routing" copies. */
@@ -386,6 +388,11 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
   const [addingItem, setAddingItem] = useState<{ rowKey: number; typed: string } | null>(null)
   const mayAddItem = can('masters', 'create')
   const [departments, setDepartments] = useState<DepartmentOption[]>([])
+  // What the material lines' Process and the labour rows' Department offer: the
+  // departments that are processes (not Accounts, HR & Admin or Store), and the
+  // one a line already holds even when it is not, so an older BOM still shows it.
+  const processChoices = (current: string | null | undefined) =>
+    departments.filter((d) => d.isProcess || (Boolean(current) && d.id === current))
   /** The processes in Routing Masters, in floor order: the labour rows' Work. */
   const [processes, setProcesses] = useState<ProcessOption[]>([])
   /** A new process being added from a labour row, in the Routing Masters form over this one. */
@@ -1399,7 +1406,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
                         onChange={(e) => setLine(index, { departmentId: e.target.value })}
                       >
                         <option value="">Select...</option>
-                        {departments.map((d) => (
+                        {processChoices(line.departmentId).map((d) => (
                           <option key={d.id} value={d.id}>
                             {d.name}
                           </option>
@@ -1632,7 +1639,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
                       onChange={(e) => setCostRow(row.rowKey, { departmentId: e.target.value })}
                     >
                       <option value="">Not set</option>
-                      {departments.map((d) => (
+                      {processChoices(row.departmentId).map((d) => (
                         <option key={d.id} value={d.id}>
                           {d.name}
                         </option>

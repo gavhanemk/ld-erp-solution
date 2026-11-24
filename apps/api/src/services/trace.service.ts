@@ -633,7 +633,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
   }
   const moIds = mos.map((m) => m.id)
 
-  const [stages, pieces, materials, cuts, transfers, qcEvents, receipts, challans, items, sizeChanges] = await Promise.all([
+  const [stages, pieces, materials, cuts, transfers, qcEvents, receipts, challans, items, sizeChanges, stockSteps] = await Promise.all([
     Promise.all(
       mos.map(async (m) => ({
         moId: m.id,
@@ -715,6 +715,8 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
     itemsOf(mos),
     // Size jumps at stitching: pieces of a bundle made as another size of the line.
     Promise.all(mos.map(async (m) => ({ mo: m, history: await sizeChangeHistory(prisma, { moId: m.id }) }))),
+    // Opening stock against the order, and pieces moved process to process.
+    processStockSteps([so?.soNumber, so?.customerPORef, ...mos.map((m) => m.moNumber)]),
   ])
 
   const steps: Step[] = []
@@ -847,6 +849,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
       steps.push({ at: inv.invoiceDate, phase: 'despatch', title: 'Invoiced', detail: `₹${n(inv.totalAmount).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`, ref: inv.invoiceNumber, by: inv.createdBy?.name })
     }
   }
+  steps.push(...stockSteps)
   steps.sort(byTime)
 
   const ordered = so ? so.lines.reduce((s, l) => s + n(l.totalQty), 0) : mos.reduce((s, m) => s + m.totalPlannedQty, 0)
@@ -888,6 +891,89 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
     materials: materials.lines,
     timeline: steps.slice(-400),
   }
+}
+
+/**
+ * Stock brought in on an opening-stock sheet against the order, and pieces
+ * moved from one process to the next on Process Stock — found by the order's
+ * own numbers (ours, its MOs', the buyer's PO), as the sheet and the moves
+ * carry them. One step per sheet, place and unit; one per move.
+ */
+async function processStockSteps(refs: Array<string | null | undefined>): Promise<Step[]> {
+  const wanted = [...new Set(refs.map((r) => r?.trim()).filter((r): r is string => Boolean(r)))]
+  if (!wanted.length) return []
+  const byOrder = { OR: wanted.map((r) => ({ orderNo: { equals: r, mode: 'insensitive' as const } })) }
+  const [openings, moves] = await Promise.all([
+    prisma.openingStockLine.findMany({
+      where: byOrder,
+      select: {
+        openingDate: true,
+        qty: true,
+        status: true,
+        item: { select: { code: true, type: true, uom: { select: { symbol: true } } } },
+        size: { select: { code: true, sequence: true } },
+        warehouse: { select: { name: true, departmentId: true } },
+        openingStock: { select: { number: true, createdBy: { select: { name: true } } } },
+      },
+    }),
+    prisma.stockTransfer.findMany({
+      where: { lines: { some: byOrder } },
+      select: {
+        transferNumber: true,
+        transferDate: true,
+        cancelledAt: true,
+        notes: true,
+        movedBy: { select: { name: true } },
+        fromWarehouse: { select: { name: true } },
+        toWarehouse: { select: { name: true } },
+        lines: { select: { qty: true, lotNo: true, bundleNo: true, size: { select: { code: true, sequence: true } } } },
+      },
+    }),
+  ])
+  const sizesSaid = (list: Array<{ size: { code: string; sequence: number } | null; qty: number }>) => {
+    const by = new Map<string, { seq: number; qty: number }>()
+    for (const l of list) if (l.size) by.set(l.size.code, { seq: l.size.sequence, qty: (by.get(l.size.code)?.qty ?? 0) + l.qty })
+    return [...by.entries()].sort((a, b) => a[1].seq - b[1].seq).map(([code, v]) => `${code} ${v.qty}`).join(' · ')
+  }
+  const steps: Step[] = []
+  const groups = new Map<string, typeof openings>()
+  for (const l of openings) {
+    const k = `${l.openingStock.number}|${l.warehouse.name}|${l.item.uom?.symbol ?? ''}`
+    groups.set(k, [...(groups.get(k) ?? []), l])
+  }
+  for (const list of groups.values()) {
+    const first = list[0]
+    const unit = first.item.uom?.symbol ?? 'pcs'
+    const qty = list.reduce((t, l) => t + n(l.qty), 0)
+    const notOk = ['HOLD', 'REJECTED', 'B_GRADE']
+      .map((s) => ({ s, q: list.filter((l) => l.status === s).reduce((t, l) => t + n(l.qty), 0) }))
+      .filter((x) => x.q > 0)
+      .map((x) => `${x.q} ${x.s === 'B_GRADE' ? 'B-grade' : x.s === 'HOLD' ? 'on hold' : 'rejected'}`)
+    const items = [...new Set(list.map((l) => l.item.code))]
+    steps.push({
+      // Stock as on a day: the start of that day in India, not 5:30 am.
+      at: new Date(first.openingDate.getTime() - 330 * 60 * 1000),
+      phase: first.warehouse.departmentId ? 'production' : first.item.type === 'SEMI_FINISHED' || first.item.type === 'FINISHED_GOOD' ? 'store' : 'material',
+      title: `Opening stock: ${qty.toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit} at ${first.warehouse.name}`,
+      detail: [items.join(', '), sizesSaid(list.map((l) => ({ size: l.size, qty: n(l.qty) }))), ...notOk].filter(Boolean).join(' · ') || null,
+      ref: first.openingStock.number,
+      by: first.openingStock.createdBy?.name,
+    })
+  }
+  for (const t of moves) {
+    const qty = t.lines.reduce((s, l) => s + n(l.qty), 0)
+    const marks = [...new Set(t.lines.flatMap((l) => [l.lotNo && `lot ${l.lotNo}`, l.bundleNo && `bundle ${l.bundleNo}`]).filter(Boolean))]
+    steps.push({
+      at: t.transferDate,
+      phase: 'production',
+      title: `${pcsOf(qty)} moved from ${t.fromWarehouse.name} to ${t.toWarehouse.name}`,
+      detail: [sizesSaid(t.lines.map((l) => ({ size: l.size, qty: n(l.qty) }))), ...marks, t.notes].filter(Boolean).join(' · ') || null,
+      ref: t.transferNumber,
+      by: t.movedBy?.name,
+      undone: Boolean(t.cancelledAt),
+    })
+  }
+  return steps
 }
 
 // ── A customer, a style ─────────────────────────────────────────────────────

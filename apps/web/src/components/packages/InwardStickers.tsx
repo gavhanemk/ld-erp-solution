@@ -135,7 +135,7 @@ function sentence(t: LabelTarget, r: Row, qtys: number[]) {
  * item, so the usual case is one press of Print. "Change" opens the two
  * figures behind the sentence, a lot, and sizes for rolls that differ; what is
  * changed is remembered for the item without being asked. Nothing is saved
- * until Print; Skip leaves the stock under Stickers → No stickers.
+ * until Print; Skip leaves the stock under Stickers → Packaging pending.
  */
 export function InwardStickers({
   source,
@@ -377,6 +377,14 @@ export function InwardStickers({
                       />
                     </label>
                     <div className="flex flex-wrap gap-x-4 gap-y-1 pb-2.5 text-sm">
+                      {/* All of it stored together: one package, one sticker. Not remembered as the item's usual size. */}
+                      <button
+                        type="button"
+                        className="text-primary font-medium hover:underline"
+                        onClick={() => setRows((p) => ({ ...p, [t.key]: { ...r, skip: false, sizes: false, each: String(r3(t.max)), count: '1' } }))}
+                      >
+                        All in one {one(t.packType)}
+                      </button>
                       <button
                         type="button"
                         className="text-primary font-medium hover:underline"

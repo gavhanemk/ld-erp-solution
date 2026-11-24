@@ -235,7 +235,12 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
     items: u.items.size,
     lines: u.lines,
   })).sort((a, b) => b.items - a.items)
-  const byType = groupBy((r) => about.get(r.itemId)?.type ?? 'OTHER')
+  // A garment still on a process's floor is semi-finished, whatever it will become.
+  const floors = new Set((await prisma.warehouse.findMany({ where: { departmentId: { not: null } }, select: { id: true } })).map((w) => w.id))
+  const byType = groupBy((r) => {
+    const t = about.get(r.itemId)?.type ?? 'OTHER'
+    return t === 'FINISHED_GOOD' && floors.has(r.warehouseId) ? 'SEMI_FINISHED' : t
+  })
 
   // ── ageing: how long since each line last moved ──
   const ageing = AGE_BUCKETS.map((b) => ({ key: b.key, label: b.label, value: 0, lines: 0 }))

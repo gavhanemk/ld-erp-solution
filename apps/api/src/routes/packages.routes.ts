@@ -7,12 +7,15 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { createTransfer, issueRequisition } from './inventory.routes'
 import {
+  changedSincePrint,
   checkFifo,
   createPackages,
+  editPackage,
+  mergePackages,
   cutOffForMove,
   lockPackage,
   normaliseCode,
-  codeCandidates,
+  scannedWhere,
   normaliseRack,
   packageRule,
   positionOf,
@@ -129,7 +132,9 @@ const putAwaySchema = z.object({
 })
 const restickSchema = z.object({
   ids: z.array(z.string().min(1)).min(1).max(500),
-  qtys: z.array(qty).min(1, 'Make at least one sticker').max(500, 'That is more than 500 stickers'),
+  qtys: z.array(qty).max(500, 'That is more than 500 stickers'),
+  /** Stickers for part of it, or none: what they do not cover stays in the store without a sticker, to label later. */
+  leaveLoose: z.boolean().optional(),
   packType: z.enum(PACK_TYPES).optional().nullable(),
   /** A note on each new sticker, in the order of `qtys`: "short width". */
   notes: z.array(z.string().trim().max(120, 'A package note is 120 characters at most')).max(500).optional(),
@@ -144,6 +149,7 @@ const pkgInclude = {
       categoryId: true,
       contentQty: true,
       contentUnit: true,
+      labelCopies: true,
       uom: { select: { symbol: true } },
       category: { select: { name: true } },
     },
@@ -154,10 +160,16 @@ const pkgInclude = {
 
 /** Everything the scan screen shows about one package, and what can be done with it. */
 /** A retired sticker scanned again: what took its place, so the right roll is picked up. */
-async function retiredMessage(tx: Prisma.TransactionClient, pkg: { id: string; code: string }, unit: string, outcome: string) {
+async function retiredMessage(tx: Prisma.TransactionClient, pkg: { id: string; code: string; status?: string }, unit: string, outcome: string) {
   const now = await replacementsOf(tx, pkg.id)
+  const list = now.map((n) => `${n.code} (${n.qty} ${unit})`.replace(' )', ')')).join(', ')
+  if (pkg.status === 'MERGED') {
+    return now.length
+      ? `Sticker ${pkg.code} was retired when its package was put together with others. It is now ${list}: scan that sticker instead. ${outcome}`
+      : `Sticker ${pkg.code} was retired when its package was put together with others, and nothing of it is left in stock. ${outcome}`
+  }
   return now.length
-    ? `Sticker ${pkg.code} was retired when part of its roll went out. What is left of it is now ${now.map((n) => `${n.code} (${n.qty} ${unit})`.replace(' )', ')')).join(', ')}: scan that sticker instead. ${outcome}`
+    ? `Sticker ${pkg.code} was retired when part of its roll went out. What is left of it is now ${list}: scan that sticker instead. ${outcome}`
     : `Sticker ${pkg.code} was retired when its roll was split, and nothing of it is left in stock. ${outcome}`
 }
 
@@ -213,8 +225,13 @@ async function detail(id: string) {
     // The racks already in use in its store, for the rack box to offer.
     racksIn(prisma, pkg.warehouseId),
   ])
-  // A retired sticker: the stickers now on what is left of its roll.
-  const replacedBy = pkg.status === 'SPLIT' ? await replacementsOf(prisma, pkg.id) : []
+  // A retired sticker: the stickers now on what is left of its roll, or the package it was put into.
+  const [replacedBy, changed, mergedInto, mergedFrom] = await Promise.all([
+    pkg.status === 'SPLIT' || pkg.status === 'MERGED' ? replacementsOf(prisma, pkg.id) : Promise.resolve([]),
+    changedSincePrint(prisma, [pkg.id]),
+    pkg.mergedIntoId ? prisma.stockPackage.findUnique({ where: { id: pkg.mergedIntoId }, select: { id: true, code: true } }) : Promise.resolve(null),
+    prisma.stockPackage.findMany({ where: { mergedIntoId: pkg.id }, select: { id: true, code: true }, orderBy: { code: 'asc' } }),
+  ])
 
   const storeName = new Map(stores.map((s) => [s.id, s.name]))
   return {
@@ -226,6 +243,11 @@ async function detail(id: string) {
     position,
     stores,
     replacedBy,
+    mergedInto,
+    mergedFrom,
+    held: pkg.grade === 'R',
+    /** Printed, then changed: why its sticker no longer says what it is. */
+    changedSincePrint: changed.get(pkg.id) ?? [],
     racks: racks.map((r) => r.rack),
     requisitions: wanting
       .map((l) => ({
@@ -404,20 +426,22 @@ router.get('/pick', requirePermission(MODULE, 'view'), async (req, res) => {
 router.get('/groups', requirePermission(MODULE, 'view'), async (req, res) => {
   const rows = await prisma.stockPackage.findMany({
     where: listWhere(req.query),
-    select: { itemId: true, warehouseId: true, ownerCustomerId: true, packType: true, lotNo: true, rack: true, qty: true, createdAt: true },
+    select: { id: true, itemId: true, warehouseId: true, ownerCustomerId: true, packType: true, lotNo: true, rack: true, qty: true, createdAt: true },
     take: 50_000,
   })
+  const changed = await changedSincePrint(prisma)
   const byKey = new Map<
     string,
-    { itemId: string; warehouseId: string; ownerCustomerId: string | null; packages: number; qty: number; types: Map<string, number>; lots: Set<string>; racks: Set<string>; lastAt: Date }
+    { itemId: string; warehouseId: string; ownerCustomerId: string | null; packages: number; qty: number; changed: number; types: Map<string, number>; lots: Set<string>; racks: Set<string>; lastAt: Date }
   >()
   for (const r of rows) {
     const key = `${r.itemId}|${r.warehouseId}|${r.ownerCustomerId ?? ''}`
     let g = byKey.get(key)
     if (!g) {
-      g = { itemId: r.itemId, warehouseId: r.warehouseId, ownerCustomerId: r.ownerCustomerId, packages: 0, qty: 0, types: new Map(), lots: new Set(), racks: new Set(), lastAt: r.createdAt }
+      g = { itemId: r.itemId, warehouseId: r.warehouseId, ownerCustomerId: r.ownerCustomerId, packages: 0, qty: 0, changed: 0, types: new Map(), lots: new Set(), racks: new Set(), lastAt: r.createdAt }
       byKey.set(key, g)
     }
+    if (changed.has(r.id)) g.changed += 1
     g.packages += 1
     g.qty += Number(r.qty)
     g.types.set(r.packType, (g.types.get(r.packType) ?? 0) + 1)
@@ -441,11 +465,17 @@ router.get('/groups', requirePermission(MODULE, 'view'), async (req, res) => {
   const itemOf = new Map(items.map((i) => [i.id, i]))
   const storeOf = new Map(stores.map((s) => [s.id, s.name]))
   const ownerOf = new Map(owners.map((c) => [c.id, c.name]))
+  // What of each item in each store is still without a sticker.
+  const position = await positionsOf(
+    prisma,
+    groups.map((g) => ({ itemId: g.itemId, warehouseId: g.warehouseId, ownership: g.ownerCustomerId ? 'CUSTOMER_OWNED' : 'OWNED', ownerCustomerId: g.ownerCustomerId })),
+  )
   res.json({
     success: true,
     data: groups
       .map((g) => {
         const item = itemOf.get(g.itemId)
+        const pos = position({ itemId: g.itemId, warehouseId: g.warehouseId, ownership: g.ownerCustomerId ? 'CUSTOMER_OWNED' : 'OWNED', ownerCustomerId: g.ownerCustomerId })
         return {
           key: `${g.itemId}|${g.warehouseId}|${g.ownerCustomerId ?? ''}`,
           itemId: g.itemId,
@@ -459,6 +489,10 @@ router.get('/groups', requirePermission(MODULE, 'view'), async (req, res) => {
           owner: g.ownerCustomerId ? (ownerOf.get(g.ownerCustomerId) ?? 'Customer') : null,
           packages: g.packages,
           qty: round3(g.qty),
+          /** In the store but on no sticker: to label from No stickers. */
+          loose: Math.max(0, pos.loose),
+          /** Printed, then changed since. */
+          changed: g.changed,
           packTypes: [...g.types].sort((a, b) => b[1] - a[1]).map(([t]) => t),
           lots: [...g.lots].sort(),
           racks: [...g.racks].sort((a, b) => a.localeCompare(b, 'en', { numeric: true })),
@@ -585,17 +619,19 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
 router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
   const ids = String(req.query.ids ?? '').split(',').filter(Boolean).slice(0, 500)
   if (!ids.length) throw new AppError('Choose the packages to print', 400, 'NO_IDS')
-  const [company, rows] = await Promise.all([
-    prisma.company.findFirst({ select: { name: true } }),
+  const [company, rows, templates] = await Promise.all([
+    prisma.company.findFirst({ select: { name: true, logoUrl: true } }),
     // Only stickers still on stock: a used-up, split or withdrawn code is
     // never printed again, so it can never end up on another roll.
     prisma.stockPackage.findMany({ where: { id: { in: ids }, status: 'IN_STOCK' }, include: pkgInclude, orderBy: { code: 'asc' } }),
+    stickerTemplates(),
   ])
   // A GRN's stickers, and the ones split from them, which keep its id.
   const fromGrn = (r: (typeof rows)[number]) => (r.sourceType === 'GRN' || r.grnLineId) && r.sourceId
   const grnIds = [...new Set(rows.filter(fromGrn).map((r) => r.sourceId as string))]
   const lineIds = [...new Set(rows.map((r) => r.grnLineId).filter((x): x is string => !!x))]
-  const [grns, lines, siblings] = await Promise.all([
+  const openingLineIds = [...new Set(rows.map((r) => r.sourceLineId).filter((x): x is string => !!x))]
+  const [grns, lines, siblings, openingSiblings] = await Promise.all([
     prisma.gRN.findMany({
       where: { id: { in: grnIds } },
       select: { id: true, grnNumber: true, grnDate: true, challanNo: true, po: { select: { poNumber: true, supplier: { select: { name: true } } } } },
@@ -611,17 +647,27 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
       select: { id: true, grnLineId: true },
       orderBy: { code: 'asc' },
     }),
+    // The same for an opening stock line packed in several.
+    prisma.stockPackage.findMany({
+      where: { sourceLineId: { in: openingLineIds }, parentId: null, status: { notIn: ['VOID', 'MERGED'] } },
+      select: { id: true, sourceLineId: true },
+      orderBy: { code: 'asc' },
+    }),
   ])
   const grnOf = new Map(grns.map((g) => [g.id, g]))
   const styleOf = new Map(lines.map((l) => [l.id, l.poLine?.style?.code ?? l.poLine?.styleNo ?? null]))
   const seqOf = new Map<string, { n: number; of: number }>()
   const byLine = new Map<string, string[]>()
   for (const p of siblings) byLine.set(p.grnLineId!, [...(byLine.get(p.grnLineId!) ?? []), p.id])
+  for (const p of openingSiblings) byLine.set(`o:${p.sourceLineId}`, [...(byLine.get(`o:${p.sourceLineId}`) ?? []), p.id])
   for (const ids of byLine.values()) if (ids.length > 1) ids.forEach((id, i) => seqOf.set(id, { n: i + 1, of: ids.length }))
   res.json({
     success: true,
     data: {
       company: company?.name ?? '',
+      // The company logo, for the kinds of sticker set to carry it.
+      logo: company?.logoUrl ?? null,
+      templates,
       packages: rows.map((r) => {
         const g = fromGrn(r) ? grnOf.get(r.sourceId as string) : undefined
         return {
@@ -637,8 +683,11 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           category: r.item.category?.name ?? '',
           store: r.warehouse.name,
           lotNo: r.lotNo,
-          // The receipt's note on this package: "torn bag".
-          note: fromGrn(r) ? (r.notes ?? null) : null,
+          // The receipt's note on this package ("torn bag"), or an opening roll's own reference.
+          note: fromGrn(r) || r.sourceType === 'OPENING' ? (r.notes ?? null) : null,
+          rack: r.rack,
+          // Its item's own number of copies, when not its kind's usual.
+          copies: r.item.labelCopies ?? null,
           owner: r.ownerCustomer?.name ?? null,
           // The document it came in on: a GRN, or a stock-in, a customer's receipt…
           grnNumber: g?.grnNumber ?? r.sourceRef ?? null,
@@ -875,6 +924,9 @@ router.get('/ready', requirePermission(MODULE, 'view'), async (req, res) => {
       sourceType: true,
       sourceId: true,
       sourceRef: true,
+      grnLineId: true,
+      sourceLineId: true,
+      lotNo: true,
       createdAt: true,
       item: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
       warehouse: { select: { name: true } },
@@ -882,16 +934,19 @@ router.get('/ready', requirePermission(MODULE, 'view'), async (req, res) => {
     orderBy: [{ createdAt: 'desc' }, { code: 'asc' }],
   })
   // `each`: what every sticker in the group holds, when they all hold the same.
+  // One group per line of the document (a GRN line, an opening stock line), so
+  // Change remakes one line's stickers.
   const groups = new Map<
     string,
-    { key: string; sourceRef: string | null; date: Date; itemCode: string; item: string; store: string; unit: string; qty: number; each: number | null; packType: string; ids: string[] }
+    { key: string; sourceRef: string | null; date: Date; itemCode: string; item: string; store: string; unit: string; qty: number; each: number | null; packType: string; lots: string[]; ids: string[] }
   >()
   for (const r of rows) {
-    const key = [r.sourceType, r.sourceId ?? '', r.item.id, r.warehouse.name].join('|')
+    const key = [r.sourceType, r.sourceId ?? '', r.item.id, r.warehouse.name, r.grnLineId ?? '', r.sourceLineId ?? ''].join('|')
     const q = Number(r.qty)
-    const g = groups.get(key) ?? { key, sourceRef: r.sourceRef, date: r.createdAt, itemCode: r.item.code, item: r.item.name, store: r.warehouse.name, unit: r.item.uom?.symbol ?? '', qty: 0, each: q, packType: r.packType, ids: [] }
+    const g = groups.get(key) ?? { key, sourceRef: r.sourceRef, date: r.createdAt, itemCode: r.item.code, item: r.item.name, store: r.warehouse.name, unit: r.item.uom?.symbol ?? '', qty: 0, each: q, packType: r.packType, lots: [], ids: [] }
     if (g.each !== null && Math.abs(g.each - q) > 1e-9) g.each = null
     g.qty = round3(g.qty + q)
+    if (r.lotNo && !g.lots.includes(r.lotNo)) g.lots.push(r.lotNo)
     g.ids.push(r.id)
     groups.set(key, g)
   }
@@ -929,11 +984,15 @@ router.post('/put-away', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   if (!rack) throw new AppError('Type the rack first', 400, 'NO_RACK')
   const code = normaliseCode(data.code)
   const out = await prisma.$transaction(async (tx) => {
-    const found = await tx.stockPackage.findFirst({ where: { code: { in: codeCandidates(data.code) } }, select: { id: true } })
+    const found = await tx.stockPackage.findFirst({ where: scannedWhere(data.code), select: { id: true } })
     if (!found) throw new AppError(`No package with the code ${code}. Check the sticker, or type the number under the QR.`, 404, 'NOT_FOUND')
     const pkg = await lockPackage(tx, found.id)
     if (pkg.status !== 'IN_STOCK') {
-      throw new AppError(`${pkg.code} is ${pkg.status === 'EMPTY' ? 'empty' : pkg.status === 'SPLIT' ? 'split into other packages' : 'withdrawn'}, so it is not on any rack.`, 400, 'NOT_IN_STOCK')
+      throw new AppError(
+        `${pkg.code} is ${pkg.status === 'EMPTY' ? 'empty' : pkg.status === 'SPLIT' ? 'split into other packages' : pkg.status === 'MERGED' ? 'put together into another package' : 'withdrawn'}, so it is not on any rack.`,
+        400,
+        'NOT_IN_STOCK',
+      )
     }
     const was = pkg.rack
     const changed = await setRack(tx, pkg, rack, { userId: req.user?.id ?? null })
@@ -948,10 +1007,115 @@ router.post('/put-away', requirePermission(MODULE, 'edit'), async (req: AuthRequ
 })
 
 /** A scanned or typed code: the package behind it. */
+/**
+ * Stickers printed, then changed: issued from, moved, corrected, taken off
+ * hold. Each with what changed and when it was printed — to print again, or
+ * leave (scanning always shows what a package holds now).
+ */
+router.get('/changed', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const changed = await changedSincePrint(prisma)
+  const rows = changed.size
+    ? await prisma.stockPackage.findMany({ where: { id: { in: [...changed.keys()] } }, include: pkgInclude, orderBy: [{ lastPrintedAt: 'asc' }, { code: 'asc' }], take: 2000 })
+    : []
+  res.json({
+    success: true,
+    data: rows.map((p) => ({ ...p, qty: Number(p.qty), initialQty: Number(p.initialQty), unit: p.item.uom?.symbol ?? '', changed: changed.get(p.id) ?? [] })),
+  })
+})
+
+/*
+ * How each kind of package's sticker looks: its size, its codes, what it
+ * shows, how big, the company logo or not, how many copies. One for rolls,
+ * one for boxes, bundles, cartons…; anything not set follows "Any package".
+ */
+const TEMPLATE_KEY = 'stickerTemplates'
+const STICKER_FIELDS = ['itemCode', 'style', 'qty', 'contents', 'lot', 'challan', 'document', 'po', 'supplier', 'store', 'rack', 'notes', 'packNo'] as const
+const templateSchema = z.object({
+  size: z.enum(['sheet', 'roll', 'small', 'custom']),
+  width: z.number().min(20).max(150).optional().nullable(),
+  height: z.number().min(15).max(150).optional().nullable(),
+  codes: z.enum(['both', 'qr', 'barcode']),
+  fields: z.array(z.enum(STICKER_FIELDS)).max(STICKER_FIELDS.length),
+  font: z.enum(['S', 'M', 'L']),
+  logo: z.boolean(),
+  copies: z.number().int().min(1).max(5),
+})
+const TEMPLATE_KINDS = ['DEFAULT', ...PACK_TYPES] as const
+const templatesSchema = z.record(z.enum(TEMPLATE_KINDS), templateSchema)
+type StickerTemplate = z.infer<typeof templateSchema>
+const EVERY_FIELD = STICKER_FIELDS.filter((f) => f !== 'rack')
+export const DEFAULT_TEMPLATES: Record<(typeof TEMPLATE_KINDS)[number], StickerTemplate> = {
+  DEFAULT: { size: 'sheet', codes: 'both', fields: [...EVERY_FIELD], font: 'M', logo: false, copies: 1 },
+  ROLL: { size: 'roll', codes: 'both', fields: [...EVERY_FIELD], font: 'M', logo: false, copies: 1 },
+  BOX: { size: 'sheet', codes: 'both', fields: [...EVERY_FIELD], font: 'M', logo: false, copies: 1 },
+  CARTON: { size: 'roll', codes: 'both', fields: [...EVERY_FIELD], font: 'L', logo: true, copies: 1 },
+  BAG: { size: 'sheet', codes: 'both', fields: [...EVERY_FIELD], font: 'M', logo: false, copies: 1 },
+  BUNDLE: { size: 'small', codes: 'barcode', fields: ['itemCode', 'qty', 'lot', 'packNo'], font: 'S', logo: false, copies: 1 },
+  PACKET: { size: 'small', codes: 'barcode', fields: ['itemCode', 'qty', 'lot'], font: 'S', logo: false, copies: 1 },
+  OTHER: { size: 'sheet', codes: 'both', fields: [...EVERY_FIELD], font: 'M', logo: false, copies: 1 },
+}
+// Read straight from its setting row: the preferences list keeps only the
+// settings it defines.
+export async function stickerTemplates() {
+  const row = await prisma.appSetting.findFirst({ where: { key: TEMPLATE_KEY }, select: { value: true } })
+  const saved = templatesSchema.safeParse(row?.value ?? {})
+  return { ...DEFAULT_TEMPLATES, ...(saved.success ? saved.data : {}) }
+}
+router.get('/templates', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const company = await prisma.company.findFirst({ select: { logoUrl: true } })
+  res.json({ success: true, data: { templates: await stickerTemplates(), fields: STICKER_FIELDS, hasLogo: Boolean(company?.logoUrl) } })
+})
+router.patch('/templates', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const templates = templatesSchema.parse(req.body?.templates)
+  const company = await prisma.company.findFirst({ select: { id: true } })
+  if (!company) throw new AppError('Company profile is not set up yet.', 409, 'NO_COMPANY')
+  const before = await stickerTemplates()
+  await prisma.appSetting.upsert({
+    where: { companyId_key: { companyId: company.id, key: TEMPLATE_KEY } },
+    update: { value: templates as never },
+    create: { companyId: company.id, key: TEMPLATE_KEY, value: templates as never },
+  })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StickerTemplates', entityId: TEMPLATE_KEY, before, after: templates })
+  res.json({ success: true, message: 'Sticker settings saved.', data: { templates: await stickerTemplates() } })
+})
+
+/**
+ * Packages of the same stock put together into one with its own sticker:
+ * the old stickers are retired and, scanned again, name the new one.
+ */
+const mergeSchema = z.object({
+  ids: z.array(z.string().min(1)).min(2, 'Pick at least two stickers').max(200),
+  packType: z.enum(PACK_TYPES).optional().nullable(),
+  notes: z.string().trim().max(120).optional().nullable(),
+})
+router.post('/merge', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = mergeSchema.parse(req.body)
+  const result = await prisma.$transaction((tx) => mergePackages(tx, { ...data, userId: req.user?.id ?? null }), { timeout: 60_000, maxWait: 20_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.merged.id, before: { codes: result.codes }, after: { code: result.merged.code, qty: Number(result.merged.qty) } })
+  res.status(201).json({
+    success: true,
+    message: `${result.codes.join(', ')} put together as ${result.merged.code}: ${Number(result.merged.qty)} ${result.unit}, ready to print.`,
+    data: await detail(result.merged.id),
+  })
+})
+
+/** A package's lot, kind or note put right; its quantity is corrected with Correct the quantity. */
+const editSchema = z.object({
+  lotNo: z.string().trim().max(60).optional().nullable(),
+  packType: z.enum(PACK_TYPES).optional().nullable(),
+  notes: z.string().trim().max(120).optional().nullable(),
+})
+router.post('/:id/edit', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = editSchema.parse(req.body)
+  const result = await prisma.$transaction((tx) => editPackage(tx, { id: req.params.id, ...data, userId: req.user?.id ?? null }))
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.pkg.id, after: { changed: result.said } })
+  res.json({ success: true, message: `${result.pkg.code}: ${result.said.join('; ')}.${result.pkg.printCount ? ' Its sticker no longer says the same: print it again.' : ''}`, data: await detail(result.pkg.id) })
+})
+
 router.get('/scan/:code', requirePermission(MODULE, 'view'), async (req, res) => {
   const raw = decodeURIComponent(req.params.code)
   const code = normaliseCode(raw)
-  const pkg = await prisma.stockPackage.findFirst({ where: { code: { in: codeCandidates(raw) } }, select: { id: true } })
+  const pkg = await prisma.stockPackage.findFirst({ where: scannedWhere(raw), select: { id: true } })
   if (!pkg) throw new AppError(`No package with the code ${code}. Check the sticker, or type the number under the QR.`, 404, 'NOT_FOUND')
   res.json({ success: true, data: await detail(pkg.id) })
 })
@@ -1005,8 +1169,9 @@ router.post('/auto', requirePermission(MODULE, 'create'), async (req: AuthReques
  */
 router.post('/restick', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = restickSchema.parse(req.body)
+  if (!data.qtys.length && !data.leaveLoose) throw new AppError('Make at least one sticker.', 400, 'NO_PACKAGES')
   await assertLineQtyFitsUnits(prisma, 'package', data.qtys.map((q) => ({ lineId: data.ids[0], qty: q, what: 'One sticker' })))
-  const result = await prisma.$transaction((tx) => restickStickers(tx, data.ids, data.qtys, data.packType ?? null, req.user?.id ?? null, data.notes), {
+  const result = await prisma.$transaction((tx) => restickStickers(tx, data.ids, data.qtys, data.packType ?? null, req.user?.id ?? null, data.notes, Boolean(data.leaveLoose)), {
     timeout: 60_000,
     maxWait: 20_000,
   })
@@ -1014,15 +1179,18 @@ router.post('/restick', requirePermission(MODULE, 'create'), async (req: AuthReq
     module: MODULE,
     action: 'UPDATE',
     entityType: 'StockPackage',
-    entityId: result.created[0].id,
+    entityId: result.created[0]?.id ?? data.ids[0],
     before: { codes: result.before },
-    after: { codes: result.created.map((c) => c.code), qtys: data.qtys },
+    after: { codes: result.created.map((c) => c.code), qtys: data.qtys, leftLoose: result.leftLoose },
   })
   const n = result.created.length
+  const loose = result.leftLoose > 0 ? ` ${result.leftLoose} ${result.unit} stays without a sticker, to label later.` : ''
   res.json({
     success: true,
-    message: `${n} ${n === 1 ? 'sticker' : 'stickers'} made in place of ${result.before.length}, ready to print.`,
-    data: { ids: result.created.map((c) => c.id) },
+    message: n
+      ? `${n} ${n === 1 ? 'sticker' : 'stickers'} made in place of ${result.before.length}, ready to print.${loose}`
+      : `${result.before.length} ${result.before.length === 1 ? 'sticker' : 'stickers'} taken off.${loose}`,
+    data: { ids: result.created.map((c) => c.id), leftLoose: result.leftLoose },
   })
 })
 
@@ -1110,7 +1278,7 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
           'ALREADY_ISSUED',
         )
       }
-      if (pkg.status === 'SPLIT') throw new AppError(await retiredMessage(tx, pkg, unit, 'Nothing was issued.'), 409, 'STICKER_RETIRED')
+      if (pkg.status === 'SPLIT' || pkg.status === 'MERGED') throw new AppError(await retiredMessage(tx, pkg, unit, 'Nothing was issued.'), 409, 'STICKER_RETIRED')
       if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is withdrawn; nothing can be issued from it.`, 400, 'NOT_IN_STOCK')
       // A held roll stays on the rack until an approver releases it or it goes back to the customer.
       if (pkg.grade === 'R') {
@@ -1342,7 +1510,7 @@ router.post('/:id/correct', requirePermission(MODULE, 'edit'), async (req: AuthR
     // found again is put on the books by a stock count, with a fresh sticker.
     if (pkg.status !== 'IN_STOCK') {
       throw new AppError(
-        `${pkg.code} is ${pkg.status === 'EMPTY' ? 'used up' : 'split into other packages'}, and a used sticker is never brought back. If the roll is really on the rack, record it in a stock count: it gets a new sticker.`,
+        `${pkg.code} is ${pkg.status === 'EMPTY' ? 'used up' : pkg.status === 'MERGED' ? 'put together into another package' : 'split into other packages'}, and a used sticker is never brought back. If the roll is really on the rack, record it in a stock count: it gets a new sticker.`,
         409,
         'STICKER_USED',
       )

@@ -454,9 +454,12 @@ export async function homeDashboard(opts: { days: number; access: HomeAccess }) 
           select: { id: true, type: true },
         })
         const typeOf = new Map(types.map((t) => [t.id, t.type as string]))
+        // A garment still on a process's floor is semi-finished, whatever it will become.
+        const floors = new Set((await prisma.warehouse.findMany({ where: { departmentId: { not: null } }, select: { id: true } })).map((w) => w.id))
         const byType = new Map<string, { type: string; label: string; value: number; items: Set<string> }>()
         for (const r of owned) {
-          const t = typeOf.get(r.itemId) ?? 'RAW_MATERIAL'
+          const own = typeOf.get(r.itemId) ?? 'RAW_MATERIAL'
+          const t = own === 'FINISHED_GOOD' && floors.has(r.warehouseId) ? 'SEMI_FINISHED' : own
           const g = byType.get(t) ?? { type: t, label: ITEM_TYPES[t] ?? t, value: 0, items: new Set<string>() }
           g.value += r.value
           g.items.add(r.itemId)

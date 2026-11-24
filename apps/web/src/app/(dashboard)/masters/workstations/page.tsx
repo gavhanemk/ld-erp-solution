@@ -8,6 +8,7 @@ import { ImportWorkstationsDialog } from '@/components/masters/ImportWorkstation
 import { RoutingMastersTabs } from '@/components/masters/RoutingMastersTabs'
 import { masterResource, type Paginated } from '@/lib/api'
 import { LinesByProcess } from '@/components/masters/LinesByProcess'
+import { isProcessDepartment } from '@/components/masters/processDepartments'
 
 /**
  * Workstations.
@@ -112,7 +113,8 @@ const columns: Column<Workstation>[] = [
  * whether any routing sends work to it. Each counts what it would leave.
  */
 const filterDefs: FilterDef[] = [
-  { key: 'departmentId', label: 'Process', facet: 'departmentId', optionsFrom: { resource: 'departments' } },
+  // Processes only: not Accounts, HR & Admin or Store.
+  { key: 'departmentId', label: 'Process', facet: 'departmentId', optionsFrom: { resource: 'departments', filter: isProcessDepartment } },
   {
     key: 'type',
     label: 'Run by',

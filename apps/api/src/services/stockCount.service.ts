@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { codeCandidates, normaliseCode, normaliseRack, packageRules, round3, setRack } from './package.service'
+import { normaliseCode, normaliseRack, packageRules, round3, scannedWhere, setRack } from './package.service'
 import { afterCountDecided } from './stockCountHooks.service'
 import { createAdjustment } from '../routes/inventory.routes'
 
@@ -132,7 +132,7 @@ function shapeScan(s: ScanRow, warehouseId: string) {
       : s.result === 'ELSEWHERE'
         ? `Booked to ${p?.warehouse.name ?? 'another store'}. Move it here with Scan → Move, or take it back where it belongs. It is not counted here.`
         : s.result === 'NOT_IN_STOCK'
-          ? `The system shows it ${p?.status === 'SPLIT' ? 'split into smaller packages' : p?.status === 'VOID' ? 'withdrawn' : 'empty — everything in it was issued'}. Check what is in it; it is not counted.`
+          ? `The system shows it ${p?.status === 'SPLIT' ? 'split into smaller packages' : p?.status === 'MERGED' ? 'put together into another package' : p?.status === 'VOID' ? 'withdrawn' : 'empty — everything in it was issued'}. Check what is in it; it is not counted.`
           : /^G-?\d/i.test(s.code)
             ? 'That is a garment tag. Garments are counted on Garment In / Out.'
             : 'No sticker with this number on the system. Check the label.'
@@ -164,7 +164,7 @@ export async function scanPackage(tx: Prisma.TransactionClient, countId: string,
   mustBeOpen(c)
   // The sticker's own code, short or from before codes were shortened.
   const pkg = await tx.stockPackage.findFirst({
-    where: { code: { in: codeCandidates(raw) } },
+    where: scannedWhere(raw),
     select: { id: true, code: true, status: true, warehouseId: true, qty: true, rack: true },
   })
   const code = pkg?.code ?? normaliseCode(raw)

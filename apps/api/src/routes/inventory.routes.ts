@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import type { z } from 'zod'
 import { prisma, Prisma } from '@ld-erp/database'
-import type { MOStatus } from '@prisma/client'
+import type { ItemType, MOStatus } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { isAdmin, requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -21,12 +21,17 @@ import { MOVEMENT_DOC_JOIN, movementDocs } from '../services/movementDocs.servic
 import { decidePending } from '../services/requisition.service'
 import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
 import { qcByGrnLine } from '../services/grnQc.service'
-import { packageRule, positionOf } from '../services/package.service'
+import { packageRule, packageRules, positionOf, stickerDefaultsFrom } from '../services/package.service'
 import { getPreference } from '../lib/preferences'
 import { createPurchaseNoteIn } from './purchase-notes.routes'
 import { assertNotCancelling, soOfMo } from '../services/orderCancel.service'
 import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
+import * as openingStock from '../services/openingStock.service'
+import * as processStock from '../services/processStock.service'
+import { floorFor, processLadder } from '../services/processFloor.service'
+import { trackedRoutings } from '../services/styleTrack.service'
+import { z as zod } from 'zod'
 import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
   stockInSchema,
@@ -5315,5 +5320,670 @@ router.patch(
     })
   },
 )
+
+/*
+ * Opening stock from the mill's 19-column sheet: the template, then check and
+ * import (all or nothing), and the uploads with their lines.
+ */
+/** A kind: Finished Goods, Semi Finished Goods or Raw Materials; none is the 19-column sheet. */
+const osKind = zod.enum(['FG', 'SFG', 'RM'])
+const kindOf = (v: unknown) => (osKind.safeParse(v).success ? (v as openingStock.OsKind) : undefined)
+
+router.get('/opening-stock/import-template', requirePermission(MODULE, 'create'), async (req, res) => {
+  const kind = kindOf(req.query.type)
+  const buffer = await openingStock.buildTemplate(kind)
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="opening-stock-${kind ? kind.toLowerCase() : 'all'}-template.xlsx"`)
+  res.send(buffer)
+})
+
+/*
+ * A sheet: checked (nothing written), or with confirm brought in. A kind's
+ * sheet takes its opening date from the screen. A save sent again with the
+ * same key finds what it posted instead of posting twice.
+ */
+/** The template uploaded is the one for the kind picked: else say which it is. */
+async function sheetIsFor(body: { file: string; fileName: string; kind?: openingStock.OsKind }) {
+  const is = await openingStock.templateOf(Buffer.from(body.file, 'base64'), body.fileName)
+  const want = body.kind ?? 'ALL'
+  if (!is || is === want) return
+  const name = (k: openingStock.OsKind | 'ALL') => (k === 'ALL' ? 'the 19-column opening stock sheet' : `the ${openingStock.KIND_LABEL[k]} template`)
+  throw new AppError(`This file is ${name(is)}, but ${name(want)} was picked. Pick ${is === 'ALL' ? 'All in one sheet' : openingStock.KIND_LABEL[is]}, or download ${name(want)}.`, 400, 'WRONG_TEMPLATE')
+}
+
+/** How a line's stock goes on stickers, from the screen: see PackInput. */
+const packInputSchema = zod.object({
+  type: zod.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).nullish(),
+  qtys: zod.array(zod.number().positive()).max(1000, 'At most 1000 packages on one line').nullish(),
+  each: zod.number().positive().nullish(),
+  count: zod.number().int().min(1).max(1000).nullish(),
+  later: zod.boolean().nullish(),
+  refs: zod.array(zod.string().trim().max(60).nullable()).max(1000).nullish(),
+})
+const openingImportBody = customerMaterialImport.importBody.extend({
+  kind: osKind.optional(),
+  openingDate: zod.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Pick the opening date').optional(),
+  requestKey: zod.string().min(8).max(100).optional(),
+  /** Packing changed on the review, by sheet row: it replaces what the sheet's package columns say. */
+  packs: zod.record(zod.string().regex(/^\d+$/), packInputSchema).optional(),
+})
+async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
+  await sheetIsFor(body)
+  const rows = await openingStock.readSheet(Buffer.from(body.file, 'base64'), body.fileName, body.kind)
+  if (body.kind) {
+    if (!body.openingDate) throw new AppError('Pick the opening date for the sheet.', 400, 'NEEDS_DATE')
+    openingStock.asNineteen(rows, body.kind, body.openingDate)
+  }
+  const packs = body.packs ?? {}
+  return openingStock.planImport(
+    rows.map((r) => (packs[String(r.row)] ? { ...r, pack: packs[String(r.row)] } : r)),
+    { kind: body.kind, labels: openingStock.labelsOf(body.kind) },
+  )
+}
+
+router.post('/opening-stock/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const body = openingImportBody.parse(req.body)
+  const { fileName, confirm } = body
+  const again = confirm ? await openingStock.savedFor(body.requestKey) : null
+  if (again) {
+    res.json({ success: true, message: `${again.number}: already brought in — nothing posted twice.`, data: again })
+    return
+  }
+  const resolved = await readOpeningSheet(body)
+  const summary = openingStock.summarise(resolved)
+  if (!confirm) {
+    res.json({ success: true, data: { summary, rows: resolved.map((r) => r.plan) } })
+    return
+  }
+  const done = await openingStock.runImport(resolved, { fileName, userId: req.user?.id ?? null, kind: body.kind ?? null, requestKey: body.requestKey ?? null })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'OpeningStock',
+    entityId: done.id,
+    after: { number: done.number, fileName, lines: done.lines, stickers: done.stickers, floorsMade: done.floorsMade },
+  })
+  res.status(201).json({
+    success: true,
+    message: `${done.number}: ${done.lines} ${done.lines === 1 ? 'line' : 'lines'} of opening stock brought in${
+      done.stickers ? `, ${done.stickers} ${done.stickers === 1 ? 'sticker' : 'stickers'} ready to print` : ''
+    }${done.floorsMade.length ? `. Made ${done.floorsMade.join(', ')}` : ''}.`,
+    data: { ...done, summary },
+  })
+})
+
+/*
+ * The sheet back as it came, with a Problems column: each row's problems
+ * beside it, those rows shaded, so it can be put right and uploaded again.
+ */
+router.post('/opening-stock/import/report', requirePermission(MODULE, 'create'), async (req, res) => {
+  const body = openingImportBody.parse(req.body)
+  await sheetIsFor(body)
+  const rows = await openingStock.readSheet(Buffer.from(body.file, 'base64'), body.fileName, body.kind)
+  const raw = rows.map((r) => ({ row: r.row, raw: { ...r.raw } }))
+  if (body.kind) {
+    if (!body.openingDate) throw new AppError('Pick the opening date for the sheet.', 400, 'NEEDS_DATE')
+    openingStock.asNineteen(rows, body.kind, body.openingDate)
+  }
+  const resolved = await openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind) })
+  const buffer = await openingStock.errorReport(raw, resolved, body.kind)
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${body.fileName.replace(/\.xlsx?$/i, '').replace(/[^\w.-]+/g, '-')}-problems.xlsx"`)
+  res.send(buffer)
+})
+
+/*
+ * What the entry screens offer, joined up so a choice only leads to what
+ * belongs to it: every style with its colours (each colour's finished item),
+ * its size run and the processes on its route (its own, its category's, or
+ * any style's — as an order's stages are offered); the size runs, to give a
+ * style one; the stores; and the raw-material categories with their items
+ * and units.
+ */
+router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const [processes, stores, styles, sizeGroups, categories, items] = await Promise.all([
+    processLadder(),
+    prisma.warehouse.findMany({ where: { isActive: true, departmentId: null }, select: { id: true, name: true, code: true }, orderBy: { name: 'asc' } }),
+    prisma.style.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        category: true,
+        colors: true,
+        sizeGroupId: true,
+        items: { where: { isActive: true, type: 'FINISHED_GOOD' }, select: { id: true, code: true, name: true, description: true, color: true }, orderBy: { code: 'asc' } },
+      },
+      orderBy: { code: 'asc' },
+    }),
+    prisma.sizeGroup.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true, sizes: { orderBy: { sequence: 'asc' }, select: { id: true, code: true } } },
+      orderBy: { name: 'asc' },
+    }),
+    // Raw materials by their subcategory (Fabric, Thread, Buttons…).
+    prisma.itemCategory.findMany({
+      where: { isActive: true, itemGroup: 'RAW_MATERIALS', parentId: { not: null } },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+    }),
+    prisma.item.findMany({
+      where: { isActive: true, styleId: null, type: { notIn: ['FINISHED_GOOD', 'SEMI_FINISHED'] } },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        type: true,
+        categoryId: true,
+        decimalPlaces: true,
+        packType: true,
+        packQty: true,
+        uom: { select: { symbol: true, name: true, decimalPlaces: true } },
+      },
+      orderBy: { name: 'asc' },
+    }),
+  ])
+  const ruleOf = await packageRules(prisma)
+  const routes = await trackedRoutings(prisma, styles.map((st) => ({ id: st.id, category: st.category })))
+  const sizesOf = new Map(sizeGroups.map((g) => [g.id, g.sizes]))
+  res.json({
+    success: true,
+    data: {
+      processes: processes.map((p) => ({ id: p.id, name: p.name, floor: p.floor?.name ?? null })),
+      stores,
+      sizeRuns: sizeGroups.map((g) => ({ id: g.id, name: g.name, sizes: g.sizes.map((z) => z.code) })),
+      styles: styles.map((st) => {
+        const r = routes.get(st.id)
+        const route = new Map<string, string>()
+        for (const step of r?.routing.steps ?? []) if (!route.has(step.departmentId)) route.set(step.departmentId, step.department.name)
+        // Every finished item linked to the style, to pick by code, name or
+        // description; each of its colours with the item made for it.
+        const items = st.items.map((i) => ({ id: i.id, code: i.code, name: i.name, description: i.description, colour: i.color }))
+        return {
+          id: st.id,
+          code: st.code,
+          name: st.name,
+          items,
+          colours: st.colors.map((c) => ({ colour: c, item: items.find((i) => (i.colour ?? '').toLowerCase() === c.toLowerCase()) ?? null })),
+          sizes: (st.sizeGroupId && sizesOf.get(st.sizeGroupId)) || [],
+          route: r ? [...route.entries()].map(([id, name]) => ({ id, name })) : null,
+          routeFrom: r ? { applies: r.applies, code: r.routing.code } : null,
+        }
+      }),
+      categories: categories.map((c) => ({ id: c.id, name: c.name, items: items.filter((i) => i.categoryId === c.id).length })),
+      items: items.map((i) => ({
+        id: i.id,
+        code: i.code,
+        name: i.name,
+        type: i.type,
+        categoryId: i.categoryId,
+        unit: i.uom?.symbol ?? null,
+        decimals: i.decimalPlaces ?? i.uom?.decimalPlaces ?? 0,
+        // Its stickers as they come when nothing else is said.
+        ...(() => {
+          const d = stickerDefaultsFrom(i, ruleOf(i.categoryId))
+          return { tracked: d.tracked, packType: d.packType, perPack: d.perPack }
+        })(),
+      })),
+    },
+  })
+})
+
+/*
+ * A style with no size run yet: given one from the entry screen, so its
+ * sizes can take pieces. Only a style without one — changing a run would
+ * change what its items and orders mean — and it is a Masters job.
+ */
+const sizeRunBody = zod.object({ styleId: zod.string().min(1), sizeGroupId: zod.string().min(1) })
+router.post('/opening-stock/style-size-run', requirePermission('masters', 'edit'), async (req: AuthRequest, res) => {
+  const { styleId, sizeGroupId } = sizeRunBody.parse(req.body)
+  const [style, run] = await Promise.all([
+    prisma.style.findUnique({ where: { id: styleId }, select: { id: true, code: true, sizeGroupId: true } }),
+    prisma.sizeGroup.findUnique({ where: { id: sizeGroupId }, select: { id: true, name: true, isActive: true } }),
+  ])
+  if (!style) throw new AppError('That style does not exist.', 404, 'NOT_FOUND')
+  if (!run || !run.isActive) throw new AppError('Pick a size run that is in use.', 400, 'BAD_SIZE_RUN')
+  if (style.sizeGroupId) throw new AppError(`${style.code} already has a size run. Change it in Masters → Styles.`, 400, 'HAS_SIZE_RUN')
+  await prisma.style.update({ where: { id: style.id }, data: { sizeGroupId: run.id } })
+  await writeAuditLog(req, { module: 'masters', action: 'UPDATE', entityType: 'Style', entityId: style.id, before: { sizeGroupId: null }, after: { sizeGroupId: run.id, from: 'Opening stock entry' } })
+  res.json({ success: true, message: `${style.code} now has the ${run.name} size run.` })
+})
+
+/*
+ * A style's colour with no finished item yet: made on the person's click,
+ * like the style's other colours. Making an item is a Masters job, so it
+ * needs Masters → create; when no category is plain, the choices come back.
+ */
+const colourItemBody = zod.object({
+  styleId: zod.string().min(1),
+  colour: zod.string().min(1).max(100),
+  categoryId: zod.string().nullish(),
+  /** Only say what the item would get; make nothing. */
+  preview: zod.boolean().optional(),
+  name: zod.string().trim().max(200).nullish(),
+})
+router.post('/opening-stock/colour-item', requirePermission('masters', 'create'), async (req: AuthRequest, res) => {
+  const body = colourItemBody.parse(req.body)
+  const out = await openingStock.colourItem(body)
+  if ('needCategory' in out || 'preview' in out) {
+    res.json({ success: true, data: out })
+    return
+  }
+  if (out.made) {
+    await writeAuditLog(req, { module: 'masters', action: 'CREATE', entityType: 'Item', entityId: out.item.id, after: { ...out.item, from: 'Opening stock entry' } })
+  }
+  res.status(out.made ? 201 : 200).json({ success: true, message: out.made ? `${out.item.name} added as ${out.item.code}.` : `${out.item.code} is already there.`, data: out })
+})
+
+/*
+ * Stickers for an opening line made later: its sizes known now, or the rest
+ * of its stock packed. Never more than the line has without stickers.
+ */
+router.post('/opening-stock/lines/:id/packages', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const pack = packInputSchema.parse(req.body?.pack ?? {})
+  const done = await openingStock.packLine(req.params.id, pack, req.user?.id ?? null)
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockPackage', entityId: done.ids[0], after: { openingLine: req.params.id, packages: done.ids.length, said: done.said } })
+  res.status(201).json({
+    success: true,
+    message: `${done.ids.length} ${done.ids.length === 1 ? 'sticker' : 'stickers'} made for ${done.number}: ${done.said}.${done.left > 0 ? ` ${done.left} ${done.unit} still without a sticker.` : ''}`,
+    data: done,
+  })
+})
+
+/**
+ * An opening line's stickers still on stock, to print — and the ones still
+ * whole as they were made (nothing issued, moved or split), which can be
+ * changed: packed another way, or part of it left with packaging pending.
+ */
+router.get('/opening-stock/lines/:id/packages', requirePermission(MODULE, 'view'), async (req, res) => {
+  const rows = await prisma.stockPackage.findMany({
+    where: { sourceLineId: req.params.id, status: 'IN_STOCK' },
+    select: { id: true, parentId: true, sourceType: true, qty: true, initialQty: true, packType: true, _count: { select: { children: true } } },
+    orderBy: { code: 'asc' },
+  })
+  const whole = rows.filter((r) => !r.parentId && r.sourceType === 'OPENING' && !r._count.children && Math.abs(Number(r.qty) - Number(r.initialQty)) < 1e-9)
+  res.json({
+    success: true,
+    data: {
+      ids: rows.map((r) => r.id),
+      change: whole.length ? { ids: whole.map((r) => r.id), qty: round3(whole.reduce((t, r) => t + Number(r.qty), 0)), packType: whole[0].packType } : null,
+    },
+  })
+})
+
+/*
+ * Opening stock entered by hand: the same columns as the sheet, sent as
+ * lines, so it is checked and brought in exactly as an upload is. Without
+ * confirm it only checks; with it, everything goes in at once or nothing.
+ */
+const openingEntryLine = zod.object({ pack: packInputSchema.nullish() }).catchall(zod.union([zod.string().max(300), zod.number(), zod.null()]))
+
+const openingEntryBody = zod.object({
+  confirm: zod.boolean().optional(),
+  kind: osKind.optional(),
+  requestKey: zod.string().min(8).max(100).optional(),
+  /** The names the screen gives its boxes, for the problems. */
+  labels: zod.record(zod.string(), zod.string().max(60)).optional(),
+  notes: zod.string().max(500).nullish(),
+  lines: zod.array(openingEntryLine).min(1, 'Add at least one line').max(openingStock.MAX_ROWS),
+})
+router.post('/opening-stock/entry', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { lines, notes, confirm, kind, requestKey, labels } = openingEntryBody.parse(req.body)
+  const again = confirm ? await openingStock.savedFor(requestKey) : null
+  if (again) {
+    res.json({ success: true, message: `${again.number}: already saved — nothing posted twice.`, data: again })
+    return
+  }
+  const resolved = await openingStock.planImport(openingStock.rowsFromEntry(lines), { rowWord: 'line', kind, labels: labels as Record<string, string> | undefined })
+  const summary = openingStock.summarise(resolved)
+  if (!confirm) {
+    res.json({ success: true, data: { summary, rows: resolved.map((r) => r.plan) } })
+    return
+  }
+  const done = await openingStock.runImport(resolved, { fileName: null, notes, userId: req.user?.id ?? null, kind: kind ?? null, requestKey: requestKey ?? null })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'OpeningStock',
+    entityId: done.id,
+    after: { number: done.number, byHand: true, lines: done.lines, stickers: done.stickers, floorsMade: done.floorsMade },
+  })
+  res.status(201).json({
+    success: true,
+    message: `${done.number}: ${done.lines} ${done.lines === 1 ? 'line' : 'lines'} of opening stock saved${
+      done.stickers ? `, ${done.stickers} ${done.stickers === 1 ? 'sticker' : 'stickers'} ready to print` : ''
+    }${done.floorsMade.length ? `. Made ${done.floorsMade.join(', ')}` : ''}.`,
+    data: { ...done, summary },
+  })
+})
+
+/*
+ * Every opening stock line, from every upload and hand entry: by kind (raw
+ * materials in a store, work in progress on a process floor, finished goods
+ * in a store), by place, by entry, or by a search over item, style, order,
+ * lot and bundle. With the totals for the tiles and the places it is at.
+ */
+const FINISHED_KINDS: ItemType[] = ['FINISHED_GOOD', 'SEMI_FINISHED']
+
+/**
+ * The filters of the opening stock lines, all together: each takes several
+ * values (?colour=Navy&colour=White) and a line must match every filter
+ * given. Style and colour match what the line said or, left empty, what its
+ * item is filed under; a process is a department or, for stock in a store,
+ * the word the line gave (Store, Finished Goods).
+ */
+function openingLinesWhere(query: Record<string, unknown>): Prisma.OpeningStockLineWhereInput {
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  const list = (v: unknown) => (Array.isArray(v) ? v : v === undefined ? [] : [v]).map((x) => String(x).trim()).filter(Boolean)
+  const like = (v: string) => ({ contains: v, mode: 'insensitive' as const })
+  const and: Prisma.OpeningStockLineWhereInput[] = []
+  // Raw materials wherever they lie; semi-finished parts, and garments still at a
+  // process; finished garments in a store.
+  const group = text(query.group)
+  if (group === 'RM') and.push({ item: { type: { notIn: FINISHED_KINDS } } })
+  if (group === 'SFG') and.push({ OR: [{ item: { type: 'SEMI_FINISHED' } }, { departmentId: { not: null }, item: { type: 'FINISHED_GOOD' } }] })
+  if (group === 'FG') and.push({ departmentId: null, item: { type: 'FINISHED_GOOD' } })
+  const entry = text(query.entry)
+  if (entry) and.push({ openingStockId: entry })
+  // Item Name and Item Code both pick items; given both, a line is one of each.
+  for (const key of ['item', 'code']) {
+    const ids = list(query[key])
+    if (ids.length) and.push({ itemId: { in: ids } })
+  }
+  const categories = list(query.category)
+  if (categories.length) and.push({ item: { categoryId: { in: categories } } })
+  const styles = list(query.style)
+  if (styles.length) and.push({ OR: [{ styleText: { in: styles } }, { styleText: null, item: { style: { code: { in: styles } } } }] })
+  const colours = list(query.colour)
+  if (colours.length) and.push({ OR: [{ colour: { in: colours } }, { colour: null, item: { color: { in: colours } } }] })
+  const sizes = list(query.size)
+  if (sizes.length) and.push({ sizeId: { in: sizes } })
+  const processes = list(query.process)
+  if (processes.length) {
+    const departments = processes.filter((p) => p.startsWith('d:')).map((p) => p.slice(2))
+    const words = processes.filter((p) => p.startsWith('t:')).map((p) => p.slice(2))
+    and.push({
+      OR: [
+        ...(departments.length ? [{ departmentId: { in: departments } }] : []),
+        ...(words.length ? [{ departmentId: null, processText: { in: words } }] : []),
+        ...(words.includes('Store') ? [{ departmentId: null, processText: null }] : []),
+      ],
+    })
+  }
+  const places = list(query.place)
+  if (places.length) and.push({ warehouseId: { in: places } })
+  const orders = list(query.order)
+  if (orders.length) and.push({ orderNo: { in: orders } })
+  const lots = list(query.lot)
+  if (lots.length) and.push({ lotNo: { in: lots } })
+  // Dates: the opening date, or the day the entry was saved (India's day).
+  const from = text(query.from)
+  const to = text(query.to)
+  if (from || to) {
+    const day = (d: string, end: boolean) => new Date(`${d}T${end ? '23:59:59.999' : '00:00:00'}+05:30`)
+    if (text(query.dateOf) === 'entered') {
+      and.push({ openingStock: { createdAt: { ...(from ? { gte: day(from, false) } : {}), ...(to ? { lte: day(to, true) } : {}) } } })
+    } else {
+      and.push({ openingDate: { ...(from ? { gte: new Date(`${from}T00:00:00Z`) } : {}), ...(to ? { lte: new Date(`${to}T00:00:00Z`) } : {}) } })
+    }
+  }
+  const q = text(query.q)
+  if (q) {
+    and.push({
+      OR: [
+        { orderNo: like(q) },
+        { styleText: like(q) },
+        { lotNo: like(q) },
+        { bundleNo: like(q) },
+        { colour: like(q) },
+        { remarks: like(q) },
+        { item: { OR: [{ code: like(q) }, { name: like(q) }, { color: like(q) }, { style: { code: like(q) } }] } },
+        { openingStock: { number: like(q) } },
+      ],
+    })
+  }
+  return and.length ? { AND: and } : {}
+}
+
+/*
+ * What each filter can offer: every value the opening stock lines hold, with
+ * how many lines have it — items by name and by code, categories, styles,
+ * colours, sizes in run order, processes, locations, orders and lots.
+ */
+router.get('/opening-stock/filters', requirePermission(MODULE, 'view'), async (_req, res) => {
+  type Opt = { value: string; label: string; sub?: string | null; lines: number }
+  const [items, categories, styles, colours, sizes, processes, locations, orders, lots] = await Promise.all([
+    prisma.$queryRaw<Array<{ id: string; code: string; name: string; lines: number }>>`
+      SELECT i.id, i.code, i.name, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
+      GROUP BY i.id, i.code, i.name ORDER BY i.name`,
+    prisma.$queryRaw<Array<{ id: string; name: string; lines: number }>>`
+      SELECT c.id, c.name, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
+      JOIN ld_erp.item_categories c ON c.id = i."categoryId" GROUP BY c.id, c.name ORDER BY c.name`,
+    prisma.$queryRaw<Array<{ value: string; lines: number }>>`
+      SELECT COALESCE(l."styleText", s.code) AS value, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l
+      JOIN ld_erp.items i ON i.id = l."itemId" LEFT JOIN ld_erp.styles s ON s.id = i."styleId"
+      WHERE COALESCE(l."styleText", s.code) IS NOT NULL GROUP BY 1 ORDER BY 1`,
+    prisma.$queryRaw<Array<{ value: string; lines: number }>>`
+      SELECT COALESCE(l.colour, i.color) AS value, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l
+      JOIN ld_erp.items i ON i.id = l."itemId" WHERE COALESCE(l.colour, i.color) IS NOT NULL GROUP BY 1 ORDER BY 1`,
+    prisma.$queryRaw<Array<{ id: string; code: string; run: string | null; lines: number }>>`
+      SELECT z.id, z.code, g.name AS run, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l JOIN ld_erp.sizes z ON z.id = l."sizeId"
+      LEFT JOIN ld_erp.size_groups g ON g.id = z."sizeGroupId"
+      GROUP BY z.id, z.code, z.sequence, g.name ORDER BY g.name, z.sequence, z.code`,
+    prisma.$queryRaw<Array<{ value: string; label: string; lines: number }>>`
+      SELECT CASE WHEN l."departmentId" IS NOT NULL THEN 'd:' || l."departmentId" ELSE 't:' || COALESCE(l."processText", 'Store') END AS value,
+             COALESCE(d.name, l."processText", 'Store') AS label, COUNT(*)::int AS lines
+      FROM ld_erp.opening_stock_lines l LEFT JOIN ld_erp.departments d ON d.id = l."departmentId"
+      GROUP BY 1, 2 ORDER BY 2`,
+    prisma.$queryRaw<Array<{ id: string; name: string; lines: number }>>`
+      SELECT w.id, w.name, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l JOIN ld_erp.warehouses w ON w.id = l."warehouseId"
+      GROUP BY w.id, w.name ORDER BY w.name`,
+    prisma.$queryRaw<Array<{ value: string; lines: number }>>`
+      SELECT l."orderNo" AS value, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l WHERE l."orderNo" IS NOT NULL GROUP BY 1 ORDER BY 1`,
+    prisma.$queryRaw<Array<{ value: string; lines: number }>>`
+      SELECT l."lotNo" AS value, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l WHERE l."lotNo" IS NOT NULL GROUP BY 1 ORDER BY 1`,
+  ])
+  const plain = (rows: Array<{ value: string; lines: number }>): Opt[] => rows.map((r) => ({ value: r.value, label: r.value, lines: r.lines }))
+  res.json({
+    success: true,
+    data: {
+      item: items.map((i) => ({ value: i.id, label: i.name, sub: i.code, lines: i.lines })),
+      code: [...items].sort((a, b) => a.code.localeCompare(b.code)).map((i) => ({ value: i.id, label: i.code, sub: i.name, lines: i.lines })),
+      category: categories.map((c) => ({ value: c.id, label: c.name, lines: c.lines })),
+      style: plain(styles),
+      colour: plain(colours),
+      size: sizes.map((z) => ({ value: z.id, label: z.code, sub: z.run, lines: z.lines })),
+      process: processes.map((p) => ({ value: p.value, label: p.label, lines: p.lines })),
+      place: locations.map((w) => ({ value: w.id, label: w.name, lines: w.lines })),
+      order: plain(orders),
+      lot: plain(lots),
+    },
+  })
+})
+
+/*
+ * The lines, style by style: a style's lines one after another (by item,
+ * colour and size within it), then the lines with no style — fabric, trims,
+ * packing.
+ */
+router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100))
+  const where = openingLinesWhere(req.query as Record<string, unknown>)
+  const [keys, kinds] = await Promise.all([
+    prisma.openingStockLine.findMany({
+      where,
+      select: {
+        id: true,
+        styleText: true,
+        colour: true,
+        rowNo: true,
+        value: true,
+        openingStock: { select: { createdAt: true } },
+        item: { select: { name: true, color: true, style: { select: { code: true } } } },
+        size: { select: { sequence: true } },
+      },
+    }),
+    prisma.$queryRaw<Array<{ kind: string; lines: number; value: number }>>`
+      SELECT CASE WHEN i.type NOT IN ('FINISHED_GOOD', 'SEMI_FINISHED') THEN 'RM'
+                  WHEN i.type = 'SEMI_FINISHED' OR l."departmentId" IS NOT NULL THEN 'SFG'
+                  ELSE 'FG' END AS kind,
+             COUNT(*)::int AS lines, COALESCE(SUM(l.value), 0)::float8 AS value
+      FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
+      GROUP BY 1`,
+  ])
+  const styleOf = (k: (typeof keys)[number]) => k.styleText ?? k.item.style?.code ?? null
+  const colourOf = (k: (typeof keys)[number]) => k.colour ?? k.item.color ?? ''
+  keys.sort((a, b) => {
+    const sa = styleOf(a)
+    const sb = styleOf(b)
+    if (sa !== sb) return !sa ? 1 : !sb ? -1 : sa.localeCompare(sb, undefined, { numeric: true })
+    return (
+      a.item.name.localeCompare(b.item.name) ||
+      colourOf(a).localeCompare(colourOf(b)) ||
+      (a.size?.sequence ?? 0) - (b.size?.sequence ?? 0) ||
+      b.openingStock.createdAt.getTime() - a.openingStock.createdAt.getTime() ||
+      a.rowNo - b.rowNo
+    )
+  })
+
+  const start = (page - 1) * limit
+  const pageKeys = keys.slice(start, start + limit)
+  const full = await prisma.openingStockLine.findMany({
+    where: { id: { in: pageKeys.map((k) => k.id) } },
+    include: {
+      openingStock: { select: { id: true, number: true, fileName: true } },
+      item: {
+        select: {
+          code: true,
+          name: true,
+          type: true,
+          color: true,
+          categoryId: true,
+          packType: true,
+          packQty: true,
+          uom: { select: { symbol: true, name: true } },
+          style: { select: { code: true } },
+          category: { select: { name: true } },
+        },
+      },
+      warehouse: { select: { id: true, name: true } },
+      department: { select: { name: true } },
+      size: { select: { code: true } },
+    },
+  })
+  const packing = await openingStock.linesPacking(full)
+  const byId = new Map(full.map((l) => [l.id, { ...l, stickers: packing.get(l.id) ?? null }]))
+  res.json({
+    success: true,
+    data: {
+      lines: pageKeys.map((k) => byId.get(k.id)!).filter(Boolean),
+      total: keys.length,
+      value: keys.reduce((t, k) => t + Number(k.value), 0),
+      page,
+      limit,
+      kinds: Object.fromEntries(kinds.map((k) => [k.kind, { lines: k.lines, value: Number(k.value) }])),
+    },
+  })
+})
+
+router.get('/opening-stock', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const docs = await prisma.openingStock.findMany({
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, number: true, fileName: true, notes: true, kind: true, createdAt: true, createdBy: { select: { name: true } } },
+  })
+  const totals = await prisma.openingStockLine.groupBy({
+    by: ['openingStockId'],
+    _count: { _all: true },
+    _sum: { value: true },
+    _min: { openingDate: true },
+  })
+  const byDoc = new Map(totals.map((t) => [t.openingStockId, t]))
+  res.json({
+    success: true,
+    data: docs.map((d) => ({
+      ...d,
+      lines: byDoc.get(d.id)?._count._all ?? 0,
+      value: Number(byDoc.get(d.id)?._sum.value ?? 0),
+      openingDate: byDoc.get(d.id)?._min.openingDate ?? null,
+    })),
+  })
+})
+
+router.get('/opening-stock/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  const doc = await prisma.openingStock.findUnique({
+    where: { id: req.params.id },
+    include: {
+      createdBy: { select: { name: true } },
+      lines: {
+        orderBy: { rowNo: 'asc' },
+        include: {
+          item: {
+            select: {
+              code: true,
+              name: true,
+              type: true,
+              color: true,
+              uom: { select: { symbol: true } },
+              style: { select: { code: true } },
+              category: { select: { name: true } },
+            },
+          },
+          warehouse: { select: { name: true } },
+          department: { select: { name: true } },
+          size: { select: { code: true } },
+        },
+      },
+    },
+  })
+  if (!doc) throw new AppError('That opening stock upload does not exist.', 404, 'NOT_FOUND')
+  res.json({ success: true, data: doc })
+})
+
+/*
+ * Work in progress and finished goods by process and size, and moving pieces
+ * from one process to the next.
+ */
+router.get('/process-stock', requirePermission(MODULE, 'view'), async (req, res) => {
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  const data = await processStock.processStock({ orderNo: text(req.query.orderNo), itemId: text(req.query.itemId), q: text(req.query.q) })
+  res.json({ success: true, data })
+})
+
+router.post('/process-stock/move', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = moveSchema.parse(req.body)
+  await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: data.itemId, qty: l.qty, what: 'Move' })))
+  if (!data.toWarehouseId && !data.toProcessId) throw new AppError('Pick where the pieces go.', 400, 'NO_DESTINATION')
+  const done = await prisma.$transaction(
+    async (tx) => {
+      const toWarehouseId = data.toWarehouseId ?? (await floorFor(tx, data.toProcessId!)).id
+      return processStock.moveStock(tx, { ...data, toWarehouseId }, req.user?.id ?? null)
+    },
+    { timeout: 60_000, maxWait: 20_000 },
+  )
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockTransfer', entityId: done.id, after: done })
+  res.status(201).json({
+    success: true,
+    message: `${done.transferNumber}: ${done.pieces} moved from ${done.from} to ${done.to}.`,
+    data: done,
+  })
+})
+
+const moveSchema = zod.object({
+  itemId: zod.string().min(1, 'Pick the item'),
+  fromWarehouseId: zod.string().min(1, 'Pick where the pieces are'),
+  // Where they go: a place, or a process whose floor is made if it has none yet.
+  toWarehouseId: zod.string().min(1).optional(),
+  toProcessId: zod.string().min(1).optional(),
+  orderNo: zod.string().max(60).optional().nullable(),
+  lotNo: zod.string().max(60).optional().nullable(),
+  bundleNo: zod.string().max(60).optional().nullable(),
+  date: zod.coerce.date().optional(),
+  notes: zod.string().max(500).optional().nullable(),
+  lines: zod
+    .array(zod.object({ sizeId: zod.string().min(1).nullable(), qty: zod.number().nonnegative() }))
+    .min(1, 'Enter the pieces of at least one size'),
+})
 
 export default router

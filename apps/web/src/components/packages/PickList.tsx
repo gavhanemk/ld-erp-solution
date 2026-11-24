@@ -134,7 +134,7 @@ export function PickList({
             <>
               There is {qtyText(pick.loose)} {unit} without a sticker: type the quantity in the table below to give it, or put stickers on it first in{' '}
               <Link href="/inventory/packages" className="text-primary font-medium hover:underline">
-                Stickers → No stickers
+                Stickers → Packaging pending
               </Link>
               .
             </>

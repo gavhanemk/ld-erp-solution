@@ -188,6 +188,12 @@ export interface FormField {
   /** Fields emptied when this one changes, as a sub-category is when its category does. */
   resets?: string[]
   /**
+   * Empties `resets` only when this says so, given the values before and after:
+   * an item's category is cleared when its type moves to another tab, not when
+   * a raw material becomes a trim.
+   */
+  resetsWhen?: (before: Record<string, unknown>, after: Record<string, unknown>) => boolean
+  /**
    * Fills another field from the row picked here: a sub-category fills the
    * item's department with its own. Only over a value it filled itself, or
    * an empty one, so a department chosen by hand is never overwritten.
@@ -580,7 +586,9 @@ export function MasterFormDialog<T extends { id: string }>({
 
     setValues((v) => {
       const updated = { ...v, [name]: next }
-      for (const r of field?.resets ?? []) updated[r] = ''
+      if (!field?.resetsWhen || field.resetsWhen(v, updated)) {
+        for (const r of field?.resets ?? []) updated[r] = ''
+      }
 
       if (field?.fills && field.optionsFrom && typeof next === 'string' && next) {
         const { valueKey = 'id' } = field.optionsFrom

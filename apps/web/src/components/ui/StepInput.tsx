@@ -63,7 +63,7 @@ export function StepInput({
   }, [])
 
   const keys = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.altKey) {
       e.preventDefault()
       bump(e.key === 'ArrowUp' ? 1 : -1)
     }
