@@ -5620,10 +5620,9 @@ router.get('/opening-stock/filters', requirePermission(MODULE, 'view'), async (_
 })
 
 /*
- * The lines, style by style: a style's lines together (by item, colour and
- * size within it), then the lines with no style — fabric, trims, packing. A
- * page carries the totals of each style on it, counted over all its lines,
- * so a style that runs on from the page before still says its whole.
+ * The lines, style by style: a style's lines one after another (by item,
+ * colour and size within it), then the lines with no style — fabric, trims,
+ * packing.
  */
 router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
@@ -5637,10 +5636,9 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
         styleText: true,
         colour: true,
         rowNo: true,
-        qty: true,
         value: true,
         openingStock: { select: { createdAt: true } },
-        item: { select: { name: true, color: true, style: { select: { code: true, name: true } }, uom: { select: { symbol: true } } } },
+        item: { select: { name: true, color: true, style: { select: { code: true } } } },
         size: { select: { sequence: true } },
       },
     }),
@@ -5667,24 +5665,6 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
     )
   })
 
-  // Each style's totals; the quantity only when its lines share one unit.
-  const groups = new Map<string, { style: string | null; name: string | null; lines: number; value: number; qty: number; units: Set<string>; first: number }>()
-  keys.forEach((k, i) => {
-    const style = styleOf(k)
-    const g = groups.get(style ?? '') ?? { style, name: k.item.style?.code === style ? k.item.style.name : null, lines: 0, value: 0, qty: 0, units: new Set<string>(), first: i }
-    g.lines += 1
-    g.value += Number(k.value)
-    g.qty += Number(k.qty)
-    g.units.add(k.item.uom?.symbol ?? '')
-    if (!g.name && k.item.style?.code === style) g.name = k.item.style.name
-    groups.set(style ?? '', g)
-  })
-  // A style named only by the sheet (cut panels): its name from Styles.
-  const unnamed = [...groups.values()].filter((g) => g.style && !g.name).map((g) => g.style!)
-  if (unnamed.length) {
-    for (const s of await prisma.style.findMany({ where: { code: { in: unnamed } }, select: { code: true, name: true } })) groups.get(s.code)!.name = s.name
-  }
-
   const start = (page - 1) * limit
   const pageKeys = keys.slice(start, start + limit)
   const full = await prisma.openingStockLine.findMany({
@@ -5708,7 +5688,6 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
     },
   })
   const byId = new Map(full.map((l) => [l.id, l]))
-  const onPage = [...new Set(pageKeys.map((k) => styleOf(k) ?? ''))]
   res.json({
     success: true,
     data: {
@@ -5718,11 +5697,6 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
       page,
       limit,
       kinds: Object.fromEntries(kinds.map((k) => [k.kind, { lines: k.lines, value: Number(k.value) }])),
-      groups: onPage.map((key) => {
-        const g = groups.get(key)!
-        const unit = g.units.size === 1 ? [...g.units][0] : null
-        return { style: g.style, name: g.name, lines: g.lines, value: g.value, qty: unit !== null ? g.qty : null, unit, continued: g.first < start }
-      }),
     },
   })
 })

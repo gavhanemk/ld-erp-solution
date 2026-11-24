@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   AlertCircle,
   Boxes,
@@ -78,8 +78,6 @@ interface LinesData {
   page: number
   limit: number
   kinds: Partial<Record<Kind, { lines: number; value: number }>>
-  /** Each style on the page, with its totals over all its lines. */
-  groups: Array<{ style: string | null; name: string | null; lines: number; value: number; qty: number | null; unit: string | null; continued: boolean }>
 }
 interface Entry {
   id: string
@@ -211,15 +209,7 @@ export default function OpeningStockPage() {
   const [notice, setNotice] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [importing, setImporting] = useState(false)
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const mayAdd = can('inventory', 'create')
-  const toggleGroup = (key: string) =>
-    setCollapsed((c) => {
-      const next = new Set(c)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
 
   useEffect(() => {
     const t = setTimeout(() => setTerm(search.trim()), 300)
@@ -444,15 +434,6 @@ export default function OpeningStockPage() {
                     </button>
                   )}
                 </div>
-                {data && data.groups.length > 1 && (
-                  <button
-                    type="button"
-                    className="text-primary whitespace-nowrap text-xs font-medium hover:underline"
-                    onClick={() => setCollapsed(collapsed.size ? new Set() : new Set(data.groups.map((g) => g.style ?? '')))}
-                  >
-                    {collapsed.size ? 'Expand all styles' : 'Collapse all styles'}
-                  </button>
-                )}
                 {data && (
                   <p className="text-muted-foreground whitespace-nowrap text-sm">
                     <span className="text-foreground font-semibold">{count(data.total, 'line', 'lines')}</span> ·{' '}
@@ -526,60 +507,22 @@ export default function OpeningStockPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {(data?.lines ?? []).map((l, i, all) => {
-                          const key = styleKey(l)
-                          const startsGroup = i === 0 || styleKey(all[i - 1]) !== key
-                          const g = startsGroup ? data?.groups.find((x) => (x.style ?? '') === key) : undefined
-                          const shut = collapsed.has(key)
-                          return (
-                            <Fragment key={l.id}>
-                              {startsGroup && g && (
-                                <tr data-group={key || 'none'}>
-                                  <td colSpan={COLUMNS.length} className="bg-secondary/70 border-border border-b p-0">
-                                    {/* The label stays at the left while the table scrolls sideways. */}
-                                    <button
-                                      type="button"
-                                      onClick={() => toggleGroup(key)}
-                                      aria-expanded={!shut}
-                                      className="sticky left-0 flex items-center gap-2 px-3 py-1.5 text-left"
-                                    >
-                                      {shut ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                                      {g.style ? (
-                                        <>
-                                          <span className="font-mono text-xs font-semibold text-teal-400">{g.style}</span>
-                                          {g.name && <span className="text-foreground text-xs font-medium">{g.name}</span>}
-                                        </>
-                                      ) : (
-                                        <span className="text-foreground text-xs font-medium">No style — fabric, trims, packing</span>
-                                      )}
-                                      <span className="text-muted-foreground text-[11px]">
-                                        {count(g.lines, 'line', 'lines')}
-                                        {g.qty !== null && g.unit ? ` · ${num(g.qty)} ${g.unit}` : ''} · {money(g.value)}
-                                        {g.continued ? ' · continued from the page before' : ''}
-                                      </span>
-                                    </button>
-                                  </td>
-                                </tr>
-                              )}
-                              {!shut && (
-                                <tr className="group" data-line={l.id}>
-                                  {COLUMNS.map((c) => (
-                                    <td
-                                      key={c.head}
-                                      className={cn(
-                                        'border-border group-hover:bg-secondary whitespace-nowrap border-b px-2 py-1.5',
-                                        c.right && 'text-right tabular-nums',
-                                        c.pin && cn(PIN[c.pin], 'bg-card z-10'),
-                                      )}
-                                    >
-                                      {c.cell(l)}
-                                    </td>
-                                  ))}
-                                </tr>
-                              )}
-                            </Fragment>
-                          )
-                        })}
+                        {(data?.lines ?? []).map((l) => (
+                          <tr key={l.id} className="group" data-line={l.id}>
+                            {COLUMNS.map((c) => (
+                              <td
+                                key={c.head}
+                                className={cn(
+                                  'border-border group-hover:bg-secondary whitespace-nowrap border-b px-2 py-1.5',
+                                  c.right && 'text-right tabular-nums',
+                                  c.pin && cn(PIN[c.pin], 'bg-card z-10'),
+                                )}
+                              >
+                                {c.cell(l)}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
