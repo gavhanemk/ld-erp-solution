@@ -5555,11 +5555,18 @@ router.post('/opening-stock/style-size-run', requirePermission('masters', 'edit'
  * like the style's other colours. Making an item is a Masters job, so it
  * needs Masters → create; when no category is plain, the choices come back.
  */
-const colourItemBody = zod.object({ styleId: zod.string().min(1), colour: zod.string().min(1).max(100), categoryId: zod.string().nullish() })
+const colourItemBody = zod.object({
+  styleId: zod.string().min(1),
+  colour: zod.string().min(1).max(100),
+  categoryId: zod.string().nullish(),
+  /** Only say what the item would get; make nothing. */
+  preview: zod.boolean().optional(),
+  name: zod.string().trim().max(200).nullish(),
+})
 router.post('/opening-stock/colour-item', requirePermission('masters', 'create'), async (req: AuthRequest, res) => {
   const body = colourItemBody.parse(req.body)
   const out = await openingStock.colourItem(body)
-  if ('needCategory' in out) {
+  if ('needCategory' in out || 'preview' in out) {
     res.json({ success: true, data: out })
     return
   }

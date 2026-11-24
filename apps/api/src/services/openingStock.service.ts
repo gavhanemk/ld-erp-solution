@@ -1208,7 +1208,7 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
  * like the other items there; when none is plain, the categories to choose
  * from are given back instead.
  */
-export async function colourItem(input: { styleId: string; colour: string; categoryId?: string | null }) {
+export async function colourItem(input: { styleId: string; colour: string; categoryId?: string | null; preview?: boolean; name?: string | null }) {
   const style = await prisma.style.findUnique({ where: { id: input.styleId }, select: { id: true, code: true, name: true, colors: true, category: true } })
   if (!style) throw new AppError('That style does not exist.', 404, 'NOT_FOUND')
   const colour = style.colors.find((c) => low(c) === low(input.colour))
@@ -1221,9 +1221,11 @@ export async function colourItem(input: { styleId: string; colour: string; categ
   const sibling = await prisma.item.findFirst({
     where: { styleId: style.id, type: 'FINISHED_GOOD' },
     orderBy: { createdAt: 'asc' },
-    select: { categoryId: true, uomId: true, hsnCode: true, taxRateId: true, standardRate: true },
+    select: { code: true, categoryId: true, uomId: true, hsnCode: true, taxRateId: true, standardRate: true },
   })
-  let template = sibling
+  let template: { categoryId: string; uomId: string; hsnCode: string | null; taxRateId: string | null; standardRate: unknown } | null = sibling
+  // The item its details are copied from, said in the preview.
+  let copiedFrom: string | null = sibling?.code ?? null
   if (!template) {
     let categoryId = input.categoryId ?? null
     const finished = await prisma.itemCategory.findMany({
@@ -1243,16 +1245,44 @@ export async function colourItem(input: { styleId: string; colour: string; categ
     const like = await prisma.item.findFirst({
       where: { categoryId, type: 'FINISHED_GOOD' },
       orderBy: { createdAt: 'desc' },
-      select: { uomId: true, hsnCode: true, taxRateId: true },
+      select: { code: true, uomId: true, hsnCode: true, taxRateId: true },
     })
+    copiedFrom = like?.code ?? null
     const pcs = like?.uomId ?? (await prisma.uOM.findFirst({ where: { symbol: { equals: 'pcs', mode: 'insensitive' } }, select: { id: true } }))?.id
     if (!pcs) throw new AppError('There is no "pcs" unit to count garments in. Add it in Masters → Units.', 400, 'NO_PCS_UNIT')
     template = { categoryId, uomId: pcs, hsnCode: like?.hsnCode ?? null, taxRateId: like?.taxRateId ?? null, standardRate: null }
   }
+  const name = input.name?.trim() || `${style.name} — ${colour}`
+
+  // Shown first, created only when asked: everything the new item gets, and where it comes from.
+  if (input.preview) {
+    const [category, unit, tax] = await Promise.all([
+      prisma.itemCategory.findUnique({ where: { id: template.categoryId }, select: { name: true, parent: { select: { name: true } } } }),
+      prisma.uOM.findUnique({ where: { id: template.uomId }, select: { symbol: true, name: true } }),
+      template.taxRateId ? prisma.taxRate.findUnique({ where: { id: template.taxRateId }, select: { name: true, rate: true } }) : null,
+    ])
+    return {
+      preview: {
+        name,
+        type: 'Finished Good',
+        style: style.code,
+        colour,
+        category: category?.parent?.name ?? null,
+        subCategory: category?.name ?? null,
+        unit: unit ? `${unit.name} (${unit.symbol})` : null,
+        hsnCode: template.hsnCode,
+        gst: tax ? `${tax.name} (${Number(tax.rate)}%)` : null,
+        standardRate: template.standardRate != null ? Number(template.standardRate) : null,
+        copiedFrom,
+        categoryId: template.categoryId,
+      },
+    }
+  }
+
   const item = await withGeneratedCode(
     'item',
     {
-      name: `${style.name} — ${colour}`,
+      name,
       type: 'FINISHED_GOOD',
       categoryId: template.categoryId,
       uomId: template.uomId,

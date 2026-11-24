@@ -1,7 +1,9 @@
 'use client'
 
 import { useState, type ReactNode } from 'react'
-import { AlertCircle, ExternalLink, RefreshCw, Wand2 } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { AlertCircle, ExternalLink, Loader2, PackagePlus, RefreshCw, X } from 'lucide-react'
+import { useEscape } from '@/lib/useEscape'
 import { api, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -46,6 +48,8 @@ export function StyleGrid({
   onOnly?: (itemId: string) => void
 }) {
   const [making, setMaking] = useState<string | null>(null)
+  // The item a colour would get, shown before it is made.
+  const [preview, setPreview] = useState<ItemPreview | null>(null)
   const [choose, setChoose] = useState<{ colour: string; categories: Array<{ id: string; name: string }>; categoryId: string } | null>(null)
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
   const [allRate, setAllRate] = useState('')
@@ -65,25 +69,28 @@ export function StyleGrid({
   const shown = picked ? rows.filter((r) => r.item?.id === picked || pieces(r.key) > 0) : rows
   const hidden = rows.length - shown.length
 
+  // First what the item would get, shown in a window; it is made only from there.
   const makeItem = async (colour: string, categoryId?: string) => {
     setMaking(colour)
     setNote(null)
     try {
-      const res = await api.post<{ message?: string; data: { item?: { id: string; code: string }; needCategory?: boolean; categories?: Array<{ id: string; name: string }> } }>(
+      const res = await api.post<{ message?: string; data: { item?: { id: string; code: string; name?: string }; needCategory?: boolean; categories?: Array<{ id: string; name: string }>; preview?: Omit<ItemPreview, 'colourKey'> } }>(
         '/inventory/opening-stock/colour-item',
-        { styleId: style.id, colour, categoryId: categoryId ?? null },
+        { styleId: style.id, colour, categoryId: categoryId ?? null, preview: true },
       )
       if (res.data.needCategory) {
         setChoose({ colour, categories: res.data.categories ?? [], categoryId: '' })
         return
       }
+      // Made meanwhile, by someone else: it is used.
       if (res.data.item) {
         onColourMade(colour, res.data.item)
         setChoose(null)
-        setNote({ ok: true, text: res.message ?? `${colour}: item made.` })
+        return
       }
+      if (res.data.preview) setPreview({ ...res.data.preview, colourKey: colour })
     } catch (err) {
-      setNote({ ok: false, text: err instanceof ApiError ? err.message : 'Could not make the item.' })
+      setNote({ ok: false, text: err instanceof ApiError ? err.message : 'Could not look up the item.' })
     } finally {
       setMaking(null)
     }
@@ -263,7 +270,7 @@ export function StyleGrid({
                         ))}
                       </SmartSelect>
                       <button type="button" className="btn-primary h-8 px-2 text-xs" disabled={!choose.categoryId || making === c.colour} onClick={() => void makeItem(c.colour, choose.categoryId)}>
-                        Make
+                        Next
                       </button>
                     </div>
                   ) : mayMakeItems ? (
@@ -273,7 +280,7 @@ export function StyleGrid({
                       disabled={making === c.colour}
                       onClick={() => void makeItem(c.colour)}
                     >
-                      <Wand2 size={11} /> {making === c.colour ? 'Making…' : 'No item yet — make it'}
+                      <PackagePlus size={11} /> {making === c.colour ? 'Looking…' : 'No item for this colour yet — Add item'}
                     </button>
                   ) : (
                     <div className="text-[11px] text-amber-500">No item yet: add it in Items &amp; Products</div>
@@ -314,7 +321,146 @@ export function StyleGrid({
         </table>
       </div>
       {note && <p className={cn('text-xs', note.ok ? 'text-emerald-500' : 'text-red-400')}>{note.text}</p>}
+      {preview && (
+        <AddItemDialog
+          preview={preview}
+          styleId={style.id}
+          onClose={() => setPreview(null)}
+          onMade={(item, message) => {
+            onColourMade(preview.colourKey, item)
+            setPreview(null)
+            setChoose(null)
+            setNote({ ok: true, text: message })
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+interface ItemPreview {
+  colourKey: string
+  name: string
+  type: string
+  style: string
+  colour: string
+  category: string | null
+  subCategory: string | null
+  unit: string | null
+  hsnCode: string | null
+  gst: string | null
+  standardRate: number | null
+  copiedFrom: string | null
+  categoryId: string
+}
+
+/**
+ * A colour's item, before it is made: every detail it gets and the item they
+ * are copied from, its name to change, then Create — or the full item form
+ * instead, for anything more.
+ */
+function AddItemDialog({
+  preview,
+  styleId,
+  onClose,
+  onMade,
+}: {
+  preview: ItemPreview
+  styleId: string
+  onClose: () => void
+  onMade: (item: { id: string; code: string; name?: string }, message: string) => void
+}) {
+  const [name, setName] = useState(preview.name)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  useEscape(() => {
+    if (!busy) onClose()
+  })
+  const create = async () => {
+    if (!name.trim()) return setError('Give the item a name.')
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await api.post<{ message?: string; data: { item: { id: string; code: string; name?: string } } }>('/inventory/opening-stock/colour-item', {
+        styleId,
+        colour: preview.colourKey,
+        categoryId: preview.categoryId,
+        name: name.trim(),
+      })
+      onMade(res.data.item, res.message ?? `${name.trim()} added as ${res.data.item.code}.`)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not create the item.')
+      setBusy(false)
+    }
+  }
+  const rows: Array<[string, ReactNode]> = [
+    ['Item Type', preview.type],
+    ['Style / Colour', `${preview.style} · ${preview.colour}`],
+    ['Category', preview.category ?? '—'],
+    ['Sub Category', preview.subCategory ?? '—'],
+    ['Unit of Measure', preview.unit ?? '—'],
+    ['HSN Code', preview.hsnCode ?? <span className="warn-text">None — add it in Items &amp; Products before selling</span>],
+    ['GST', preview.gst ?? 'From the HSN code'],
+    ['Standard Rate', preview.standardRate != null ? money(preview.standardRate) : '—'],
+    ['Item Code', 'Given the next number when created'],
+  ]
+  return createPortal(
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm sm:left-[var(--sidebar-current-width)]">
+      <div className="glass-card flex max-h-full w-full max-w-lg flex-col overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="add-item-title">
+        <div className="flex items-start gap-3 p-5 pb-3">
+          <span className="bg-primary/10 text-primary flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
+            <PackagePlus size={20} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 id="add-item-title" className="text-foreground text-lg font-semibold">
+              Add the item for {preview.colour}
+            </h2>
+            <p className="text-muted-foreground mt-0.5 text-sm">
+              {preview.style} has no item in {preview.colour} yet, so its pieces cannot be entered.{' '}
+              {preview.copiedFrom ? `Its details are copied from ${preview.copiedFrom}, the same style's item.` : 'Its details are copied from an item in the same sub-category.'} Check them,
+              then create it.
+            </p>
+          </div>
+          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onClose} aria-label="Close" disabled={busy}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5">
+          <label className="block space-y-1 text-sm">
+            <span className="text-foreground font-medium">Item Name</span>
+            <input className="form-input" value={name} maxLength={200} onChange={(e) => setName(e.target.value)} aria-label="Item Name" autoFocus />
+          </label>
+          <dl className="border-border divide-border divide-y rounded-lg border text-sm">
+            {rows.map(([label, value]) => (
+              <div key={label} className="flex gap-3 px-3 py-1.5">
+                <dt className="text-muted-foreground w-36 shrink-0">{label}</dt>
+                <dd className="text-foreground min-w-0">{value}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="text-muted-foreground text-xs">
+            Description, stock levels and sticker settings stay empty; fill them any time in Masters → Items & Products.
+          </p>
+          {error && (
+            <p className="text-sm text-red-400" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2 p-5">
+          <a className="text-primary mr-auto inline-flex items-center gap-1 text-sm font-medium hover:underline" href="/masters/items" target="_blank" rel="noreferrer">
+            Use the full item form instead <ExternalLink size={12} />
+          </a>
+          <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button type="button" className="btn-primary" onClick={() => void create()} disabled={busy}>
+            {busy ? <Loader2 size={15} className="animate-spin" /> : <PackagePlus size={15} />} Create item
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }
 
