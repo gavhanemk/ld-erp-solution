@@ -47,6 +47,8 @@ async function sheet(kind: K, rows: Array<Partial<Record<string, string | number
   const wb = await template(kind)
   const ws = wb.getWorksheet(SHEET[kind])!
   const heads = HEADS[kind] as readonly string[]
+  // The template's grey example row goes first, as a person deletes it.
+  ws.spliceRows(2, 1)
   rows.forEach((r, i) => heads.forEach((h, c) => { if (r[h] !== undefined) ws.getCell(i + 2, c + 1).value = r[h] as string | number }))
   return { fileName: `${name}.xlsx`, file: Buffer.from(await wb.xlsx.writeBuffer()).toString('base64') }
 }
@@ -67,7 +69,7 @@ async function main() {
   for (const kind of ['FG', 'SFG', 'RM'] as K[]) {
     const ws = (await template(kind)).getWorksheet(SHEET[kind])
     const heads = ((ws?.getRow(1).values as unknown[]) ?? []).slice(1).map(String)
-    check(`${kind} template: its own columns, in order`, JSON.stringify(heads) === JSON.stringify(HEADS[kind]), heads)
+    check(`${kind} template: its own columns, in order`, JSON.stringify(heads.map((h) => h.replace(/\s*\*$/, ''))) === JSON.stringify(HEADS[kind]), heads)
   }
 
   // 2. The test style, a colour of this run's own, its item made as the entry screen makes it.
@@ -106,7 +108,7 @@ async function main() {
   const fgExpect: Array<[number, RegExp, string]> = [
     [4, /A Finished Goods row, but .* is raw material/i, 'a raw material'],
     [5, /Cutting Floor is a process's floor, not a store/, 'a process floor as the store'],
-    [6, /No finished item for ZZTEST-SH-01 in Purple/, 'a colour the style does not have'],
+    [6, /ZZTEST-SH-01 does not come in Purple/, 'a colour the style does not have'],
     [7, /Size XXXXL is not in the size run/, 'a size not in its run'],
   ]
   for (const [row, re, what] of fgExpect) check(`FG row ${row} refused: ${what}`, re.test(problemsOf(fgCheck, row)), problemsOf(fgCheck, row))
