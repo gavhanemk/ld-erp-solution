@@ -8,6 +8,7 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { recordMovement } from './stock.service'
 import { createPackages, packageRules, stickerDefaultsFrom } from './package.service'
 import { floorFor } from './processFloor.service'
+import { withGeneratedCode } from '../lib/masterCode'
 
 /*
  * Opening stock from the mill's own 19-column sheet, process by process.
@@ -239,8 +240,22 @@ export function readSheet(file: Buffer, fileName: string) {
   })
 }
 
-/** Every row checked; nothing written. */
-export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promise<Resolved[]> {
+/**
+ * Lines entered by hand on the screen, as sheet rows: the same columns, so
+ * they are checked and brought in exactly as an uploaded sheet is.
+ */
+export function rowsFromEntry(lines: Array<Record<string, unknown>>): Array<{ row: number; raw: Raw }> {
+  const keys = OS_COLUMNS.map((c) => c.key)
+  return lines.map((l, i) => ({
+    row: i + 1,
+    raw: Object.fromEntries(
+      keys.map((k) => [k, l[k] === null || l[k] === undefined ? '' : String(l[k]).trim()]),
+    ) as Raw,
+  }))
+}
+
+/** Every row checked; nothing written. Lines entered by hand are called lines, not rows. */
+export async function planImport(rows: Array<{ row: number; raw: Raw }>, opts: { rowWord?: 'row' | 'line' } = {}): Promise<Resolved[]> {
   const m = await loadMasters()
   const processByName = new Map<string, (typeof m.departments)[number]>()
   for (const d of m.departments) {
@@ -498,7 +513,7 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
     out.push({ plan, ready })
   }
 
-  await checkDuplicates(out)
+  await checkDuplicates(out, opts.rowWord ?? 'row')
   return out
 }
 
@@ -512,14 +527,14 @@ const dedupeKey = (r: Ready, warehouseId: string) =>
  * on two rows; a row already brought in by an earlier upload; or stock that
  * is already moving in the ERP at that place, which a count corrects instead.
  */
-async function checkDuplicates(resolved: Resolved[]) {
+async function checkDuplicates(resolved: Resolved[], rowWord: 'row' | 'line') {
   const seen = new Map<string, number>()
   for (const r of resolved) {
     if (!r.ready) continue
     const key = dedupeKey(r.ready, placeOf(r.ready))
     const earlier = seen.get(key)
     if (earlier) {
-      r.plan.problems.push(`Same as row ${earlier}: item, location, size, status, order, lot and bundle all match. Put them on one row with the total.`)
+      r.plan.problems.push(`Same as ${rowWord} ${earlier}: item, location, size, status, order, lot and bundle all match. Put them on one ${rowWord} with the total.`)
       r.ready = undefined
     } else seen.set(key, r.plan.row)
   }
@@ -621,18 +636,24 @@ export function summarise(resolved: Resolved[]) {
 }
 
 /** Posts every row, in one transaction: stock in, floors made, stickers made, the sheet kept. */
-export async function runImport(resolved: Resolved[], opts: { fileName: string; userId: string | null }) {
+/** Brought in, all or nothing. No file name: entered by hand on the screen. */
+export async function runImport(resolved: Resolved[], opts: { fileName: string | null; notes?: string | null; userId: string | null }) {
+  const byHand = !opts.fileName
   if (resolved.some((r) => r.plan.problems.length > 0)) {
-    throw new AppError('Some rows have problems. Fix them and upload the sheet again.', 400, 'IMPORT_HAS_PROBLEMS')
+    throw new AppError(
+      byHand ? 'Some lines have problems. Put them right and save again.' : 'Some rows have problems. Fix them and upload the sheet again.',
+      400,
+      'IMPORT_HAS_PROBLEMS',
+    )
   }
   const rows = resolved.filter((r) => r.ready)
-  if (!rows.length) throw new AppError('The sheet has no rows to bring in.', 400, 'NOTHING_TO_IMPORT')
+  if (!rows.length) throw new AppError(byHand ? 'Nothing to save: enter a quantity on at least one line.' : 'The sheet has no rows to bring in.', 400, 'NOTHING_TO_IMPORT')
 
   return prisma.$transaction(
     async (tx) => {
       const latest = rows.reduce((d, r) => (r.ready!.date > d ? r.ready!.date : d), rows[0].ready!.date)
       const number = await nextDocumentNumber(tx, 'OPS', latest)
-      const doc = await tx.openingStock.create({ data: { number, fileName: opts.fileName, createdById: opts.userId } })
+      const doc = await tx.openingStock.create({ data: { number, fileName: opts.fileName, notes: opts.notes?.trim() || null, createdById: opts.userId } })
 
       // Floors for the processes that have none yet.
       const floors = new Map<string, string>()
@@ -661,7 +682,7 @@ export async function runImport(resolved: Resolved[], opts: { fileName: string; 
       let stickers = 0
       for (const r of ordered) {
         const d = r.ready!
-        const note = [`${number} row ${r.plan.row}`, d.bundleNo ? `bundle ${d.bundleNo}` : null, (d.raw.remarks ?? '').trim() || null].filter(Boolean).join(' · ')
+        const note = [`${number} ${byHand ? 'line' : 'row'} ${r.plan.row}`, d.bundleNo ? `bundle ${d.bundleNo}` : null, (d.raw.remarks ?? '').trim() || null].filter(Boolean).join(' · ')
         await recordMovement(tx, {
           itemId: d.itemId,
           warehouseId: d.warehouseId!,
@@ -742,4 +763,71 @@ export async function runImport(resolved: Resolved[], opts: { fileName: string; 
     },
     { timeout: 300_000, maxWait: 20_000 },
   )
+}
+
+/**
+ * The finished item for a style in one colour: found, or made when missing —
+ * on the person's click in the entry window, never on its own. Made like the
+ * style's other colours (category, unit, HSN, GST, rate). With none, under the
+ * finished-goods category that is plainly the style's (or the one chosen),
+ * like the other items there; when none is plain, the categories to choose
+ * from are given back instead.
+ */
+export async function colourItem(input: { styleId: string; colour: string; categoryId?: string | null }) {
+  const style = await prisma.style.findUnique({ where: { id: input.styleId }, select: { id: true, code: true, name: true, colors: true, category: true } })
+  if (!style) throw new AppError('That style does not exist.', 404, 'NOT_FOUND')
+  const colour = style.colors.find((c) => low(c) === low(input.colour))
+  if (!colour) throw new AppError(`${style.code} does not come in ${input.colour}. Its colours: ${style.colors.join(', ')}.`, 400, 'INVALID_COLOUR')
+
+  const pick = { id: true, code: true, name: true, color: true } as const
+  const existing = await prisma.item.findFirst({ where: { styleId: style.id, color: { equals: colour, mode: 'insensitive' } }, select: pick })
+  if (existing) return { item: existing, made: false as const }
+
+  const sibling = await prisma.item.findFirst({
+    where: { styleId: style.id, type: 'FINISHED_GOOD' },
+    orderBy: { createdAt: 'asc' },
+    select: { categoryId: true, uomId: true, hsnCode: true, taxRateId: true, standardRate: true },
+  })
+  let template = sibling
+  if (!template) {
+    let categoryId = input.categoryId ?? null
+    const finished = await prisma.itemCategory.findMany({
+      where: { isActive: true, itemGroup: 'FINISHED_GOODS', parentId: { not: null } },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+    })
+    if (!categoryId) {
+      // Plainly the style's: its category word, or its name, names exactly one.
+      const said = [stem(style.category), ...low(style.name).split(/[^a-z0-9]+/).map((w) => stem(w))].filter(Boolean)
+      const hits = finished.filter((c) => said.includes(stem(c.name)))
+      if (hits.length === 1) categoryId = hits[0].id
+    }
+    if (!categoryId || !finished.some((c) => c.id === categoryId)) {
+      return { needCategory: true as const, categories: finished }
+    }
+    const like = await prisma.item.findFirst({
+      where: { categoryId, type: 'FINISHED_GOOD' },
+      orderBy: { createdAt: 'desc' },
+      select: { uomId: true, hsnCode: true, taxRateId: true },
+    })
+    const pcs = like?.uomId ?? (await prisma.uOM.findFirst({ where: { symbol: { equals: 'pcs', mode: 'insensitive' } }, select: { id: true } }))?.id
+    if (!pcs) throw new AppError('There is no "pcs" unit to count garments in. Add it in Masters → Units.', 400, 'NO_PCS_UNIT')
+    template = { categoryId, uomId: pcs, hsnCode: like?.hsnCode ?? null, taxRateId: like?.taxRateId ?? null, standardRate: null }
+  }
+  const item = await withGeneratedCode(
+    'item',
+    {
+      name: `${style.name} — ${colour}`,
+      type: 'FINISHED_GOOD',
+      categoryId: template.categoryId,
+      uomId: template.uomId,
+      hsnCode: template.hsnCode,
+      taxRateId: template.taxRateId,
+      standardRate: template.standardRate,
+      styleId: style.id,
+      color: colour,
+    },
+    (data) => prisma.item.create({ data: data as never, select: pick }),
+  )
+  return { item, made: true as const }
 }

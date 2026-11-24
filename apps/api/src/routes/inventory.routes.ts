@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import type { z } from 'zod'
 import { prisma, Prisma } from '@ld-erp/database'
-import type { MOStatus } from '@prisma/client'
+import type { ItemType, MOStatus } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { isAdmin, requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -29,7 +29,7 @@ import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
 import * as openingStock from '../services/openingStock.service'
 import * as processStock from '../services/processStock.service'
-import { floorFor } from '../services/processFloor.service'
+import { floorFor, processLadder } from '../services/processFloor.service'
 import { z as zod } from 'zod'
 import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
@@ -5357,10 +5357,229 @@ router.post('/opening-stock/import', requirePermission(MODULE, 'create'), async 
   })
 })
 
+/*
+ * What the hand-entry window offers: the processes in floor order (with their
+ * floor if made), the stores, every style with its colours, each colour's
+ * finished item and its size run, and the items without a style (fabric,
+ * trims, packing…) with their unit.
+ */
+router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const [processes, stores, styles, sizeGroups, items] = await Promise.all([
+    processLadder(),
+    prisma.warehouse.findMany({ where: { isActive: true, departmentId: null }, select: { id: true, name: true, code: true }, orderBy: { name: 'asc' } }),
+    prisma.style.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        colors: true,
+        sizeGroupId: true,
+        items: { where: { isActive: true, type: 'FINISHED_GOOD' }, select: { id: true, code: true, color: true } },
+      },
+      orderBy: { code: 'asc' },
+    }),
+    prisma.sizeGroup.findMany({ select: { id: true, sizes: { orderBy: { sequence: 'asc' }, select: { id: true, code: true } } } }),
+    prisma.item.findMany({
+      where: { isActive: true, styleId: null },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        type: true,
+        decimalPlaces: true,
+        uom: { select: { symbol: true, decimalPlaces: true } },
+        category: { select: { name: true } },
+      },
+      orderBy: { name: 'asc' },
+    }),
+  ])
+  const sizesOf = new Map(sizeGroups.map((g) => [g.id, g.sizes]))
+  res.json({
+    success: true,
+    data: {
+      processes: processes.map((p) => ({ id: p.id, name: p.name, floor: p.floor?.name ?? null })),
+      stores,
+      styles: styles.map((s) => ({
+        id: s.id,
+        code: s.code,
+        name: s.name,
+        colours: s.colors.map((c) => ({ colour: c, item: s.items.find((i) => (i.color ?? '').toLowerCase() === c.toLowerCase()) ?? null })),
+        sizes: (s.sizeGroupId && sizesOf.get(s.sizeGroupId)) || [],
+      })),
+      items: items.map((i) => ({
+        id: i.id,
+        code: i.code,
+        name: i.name,
+        type: i.type,
+        category: i.category?.name ?? null,
+        unit: i.uom?.symbol ?? null,
+        decimals: i.decimalPlaces ?? i.uom?.decimalPlaces ?? 0,
+      })),
+    },
+  })
+})
+
+/*
+ * A style's colour with no finished item yet: made on the person's click,
+ * like the style's other colours. Making an item is a Masters job, so it
+ * needs Masters → create; when no category is plain, the choices come back.
+ */
+const colourItemBody = zod.object({ styleId: zod.string().min(1), colour: zod.string().min(1).max(100), categoryId: zod.string().nullish() })
+router.post('/opening-stock/colour-item', requirePermission('masters', 'create'), async (req: AuthRequest, res) => {
+  const body = colourItemBody.parse(req.body)
+  const out = await openingStock.colourItem(body)
+  if ('needCategory' in out) {
+    res.json({ success: true, data: out })
+    return
+  }
+  if (out.made) {
+    await writeAuditLog(req, { module: 'masters', action: 'CREATE', entityType: 'Item', entityId: out.item.id, after: { ...out.item, from: 'Opening stock entry' } })
+  }
+  res.status(out.made ? 201 : 200).json({ success: true, message: out.made ? `${out.item.name} added as ${out.item.code}.` : `${out.item.code} is already there.`, data: out })
+})
+
+/*
+ * Opening stock entered by hand: the same columns as the sheet, sent as
+ * lines, so it is checked and brought in exactly as an upload is. Without
+ * confirm it only checks; with it, everything goes in at once or nothing.
+ */
+const openingEntryBody = zod.object({
+  confirm: zod.boolean().optional(),
+  notes: zod.string().max(500).nullish(),
+  lines: zod
+    .array(zod.record(zod.string(), zod.union([zod.string().max(300), zod.number(), zod.null()])))
+    .min(1, 'Add at least one line')
+    .max(openingStock.MAX_ROWS),
+})
+router.post('/opening-stock/entry', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { lines, notes, confirm } = openingEntryBody.parse(req.body)
+  const resolved = await openingStock.planImport(openingStock.rowsFromEntry(lines), { rowWord: 'line' })
+  const summary = openingStock.summarise(resolved)
+  if (!confirm) {
+    res.json({ success: true, data: { summary, rows: resolved.map((r) => r.plan) } })
+    return
+  }
+  const done = await openingStock.runImport(resolved, { fileName: null, notes, userId: req.user?.id ?? null })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'OpeningStock',
+    entityId: done.id,
+    after: { number: done.number, byHand: true, lines: done.lines, stickers: done.stickers, floorsMade: done.floorsMade },
+  })
+  res.status(201).json({
+    success: true,
+    message: `${done.number}: ${done.lines} ${done.lines === 1 ? 'line' : 'lines'} of opening stock saved${
+      done.stickers ? `, ${done.stickers} ${done.stickers === 1 ? 'sticker' : 'stickers'} ready to print` : ''
+    }${done.floorsMade.length ? `. Made ${done.floorsMade.join(', ')}` : ''}.`,
+    data: { ...done, summary },
+  })
+})
+
+/*
+ * Every opening stock line, from every upload and hand entry: by kind (raw
+ * materials in a store, work in progress on a process floor, finished goods
+ * in a store), by place, by entry, or by a search over item, style, order,
+ * lot and bundle. With the totals for the tiles and the places it is at.
+ */
+const FINISHED_KINDS: ItemType[] = ['FINISHED_GOOD', 'SEMI_FINISHED']
+router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req, res) => {
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  const q = text(req.query.q)
+  const group = text(req.query.group)
+  const place = text(req.query.place)
+  const entry = text(req.query.entry)
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100))
+  const like = (v: string) => ({ contains: v, mode: 'insensitive' as const })
+  const where: Prisma.OpeningStockLineWhereInput = {
+    ...(group === 'WIP'
+      ? { departmentId: { not: null } }
+      : group === 'FINISHED'
+        ? { departmentId: null, item: { type: { in: FINISHED_KINDS } } }
+        : group === 'RAW'
+          ? { departmentId: null, item: { type: { notIn: FINISHED_KINDS } } }
+          : {}),
+    ...(place ? { warehouseId: place } : {}),
+    ...(entry ? { openingStockId: entry } : {}),
+    ...(q
+      ? {
+          OR: [
+            { orderNo: like(q) },
+            { styleText: like(q) },
+            { lotNo: like(q) },
+            { bundleNo: like(q) },
+            { colour: like(q) },
+            { remarks: like(q) },
+            { item: { OR: [{ code: like(q) }, { name: like(q) }, { style: { code: like(q) } }] } },
+            { openingStock: { number: like(q) } },
+          ],
+        }
+      : {}),
+  }
+  const [lines, total, filtered, kinds, places, ladder] = await Promise.all([
+    prisma.openingStockLine.findMany({
+      where,
+      orderBy: [{ openingStock: { createdAt: 'desc' } }, { rowNo: 'asc' }],
+      skip: (page - 1) * limit,
+      take: limit,
+      include: {
+        openingStock: { select: { id: true, number: true, fileName: true } },
+        item: {
+          select: {
+            code: true,
+            name: true,
+            type: true,
+            color: true,
+            uom: { select: { symbol: true } },
+            style: { select: { code: true } },
+            category: { select: { name: true } },
+          },
+        },
+        warehouse: { select: { id: true, name: true } },
+        department: { select: { name: true } },
+        size: { select: { code: true } },
+      },
+    }),
+    prisma.openingStockLine.count({ where }),
+    prisma.openingStockLine.aggregate({ where, _sum: { value: true } }),
+    prisma.$queryRaw<Array<{ kind: string; lines: number; value: number }>>`
+      SELECT CASE WHEN l."departmentId" IS NOT NULL THEN 'WIP'
+                  WHEN i.type IN ('FINISHED_GOOD', 'SEMI_FINISHED') THEN 'FINISHED'
+                  ELSE 'RAW' END AS kind,
+             COUNT(*)::int AS lines, COALESCE(SUM(l.value), 0)::float8 AS value
+      FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
+      GROUP BY 1`,
+    prisma.$queryRaw<Array<{ id: string; name: string; departmentId: string | null; process: string | null; lines: number; value: number }>>`
+      SELECT w.id, w.name, w."departmentId", d.name AS process, COUNT(*)::int AS lines, COALESCE(SUM(l.value), 0)::float8 AS value
+      FROM ld_erp.opening_stock_lines l
+      JOIN ld_erp.warehouses w ON w.id = l."warehouseId"
+      LEFT JOIN ld_erp.departments d ON d.id = w."departmentId"
+      GROUP BY w.id, w.name, w."departmentId", d.name`,
+    processLadder(),
+  ])
+  // Stores first, then the process floors in the order the work goes.
+  const rank = new Map(ladder.map((p, i) => [p.id, i]))
+  places.sort((a, b) => (a.departmentId ? 1 + (rank.get(a.departmentId) ?? 99) : 0) - (b.departmentId ? 1 + (rank.get(b.departmentId) ?? 99) : 0) || a.name.localeCompare(b.name))
+  res.json({
+    success: true,
+    data: {
+      lines,
+      total,
+      value: Number(filtered._sum.value ?? 0),
+      page,
+      limit,
+      kinds: Object.fromEntries(kinds.map((k) => [k.kind, { lines: k.lines, value: Number(k.value) }])),
+      places: places.map((p) => ({ id: p.id, name: p.name, process: p.process, lines: p.lines, value: Number(p.value) })),
+    },
+  })
+})
+
 router.get('/opening-stock', requirePermission(MODULE, 'view'), async (_req, res) => {
   const docs = await prisma.openingStock.findMany({
     orderBy: { createdAt: 'desc' },
-    select: { id: true, number: true, fileName: true, createdAt: true, createdBy: { select: { name: true } } },
+    select: { id: true, number: true, fileName: true, notes: true, createdAt: true, createdBy: { select: { name: true } } },
   })
   const totals = await prisma.openingStockLine.groupBy({
     by: ['openingStockId'],
