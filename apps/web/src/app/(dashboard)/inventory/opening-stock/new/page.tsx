@@ -145,6 +145,8 @@ function AddOpeningStock() {
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState<Saved | null>(null)
   const [throwing, setThrowing] = useState(false)
+  // When the entry was last kept on this computer, for the bar at the bottom.
+  const [keptAt, setKeptAt] = useState<number | null>(null)
   const [printing, setPrinting] = useState(false)
   const mayAdd = can('inventory', 'create')
 
@@ -169,6 +171,7 @@ function AddOpeningStock() {
     const kept = readDraft(kind)
     setDraft(kept ?? fresh(kind))
     setRestored(Boolean(kept))
+    setKeptAt(kept?.savedAt || null)
     setStep('enter')
     setPlan(null)
     setProblems(new Map())
@@ -180,8 +183,13 @@ function AddOpeningStock() {
     const t = setTimeout(() => {
       try {
         // Everything removed: nothing is kept, so nothing comes back as an unsaved entry.
-        if (draft.garments.length || draft.materials.length) localStorage.setItem(DRAFT(draft.kind), JSON.stringify({ ...draft, savedAt: Date.now() }))
-        else localStorage.removeItem(DRAFT(draft.kind))
+        if (draft.garments.length || draft.materials.length) {
+          localStorage.setItem(DRAFT(draft.kind), JSON.stringify({ ...draft, savedAt: Date.now() }))
+          setKeptAt(Date.now())
+        } else {
+          localStorage.removeItem(DRAFT(draft.kind))
+          setKeptAt(null)
+        }
       } catch {
         // Not kept on this computer: the entry still saves.
       }
@@ -336,7 +344,7 @@ function AddOpeningStock() {
   const bad = (plan ?? []).filter((r) => r.problems.length).length
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" style={{ ['--field' as string]: 'var(--card)' }}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <Link href="/inventory/opening-stock" className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-xs">
@@ -437,6 +445,7 @@ function AddOpeningStock() {
           <fieldset disabled={step === 'review' || busy} className={cn('space-y-3', step === 'review' && 'opacity-60')}>
             {/* Where and when, for the whole entry. */}
             <section className="glass-card grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-5" aria-label="Where and when">
+              <h2 className="text-foreground text-sm font-semibold sm:col-span-2 lg:col-span-5">Stock details</h2>
               <label className="space-y-1 text-sm">
                 <span className="text-foreground font-medium">Opening date</span>
                 <input type="date" className="form-input" value={draft.date} max={todayInIndia()} onChange={(e) => set({ date: e.target.value })} aria-label="Opening date" />
@@ -512,22 +521,21 @@ function AddOpeningStock() {
           {/* The actions, always in reach. */}
           <div className="border-border bg-card/95 sticky bottom-0 z-30 -mx-4 border-t px-4 py-3 backdrop-blur">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-muted-foreground text-sm">
-                {built.lines.length ? (
-                  <>
-                    <span className="text-foreground font-semibold">{built.lines.length}</span> {built.lines.length === 1 ? 'line' : 'lines'}
-                    {kind !== 'RM' && (
-                      <>
-                        {' '}
-                        · <span className="text-foreground font-semibold">{num(built.pieces)}</span> pcs
-                      </>
-                    )}{' '}
-                    · <span className="text-foreground font-semibold">{money(built.value)}</span>
-                  </>
-                ) : (
-                  'Nothing entered yet'
+              {/* Whether the entry is kept, and what it comes to so far. */}
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+                  <span className={cn('h-2 w-2 rounded-full', keptAt ? 'bg-emerald-500' : 'bg-muted-foreground/40')} aria-hidden />
+                  {keptAt ? `Draft kept on this computer · ${new Date(keptAt).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' })}` : built.lines.length ? 'Draft not kept yet' : 'Nothing entered yet'}
+                </p>
+                {built.lines.length > 0 && (
+                  <dl className="flex items-center gap-5 text-sm" aria-label="Entry summary">
+                    <Stat label={kind === 'RM' ? 'Materials' : 'Styles'} value={String(kind === 'RM' ? draft.materials.length : draft.garments.length)} />
+                    <Stat label="Lines" value={String(built.lines.length)} />
+                    {kind !== 'RM' && <Stat label="Pieces" value={num(built.pieces)} />}
+                    <Stat label="Stock value" value={money(built.value)} />
+                  </dl>
                 )}
-              </p>
+              </div>
               <div className="flex items-center gap-2">
                 {step === 'enter' ? (
                   <>
@@ -542,12 +550,19 @@ function AddOpeningStock() {
                         </button>
                       </span>
                     ) : (
-                      <button type="button" className="btn-ghost h-9 text-sm" onClick={() => (built.lines.length ? setThrowing(true) : router.push('/inventory/opening-stock/new'))}>
-                        {built.lines.length ? 'Throw away' : 'Back'}
-                      </button>
+                      <>
+                        {built.lines.length > 0 && (
+                          <button type="button" className="btn-ghost text-muted-foreground h-9 text-sm" onClick={() => setThrowing(true)}>
+                            Throw away
+                          </button>
+                        )}
+                        <button type="button" className="btn-secondary h-9 text-sm" onClick={() => router.push('/inventory/opening-stock/new')} title="Back to what you are entering; this entry is kept">
+                          <ArrowLeft size={15} /> Back
+                        </button>
+                      </>
                     )}
                     <button type="button" className="btn-primary h-9" disabled={busy || !mayAdd} onClick={() => void review()}>
-                      {busy ? <Loader2 size={15} className="animate-spin" /> : null} Review <ArrowRight size={15} />
+                      {busy ? <Loader2 size={15} className="animate-spin" /> : null} Review stock <ArrowRight size={15} />
                     </button>
                   </>
                 ) : (
@@ -726,6 +741,16 @@ function ReviewPanel({
         </table>
       </div>
     </section>
+  )
+}
+
+/** One figure of the summary in the bar at the bottom. */
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="leading-tight">
+      <dt className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wide">{label}</dt>
+      <dd className="text-foreground font-semibold tabular-nums">{value}</dd>
+    </div>
   )
 }
 

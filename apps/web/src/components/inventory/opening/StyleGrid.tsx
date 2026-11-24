@@ -1,8 +1,8 @@
 'use client'
 
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, ExternalLink, Loader2, PackagePlus, RefreshCw, X } from 'lucide-react'
+import { AlertCircle, ChevronDown, ExternalLink, Loader2, PackagePlus, RefreshCw, SlidersHorizontal, X } from 'lucide-react'
 import { useEscape } from '@/lib/useEscape'
 import { api, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -55,6 +55,12 @@ export function StyleGrid({
   const [allRate, setAllRate] = useState('')
   const [run, setRun] = useState('')
   const [busy, setBusy] = useState(false)
+  const gridRef = useRef<HTMLTableElement>(null)
+  // The item filters open by themselves when an item is picked (found by its code, say).
+  const [filtersOpen, setFiltersOpen] = useState(Boolean(only))
+  useEffect(() => {
+    if (only) setFiltersOpen(true)
+  }, [only])
 
   // A row a colour (with its item) or another item of the style; cells keyed by the row.
   const rows = styleRows(style)
@@ -159,76 +165,163 @@ export function StyleGrid({
     )
   }
 
+  // The boxes that take pieces, row by row: ← → at a box's edge moves along,
+  // and a block copied from a sheet is spread over the boxes from where it is pasted.
+  const entryRows = shown.filter((r) => r.item)
+  const cellAt = (r: number, c: number) => gridRef.current?.querySelector<HTMLInputElement>(`input[data-cell="${r}:${c}"]`) ?? null
+  const step = (r: number, c: number, dir: 1 | -1) => {
+    for (let rr = r, cc = c + dir; rr >= 0 && rr < entryRows.length; ) {
+      if (cc >= 0 && cc < style.sizes.length) return cellAt(rr, cc)
+      rr += dir
+      cc = dir > 0 ? 0 : style.sizes.length - 1
+    }
+    return null
+  }
+  const onCellKey = (r: number, c: number) => (e: KeyboardEvent<HTMLInputElement>) => {
+    const el = e.currentTarget
+    const atStart = el.selectionStart === 0 && el.selectionEnd === 0
+    const atEnd = el.selectionStart === el.value.length && el.selectionEnd === el.value.length
+    // Alt+↑ ↓: the same size of the colour above or below.
+    if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const next = cellAt(r + (e.key === 'ArrowDown' ? 1 : -1), c)
+      if (next) {
+        e.preventDefault()
+        next.focus()
+        next.select()
+      }
+      return
+    }
+    if ((e.key === 'ArrowRight' && atEnd) || (e.key === 'ArrowLeft' && atStart)) {
+      const next = step(r, c, e.key === 'ArrowRight' ? 1 : -1)
+      if (next) {
+        e.preventDefault()
+        next.focus()
+        next.select()
+      }
+    }
+  }
+  const onCellPaste = (r: number, c: number) => (e: ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData('text').replace(/\r/g, '').replace(/\n+$/, '')
+    if (!/[\t\n]/.test(text)) return
+    e.preventDefault()
+    const next = { ...qty }
+    let filled = 0
+    text.split('\n').forEach((line, dr) => {
+      const row = entryRows[r + dr]
+      if (!row) return
+      line.split('\t').forEach((v, dc) => {
+        const size = style.sizes[c + dc]
+        const n = Number(v.replace(/[,\s]/g, ''))
+        if (!size || v.trim() === '' || !Number.isFinite(n) || n < 0) return
+        next[cellKey(row.key, size.id)] = String(Math.round(n))
+        filled++
+      })
+    })
+    onQty(next)
+    setNote({ ok: true, text: `${filled} ${filled === 1 ? 'box' : 'boxes'} filled from what was pasted.` })
+  }
+  const pickedItem = items.find((i) => i.id === picked)
+
   return (
-    <div className="space-y-2">
-      {/* The style's items, picked by code, name or description: the three move together. */}
+    <div className="space-y-3">
+      {/* The style's items, by code, name or description — folded away until wanted. */}
       {items.length > 0 && onOnly && (
-        <div className="flex flex-wrap items-end gap-2" aria-label={`Items of ${style.code}`}>
-          <ItemField label="Item Code" value={picked} onChange={onOnly} style={style.code} all={items.length}>
-            {items.map((i) => (
-              <option key={i.id} value={i.id} data-sub={[i.name, i.colour].filter(Boolean).join(' · ')}>
-                {i.code}
-              </option>
-            ))}
-          </ItemField>
-          <ItemField label="Item Name" value={picked} onChange={onOnly} style={style.code} all={items.length} wide>
-            {items.map((i) => (
-              <option key={i.id} value={i.id} data-sub={[i.code, i.colour].filter(Boolean).join(' · ')}>
-                {i.name}
-              </option>
-            ))}
-          </ItemField>
-          <ItemField label="Item Description" value={picked} onChange={onOnly} style={style.code} all={items.length} wide>
-            {items.map((i) => (
-              <option key={i.id} value={i.id} data-sub={`${i.code} · ${i.name}`}>
-                {i.description || `No description (${i.code})`}
-              </option>
-            ))}
-          </ItemField>
-          {picked && (
-            <button type="button" className="text-primary h-9 text-xs font-medium hover:underline" onClick={() => onOnly('')}>
-              Show all of {style.code}{hidden ? ` (${hidden} more ${hidden === 1 ? 'row' : 'rows'})` : ''}
+        <div className="border-border rounded-lg border">
+          <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+            <button
+              type="button"
+              className="text-foreground inline-flex items-center gap-1.5 text-sm font-medium"
+              aria-expanded={filtersOpen}
+              onClick={() => setFiltersOpen((o) => !o)}
+            >
+              <SlidersHorizontal size={14} className="text-muted-foreground" />
+              Filter by item
+              <ChevronDown size={14} className={cn('text-muted-foreground transition-transform', filtersOpen && 'rotate-180')} />
             </button>
+            {pickedItem ? (
+              <span className="bg-primary/10 text-primary inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium">
+                Showing {pickedItem.code}
+                {hidden ? ` · ${hidden} more ${hidden === 1 ? 'row' : 'rows'} hidden` : ''}
+              </span>
+            ) : (
+              <span className="text-muted-foreground text-xs">
+                All {items.length} {items.length === 1 ? 'item' : 'items'} shown
+              </span>
+            )}
+            {picked && (
+              <button type="button" className="text-primary ml-auto text-xs font-medium hover:underline" onClick={() => onOnly('')}>
+                Show all of {style.code}
+                {hidden ? ` (${hidden} more ${hidden === 1 ? 'row' : 'rows'})` : ''}
+              </button>
+            )}
+          </div>
+          {filtersOpen && (
+            <div className="border-border grid gap-3 border-t px-3 py-3 sm:grid-cols-[minmax(0,0.7fr)_minmax(0,1fr)_minmax(0,1fr)]" aria-label={`Items of ${style.code}`}>
+              <ItemField label="Item Code" value={picked} onChange={onOnly} style={style.code} all={items.length}>
+                {items.map((i) => (
+                  <option key={i.id} value={i.id} data-sub={[i.name, i.colour].filter(Boolean).join(' · ')}>
+                    {i.code}
+                  </option>
+                ))}
+              </ItemField>
+              <ItemField label="Item Name" value={picked} onChange={onOnly} style={style.code} all={items.length}>
+                {items.map((i) => (
+                  <option key={i.id} value={i.id} data-sub={[i.code, i.colour].filter(Boolean).join(' · ')}>
+                    {i.name}
+                  </option>
+                ))}
+              </ItemField>
+              <ItemField label="Item Description" value={picked} onChange={onOnly} style={style.code} all={items.length}>
+                {items.map((i) => (
+                  <option key={i.id} value={i.id} data-sub={`${i.code} · ${i.name}`}>
+                    {i.description || `No description (${i.code})`}
+                  </option>
+                ))}
+              </ItemField>
+            </div>
           )}
         </div>
       )}
-      <div className="overflow-x-auto">
-        <table className="subtable text-sm">
+
+      {/* Colours down, sizes across: one box a colour and size, totals each way. */}
+      <div className="border-border overflow-x-auto rounded-lg border">
+        <table ref={gridRef} className="subtable w-full border-separate border-spacing-0 text-sm" data-grid>
           <thead>
-            <tr className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wide">
-              <th className="min-w-44 py-1.5 pr-3 text-left">Colour</th>
+            <tr className="bg-secondary text-muted-foreground text-[11px] font-semibold uppercase tracking-wide">
+              <th className="bg-secondary sticky left-0 z-10 min-w-[15rem] px-3 py-2 text-left">Colour / Item</th>
               {style.sizes.map((s) => (
-                <th key={s.id} className="w-20 px-1 py-1.5 text-center">
+                <th key={s.id} className="min-w-[4.75rem] px-1 py-2 text-center">
                   {s.code}
                 </th>
               ))}
-              <th className="px-3 py-1.5 text-right">Pieces</th>
-              <th className="px-3 py-1.5 text-right">Value</th>
+              <th className="min-w-[5rem] px-3 py-2 text-right">Pieces</th>
+              <th className="min-w-[7rem] px-3 py-2 text-right">Value</th>
             </tr>
           </thead>
           <tbody>
-            <tr className="bg-secondary/40">
-              <td className="py-1.5 pr-3">
+            {/* One rate for every size, then any size changed on its own. */}
+            <tr className="bg-primary/5" data-grid-row>
+              <td className="bg-card border-border sticky left-0 z-10 border-b px-3 py-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-foreground text-xs font-semibold">Rate per piece ₹</span>
+                  <span className="text-foreground text-xs font-semibold">Rate / pc ₹</span>
                   <StepInput
-                    className="form-input h-8 w-20 text-right text-xs"
+                    className="form-input h-8 w-24 px-2 text-right text-xs"
                     value={allRate}
                     decimals
                     onValueChange={(v) => {
                       setAllRate(v)
                       onRates(Object.fromEntries(style.sizes.map((s) => [s.id, v])))
                     }}
-                    placeholder="All"
+                    placeholder="All sizes"
                     aria-label={`Rate for every size of ${style.code}`}
                     title="One rate for every size; change any size after"
                   />
                 </div>
               </td>
               {style.sizes.map((s) => (
-                <td key={s.id} className="px-1 py-1.5">
+                <td key={s.id} className="border-border border-b px-1 py-2">
                   <StepInput
-                    className="form-input h-8 text-right text-xs"
+                    className="form-input h-8 px-2 text-right text-xs tabular-nums"
                     value={rates[s.id] ?? ''}
                     decimals
                     onValueChange={(v) => onRates({ ...rates, [s.id]: v })}
@@ -236,90 +329,120 @@ export function StyleGrid({
                   />
                 </td>
               ))}
-              <td colSpan={2} />
+              <td className="border-border text-muted-foreground border-b px-3 py-2 text-right text-[11px]" colSpan={2}>
+                size-wise rates
+              </td>
             </tr>
             {shown.map((r) => {
-              const c = r
+              const er = entryRows.indexOf(r)
+              const tint = swatchOf(r.colour)
               return (
-              <tr key={r.key} className="border-border border-t">
-                <td className="py-1.5 pr-3">
-                  <div className="text-foreground font-medium">{c.colour || r.item?.code}</div>
-                  {r.item ? (
-                    <>
-                      <div className="text-muted-foreground font-mono text-[11px]">{r.item.code}</div>
-                      {r.item.name && <div className="text-muted-foreground max-w-56 truncate text-[11px]" title={r.item.name}>{r.item.name}</div>}
-                      {r.item.description && (
-                        <div className="text-muted-foreground max-w-56 truncate text-[11px] italic" title={r.item.description}>
-                          {r.item.description}
-                        </div>
-                      )}
-                    </>
-                  ) : choose?.colour === c.colour ? (
-                    <div className="mt-1 flex items-center gap-1">
-                      <SmartSelect
-                        className="form-input h-8 text-xs"
-                        value={choose.categoryId}
-                        onChange={(e) => setChoose({ ...choose, categoryId: e.target.value })}
-                        aria-label={`Category for ${style.code} ${c.colour}`}
-                      >
-                        <option value="">File under…</option>
-                        {choose.categories.map((k) => (
-                          <option key={k.id} value={k.id}>
-                            {k.name}
-                          </option>
-                        ))}
-                      </SmartSelect>
-                      <button type="button" className="btn-primary h-8 px-2 text-xs" disabled={!choose.categoryId || making === c.colour} onClick={() => void makeItem(c.colour, choose.categoryId)}>
-                        Next
-                      </button>
-                    </div>
-                  ) : mayMakeItems ? (
-                    <button
-                      type="button"
-                      className="text-primary mt-0.5 flex items-center gap-1 text-[11px] hover:underline"
-                      disabled={making === c.colour}
-                      onClick={() => void makeItem(c.colour)}
-                    >
-                      <PackagePlus size={11} /> {making === c.colour ? 'Looking…' : 'No item for this colour yet — Add item'}
-                    </button>
-                  ) : (
-                    <div className="text-[11px] text-amber-500">No item yet: add it in Items &amp; Products</div>
-                  )}
-                </td>
-                {style.sizes.map((s) => {
-                  const q = Number(qty[cellKey(r.key, s.id)] || 0)
-                  const noRate = q > 0 && !Number(rates[s.id] || 0)
-                  return (
-                    <td key={s.id} className="px-1 py-1.5">
-                      <StepInput
-                        className={cn('form-input h-8 text-right', !r.item && 'opacity-40', noRate && 'border-amber-500')}
-                        value={qty[cellKey(r.key, s.id)] ?? ''}
-                        disabled={!r.item}
-                        onValueChange={(v) => onQty({ ...qty, [cellKey(r.key, s.id)]: v })}
-                        aria-label={`Pieces of ${c.colour || r.item?.code} size ${s.code}`}
-                        title={noRate ? `No rate for size ${s.code} yet` : undefined}
+                <tr key={r.key} className="group" data-grid-row>
+                  <td className="bg-card group-hover:bg-secondary border-border sticky left-0 z-10 border-b px-3 py-2">
+                    <div className="flex items-start gap-2.5">
+                      <span
+                        className="border-border mt-0.5 h-4 w-4 shrink-0 rounded-full border"
+                        style={tint ? { background: tint } : { background: 'repeating-linear-gradient(45deg, hsl(var(--muted)), hsl(var(--muted)) 2px, transparent 2px, transparent 4px)' }}
+                        aria-hidden
                       />
-                    </td>
-                  )
-                })}
-                <td className="text-foreground px-3 py-1.5 text-right font-semibold tabular-nums">{pieces(r.key) ? num(pieces(r.key)) : ''}</td>
-                <td className="text-foreground px-3 py-1.5 text-right tabular-nums">{valueOf(r.key) ? money(valueOf(r.key)) : ''}</td>
-              </tr>
+                      <div className="min-w-0">
+                        <div className="text-foreground font-medium leading-tight">{r.colour || r.item?.code}</div>
+                        {r.item ? (
+                          <>
+                            <div className="text-muted-foreground mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px]">
+                              <span className="shrink-0 whitespace-nowrap font-mono text-teal-400">{r.item.code}</span>
+                              {r.item.name && (
+                                <span className="min-w-0 max-w-52 truncate" title={r.item.name}>
+                                  · {r.item.name}
+                                </span>
+                              )}
+                            </div>
+                            {r.item.description && (
+                              <div className="text-muted-foreground max-w-60 truncate text-[11px] italic" title={r.item.description}>
+                                {r.item.description}
+                              </div>
+                            )}
+                          </>
+                        ) : choose?.colour === r.colour ? (
+                          <div className="mt-1 flex items-center gap-1">
+                            <SmartSelect
+                              className="form-input h-8 text-xs"
+                              value={choose.categoryId}
+                              onChange={(e) => setChoose({ ...choose, categoryId: e.target.value })}
+                              aria-label={`Category for ${style.code} ${r.colour}`}
+                            >
+                              <option value="">File under…</option>
+                              {choose.categories.map((k) => (
+                                <option key={k.id} value={k.id}>
+                                  {k.name}
+                                </option>
+                              ))}
+                            </SmartSelect>
+                            <button type="button" className="btn-primary h-8 px-2 text-xs" disabled={!choose.categoryId || making === r.colour} onClick={() => void makeItem(r.colour, choose.categoryId)}>
+                              Next
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            <span className="warn-text text-[11px]">No item yet</span>
+                            {mayMakeItems ? (
+                              <button
+                                type="button"
+                                className="border-primary/40 text-primary hover:bg-primary/10 inline-flex h-6 items-center gap-1 rounded-md border px-2 text-[11px] font-semibold"
+                                disabled={making === r.colour}
+                                onClick={() => void makeItem(r.colour)}
+                                aria-label={`Create item for ${r.colour}`}
+                              >
+                                {making === r.colour ? <Loader2 size={11} className="animate-spin" /> : <PackagePlus size={11} />} Create item
+                              </button>
+                            ) : (
+                              <span className="text-muted-foreground text-[11px]">add it in Items &amp; Products</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </td>
+                  {style.sizes.map((s, c) => {
+                    const q = Number(qty[cellKey(r.key, s.id)] || 0)
+                    const noRate = q > 0 && !Number(rates[s.id] || 0)
+                    return (
+                      <td key={s.id} className="group-hover:bg-secondary border-border border-b px-1 py-2">
+                        <StepInput
+                          className={cn('form-input h-9 px-2 text-right tabular-nums', !r.item && 'opacity-40', q > 0 && 'border-primary/50 font-semibold', noRate && 'border-amber-500')}
+                          value={qty[cellKey(r.key, s.id)] ?? ''}
+                          disabled={!r.item}
+                          onValueChange={(v) => onQty({ ...qty, [cellKey(r.key, s.id)]: v })}
+                          onKeyDown={er >= 0 ? onCellKey(er, c) : undefined}
+                          onPaste={er >= 0 ? onCellPaste(er, c) : undefined}
+                          data-cell={er >= 0 ? `${er}:${c}` : undefined}
+                          aria-label={`Pieces of ${r.colour || r.item?.code} size ${s.code}`}
+                          title={noRate ? `No rate for size ${s.code} yet` : undefined}
+                        />
+                      </td>
+                    )
+                  })}
+                  <td className="group-hover:bg-secondary border-border text-foreground border-b px-3 py-2 text-right font-semibold tabular-nums">{pieces(r.key) ? num(pieces(r.key)) : '—'}</td>
+                  <td className="group-hover:bg-secondary border-border text-foreground border-b px-3 py-2 text-right tabular-nums">{valueOf(r.key) ? money(valueOf(r.key)) : '—'}</td>
+                </tr>
               )
             })}
-            <tr className="border-border bg-secondary/30 border-t font-semibold">
-              <td className="text-foreground py-1.5 pr-3 text-xs">Total</td>
+            <tr className="bg-secondary font-semibold">
+              <td className="bg-secondary text-foreground sticky left-0 z-10 px-3 py-2 text-xs uppercase tracking-wide">Total</td>
               {style.sizes.map((s) => (
-                <td key={s.id} className="text-foreground px-1 py-1.5 text-center text-xs tabular-nums">
-                  {sizeTotal(s.id) || ''}
+                <td key={s.id} className="text-foreground px-1 py-2 text-center text-sm tabular-nums">
+                  {sizeTotal(s.id) || '—'}
                 </td>
               ))}
-              <td className="text-foreground px-3 py-1.5 text-right tabular-nums">{total ? num(total) : ''}</td>
-              <td className="text-foreground px-3 py-1.5 text-right tabular-nums">{totalValue ? money(totalValue) : ''}</td>
+              <td className="text-foreground px-3 py-2 text-right tabular-nums">{total ? num(total) : '—'}</td>
+              <td className="text-foreground px-3 py-2 text-right tabular-nums">{totalValue ? money(totalValue) : '—'}</td>
             </tr>
           </tbody>
         </table>
       </div>
+      <p className="text-muted-foreground text-[11px]">
+        Enter or ← → to move along · Alt+↑ ↓ up and down a size · paste a block copied from a sheet into any box to fill from there.
+      </p>
       {note && <p className={cn('text-xs', note.ok ? 'text-emerald-500' : 'text-red-400')}>{note.text}</p>}
       {preview && (
         <AddItemDialog
@@ -336,6 +459,13 @@ export function StyleGrid({
       )}
     </div>
   )
+}
+
+/** A colour's swatch, when its name is one a browser knows: "Sky Blue" → skyblue. */
+function swatchOf(colour: string): string | null {
+  const c = colour.trim().toLowerCase().replace(/\s+/g, '')
+  if (!c || typeof CSS === 'undefined') return null
+  return CSS.supports('color', c) ? c : null
 }
 
 interface ItemPreview {
@@ -485,7 +615,7 @@ function ItemField({
   return (
     <label className="flex flex-col gap-1 text-xs">
       <span className="text-muted-foreground font-semibold uppercase tracking-wide">{label}</span>
-      <SmartSelect className={cn('form-input h-9 text-sm', wide ? 'w-72' : 'w-44')} value={value} onChange={(e) => onChange(e.target.value)} aria-label={`${label} of ${style}`}>
+      <SmartSelect className={cn('form-input h-9 w-full text-sm', wide && 'min-w-72')} value={value} onChange={(e) => onChange(e.target.value)} aria-label={`${label} of ${style}`}>
         <option value="">All items ({all})</option>
         {children}
       </SmartSelect>

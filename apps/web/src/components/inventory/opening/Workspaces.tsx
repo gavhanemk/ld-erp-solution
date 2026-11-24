@@ -63,22 +63,36 @@ const piecesOf = (g: Garment) => Object.values(g.qty).reduce((n, v) => n + Numbe
 const valueOf = (g: Garment, st: StyleOption | undefined) =>
   (st ? styleRows(st) : []).reduce((n, r) => n + (st?.sizes ?? []).reduce((m, s) => m + Number(g.qty[cellKey(r.key, s.id)] || 0) * Number(g.rates[s.id] || 0), 0), 0)
 
-/** Every finished item linked to a style, to find its style by: "SHI-007 — Formal Shirt White". */
-function ItemFinder({ options, onPick, label }: { options: FormOptions; onPick: (styleId: string, itemId: string) => void; label: string }) {
+/**
+ * One search for what to enter: a style (its colours and sizes come with it),
+ * or one of its items by code or name (its style comes, showing that item).
+ */
+function StyleSearch({ options, taken, onPick }: { options: FormOptions; taken: Set<string>; onPick: (styleId: string, itemId: string) => void }) {
   return (
     <SmartSelect
-      className="form-input h-9 w-80"
+      className="form-input h-10 min-w-0 flex-1"
       value=""
       onChange={(e) => {
-        const st = options.styles.find((x) => (x.items ?? []).some((i) => i.id === e.target.value))
-        if (st) onPick(st.id, e.target.value)
+        const [kind, id] = e.target.value.split(':')
+        if (kind === 'style') onPick(id, '')
+        if (kind === 'item') {
+          const st = options.styles.find((x) => (x.items ?? []).some((i) => i.id === id))
+          if (st) onPick(st.id, id)
+        }
       }}
-      aria-label={label}
+      aria-label="Add a style"
     >
-      <option value="">…or find by Item Code / Item Name</option>
+      <option value="">Search a style, item code or item name…</option>
+      {options.styles
+        .filter((st) => !taken.has(st.id))
+        .map((st) => (
+          <option key={st.id} value={`style:${st.id}`} data-sub={`Style · ${st.colours.length} ${st.colours.length === 1 ? 'colour' : 'colours'} · ${st.sizes.length} sizes`}>
+            {`${st.code} — ${st.name}`}
+          </option>
+        ))}
       {options.styles.flatMap((st) =>
         (st.items ?? []).map((i) => (
-          <option key={i.id} value={i.id} data-sub={[st.code, i.colour, i.description].filter(Boolean).join(' · ')}>
+          <option key={i.id} value={`item:${i.id}`} data-sub={['Item of ' + st.code, i.colour, i.description].filter(Boolean).join(' · ')}>
             {`${i.code} — ${i.name}`}
           </option>
         )),
@@ -87,11 +101,29 @@ function ItemFinder({ options, onPick, label }: { options: FormOptions; onPick: 
   )
 }
 
+/** A style's card heading: its name first, its code, and what it is made in. */
+function StyleTitle({ st, extra }: { st: StyleOption; extra?: ReactNode }) {
+  const items = (st.items ?? []).length
+  const run = st.sizes.length ? `${st.sizes[0].code}–${st.sizes[st.sizes.length - 1].code}` : ''
+  return (
+    <div className="min-w-0">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="text-foreground text-base font-semibold leading-tight">{st.name}</span>
+        <span className="bg-primary/10 rounded-md px-1.5 py-0.5 font-mono text-xs font-semibold text-teal-400">{st.code}</span>
+        {extra}
+      </div>
+      <div className="text-muted-foreground mt-0.5 text-xs">
+        {st.colours.length} {st.colours.length === 1 ? 'colour' : 'colours'} · {st.sizes.length} {st.sizes.length === 1 ? 'size' : 'sizes'}
+        {run ? ` (${run})` : ''} · {items} {items === 1 ? 'item' : 'items'}
+      </div>
+    </div>
+  )
+}
+
 // ── Finished Goods: style → its colours → its sizes ─────────────────────
 
 export function FinishedGoods({ garments, onChange, ...shared }: Shared & { garments: Garment[]; onChange: (g: Garment[]) => void }) {
   const { options } = shared
-  const [pick, setPick] = useState('')
   const taken = new Set(garments.map((g) => g.styleId))
   const add = (styleId: string, item = '') => {
     if (!styleId) return
@@ -101,25 +133,19 @@ export function FinishedGoods({ garments, onChange, ...shared }: Shared & { garm
       return
     }
     onChange([...garments, { key: newKey(), styleId, processId: '', locationId: '', orderNo: '', bundle: '', rates: {}, qty: {}, item }])
-    setPick('')
   }
   return (
     <section className="space-y-3" aria-label="Finished goods by style">
-      <div className="glass-card flex flex-wrap items-center gap-3 p-3">
-        <Shirt size={16} className="text-primary" />
-        <span className="text-foreground text-sm font-semibold">Add a style</span>
-        <SmartSelect className="form-input h-9 min-w-80 flex-1" value={pick} onChange={(e) => add(e.target.value)} aria-label="Add a style">
-          <option value="">Pick a style — its colours and sizes come with it…</option>
-          {options.styles
-            .filter((st) => !taken.has(st.id))
-            .map((st) => (
-              <option key={st.id} value={st.id} data-sub={`${st.name} · ${st.colours.length} ${st.colours.length === 1 ? 'colour' : 'colours'} · ${st.sizes.length} sizes`}>
-                {st.code}
-              </option>
-            ))}
-        </SmartSelect>
-        <Search size={14} className="text-muted-foreground" />
-        <ItemFinder options={options} onPick={(styleId, itemId) => add(styleId, itemId)} label="Find by item code or name" />
+      <div className="glass-card flex flex-wrap items-center gap-3 px-4 py-3">
+        <span className="text-foreground flex items-center gap-2 text-sm font-semibold">
+          <Search size={15} className="text-primary" /> Add a style
+        </span>
+        <StyleSearch options={options} taken={taken} onPick={add} />
+        {garments.length > 0 && (
+          <span className="text-muted-foreground text-xs">
+            {garments.length} {garments.length === 1 ? 'style' : 'styles'} added
+          </span>
+        )}
       </div>
       {garments.length === 0 && <Empty icon={Shirt} text="Pick a style to enter its finished pieces: a box for each of its colours and sizes." />}
       {garments.map((g) => {
@@ -129,12 +155,8 @@ export function FinishedGoods({ garments, onChange, ...shared }: Shared & { garm
           <Block
             key={g.key}
             label={`Style ${st.code}`}
-            title={
-              <>
-                <span className="font-mono font-semibold text-teal-400">{st.code}</span> <span className="text-foreground">{st.name}</span>
-              </>
-            }
-            totals={totalsText(piecesOf(g), valueOf(g, st))}
+            title={<StyleTitle st={st} />}
+            totals={<BlockTotals pieces={piecesOf(g)} value={valueOf(g, st)} />}
             problems={shared.problems.get(g.key)}
             onRemove={() => onChange(garments.filter((x) => x.key !== g.key))}
           >
@@ -257,13 +279,8 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
           <Block
             key={g.key}
             label={`Style ${st.code} at ${p.name}`}
-            title={
-              <>
-                <span className="font-mono font-semibold text-teal-400">{st.code}</span> <span className="text-foreground">{st.name}</span>
-                <span className="badge-info ml-2">at {p.name}</span>
-              </>
-            }
-            totals={totalsText(piecesOf(g), valueOf(g, st))}
+            title={<StyleTitle st={st} extra={<span className="badge-info">at {p.name}</span>} />}
+            totals={<BlockTotals pieces={piecesOf(g)} value={valueOf(g, st)} />}
             problems={shared.problems.get(g.key)}
             onRemove={() => onChange(garments.filter((x) => x.key !== g.key))}
           >
@@ -377,7 +394,7 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
                 </span>
               </>
             }
-            totals={qty ? `${num(qty)} ${it.unit ?? ''} · ${money(value)}` : ''}
+            totals={<BlockTotals pieces={qty} value={value} unit={it.unit ?? ''} />}
             problems={lotProblems.length ? lotProblems : undefined}
             onRemove={() => onChange(materials.filter((x) => x.key !== m.key))}
           >
@@ -506,28 +523,43 @@ function Block({
 }: {
   label: string
   title: ReactNode
-  totals: string
+  totals: ReactNode
   problems: string[] | undefined
   onRemove: () => void
   children: ReactNode
 }) {
   return (
-    <div className={cn('glass-card space-y-3 p-4', problems && 'ring-1 ring-red-500/50')} aria-label={label}>
-      <div className="flex flex-wrap items-center gap-3">
+    <div className={cn('glass-card overflow-hidden p-0', problems && 'ring-1 ring-red-500/50')} aria-label={label}>
+      <div className="border-border flex flex-wrap items-center gap-3 border-b px-4 py-3">
         <div className="min-w-0 flex-1 text-sm">{title}</div>
-        {totals && <span className="text-foreground text-sm font-semibold tabular-nums">{totals}</span>}
-        <button type="button" className="btn-ghost p-1" onClick={onRemove} aria-label={`Remove ${label}`}>
-          <Trash2 size={14} />
+        {totals}
+        <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1.5" onClick={onRemove} aria-label={`Remove ${label}`} title="Remove from this entry">
+          <Trash2 size={15} />
         </button>
       </div>
-      {children}
-      {problems && (
-        <ul className="space-y-0.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400" aria-label="Problems">
-          {problems.map((p) => (
-            <li key={p}>{p}</li>
-          ))}
-        </ul>
-      )}
+      <div className="space-y-3 p-4">
+        {children}
+        {problems && (
+          <ul className="space-y-0.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400" aria-label="Problems">
+            {problems.map((p) => (
+              <li key={p}>{p}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** A card's own totals, at its top right: pieces, and what they are worth. */
+function BlockTotals({ pieces, value, unit = 'pcs' }: { pieces: number; value: number; unit?: string }) {
+  if (!pieces) return <span className="text-muted-foreground text-xs">Nothing entered</span>
+  return (
+    <div className="flex items-baseline gap-3 text-right tabular-nums">
+      <span>
+        <span className="text-foreground text-base font-semibold">{num(pieces)}</span> <span className="text-muted-foreground text-xs">{unit}</span>
+      </span>
+      <span className="text-foreground text-sm font-semibold">{money(value)}</span>
     </div>
   )
 }
@@ -553,4 +585,3 @@ export function usualPack(item: MaterialOption, lot: Pick<Lot, 'bundle'>): PackV
   return newPack(type, 'LATER')
 }
 
-const totalsText = (pieces: number, value: number) => (pieces ? `${num(pieces)} pcs · ${money(value)}` : '')
