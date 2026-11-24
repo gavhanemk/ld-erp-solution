@@ -5484,40 +5484,145 @@ router.post('/opening-stock/entry', requirePermission(MODULE, 'create'), async (
  * lot and bundle. With the totals for the tiles and the places it is at.
  */
 const FINISHED_KINDS: ItemType[] = ['FINISHED_GOOD', 'SEMI_FINISHED']
-router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req, res) => {
+
+/**
+ * The filters of the opening stock lines, all together: each takes several
+ * values (?colour=Navy&colour=White) and a line must match every filter
+ * given. Style and colour match what the line said or, left empty, what its
+ * item is filed under; a process is a department or, for stock in a store,
+ * the word the line gave (Store, Finished Goods).
+ */
+function openingLinesWhere(query: Record<string, unknown>): Prisma.OpeningStockLineWhereInput {
   const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
-  const q = text(req.query.q)
-  const group = text(req.query.group)
-  const place = text(req.query.place)
-  const entry = text(req.query.entry)
+  const list = (v: unknown) => (Array.isArray(v) ? v : v === undefined ? [] : [v]).map((x) => String(x).trim()).filter(Boolean)
+  const like = (v: string) => ({ contains: v, mode: 'insensitive' as const })
+  const and: Prisma.OpeningStockLineWhereInput[] = []
+  const group = text(query.group)
+  if (group === 'WIP') and.push({ departmentId: { not: null } })
+  if (group === 'FINISHED') and.push({ departmentId: null, item: { type: { in: FINISHED_KINDS } } })
+  if (group === 'RAW') and.push({ departmentId: null, item: { type: { notIn: FINISHED_KINDS } } })
+  const entry = text(query.entry)
+  if (entry) and.push({ openingStockId: entry })
+  // Item Name and Item Code both pick items; given both, a line is one of each.
+  for (const key of ['item', 'code']) {
+    const ids = list(query[key])
+    if (ids.length) and.push({ itemId: { in: ids } })
+  }
+  const categories = list(query.category)
+  if (categories.length) and.push({ item: { categoryId: { in: categories } } })
+  const styles = list(query.style)
+  if (styles.length) and.push({ OR: [{ styleText: { in: styles } }, { styleText: null, item: { style: { code: { in: styles } } } }] })
+  const colours = list(query.colour)
+  if (colours.length) and.push({ OR: [{ colour: { in: colours } }, { colour: null, item: { color: { in: colours } } }] })
+  const sizes = list(query.size)
+  if (sizes.length) and.push({ sizeId: { in: sizes } })
+  const processes = list(query.process)
+  if (processes.length) {
+    const departments = processes.filter((p) => p.startsWith('d:')).map((p) => p.slice(2))
+    const words = processes.filter((p) => p.startsWith('t:')).map((p) => p.slice(2))
+    and.push({
+      OR: [
+        ...(departments.length ? [{ departmentId: { in: departments } }] : []),
+        ...(words.length ? [{ departmentId: null, processText: { in: words } }] : []),
+        ...(words.includes('Store') ? [{ departmentId: null, processText: null }] : []),
+      ],
+    })
+  }
+  const places = list(query.place)
+  if (places.length) and.push({ warehouseId: { in: places } })
+  const orders = list(query.order)
+  if (orders.length) and.push({ orderNo: { in: orders } })
+  const lots = list(query.lot)
+  if (lots.length) and.push({ lotNo: { in: lots } })
+  // Dates: the opening date, or the day the entry was saved (India's day).
+  const from = text(query.from)
+  const to = text(query.to)
+  if (from || to) {
+    const day = (d: string, end: boolean) => new Date(`${d}T${end ? '23:59:59.999' : '00:00:00'}+05:30`)
+    if (text(query.dateOf) === 'entered') {
+      and.push({ openingStock: { createdAt: { ...(from ? { gte: day(from, false) } : {}), ...(to ? { lte: day(to, true) } : {}) } } })
+    } else {
+      and.push({ openingDate: { ...(from ? { gte: new Date(`${from}T00:00:00Z`) } : {}), ...(to ? { lte: new Date(`${to}T00:00:00Z`) } : {}) } })
+    }
+  }
+  const q = text(query.q)
+  if (q) {
+    and.push({
+      OR: [
+        { orderNo: like(q) },
+        { styleText: like(q) },
+        { lotNo: like(q) },
+        { bundleNo: like(q) },
+        { colour: like(q) },
+        { remarks: like(q) },
+        { item: { OR: [{ code: like(q) }, { name: like(q) }, { color: like(q) }, { style: { code: like(q) } }] } },
+        { openingStock: { number: like(q) } },
+      ],
+    })
+  }
+  return and.length ? { AND: and } : {}
+}
+
+/*
+ * What each filter can offer: every value the opening stock lines hold, with
+ * how many lines have it — items by name and by code, categories, styles,
+ * colours, sizes in run order, processes, locations, orders and lots.
+ */
+router.get('/opening-stock/filters', requirePermission(MODULE, 'view'), async (_req, res) => {
+  type Opt = { value: string; label: string; sub?: string | null; lines: number }
+  const [items, categories, styles, colours, sizes, processes, locations, orders, lots] = await Promise.all([
+    prisma.$queryRaw<Array<{ id: string; code: string; name: string; lines: number }>>`
+      SELECT i.id, i.code, i.name, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
+      GROUP BY i.id, i.code, i.name ORDER BY i.name`,
+    prisma.$queryRaw<Array<{ id: string; name: string; lines: number }>>`
+      SELECT c.id, c.name, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
+      JOIN ld_erp.item_categories c ON c.id = i."categoryId" GROUP BY c.id, c.name ORDER BY c.name`,
+    prisma.$queryRaw<Array<{ value: string; lines: number }>>`
+      SELECT COALESCE(l."styleText", s.code) AS value, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l
+      JOIN ld_erp.items i ON i.id = l."itemId" LEFT JOIN ld_erp.styles s ON s.id = i."styleId"
+      WHERE COALESCE(l."styleText", s.code) IS NOT NULL GROUP BY 1 ORDER BY 1`,
+    prisma.$queryRaw<Array<{ value: string; lines: number }>>`
+      SELECT COALESCE(l.colour, i.color) AS value, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l
+      JOIN ld_erp.items i ON i.id = l."itemId" WHERE COALESCE(l.colour, i.color) IS NOT NULL GROUP BY 1 ORDER BY 1`,
+    prisma.$queryRaw<Array<{ id: string; code: string; run: string | null; lines: number }>>`
+      SELECT z.id, z.code, g.name AS run, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l JOIN ld_erp.sizes z ON z.id = l."sizeId"
+      LEFT JOIN ld_erp.size_groups g ON g.id = z."sizeGroupId"
+      GROUP BY z.id, z.code, z.sequence, g.name ORDER BY g.name, z.sequence, z.code`,
+    prisma.$queryRaw<Array<{ value: string; label: string; lines: number }>>`
+      SELECT CASE WHEN l."departmentId" IS NOT NULL THEN 'd:' || l."departmentId" ELSE 't:' || COALESCE(l."processText", 'Store') END AS value,
+             COALESCE(d.name, l."processText", 'Store') AS label, COUNT(*)::int AS lines
+      FROM ld_erp.opening_stock_lines l LEFT JOIN ld_erp.departments d ON d.id = l."departmentId"
+      GROUP BY 1, 2 ORDER BY 2`,
+    prisma.$queryRaw<Array<{ id: string; name: string; lines: number }>>`
+      SELECT w.id, w.name, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l JOIN ld_erp.warehouses w ON w.id = l."warehouseId"
+      GROUP BY w.id, w.name ORDER BY w.name`,
+    prisma.$queryRaw<Array<{ value: string; lines: number }>>`
+      SELECT l."orderNo" AS value, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l WHERE l."orderNo" IS NOT NULL GROUP BY 1 ORDER BY 1`,
+    prisma.$queryRaw<Array<{ value: string; lines: number }>>`
+      SELECT l."lotNo" AS value, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l WHERE l."lotNo" IS NOT NULL GROUP BY 1 ORDER BY 1`,
+  ])
+  const plain = (rows: Array<{ value: string; lines: number }>): Opt[] => rows.map((r) => ({ value: r.value, label: r.value, lines: r.lines }))
+  res.json({
+    success: true,
+    data: {
+      item: items.map((i) => ({ value: i.id, label: i.name, sub: i.code, lines: i.lines })),
+      code: [...items].sort((a, b) => a.code.localeCompare(b.code)).map((i) => ({ value: i.id, label: i.code, sub: i.name, lines: i.lines })),
+      category: categories.map((c) => ({ value: c.id, label: c.name, lines: c.lines })),
+      style: plain(styles),
+      colour: plain(colours),
+      size: sizes.map((z) => ({ value: z.id, label: z.code, sub: z.run, lines: z.lines })),
+      process: processes.map((p) => ({ value: p.value, label: p.label, lines: p.lines })),
+      place: locations.map((w) => ({ value: w.id, label: w.name, lines: w.lines })),
+      order: plain(orders),
+      lot: plain(lots),
+    },
+  })
+})
+
+router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100))
-  const like = (v: string) => ({ contains: v, mode: 'insensitive' as const })
-  const where: Prisma.OpeningStockLineWhereInput = {
-    ...(group === 'WIP'
-      ? { departmentId: { not: null } }
-      : group === 'FINISHED'
-        ? { departmentId: null, item: { type: { in: FINISHED_KINDS } } }
-        : group === 'RAW'
-          ? { departmentId: null, item: { type: { notIn: FINISHED_KINDS } } }
-          : {}),
-    ...(place ? { warehouseId: place } : {}),
-    ...(entry ? { openingStockId: entry } : {}),
-    ...(q
-      ? {
-          OR: [
-            { orderNo: like(q) },
-            { styleText: like(q) },
-            { lotNo: like(q) },
-            { bundleNo: like(q) },
-            { colour: like(q) },
-            { remarks: like(q) },
-            { item: { OR: [{ code: like(q) }, { name: like(q) }, { style: { code: like(q) } }] } },
-            { openingStock: { number: like(q) } },
-          ],
-        }
-      : {}),
-  }
+  const where = openingLinesWhere(req.query as Record<string, unknown>)
   const [lines, total, filtered, kinds, places, ladder] = await Promise.all([
     prisma.openingStockLine.findMany({
       where,
