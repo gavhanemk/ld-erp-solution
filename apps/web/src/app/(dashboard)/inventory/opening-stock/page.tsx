@@ -1,6 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import {
   AlertCircle,
   Boxes,
@@ -23,8 +25,6 @@ import {
 import { api, ApiError, can } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { MultiFilter, type FilterOption } from '@/components/ui/MultiFilter'
-import { ImportOpeningStockDialog } from '@/components/inventory/ImportOpeningStockDialog'
-import { OpeningStockEntryDialog } from '@/components/inventory/OpeningStockEntryDialog'
 
 /*
  * Inventory → Stock → Opening Stock: what the mill had on the day it started
@@ -84,6 +84,8 @@ interface Entry {
   number: string
   fileName: string | null
   notes: string | null
+  /** FG, SFG or RM as entered; none for the 19-column sheet, which holds all three. */
+  kind: 'FG' | 'SFG' | 'RM' | null
   createdAt: string
   createdBy: { name: string } | null
   lines: number
@@ -91,7 +93,7 @@ interface Entry {
   openingDate: string | null
 }
 
-type Kind = 'RAW' | 'WIP' | 'FINISHED'
+type Kind = 'FG' | 'SFG' | 'RM'
 type FilterKey = 'item' | 'code' | 'category' | 'style' | 'colour' | 'size' | 'process' | 'place' | 'order' | 'lot'
 type Options = Record<FilterKey, FilterOption[]>
 interface Dates {
@@ -102,9 +104,9 @@ interface Dates {
 
 const TILES: Array<{ key: Kind | ''; label: string; icon: typeof Package; note: string }> = [
   { key: '', label: 'All', icon: LayoutGrid, note: 'Every line' },
-  { key: 'RAW', label: 'Raw Materials', icon: Package, note: 'In the stores' },
-  { key: 'WIP', label: 'Work in Progress', icon: Factory, note: 'At the processes' },
-  { key: 'FINISHED', label: 'Finished Goods', icon: Shirt, note: 'Ready, by size' },
+  { key: 'FG', label: 'Finished Goods', icon: Shirt, note: 'Ready, by size' },
+  { key: 'SFG', label: 'Semi Finished Goods', icon: Factory, note: 'At the processes' },
+  { key: 'RM', label: 'Raw Materials', icon: Package, note: 'In the stores' },
 ]
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: 'item', label: 'Item Name' },
@@ -192,7 +194,18 @@ const PIN = {
   name: 'sticky left-64 w-60 min-w-60 max-w-60 shadow-[1px_0_0_hsl(var(--border))]',
 }
 
+const KIND_NAME: Record<Kind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
+
 export default function OpeningStockPage() {
+  return (
+    <Suspense fallback={null}>
+      <OpeningStock />
+    </Suspense>
+  )
+}
+
+function OpeningStock() {
+  const params = useSearchParams()
   const [view, setView] = useState<'lines' | 'entries'>('lines')
   const [kind, setKind] = useState<Kind | ''>('')
   const [entry, setEntry] = useState<Entry | null>(null)
@@ -207,8 +220,6 @@ export default function OpeningStockPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [adding, setAdding] = useState(false)
-  const [importing, setImporting] = useState(false)
   const mayAdd = can('inventory', 'create')
 
   useEffect(() => {
@@ -243,15 +254,18 @@ export default function OpeningStockPage() {
       setLoading(false)
     }
   }, [query])
+  const wanted = params.get('entry')
   const loadLists = useCallback(async () => {
     try {
       const [e, o] = await Promise.all([api.get<{ data: Entry[] }>('/inventory/opening-stock'), api.get<{ data: Options }>('/inventory/opening-stock/filters')])
       setEntries(e.data)
       setOptions(o.data)
+      const asked = wanted ? e.data.find((x) => x.id === wanted) : undefined
+      if (asked) setEntry((cur) => cur ?? asked)
     } catch {
       // The lines say what went wrong.
     }
-  }, [])
+  }, [wanted])
   useEffect(() => {
     void load()
   }, [load])
@@ -315,12 +329,12 @@ export default function OpeningStockPage() {
           </button>
           {mayAdd && (
             <>
-              <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
+              <Link href="/inventory/opening-stock/import" className="btn-secondary">
                 <Upload size={16} /> Import from Excel
-              </button>
-              <button type="button" className="btn-primary" onClick={() => setAdding(true)} data-hotkey="new" aria-keyshortcuts="Alt+N">
+              </Link>
+              <Link href="/inventory/opening-stock/new" className="btn-primary" data-hotkey="new" aria-keyshortcuts="Alt+N">
                 <PackagePlus size={16} /> Add Opening Stock
-              </button>
+              </Link>
             </>
           )}
         </div>
@@ -346,16 +360,16 @@ export default function OpeningStockPage() {
           <WayIn
             icon={PackagePlus}
             title="Add by hand"
-            text="Pick where it is (a store, or a process such as Cutting), then a style: enter the pieces of each colour and size, with a rate. Or add fabric, trims and packing item by item, with their lot and roll."
+            text="Pick what you are entering — Finished Goods, Semi Finished Goods or Raw Materials — and the screen leads you: a style to its colours and sizes (and, at a process, its route), a category to its items, lots and rolls."
             action="Add Opening Stock"
-            onClick={mayAdd ? () => setAdding(true) : undefined}
+            href={mayAdd ? '/inventory/opening-stock/new' : undefined}
           />
           <WayIn
             icon={FileSpreadsheet}
             title="Import from Excel"
-            text="Download the template — your 19 columns, Opening Date to Remarks — fill it in, upload it. Every row is checked first; nothing goes in until every row is right."
+            text="A template for each kind (or your 19-column sheet): fill it in, upload it. Every row is checked against the masters first, with an error report to fix; nothing goes in until every row is right."
             action="Import from Excel"
-            onClick={mayAdd ? () => setImporting(true) : undefined}
+            href={mayAdd ? '/inventory/opening-stock/import' : undefined}
           />
         </div>
       ) : (
@@ -383,7 +397,10 @@ export default function OpeningStockPage() {
                   <span className="min-w-0 flex-1">
                     <span className="flex items-baseline justify-between gap-2">
                       <span className={cn('truncate text-xs font-semibold', on ? 'text-primary' : 'text-muted-foreground')}>{t.label}</span>
-                      <span className="text-muted-foreground shrink-0 text-[11px]">{count(f.lines, 'line', 'lines')}</span>
+                      <span className="text-muted-foreground shrink-0 text-[11px]">
+                        {count(f.lines, 'line', 'lines')}
+                        {!t.key && entries ? ` · ${count(entries.length, 'entry', 'entries')}` : ''}
+                      </span>
                     </span>
                     <span className="text-foreground block text-base font-semibold tabular-nums">{money(f.value)}</span>
                   </span>
@@ -549,6 +566,7 @@ export default function OpeningStockPage() {
                   <tr className="text-muted-foreground bg-secondary text-left text-[11px] font-semibold uppercase tracking-wide">
                     <th className="px-4 py-2">Number</th>
                     <th className="px-2 py-2">Opening date</th>
+                    <th className="px-2 py-2">Kind</th>
                     <th className="px-2 py-2">How</th>
                     <th className="px-2 py-2 text-right">Lines</th>
                     <th className="px-2 py-2 text-right">Value</th>
@@ -561,6 +579,7 @@ export default function OpeningStockPage() {
                     <tr key={e.id} className="border-border hover:bg-secondary/40 cursor-pointer border-t" onClick={() => openEntry(e)} title="Show its lines">
                       <td className="px-4 py-2 font-mono text-xs font-semibold text-teal-400">{e.number}</td>
                       <td className="px-2 py-2">{day(e.openingDate)}</td>
+                      <td className="text-foreground px-2 py-2 text-xs">{e.kind ? KIND_NAME[e.kind] : e.fileName ? 'All kinds (19 columns)' : 'Mixed'}</td>
                       <td className="px-2 py-2">
                         <span className={e.fileName ? 'badge-info' : 'badge-neutral'}>{e.fileName ? 'Excel' : 'By hand'}</span>
                         {e.fileName && <span className="text-muted-foreground ml-2 text-xs">{e.fileName}</span>}
@@ -581,26 +600,6 @@ export default function OpeningStockPage() {
         </>
       )}
 
-      {adding && (
-        <OpeningStockEntryDialog
-          onClose={() => setAdding(false)}
-          onSaved={(message) => {
-            setAdding(false)
-            setNotice(message)
-            setEntry(null)
-            refresh()
-          }}
-        />
-      )}
-      {importing && (
-        <ImportOpeningStockDialog
-          onClose={() => setImporting(false)}
-          onImported={() => {
-            setEntry(null)
-            refresh()
-          }}
-        />
-      )}
     </div>
   )
 }
@@ -696,7 +695,7 @@ function DateFilter({ dates, onChange }: { dates: Dates; onChange: (d: Dates) =>
 }
 
 /** One way to bring opening stock in, as a card with its button. */
-function WayIn({ icon: Icon, title, text, action, onClick }: { icon: typeof Package; title: string; text: string; action: string; onClick?: () => void }) {
+function WayIn({ icon: Icon, title, text, action, href }: { icon: typeof Package; title: string; text: string; action: string; href?: string }) {
   return (
     <div className="glass-card flex flex-col gap-3 p-6">
       <span className="bg-primary/10 text-primary w-fit rounded-xl p-3">
@@ -704,10 +703,10 @@ function WayIn({ icon: Icon, title, text, action, onClick }: { icon: typeof Pack
       </span>
       <h2 className="text-foreground text-lg font-semibold">{title}</h2>
       <p className="text-muted-foreground flex-1 text-sm">{text}</p>
-      {onClick && (
-        <button type="button" className="btn-primary w-fit" onClick={onClick}>
+      {href && (
+        <Link href={href} className="btn-primary w-fit">
           {action}
-        </button>
+        </Link>
       )}
     </div>
   )

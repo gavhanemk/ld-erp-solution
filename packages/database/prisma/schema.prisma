@@ -2941,16 +2941,22 @@ model MaterialRequisitionLine {
   @@map("material_requisition_lines")
 }
 
-/// Opening stock brought in from the mill's 19-column sheet, one per upload,
-/// numbered OPS-2627-0001. Raw materials go into their store, work in progress
-/// onto its process's floor and finished goods into their store, size by size;
-/// each row is kept as typed beside what it was matched to, so every opening
-/// quantity traces back to its line on the sheet.
+/// Opening stock, one per save or upload, numbered OPS-2627-0001: entered by
+/// hand or from a sheet (the mill's 19-column one, or the Finished Goods, Semi
+/// Finished Goods or Raw Materials template). Raw materials go into their
+/// store, semi-finished goods onto their process's floor and finished goods
+/// into their store, size by size; each row is kept as typed beside what it
+/// was matched to, so every opening quantity traces back to its line.
 model OpeningStock {
   id          String   @id @default(cuid())
   number      String   @unique
   fileName    String?
   notes       String?
+  /// FG, SFG or RM as the entry was made; empty for the 19-column sheet, which holds all three.
+  kind        String?
+  /// The key the screen sends with a save: the same save sent again (a retry,
+  /// a second click, a refresh) finds this entry instead of posting twice.
+  requestKey  String?  @unique
   createdById String?
   createdBy   User?    @relation("OpeningStockCreatedBy", fields: [createdById], references: [id])
   createdAt   DateTime @default(now())

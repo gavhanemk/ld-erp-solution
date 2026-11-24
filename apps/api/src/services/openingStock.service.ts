@@ -9,6 +9,7 @@ import { recordMovement } from './stock.service'
 import { createPackages, packageRules, stickerDefaultsFrom } from './package.service'
 import { floorFor } from './processFloor.service'
 import { withGeneratedCode } from '../lib/masterCode'
+import { trackedRoutings } from './styleTrack.service'
 
 /*
  * Opening stock from the mill's own 19-column sheet, process by process.
@@ -31,6 +32,17 @@ const REFERENCE = 'OPENING_IMPORT'
 export type OsKey =
   | 'date' | 'process' | 'location' | 'order' | 'style' | 'code' | 'description' | 'category' | 'fabric'
   | 'colour' | 'size' | 'lot' | 'bundle' | 'uom' | 'qty' | 'rate' | 'value' | 'status' | 'remarks'
+  /** Only on the Semi Finished Goods template: checked against the process. */
+  | 'department'
+
+/**
+ * The three kinds opening stock is entered as, each with its own screen and
+ * template: finished garments in a store, semi-finished pieces at a process
+ * on their style's route, raw materials in a store. The 19-column sheet holds
+ * all three.
+ */
+export type OsKind = 'FG' | 'SFG' | 'RM'
+export const KIND_LABEL: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
 
 /** The sheet, exactly: these names, in this order (A to S). */
 export const OS_COLUMNS: SheetColumn<OsKey>[] = [
@@ -54,6 +66,49 @@ export const OS_COLUMNS: SheetColumn<OsKey>[] = [
   { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'OK, Hold, Rejected or B-Grade. Empty is OK.' },
   { key: 'remarks', head: 'Remarks', width: 28 },
 ]
+
+/** Each kind's template: only its own columns, in this order. */
+export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
+  FG: [
+    { key: 'style', head: 'Style / Article No.', width: 18, list: 'styles', note: 'The style, as in Masters → Styles.' },
+    { key: 'code', head: 'Item Code', width: 16, note: 'May be left empty: the style and colour find the item.' },
+    { key: 'colour', head: 'Colour', width: 14, note: "One of the style's colours." },
+    { key: 'size', head: 'Size', width: 8, note: "From the style's size run." },
+    { key: 'qty', head: 'Opening Quantity', width: 15, note: 'Pieces.' },
+    { key: 'rate', head: 'Rate Per Piece', width: 14 },
+    { key: 'location', head: 'Location', width: 22, list: 'stores', note: 'The finished goods store.' },
+    { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'OK, Hold, Rejected or B-Grade. Empty is OK.' },
+    { key: 'remarks', head: 'Remarks', width: 24 },
+  ],
+  SFG: [
+    { key: 'style', head: 'Style / Article No.', width: 18, list: 'styles', note: 'The style, as in Masters → Styles.' },
+    { key: 'process', head: 'Process', width: 16, list: 'processes', note: "Where the pieces are now: a process on the style's route." },
+    { key: 'colour', head: 'Colour', width: 14, note: "One of the style's colours." },
+    { key: 'size', head: 'Size', width: 8, note: "From the style's size run." },
+    { key: 'qty', head: 'Opening Quantity', width: 15, note: 'Pieces.' },
+    { key: 'rate', head: 'Rate / Valuation', width: 15, note: 'What one piece is valued at, at this stage.' },
+    { key: 'department', head: 'Department', width: 16, list: 'processes', note: 'May be left empty: the process says it.' },
+    { key: 'location', head: 'Location', width: 22, list: 'locations', note: "Empty puts the pieces on the process's own floor; name an outside unit when they are there." },
+    { key: 'order', head: 'Order Reference', width: 16, note: 'Optional: SO, MO or old order number.' },
+    { key: 'bundle', head: 'Batch / Bundle Reference', width: 20, note: 'Optional.' },
+    { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'OK, Hold, Rejected or B-Grade. Empty is OK.' },
+    { key: 'remarks', head: 'Remarks', width: 24 },
+  ],
+  RM: [
+    { key: 'category', head: 'Material Category', width: 18, list: 'materials', note: "Checked against the item's category." },
+    { key: 'code', head: 'Item Code', width: 16, note: 'The item code in Items & Products.' },
+    { key: 'description', head: 'Item Name', width: 28, note: 'May be left empty when the code is given.' },
+    { key: 'lot', head: 'Lot / Batch / Roll Number', width: 20 },
+    { key: 'bundle', head: 'Bundle / Barcode Number', width: 20 },
+    { key: 'uom', head: 'UOM', width: 8, list: 'units', note: "The item's own unit: checked, never converted." },
+    { key: 'qty', head: 'Opening Quantity', width: 15 },
+    { key: 'rate', head: 'Unit Rate', width: 12 },
+    { key: 'location', head: 'Location', width: 22, list: 'stores', note: 'The store it is in.' },
+    { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'OK, Hold or Rejected. Empty is OK.' },
+    { key: 'remarks', head: 'Remarks', width: 24 },
+  ],
+}
+const TYPE_SHEET: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
 
 type Raw = Partial<Record<OsKey, string>>
 export type OsStatus = 'OK' | 'HOLD' | 'REJECTED' | 'B_GRADE'
@@ -189,15 +244,78 @@ async function loadMasters() {
       where: { isActive: true },
       select: { id: true, name: true, code: true, operations: { where: { isActive: true }, select: { id: true }, take: 1 } },
     }),
-    prisma.style.findMany({ select: { id: true, code: true, name: true, sizeGroupId: true } }),
+    prisma.style.findMany({ select: { id: true, code: true, name: true, sizeGroupId: true, category: true, isActive: true } }),
     prisma.size.findMany({ select: { id: true, code: true, label: true, sizeGroupId: true } }),
     prisma.uOM.findMany({ where: { isActive: true }, select: { symbol: true } }),
   ])
   return { items, warehouses, departments, styles, sizes, units }
 }
 
-/** The template: the 19 columns in their order, dropdowns from the masters, and how to fill it. */
-export async function buildTemplate(): Promise<Buffer> {
+const HOW_TO: Record<OsKind, string[]> = {
+  FG: [
+    'One row per style, colour and size. Style / Article No. and Colour find the finished item; Item Code may be left empty.',
+    "Only the style's own colours and sizes are taken (Masters → Styles).",
+    'Opening Quantity is in pieces; Rate Per Piece is what one piece is valued at.',
+    'Location: the finished goods store, as in Masters → Warehouses. Pieces still at a process are semi-finished: use the Semi Finished Goods template.',
+    'Stock Status: OK, Hold, Rejected or B-Grade (second quality). Empty is OK.',
+  ],
+  SFG: [
+    'One row per style, process, colour and size.',
+    "Process: where the pieces are now — one of the processes on the style's route (Masters → Routings).",
+    'Department may be left empty: the process says where the work is done.',
+    "Location may be left empty: the pieces go on the process's own floor. Name an outside unit when they are there.",
+    'Order Reference and Batch / Bundle Reference are optional and kept on every line.',
+    'Pieces of an order already on the Production Floor are counted there, so they are not opening stock.',
+    'Stock Status: OK, Hold, Rejected or B-Grade. Empty is OK.',
+  ],
+  RM: [
+    'One row per item and lot or roll: the same item may come in many rows.',
+    "Material Category is checked against the item's category (Fabric, Thread, Buttons…).",
+    'Item Code must be in Items & Products; Item Name may be left empty.',
+    "UOM is the item's own unit: checked, never converted, so give the quantity in it.",
+    'Location: the store it is in, as in Masters → Warehouses.',
+    'A sticker is made for each lot or roll where the category is tracked.',
+    'Stock Status: OK, Hold or Rejected. Empty is OK.',
+  ],
+}
+
+/**
+ * A kind's template: its own columns, dropdowns from the masters, and how to
+ * fill it. The opening date is picked on the screen for the whole sheet.
+ */
+async function buildKindTemplate(kind: OsKind): Promise<Buffer> {
+  const m = await loadMasters()
+  const columns = TYPE_COLUMNS[kind]
+  const wb = new ExcelJS.Workbook()
+  const sheet = addTemplateSheet(wb, TYPE_SHEET[kind], columns)
+  const materials = await prisma.itemCategory.findMany({
+    where: { isActive: true, itemGroup: 'RAW_MATERIALS', parentId: { not: null } },
+    select: { name: true },
+    orderBy: { name: 'asc' },
+  })
+  const all: Record<string, string[]> = {
+    styles: m.styles.filter((st) => st.isActive).map((st) => st.code).sort(),
+    processes: m.departments.filter((d) => d.operations.length > 0).map((d) => d.name).sort(),
+    stores: m.warehouses.filter((w) => !w.departmentId).map((w) => w.name).sort(),
+    locations: m.warehouses.map((w) => w.name).sort(),
+    materials: materials.map((c) => c.name),
+    units: m.units.map((u) => u.symbol).sort(),
+    statuses: kind === 'RM' ? ['OK', 'Hold', 'Rejected'] : Object.values(STATUS_LABEL),
+  }
+  const used = new Set(columns.map((c) => c.list).filter(Boolean) as string[])
+  addDropdowns(wb, sheet, columns, Object.fromEntries(Object.entries(all).filter(([k]) => used.has(k))), MAX_ROWS)
+  addHowToSheet(wb, [
+    ...HOW_TO[kind],
+    'The opening date is picked on the screen when the sheet is uploaded: one date for the whole sheet.',
+    'Nothing is brought in twice: a row matching an earlier entry, or stock already moving in the ERP at that place, is refused. Correct those with a stock count.',
+    `Up to ${MAX_ROWS} rows per upload; a bigger stock can go in several uploads.`,
+  ])
+  return Buffer.from(await wb.xlsx.writeBuffer())
+}
+
+/** The template: a kind's own, or the 19 columns in their order with dropdowns from the masters, and how to fill it. */
+export async function buildTemplate(kind?: OsKind): Promise<Buffer> {
+  if (kind) return buildKindTemplate(kind)
   const m = await loadMasters()
   const processes = m.departments.filter((d) => d.operations.length > 0).map((d) => d.name).sort()
   const wb = new ExcelJS.Workbook()
@@ -230,22 +348,41 @@ export async function buildTemplate(): Promise<Buffer> {
   return Buffer.from(await wb.xlsx.writeBuffer())
 }
 
-export function readSheet(file: Buffer, fileName: string) {
+export function readSheet(file: Buffer, fileName: string, kind?: OsKind) {
   return readSheetRows<OsKey>(file, fileName, {
-    columns: OS_COLUMNS,
-    sheetName: 'Opening Stock',
+    columns: kind ? TYPE_COLUMNS[kind] : OS_COLUMNS,
+    sheetName: kind ? TYPE_SHEET[kind] : 'Opening Stock',
     mustHave: 'qty',
-    mustHaveLabel: 'Opening Qty',
+    mustHaveLabel: kind ? 'Opening Quantity' : 'Opening Qty',
     maxRows: MAX_ROWS,
   })
 }
+
+/**
+ * A kind's sheet as the 19 columns: the date picked on the screen on every
+ * row, and the process its kind means — finished goods are in a store, raw
+ * materials in a store; semi-finished rows say their process themselves.
+ */
+export function asNineteen(rows: Array<{ row: number; raw: Raw }>, kind: OsKind, openingDate: string) {
+  for (const r of rows) {
+    if (Object.values(r.raw).every((v) => !(v ?? '').trim())) continue
+    r.raw.date = openingDate
+    if (kind === 'FG') r.raw.process = 'Finished Goods'
+    if (kind === 'RM') r.raw.process = 'Store'
+  }
+  return rows
+}
+
+/** The column names problems are told in: the kind's own template, or the 19 columns. */
+export const labelsOf = (kind?: OsKind): Partial<Record<OsKey, string>> =>
+  Object.fromEntries((kind ? TYPE_COLUMNS[kind] : OS_COLUMNS).map((c) => [c.key, c.head]))
 
 /**
  * Lines entered by hand on the screen, as sheet rows: the same columns, so
  * they are checked and brought in exactly as an uploaded sheet is.
  */
 export function rowsFromEntry(lines: Array<Record<string, unknown>>): Array<{ row: number; raw: Raw }> {
-  const keys = OS_COLUMNS.map((c) => c.key)
+  const keys: OsKey[] = [...OS_COLUMNS.map((c) => c.key), 'department']
   return lines.map((l, i) => ({
     row: i + 1,
     raw: Object.fromEntries(
@@ -254,9 +391,51 @@ export function rowsFromEntry(lines: Array<Record<string, unknown>>): Array<{ ro
   }))
 }
 
-/** Every row checked; nothing written. Lines entered by hand are called lines, not rows. */
-export async function planImport(rows: Array<{ row: number; raw: Raw }>, opts: { rowWord?: 'row' | 'line' } = {}): Promise<Resolved[]> {
+/**
+ * Every row checked; nothing written. Lines entered by hand are called lines,
+ * not rows. Given a kind, its own rules too: finished goods only in a store,
+ * semi-finished pieces only at a process on their style's route, raw
+ * materials only in a store. Problems name the columns as the kind's
+ * template (or the screen) does.
+ */
+export async function planImport(
+  rows: Array<{ row: number; raw: Raw }>,
+  opts: { rowWord?: 'row' | 'line'; kind?: OsKind; labels?: Partial<Record<OsKey, string>> } = {},
+): Promise<Resolved[]> {
   const m = await loadMasters()
+  const L = (k: OsKey) => opts.labels?.[k] ?? OS_COLUMNS.find((c) => c.key === k)?.head ?? k
+  // Only the 19-column sheet has an Opening Value column.
+  const hasValue = !opts.kind && opts.rowWord !== 'line'
+  const departmentById = new Map(m.departments.map((d) => [d.id, d]))
+  const styleById = new Map(m.styles.map((st) => [st.id, st]))
+  // Each style's route, as an order's stages are offered: its own, its category's, any style's.
+  const tracked = await trackedRoutings(prisma, m.styles.map((st) => ({ id: st.id, category: st.category })))
+  const routeOf = (styleId: string) => {
+    const t = tracked.get(styleId)
+    if (!t) return null
+    const seen = new Map<string, string>()
+    for (const step of t.routing.steps) if (!seen.has(step.departmentId)) seen.set(step.departmentId, step.department.name)
+    return [...seen.entries()].map(([id, name]) => ({ id, name }))
+  }
+  // Orders whose pieces are already on the Production Floor: counted there, not as opening stock.
+  const orders = [...new Set(rows.map((r) => (r.raw.order ?? '').trim()).filter(Boolean))]
+  const onFloor = new Map<string, string>()
+  if (orders.length) {
+    const mos = await prisma.manufacturingOrder.findMany({
+      where: {
+        bundles: { some: {} },
+        OR: orders.flatMap((o) => [
+          { moNumber: { equals: o, mode: 'insensitive' as const } },
+          { so: { soNumber: { equals: o, mode: 'insensitive' as const } } },
+        ]),
+      },
+      select: { moNumber: true, so: { select: { soNumber: true } } },
+    })
+    for (const mo of mos) {
+      onFloor.set(squash(mo.moNumber), mo.moNumber)
+      if (mo.so) onFloor.set(squash(mo.so.soNumber), onFloor.has(squash(mo.so.soNumber)) ? `${onFloor.get(squash(mo.so.soNumber))}, ${mo.moNumber}` : mo.moNumber)
+    }
+  }
   const processByName = new Map<string, (typeof m.departments)[number]>()
   for (const d of m.departments) {
     processByName.set(squash(d.name), d)
@@ -308,9 +487,9 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>, opts: {
 
     // Opening Date.
     const date = parseDay(raw.date)
-    if (date === null) problems.push('Opening Date is empty.')
-    else if (date === 'bad') problems.push(`Opening Date "${raw.date}" is not a date: write it as 31-03-2026.`)
-    else if (date.getTime() >= endOfToday) problems.push(`Opening Date ${dmy(date)} is later than today.`)
+    if (date === null) problems.push(`${L('date')} is empty.`)
+    else if (date === 'bad') problems.push(`${L('date')} "${raw.date}" is not a date: write it as 31-03-2026.`)
+    else if (date.getTime() >= endOfToday) problems.push(`${L('date')} ${dmy(date)} is later than today.`)
 
     // Process: a store, finished goods in a store, or one of the processes.
     const procText = squash(raw.process)
@@ -329,6 +508,11 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>, opts: {
         process = d
         plan.process = d.name
       }
+    }
+    // Semi-finished pieces are at a process; the Department column, if given, is that process.
+    if (opts.kind === 'SFG' && kind && kind !== 'PROCESS') problems.push(`Semi-finished pieces are at a process: give the ${L('process')} (Cutting, Stitching…).`)
+    if ((raw.department ?? '').trim() && process && ![squash(process.name), squash(process.code)].includes(squash(raw.department))) {
+      problems.push(`${L('department')} "${raw.department}" is not where ${process.name} is done: leave it empty or give ${process.name}.`)
     }
 
     // Department / Location: where it lies.
@@ -354,7 +538,9 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>, opts: {
         }
       } else {
         const w = warehouseByName.get(locText)
-        if (w) {
+        if (w && w.departmentId && w.departmentId !== process.id) {
+          problems.push(`${w.name} is ${departmentById.get(w.departmentId)?.name ?? 'another process'}'s floor, not ${process.name}'s. Leave ${L('location')} empty for ${process.name}'s own floor.`)
+        } else if (w) {
           warehouseId = w.id
           plan.location = w.name
         } else {
@@ -362,10 +548,12 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>, opts: {
         }
       }
     } else if (kind) {
-      if (!locText) problems.push('Department / Location is empty: name the store it is in.')
+      if (!locText) problems.push(`${L('location')} is empty: name the store it is in.`)
       else {
         const w = warehouseByName.get(locText)
-        if (w) {
+        if (w && w.departmentId) {
+          problems.push(`${w.name} is a process's floor, not a store. Pieces still at a process are semi-finished goods; give the store the stock is in.`)
+        } else if (w) {
           warehouseId = w.id
           plan.location = w.name
         } else problems.push(`No store named "${raw.location}". Use one in Masters → Warehouses.`)
@@ -386,7 +574,8 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>, opts: {
       if (named.length === 1) item = named[0]
       else if (named.length > 1) problems.push(`"${raw.description}" is the name of ${named.length} items: give the Item Code.`)
       else problems.push(`No item named "${raw.description}": give the Item Code.`)
-    } else problems.push('Item Code is empty.')
+    } else problems.push(`${L('code')} is empty.`)
+    if (opts.kind === 'SFG' && !style && !item?.styleId) problems.push(`Give the ${L('style')}: semi-finished pieces are entered style by style.`)
 
     let sizeId: string | null = null
     if (item) {
@@ -397,8 +586,24 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>, opts: {
       plan.unit = item.uom?.symbol ?? null
       if (!item.category?.isActive) problems.push(`${item.code} is filed under ${item.category?.name}, which is switched off.`)
 
-      // Finished Goods rows hold finished goods.
+      // Finished Goods rows hold finished goods; each kind holds its own.
       if (kind === 'FG' && group !== 'FINISHED_GOODS') problems.push(`A Finished Goods row, but ${item.code} is ${ITEM_GROUP_LABEL[group].toLowerCase()}.`)
+      if (opts.kind === 'RM' && group !== 'RAW_MATERIALS') {
+        problems.push(`${item.code} is ${ITEM_GROUP_LABEL[group].toLowerCase()}, not a raw material: enter it under ${group === 'FINISHED_GOODS' ? 'Finished Goods' : 'Semi Finished Goods'}.`)
+      }
+      if (opts.kind === 'SFG' && group === 'RAW_MATERIALS') problems.push(`${item.code} is a raw material: enter it under Raw Materials.`)
+
+      // A garment at a process: on its style's route, and not an order already on the Production Floor.
+      const routeStyle = item.styleId ? styleById.get(item.styleId) : style
+      if (kind === 'PROCESS' && process && group !== 'RAW_MATERIALS') {
+        if (routeStyle) {
+          const route = routeOf(routeStyle.id)
+          if (!route) problems.push(`${routeStyle.code} has no route yet, so where its pieces can be is not known. Set one in Masters → Routings, then enter its semi-finished stock.`)
+          else if (!route.some((d) => d.id === process!.id)) problems.push(`${process.name} is not on ${routeStyle.code}'s route (${route.map((d) => d.name).join(' → ')}).`)
+        }
+        const mo = plan.order ? onFloor.get(squash(plan.order)) : undefined
+        if (mo) problems.push(`${plan.order} is already on the Production Floor (${mo}): its pieces are counted there, not as opening stock.`)
+      }
 
       // Category, as the sheet says it.
       const cat = stem(raw.category)
@@ -447,13 +652,13 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>, opts: {
 
       // Quantity, in the places the item allows.
       const qty = parseNum(raw.qty)
-      if (qty === null) problems.push('Opening Qty is empty.')
-      else if (Number.isNaN(qty)) problems.push(`Opening Qty "${raw.qty}" is not a number.`)
-      else if (!(qty > 0)) problems.push('Opening Qty has to be more than nought.')
+      if (qty === null) problems.push(`${L('qty')} is empty.`)
+      else if (Number.isNaN(qty)) problems.push(`${L('qty')} "${raw.qty}" is not a number.`)
+      else if (!(qty > 0)) problems.push(`${L('qty')} has to be more than nought.`)
       else {
         plan.qty = round3(qty)
         const places = qtyPlaces(item)
-        if (!fitsPlaces(qty, places)) problems.push(`Opening Qty ${qty}: ${placesMessage(places)}`)
+        if (!fitsPlaces(qty, places)) problems.push(`${L('qty')} ${qty}: ${placesMessage(places)}`)
       }
     } else {
       const qty = parseNum(raw.qty)
@@ -463,29 +668,29 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>, opts: {
     // Rate and value: either may be left out; given both, they must agree.
     const rate = parseNum(raw.rate)
     const value = parseNum(raw.value)
-    if (rate !== null && (Number.isNaN(rate) || rate < 0)) problems.push(`Unit Rate "${raw.rate}" is not a rate.`)
-    if (value !== null && (Number.isNaN(value) || value < 0)) problems.push(`Opening Value "${raw.value}" is not an amount.`)
+    if (rate !== null && (Number.isNaN(rate) || rate < 0)) problems.push(`${L('rate')} "${raw.rate}" is not a rate.`)
+    if (value !== null && (Number.isNaN(value) || value < 0)) problems.push(`${L('value')} "${raw.value}" is not an amount.`)
     if (plan.qty && plan.qty > 0) {
       if (rate !== null && !Number.isNaN(rate) && rate >= 0) {
         plan.rate = round2(rate)
         plan.value = round2(plan.qty * rate)
         if (value !== null && !Number.isNaN(value) && Math.abs(plan.qty * rate - value) > Math.max(1, value * 0.005)) {
-          problems.push(`${plan.qty} × ₹${rate} is ₹${round2(plan.qty * rate)}, but Opening Value says ₹${value}.`)
+          problems.push(`${plan.qty} × ₹${rate} is ₹${round2(plan.qty * rate)}, but ${L('value')} says ₹${value}.`)
         }
       } else if (value !== null && !Number.isNaN(value) && value >= 0) {
         plan.rate = round2(value / plan.qty)
         plan.value = round2(value)
-      } else if (rate === null && value === null) problems.push('Give the Unit Rate or the Opening Value.')
+      } else if (rate === null && value === null) problems.push(hasValue ? `Give the ${L('rate')} or the ${L('value')}.` : `Give the ${L('rate')}.`)
     }
 
     // Stock Status.
     const statusText = squash(raw.status)
     const status = (Object.keys(STATUS_WORDS) as OsStatus[]).find((s) => STATUS_WORDS[s].includes(statusText)) ?? null
-    if (!status) problems.push(`Stock Status "${raw.status}" is not one of: OK, Hold, Rejected, B-Grade.`)
+    if (!status) problems.push(`${L('status')} "${raw.status}" is not one of: OK, Hold, Rejected, B-Grade.`)
     else {
       plan.status = STATUS_LABEL[status]
       if (status === 'B_GRADE' && plan.group === 'RAW_MATERIALS') problems.push('B-Grade is for semi-finished and finished goods, not raw materials.')
-      if (status === 'OK' && plan.rate === 0) problems.push('Unit Rate is nought: give the rate the stock is valued at.')
+      if (status === 'OK' && plan.rate === 0) problems.push(`${L('rate')} is nought: give the rate the stock is valued at.`)
     }
 
     const ready =
@@ -636,8 +841,23 @@ export function summarise(resolved: Resolved[]) {
 }
 
 /** Posts every row, in one transaction: stock in, floors made, stickers made, the sheet kept. */
+/**
+ * The entry a save was sent with, when it has already gone in: a retry, a
+ * second click or a refresh finds it instead of posting the stock twice.
+ */
+export async function savedFor(requestKey: string | null | undefined) {
+  if (!requestKey) return null
+  const doc = await prisma.openingStock.findUnique({ where: { requestKey }, select: { id: true, number: true, _count: { select: { lines: true } } } })
+  if (!doc) return null
+  const stickers = await prisma.stockPackage.count({ where: { sourceId: doc.id } })
+  return { id: doc.id, number: doc.number, lines: doc._count.lines, stickers, floorsMade: [] as string[], again: true }
+}
+
 /** Brought in, all or nothing. No file name: entered by hand on the screen. */
-export async function runImport(resolved: Resolved[], opts: { fileName: string | null; notes?: string | null; userId: string | null }) {
+export async function runImport(
+  resolved: Resolved[],
+  opts: { fileName: string | null; notes?: string | null; userId: string | null; kind?: OsKind | null; requestKey?: string | null },
+) {
   const byHand = !opts.fileName
   if (resolved.some((r) => r.plan.problems.length > 0)) {
     throw new AppError(
@@ -649,11 +869,24 @@ export async function runImport(resolved: Resolved[], opts: { fileName: string |
   const rows = resolved.filter((r) => r.ready)
   if (!rows.length) throw new AppError(byHand ? 'Nothing to save: enter a quantity on at least one line.' : 'The sheet has no rows to bring in.', 400, 'NOTHING_TO_IMPORT')
 
+  try {
+    return await postImport(rows, opts, byHand)
+  } catch (err) {
+    // Sent twice at once: the other one went in first.
+    const again = (err as { code?: string }).code === 'P2002' ? await savedFor(opts.requestKey) : null
+    if (again) return again
+    throw err
+  }
+}
+
+async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1], byHand: boolean) {
   return prisma.$transaction(
     async (tx) => {
       const latest = rows.reduce((d, r) => (r.ready!.date > d ? r.ready!.date : d), rows[0].ready!.date)
       const number = await nextDocumentNumber(tx, 'OPS', latest)
-      const doc = await tx.openingStock.create({ data: { number, fileName: opts.fileName, notes: opts.notes?.trim() || null, createdById: opts.userId } })
+      const doc = await tx.openingStock.create({
+        data: { number, fileName: opts.fileName, notes: opts.notes?.trim() || null, kind: opts.kind ?? null, requestKey: opts.requestKey ?? null, createdById: opts.userId },
+      })
 
       // Floors for the processes that have none yet.
       const floors = new Map<string, string>()
@@ -830,4 +1063,53 @@ export async function colourItem(input: { styleId: string; colour: string; categ
     (data) => prisma.item.create({ data: data as never, select: pick }),
   )
   return { item, made: true as const }
+}
+
+/**
+ * Which template a workbook is, by its sheet's name: a kind's own, the
+ * 19-column sheet ('ALL'), or not known (a .csv, a sheet renamed).
+ */
+export async function templateOf(file: Buffer, fileName: string): Promise<OsKind | 'ALL' | null> {
+  if (/\.csv$/i.test(fileName)) return null
+  const wb = new ExcelJS.Workbook()
+  try {
+    await wb.xlsx.load(file as unknown as ExcelJS.Buffer)
+  } catch {
+    return null
+  }
+  const names = wb.worksheets.map((w) => w.name)
+  const kind = (Object.keys(TYPE_SHEET) as OsKind[]).find((k) => names.includes(TYPE_SHEET[k]))
+  return kind ?? (names.includes('Opening Stock') ? 'ALL' : null)
+}
+
+/**
+ * The sheet as it was uploaded, with a Problems column: each row's problems
+ * beside it and those rows shaded, on the same row numbers. Put right, it
+ * goes back up as it is — the Problems column is passed over.
+ */
+export async function errorReport(rows: Array<{ row: number; raw: Raw }>, resolved: Resolved[], kind?: OsKind): Promise<Buffer> {
+  const columns = kind ? TYPE_COLUMNS[kind] : OS_COLUMNS
+  const wb = new ExcelJS.Workbook()
+  const sheet = addTemplateSheet(wb, kind ? TYPE_SHEET[kind] : 'Opening Stock', [...columns, { key: 'problems', head: 'Problems', width: 80 }])
+  const problemsAt = new Map(resolved.map((r) => [r.plan.row, r.plan.problems]))
+  const shade = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFDE2E1' } }
+  for (const r of rows) {
+    const line = sheet.getRow(r.row)
+    columns.forEach((c, i) => {
+      const v = r.raw[c.key]
+      if (v !== undefined && v !== '') line.getCell(i + 1).value = v
+    })
+    const problems = problemsAt.get(r.row) ?? []
+    if (problems.length) {
+      line.getCell(columns.length + 1).value = problems.join(' · ')
+      for (let i = 1; i <= columns.length + 1; i++) line.getCell(i).fill = shade
+    }
+  }
+  const bad = resolved.filter((r) => r.plan.problems.length).length
+  addHowToSheet(wb, [
+    `${bad} ${bad === 1 ? 'row has' : 'rows have'} problems, shaded, with what is wrong in the Problems column.`,
+    'Put each one right in this sheet (or take the row out), save it, and upload it again: the Problems column is passed over.',
+    'Nothing is brought in until every row is right.',
+  ])
+  return Buffer.from(await wb.xlsx.writeBuffer())
 }

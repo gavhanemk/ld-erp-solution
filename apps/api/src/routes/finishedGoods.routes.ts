@@ -155,7 +155,8 @@ router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
       ...(ownerCustomerId ? { ownership: 'CUSTOMER_OWNED', ownerCustomerId } : { ownership: 'OWNED' }),
       item: { type: 'FINISHED_GOOD' },
       ...(ids.length ? { itemId: { in: ids } } : {}),
-      ...(warehouseId ? { warehouseId } : {}),
+      // A process's floor holds pieces still being made, not packed stock.
+      ...(warehouseId ? { warehouseId } : { warehouse: { departmentId: null } }),
     },
     _sum: { inQty: true, outQty: true },
   })

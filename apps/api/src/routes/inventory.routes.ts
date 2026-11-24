@@ -30,6 +30,7 @@ import * as customerMaterialImport from '../services/customerMaterialImport.serv
 import * as openingStock from '../services/openingStock.service'
 import * as processStock from '../services/processStock.service'
 import { floorFor, processLadder } from '../services/processFloor.service'
+import { trackedRoutings } from '../services/styleTrack.service'
 import { z as zod } from 'zod'
 import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
@@ -5324,23 +5325,62 @@ router.patch(
  * Opening stock from the mill's 19-column sheet: the template, then check and
  * import (all or nothing), and the uploads with their lines.
  */
-router.get('/opening-stock/import-template', requirePermission(MODULE, 'create'), async (_req, res) => {
-  const buffer = await openingStock.buildTemplate()
+/** A kind: Finished Goods, Semi Finished Goods or Raw Materials; none is the 19-column sheet. */
+const osKind = zod.enum(['FG', 'SFG', 'RM'])
+const kindOf = (v: unknown) => (osKind.safeParse(v).success ? (v as openingStock.OsKind) : undefined)
+
+router.get('/opening-stock/import-template', requirePermission(MODULE, 'create'), async (req, res) => {
+  const kind = kindOf(req.query.type)
+  const buffer = await openingStock.buildTemplate(kind)
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-  res.setHeader('Content-Disposition', 'attachment; filename="opening-stock-template.xlsx"')
+  res.setHeader('Content-Disposition', `attachment; filename="opening-stock-${kind ? kind.toLowerCase() : 'all'}-template.xlsx"`)
   res.send(buffer)
 })
 
+/*
+ * A sheet: checked (nothing written), or with confirm brought in. A kind's
+ * sheet takes its opening date from the screen. A save sent again with the
+ * same key finds what it posted instead of posting twice.
+ */
+/** The template uploaded is the one for the kind picked: else say which it is. */
+async function sheetIsFor(body: { file: string; fileName: string; kind?: openingStock.OsKind }) {
+  const is = await openingStock.templateOf(Buffer.from(body.file, 'base64'), body.fileName)
+  const want = body.kind ?? 'ALL'
+  if (!is || is === want) return
+  const name = (k: openingStock.OsKind | 'ALL') => (k === 'ALL' ? 'the 19-column opening stock sheet' : `the ${openingStock.KIND_LABEL[k]} template`)
+  throw new AppError(`This file is ${name(is)}, but ${name(want)} was picked. Pick ${is === 'ALL' ? 'All in one sheet' : openingStock.KIND_LABEL[is]}, or download ${name(want)}.`, 400, 'WRONG_TEMPLATE')
+}
+
+const openingImportBody = customerMaterialImport.importBody.extend({
+  kind: osKind.optional(),
+  openingDate: zod.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Pick the opening date').optional(),
+  requestKey: zod.string().min(8).max(100).optional(),
+})
+async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
+  await sheetIsFor(body)
+  const rows = await openingStock.readSheet(Buffer.from(body.file, 'base64'), body.fileName, body.kind)
+  if (body.kind) {
+    if (!body.openingDate) throw new AppError('Pick the opening date for the sheet.', 400, 'NEEDS_DATE')
+    openingStock.asNineteen(rows, body.kind, body.openingDate)
+  }
+  return openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind) })
+}
+
 router.post('/opening-stock/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const { fileName, file, confirm } = customerMaterialImport.importBody.parse(req.body)
-  const rows = await openingStock.readSheet(Buffer.from(file, 'base64'), fileName)
-  const resolved = await openingStock.planImport(rows)
+  const body = openingImportBody.parse(req.body)
+  const { fileName, confirm } = body
+  const again = confirm ? await openingStock.savedFor(body.requestKey) : null
+  if (again) {
+    res.json({ success: true, message: `${again.number}: already brought in — nothing posted twice.`, data: again })
+    return
+  }
+  const resolved = await readOpeningSheet(body)
   const summary = openingStock.summarise(resolved)
   if (!confirm) {
     res.json({ success: true, data: { summary, rows: resolved.map((r) => r.plan) } })
     return
   }
-  const done = await openingStock.runImport(resolved, { fileName, userId: req.user?.id ?? null })
+  const done = await openingStock.runImport(resolved, { fileName, userId: req.user?.id ?? null, kind: body.kind ?? null, requestKey: body.requestKey ?? null })
   await writeAuditLog(req, {
     module: MODULE,
     action: 'CREATE',
@@ -5358,13 +5398,35 @@ router.post('/opening-stock/import', requirePermission(MODULE, 'create'), async 
 })
 
 /*
- * What the hand-entry window offers: the processes in floor order (with their
- * floor if made), the stores, every style with its colours, each colour's
- * finished item and its size run, and the items without a style (fabric,
- * trims, packing…) with their unit.
+ * The sheet back as it came, with a Problems column: each row's problems
+ * beside it, those rows shaded, so it can be put right and uploaded again.
+ */
+router.post('/opening-stock/import/report', requirePermission(MODULE, 'create'), async (req, res) => {
+  const body = openingImportBody.parse(req.body)
+  await sheetIsFor(body)
+  const rows = await openingStock.readSheet(Buffer.from(body.file, 'base64'), body.fileName, body.kind)
+  const raw = rows.map((r) => ({ row: r.row, raw: { ...r.raw } }))
+  if (body.kind) {
+    if (!body.openingDate) throw new AppError('Pick the opening date for the sheet.', 400, 'NEEDS_DATE')
+    openingStock.asNineteen(rows, body.kind, body.openingDate)
+  }
+  const resolved = await openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind) })
+  const buffer = await openingStock.errorReport(raw, resolved, body.kind)
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${body.fileName.replace(/\.xlsx?$/i, '').replace(/[^\w.-]+/g, '-')}-problems.xlsx"`)
+  res.send(buffer)
+})
+
+/*
+ * What the entry screens offer, joined up so a choice only leads to what
+ * belongs to it: every style with its colours (each colour's finished item),
+ * its size run and the processes on its route (its own, its category's, or
+ * any style's — as an order's stages are offered); the size runs, to give a
+ * style one; the stores; and the raw-material categories with their items
+ * and units.
  */
 router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req, res) => {
-  const [processes, stores, styles, sizeGroups, items] = await Promise.all([
+  const [processes, stores, styles, sizeGroups, categories, items] = await Promise.all([
     processLadder(),
     prisma.warehouse.findMany({ where: { isActive: true, departmentId: null }, select: { id: true, name: true, code: true }, orderBy: { name: 'asc' } }),
     prisma.style.findMany({
@@ -5373,51 +5435,92 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
         id: true,
         code: true,
         name: true,
+        category: true,
         colors: true,
         sizeGroupId: true,
         items: { where: { isActive: true, type: 'FINISHED_GOOD' }, select: { id: true, code: true, color: true } },
       },
       orderBy: { code: 'asc' },
     }),
-    prisma.sizeGroup.findMany({ select: { id: true, sizes: { orderBy: { sequence: 'asc' }, select: { id: true, code: true } } } }),
+    prisma.sizeGroup.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true, sizes: { orderBy: { sequence: 'asc' }, select: { id: true, code: true } } },
+      orderBy: { name: 'asc' },
+    }),
+    // Raw materials by their subcategory (Fabric, Thread, Buttons…).
+    prisma.itemCategory.findMany({
+      where: { isActive: true, itemGroup: 'RAW_MATERIALS', parentId: { not: null } },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+    }),
     prisma.item.findMany({
-      where: { isActive: true, styleId: null },
+      where: { isActive: true, styleId: null, type: { notIn: ['FINISHED_GOOD', 'SEMI_FINISHED'] } },
       select: {
         id: true,
         code: true,
         name: true,
         type: true,
+        categoryId: true,
         decimalPlaces: true,
         uom: { select: { symbol: true, decimalPlaces: true } },
-        category: { select: { name: true } },
       },
       orderBy: { name: 'asc' },
     }),
   ])
+  const routes = await trackedRoutings(prisma, styles.map((st) => ({ id: st.id, category: st.category })))
   const sizesOf = new Map(sizeGroups.map((g) => [g.id, g.sizes]))
   res.json({
     success: true,
     data: {
       processes: processes.map((p) => ({ id: p.id, name: p.name, floor: p.floor?.name ?? null })),
       stores,
-      styles: styles.map((s) => ({
-        id: s.id,
-        code: s.code,
-        name: s.name,
-        colours: s.colors.map((c) => ({ colour: c, item: s.items.find((i) => (i.color ?? '').toLowerCase() === c.toLowerCase()) ?? null })),
-        sizes: (s.sizeGroupId && sizesOf.get(s.sizeGroupId)) || [],
-      })),
+      sizeRuns: sizeGroups.map((g) => ({ id: g.id, name: g.name, sizes: g.sizes.map((z) => z.code) })),
+      styles: styles.map((st) => {
+        const r = routes.get(st.id)
+        const route = new Map<string, string>()
+        for (const step of r?.routing.steps ?? []) if (!route.has(step.departmentId)) route.set(step.departmentId, step.department.name)
+        return {
+          id: st.id,
+          code: st.code,
+          name: st.name,
+          colours: st.colors.map((c) => ({ colour: c, item: st.items.find((i) => (i.color ?? '').toLowerCase() === c.toLowerCase()) ?? null })),
+          sizes: (st.sizeGroupId && sizesOf.get(st.sizeGroupId)) || [],
+          route: r ? [...route.entries()].map(([id, name]) => ({ id, name })) : null,
+          routeFrom: r ? { applies: r.applies, code: r.routing.code } : null,
+        }
+      }),
+      categories: categories.map((c) => ({ id: c.id, name: c.name, items: items.filter((i) => i.categoryId === c.id).length })),
       items: items.map((i) => ({
         id: i.id,
         code: i.code,
         name: i.name,
         type: i.type,
-        category: i.category?.name ?? null,
+        categoryId: i.categoryId,
         unit: i.uom?.symbol ?? null,
         decimals: i.decimalPlaces ?? i.uom?.decimalPlaces ?? 0,
       })),
     },
   })
+})
+
+/*
+ * A style with no size run yet: given one from the entry screen, so its
+ * sizes can take pieces. Only a style without one — changing a run would
+ * change what its items and orders mean — and it is a Masters job.
+ */
+const sizeRunBody = zod.object({ styleId: zod.string().min(1), sizeGroupId: zod.string().min(1) })
+router.post('/opening-stock/style-size-run', requirePermission('masters', 'edit'), async (req: AuthRequest, res) => {
+  const { styleId, sizeGroupId } = sizeRunBody.parse(req.body)
+  const [style, run] = await Promise.all([
+    prisma.style.findUnique({ where: { id: styleId }, select: { id: true, code: true, sizeGroupId: true } }),
+    prisma.sizeGroup.findUnique({ where: { id: sizeGroupId }, select: { id: true, name: true, isActive: true } }),
+  ])
+  if (!style) throw new AppError('That style does not exist.', 404, 'NOT_FOUND')
+  if (!run || !run.isActive) throw new AppError('Pick a size run that is in use.', 400, 'BAD_SIZE_RUN')
+  if (style.sizeGroupId) throw new AppError(`${style.code} already has a size run. Change it in Masters → Styles.`, 400, 'HAS_SIZE_RUN')
+  await prisma.style.update({ where: { id: style.id }, data: { sizeGroupId: run.id } })
+  await writeAuditLog(req, { module: 'masters', action: 'UPDATE', entityType: 'Style', entityId: style.id, before: { sizeGroupId: null }, after: { sizeGroupId: run.id, from: 'Opening stock entry' } })
+  res.json({ success: true, message: `${style.code} now has the ${run.name} size run.` })
 })
 
 /*
@@ -5446,6 +5549,10 @@ router.post('/opening-stock/colour-item', requirePermission('masters', 'create')
  */
 const openingEntryBody = zod.object({
   confirm: zod.boolean().optional(),
+  kind: osKind.optional(),
+  requestKey: zod.string().min(8).max(100).optional(),
+  /** The names the screen gives its boxes, for the problems. */
+  labels: zod.record(zod.string(), zod.string().max(60)).optional(),
   notes: zod.string().max(500).nullish(),
   lines: zod
     .array(zod.record(zod.string(), zod.union([zod.string().max(300), zod.number(), zod.null()])))
@@ -5453,14 +5560,19 @@ const openingEntryBody = zod.object({
     .max(openingStock.MAX_ROWS),
 })
 router.post('/opening-stock/entry', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const { lines, notes, confirm } = openingEntryBody.parse(req.body)
-  const resolved = await openingStock.planImport(openingStock.rowsFromEntry(lines), { rowWord: 'line' })
+  const { lines, notes, confirm, kind, requestKey, labels } = openingEntryBody.parse(req.body)
+  const again = confirm ? await openingStock.savedFor(requestKey) : null
+  if (again) {
+    res.json({ success: true, message: `${again.number}: already saved — nothing posted twice.`, data: again })
+    return
+  }
+  const resolved = await openingStock.planImport(openingStock.rowsFromEntry(lines), { rowWord: 'line', kind, labels: labels as Record<string, string> | undefined })
   const summary = openingStock.summarise(resolved)
   if (!confirm) {
     res.json({ success: true, data: { summary, rows: resolved.map((r) => r.plan) } })
     return
   }
-  const done = await openingStock.runImport(resolved, { fileName: null, notes, userId: req.user?.id ?? null })
+  const done = await openingStock.runImport(resolved, { fileName: null, notes, userId: req.user?.id ?? null, kind: kind ?? null, requestKey: requestKey ?? null })
   await writeAuditLog(req, {
     module: MODULE,
     action: 'CREATE',
@@ -5497,10 +5609,12 @@ function openingLinesWhere(query: Record<string, unknown>): Prisma.OpeningStockL
   const list = (v: unknown) => (Array.isArray(v) ? v : v === undefined ? [] : [v]).map((x) => String(x).trim()).filter(Boolean)
   const like = (v: string) => ({ contains: v, mode: 'insensitive' as const })
   const and: Prisma.OpeningStockLineWhereInput[] = []
+  // Raw materials wherever they lie; semi-finished parts, and garments still at a
+  // process; finished garments in a store.
   const group = text(query.group)
-  if (group === 'WIP') and.push({ departmentId: { not: null } })
-  if (group === 'FINISHED') and.push({ departmentId: null, item: { type: { in: FINISHED_KINDS } } })
-  if (group === 'RAW') and.push({ departmentId: null, item: { type: { notIn: FINISHED_KINDS } } })
+  if (group === 'RM') and.push({ item: { type: { notIn: FINISHED_KINDS } } })
+  if (group === 'SFG') and.push({ OR: [{ item: { type: 'SEMI_FINISHED' } }, { departmentId: { not: null }, item: { type: 'FINISHED_GOOD' } }] })
+  if (group === 'FG') and.push({ departmentId: null, item: { type: 'FINISHED_GOOD' } })
   const entry = text(query.entry)
   if (entry) and.push({ openingStockId: entry })
   // Item Name and Item Code both pick items; given both, a line is one of each.
@@ -5643,9 +5757,9 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
       },
     }),
     prisma.$queryRaw<Array<{ kind: string; lines: number; value: number }>>`
-      SELECT CASE WHEN l."departmentId" IS NOT NULL THEN 'WIP'
-                  WHEN i.type IN ('FINISHED_GOOD', 'SEMI_FINISHED') THEN 'FINISHED'
-                  ELSE 'RAW' END AS kind,
+      SELECT CASE WHEN i.type NOT IN ('FINISHED_GOOD', 'SEMI_FINISHED') THEN 'RM'
+                  WHEN i.type = 'SEMI_FINISHED' OR l."departmentId" IS NOT NULL THEN 'SFG'
+                  ELSE 'FG' END AS kind,
              COUNT(*)::int AS lines, COALESCE(SUM(l.value), 0)::float8 AS value
       FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
       GROUP BY 1`,
@@ -5704,7 +5818,7 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
 router.get('/opening-stock', requirePermission(MODULE, 'view'), async (_req, res) => {
   const docs = await prisma.openingStock.findMany({
     orderBy: { createdAt: 'desc' },
-    select: { id: true, number: true, fileName: true, notes: true, createdAt: true, createdBy: { select: { name: true } } },
+    select: { id: true, number: true, fileName: true, notes: true, kind: true, createdAt: true, createdBy: { select: { name: true } } },
   })
   const totals = await prisma.openingStockLine.groupBy({
     by: ['openingStockId'],

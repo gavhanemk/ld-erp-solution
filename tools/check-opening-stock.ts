@@ -69,6 +69,14 @@ async function main() {
   const panel = (await call('POST', '/masters/items', { name: `ZZTEST Opening Panel ${stamp}`, type: 'SEMI_FINISHED', categoryId: panelCat.id, uomId: unit('pcs').id })).body.data
   const style = await prisma.style.findFirstOrThrow({ where: { code: 'ZZTEST-SH-01' }, select: { id: true, code: true, colors: true } })
   const colour = style.colors[0]
+  // Work in progress is only where the style's route goes: the test style's route, made once.
+  if (!(await prisma.routing.findFirst({ where: { styleId: style.id, isActive: true } }))) {
+    const op = (name: string) => prisma.operation.findFirstOrThrow({ where: { name, isActive: true }, select: { id: true, departmentId: true } })
+    const steps = [await op('Cutting'), await op('Stitching'), await op('Finishing')]
+    await prisma.routing.create({
+      data: { code: `ZZTEST-RT-${style.code}`, name: 'ZZTEST route for the opening stock checks', styleId: style.id, steps: { create: steps.map((o, i) => ({ sequence: i + 1, operationId: o.id, departmentId: o.departmentId })) } },
+    })
+  }
   let garment = await prisma.item.findFirst({ where: { styleId: style.id, color: colour }, select: { id: true, code: true } })
   if (!garment) garment = (await call('POST', '/masters/items', { name: `ZZTEST Opening Shirt ${stamp}`, type: 'FINISHED_GOOD', categoryId: shirtsCat.id, uomId: unit('pcs').id, styleId: style.id, color: colour })).body.data
   check('test items made', Boolean(fabric?.code && panel?.code && garment?.code), { fabric, panel, garment })
@@ -97,6 +105,8 @@ async function main() {
     { ...base, Process: 'Store', 'Department / Location': 'Store', 'Item Code': fabric.code, 'Opening Date': '2099-01-01', 'Bundle / Barcode No.': 'X5' }, // 16: future
     { ...base, Process: 'Store', 'Department / Location': 'Store', 'Item Code': fabric.code, 'Stock Status': 'Maybe', 'Bundle / Barcode No.': 'X6' }, // 17: status
     { ...base, Process: 'Store', 'Department / Location': 'Store', 'Item Code': 'NO-SUCH-CODE' },           // 18: no item
+    { ...base, Process: 'Washing', 'Order No.': order, 'Style / Article No.': style.code, 'Item Code': garment.code, Size: 'S', 'Bundle / Barcode No.': 'X7' }, // 19: off the route
+    { ...base, Process: 'Store', 'Department / Location': 'Cutting Floor', 'Item Code': fabric.code, 'Bundle / Barcode No.': 'X8' }, // 20: a floor is not a store
   ]
   const checked = await call('POST', '/inventory/opening-stock/import', await sheetWith(template, [...good, ...bad], 'opening-check'))
   check('the check answers', okay(checked), checked.body)
@@ -115,10 +125,12 @@ async function main() {
     [16, /later than today/, 'a future date'],
     [17, /not one of: OK, Hold, Rejected, B-Grade/, 'an unknown status'],
     [18, /No item with code NO-SUCH-CODE/, 'an unknown item'],
+    [19, /Washing is not on ZZTEST-SH-01's route \(Cutting → Stitching → Finishing\)/, "a process off the style's route"],
+    [20, /Cutting Floor is a process's floor, not a store/, 'a process floor given as a store'],
   ]
   for (const [row, re, what] of expect) check(`row ${row} refused: ${what}`, re.test(problemsOf(row)), problemsOf(row))
   const summary = checked.body?.data?.summary
-  check('summary counts lines, problems and value', summary?.lines === 6 && summary?.problems === 11 && summary?.value === 6000 + 4800 + 5000 + 6400 + 600 + 6000, summary)
+  check('summary counts lines, problems and value', summary?.lines === 6 && summary?.problems === 13 && summary?.value === 6000 + 4800 + 5000 + 6400 + 600 + 6000, summary)
   const stage = (g: string) => summary?.byGroup?.find((x: any) => x.group === g)?.lines
   check('summary: 2 raw, 3 work in progress (semi-finished), 1 finished', stage('RAW_MATERIALS') === 2 && stage('SEMI_FINISHED') === 3 && stage('FINISHED_GOODS') === 1, summary?.byGroup)
   const refusedImport = await call('POST', '/inventory/opening-stock/import', { ...(await sheetWith(template, [...good, ...bad], 'opening-bad')), confirm: true })
