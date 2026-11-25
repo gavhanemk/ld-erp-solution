@@ -11,6 +11,8 @@ export interface Company {
   name: string
   legalName: string | null
   address: string | null
+  /** The head office (HO), when it is not the works. */
+  address2?: string | null
   city: string | null
   state: string | null
   pincode: string | null

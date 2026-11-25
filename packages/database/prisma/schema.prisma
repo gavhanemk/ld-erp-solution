@@ -884,6 +884,8 @@ model Company {
   name           String
   legalName      String?
   address        String?
+  /// A second address: the head office (HO), when it is not where the works are.
+  address2       String?
   city           String?
   state          String?
   pincode        String?
