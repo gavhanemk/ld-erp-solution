@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
 import bcrypt from 'bcryptjs'
@@ -31,6 +32,8 @@ import {
 import { getPreferences, invalidatePreferences } from '../lib/preferences'
 import { AI_MODELS, PROVIDER_LABEL, getAiConfig, maskKey, saveAiConfig } from '../lib/aiConfig'
 import { testAssistant } from '../services/ai.service'
+import { forgetAccess, expandGrants } from '../lib/access'
+import { ACCESS_CATALOG, ACTIONS, ACTION_LABELS as CATALOG_ACTION_LABELS, CATALOG_PERMISSIONS, SUPER_ROLE } from '../lib/accessCatalog'
 
 const router = Router()
 
@@ -39,8 +42,6 @@ const SETTINGS = 'settings'
 /** Users, roles and the activity trail — a narrower group than SETTINGS. */
 const ADMIN = 'admin'
 
-/** The role that can never be locked out; mirrors SUPER_ROLE in the auth middleware. */
-const SUPER_ROLE = 'Admin'
 
 const BCRYPT_ROUNDS = 10
 
@@ -127,6 +128,7 @@ router.post('/users', requirePermission(ADMIN, 'create'), async (req: AuthReques
 
   const role = await prisma.role.findUnique({ where: { id: data.roleId } })
   if (!role) throw new AppError('That role no longer exists', 400, 'INVALID_ROLE')
+  assertMayGiveRole(req, role.name)
 
   const existing = await prisma.user.findUnique({ where: { email: data.email } })
   if (existing) throw new AppError('Someone already signs in with that email address', 409, 'DUPLICATE_EMAIL')
@@ -169,6 +171,9 @@ router.patch('/users/:id', requirePermission(ADMIN, 'edit'), async (req: AuthReq
   if (data.roleId && data.roleId !== before.roleId) {
     const role = await prisma.role.findUnique({ where: { id: data.roleId } })
     if (!role) throw new AppError('That role no longer exists', 400, 'INVALID_ROLE')
+    assertMayGiveRole(req, role.name)
+    // Taking Super Admin away is as much a Super Admin's call as giving it.
+    assertMayGiveRole(req, before.role.name)
   }
 
   // Losing every administrator means nobody can ever create one again.
@@ -188,6 +193,7 @@ router.patch('/users/:id', requirePermission(ADMIN, 'edit'), async (req: AuthReq
     data,
     select: userView,
   })
+  forgetAccess(after.id)
 
   await writeAuditLog(req, {
     module: ADMIN,
@@ -243,6 +249,7 @@ router.delete('/users/:id', requirePermission(ADMIN, 'delete'), async (req: Auth
     data: { status: 'INACTIVE' },
     select: userView,
   })
+  forgetAccess(after.id)
 
   await writeAuditLog(req, {
     module: ADMIN,
@@ -254,6 +261,135 @@ router.delete('/users/:id', requirePermission(ADMIN, 'delete'), async (req: Auth
   })
 
   res.json({ success: true, message: `${after.name} can no longer sign in.`, data: after })
+})
+
+/**
+ * Everything in the ERP that names a person, counted.
+ *
+ * Read from the database's own list of links to the users table rather than
+ * kept by hand: there are a hundred of them, and a new one added next month
+ * must stop a delete without anybody remembering to add it here. Half of them
+ * would not even refuse a delete — they are set to blank instead, so an
+ * approved order would quietly stop saying who approved it. Their own
+ * notifications and assistant chats are left out: those are theirs, and go
+ * with them.
+ */
+const PERSONAL_TABLES = new Set(['notifications', 'ai_conversations'])
+
+async function recordsNaming(userId: string): Promise<Array<{ table: string; count: number }>> {
+  const links = await prisma.$queryRaw<Array<{ table: string; column: string }>>`
+    SELECT cl.relname AS "table", att.attname AS "column"
+    FROM pg_constraint c
+    JOIN pg_class cl ON cl.oid = c.conrelid
+    JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+    JOIN pg_attribute att ON att.attrelid = c.conrelid AND att.attnum = ANY(c.conkey)
+    WHERE c.contype = 'f' AND c.confrelid = 'ld_erp.users'::regclass AND ns.nspname = 'ld_erp'`
+  const checked = links.filter((l) => !PERSONAL_TABLES.has(l.table))
+  if (!checked.length) return []
+  // The names come from the database's own catalogue, never from the request,
+  // and are quoted as identifiers; the id is the one bound parameter.
+  const ident = (s: string) => `"${s.replace(/"/g, '""')}"`
+  const sql = checked
+    .map(
+      (l, i) =>
+        `SELECT ${i} AS i, COUNT(*)::int AS n FROM "ld_erp".${ident(l.table)} WHERE ${ident(l.column)} = $1`,
+    )
+    .join(' UNION ALL ')
+  const counts = await prisma.$queryRawUnsafe<Array<{ i: number; n: number }>>(sql, userId)
+  const byTable = new Map<string, number>()
+  for (const c of counts) {
+    if (!c.n) continue
+    const table = checked[c.i].table
+    byTable.set(table, (byTable.get(table) ?? 0) + c.n)
+  }
+  return [...byTable.entries()]
+    .map(([table, count]) => ({ table, count }))
+    .sort((a, b) => b.count - a.count)
+}
+
+/** "purchase_orders" as people say it. */
+const TABLE_WORDS: Record<string, string> = {
+  audit_logs: 'activity log entries',
+  grn: 'goods receipts',
+  customer_grn: 'customer material receipts',
+  purchase_invoices: 'purchase bills',
+  material_requisitions: 'requisitions',
+  bom: 'bills of materials',
+  wip_events: 'production entries',
+  garment_events: 'garment records',
+  stock_package_moves: 'package movements',
+  acc_vouchers: 'vouchers',
+}
+const tableWords = (t: string) => TABLE_WORDS[t] ?? t.replace(/^acc_/, '').replace(/_/g, ' ')
+
+/**
+ * Whether a person can be deleted, asked before the delete window offers to:
+ * what the ERP holds with their name on, in words, and the answer.
+ */
+router.get('/users/:id/records', requirePermission(ADMIN, 'delete'), async (req: AuthRequest, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, status: true } })
+  if (!user) throw new AppError('User not found', 404, 'NOT_FOUND')
+  const found = await recordsNaming(user.id)
+  const isSelf = req.user?.id === user.id
+  res.json({
+    success: true,
+    data: {
+      total: found.reduce((t, f) => t + f.count, 0),
+      records: found.map((f) => ({ what: tableWords(f.table), count: f.count })),
+      canDelete: !found.length && !isSelf,
+      reason: isSelf ? 'You cannot delete your own account.' : null,
+    },
+  })
+})
+
+/**
+ * Deleting a person outright — for an account made by mistake or a test
+ * sign-in that never did anything. Anyone the ERP has a record of is refused,
+ * with what was found, and is to be made inactive instead: their name has to
+ * stay on what they did.
+ */
+router.delete('/users/:id/permanent', requirePermission(ADMIN, 'delete'), async (req: AuthRequest, res) => {
+  const before = await prisma.user.findUnique({ where: { id: req.params.id }, select: userView })
+  if (!before) throw new AppError('User not found', 404, 'NOT_FOUND')
+
+  if (req.user?.id === before.id) {
+    throw new AppError('You cannot delete your own account.', 400, 'SELF_DELETE')
+  }
+  if (before.role.name === SUPER_ROLE && before.status === 'ACTIVE') await assertAnotherAdminRemains(before.id)
+
+  const found = await recordsNaming(before.id)
+  if (found.length) {
+    const total = found.reduce((t, f) => t + f.count, 0)
+    const list = found
+      .slice(0, 3)
+      .map((f) => `${tableWords(f.table)} (${f.count.toLocaleString('en-IN')})`)
+      .join(', ')
+    throw new AppError(
+      `${before.name} cannot be deleted: the ERP has ${total.toLocaleString('en-IN')} ${total === 1 ? 'record' : 'records'} with their name on — ${list}${found.length > 3 ? ' and more' : ''}. Deleting would lose who made them. Make the account inactive instead; it then cannot sign in.`,
+      409,
+      'USER_HAS_RECORDS',
+    )
+  }
+
+  await prisma.$transaction(async (tx) => {
+    const convs = await tx.aIConversation.findMany({ where: { userId: before.id }, select: { id: true } })
+    if (convs.length) await tx.aIMessage.deleteMany({ where: { conversationId: { in: convs.map((c) => c.id) } } })
+    await tx.aIConversation.deleteMany({ where: { userId: before.id } })
+    await tx.notification.deleteMany({ where: { userId: before.id } })
+    await tx.user.delete({ where: { id: before.id } })
+  })
+  forgetAccess(before.id)
+
+  await writeAuditLog(req, {
+    module: ADMIN,
+    action: 'DELETE',
+    entityType: 'User',
+    entityId: before.id,
+    before,
+    after: { deleted: true },
+  })
+
+  res.json({ success: true, message: `${before.name} has been deleted.` })
 })
 
 async function assertAnotherAdminRemains(excludingUserId: string): Promise<void> {
@@ -355,32 +491,27 @@ const ACTION_LABEL_OVERRIDES: Record<string, string> = {
   'ai:export': 'May export answers',
 }
 
+/**
+ * The matrix the role editor draws: every module, every screen in it, and the
+ * actions that mean something on each screen — from the access catalogue,
+ * which is also what the server checks against.
+ */
 router.get('/permissions', requirePermission(ADMIN, 'view'), async (_req, res) => {
-  const permissions = await prisma.permission.findMany({ orderBy: [{ module: 'asc' }, { action: 'asc' }] })
-
-  const modules = new Map<string, { module: string; label: string; actions: { action: string; label: string; key: string }[] }>()
-  for (const p of permissions) {
-    const entry = modules.get(p.module) ?? {
-      module: p.module,
-      label: MODULE_LABELS[p.module] ?? p.module,
-      actions: [],
-    }
-    const key = `${p.module}:${p.action}`
-    entry.actions.push({
-      action: p.action,
-      label: ACTION_LABEL_OVERRIDES[key] ?? ACTION_LABELS[p.action] ?? p.action,
-      key,
-    })
-    modules.set(p.module, entry)
-  }
-
-  // Keep the on-screen order the same as the sidebar rather than alphabetical.
-  const order = Object.keys(MODULE_LABELS)
-  const data = [...modules.values()].sort(
-    (a, b) => (order.indexOf(a.module) + 1 || 99) - (order.indexOf(b.module) + 1 || 99),
-  )
-
-  res.json({ success: true, data, actions: Object.entries(ACTION_LABELS).map(([action, label]) => ({ action, label })) })
+  const data = ACCESS_CATALOG.map((m) => ({
+    module: m.key,
+    label: m.label,
+    screens: m.screens.map((sc) => ({
+      key: sc.key,
+      label: sc.label,
+      hint: sc.hint ?? null,
+      actions: sc.actions.map((action) => ({
+        action,
+        label: ACTION_LABEL_OVERRIDES[`${sc.key}:${action}`] ?? CATALOG_ACTION_LABELS[action],
+        key: `${sc.key}:${action}`,
+      })),
+    })),
+  }))
+  res.json({ success: true, data, actions: ACTIONS.map((action) => ({ action, label: CATALOG_ACTION_LABELS[action] })) })
 })
 
 router.get('/roles', requirePermission(ADMIN, 'view'), async (_req, res) => {
@@ -400,10 +531,13 @@ router.get('/roles', requirePermission(ADMIN, 'view'), async (_req, res) => {
       description: r.description,
       isSystem: r.isSystem,
       userCount: r._count.users,
-      // The Admin role bypasses the matrix in the auth middleware, so listing
+      // Super Admin bypasses the matrix in the auth middleware, so listing
       // its rows and pretending they can be revoked would be misleading.
       unrestricted: r.name === SUPER_ROLE,
-      permissions: r.permissions.map((rp) => `${rp.permission.module}:${rp.permission.action}`),
+      // Spelt out screen by screen: a role set up before screens existed
+      // holds "purchase:create", which the editor shows as every Purchase
+      // screen ticked, and saves back screen by screen.
+      permissions: expandGrants(r.permissions.map((rp) => `${rp.permission.module}:${rp.permission.action}`)),
     })),
   })
 })
@@ -447,9 +581,9 @@ router.patch('/roles/:id', requirePermission(ADMIN, 'edit'), async (req: AuthReq
   if (before.isSystem && data.name && data.name !== before.name) {
     throw new AppError('Built-in roles cannot be renamed', 400, 'SYSTEM_ROLE')
   }
-  if (before.name === SUPER_ROLE && data.permissions) {
+  if (before.name === SUPER_ROLE && (data.permissions || (data.name && data.name !== before.name))) {
     throw new AppError(
-      'The Admin role always has full access. Create a separate role if you need a narrower one.',
+      'Super Admin always has full access and cannot be changed. Use the Admin role, or a new one, for anyone who needs less.',
       400,
       'SYSTEM_ROLE',
     )
@@ -501,11 +635,13 @@ router.patch('/roles/:id', requirePermission(ADMIN, 'edit'), async (req: AuthReq
     },
   })
 
+  // Access is read from the database and kept for half a minute, so everyone
+  // on this role works to the new matrix on their next request.
+  forgetAccess()
+
   res.json({
     success: true,
-    // Changed grants only reach a signed-in user when their access token is
-    // renewed, which is fifteen minutes at the outside.
-    message: 'Saved. People already signed in pick up the change within 15 minutes.',
+    message: 'Saved. Everyone on this role works to the new access straight away.',
     data: {
       id: after.id,
       name: after.name,
@@ -532,6 +668,7 @@ router.delete('/roles/:id', requirePermission(ADMIN, 'delete'), async (req: Auth
   }
 
   await prisma.role.delete({ where: { id: role.id } })
+  forgetAccess()
 
   await writeAuditLog(req, {
     module: ADMIN,
@@ -544,9 +681,32 @@ router.delete('/roles/:id', requirePermission(ADMIN, 'delete'), async (req: Auth
   res.json({ success: true, message: `Role "${role.name}" deleted.` })
 })
 
+/**
+ * Only a Super Admin gives anyone the Super Admin role, or takes it away:
+ * otherwise anybody allowed to edit people could make themselves one.
+ */
+function assertMayGiveRole(req: AuthRequest, roleName: string) {
+  if (roleName === SUPER_ROLE && !req.user?.superAdmin) {
+    throw new AppError('Only a Super Admin can give or take away the Super Admin role.', 403, 'SUPER_ADMIN_ONLY')
+  }
+}
+
+/**
+ * Every permission the access catalogue knows exists as a row, so a role can
+ * be given it. Screens are added to the catalogue over time; their rows are
+ * made here the first time a role is saved after that, once per server start.
+ */
+let catalogueSynced = false
+async function syncCatalogue() {
+  if (catalogueSynced) return
+  await prisma.permission.createMany({ data: CATALOG_PERMISSIONS, skipDuplicates: true })
+  catalogueSynced = true
+}
+
 /** Turns "sales:create" keys into permission ids, rejecting anything unknown. */
 async function resolvePermissionIds(keys: string[]): Promise<string[]> {
   if (keys.length === 0) return []
+  await syncCatalogue()
 
   const wanted = new Set(keys)
   const permissions = await prisma.permission.findMany()
@@ -1015,10 +1175,25 @@ router.delete('/tds-sections/:id', requirePermission(SETTINGS, 'delete'), async 
 const DISPLAY_PREFERENCE_KEYS = ['rowsPerPage', 'dateFormat', 'qcInDailyProduction', 'issueByScanOnly'] as const
 
 router.get('/app', async (_req, res) => {
-  const values = await getPreferences()
+  const [values, company] = await Promise.all([
+    getPreferences(),
+    prisma.company.findFirst({ select: { name: true, logoUrl: true } }),
+  ])
   const data: Record<string, unknown> = {}
   for (const key of DISPLAY_PREFERENCE_KEYS) data[key] = values[key]
+  // The menu carries the company's own name and logo. The logo is kept as a
+  // picture of up to 400 KB, so only a fingerprint of it travels here, on
+  // every screen; the picture itself comes from /app/logo when it changes.
+  data.companyName = company?.name ?? null
+  data.logoKey = company?.logoUrl ? createHash('sha1').update(company.logoUrl).digest('hex').slice(0, 12) : null
   res.json({ success: true, data })
+})
+
+// The logo for the menu. Open to anyone signed in, like /app: it is printed on
+// every document the mill sends out, so there is nothing in it to withhold.
+router.get('/app/logo', async (_req, res) => {
+  const company = await prisma.company.findFirst({ select: { logoUrl: true } })
+  res.json({ success: true, data: { logoUrl: company?.logoUrl ?? null } })
 })
 
 router.get('/preferences', requirePermission(SETTINGS, 'view'), async (_req, res) => {

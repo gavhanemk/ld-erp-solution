@@ -7,6 +7,7 @@ import { api, ApiError, currentUser } from '@/lib/api'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { formatRupees } from '@/lib/utils'
 import { StickersReady } from '@/components/packages/StickersReady'
+import { isAdminRole } from '@/lib/access'
 
 /** Which items of an approved stock-in need stickers, and which are not kept in packages. */
 export interface StickerNews {
@@ -57,7 +58,7 @@ export function StickerNote({ stickers }: { stickers: StickerNews }) {
  * would refuse.
  */
 export function StockInNext({ saved, message, onApproved }: { saved: SavedStockIn; message: string; onApproved: () => void }) {
-  const admin = (currentUser() as { role?: string } | null)?.role === 'Admin'
+  const admin = isAdminRole((currentUser() as { role?: string } | null)?.role)
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)

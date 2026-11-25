@@ -43,3 +43,14 @@ export function samplingPilotEnabled(): boolean {
     }
   })
 }
+
+/**
+ * The address the API listens on. The local pilot answers only this machine,
+ * so its fictional data is never open to the office network. Every other
+ * server listens on all addresses, the live one included with Sampling
+ * switched on: Render reaches the API from outside the machine, and a live
+ * API listening on loopback would answer no one.
+ */
+export function apiListenHost(): string {
+  return samplingPilotEnabled() ? '127.0.0.1' : '0.0.0.0'
+}

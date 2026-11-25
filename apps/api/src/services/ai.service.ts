@@ -4,6 +4,7 @@ import { buildSystemPrompt, misPrompt } from './ai/prompt'
 import { runConversation, type Turn } from './ai/providers'
 import type { Proposal } from './ai/writeTools'
 import { READ_TOOLS, toolsFor } from './ai/tools'
+import { SUPER_ROLE } from '../lib/accessCatalog'
 
 /**
  * The assistant.
@@ -143,7 +144,7 @@ export async function generateDailyMISReport(date: Date = new Date()): Promise<s
 
   const systemPrompt = await buildSystemPrompt({
     userName: 'the owner',
-    userRole: 'Admin',
+    userRole: SUPER_ROLE,
     allowed: READ_TOOLS,
   })
 
@@ -160,7 +161,7 @@ export async function generateDailyMISReport(date: Date = new Date()): Promise<s
       caller: {
         userId: 'system',
         userName: 'the owner',
-        role: 'Admin',
+        role: SUPER_ROLE,
         permissions: [],
         ip: null,
         turnCount: 1,
@@ -189,7 +190,7 @@ export async function testAssistant(): Promise<{ ok: true; provider: AiProvider;
       caller: {
         userId: 'system',
         userName: 'the system',
-        role: 'Admin',
+        role: SUPER_ROLE,
         permissions: [],
         ip: null,
         turnCount: 1,

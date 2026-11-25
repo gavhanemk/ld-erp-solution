@@ -43,8 +43,10 @@ export const changeOwnPasswordSchema = z.object({
 
 // ── Roles ────────────────────────────────────────────────────────────────────
 
-/** "masters:create" — the same shape requirePermission checks against. */
-const permissionKey = z.string().regex(/^[a-z]+:[a-z]+$/, 'Permissions look like "sales:create"')
+/** "masters:create" for a whole module, "purchase.orders:create" for one screen. */
+const permissionKey = z
+  .string()
+  .regex(/^[a-z]+(\.[a-z-]+)?:[a-z]+$/, 'Permissions look like "sales:create" or "purchase.orders:create"')
 
 export const createRoleSchema = z.object({
   name: z.string().min(2, 'Name is required').max(60),

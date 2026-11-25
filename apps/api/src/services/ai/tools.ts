@@ -2,6 +2,7 @@ import { prisma } from '@ld-erp/database'
 import { logger } from '../../utils/logger'
 import { onHand } from '../stock.service'
 import { isWriteTool, runWriteTool, writeToolsFor, type Proposal } from './writeTools'
+import { grantsAllowKey, isSuperRole } from '../../lib/access'
 
 /**
  * What the assistant is allowed to look up.
@@ -260,14 +261,14 @@ export const ERP_TOOLS: ErpTool[] = [
 ]
 
 /**
- * Only the tools this person's permissions allow. Admin holds everything.
+ * Only the tools this person's permissions allow. Super Admin holds everything.
  *
  * Reads and writes are gathered separately because they are gated differently:
  * a read needs one permission, a write needs two. See writeToolsFor.
  */
 export function toolsFor(role: string, permissions: string[]): ErpTool[] {
   const reads =
-    role === 'Admin' ? ERP_TOOLS : ERP_TOOLS.filter((t) => !t.needs || permissions.includes(t.needs))
+    isSuperRole(role) ? ERP_TOOLS : ERP_TOOLS.filter((t) => !t.needs || grantsAllowKey(permissions, t.needs))
   return [...reads, ...writeToolsFor(role, permissions)]
 }
 
@@ -333,7 +334,7 @@ export interface Caller {
 }
 
 const can = (caller: Caller, needed: string) =>
-  caller.role === 'Admin' || caller.permissions.includes(needed)
+  isSuperRole(caller.role) || grantsAllowKey(caller.permissions, needed)
 
 export async function executeTool(
   name: string,

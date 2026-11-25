@@ -1804,8 +1804,9 @@ export default function PrintPurchaseOrder() {
                     {companyAddress}
                   </div>
                 )}
-                {/* The head office, when it is not the works above (25 Nov 2026). */}
-                {company.headOfficeAddress && (
+                {/* Settings → Company's "Address 2 / HO": the head office, when it is
+                  not the works above (25 Nov 2026). */}
+                {company.address2 && (
                   <div
                     style={{
                       fontSize: '10.5px',
@@ -1815,7 +1816,7 @@ export default function PrintPurchaseOrder() {
                       maxWidth: '86%',
                     }}
                   >
-                    <strong style={{ color: NAVY, fontWeight: 700 }}>HO:</strong> {company.headOfficeAddress}
+                    <strong style={{ color: NAVY, fontWeight: 700 }}>HO:</strong> {company.address2}
                   </div>
                 )}
               </div>

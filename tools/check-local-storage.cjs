@@ -42,7 +42,7 @@ process.env.LOCAL_STORAGE_DIR = path.relative(repo, root).split(path.sep).join('
 require('./register-ts.cjs')
 const express = require('express')
 const storage = require('../apps/api/src/lib/storage.ts')
-const { samplingEnabled, samplingPilotEnabled } = require('../apps/api/src/lib/pilot.ts')
+const { apiListenHost, samplingEnabled, samplingPilotEnabled } = require('../apps/api/src/lib/pilot.ts')
 const router = require('../apps/api/src/routes/localFiles.routes.ts').default
 
 const MAX = storage.MAX_FILE_BYTES
@@ -193,6 +193,19 @@ async function main() {
       assert.equal(samplingEnabled(), false)
       assert.equal(samplingPilotEnabled(), false)
     })
+  })
+  await check('the pilot API answers only this machine; the live API answers Render with Sampling on', async () => {
+    assert.equal(apiListenHost(), '127.0.0.1')
+    // Listening on loopback on Render would take the whole live API offline.
+    await withEnv({ NODE_ENV: 'production', DATABASE_URL: SHARED_DB, DIRECT_URL: SHARED_DB }, async () => {
+      assert.equal(samplingEnabled(), true)
+      assert.equal(apiListenHost(), '0.0.0.0')
+    })
+    await withEnv({ SAMPLING_ENABLED: undefined }, async () => {
+      assert.equal(apiListenHost(), '0.0.0.0')
+    })
+    const src = fs.readFileSync(path.join(repo, 'apps/api/src/index.ts'), 'utf8')
+    assert.match(src, /httpServer\.listen\(Number\(PORT\), apiListenHost\(\),/)
   })
 
   // ── Upload, measure, download ─────────────────────────────────────────────

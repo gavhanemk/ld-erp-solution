@@ -1,5 +1,5 @@
 /**
- * Checks the company's head office address: kept in Settings → Company and
+ * Checks the company's head office address — Settings → Company's "Address 2 / HO" — kept there and
  * carried to the purchase order's print. Demo database (lderp_demo) only; the
  * address it found is put back at the end. From the repo root:
  *
@@ -31,18 +31,18 @@ async function main() {
   if (!token) throw new Error('login failed')
 
   const before = (await call('GET', '/settings/company')).body?.data
-  const saved = await call('PATCH', '/settings/company', { headOfficeAddress: HO })
-  check('Settings → Company saves a head office address', saved.status < 300 && saved.body?.data?.headOfficeAddress === HO, saved)
+  const saved = await call('PATCH', '/settings/company', { address2: HO })
+  check('Settings → Company saves a head office address', saved.status < 300 && saved.body?.data?.address2 === HO, saved)
 
   const po = (await call('GET', '/purchase/orders?limit=1')).body?.data?.[0]
   if (!po) { check('a purchase order to print exists', false); return }
   const print = await call('GET', `/purchase/orders/${po.id}/print`)
-  check("the purchase order's print carries it", print.body?.data?.header?.company?.headOfficeAddress === HO || print.body?.data?.company?.headOfficeAddress === HO, Object.keys(print.body?.data ?? {}))
+  check("the purchase order's print carries it", print.body?.data?.header?.company?.address2 === HO || print.body?.data?.company?.address2 === HO, Object.keys(print.body?.data ?? {}))
 
-  const cleared = await call('PATCH', '/settings/company', { headOfficeAddress: null })
-  check('it can be cleared', cleared.status < 300 && cleared.body?.data?.headOfficeAddress == null, cleared.body?.data?.headOfficeAddress)
+  const cleared = await call('PATCH', '/settings/company', { address2: null })
+  check('it can be cleared', cleared.status < 300 && cleared.body?.data?.address2 == null, cleared.body?.data?.address2)
 
-  await call('PATCH', '/settings/company', { headOfficeAddress: before?.headOfficeAddress ?? null })
+  await call('PATCH', '/settings/company', { address2: before?.address2 ?? null })
   console.log(`\n${pass} passed, ${fail} failed`)
   if (fail) process.exitCode = 1
 }
