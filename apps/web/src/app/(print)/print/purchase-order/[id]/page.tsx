@@ -8,6 +8,7 @@ import { useParams, useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar, money } from '@/components/print/PrintSheet'
 import type { TaxByRate } from '@ld-erp/shared'
+import { SecondAddress } from '@/components/print/SecondAddress'
 
 /**
  * The printed purchase order.
@@ -1803,9 +1804,9 @@ export default function PrintPurchaseOrder() {
                     {companyAddress}
                   </div>
                 )}
-                {company.headOffice && (
+                {company.address2 && (
                   <div style={{ fontSize: '10.5px', color: GREY, lineHeight: 1.6, maxWidth: '86%' }}>
-                    <span style={{ fontWeight: 700 }}>HO:</span> {company.headOffice}
+                    <SecondAddress text={company.address2} />
                   </div>
                 )}
               </div>

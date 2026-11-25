@@ -229,7 +229,7 @@ function CompanyProfile() {
     const editable = [
       'name', 'legalName', 'gstin', 'stateCode', 'pan', 'tan', 'msmeNumber',
       'phone', 'email', 'website',
-      'address', 'city', 'state', 'pincode', 'headOffice', 'currentFY',
+      'address', 'address2', 'city', 'state', 'pincode', 'currentFY',
       'gs1Prefix', 'countryOfOrigin', 'customerCare',
     ]
     for (const key of editable) {
@@ -412,7 +412,21 @@ function CompanyProfile() {
               onChange={(e) => set('address', e.target.value)}
             />
           </Field>
-
+          <Field
+            label="Address 2 / HO"
+            htmlFor="address2"
+            error={errors.address2}
+            span={2}
+            help="Optional. The head office, or a second unit, when it is not the address above."
+          >
+            <textarea
+              id="address2"
+              rows={2}
+              className="form-input"
+              value={values.address2 ?? ''}
+              onChange={(e) => set('address2', e.target.value)}
+            />
+          </Field>
           <Field label="City" htmlFor="city" error={errors.city}>
             <input
               id="city"
@@ -438,18 +452,6 @@ function CompanyProfile() {
               placeholder="395010"
               value={values.pincode ?? ''}
               onChange={(e) => set('pincode', e.target.value)}
-            />
-          </Field>
-
-          {/* Printed as "HO: …" under the address above, on every document's letterhead. */}
-          <Field label="Head office (HO)" htmlFor="headOffice" error={errors.headOffice} span={2}>
-            <textarea
-              id="headOffice"
-              rows={2}
-              className="form-input"
-              placeholder="Printed under the address on every document, as HO: …"
-              value={values.headOffice ?? ''}
-              onChange={(e) => set('headOffice', e.target.value)}
             />
           </Field>
         </div>

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
+import { SecondAddress } from '@/components/print/SecondAddress'
 
 /**
  * The printed return challan — the outward gate pass goods leave the mill on.
@@ -288,9 +289,9 @@ export default function PurchaseReturnPrintPage() {
                   {[co.address, co.city, co.state, co.pincode].filter(Boolean).join(', ')}
                 </p>
               )}
-              {co.headOffice && (
+              {co.address2 && (
                 <p style={{ margin: '2px 0 0', fontSize: 12.5, color: GREY, lineHeight: 1.55 }}>
-                  <span style={{ fontWeight: 700 }}>HO:</span> {co.headOffice}
+                  <SecondAddress text={co.address2} />
                 </p>
               )}
               <div

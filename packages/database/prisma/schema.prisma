@@ -470,12 +470,11 @@ model Company {
   name           String
   legalName      String?
   address        String?
+  /// A second address: the head office (HO), when it is not where the works are.
+  address2       String?
   city           String?
   state          String?
   pincode        String?
-  /// The head office, printed as "HO: …" under the address above on every
-  /// document's letterhead.
-  headOffice     String?
   gstin          String?   @unique
   /// Two-digit GST state code, e.g. "27" for Maharashtra. Place of supply is
   /// decided by comparing this against the customer's, so it cannot be free text.

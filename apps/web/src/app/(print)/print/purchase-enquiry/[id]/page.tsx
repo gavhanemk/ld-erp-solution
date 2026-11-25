@@ -20,6 +20,7 @@ import { inPack } from '@/lib/packs'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/enquiryTypes'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { SecondAddress } from '@/components/print/SecondAddress'
 
 /**
  * The printed purchase requisition — what the mill sends a supplier.
@@ -343,9 +344,9 @@ export default function PurchaseRequisitionPrintPage() {
                   {[co.address, co.city, co.state, co.pincode].filter(Boolean).join(', ')}
                 </p>
               )}
-              {co.headOffice && (
+              {co.address2 && (
                 <p style={{ margin: '2px 0 0', fontSize: 11.5, color: GREY, lineHeight: 1.45 }}>
-                  <span style={{ fontWeight: 700 }}>HO:</span> {co.headOffice}
+                  <SecondAddress text={co.address2} />
                 </p>
               )}
               <div
