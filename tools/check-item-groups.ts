@@ -1,6 +1,6 @@
 /**
- * Checks Items & Products in three tabs (Raw Materials, Semi-Finished Goods,
- * Finished Goods) against a running API and the demo database (lderp_demo)
+ * Checks Items & Products in four tabs (Raw Materials, Semi-Finished Goods,
+ * Finished Goods, Fixed Assets) against a running API and the demo database (lderp_demo)
  * only. Refuses any other database. Each run makes its own ZZTEST records,
  * named with the time. From apps/api:
  *
@@ -41,9 +41,9 @@ async function main() {
   if (!token) throw new Error('login failed')
   const stamp = Date.now().toString().slice(-6)
 
-  // The three tabs, and their figures agree with the list.
+  // The four tabs, and their figures agree with the list.
   let groups = await tree()
-  check('three tabs, in order', groups.map((g) => g.group).join() === 'RAW_MATERIALS,SEMI_FINISHED,FINISHED_GOODS', groups.map((g) => g.group))
+  check('four tabs, in order', groups.map((g) => g.group).join() === 'RAW_MATERIALS,SEMI_FINISHED,FINISHED_GOODS,FIXED_ASSETS', groups.map((g) => g.group))
   for (const g of groups) {
     check(`${g.group}: the tab's figure is the list's`, g.count === (await total(`group=${g.group}`)), { tab: g.count })
     for (const m of g.categories) {
@@ -51,9 +51,9 @@ async function main() {
     }
   }
   const byGroup = Object.fromEntries(groups.map((g) => [g.group, g]))
-  check('each tab is one category of its own name', ['Raw Materials', 'Semi-Finished Goods', 'Finished Goods'].every((n, i) => groups[i].categories.length === 1 && groups[i].categories[0].name === n), groups.map((g) => g.categories.map((c) => c.name)))
+  check('each tab is one category of its own name', ['Raw Materials', 'Semi-Finished Goods', 'Finished Goods', 'Fixed Assets'].every((n, i) => groups[i].categories.length === 1 && groups[i].categories[0].name === n), groups.map((g) => g.categories.map((c) => c.name)))
   const mains = await prisma.itemCategory.findMany({ where: { parentId: null, isActive: true }, select: { name: true } })
-  check('no other main category but the expense heads\'', mains.every((m) => ['Raw Materials', 'Semi-Finished Goods', 'Finished Goods'].includes(m.name) || /expense/i.test(m.name)), mains.map((m) => m.name))
+  check('no other main category but the expense heads\'', mains.every((m) => ['Raw Materials', 'Semi-Finished Goods', 'Finished Goods', 'Fixed Assets'].includes(m.name) || /expense/i.test(m.name)), mains.map((m) => m.name))
   check('no active item is filed in a switched-off category', (await prisma.item.count({ where: { isActive: true, category: { isActive: false } } })) === 0)
   const rawSubs = byGroup.RAW_MATERIALS.categories[0].subs
   check('Raw Materials: Fabric (cutting) first, Packing Material last', rawSubs[0]?.name === 'Fabric' && rawSubs[rawSubs.length - 1]?.name === 'Packing Material', rawSubs.map((c) => c.name))
@@ -94,7 +94,7 @@ async function main() {
   const sub = await call('POST', '/masters/item-categories', { name: `ZZTEST Kidswear ${stamp}`, parentId: fgMain.id, itemGroup: 'RAW_MATERIALS' })
   check('a sub-category under Finished Goods is under Finished Goods, whatever was sent', okay(sub) && sub.body.data.itemGroup === 'FINISHED_GOODS', sub.body)
   const plain = await call('POST', '/masters/item-categories', { name: `ZZTEST Plain ${stamp}` })
-  check('a fourth main category is refused, on the Category box', plain.status === 400 && plain.body?.errors?.[0]?.path?.[0] === 'parentId' && /three categories/.test(plain.body.errors[0].message), plain.body)
+  check('a fifth main category is refused, on the Category box', plain.status === 400 && plain.body?.errors?.[0]?.path?.[0] === 'parentId' && /four categories/.test(plain.body.errors[0].message), plain.body)
   const promoted = await call('PATCH', `/masters/item-categories/${sub.body.data.id}`, { parentId: null })
   check('a sub-category cannot be made a main category', promoted.status === 400 && promoted.body?.errors?.[0]?.path?.[0] === 'parentId', promoted.body)
   const expenses = await call('POST', '/masters/item-categories', { name: `ZZTEST Expenses ${stamp}` })

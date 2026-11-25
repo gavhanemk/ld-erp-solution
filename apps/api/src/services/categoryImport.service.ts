@@ -175,7 +175,7 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
       problems.push(`Row ${sheetMain.row} makes ${mainName} a sub-category, so it cannot also be a main category.`)
       continue
     }
-    // There are three main categories; anything else goes under one of them.
+    // There are four main categories; anything else goes under one of them.
     if (!main && !sheetMain && !mainNameAllowed(mainName)) {
       problems.push(`${mainName} is not one of the categories: ${MAIN_CATEGORIES.join(', ')}. Put one of those in Category and ${mainName} in Sub-category.`)
       continue

@@ -36,6 +36,8 @@ enum ItemType {
   CONSUMABLE
   PACKING_MATERIAL
   TRIM
+  /// A machine, a computer, furniture: kept and moved, never used up. Each one tagged.
+  FIXED_ASSET
 }
 
 /// The three tabs of Masters → Items & Products, set on a main category and
@@ -47,6 +49,7 @@ enum ItemGroup {
   SEMI_FINISHED
   FINISHED_GOODS
   EXPENSES
+  FIXED_ASSETS
 }
 
 enum CustomerType {

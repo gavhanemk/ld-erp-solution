@@ -78,7 +78,7 @@ import {
   stateCode,
 } from '../schemas/master.schemas'
 
-const ITEM_GROUPS = new Set(['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS', 'EXPENSES'])
+const ITEM_GROUPS = new Set(['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS', 'FIXED_ASSETS', 'EXPENSES'])
 
 const ITEM_TYPES = new Set([
   'RAW_MATERIAL',
@@ -87,6 +87,7 @@ const ITEM_TYPES = new Set([
   'CONSUMABLE',
   'PACKING_MATERIAL',
   'TRIM',
+  'FIXED_ASSET',
 ])
 
 /** A filter on an optional link, where the choice 'none' means "not set". */

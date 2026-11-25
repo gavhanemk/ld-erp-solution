@@ -133,6 +133,10 @@ const COLUMNS: Record<Choice, Array<[string, boolean]>> = {
     ['Opening Quantity', true], ['Unit Rate', false], ['Location', false], ['Package Type', false], ['Package Count', false], ['Qty per Package', false],
     ['Package Quantities', false], ['Package References', false], ['Stock Status', false], ['Remarks', false], ['HSN Code', false], ['GST %', false],
   ],
+  FA: [
+    ['Asset Category', false], ['Item Code', false], ['Item Name', true], ['Serial Numbers', false], ['Quantity', true], ['Cost Each', false], ['Location', false],
+    ['Stock Status', false], ['Remarks', false], ['HSN Code', false], ['GST %', false],
+  ],
 }
 /** What each template is for, in a line. */
 const ABOUT: Record<Choice, string> = {
@@ -140,6 +144,7 @@ const ABOUT: Record<Choice, string> = {
   FG: 'One row per style, colour and size, in a finished goods store.',
   SFG: "One row per style, process, colour and size. The process must be on the style's route.",
   RM: 'One row per item and lot or roll, in its own unit. How it is packed is optional.',
+  FA: 'One row per item and place — a store, or the department it is installed at. Each one gets its own asset tag.',
 }
 
 const asBase64 = (file: File) =>
@@ -320,7 +325,7 @@ function ImportOpeningStock() {
       {/* 1. What the sheet holds. */}
       {!choice && (
         <div className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
             {[...KINDS, ALL].map((t) => (
               <ChoiceCard
                 key={t.key}

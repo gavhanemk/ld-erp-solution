@@ -65,6 +65,7 @@ export const ITEM_TYPE: Record<string, string> = {
   CONSUMABLE: '#d97706',
   FINISHED_GOOD: '#ec4899',
   SEMI_FINISHED: '#64748b',
+  FIXED_ASSET: '#78716c',
 }
 
 /* ───────────────────────────── the business over time ───────────────────────────── */

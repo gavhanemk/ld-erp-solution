@@ -21,6 +21,7 @@ import {
   Search,
   Shirt,
   Upload,
+  Wrench,
   X,
 } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
@@ -100,7 +101,7 @@ interface Entry {
   fileName: string | null
   notes: string | null
   /** FG, SFG or RM as entered; none for the 19-column sheet, which holds all three. */
-  kind: 'FG' | 'SFG' | 'RM' | null
+  kind: 'FG' | 'SFG' | 'RM' | 'FA' | null
   createdAt: string
   createdBy: { name: string } | null
   lines: number
@@ -112,7 +113,7 @@ interface Entry {
   changes?: Array<{ number: string; kind: string }>
 }
 
-type Kind = 'FG' | 'SFG' | 'RM'
+type Kind = 'FG' | 'SFG' | 'RM' | 'FA'
 type FilterKey = 'item' | 'code' | 'category' | 'style' | 'colour' | 'size' | 'process' | 'place' | 'order' | 'lot'
 type Options = Record<FilterKey, FilterOption[]>
 interface Dates {
@@ -126,6 +127,7 @@ const TILES: Array<{ key: Kind | ''; label: string; icon: typeof Package; note: 
   { key: 'FG', label: 'Finished Goods', icon: Shirt, note: 'Ready, by size' },
   { key: 'SFG', label: 'Semi Finished Goods', icon: Factory, note: 'At the processes' },
   { key: 'RM', label: 'Raw Materials', icon: Package, note: 'In the stores' },
+  { key: 'FA', label: 'Fixed Assets', icon: Wrench, note: 'Tagged one by one' },
 ]
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: 'item', label: 'Item Name' },
@@ -214,7 +216,7 @@ const PIN = {
   name: 'sticky left-64 w-60 min-w-60 max-w-60 shadow-[1px_0_0_hsl(var(--border))]',
 }
 
-const KIND_NAME: Record<Kind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
+const KIND_NAME: Record<Kind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials', FA: 'Fixed Assets' }
 
 /** What a line's Stickers cell can do on the page: load the lines again, say what happened. */
 const LineActions = createContext<{ reload: () => void; say: (message: string) => void }>({ reload: () => undefined, say: () => undefined })
@@ -549,7 +551,7 @@ function OpeningStock() {
       ) : (
         <>
           {/* The kinds as slim cards: picking one shows only it; All shows everything. */}
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" role="tablist" aria-label="Kinds of stock">
+          <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-5" role="tablist" aria-label="Kinds of stock">
             {TILES.map((t) => {
               const f = tileFigures(t.key)
               const on = kind === t.key

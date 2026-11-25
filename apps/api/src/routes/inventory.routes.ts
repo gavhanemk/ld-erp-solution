@@ -5327,7 +5327,7 @@ router.patch(
  * import (all or nothing), and the uploads with their lines.
  */
 /** A kind: Finished Goods, Semi Finished Goods or Raw Materials; none is the 19-column sheet. */
-const osKind = zod.enum(['FG', 'SFG', 'RM'])
+const osKind = zod.enum(['FG', 'SFG', 'RM', 'FA'])
 const kindOf = (v: unknown) => (osKind.safeParse(v).success ? (v as openingStock.OsKind) : undefined)
 
 router.get('/opening-stock/import-template', requirePermission(MODULE, 'create'), async (req, res) => {
@@ -5492,6 +5492,11 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
   const ruleOf = await packageRules(prisma)
   const routes = await trackedRoutings(prisma, styles.map((st) => ({ id: st.id, category: st.category })))
   const sizesOf = new Map(sizeGroups.map((g) => [g.id, g.sizes]))
+  // Fixed assets by their subcategory (Machines, Computers…), and the departments one may be installed at.
+  const [assetCategories, departments] = await Promise.all([
+    prisma.itemCategory.findMany({ where: { isActive: true, itemGroup: 'FIXED_ASSETS', parentId: { not: null } }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    prisma.department.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+  ])
   res.json({
     success: true,
     data: {
@@ -5517,6 +5522,8 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
         }
       }),
       categories: categories.map((c) => ({ id: c.id, name: c.name, items: items.filter((i) => i.categoryId === c.id).length })),
+      assetCategories: assetCategories.map((c) => ({ id: c.id, name: c.name, items: items.filter((i) => i.categoryId === c.id).length })),
+      departments,
       items: items.map((i) => ({
         id: i.id,
         code: i.code,
@@ -5686,7 +5693,8 @@ function openingLinesWhere(query: Record<string, unknown>): Prisma.OpeningStockL
   // Raw materials wherever they lie; semi-finished parts, and garments still at a
   // process; finished garments in a store.
   const group = text(query.group)
-  if (group === 'RM') and.push({ item: { type: { notIn: FINISHED_KINDS } } })
+  if (group === 'RM') and.push({ item: { type: { notIn: [...FINISHED_KINDS, 'FIXED_ASSET'] } } })
+  if (group === 'FA') and.push({ item: { type: 'FIXED_ASSET' } })
   if (group === 'SFG') and.push({ OR: [{ item: { type: 'SEMI_FINISHED' } }, { departmentId: { not: null }, item: { type: 'FINISHED_GOOD' } }] })
   if (group === 'FG') and.push({ departmentId: null, item: { type: 'FINISHED_GOOD' } })
   const entry = text(query.entry)
@@ -5831,7 +5839,8 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
       },
     }),
     prisma.$queryRaw<Array<{ kind: string; lines: number; value: number }>>`
-      SELECT CASE WHEN i.type NOT IN ('FINISHED_GOOD', 'SEMI_FINISHED') THEN 'RM'
+      SELECT CASE WHEN i.type = 'FIXED_ASSET' THEN 'FA'
+                  WHEN i.type NOT IN ('FINISHED_GOOD', 'SEMI_FINISHED') THEN 'RM'
                   WHEN i.type = 'SEMI_FINISHED' OR l."departmentId" IS NOT NULL THEN 'SFG'
                   ELSE 'FG' END AS kind,
              COUNT(*)::int AS lines, COALESCE(SUM(l.value), 0)::float8 AS value

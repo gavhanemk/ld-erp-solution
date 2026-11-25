@@ -338,6 +338,7 @@ const TYPE_FROM_CATEGORY: Array<[RegExp, string]> = [
   [/fabric|cloth|greige|yarn|thread/i, 'RAW_MATERIAL'],
   [/label|tag|button|fastener|trim|accessor|zip/i, 'TRIM'],
   [/pack/i, 'PACKING_MATERIAL'],
+  [/fixed asset|machine|machinery|computer|furniture|equipment/i, 'FIXED_ASSET'],
   [/consumable|spare|stationer/i, 'CONSUMABLE'],
   [/finished|garment/i, 'FINISHED_GOOD'],
 ]
@@ -588,7 +589,7 @@ const WRITES: WriteDefinition[] = [
             type: 'string',
             description:
               'Leave this out. It is worked out from the category, and asking for it is asking the same question twice in words nobody uses. Send it only if the person volunteers a correction.',
-            enum: ['RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'CONSUMABLE', 'PACKING_MATERIAL', 'TRIM'],
+            enum: ['RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'CONSUMABLE', 'PACKING_MATERIAL', 'TRIM', 'FIXED_ASSET'],
           },
           hsnCode: { type: 'string', description: 'HSN code' },
           gstRate: { type: 'number', description: 'GST percentage, e.g. 5, 12, 18' },
@@ -708,6 +709,7 @@ const WRITES: WriteDefinition[] = [
         CONSUMABLE: 'Consumable',
         PACKING_MATERIAL: 'Packing material',
         TRIM: 'Trim',
+        FIXED_ASSET: 'Fixed asset',
       }
 
       const shown = {

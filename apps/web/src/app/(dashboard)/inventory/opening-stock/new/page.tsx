@@ -102,6 +102,17 @@ const dropDraft = (k: Kind) => {
 const LABELS: Record<Kind, Record<string, string>> = {
   FG: { date: 'Opening date', location: 'Store', code: 'Item', qty: 'Pieces', rate: 'Rate per piece', status: 'Stock status', style: 'Style' },
   SFG: { date: 'Opening date', process: 'Process', location: 'Location', code: 'Item', qty: 'Pieces', rate: 'Rate per piece', status: 'Stock status', style: 'Style' },
+  FA: {
+    date: 'Opening date',
+    location: 'Location',
+    code: 'Item',
+    qty: 'Quantity',
+    rate: 'Cost each',
+    status: 'Stock status',
+    uom: 'Unit',
+    packQtys: 'Asset tags',
+    packRefs: 'Serial numbers',
+  },
   RM: {
     date: 'Opening date',
     location: 'Store',
@@ -130,6 +141,7 @@ const STEP_LINE = [
 /** The store an entry most likely goes to: the finished goods store, or the raw material one. */
 function likelyStore(o: FormOptions, k: Kind) {
   const by = (re: RegExp) => o.stores.find((s) => re.test(s.name))?.id
+  if (k === 'FA') return by(/^store$/i) ?? o.stores[0]?.id ?? ''
   return (k === 'FG' ? (by(/finish|\bfg\b/i) ?? by(/^store$/i)) : (by(/raw|fabric|main/i) ?? by(/^store$/i))) ?? o.stores[0]?.id ?? ''
 }
 
@@ -222,7 +234,10 @@ function AddOpeningStock() {
     const refs: Array<{ key: string; label: string; style?: string; colour?: string }> = []
     let value = 0
     if (!draft || !options) return { lines, refs, value, pieces: 0 }
-    const storeName = options.stores.find((s) => s.id === draft.storeId)?.name ?? ''
+    // A fixed asset may be at a department: its place is kept as "dept:<id>".
+    const storeName = draft.storeId.startsWith('dept:')
+      ? (options.departments?.find((d) => `dept:${d.id}` === draft.storeId)?.name ?? '')
+      : (options.stores.find((s) => s.id === draft.storeId)?.name ?? '')
     const base = { date: draft.date, status: draft.status }
     let pieces = 0
     for (const g of draft.kind === 'RM' ? [] : draft.garments) {
@@ -255,14 +270,17 @@ function AddOpeningStock() {
         }
       }
     }
-    for (const m of draft.kind === 'RM' ? draft.materials : []) {
+    for (const m of draft.kind === 'RM' || draft.kind === 'FA' ? draft.materials : []) {
       const it = options.items.find((x) => x.id === m.itemId)
       if (!it) continue
-      const category = options.categories.find((c) => c.id === it.categoryId)?.name ?? ''
+      const asset = draft.kind === 'FA'
+      const category = (asset ? (options.assetCategories ?? []) : options.categories).find((c) => c.id === it.categoryId)?.name ?? ''
       for (const l of m.lots) {
         const q = Number(l.qty || 0)
         if (!(q > 0)) continue
         value += q * Number(l.rate || 0)
+        // A fixed asset: one tag each, with its serial numbers.
+        const serials = asset ? l.lot.split(/[,;\n]+/).map((t) => t.trim()).filter(Boolean) : []
         lines.push({
           ...base,
           process: 'Store',
@@ -272,10 +290,16 @@ function AddOpeningStock() {
           uom: it.unit ?? '',
           qty: q,
           rate: l.rate,
-          lot: l.lot.trim(),
-          bundle: l.bundle.trim(),
+          lot: asset ? '' : l.lot.trim(),
+          bundle: asset ? '' : l.bundle.trim(),
           // Its packing, when one was chosen; else the save goes by the item's usual.
-          ...(it.tracked && l.pack ? { pack: packInputOf(l.pack, q, it.unit ?? '', it.decimals) } : {}),
+          ...(asset
+            ? Number.isInteger(q)
+              ? { pack: { type: 'OTHER', qtys: Array.from({ length: q }, () => 1), ...(serials.length ? { refs: serials } : {}) } }
+              : {}
+            : it.tracked && l.pack
+              ? { pack: packInputOf(l.pack, q, it.unit ?? '', it.decimals) }
+              : {}),
         })
         refs.push({ key: l.key, label: `${it.code}${l.lot.trim() ? ` lot ${l.lot.trim()}` : ''}${l.bundle.trim() ? ` · ${l.bundle.trim()}` : ''}` })
       }
@@ -285,7 +309,7 @@ function AddOpeningStock() {
 
   const review = async () => {
     if (!draft) return
-    if (draft.kind !== 'SFG' && !draft.storeId) return setError('Pick the store the stock is in.')
+    if (draft.kind !== 'SFG' && !draft.storeId) return setError(draft.kind === 'FA' ? 'Pick where the assets are: a store or a department.' : 'Pick the store the stock is in.')
     if (!built.lines.length) {
       return setError(draft.kind === 'RM' ? 'Enter a quantity for at least one lot or roll.' : 'Enter pieces for at least one colour and size.')
     }
@@ -363,7 +387,7 @@ function AddOpeningStock() {
       {/* 1. What is being entered. */}
       {!kind && (
         <div className="space-y-4">
-          <div className="grid gap-4 lg:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             {KINDS.map((t) => {
               const waiting = typeof window !== 'undefined' ? readDraft(t.key) : null
               return (
@@ -442,20 +466,26 @@ function AddOpeningStock() {
                   <input type="date" className="form-input h-9" value={draft.date} max={todayInIndia()} onChange={(e) => set({ date: e.target.value })} aria-label="Opening date" />
                 </MiniField>
                 {kind !== 'SFG' && (
-                  <MiniField label={kind === 'FG' ? 'Finished goods store' : 'Store'} required className="w-52">
-                    <SmartSelect className="form-input h-9" value={draft.storeId} onChange={(e) => set({ storeId: e.target.value })} aria-label="Store">
-                      <option value="">Pick the store…</option>
+                  <MiniField label={kind === 'FG' ? 'Finished goods store' : kind === 'FA' ? 'Location' : 'Store'} required className="w-52">
+                    <SmartSelect className="form-input h-9" value={draft.storeId} onChange={(e) => set({ storeId: e.target.value })} aria-label={kind === 'FA' ? 'Location' : 'Store'}>
+                      <option value="">{kind === 'FA' ? 'A store or a department…' : 'Pick the store…'}</option>
                       {options.stores.map((s) => (
-                        <option key={s.id} value={s.id}>
+                        <option key={s.id} value={s.id} data-sub={kind === 'FA' ? 'Store' : undefined}>
                           {s.name}
                         </option>
                       ))}
+                      {kind === 'FA' &&
+                        (options.departments ?? []).map((d) => (
+                          <option key={d.id} value={`dept:${d.id}`} data-sub="Department: installed there">
+                            {d.name}
+                          </option>
+                        ))}
                     </SmartSelect>
                   </MiniField>
                 )}
                 <MiniField label="Stock status" className="w-48">
                   <SmartSelect className="form-input h-9" value={draft.status} onChange={(e) => set({ status: e.target.value })} aria-label="Stock status">
-                    {STATUSES.filter((s) => kind !== 'RM' || s.value !== 'B-Grade').map((s) => (
+                    {STATUSES.filter((s) => (kind !== 'RM' && kind !== 'FA') || s.value !== 'B-Grade').map((s) => (
                       <option key={s.value} value={s.value}>
                         {s.label}
                       </option>
@@ -502,7 +532,7 @@ function AddOpeningStock() {
               }
               if (kind === 'FG') return <FinishedGoods {...shared} garments={draft.garments} onChange={(garments) => set({ garments })} />
               if (kind === 'SFG') return <SemiFinished {...shared} garments={draft.garments} onChange={(garments) => set({ garments })} />
-              return <RawMaterials {...shared} materials={draft.materials} onChange={(materials) => set({ materials })} />
+              return <RawMaterials {...shared} asset={kind === 'FA'} materials={draft.materials} onChange={(materials) => set({ materials })} />
             })()}
           </fieldset>
 
@@ -517,7 +547,7 @@ function AddOpeningStock() {
                 </p>
                 {built.lines.length > 0 && (
                   <dl className="flex items-center gap-5 text-sm" aria-label="Entry summary">
-                    <Stat label={kind === 'RM' ? 'Materials' : 'Styles'} value={String(kind === 'RM' ? draft.materials.length : draft.garments.length)} />
+                    <Stat label={kind === 'RM' ? 'Materials' : kind === 'FA' ? 'Assets' : 'Styles'} value={String(kind === 'RM' || kind === 'FA' ? draft.materials.length : draft.garments.length)} />
                     <Stat label="Lines" value={String(built.lines.length)} />
                     {kind !== 'RM' && <Stat label="Pieces" value={num(built.pieces)} />}
                     <Stat label="Stock value" value={money(built.value)} />
@@ -662,7 +692,7 @@ function ReviewPanel({
       </section>
     )
   }
-  const garments = kind !== 'RM'
+  const garments = kind !== 'RM' && kind !== 'FA'
   const stickers = plan.reduce((t, r) => t + (r.stickers ?? 0), 0)
   const places = [...new Set(plan.map((r) => r.location))]
   return (

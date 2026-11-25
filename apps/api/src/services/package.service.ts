@@ -122,7 +122,7 @@ export async function lockPackage(tx: Prisma.TransactionClient, id: string) {
   await tx.$queryRaw`SELECT id FROM ld_erp.stock_packages WHERE id = ${id} FOR UPDATE`
   const pkg = await tx.stockPackage.findUnique({
     where: { id },
-    include: { item: { select: { name: true, code: true, uom: { select: { symbol: true } } } }, warehouse: { select: { name: true } } },
+    include: { item: { select: { name: true, code: true, type: true, uom: { select: { symbol: true } } } }, warehouse: { select: { name: true } } },
   })
   if (!pkg) throw new AppError('That package does not exist', 404, 'NOT_FOUND')
   return pkg
@@ -174,15 +174,25 @@ export async function positionOf(tx: Prisma.TransactionClient, spot: StockSpot) 
   }
 }
 
-type PackageRule = { tracked: boolean; packType: PackType | null; category: string }
+/** oneEach: a fixed asset — always tagged, one tag (sticker) for each unit. */
+type PackageRule = { tracked: boolean; packType: PackType | null; category: string; oneEach?: boolean }
+
+type RuleCategory = { id: string; name: string; parentId: string | null; trackPackages: boolean; packType: PackType | null; itemGroup: string | null }
+/** Whether a category is under Fixed Assets: its own group or any above it. */
+function underFixedAssets(byId: Map<string, RuleCategory>, categoryId: string) {
+  for (let c = byId.get(categoryId), i = 0; c && i < 10; c = c.parentId ? byId.get(c.parentId) : undefined, i++) {
+    if (c.itemGroup === 'FIXED_ASSETS') return true
+  }
+  return false
+}
 
 /**
  * Every category's rule from one read, for a screen that asks about dozens of
  * items: one query rather than one an item.
  */
 export async function packageRules(tx: Prisma.TransactionClient): Promise<(categoryId: string) => PackageRule> {
-  const all = await tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, trackPackages: true, packType: true } })
-  const byId = new Map(all.map((c) => [c.id, c]))
+  const all = await tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, trackPackages: true, packType: true, itemGroup: true } })
+  const byId = new Map<string, RuleCategory>(all.map((c) => [c.id, c]))
   const memo = new Map<string, PackageRule>()
   return (categoryId) => {
     const had = memo.get(categoryId)
@@ -200,6 +210,8 @@ export async function packageRules(tx: Prisma.TransactionClient): Promise<(categ
       c = c.parentId ? byId.get(c.parentId) : undefined
     }
     if (!rule.tracked) rule = { tracked: false, packType, category: own }
+    // A fixed asset is tagged one by one, whatever the category's switch says.
+    if (underFixedAssets(byId, categoryId)) rule = { tracked: true, packType: rule.packType ?? 'OTHER', category: own, oneEach: true }
     memo.set(categoryId, rule)
     return rule
   }
@@ -246,10 +258,16 @@ export async function positionsOf(tx: Prisma.TransactionClient, spots: StockSpot
 export async function packageRule(
   tx: Prisma.TransactionClient,
   categoryId: string,
-): Promise<{ tracked: boolean; packType: PackType | null; category: string }> {
-  const all = await tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, trackPackages: true, packType: true } })
-  const byId = new Map(all.map((c) => [c.id, c]))
+): Promise<PackageRule> {
+  const all = await tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, trackPackages: true, packType: true, itemGroup: true } })
+  const byId = new Map<string, RuleCategory>(all.map((c) => [c.id, c]))
   let c = byId.get(categoryId)
+  // A fixed asset is tagged one by one, whatever the category's switch says.
+  if (underFixedAssets(byId, categoryId)) {
+    let type: PackType | null = null
+    for (let k = byId.get(categoryId), i = 0; k && i < 10 && !type; k = k.parentId ? byId.get(k.parentId) : undefined, i++) type = k.packType
+    return { tracked: true, packType: type ?? 'OTHER', category: c?.name ?? '', oneEach: true }
+  }
   const own = c?.name ?? ''
   let packType: PackType | null = null
   for (let i = 0; c && i < 10; i++) {
@@ -292,6 +310,8 @@ export function stickerDefaultsFrom(item: StickerItem, rule: PackageRule): Stick
   const unit = [item.uom?.symbol, item.uom?.name].map((u) => (u ?? '').trim().toLowerCase())
   const byUnit = UNIT_PACK.find(([re]) => unit.some((u) => re.test(u)))?.[1] ?? null
   const remembered = item.packQty != null && Number(item.packQty) > 0 ? Number(item.packQty) : null
+  // A fixed asset: one tag for each machine, computer or chair.
+  if (rule.oneEach) return { packType: item.packType ?? rule.packType ?? 'OTHER', perPack: 1, tracked: true, category: rule.category }
   return {
     packType: item.packType ?? (byUnit && byUnit !== 'OTHER' ? byUnit : null) ?? rule.packType ?? byUnit ?? 'BOX',
     perPack: remembered ?? (byUnit ? 1 : null),
@@ -675,6 +695,9 @@ export async function olderPackage(
   },
   exclude: string[] = [],
 ) {
+  // A fixed asset is one particular machine, not stock used oldest first: no FIFO.
+  const item = await tx.item.findUnique({ where: { id: pkg.itemId }, select: { type: true } })
+  if (item?.type === 'FIXED_ASSET') return null
   return tx.stockPackage.findFirst({
     where: {
       itemId: pkg.itemId,

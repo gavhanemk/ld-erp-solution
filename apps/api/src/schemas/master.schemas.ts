@@ -135,6 +135,7 @@ const ItemTypeEnum = z.enum([
   'CONSUMABLE',
   'PACKING_MATERIAL',
   'TRIM',
+  'FIXED_ASSET',
 ], pickOne('an item type'))
 const CustomerTypeEnum = z.enum(['DOMESTIC', 'EXPORT', 'JOB_WORK', 'VHAGAR_DEALER'], pickOne('a customer type'))
 const SupplierCategoryEnum = z.enum([
@@ -750,7 +751,7 @@ export const createItemCategorySchema = z.object({
   packType: z.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).optional().nullable(),
   // Which tab of Items & Products a main category is under. A sub-category
   // takes its main category's, whatever is sent.
-  itemGroup: z.enum(['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS', 'EXPENSES']).optional(),
+  itemGroup: z.enum(['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS', 'FIXED_ASSETS', 'EXPENSES']).optional(),
   // The HSN code an item made under it takes when nothing more particular is
   // given (an opening stock sheet, say). Its GST comes from the HSN list.
   hsnCode: z

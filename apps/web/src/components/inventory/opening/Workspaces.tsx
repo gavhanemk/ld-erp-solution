@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState, type ReactNode } from 'react'
-import { ExternalLink, Factory, Package, Plus, Search, Shirt, Tag, Trash2, type LucideIcon } from 'lucide-react'
+import { ExternalLink, Factory, Package, Plus, Search, Shirt, Tag, Trash2, Wrench, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
@@ -380,8 +380,10 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
 
 // ── Raw Materials: category → its items → lots and rolls ────────────────
 
-export function RawMaterials({ materials, onChange, ...shared }: Shared & { materials: Material[]; onChange: (m: Material[]) => void }) {
+export function RawMaterials({ materials, onChange, asset = false, ...shared }: Shared & { materials: Material[]; onChange: (m: Material[]) => void; asset?: boolean }) {
   const { options } = shared
+  // Fixed assets: the same, from the asset categories, each unit tagged with its serial number.
+  const categories = asset ? (options.assetCategories ?? []) : options.categories
   const [categoryId, setCategoryId] = useState('')
   const [itemId, setItemId] = useState('')
   const taken = new Set(materials.map((m) => m.itemId))
@@ -391,11 +393,11 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
     onChange([...materials, { key: newKey(), itemId, lots: [newLot()] }])
     setItemId('')
   }
-  const categoryName = (id: string) => options.categories.find((c) => c.id === id)?.name ?? ''
+  const categoryName = (id: string) => categories.find((c) => c.id === id)?.name ?? ''
   return (
-    <section className="space-y-3" aria-label="Raw materials by item">
-      <Toolbar icon={Package} title="Add a material" hint="Category, then its item">
-        <MiniField label="Material category" className="w-64">
+    <section className="space-y-3" aria-label={asset ? 'Fixed assets by item' : 'Raw materials by item'}>
+      <Toolbar icon={asset ? Wrench : Package} title={asset ? 'Add an asset' : 'Add a material'} hint="Category, then its item">
+        <MiniField label={asset ? 'Asset category' : 'Material category'} className="w-64">
         <SmartSelect
           className="form-input h-9 w-full"
           value={categoryId}
@@ -404,10 +406,10 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
             setCategoryId(e.target.value)
             setItemId('')
           }}
-          aria-label="Material category"
+          aria-label={asset ? 'Asset category' : 'Material category'}
         >
-          <option value="">1. Material category…</option>
-          {options.categories.map((c) => (
+          <option value="">{asset ? '1. Asset category…' : '1. Material category…'}</option>
+          {categories.map((c) => (
             <option key={c.id} value={c.id} data-sub={`${c.items} ${c.items === 1 ? 'item' : 'items'}`}>
               {c.name}
             </option>
@@ -428,7 +430,12 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
           <Plus size={14} /> Add
         </button>
       </Toolbar>
-      {materials.length === 0 && <Empty icon={Package} title="No materials yet" text="Pick a category, then its item: a row for each lot or roll, in the item's own unit." />}
+      {materials.length === 0 &&
+        (asset ? (
+          <Empty icon={Wrench} title="No assets yet" text="Pick an asset category, then its item: how many there are, and each one's serial number. Every one gets its own asset tag." />
+        ) : (
+          <Empty icon={Package} title="No materials yet" text="Pick a category, then its item: a row for each lot or roll, in the item's own unit." />
+        ))}
       {materials.map((m) => {
         const it = options.items.find((x) => x.id === m.itemId)
         if (!it) return null
@@ -447,12 +454,12 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
                   <span className="bg-primary/10 rounded-md px-1.5 py-0.5 font-mono text-xs font-semibold text-teal-400">{it.code}</span>
                   {it.tracked && (
                     <span className="badge-neutral">
-                      <Tag size={11} /> Labelled by package
+                      <Tag size={11} /> {asset ? 'One asset tag each' : 'Labelled by package'}
                     </span>
                   )}
                 </div>
                 <div className="text-muted-foreground mt-0.5 text-xs">
-                  {categoryName(it.categoryId)} · counted in {it.unit ?? '—'} · {m.lots.length} {m.lots.length === 1 ? 'lot' : 'lots'}
+                  {categoryName(it.categoryId)} · counted in {it.unit ?? '—'} · {m.lots.length} {m.lots.length === 1 ? (asset ? 'row' : 'lot') : asset ? 'rows' : 'lots'}
                 </div>
               </div>
             }
@@ -460,7 +467,7 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
             problems={lotProblems.length ? lotProblems : undefined}
             onRemove={() => onChange(materials.filter((x) => x.key !== m.key))}
           >
-            <LotRows item={it} lots={m.lots} problems={shared.problems} onChange={setLots} qty={qty} value={value} />
+            <LotRows item={it} lots={m.lots} problems={shared.problems} onChange={setLots} qty={qty} value={value} asset={asset} />
           </Block>
         )
       })}
@@ -475,6 +482,7 @@ function LotRows({
   onChange,
   qty,
   value,
+  asset = false,
 }: {
   item: MaterialOption
   lots: Lot[]
@@ -482,6 +490,8 @@ function LotRows({
   onChange: (lots: Lot[]) => void
   qty: number
   value: number
+  /** Fixed assets: serial numbers in place of lot and bundle, one tag each. */
+  asset?: boolean
 }) {
   const set = (key: string, change: Partial<Lot>) => onChange(lots.map((l) => (l.key === key ? { ...l, ...change } : l)))
   const unit = item.unit ?? ''
@@ -491,12 +501,18 @@ function LotRows({
         <thead>
           <tr className="bg-secondary text-muted-foreground text-left text-[11px] font-semibold uppercase tracking-wide">
             <th className="w-10 px-3 py-2">#</th>
-            <th className="min-w-[10rem] px-2 py-2">Lot / Batch / Roll No.</th>
-            <th className="min-w-[10rem] px-2 py-2">Bundle / Barcode No.</th>
-            <th className="w-44 px-2 py-2 text-right">Opening Qty</th>
-            <th className="w-36 px-2 py-2 text-right">Unit Rate</th>
+            {asset ? (
+              <th className="min-w-[16rem] px-2 py-2">Serial numbers</th>
+            ) : (
+              <>
+                <th className="min-w-[10rem] px-2 py-2">Lot / Batch / Roll No.</th>
+                <th className="min-w-[10rem] px-2 py-2">Bundle / Barcode No.</th>
+              </>
+            )}
+            <th className="w-44 px-2 py-2 text-right">{asset ? 'Quantity' : 'Opening Qty'}</th>
+            <th className="w-36 px-2 py-2 text-right">{asset ? 'Cost each' : 'Unit Rate'}</th>
             <th className="w-32 px-3 py-2 text-right">Value</th>
-            {item.tracked && <th className="w-52 px-2 py-2">Packed as</th>}
+            {asset ? <th className="w-32 px-2 py-2">Asset tags</th> : item.tracked && <th className="w-52 px-2 py-2">Packed as</th>}
             <th className="w-10" />
           </tr>
         </thead>
@@ -504,12 +520,26 @@ function LotRows({
           {lots.map((l, i) => (
             <tr key={l.key} className={cn('border-border border-t', problems.get(l.key) && 'bg-red-500/5')}>
               <td className="text-muted-foreground px-3 py-1.5 text-xs tabular-nums">{i + 1}</td>
-              <td className="px-2 py-1.5">
-                <input className="form-input h-9" value={l.lot} onChange={(e) => set(l.key, { lot: e.target.value })} placeholder="Optional" aria-label={`Lot of ${item.code}, row ${i + 1}`} />
-              </td>
-              <td className="px-2 py-1.5">
-                <input className="form-input h-9" value={l.bundle} onChange={(e) => set(l.key, { bundle: e.target.value })} placeholder="Optional" aria-label={`Bundle of ${item.code}, row ${i + 1}`} />
-              </td>
+              {asset ? (
+                <td className="px-2 py-1.5">
+                  <input
+                    className="form-input h-9"
+                    value={l.lot}
+                    onChange={(e) => set(l.key, { lot: e.target.value })}
+                    placeholder="Optional: SN-1001, SN-1002"
+                    aria-label={`Serial numbers of ${item.code}, row ${i + 1}`}
+                  />
+                </td>
+              ) : (
+                <>
+                  <td className="px-2 py-1.5">
+                    <input className="form-input h-9" value={l.lot} onChange={(e) => set(l.key, { lot: e.target.value })} placeholder="Optional" aria-label={`Lot of ${item.code}, row ${i + 1}`} />
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <input className="form-input h-9" value={l.bundle} onChange={(e) => set(l.key, { bundle: e.target.value })} placeholder="Optional" aria-label={`Bundle of ${item.code}, row ${i + 1}`} />
+                  </td>
+                </>
+              )}
               <td className="px-2 py-1.5">
                 <div className="relative">
                   <StepInput
@@ -536,10 +566,16 @@ function LotRows({
                 </div>
               </td>
               <td className="text-foreground px-3 py-1.5 text-right font-semibold tabular-nums">{money(Number(l.qty || 0) * Number(l.rate || 0))}</td>
-              {item.tracked && (
-                <td className="px-2 py-1.5">
-                  <PackedAs item={item} lot={l} row={i + 1} onChange={(pack) => set(l.key, { pack })} />
+              {asset ? (
+                <td className="text-muted-foreground px-2 py-1.5 text-xs">
+                  {Number(l.qty || 0) > 0 ? `${num(Number(l.qty))} ${Number(l.qty) === 1 ? 'tag' : 'tags'}` : '—'}
                 </td>
+              ) : (
+                item.tracked && (
+                  <td className="px-2 py-1.5">
+                    <PackedAs item={item} lot={l} row={i + 1} onChange={(pack) => set(l.key, { pack })} />
+                  </td>
+                )
               )}
               <td className="py-1.5 pr-2">
                 <button
@@ -557,9 +593,9 @@ function LotRows({
         </tbody>
         <tfoot>
           <tr className="border-border bg-secondary/40 border-t">
-            <td colSpan={3} className="px-3 py-2">
+            <td colSpan={asset ? 2 : 3} className="px-3 py-2">
               <button type="button" className="text-primary flex items-center gap-1 text-xs font-semibold hover:underline" onClick={() => onChange([...lots, newLot()])}>
-                <Plus size={13} /> Add another lot or roll of {item.code}
+                <Plus size={13} /> {asset ? `Add another row of ${item.code}` : `Add another lot or roll of ${item.code}`}
               </button>
             </td>
             <td className="text-foreground px-2 py-2 text-right text-sm font-semibold tabular-nums">
@@ -573,7 +609,7 @@ function LotRows({
             </td>
             <td />
             <td className="text-foreground px-3 py-2 text-right text-sm font-semibold tabular-nums">{value ? money(value) : '—'}</td>
-            {item.tracked && <td />}
+            {(asset || item.tracked) && <td />}
             <td />
           </tr>
         </tfoot>

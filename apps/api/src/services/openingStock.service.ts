@@ -46,8 +46,8 @@ export type OsKey =
  * on their style's route, raw materials in a store. The 19-column sheet holds
  * all three.
  */
-export type OsKind = 'FG' | 'SFG' | 'RM'
-export const KIND_LABEL: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
+export type OsKind = 'FG' | 'SFG' | 'RM' | 'FA'
+export const KIND_LABEL: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials', FA: 'Fixed Assets' }
 
 /**
  * The sheet, exactly: these names, in this order (A to S). A trailing * marks
@@ -125,6 +125,19 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's." },
     { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
   ],
+  FA: [
+    { key: 'category', head: 'Asset Category', width: 18, list: 'assetCategories', note: "Needed for a new item: its subcategory under Fixed Assets (Machines, Computers…). For an item already there it is checked against the item's category." },
+    { key: 'code', head: 'Item Code', width: 16, note: 'Optional. The ERP gives every item its own code: leave this empty and the item is found by its name, or made new.' },
+    { key: 'description', head: 'Item Name *', width: 30, note: 'Required unless Item Code is given. An item of exactly this name is used, else a new item is made with it.' },
+    { key: 'packRefs', head: 'Serial Numbers', width: 26, note: "Optional: each one's serial number, separated by commas — as many as the quantity. Printed on its asset tag." },
+    { key: 'qty', head: 'Quantity *', width: 10, note: 'Required. How many: each one gets its own asset tag.' },
+    { key: 'rate', head: 'Cost Each', width: 12, note: 'Optional. What one is valued at. Empty: in at nought, valuation pending.' },
+    { key: 'location', head: 'Location', width: 22, list: 'assetPlaces', note: 'Optional. A store, or the department it is installed at (Stitching, Cutting, Accounts…). Empty: the store called Store.' },
+    { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'Optional. OK, Hold or Rejected. Empty is OK.' },
+    { key: 'remarks', head: 'Remarks', width: 24, note: 'Optional.' },
+    { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's." },
+    { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
+  ],
 }
 
 /** A column's name without the * that marks it required: how problems name it. */
@@ -147,6 +160,10 @@ const EXAMPLES: Record<OsKind | 'ALL', Raw> = {
   RM: {
     category: 'Fabric', description: 'Cotton Poplin 58in White', lot: 'ROLL-101', uom: 'mtr', qty: '120.5', rate: '85', location: 'Store',
     packType: 'Roll', status: 'OK', remarks: EXAMPLE_REMARK,
+  },
+  FA: {
+    category: 'Machines', description: 'Single Needle Lockstitch Machine', packRefs: 'SN-1001, SN-1002', qty: '2', rate: '18500', location: 'Stitching',
+    status: 'OK', remarks: EXAMPLE_REMARK,
   },
 }
 const isExample = (raw: Raw, example: Raw) => {
@@ -293,10 +310,14 @@ function planPacks(
     return later(input.count, `Packaging pending: ${packs(input.count, type)}, sizes to give later`)
   }
   if (ctx.bundle) return made([ctx.qty], [null])
-  if (ctx.perPack) return made(suggestQtys(ctx.qty, ctx.perPack), Array.from({ length: suggestQtys(ctx.qty, ctx.perPack).length }, () => null))
+  if (ctx.perPack) {
+    const qtys = suggestQtys(ctx.qty, ctx.perPack)
+    // Each one's own number (a fixed asset's serial numbers), when given.
+    return made(qtys, input?.refs?.length ? refsFor(qtys.length) : Array.from({ length: qtys.length }, () => null))
+  }
   return later(null, 'Packaging pending: give its packages when you know them')
 }
-const TYPE_SHEET: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
+const TYPE_SHEET: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials', FA: 'Fixed Assets' }
 
 type Raw = Partial<Record<OsKey, string>>
 export type OsStatus = 'OK' | 'HOLD' | 'REJECTED' | 'B_GRADE'
@@ -435,7 +456,7 @@ type Resolved = { plan: OsRowPlan; ready?: Ready }
 interface NewItem {
   key: string
   name: string
-  type: 'RAW_MATERIAL' | 'TRIM' | 'PACKING_MATERIAL' | 'CONSUMABLE' | 'SEMI_FINISHED' | 'FINISHED_GOOD'
+  type: 'RAW_MATERIAL' | 'TRIM' | 'PACKING_MATERIAL' | 'CONSUMABLE' | 'SEMI_FINISHED' | 'FINISHED_GOOD' | 'FIXED_ASSET'
   categoryId: string
   uomId: string
   hsnCode: string | null
@@ -513,6 +534,16 @@ const HOW_TO: Record<OsKind, string[]> = {
     "Nothing given: a row with its own Bundle / Barcode Number is one package; otherwise the item's usual package size, if it has one; else the stickers wait.",
     'Stock Status: OK, Hold or Rejected. Empty is OK.',
   ],
+  FA: [
+    'One row per item and place: 3 machines of one kind in Stitching are one row of quantity 3.',
+    'Every one gets its own asset tag (a QR sticker with its own number), made as it comes in, ready to print.',
+    'Serial Numbers: each one’s, separated by commas, as many as the quantity. Printed on its tag; may be left empty.',
+    'Location: a store, or the department it is installed at — Stitching, Cutting, Accounts. Empty: the store called Store.',
+    'Item Code may be left empty: the item is found by its exact Item Name, or made new under its Asset Category (a subcategory of Fixed Assets in Masters → Item Categories).',
+    "A new item's HSN code: the HSN Code column, else its category's. The code must be in Masters → HSN / SAC Codes.",
+    'Cost Each is optional: without it the asset comes in at nought, its valuation pending, to be set later in Opening Stock.',
+    'Stock Status: OK, Hold or Rejected. Empty is OK.',
+  ],
 }
 
 /**
@@ -524,19 +555,21 @@ async function buildKindTemplate(kind: OsKind): Promise<Buffer> {
   const columns = TYPE_COLUMNS[kind]
   const wb = new ExcelJS.Workbook()
   const sheet = addTemplateSheet(wb, TYPE_SHEET[kind], columns)
-  const materials = await prisma.itemCategory.findMany({
-    where: { isActive: true, itemGroup: 'RAW_MATERIALS', parentId: { not: null } },
-    select: { name: true },
-    orderBy: { name: 'asc' },
-  })
+  const [materials, assetCategories] = await Promise.all(
+    (['RAW_MATERIALS', 'FIXED_ASSETS'] as const).map((itemGroup) =>
+      prisma.itemCategory.findMany({ where: { isActive: true, itemGroup, parentId: { not: null } }, select: { name: true }, orderBy: { name: 'asc' } }),
+    ),
+  )
   const all: Record<string, string[]> = {
+    assetCategories: assetCategories.map((c) => c.name),
+    assetPlaces: [...m.warehouses.filter((w) => !w.departmentId).map((w) => w.name).sort(), ...m.departments.map((d) => d.name).sort()],
     styles: m.styles.filter((st) => st.isActive).map((st) => st.code).sort(),
     processes: m.departments.filter((d) => d.operations.length > 0).map((d) => d.name).sort(),
     stores: m.warehouses.filter((w) => !w.departmentId).map((w) => w.name).sort(),
     locations: m.warehouses.map((w) => w.name).sort(),
     materials: materials.map((c) => c.name),
     units: m.units.map((u) => u.symbol).sort(),
-    statuses: kind === 'RM' ? ['OK', 'Hold', 'Rejected'] : Object.values(STATUS_LABEL),
+    statuses: kind === 'RM' || kind === 'FA' ? ['OK', 'Hold', 'Rejected'] : Object.values(STATUS_LABEL),
     packTypes: ['Roll', 'Box', 'Carton', 'Bag', 'Bundle', 'Packet', 'Other'],
   }
   const used = new Set(columns.map((c) => c.list).filter(Boolean) as string[])
@@ -617,7 +650,7 @@ export function asNineteen(rows: Array<{ row: number; raw: Raw }>, kind: OsKind,
     if (Object.values(r.raw).every((v) => !(v ?? '').trim())) continue
     r.raw.date = openingDate
     if (kind === 'FG') r.raw.process = 'Finished Goods'
-    if (kind === 'RM') r.raw.process = 'Store'
+    if (kind === 'RM' || kind === 'FA') r.raw.process = 'Store'
   }
   return rows
 }
@@ -902,8 +935,8 @@ export async function planImport(
       problems.push(`A new finished item is made from its ${L('style')} and ${L('colour')}, like the style's other colours: give both.`)
       return null
     }
-    if (cat.group !== 'RAW_MATERIALS' && cat.group !== 'SEMI_FINISHED') {
-      problems.push(`${cat.name} is ${cat.group === 'EXPENSES' ? 'an expense head' : 'not under Raw Materials, Semi-Finished or Finished Goods'}, not stock.`)
+    if (cat.group !== 'RAW_MATERIALS' && cat.group !== 'SEMI_FINISHED' && cat.group !== 'FIXED_ASSETS') {
+      problems.push(`${cat.name} is ${cat.group === 'EXPENSES' ? 'an expense head' : 'not under Raw Materials, Semi-Finished Goods, Finished Goods or Fixed Assets'}, not stock.`)
       return null
     }
     const like = await likeIn(cat.id)
@@ -913,7 +946,9 @@ export async function planImport(
       problems.push(uomText ? `No unit "${uomText}" in Masters → Units.` : `Give the ${L('uom')} the new item "${name}" is counted in.`)
       return null
     }
-    const type = (like && typeFitsGroup(like.type, cat.group) ? like.type : cat.group === 'SEMI_FINISHED' ? 'SEMI_FINISHED' : 'RAW_MATERIAL') as NewItem['type']
+    const type = (
+      like && typeFitsGroup(like.type, cat.group) ? like.type : cat.group === 'SEMI_FINISHED' ? 'SEMI_FINISHED' : cat.group === 'FIXED_ASSETS' ? 'FIXED_ASSET' : 'RAW_MATERIAL'
+    ) as NewItem['type']
     const tax = taxOf(name, raw, { hsnCode: cat.hsnCode, from: `the category ${cat.name}` }, problems)
     if (!tax) return null
     const spec: NewItem = {
@@ -981,6 +1016,9 @@ export async function planImport(
     let warehouseId: string | null = null
     let floorOf: string | null = null
     let needsStore = false
+    // A department named as the place: only a fixed asset may be installed there.
+    // floor: the process floor's own name was given, not the department's.
+    let atDepartment: { id: string; name: string; floor?: string } | null = null
     const locText = squash(raw.location)
     if (kind === 'PROCESS' && process) {
       const floor = floorByProcess.get(process.id)
@@ -1015,12 +1053,16 @@ export async function planImport(
       if (!locText) needsStore = true
       else {
         const w = warehouseByName.get(locText)
+        const d = w ? undefined : processByName.get(locText)
         if (w && w.departmentId) {
-          problems.push(`${w.name} is a process's floor, not a store. Pieces still at a process are semi-finished goods; give the store the stock is in.`)
+          const dept = departmentById.get(w.departmentId)
+          atDepartment = { id: w.departmentId, name: dept?.name ?? w.name, floor: w.name }
         } else if (w) {
           warehouseId = w.id
           plan.location = w.name
-        } else problems.push(`No store named "${raw.location}". Use one in Masters → Warehouses.`)
+        } else if (d) atDepartment = { id: d.id, name: d.name }
+        else if (opts.kind === 'FA') problems.push(`No store or department named "${raw.location}". Use one in Masters → Warehouses or Departments.`)
+        else problems.push(`No store named "${raw.location}". Use one in Masters → Warehouses.`)
       }
     }
 
@@ -1100,9 +1142,12 @@ export async function planImport(
       // Finished Goods rows hold finished goods; each kind holds its own.
       if (kind === 'FG' && group !== 'FINISHED_GOODS') problems.push(`A Finished Goods row, but ${item.code} is ${ITEM_GROUP_LABEL[group].toLowerCase()}.`)
       if (opts.kind === 'RM' && group !== 'RAW_MATERIALS') {
-        problems.push(`${item.code} is ${ITEM_GROUP_LABEL[group].toLowerCase()}, not a raw material: enter it under ${group === 'FINISHED_GOODS' ? 'Finished Goods' : 'Semi Finished Goods'}.`)
+        problems.push(`${item.code} is ${ITEM_GROUP_LABEL[group].toLowerCase()}, not a raw material: enter it under ${ITEM_GROUP_LABEL[group] === 'Semi-Finished Goods' ? 'Semi Finished Goods' : ITEM_GROUP_LABEL[group]}.`)
       }
       if (opts.kind === 'SFG' && group === 'RAW_MATERIALS') problems.push(`${item.code} is a raw material: enter it under Raw Materials.`)
+      if (opts.kind === 'FA' && group !== 'FIXED_ASSETS') problems.push(`${item.code} is ${ITEM_GROUP_LABEL[group].toLowerCase()}, not a fixed asset.`)
+      if (opts.kind !== 'FA' && opts.kind && group === 'FIXED_ASSETS') problems.push(`${item.code} is a fixed asset: enter it under Fixed Assets.`)
+      if (kind === 'PROCESS' && group === 'FIXED_ASSETS') problems.push(`${item.code} is a fixed asset, not work in progress: give the department it is at as its Location, with Process Store.`)
 
       // A garment at a process: on its style's route, and not an order already on the Production Floor.
       const routeStyle = item.styleId ? styleById.get(item.styleId) : style
@@ -1140,8 +1185,8 @@ export async function planImport(
       // Size: garments and parts by size; raw materials have none.
       const sizeText = squash(raw.size)
       const run = item.style?.sizeGroupId ?? (style?.sizeGroupId ?? null)
-      if (group === 'RAW_MATERIALS') {
-        if (sizeText) problems.push(`${item.code} is a raw material, which is kept without sizes. Leave Size empty, or put it in Remarks.`)
+      if (group === 'RAW_MATERIALS' || group === 'FIXED_ASSETS') {
+        if (sizeText) problems.push(`${item.code} is ${group === 'FIXED_ASSETS' ? 'a fixed asset' : 'a raw material'}, which is kept without sizes. Leave Size empty, or put it in Remarks.`)
       } else if (sizeText) {
         if (run) {
           const s = sizesOfGroup.get(run)?.get(sizeText)
@@ -1205,7 +1250,7 @@ export async function planImport(
     if (!status) problems.push(`${L('status')} "${raw.status}" is not one of: OK, Hold, Rejected, B-Grade.`)
     else {
       plan.status = STATUS_LABEL[status]
-      if (status === 'B_GRADE' && plan.group === 'RAW_MATERIALS') problems.push('B-Grade is for semi-finished and finished goods, not raw materials.')
+      if (status === 'B_GRADE' && (plan.group === 'RAW_MATERIALS' || plan.group === 'FIXED_ASSETS')) problems.push('B-Grade is for semi-finished and finished goods only.')
     }
 
     // Its stickers: raw materials of a category labelled by package, kept without sizes.
@@ -1220,12 +1265,34 @@ export async function planImport(
           problems,
         )
         plan.packing = pack.said
+        // A fixed asset: one asset tag each.
+        if (plan.group === 'FIXED_ASSETS' && !pack.later) plan.packing = `${pack.qtys.length} asset ${pack.qtys.length === 1 ? 'tag' : 'tags'}${pack.refs.some(Boolean) ? ', each with its serial number' : ''}`
         // Stickers to print: a package keeping its own barcode needs none.
         plan.stickers = pack.qtys.length - (pack.barcode ? 1 : 0)
         plan.pack = { type: pack.packType, qtys: pack.qtys, later: pack.later, count: pack.count, barcode: pack.barcode }
         // A lot's own barcode, not one of the ERP's sticker numbers (checked against other packages after the repeats).
         if (pack.barcode && /^PK-\d+$/i.test(pack.barcode)) problems.push(`${L('bundle')} ${pack.barcode} is an ERP sticker number, not the lot's own barcode.`)
       } else if (packInput) problems.push(`${item.code} is filed under ${item.category?.name}, which is not labelled by package: leave its package columns empty.`)
+    }
+
+    if (atDepartment) {
+      if (plan.group !== 'FIXED_ASSETS') {
+        problems.push(
+          atDepartment.floor
+            ? `${atDepartment.floor} is a process's floor, not a store. Pieces still at a process are semi-finished goods; give the store the stock is in.`
+            : `${atDepartment.name} is a department: only a fixed asset is kept at a department. Give the store the stock is in${plan.group === 'SEMI_FINISHED' || plan.group === 'FINISHED_GOODS' ? ', or the process for pieces still being made' : ''}.`,
+        )
+      } else {
+        const floor = floorByProcess.get(atDepartment.id)
+        if (floor) {
+          warehouseId = floor.id
+          plan.location = floor.name
+        } else {
+          floorOf = atDepartment.id
+          plan.location = `${atDepartment.name} Floor`
+          plan.newFloor = true
+        }
+      }
     }
 
     // No Location: the store called Store; finished garments, the finished goods store.
@@ -1539,7 +1606,7 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
 
       const items = await tx.item.findMany({
         where: { id: { in: [...new Set(rows.map((r) => r.ready!.itemId))] } },
-        select: { id: true, name: true, categoryId: true, packType: true, packQty: true, uom: { select: { symbol: true, name: true } } },
+        select: { id: true, name: true, type: true, categoryId: true, packType: true, packQty: true, uom: { select: { symbol: true, name: true } } },
       })
       const itemById = new Map(items.map((i) => [i.id, i]))
       const ruleOf = await packageRules(tx)
@@ -1616,7 +1683,7 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
             spot: { itemId: d.itemId, warehouseId: d.warehouseId!, ownership: 'OWNED', ownerCustomerId: null },
             packType: d.pack.packType,
             qtys: d.pack.qtys,
-            notesEach: d.pack.refs.map((ref) => (ref ? `Ref ${ref}`.slice(0, 120) : null)),
+            notesEach: d.pack.refs.map((ref) => (ref ? `${item.type === 'FIXED_ASSET' ? 'S/N' : 'Ref'} ${ref}`.slice(0, 120) : null)),
             barcodesEach: [d.pack.barcode],
             lotNo: d.lotNo,
             notes: d.bundleNo ? `Barcode ${d.bundleNo}`.slice(0, 120) : null,
@@ -1829,7 +1896,7 @@ export async function packLine(lineId: string, input: PackInput, userId: string 
         openingStock: { select: { id: true, number: true } },
         item: {
           select: {
-            id: true, code: true, name: true, categoryId: true, packType: true, packQty: true, decimalPlaces: true,
+            id: true, code: true, name: true, categoryId: true, packType: true, packQty: true, decimalPlaces: true, type: true,
             uom: { select: { symbol: true, name: true, decimalPlaces: true } },
           },
         },
@@ -1855,7 +1922,7 @@ export async function packLine(lineId: string, input: PackInput, userId: string 
       spot: { itemId: line.itemId, warehouseId: line.warehouseId, ownership: 'OWNED', ownerCustomerId: null },
       packType: plan.packType,
       qtys: plan.qtys,
-      notesEach: plan.refs.map((ref) => (ref ? `Ref ${ref}`.slice(0, 120) : null)),
+      notesEach: plan.refs.map((ref) => (ref ? `${line.item.type === 'FIXED_ASSET' ? 'S/N' : 'Ref'} ${ref}`.slice(0, 120) : null)),
       lotNo: line.lotNo,
       notes: line.bundleNo ? `Barcode ${line.bundleNo}`.slice(0, 120) : null,
       sourceType: 'OPENING',

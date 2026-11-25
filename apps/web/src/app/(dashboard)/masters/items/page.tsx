@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { AlertTriangle, FileSpreadsheet, Layers, Package, Settings2, Shirt } from 'lucide-react'
+import { AlertTriangle, FileSpreadsheet, Layers, Package, Settings2, Shirt, Wrench } from 'lucide-react'
 import { ITEM_GROUP_TYPES, typeFitsGroup, type ItemGroup } from '@ld-erp/shared'
 import { ImportItemsDialog } from '@/components/masters/ImportItemsDialog'
 import { BuyUnitsDialog, type BuyUnit } from '@/components/masters/BuyUnitsDialog'
@@ -58,12 +58,13 @@ interface Item {
   style: { id: string; code: string; name: string; colors: string[] } | null
 }
 
-type Tab = 'RAW_MATERIALS' | 'SEMI_FINISHED' | 'FINISHED_GOODS'
+type Tab = 'RAW_MATERIALS' | 'SEMI_FINISHED' | 'FINISHED_GOODS' | 'FIXED_ASSETS'
 
 const TABS: Array<{ key: Tab; slug: string; label: string; hint: string; icon: typeof Package }> = [
   { key: 'RAW_MATERIALS', slug: 'raw', label: 'Raw Materials', hint: 'Fabric, thread, trims, labels, packing', icon: Package },
   { key: 'SEMI_FINISHED', slug: 'semi', label: 'Semi-Finished Goods', hint: 'Cut panels and parts between processes', icon: Layers },
   { key: 'FINISHED_GOODS', slug: 'finished', label: 'Finished Goods', hint: 'Garments, by style and colour', icon: Shirt },
+  { key: 'FIXED_ASSETS', slug: 'assets', label: 'Fixed Assets', hint: 'Machines, computers, furniture — each one tagged', icon: Wrench },
 ]
 
 /** What GET /masters/items/groups sends: each tab, its categories in floor order, counted. */
@@ -343,6 +344,7 @@ const EMPTY: Record<Tab, string> = {
   RAW_MATERIALS: 'No raw materials here yet. Add fabric, thread, buttons and other materials.',
   SEMI_FINISHED: 'No semi-finished items yet. Cut panels and parts go here when they are kept in stock between processes.',
   FINISHED_GOODS: 'No finished goods here yet. Each one is a style in one colour.',
+  FIXED_ASSETS: 'No fixed assets here yet. Add machines, computers and furniture: each one gets its own asset tag when it comes in.',
 }
 
 export default function ItemsPage() {
@@ -437,7 +439,7 @@ function Items() {
   const tabs = (
     <div className="glass-card space-y-4 p-4">
       {/* The three groups. */}
-      <div className="grid gap-2 sm:grid-cols-3" role="tablist" aria-label="Item groups">
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" role="tablist" aria-label="Item groups">
         {TABS.map((t) => {
           const on = t.key === tab
           const count = tree?.find((g) => g.group === t.key)?.count
