@@ -830,6 +830,29 @@
     height: 2.625rem;
   }
 
+  /* The purchase order and bill forms (25 Nov 2026): white boxes with a clear
+     edge on the light theme, as the user's purchase brief asked — "white
+     editable inputs, grey only for disabled or read-only". Scoped to these two
+     forms by `.purchase-sheet`; every other screen keeps the shared grey field.
+     The edge is darker than the card's border so a white box on a white card
+     still reads as a box; it darkens on hover and turns teal on focus. */
+  .light .purchase-sheet {
+    --field: 0 0% 100%;
+    --field-border: 215 18% 76%;
+  }
+  .light .purchase-sheet .form-input:hover:not(:disabled):not(:focus) {
+    border-color: hsl(215 18% 60%);
+  }
+  .light .purchase-sheet .form-input[readonly] {
+    background: hsl(210 33% 97%);
+  }
+  .light .purchase-sheet .form-input:disabled {
+    background: hsl(210 25% 95%);
+  }
+  .light .purchase-sheet .zebra-row {
+    background: hsl(210 33% 98.5%);
+  }
+
   /* Amber text that holds up in both themes.
 
      `text-amber-400` was chosen against the dark background; on the light

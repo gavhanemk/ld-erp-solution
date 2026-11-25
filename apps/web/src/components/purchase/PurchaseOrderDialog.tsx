@@ -3,7 +3,10 @@
 import { packsFor, packText } from '@ld-erp/shared'
 import { useQtyRules } from '@/lib/qtyRules'
 import { QtyProblem } from '@/components/ui/QtyProblem'
-import { ChargeTaxDetails, taxOverridePayload } from './ChargeTaxDetails'
+import { taxOverridePayload } from './ChargeTaxDetails'
+import { PurchaseChargesTable, type ChargeTableRow } from './PurchaseChargesTable'
+import { PurchaseSummary } from './PurchaseSummary'
+import { chargeGstLabel } from './chargeRules'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -21,13 +24,11 @@ import {
   Truck,
   Paperclip,
   ScrollText,
-  Lock,
   MapPin,
   User,
   MessageSquare,
   UploadCloud,
   Save as SaveIcon,
-  Mail,
   History,
   Pencil,
   MapPinned,
@@ -37,6 +38,7 @@ import {
   ChevronDown,
   Copy,
   Layers,
+  Receipt,
 } from 'lucide-react'
 import { Section } from '@/components/purchase/Section'
 import type { EnquiryQuote, EnquiryRecord as EnquiryLite } from '@/components/purchase/enquiryTypes'
@@ -59,7 +61,7 @@ import {
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { priceDocument, chargeConfigOf, chargeSnapshot, savedChargeConfig, SAMPLE_OVER_REASON_MIN, type ChargeMasterConfig, type ChargeTaxSnapshot, type ChargeGstMode, type SampleNeed } from '@ld-erp/shared'
-import { ChargeGstControl, TaxBreakdown, type HsnOption } from '@/components/purchase/TaxBreakdown'
+import { type HsnOption } from '@/components/purchase/TaxBreakdown'
 
 /**
  * Raising a purchase order.
@@ -482,7 +484,7 @@ const COL = {
   num: 'w-8',
   // Remove and copy, side by side.
   remove: 'w-16',
-  item: 'w-64',
+  item: 'w-56',
   category: 'w-40',
   // Wide enough for a whole style code (LD-SH-2601) now that it fills in
   // from the item; at w-24 its last digit was cut off.
@@ -504,36 +506,13 @@ const COL = {
  */
 export { Section }
 
-/**
- * A control for something the ERP cannot do yet.
- *
- * Shown rather than hidden, because the field is part of the order the mill
- * knows and leaving it out reads as though it had been forgotten. Disabled
- * rather than accepting input, because a box that takes what you type and
- * throws it away is worse than no box — the same reason an unbuilt endpoint
- * here answers 501 instead of an empty list.
- */
-function Faded({ children }: { children: React.ReactNode }) {
-  // 70%, not 50%. Half opacity takes a 7:1 label down to roughly 3:1, which is
-  // below the floor for text of any size — the control read as damaged rather
-  // than switched off. This is still visibly inactive and still legible.
-  return <div className="pointer-events-none select-none opacity-70">{children}</div>
-}
-
-/**
- * One line covering everything in a section that cannot work yet.
- *
- * Shared rather than repeated per field: four of these sat on one screen, and
- * four near-identical apologies read as a broken product instead of an
- * unfinished one.
- */
-function NotBuiltNote({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
-      <Lock size={13} className="mt-0.5 shrink-0" />
-      {children}
-    </p>
-  )
+/** The same badges as the order list, so a status reads the same in both places. */
+const PO_STATUS: Record<string, { label: string; cls: string }> = {
+  DRAFT: { label: 'Draft', cls: 'badge-neutral' },
+  SENT: { label: 'Sent', cls: 'badge-info' },
+  PARTIALLY_RECEIVED: { label: 'Part received', cls: 'badge-warning' },
+  COMPLETED: { label: 'Completed', cls: 'badge-success' },
+  CANCELLED: { label: 'Cancelled', cls: 'badge-danger' },
 }
 
 /**
@@ -545,15 +524,6 @@ function NotBuiltNote({ children }: { children: React.ReactNode }) {
  */
 const isOtherChargesType = (t: { name: string }) =>
   t.name.replace(/\s+/g, '').toLowerCase() === 'othercharges'
-
-function Row({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="text-foreground tabular-nums">{inr(value)}</span>
-    </div>
-  )
-}
 
 /** The last rate an item was bought at, under its rate box; one press to take it while the box is empty. */
 function LastRate({ rate, use }: { rate: number; use?: () => void }) {
@@ -662,6 +632,8 @@ export function PurchaseOrderDialog({
   /// The date on the order. Asked for now, so a back-dated order lands in the
   /// right month rather than always taking today.
   const [poDate, setPoDate] = useState('')
+  /** When the goods are wanted by. Optional; printed on the order; never before its date. */
+  const [deliveryDate, setDeliveryDate] = useState('')
   /// The next number, previewed. Read-only: it is allocated by the server when
   /// the order is written, because two people filling this form at once must
   /// not be shown the same number as though it were theirs.
@@ -708,6 +680,13 @@ export function PurchaseOrderDialog({
    * it reopens in rupees.
    */
   const [chargeOverrides, setChargeOverrides] = useState<Record<string, ChargeTaxSnapshot>>({})
+  /**
+   * Charge types taken off this order in this form (25 Nov 2026). Added
+   * again, such a charge is a new entry: it takes today's Masters → Charges
+   * setting, not the one the saved order holds — the saved setting stays only
+   * on an entry that was kept.
+   */
+  const [freshCharges, setFreshCharges] = useState<string[]>([])
   const [chargeUnit, setChargeUnit] = useState<Record<string, '%' | 'INR'>>({})
   /**
    * Each charge's GST, keyed by charge type id: where the rate comes from
@@ -744,6 +723,8 @@ export function PurchaseOrderDialog({
     setChargeGstMode(drop)
     setChargeHsnId(drop)
     setChargeGstRate(drop)
+    setChargeOverrides(drop)
+    setFreshCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
   }
 
   /*
@@ -824,6 +805,8 @@ export function PurchaseOrderDialog({
   const [dragOver, setDragOver] = useState(false)
 
   const [saving, setSaving] = useState<'draft' | 'send' | 'print' | null>(null)
+  /** A save was pressed on an incomplete order: say what is missing, and stay saying it. */
+  const [showMissing, setShowMissing] = useState(false)
   const qtyRules = useQtyRules()
   const [error, setError] = useState<string | null>(null)
   const [mounted, setMounted] = useState(false)
@@ -856,6 +839,8 @@ export function PurchaseOrderDialog({
     // received nowhere else.
     setWarehouseId(record?.deliveryWarehouseId ?? sampleSource?.sampleStoreId ?? '')
     setPoDate(record?.poDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10))
+    setDeliveryDate(record?.deliveryDate?.slice(0, 10) ?? '')
+    setShowMissing(false)
     // Raised for samples, the reference names them — and keeps following the
     // lines added after, until somebody types over it.
     const sampleRefText = sampleSource ? sampleReference(sampleSource.needs) : ''
@@ -986,6 +971,7 @@ export function PurchaseOrderDialog({
       Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(savedChargeConfig(c).inputAmount)]))
     )
     setChargeOverrides({})
+    setFreshCharges([])
     setChargeUnit(Object.fromEntries((record?.charges ?? []).map(c => [c.chargeTypeId, savedChargeConfig(c).amountMode === 'PERCENT' ? '%' : 'INR'])))
     setShownCharges(
       (record?.charges ?? []).filter((c) => Number(c.amount) > 0).map((c) => c.chargeTypeId)
@@ -1590,10 +1576,37 @@ export function PurchaseOrderDialog({
   const configForCharge = (id: string): ChargeTaxSnapshot => {
     const saved = record?.charges?.find(c => c.chargeTypeId === id)
     const type = chargeTypes.find(t => t.id === id)
-    const base = chargeOverrides[id] ?? (saved ? savedChargeConfig(saved) : chargeConfigOf(type ?? { name: 'Charge', defaultGstRate: 0 }, 'purchase'))
+    const kept = saved && !freshCharges.includes(id) ? saved : undefined
+    const base = chargeOverrides[id] ?? (kept ? savedChargeConfig(kept) : chargeConfigOf(type ?? { name: 'Charge', defaultGstRate: 0 }, 'purchase'))
     return { ...base, amountMode: chargeUnit[id] === '%' ? 'PERCENT' : 'FIXED', inputAmount: num(charges[id]) }
   }
   const chargeRateOf = (id: string) => configForCharge(id).ownRate
+  /**
+   * What one charge would come to under a tax configuration not yet applied —
+   * the "Change tax" window's preview. The same goods, discount and split as
+   * the totals below, so the figure previewed is the figure Apply gives.
+   */
+  const previewCharge = (id: string, config: ChargeTaxSnapshot) => {
+    const priced = priceDocument({
+      lines: activeLines.map((l) => ({
+        qty: num(l.qty),
+        rate: num(l.unitRate),
+        discountPct: lineDiscountOf(l),
+        gstRate: num(l.gstRate),
+      })),
+      orderDiscount,
+      split: taxMode ?? 'CGST_SGST',
+      charges: [
+        {
+          key: id,
+          amount: num(charges[id]),
+          gstRate: config.ownRate,
+          config: { ...config, amountMode: chargeUnit[id] === '%' ? 'PERCENT' : 'FIXED', inputAmount: num(charges[id]) },
+        },
+      ],
+    }).charges[0]
+    return { rate: chargeGstLabel(config, priced, taxMode).rate, tax: priced?.tax ?? 0 }
+  }
 
   /*
    * Every figure on the form, from the one calculation.
@@ -1703,6 +1716,7 @@ export function PurchaseOrderDialog({
     poType,
     chargeTypes,
     shownCharges,
+    freshCharges,
     charges,
     chargeUnit,
     chargeOverrides,
@@ -1776,6 +1790,7 @@ export function PurchaseOrderDialog({
 
   const unfinished = activeLines
     .map((l) => ({
+      line: l,
       name: itemById.get(l.itemId)?.name ?? 'A line',
       noQty: num(l.qty) <= 0,
       // 2.5 cartons: a whole number for an item counted whole.
@@ -2231,10 +2246,9 @@ export function PurchaseOrderDialog({
       return [...prev.slice(0, index + 1), copy, ...prev.slice(index + 1)]
     })
 
-  // poDate and deliveryDate are deliberately absent. The form no longer asks
-  // for either, and omitting them rather than sending a value means a new
-  // order takes today's date from the API, while editing an existing draft
-  // leaves the date it already carries alone instead of overwriting it.
+  // poDate is sent only when set, so a new order without one takes today's
+  // date from the API. deliveryDate (25 Nov 2026: asked for again) is sent
+  // as typed, or null to clear it.
   /**
    * Sends files to storage, then tells the API they landed.
    *
@@ -2406,6 +2420,7 @@ export function PurchaseOrderDialog({
     deliveryWarehouseId: deliverTo === 'CUSTOMER' ? null : warehouseId || null,
     deliveryCustomerId: deliverTo === 'CUSTOMER' ? deliveryCustomerId || null : null,
     poDate: poDate || undefined,
+    deliveryDate: deliveryDate || null,
     // Which of the supplier's addresses. The server renders the text from the
     // row and keeps it on the order, so the words cannot come from here.
     supplierAddressId: supplierAddressId || null,
@@ -2422,7 +2437,10 @@ export function PurchaseOrderDialog({
         chargeTypeId: c.chargeTypeId,
         amount: num(charges[c.chargeTypeId]),
         amountMode: c.unit === '%' ? 'PERCENT' : 'FIXED',
-        sourceChargeId: record?.charges?.find(x => x.chargeTypeId === c.chargeTypeId)?.id,
+        sourceChargeId: freshCharges.includes(c.chargeTypeId)
+          ? undefined
+          : record?.charges?.find((x) => x.chargeTypeId === c.chargeTypeId)?.id,
+        fresh: freshCharges.includes(c.chargeTypeId) || undefined,
         taxOverride: taxOverridePayload(chargeOverrides[c.chargeTypeId]),
         gstMode: c.gstMode,
         hsnCodeId: c.gstMode === 'HSN' ? c.hsnCodeId : null,
@@ -2585,7 +2603,9 @@ export function PurchaseOrderDialog({
   // not five of each.
   const fileCount = attachments.length + pendingFiles.length + carriedFiles.length
 
-  const incomplete = !supplierId || activeLines.length === 0 || unfinished.length > 0
+  /** A delivery date before the order's own date — the server refuses it. */
+  const deliveryEarly = Boolean(deliveryDate && poDate && deliveryDate < poDate)
+  const incomplete = !supplierId || activeLines.length === 0 || unfinished.length > 0 || deliveryEarly
   const busy = saving !== null
   const orgAddress = [company?.address, company?.city, company?.pincode].filter(Boolean).join(', ')
   // Where the goods are actually going: the chosen warehouse, or our own
@@ -2607,64 +2627,93 @@ export function PurchaseOrderDialog({
    * From the body there is nothing above it to get in the way.
    */
   /*
-   * Save, written once and shown twice.
-   *
-   * The form is long enough to scroll, so there is one at the top as well as
-   * at the bottom and finishing an order never means scrolling back to look
-   * for it. Written once because the disabled state is the part that must
-   * never disagree: a Save that looks live at the top and dead at the bottom
-   * is worse than either.
-   *
-   * Only this one is repeated. All three sat in the header and all four in the
-   * footer, which is seven buttons for four actions — and the two at the top
-   * that were not Save had no reason to be there, since choosing between
-   * draft, print and send is the last decision made about an order, not the
-   * first. The header keeps Save; the footer keeps the choice.
+   * The buttons stay pressable while the order is incomplete. Pressed then,
+   * nothing is sent: the bar says what is missing and the first missing box
+   * is scrolled to and given the cursor — a greyed button that says nothing
+   * leaves the clerk hunting (6 Nov 2026). Disabled only while saving, which
+   * is also what stops a second press sending the order twice.
    */
-  const primarySave = (
+  const revealMissing = () => {
+    setShowMissing(true)
+    const shown = (selector: string) =>
+      [...(dialogRef.current?.querySelectorAll<HTMLElement>(selector) ?? [])].find(
+        (el) => el.offsetParent !== null
+      )
+    const first = unfinished[0]
+    const at = first ? lines.indexOf(first.line) + 1 : 1
+    const target = !supplierId
+      ? shown('#po-supplier')
+      : deliveryEarly
+        ? shown('#po-delivery')
+        : activeLines.length === 0
+          ? shown('[aria-label="Row 1 item"]')
+          : first
+            ? shown(
+                first.noQty || first.badQty
+                  ? `[aria-label="Row ${at} quantity"]`
+                  : first.noRate
+                    ? `[aria-label="Row ${at} rate"]`
+                    : `[aria-label="Row ${at}: why more than the sample needs"]`
+              )
+            : undefined
+    target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    target?.focus({ preventScroll: true })
+  }
+  const attempt = (mode: 'draft' | 'send' | 'print') => {
+    if (incomplete) revealMissing()
+    else void save(mode)
+  }
+
+  /*
+   * One bar of buttons, at the foot only.
+   *
+   * A draft (or new) order: Save as draft (Ctrl+S) · Save and print ·
+   * Confirm order, which saves and sends it. An order already sent can still
+   * be changed until goods or a bill arrive, and stays sent — the server has
+   * no way back to draft — so there it is Save and print · Save changes,
+   * with Ctrl+S on Save changes.
+   */
+  const isSent = Boolean(isEdit && record?.status && record.status !== 'DRAFT')
+  const primarySave = isSent ? (
     <button
       type="button"
-      onClick={() => void save('send')}
+      onClick={() => attempt('draft')}
       className="btn-primary"
-      disabled={busy || incomplete}
+      disabled={busy}
+      data-hotkey="save"
+      aria-keyshortcuts="Control+S Meta+S"
+      title="Save changes (Ctrl+S)"
     >
+      {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <SaveIcon size={15} />}
+      Save changes
+    </button>
+  ) : (
+    <button type="button" onClick={() => attempt('send')} className="btn-primary" disabled={busy}>
       {saving === 'send' ? <Loader2 size={15} className="animate-spin" /> : <SaveIcon size={15} />}
-      Save
+      Confirm order
     </button>
   )
 
   const saveActions = (
     <>
-      <button
-        type="button"
-        onClick={() => void save('draft')}
-        className="btn-secondary"
-        disabled={busy || incomplete}
-        data-hotkey="save"
-        aria-keyshortcuts="Control+S Meta+S"
-        title="Save as draft (Ctrl+S)"
-      >
-        {saving === 'draft' ? (
-          <Loader2 size={15} className="animate-spin" />
-        ) : (
-          <SaveIcon size={15} />
-        )}
-        {/* Short on a phone, so the three choices share one row. */}
-        <span className="sm:hidden">Draft</span>
-        <span className="hidden sm:inline">Save as draft</span>
-      </button>
-      <button
-        type="button"
-        onClick={() => void save('print')}
-        className="btn-secondary"
-        disabled={busy || incomplete}
-        title="Save and print"
-      >
-        {saving === 'print' ? (
-          <Loader2 size={15} className="animate-spin" />
-        ) : (
-          <Printer size={15} />
-        )}
+      {!isSent && (
+        <button
+          type="button"
+          onClick={() => attempt('draft')}
+          className="btn-secondary"
+          disabled={busy}
+          data-hotkey="save"
+          aria-keyshortcuts="Control+S Meta+S"
+          title="Save as draft (Ctrl+S)"
+        >
+          {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <SaveIcon size={15} />}
+          {/* Short on a phone, so the choices share one row. */}
+          <span className="sm:hidden">Draft</span>
+          <span className="hidden sm:inline">Save as draft</span>
+        </button>
+      )}
+      <button type="button" onClick={() => attempt('print')} className="btn-secondary" disabled={busy} title="Save and print">
+        {saving === 'print' ? <Loader2 size={15} className="animate-spin" /> : <Printer size={15} />}
         <span className="sm:hidden">Print</span>
         <span className="hidden sm:inline">Save and print</span>
       </button>
@@ -2694,7 +2743,7 @@ export function PurchaseOrderDialog({
           did already. */}
         <div
           ref={dialogRef}
-          className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+          className="glass-card po-form purchase-sheet flex h-full max-h-full w-full flex-col overflow-hidden"
           role="dialog"
           aria-modal="true"
           aria-labelledby="po-dialog-title"
@@ -2711,13 +2760,18 @@ export function PurchaseOrderDialog({
                   className="text-foreground truncate text-xl font-semibold tracking-tight"
                 >
                   {serviceMode ? 'Service Purchase Order' : 'Purchase Order'}
+                  {isEdit && record?.status && PO_STATUS[record.status] && (
+                    <span className={`${PO_STATUS[record.status].cls} ml-2 align-middle text-xs font-medium`}>
+                      {PO_STATUS[record.status].label}
+                    </span>
+                  )}
                 </h2>
                 {/* The number moves down here rather than into the heading. The
                   heading says what the form is; the line under it says which
                   one and what may be done to it. */}
                 <p className="text-muted-foreground mt-0.5 text-[13px]">
                   {isEdit
-                    ? `${record?.poNumber} — only a draft order can be changed`
+                    ? `${record?.poNumber} — can be changed until goods are received or billed`
                     : serviceMode
                       ? 'Labour, job charges, repairs — billed when the work is done'
                       : 'New order to a supplier'}
@@ -2725,7 +2779,6 @@ export function PurchaseOrderDialog({
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <div className="hidden md:block">{primarySave}</div>
               <button onClick={onClose} className="btn-ghost p-2" aria-label="Close">
                 <X size={18} />
               </button>
@@ -2803,92 +2856,12 @@ export function PurchaseOrderDialog({
                 )}
               </div>
             )}
-            <Section icon={FileText} title="Basic Details">
-              {/* `auto-fit`, not a fixed two columns: fields pair up only
-                while each box is 160px or more, and drop to one column
-                below that. At 105px a phone paired them and clipped the
-                location and supplier pickers to "Head offic" and "Choose
-                su" — stacking is longer, but every box says what is in it.
-                `order` moves them back into the desktop's three
-                grouped rows (location/number/date, then supplier/
-                reference/remark) without changing the DOM, so tab order
-                still matches what is on screen at every width. */}
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-x-4 gap-y-3 md:grid-cols-3">
-                <div className="order-1 md:order-1">
-                  <label className="form-label" htmlFor="po-location">
-                    Location
-                  </label>
-                  {/* The icon is drawn over the control and the control padded to
-                    clear it, rather than set beside it in a flex row. Outside
-                    the border it would push each control a different distance
-                    from its label and break the line the six fields make. */}
-                  <div className="relative">
-                    <MapPin
-                      size={14}
-                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
-                    />
-                    <SmartSelect
-                      id="po-location"
-                      ref={firstFieldRef}
-                      className="form-input pl-9"
-                      value={warehouseId}
-                      onChange={(e) => setWarehouseId(e.target.value)}
-                    >
-                      <option value="">Head office</option>
-                      {/* A sample store says so: goods bought for a sample
-                        go there, and only those. */}
-                      {warehouses.map((w) => (
-                        <option key={w.id} value={w.id}>
-                          {isSampleStore(w) ? `${w.name} (sample store)` : w.name}
-                        </option>
-                      ))}
-                    </SmartSelect>
-                  </div>
-                </div>
-
-                <div className="order-3 md:order-2">
-                  <label className="form-label" htmlFor="po-number">
-                    Purchase order<span className="ml-0.5 text-red-500">*</span>
-                  </label>
-                  {/* Read-only on purpose. The number comes from the counter in
-                    Settings → Company when the order is written, so that two
-                    clerks filling this form at the same moment cannot both be
-                    handed the same one. What is shown on a new order is a
-                    preview of what is next, not a reservation. */}
-                  <input
-                    id="po-number"
-                    className="form-input font-mono"
-                    value={isEdit ? (record?.poNumber ?? '') : nextPoNumber}
-                    readOnly
-                    placeholder="Allocated on save"
-                    aria-describedby={isEdit ? undefined : 'po-number-note'}
-                  />
-                  {!isEdit && (
-                    <p id="po-number-note" className="text-muted-foreground mt-1 text-xs">
-                      Allocated when you save.
-                    </p>
-                  )}
-                </div>
-
-                <div className="order-4 md:order-3">
-                  <label className="form-label" htmlFor="po-date">
-                    Date
-                  </label>
-                  {/* No calendar glyph of our own on this one. A date input
-                    already draws the browser's picker button at its right end,
-                    and that is the one that opens the calendar — ours sat on
-                    the left doing nothing, so the field carried two calendars
-                    and only one of them worked. */}
-                  <input
-                    id="po-date"
-                    type="date"
-                    className="form-input"
-                    value={poDate}
-                    onChange={(e) => setPoDate(e.target.value)}
-                  />
-                </div>
-
-                <div className="order-2 md:order-4">
+            <Section icon={FileText} title="Order details">
+              {/* Supplier and dates first — what an order is decided by — then
+                where it goes and how it is referred to. DOM order is the
+                order on screen, so Tab follows what the eye reads. */}
+              <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="sm:col-span-2">
                   <label className="form-label" htmlFor="po-supplier">
                     Supplier<span className="ml-0.5 text-red-500">*</span>
                   </label>
@@ -2899,6 +2872,7 @@ export function PurchaseOrderDialog({
                     />
                     <SmartSelect
                       id="po-supplier"
+                      ref={firstFieldRef}
                       className="form-input pl-9"
                       value={supplierId}
                       onChange={(e) => setSupplierId(e.target.value)}
@@ -2939,9 +2913,9 @@ export function PurchaseOrderDialog({
                     wide
                     stacked
                   />
-                  {/* A prompt, not an alarm. Every Save on this form is
-                    disabled while the supplier is empty, so this still says
-                    which field is holding them back — but in the same grey a
+                  {/* A prompt, not an alarm. Saving without a supplier only
+                    shows what is missing, so this still says which field is
+                    holding the order back — but in the same grey a
                     blank box on a form nobody has filled in yet gets
                     everywhere else on this screen. Red is for a mistake
                     already made, and choosing nothing on a form just opened
@@ -2953,9 +2927,103 @@ export function PurchaseOrderDialog({
                   ) : null}
                 </div>
 
-                <div className="order-5 md:order-5">
+                <div>
+                  <label className="form-label" htmlFor="po-date">
+                    PO date
+                  </label>
+                  {/* No calendar glyph of our own on this one. A date input
+                    already draws the browser's picker button at its right end,
+                    and that is the one that opens the calendar — ours sat on
+                    the left doing nothing, so the field carried two calendars
+                    and only one of them worked. */}
+                  <input
+                    id="po-date"
+                    type="date"
+                    className="form-input"
+                    value={poDate}
+                    onChange={(e) => setPoDate(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-delivery">
+                    Delivery by
+                  </label>
+                  <input
+                    id="po-delivery"
+                    type="date"
+                    className="form-input"
+                    value={deliveryDate}
+                    min={poDate || undefined}
+                    onChange={(e) => setDeliveryDate(e.target.value)}
+                    aria-invalid={deliveryEarly || undefined}
+                    aria-describedby={deliveryEarly ? 'po-delivery-error' : undefined}
+                  />
+                  {deliveryEarly && (
+                    <p id="po-delivery-error" className="warn-text mt-1 text-xs">
+                      Delivery can&apos;t be before the order date.
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-location">
+                    Location
+                  </label>
+                  {/* The icon is drawn over the control and the control padded to
+                    clear it, rather than set beside it in a flex row. Outside
+                    the border it would push each control a different distance
+                    from its label and break the line the six fields make. */}
+                  <div className="relative">
+                    <MapPin
+                      size={14}
+                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
+                    />
+                    <SmartSelect
+                      id="po-location"
+                      className="form-input pl-9"
+                      value={warehouseId}
+                      onChange={(e) => setWarehouseId(e.target.value)}
+                    >
+                      <option value="">Head office</option>
+                      {/* A sample store says so: goods bought for a sample
+                        go there, and only those. */}
+                      {warehouses.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {isSampleStore(w) ? `${w.name} (sample store)` : w.name}
+                        </option>
+                      ))}
+                    </SmartSelect>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-number">
+                    Purchase order<span className="ml-0.5 text-red-500">*</span>
+                  </label>
+                  {/* Read-only on purpose. The number comes from the counter in
+                    Settings → Company when the order is written, so that two
+                    clerks filling this form at the same moment cannot both be
+                    handed the same one. What is shown on a new order is a
+                    preview of what is next, not a reservation. */}
+                  <input
+                    id="po-number"
+                    className="form-input font-mono"
+                    value={isEdit ? (record?.poNumber ?? '') : nextPoNumber}
+                    readOnly
+                    placeholder="Allocated on save"
+                    aria-describedby={isEdit ? undefined : 'po-number-note'}
+                  />
+                  {!isEdit && (
+                    <p id="po-number-note" className="text-muted-foreground mt-1 text-xs">
+                      Allocated when you save.
+                    </p>
+                  )}
+                </div>
+
+                <div>
                   <label className="form-label" htmlFor="po-reference">
-                    Reference
+                    Order ref
                   </label>
                   <div className="relative">
                     <FileText
@@ -2972,7 +3040,7 @@ export function PurchaseOrderDialog({
                   </div>
                 </div>
 
-                <div className="order-6 md:order-6">
+                <div>
                   <label className="form-label" htmlFor="po-remark">
                     Remark
                   </label>
@@ -2991,6 +3059,16 @@ export function PurchaseOrderDialog({
                   </div>
                 </div>
               </div>
+              {/* Which indents this order fills — read off its lines, never typed. */}
+              {(() => {
+                const mrs = [...new Set(lines.map((l) => l.mrNumber).filter((n): n is string => Boolean(n)))]
+                return mrs.length > 0 ? (
+                  <p className="text-muted-foreground mt-2 text-xs">
+                    Against indent{mrs.length > 1 ? 's' : ''}{' '}
+                    <span className="text-foreground font-mono">{mrs.join(', ')}</span>
+                  </p>
+                ) : null
+              })()}
 
               {/* Who the order is to, filled in from the supplier master.
 
@@ -3004,86 +3082,59 @@ export function PurchaseOrderDialog({
                 second version of it that nothing keeps in step — Change edits
                 the master itself. */}
               {supplier && (
-                <div className="border-border bg-secondary mt-3 rounded-lg border">
-                  <div className="border-border/70 flex flex-wrap items-center gap-x-2 gap-y-1 border-b px-3 py-1.5">
-                    <h4 className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">
-                      Billing address
-                    </h4>
-                    {chosenAddress?.label && (
-                      <span className="text-muted-foreground text-[10px]">
-                        · {chosenAddress.label}
+                <div className="border-border bg-secondary/40 mt-4 grid gap-x-8 gap-y-3 rounded-xl border px-4 py-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wider">
+                        Bill to{chosenAddress?.label ? ` · ${chosenAddress.label}` : ''}
                       </span>
-                    )}
-                    {/* The tax split follows the two GSTINs, and it decides what
-                        the supplier may charge — so it is said here, beside the
-                        number it is worked out from, rather than discovered on
-                        the bill. A chip rather than a fifth grey sentence: it
-                        is a conclusion, not a field off the master. */}
-                    {supplier.gstin && taxMode && taxMode !== 'NONE' && (
-                      <span className="border-primary/25 bg-primary/10 text-primary ml-1 rounded-full border px-2 py-0.5 text-[10px] font-medium">
-                        {taxMode === 'CGST_SGST'
-                          ? 'Within the state · CGST + SGST'
-                          : 'Other state · IGST'}
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => setAddressPickerOpen(true)}
-                      className="text-primary ml-auto flex shrink-0 items-center gap-1 text-xs hover:underline"
-                    >
-                      <Pencil size={11} />
-                      Change
-                      {supplierAddresses.length > 1 && (
-                        <span className="text-muted-foreground">({supplierAddresses.length})</span>
+                      {/* The tax split follows the two GSTINs and decides what the
+                        supplier may charge, so it is said beside them. */}
+                      {supplier.gstin && taxMode && taxMode !== 'NONE' && (
+                        <span className="border-primary/25 bg-primary/10 text-primary rounded-full border px-2 py-0.5 text-[10px] font-medium">
+                          {taxMode === 'CGST_SGST' ? 'Within the state · CGST + SGST' : 'Other state · IGST'}
+                        </span>
                       )}
-                    </button>
-                  </div>
-
-                  <div className="px-3 py-2.5">
-                    <p className="text-foreground text-sm font-semibold">{supplier.name}</p>
+                      <button
+                        type="button"
+                        onClick={() => setAddressPickerOpen(true)}
+                        className="text-primary ml-auto flex shrink-0 items-center gap-1 text-xs font-medium hover:underline"
+                      >
+                        <Pencil size={11} />
+                        Change
+                        {supplierAddresses.length > 1 && (
+                          <span className="text-muted-foreground">({supplierAddresses.length})</span>
+                        )}
+                      </button>
+                    </div>
+                    <p className="text-foreground mt-1 text-sm font-semibold">{supplier.name}</p>
                     {billingLine ? (
-                      <p className="text-muted-foreground mt-0.5 text-sm leading-relaxed">
-                        {billingLine}
-                      </p>
+                      <p className="text-muted-foreground text-[13px] leading-relaxed">{billingLine}</p>
                     ) : (
-                      <p className="text-muted-foreground mt-0.5 text-sm">
+                      <p className="text-muted-foreground text-[13px]">
                         No address on this supplier — add it under{' '}
-                        <a
-                          href="/masters/suppliers"
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-primary underline"
-                        >
+                        <a href="/masters/suppliers" target="_blank" rel="noreferrer" className="text-primary underline">
                           Masters → Suppliers
                         </a>
                         .
                       </p>
                     )}
-
-                    {supplierFacts.length > 0 && (
-                      <div className="border-border/70 mt-2.5 grid grid-cols-2 gap-x-4 gap-y-2 border-t pt-2.5 sm:grid-cols-4">
-                        {supplierFacts.map((f) => (
-                          <div key={f.label} className="min-w-0">
-                            <p className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">
-                              {f.label}
-                            </p>
-                            <p
-                              className={`text-foreground truncate text-xs ${f.mono ? 'font-mono' : ''}`}
-                              title={f.value}
-                            >
-                              {f.value}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
                     {!supplier.gstin && (
-                      <p className="warn-text mt-2 text-xs">
-                        No GSTIN on file — this order will carry no GST.
-                      </p>
+                      <p className="warn-text mt-1 text-xs">No GSTIN on file — this order will carry no GST.</p>
                     )}
                   </div>
+                  {supplierFacts.length > 0 && (
+                    <dl className="grid grid-cols-2 content-center gap-x-6 gap-y-2.5 sm:grid-cols-4 lg:border-l lg:border-border lg:pl-8">
+                      {supplierFacts.map((f) => (
+                        <div key={f.label} className="min-w-0">
+                          <dt className="text-muted-foreground text-[11px] font-medium">{f.label}</dt>
+                          <dd className={`text-foreground truncate text-[13px] ${f.mono ? 'font-mono' : ''}`} title={f.value}>
+                            {f.value}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )}
                 </div>
               )}
             </Section>
@@ -3155,28 +3206,32 @@ export function PurchaseOrderDialog({
                 is typed into them, and in a row of its own it was a third size
                 of text on a line nobody needed. This sentence stays down here,
                 over the cells it is about. */}
-              <p className="text-muted-foreground mb-2 text-xs">
-                {poType === 'ITEM_LEVEL'
-                  ? 'A discount per line, in the Discount column — percent or rupees.'
-                  : poType === 'ORDER_LEVEL'
-                    ? 'One discount off the whole order, entered as Total discount on the right. The per-line Discount cells are switched off.'
-                    : 'No discount on this order. Both the per-line cells and the order-level box are switched off.'}
-              </p>
+              {poType !== 'NONE' && (
+                <p className="text-muted-foreground mb-2 text-xs">
+                  {poType === 'ITEM_LEVEL'
+                    ? 'A discount per line, in the Discount column — percent or rupees.'
+                    : 'One discount off the whole order, typed under the table.'}
+                </p>
+              )}
 
               <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
-                <table className="w-full min-w-[1180px] table-fixed border-collapse text-sm">
+                <table
+                  className={`w-full table-fixed border-collapse text-sm ${
+                    poType === 'ITEM_LEVEL' ? 'min-w-[1240px]' : 'min-w-[1090px]'
+                  }`}
+                >
                   <thead>
                     <tr className="bg-secondary">
                       {[
                         ['#', `${COL.num} sticky left-0 z-20 bg-secondary`, 'left'],
                         ['', `${COL.remove} sticky left-8 z-20 bg-secondary`, 'left'],
-                        ['Category', COL.category, 'left'],
-                        ['Item', `${COL.item} border-border border-r`, 'left'],
+                        ['Category / Sub', COL.category, 'left'],
+                        ['Item code / Item name', `${COL.item} border-border border-r`, 'left'],
                         ['Style no.', COL.style, 'left'],
                         ['Description', COL.description, 'left'],
                         ['Qty', COL.qty, 'right'],
                         ['Rate', COL.rate, 'right'],
-                        ['Discount', COL.discount, 'right'],
+                        ...(poType === 'ITEM_LEVEL' ? [['Discount', COL.discount, 'right']] : []),
                         ['Tax %', COL.tax, 'right'],
                         ['Amount', COL.amount, 'right'],
                       ].map(([label, width, align], i) => (
@@ -3497,6 +3552,7 @@ export function PurchaseOrderDialog({
                             )}
                           </td>
 
+                          {poType === 'ITEM_LEVEL' && (
                           <td className={COL.discount}>
                             {/* Percent or rupees, as the mill's old form
                               allowed. Both sit in the cell, so which one this
@@ -3526,6 +3582,7 @@ export function PurchaseOrderDialog({
                               </SmartSelect>
                             </div>
                           </td>
+                          )}
 
                           <td className={COL.tax}>
                             <StepInput
@@ -3601,14 +3658,15 @@ export function PurchaseOrderDialog({
                 {lines.map((line, i) => {
                   const item = itemById.get(line.itemId)
                   const filed = categories.find((c) => c.id === item?.categoryId)
-                  const view = {
-                    ...line,
-                    categoryId: line.categoryId || filed?.parentId || filed?.id || '',
-                    subcategoryId: line.subcategoryId || (filed?.parentId ? filed.id : ''),
-                  }
-                  const subs = subCategoriesOf(view.categoryId)
-                  const choices = itemsFor(view)
-                  const money = priceOf(line)
+                      const view = {
+                        ...line,
+                        categoryId: line.categoryId || filed?.parentId || filed?.id || '',
+                        subcategoryId: line.subcategoryId || (filed?.parentId ? filed.id : ''),
+                      }
+
+                      const subs = subCategoriesOf(view.categoryId)
+                      const choices = itemsFor(view)
+                      const money = priceOf(line)
                   const needsQty = Boolean(line.itemId) && num(line.qty) <= 0
                   const needsRate = Boolean(line.itemId) && String(line.unitRate).trim() === ''
                   const cell = 'form-input h-9 px-2 text-xs w-full'
@@ -3801,6 +3859,7 @@ export function PurchaseOrderDialog({
                       </div>
 
                       <div className="mt-2 grid grid-cols-2 gap-2">
+                        {poType === 'ITEM_LEVEL' && (
                         <div className="space-y-1">
                           <label className={fieldLabel}>Discount</label>
                           {/* `cell` carries `w-full`, which fights a
@@ -3834,6 +3893,7 @@ export function PurchaseOrderDialog({
                             </SmartSelect>
                           </div>
                         </div>
+                        )}
                         <div className="space-y-1">
                           <label className={fieldLabel}>Tax %</label>
                           <StepInput
@@ -3898,6 +3958,22 @@ export function PurchaseOrderDialog({
                 >
                   <Plus size={14} /> Add item row
                 </button>
+                {/* A discount on the goods as a whole, so it sits with the goods. */}
+                {poType === 'ORDER_LEVEL' && (
+                  <div className="flex items-center gap-2">
+                    <label htmlFor="po-discount" className="text-muted-foreground text-xs">
+                      Discount on the whole order (₹)
+                    </label>
+                    <StepInput
+                      id="po-discount"
+                      decimals
+                      className="form-input h-9 w-32 text-right"
+                      placeholder="0.00"
+                      value={discountAmount}
+                      onValueChange={setDiscountAmount}
+                    />
+                  </div>
+                )}
                 {/* True as of 19 Sep 2026. It used to say indents were not
                   built, which stopped being true the day the button above it
                   appeared — and a form that tells the buyer a feature is
@@ -3921,7 +3997,7 @@ export function PurchaseOrderDialog({
               One row, two boxes: the delivery and its files on the left, the
               calculation on the right — the arrangement the form has always
               had, and the one the clerk checks left to right before saving. */}
-            <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_460px]">
+            <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_22rem] xl:grid-cols-[minmax(0,1fr)_25rem]">
               {/* The left column is stacked rather than left half-empty.
 
                 The calculation beside it runs to a dozen rows once the charge
@@ -3931,11 +4007,222 @@ export function PurchaseOrderDialog({
                 whole row, and the form scrolling for no reason. The terms and
                 the note move up into that space instead. */}
               <div className="min-w-0 space-y-3">
-                <Section icon={Truck} title="Attachments &amp; Deliver To">
-                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                    <div className="space-y-2">
-                      <h4 className="text-foreground text-xs font-semibold">Attachments</h4>
+                {/* The extra charges, one row each: pick the charge, type the
+                  amount. The GST comes from Masters → Charges and each row says
+                  where its rate comes from; changing it is a separate step
+                  behind the pencil, for users allowed to. */}
+                <Section icon={Receipt} title="Charges">
+                  <PurchaseChargesTable
+                    rows={totals.chargeRows.map(
+                      (c): ChargeTableRow => ({
+                        key: c.chargeTypeId,
+                        name: c.name,
+                        unit: c.unit,
+                        typed: charges[c.chargeTypeId] ?? '',
+                        enteredAmount: c.enteredAmount,
+                        config: c.config,
+                        priced: c.priced,
+                        unsavedChange: c.chargeTypeId in chargeOverrides,
+                        savedAs:
+                          !(c.chargeTypeId in chargeOverrides) &&
+                          !freshCharges.includes(c.chargeTypeId) &&
+                          record?.charges?.some((s) => s.chargeTypeId === c.chargeTypeId)
+                            ? 'as saved on this order'
+                            : undefined,
+                      })
+                    )}
+                    split={taxMode}
+                    goodsValue={totals.grossTotal}
+                    canChangeTax={can('masters', 'edit')}
+                    hsnOptions={hsnCodes}
+                    addOptions={chargeTypes.filter((t) => !shownCharges.includes(t.id))}
+                    onAmount={(id, v) => setCharges((prev) => ({ ...prev, [id]: v }))}
+                    onUnit={(id, unit, typed) => {
+                      setCharges((prev) => ({ ...prev, [id]: typed }))
+                      setChargeUnit((prev) => ({ ...prev, [id]: unit }))
+                    }}
+                    onRemove={removeCharge}
+                    onAdd={addCharge}
+                    onTaxChange={(id, config) =>
+                      setChargeOverrides((prev) => {
+                        const next = { ...prev }
+                        if (config) next[id] = config
+                        else delete next[id]
+                        return next
+                      })
+                    }
+                    preview={previewCharge}
+                    onMasterRate={async (id, rate) => {
+                      // Masters → Charges first: if that is refused, nothing here changes.
+                      try {
+                        await api.patch(`/masters/charge-types/${id}`, {
+                          defaultGstMode: 'MANUAL',
+                          defaultGstRate: rate,
+                          purchaseGstApplicability: 'APPLICABLE',
+                        })
+                      } catch (err) {
+                        throw new Error(apiErrorMessage(err, 'Could not save to Masters → Charges'))
+                      }
+                      setChargeTypes((prev) =>
+                        prev.map((t) =>
+                          t.id === id
+                            ? { ...t, defaultGstMode: 'MANUAL', defaultGstRate: rate, defaultHsnCodeId: null, defaultHsnCode: null, purchaseGstApplicability: 'APPLICABLE' }
+                            : t
+                        )
+                      )
+                      // This charge now takes the master's new setting, as a fresh entry.
+                      setChargeOverrides((prev) => {
+                        const next = { ...prev }
+                        delete next[id]
+                        return next
+                      })
+                      setFreshCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
+                    }}
+                    emptyHint={
+                      chargeTypes.length === 0 ? (
+                        <p className="text-muted-foreground text-xs">
+                          No purchase charges are set up yet — add them under{' '}
+                          <a href="/masters/charges" target="_blank" rel="noreferrer" className="text-primary underline">
+                            Masters → Charges
+                          </a>
+                          .
+                        </p>
+                      ) : totals.chargeRows.length === 0 ? (
+                        <p className="text-muted-foreground text-xs">
+                          Freight, transport, packing… Type each as the figure before GST; its GST is added on top.
+                        </p>
+                      ) : null
+                    }
+                    footer={
+                      retiredCharges.length > 0 ? (
+                        <p className="warn-text text-xs">
+                          {retiredCharges.map((c) => `${c.chargeType?.name ?? 'A charge'} (₹${Number(c.amount)})`).join(', ')}{' '}
+                          {retiredCharges.length === 1 ? 'is' : 'are'} no longer a purchase charge in the master, so{' '}
+                          {retiredCharges.length === 1 ? 'it is' : 'they are'} left off when you save. Add it again
+                          under another charge if it still applies.
+                        </p>
+                      ) : null
+                    }
+                  />
+                </Section>
 
+                <Section
+                  icon={Truck}
+                  title="Deliver to"
+                  foldable
+                  openByDefault={false}
+                  summary={
+                    deliverTo === 'CUSTOMER'
+                      ? deliveryCustomer
+                        ? `Customer · ${deliveryCustomer.name}`
+                        : 'Customer · not chosen yet'
+                      : (destination?.name ?? company?.name ?? 'Your company')
+                  }
+                >
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="po-deliver-to"
+                            checked={deliverTo === 'ORGANIZATION'}
+                            onChange={() => setDeliverTo('ORGANIZATION')}
+                          />
+                          Organization
+                        </label>
+                        <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="po-deliver-to"
+                            checked={deliverTo === 'CUSTOMER'}
+                            onChange={() => setDeliverTo('CUSTOMER')}
+                          />
+                          Customer
+                        </label>
+                      </div>
+
+                      {deliverTo === 'CUSTOMER' ? (
+                        <>
+                          <SmartSelect
+                            className="form-input"
+                            value={deliveryCustomerId}
+                            onChange={(e) => setDeliveryCustomerId(e.target.value)}
+                            aria-label="Deliver to customer"
+                          >
+                            <option value="">Choose customer</option>
+                            {customers.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.code ? `${c.code} — ${c.name}` : c.name}
+                              </option>
+                            ))}
+                          </SmartSelect>
+
+                          {deliveryCustomer && (
+                            <div className="border-border bg-secondary rounded-lg border px-3 py-2">
+                              <p className="text-foreground text-sm font-medium">
+                                {deliveryCustomer.name}
+                              </p>
+                              <p className="text-muted-foreground text-xs">
+                                {customerAddress || 'No address on this customer.'}
+                              </p>
+                              {/* Said because it used to work the other way. The
+                                supplier still bills us, so the tax follows our
+                                own state wherever the goods are sent — a
+                                customer in another state does not turn it into
+                                IGST (IGST Act s.10(1)(b), bill-to / ship-to). */}
+                              {customerStateCode && (
+                                <p className="text-muted-foreground mt-1 text-xs">
+                                  Delivered in state {customerStateCode}. The supplier
+                                  still bills us, so the GST follows our own state,
+                                  not the customer&apos;s
+                                  {supplier && taxMode === 'CGST_SGST'
+                                    ? ' — CGST + SGST on this order.'
+                                    : supplier && taxMode === 'IGST'
+                                      ? ' — IGST on this order, as the supplier is in another state.'
+                                      : '.'}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        /* Shown, not repeated. An order has one destination, so a
+                         second dropdown for it here would only mirror the Location
+                         field above — change one and the other moves, which reads
+                         as two settings that disagree. */
+                        <div className="border-border bg-secondary rounded-lg border px-3 py-2">
+                          <p className="text-foreground text-sm font-medium">
+                            {destination?.name ?? company?.name ?? 'Your company'}
+                          </p>
+                          <p className="text-muted-foreground text-xs">
+                            {destination?.address ||
+                              orgAddress ||
+                              'Address not set — add it in Settings → Company.'}
+                          </p>
+                          <button
+                            type="button"
+                            className="text-primary mt-1.5 flex items-center gap-1.5 text-xs hover:underline"
+                            onClick={() => document.getElementById('po-location')?.focus()}
+                            title="Delivering somewhere else? Change the Location field above."
+                          >
+                            <MapPin size={12} className="shrink-0" />
+                            Location
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                </Section>
+
+                <Section
+                  icon={Paperclip}
+                  title="Attachments"
+                  foldable
+                  openByDefault={false}
+                  summary={
+                    fileCount > 0 ? `${fileCount} attached` : 'None'
+                  }
+                >
+                    <div className="space-y-2">
                       {/* One box whether or not the order exists yet. On a new
                         order the files are held and go up the moment it is saved,
                         so nobody has to save, reopen and come back for them. */}
@@ -4083,100 +4370,6 @@ export function PurchaseOrderDialog({
                       </div>
                     </div>
 
-                    <div className="space-y-2">
-                      <h4 className="text-foreground text-xs font-semibold">Deliver to</h4>
-                      <div className="flex flex-wrap items-center gap-4">
-                        <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
-                          <input
-                            type="radio"
-                            name="po-deliver-to"
-                            checked={deliverTo === 'ORGANIZATION'}
-                            onChange={() => setDeliverTo('ORGANIZATION')}
-                          />
-                          Organization
-                        </label>
-                        <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
-                          <input
-                            type="radio"
-                            name="po-deliver-to"
-                            checked={deliverTo === 'CUSTOMER'}
-                            onChange={() => setDeliverTo('CUSTOMER')}
-                          />
-                          Customer
-                        </label>
-                      </div>
-
-                      {deliverTo === 'CUSTOMER' ? (
-                        <>
-                          <SmartSelect
-                            className="form-input"
-                            value={deliveryCustomerId}
-                            onChange={(e) => setDeliveryCustomerId(e.target.value)}
-                            aria-label="Deliver to customer"
-                          >
-                            <option value="">Choose customer</option>
-                            {customers.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.code ? `${c.code} — ${c.name}` : c.name}
-                              </option>
-                            ))}
-                          </SmartSelect>
-
-                          {deliveryCustomer && (
-                            <div className="border-border bg-secondary rounded-lg border px-3 py-2">
-                              <p className="text-foreground text-sm font-medium">
-                                {deliveryCustomer.name}
-                              </p>
-                              <p className="text-muted-foreground text-xs">
-                                {customerAddress || 'No address on this customer.'}
-                              </p>
-                              {/* Said because it used to work the other way. The
-                                supplier still bills us, so the tax follows our
-                                own state wherever the goods are sent — a
-                                customer in another state does not turn it into
-                                IGST (IGST Act s.10(1)(b), bill-to / ship-to). */}
-                              {customerStateCode && (
-                                <p className="text-muted-foreground mt-1 text-xs">
-                                  Delivered in state {customerStateCode}. The supplier
-                                  still bills us, so the GST follows our own state,
-                                  not the customer&apos;s
-                                  {supplier && taxMode === 'CGST_SGST'
-                                    ? ' — CGST + SGST on this order.'
-                                    : supplier && taxMode === 'IGST'
-                                      ? ' — IGST on this order, as the supplier is in another state.'
-                                      : '.'}
-                                </p>
-                              )}
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        /* Shown, not repeated. An order has one destination, so a
-                         second dropdown for it here would only mirror the Location
-                         field above — change one and the other moves, which reads
-                         as two settings that disagree. */
-                        <div className="border-border bg-secondary rounded-lg border px-3 py-2">
-                          <p className="text-foreground text-sm font-medium">
-                            {destination?.name ?? company?.name ?? 'Your company'}
-                          </p>
-                          <p className="text-muted-foreground text-xs">
-                            {destination?.address ||
-                              orgAddress ||
-                              'Address not set — add it in Settings → Company.'}
-                          </p>
-                          <button
-                            type="button"
-                            className="text-primary mt-1.5 flex items-center gap-1.5 text-xs hover:underline"
-                            onClick={() => document.getElementById('po-location')?.focus()}
-                            title="Delivering somewhere else? Change the Location field above."
-                          >
-                            <MapPin size={12} className="shrink-0" />
-                            Location
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
                 </Section>
 
                 {/* 5 — What the order says. Two boxes side by side, as the mockup
@@ -4204,9 +4397,16 @@ export function PurchaseOrderDialog({
                       onChange={(e) => setTerms(e.target.value)}
                       aria-label="Terms and conditions"
                     />
-                    <p className="text-muted-foreground mt-1 text-right text-[11px] tabular-nums">
-                      {terms.length}/{TERMS_MAX}
-                    </p>
+                    <div className="mt-1 flex items-center justify-between gap-3 text-[11px]">
+                      {/* Emailing is not built, so the Template & Email panel is gone;
+                        the wording and printed blocks live in Settings → Documents. */}
+                      <a href="/settings/documents" target="_blank" rel="noreferrer" className="text-primary underline">
+                        Edit the printed wording
+                      </a>
+                      <span className="text-muted-foreground tabular-nums">
+                        {terms.length}/{TERMS_MAX}
+                      </span>
+                    </div>
                   </Section>
 
                   <Section
@@ -4231,378 +4431,37 @@ export function PurchaseOrderDialog({
                   </Section>
                 </div>
 
-                {/* How it goes out, tucked under the terms rather than given a row
-                of its own across the bottom of the form.
-
-                Neither control does anything yet, so a box each would be height
-                spent on two switched-off things. And the calculation beside this
-                column is taller than everything stacked against it, so this is
-                space the form was already paying for either way. */}
-                <Section
-                  icon={Mail}
-                  title="Template &amp; Email"
-                  foldable
-                  openByDefault={false}
-                  summary="One template per document type; emailing is not built yet"
-                >
-                  <div className="space-y-2">
-                    <div className="grid grid-cols-1 items-center gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
-                      {/* A real link, not a greyed box. The wording, the title and
-                    which blocks print are all editable — under Settings →
-                    Documents, per document type. Showing this as "not built"
-                    was wrong: it is built, it just does not live here. */}
-                      <div className="border-border bg-secondary flex items-center justify-between gap-2 rounded-lg border px-3 py-2">
-                        <span className="text-foreground flex min-w-0 items-center gap-2 text-sm">
-                          <FileText size={14} className="text-muted-foreground shrink-0" />
-                          <span className="truncate">Template: Standard</span>
-                        </span>
-                        <a
-                          href="/settings/documents"
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-primary shrink-0 text-xs underline"
-                        >
-                          Edit
-                        </a>
-                      </div>
-
-                      {/* The supplier, not us. This showed `company.email` — our
-                      own accounts address — which is the wrong way round for a
-                      purchase order: the order goes to the supplier, so they
-                      are the recipient. The address comes off the supplier
-                      master, which the form already has loaded for the billing
-                      block above. */}
-                      <Faded>
-                        {/* Both addresses, because once emailing is built both
-                          are wanted: the order goes to the supplier, and
-                          accounts needs to know an order was raised.
-
-                          The mill's old form showed only the second of these
-                          and labelled it "Email To", which is what nobody
-                          could explain — an address that looks like the
-                          recipient but is your own office. Naming the two
-                          separately is the whole fix.
-
-                          Switched off until emailing exists, and then these
-                          are the two lines it sends to. */}
-                        <div className="min-w-0 space-y-1">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <Mail size={14} className="text-muted-foreground shrink-0" />
-                            <span className="text-muted-foreground w-14 shrink-0 text-xs">To</span>
-                            <input
-                              type="checkbox"
-                              checked={Boolean(supplier?.email)}
-                              readOnly
-                              className="shrink-0"
-                            />
-                            {supplier?.email ? (
-                              <span className="text-foreground truncate text-sm">
-                                {supplier.email}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground truncate text-sm">
-                                {supplier
-                                  ? `No email on ${supplier.name}`
-                                  : 'Choose a supplier to see where it would go'}
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="flex min-w-0 items-center gap-2">
-                            {/* Kept clear rather than given an icon of its own,
-                              so the two addresses line up under one heading
-                              instead of reading as two unrelated rows. */}
-                            <span className="w-[14px] shrink-0" aria-hidden />
-                            <span className="text-muted-foreground w-14 shrink-0 text-xs">
-                              Copy to
-                            </span>
-                            <input
-                              type="checkbox"
-                              checked={Boolean(company?.email)}
-                              readOnly
-                              className="shrink-0"
-                            />
-                            {company?.email ? (
-                              <span className="text-foreground truncate text-sm">
-                                {company.email}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground truncate text-sm">
-                                No company email in Settings
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </Faded>
-                    </div>
-
-                    <NotBuiltNote>
-                      Emailing the order is not built yet — print it and send it yourself. There is
-                      one template per document type, so there is nothing to choose here; Edit opens
-                      the wording and the printed blocks in Settings.
-                    </NotBuiltNote>
-                  </div>
-                </Section>
               </div>
 
-              {/* The calculation, beside the delivery box as the old ERP had it.
-
-                In its order: the discount, the gross, one row per charge on
-                this order with its own GST %, what GST is worked out on, where
-                the GST comes from rate by rate, the tax split, and what the
-                order comes to. Every figure is read from priceDocument(), the
-                same sum the server saves and the bill books. The charges
-                offered are read from the charge master rather than written
-                into this form, so adding one there offers it here. */}
-              <Section icon={Calculator} title="Totals">
-                <div className="space-y-1.5 text-sm">
-                  {/* Where the discount sits follows the dropdown at the top of
-                    the items box. On an item-level order this is the sum of
-                    the per-line discounts and cannot be typed into; on an
-                    order-level order it is the one figure taken off the whole
-                    order, and the per-line boxes are the ones switched off. */}
-                  {poType === 'ORDER_LEVEL' ? (
-                    <div className="flex items-center justify-between gap-3">
-                      <label htmlFor="po-discount" className="text-muted-foreground">
-                        Total discount
-                      </label>
-                      <input
-                        id="po-discount"
-                        type="number"
-                        step="any"
-                        min={0}
-                        className="form-input h-8 w-28 text-right"
-                        placeholder="0.00"
-                        value={discountAmount}
-                        onChange={(e) => setDiscountAmount(e.target.value)}
-                      />
-                    </div>
-                  ) : (
-                    <Row label="Total discount" value={totals.totalDiscount} />
-                  )}
-
-                  <Row label="Gross total" value={totals.grossTotal} />
-
-                  {/* The GST on the goods, one line per rate, so the tax rows
-                    below can be traced back to what made them. It also says
-                    so when the supplier is not registered. */}
-                  <TaxBreakdown result={totals.result} split={taxMode} />
-
-                  {/* SGST + CGST within the state, IGST across a state line —
-                    never both, and never two halves of a tax the supplier
-                    cannot charge. Until a supplier is chosen the tax is
-                    previewed as SGST + CGST; the note under the grand total
-                    says the split is still to come. */}
-                  {(taxMode === 'CGST_SGST' || taxMode === null) && (
-                    <>
-                      <Row label="SGST" value={totals.sgst} />
-                      <Row label="CGST" value={totals.cgst} />
-                    </>
-                  )}
-                  {taxMode === 'IGST' && <Row label="IGST" value={totals.igst} />}
-
-                  <Row label="Total tax" value={totals.tax} />
-
-                  {/* Each charge, typed before GST — freight at ₹1,200 is
-                    ₹1,200 — with its own GST chosen below it and worked into
-                    the Total tax row above, same as the goods'. Only the
-                    charges this order carries; "+ Add a charge" offers the
-                    purchase charges from Masters → Charges that are not on it
-                    yet. */}
-                  {chargeTypes.length === 0 ? (
-                    <p className="text-muted-foreground py-1 text-xs">
-                      No purchase charges are set up yet — add them under{' '}
-                      <a
-                        href="/masters/charges"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary underline"
-                      >
-                        Masters → Charges
-                      </a>
-                      .
-                    </p>
-                  ) : (
-                    <div className="space-y-1.5 pt-0.5">
-                      <div className="flex items-center justify-between border-t border-border/60 pt-3 pb-1">
-                        <span className="text-foreground text-xs font-semibold">Additional charges</span>
-                      </div>
-                      {totals.chargeRows.map((c) => (
-                        <div key={c.chargeTypeId} className="rounded-lg border border-border/60 bg-secondary/20 p-3">
-                          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-                            {/* The name keeps a floor it will not shrink under,
-                              so a long one wraps the boxes onto their own line
-                              rather than breaking mid-word beside them. */}
-                            <span className="text-muted-foreground min-w-[9rem] flex-1">{c.name}</span>
-                            <div className="ml-auto flex shrink-0 items-center gap-1">
-                              <StepInput
-                                decimals
-                                max={c.unit === '%' ? 100 : undefined}
-                                className="form-input h-8 w-28 text-right"
-                                placeholder="0.00"
-                                value={charges[c.chargeTypeId] ?? ''}
-                                onValueChange={(v) =>
-                                  setCharges((prev) => ({ ...prev, [c.chargeTypeId]: v }))
-                                }
-                                aria-label={`${c.name} ${c.unit === '%' ? 'percent' : 'amount'}`}
-                              />
-                              {/* Rupees or percent, as two buttons side by side
-                                rather than a dropdown — a dropdown showing "₹"
-                                was read as a label, and "10" typed into the
-                                box went in as ₹10. Both are always in sight
-                                and the one in use is lit.
-
-                                Pressing % keeps the number already typed as
-                                the percentage (10 becomes 10%), unless it is
-                                over 100 — a rupee figure like 1,200 is not a
-                                percentage, and the box starts empty instead.
-                                Pressing ₹ keeps what the % came to, so the
-                                figure can be rounded off by hand. */}
-                              <div
-                                role="group"
-                                aria-label={`${c.name} in rupees or percent`}
-                                className="border-border flex h-8 shrink-0 overflow-hidden rounded-lg border"
-                              >
-                                {(['INR', '%'] as const).map((unit) => (
-                                  <button
-                                    key={unit}
-                                    type="button"
-                                    aria-pressed={c.unit === unit}
-                                    title={
-                                      unit === '%'
-                                        ? `Type ${c.name} as a % of the goods value`
-                                        : `Type ${c.name} as an amount in ₹`
-                                    }
-                                    onClick={() => {
-                                      if (unit === c.unit) return
-                                      const typed = charges[c.chargeTypeId] ?? ''
-                                      setCharges((prev) => ({
-                                        ...prev,
-                                        [c.chargeTypeId]:
-                                          unit === '%'
-                                            ? num(typed) > 0 && num(typed) <= 100
-                                              ? typed
-                                              : ''
-                                            : c.amount
-                                              ? String(c.enteredAmount)
-                                              : '',
-                                      }))
-                                      setChargeUnit((prev) => ({ ...prev, [c.chargeTypeId]: unit }))
-                                    }}
-                                    className={`w-8 text-sm font-semibold transition-colors ${
-                                      c.unit === unit
-                                        ? 'bg-primary/15 text-primary'
-                                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-                                    }`}
-                                  >
-                                    {unit === '%' ? '%' : '₹'}
-                                  </button>
-                                ))}
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => removeCharge(c.chargeTypeId)}
-                                className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
-                                title={`Take ${c.name} off this order`}
-                                aria-label={`Remove ${c.name}`}
-                              >
-                                <X size={14} />
-                              </button>
-                            </div>
-                          </div>
-                          {/* The working, in figures, so a percentage is never
-                            one more number to take on trust. */}
-                          {c.unit === '%' && (
-                            <p className="text-muted-foreground mt-0.5 text-right text-[11px] tabular-nums">
-                              {totals.grossTotal > 0 ? (
-                                <>
-                                  {num(charges[c.chargeTypeId])}% of goods ₹{inr(totals.grossTotal)} ={' '}
-                                  <span className="text-foreground font-medium">₹{inr(c.enteredAmount)}</span>
-                                </>
-                              ) : (
-                                'Add the goods first — the % is worked out on their value.'
-                              )}
-                            </p>
-                          )}
-                          <ChargeTaxDetails config={c.config} priced={c.priced} hsnOptions={hsnCodes}
-                            onOverride={value => setChargeOverrides(prev => ({ ...prev, [c.chargeTypeId]: value }))} />
-                        </div>
-                      ))}
-                      {chargeTypes.some((t) => !shownCharges.includes(t.id)) && (
-                        <SmartSelect
-                          className="form-input h-8 w-full text-xs"
-                          value=""
-                          onChange={(e) => {
-                            if (e.target.value) addCharge(e.target.value)
-                          }}
-                          aria-label="Add a charge"
-                        >
-                          <option value="">+ Add charge</option>
-                          {chargeTypes
-                            .filter((t) => !shownCharges.includes(t.id))
-                            .map((t) => (
-                              <option key={t.id} value={t.id}>
-                                {t.name}
-                              </option>
-                            ))}
-                        </SmartSelect>
-                      )}
-                      {retiredCharges.length > 0 && (
-                        <p className="warn-text text-xs">
-                          {retiredCharges
-                            .map((c) => `${c.chargeType?.name ?? 'A charge'} (₹${Number(c.amount)})`)
-                            .join(', ')}{' '}
-                          {retiredCharges.length === 1 ? 'is' : 'are'} no longer a purchase charge in
-                          the master, so {retiredCharges.length === 1 ? 'it is' : 'they are'} left off
-                          when you save. Add it again under another charge if it still applies.
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Only an old order whose charge master has no "Other
-                    Charges" row to move the figure onto. Added as it is, like
-                    any other charge. */}
-                  {totals.untaxedExtra > 0 && (
-                    <Row label="Other charges" value={totals.untaxedExtra} />
-                  )}
-
-                  {/* Shown whenever the total was rounded, and only then.
-                    The grand total is taken to the nearest rupee, which is how
-                    an Indian document is normally settled — but without this
-                    row the figures above it add up to something else and
-                    nothing on the screen says why. The printed sheet has
-                    carried this line all along; the form had not. */}
-                  {Math.abs(totals.roundOff) >= 0.005 && (
-                    <Row label="Rounding" value={totals.roundOff} />
-                  )}
-
-                  <div className="border-primary/20 bg-primary/5 mt-2 flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
-                    <span className="text-foreground font-semibold">Grand total</span>
-                    <span className="text-foreground whitespace-nowrap text-lg font-semibold tabular-nums">
-                      ₹{inr(totals.total)}
-                    </span>
-                  </div>
-
-                  {taxMode === null && (
-                    <p className="text-muted-foreground pt-1 text-xs">
-                      Pick the supplier to see whether this is CGST + SGST or IGST.
-                    </p>
-                  )}
-                </div>
-              </Section>
+              {/* The figures, read-only, every one from priceDocument() — the
+                same sum the server saves and the print shows. */}
+              <div className="lg:sticky lg:top-0">
+                <Section icon={Calculator} title="Summary">
+                  <PurchaseSummary
+                    result={totals.result}
+                    split={taxMode}
+                    itemNames={activeLines.map((l) => itemById.get(l.itemId)?.name ?? 'Item')}
+                    chargeNames={totals.chargeRows.map((c) => c.name)}
+                  />
+                </Section>
+              </div>
             </div>
           </div>
 
           {/* Footer — stays put, so Save never has to be hunted for at the bottom of a long form */}
           <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-3 py-2.5 sm:gap-3 sm:px-5 sm:py-3.5">
-            {incomplete && (
-              <p className="warn-text mr-auto flex max-w-xl basis-full items-start gap-1.5 text-xs sm:basis-auto">
+            {showMissing && incomplete && (
+              <p
+                role="alert"
+                className="warn-text mr-auto flex max-w-xl basis-full items-start gap-1.5 text-xs sm:basis-auto"
+              >
                 <AlertCircle size={13} className="mt-px shrink-0" />
                 <span>
                   {!supplierId
                     ? 'Choose a supplier to save this order.'
-                    : activeLines.length === 0
+                    : deliveryEarly
+                      ? "Delivery can't be before the order date."
+                      : activeLines.length === 0
                       ? 'Add at least one item to save this order.'
                       : /* Named, with the empty cell outlined in the table, so a
                        long order does not have to be read twice to find it. */
@@ -5134,10 +4993,8 @@ export function PurchaseOrderDialog({
              * list is fetched once, when the form opens.
              *
              * `categoryId` is spelled out because this form's items carry the
-             * id flat while the master returns the category nested, and
-             * `itemsFor` narrows on the flat one. Without it the new item
-             * would sit outside every category and vanish the moment the row
-             * it was made for narrowed to the category it was filed under.
+             * id flat while the master returns the category nested, and the
+             * item box reads the flat one for the "Category › Sub" line.
              */
             const option: Option = {
               id: created.id,

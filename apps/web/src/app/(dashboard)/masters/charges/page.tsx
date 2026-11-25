@@ -111,7 +111,7 @@ const formFields: FormField[] = [
     type: 'number',
     required: true,
     placeholder: '18',
-    help: 'Freight often carries a different rate from the garment itself',
+    help: 'The rate a new purchase order or bill takes for this charge. Changing it never changes orders or bills already saved — they keep the rate they were saved with',
   },
   {
     name: 'percentOfValue',
