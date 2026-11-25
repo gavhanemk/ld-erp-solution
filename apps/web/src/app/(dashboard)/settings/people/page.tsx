@@ -7,6 +7,7 @@ import { settingsApi, type PermissionModule, type SettingsRole, type SettingsUse
 import { LoadingRow, Notice, SettingsCard } from '@/components/settings/ui'
 import { ResetPasswordDialog, UserDialog } from '@/components/settings/UserDialog'
 import { RoleEditor } from '@/components/settings/RoleEditor'
+import { DeleteUserDialog } from '@/components/settings/DeleteUserDialog'
 import { formatDate } from '@/lib/utils'
 import { ActionMenu } from '@/components/tables/ActionMenu'
 
@@ -150,39 +151,13 @@ export default function PeopleSettingsPage() {
     }
   }
 
-  /**
-   * Deleting a person. The server refuses anyone the ERP has a record of and
-   * says what it found; the refusal then offers to make them inactive, which
-   * is what such an account needs.
-   */
-  const deleteUser = async (user: SettingsUser) => {
-    if (
-      !confirm(
-        `Delete ${user.name} (${user.email})?
+  const [deleting, setDeleting] = useState<SettingsUser | null>(null)
 
-Only an account with nothing in the ERP can be deleted — one made by mistake, or a test sign-in. Anyone who has entered or approved anything is made inactive instead.
-
-This cannot be undone.`,
-      )
-    )
-      return
-    setBusy(true)
-    setMessage(null)
-    try {
-      const res = await settingsApi.users.remove(user.id)
-      await load()
-      setMessage({ kind: 'success', text: res.message })
-    } catch (err) {
-      setMessage({
-        kind: 'error',
-        text: err instanceof ApiError ? err.message : 'Could not delete.',
-        inactivate:
-          err instanceof ApiError && err.code === 'USER_HAS_RECORDS' && user.status === 'ACTIVE' ? user : undefined,
-      })
-    } finally {
-      setBusy(false)
-    }
-  }
+  // A message is shown where the eye is: the list can be long, and a result
+  // written above it was out of sight halfway down.
+  useEffect(() => {
+    if (message) document.getElementById('people-notice')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }, [message])
 
   const term = search.trim().toLowerCase()
   const shown = show === 'all' ? users : users.filter((u) => (show === 'active' ? u.status === 'ACTIVE' : u.status !== 'ACTIVE'))
@@ -209,6 +184,7 @@ This cannot be undone.`,
         </Notice>
       )}
       {message && (
+        <div id="people-notice" className="scroll-mt-4">
         <Notice
           kind={message.kind}
           action={
@@ -226,6 +202,7 @@ This cannot be undone.`,
         >
           {message.text}
         </Notice>
+        </div>
       )}
 
       <div role="tablist" aria-label="People or roles" className="border-border bg-card inline-flex rounded-xl border p-1 shadow-sm">
@@ -429,7 +406,7 @@ This cannot be undone.`,
                                     label: 'Delete',
                                     icon: <Trash2 size={14} />,
                                     danger: true,
-                                    onClick: () => void deleteUser(u),
+                                    onClick: () => setDeleting(u),
                                     disabled: busy || isSelf,
                                     hint: isSelf ? 'Not your own account' : undefined,
                                   },
@@ -590,6 +567,16 @@ This cannot be undone.`,
           void load()
         }}
         onShowRole={(role) => setRoleDialog({ open: true, role })}
+      />
+
+      <DeleteUserDialog
+        user={deleting}
+        onClose={() => setDeleting(null)}
+        onDeleted={(text) => {
+          setMessage({ kind: 'success', text })
+          void load()
+        }}
+        onMakeInactive={(u) => setStatus(u, 'INACTIVE')}
       />
 
       <ResetPasswordDialog

@@ -323,6 +323,26 @@ const TABLE_WORDS: Record<string, string> = {
 const tableWords = (t: string) => TABLE_WORDS[t] ?? t.replace(/^acc_/, '').replace(/_/g, ' ')
 
 /**
+ * Whether a person can be deleted, asked before the delete window offers to:
+ * what the ERP holds with their name on, in words, and the answer.
+ */
+router.get('/users/:id/records', requirePermission(ADMIN, 'delete'), async (req: AuthRequest, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, status: true } })
+  if (!user) throw new AppError('User not found', 404, 'NOT_FOUND')
+  const found = await recordsNaming(user.id)
+  const isSelf = req.user?.id === user.id
+  res.json({
+    success: true,
+    data: {
+      total: found.reduce((t, f) => t + f.count, 0),
+      records: found.map((f) => ({ what: tableWords(f.table), count: f.count })),
+      canDelete: !found.length && !isSelf,
+      reason: isSelf ? 'You cannot delete your own account.' : null,
+    },
+  })
+})
+
+/**
  * Deleting a person outright — for an account made by mistake or a test
  * sign-in that never did anything. Anyone the ERP has a record of is refused,
  * with what was found, and is to be made inactive instead: their name has to

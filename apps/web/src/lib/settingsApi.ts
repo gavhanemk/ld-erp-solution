@@ -203,6 +203,11 @@ export const settingsApi = {
     resetPassword: (id: string, password: string) =>
       api.post<{ success: boolean; message: string }>(`/settings/users/${id}/reset-password`, { password }),
     deactivate: (id: string) => api.delete<{ success: boolean; message: string }>(`/settings/users/${id}`),
+    /** What the ERP holds with this person's name on, and whether they can be deleted. */
+    records: (id: string) =>
+      api.get<{
+        data: { total: number; records: Array<{ what: string; count: number }>; canDelete: boolean; reason: string | null }
+      }>(`/settings/users/${id}/records`),
     /** Deletes outright; refused for anyone the ERP has a record of. */
     remove: (id: string) => api.delete<{ success: boolean; message: string }>(`/settings/users/${id}/permanent`),
   },
