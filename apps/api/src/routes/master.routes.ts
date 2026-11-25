@@ -1770,6 +1770,10 @@ router.use(
     searchFields: ['name', 'description'],
     sortableFields: ['name', 'createdAt'],
     defaultSort: { field: 'name', order: 'asc' },
+    // In House Brands (LD Cotton Mills, VHAGAR) and customers' brands (Custom) are listed apart.
+    filters: {
+      type: { where: (v) => ({ type: { in: v.filter((t) => ['LD_COTTON_MILLS', 'VHAGAR', 'CUSTOM'].includes(t)) } }) },
+    },
   }),
 )
 

@@ -15,28 +15,12 @@ interface Brand {
   _count?: { salesOrders?: number; manufacturingOrders?: number }
 }
 
-// The same words the Styles master uses for the same three kinds.
-const BRAND_LABEL: Record<BrandType, string> = {
-  LD_COTTON_MILLS: 'LD Cotton Mills',
-  VHAGAR: 'VHAGAR',
-  CUSTOM: 'Custom',
-}
-
 /** A count, or a quiet dash for none, so the eye goes to what is in use. */
 const used = (n: number | undefined) =>
   n ? <span className="tabular-nums">{n}</span> : <span className="text-muted-foreground">—</span>
 
 const columns: Column<Brand>[] = [
   { key: 'name', header: 'Brand', sortable: true, className: 'font-medium' },
-  {
-    key: 'type',
-    header: 'Kind',
-    render: (b) => (
-      <span className={b.type === 'VHAGAR' ? 'vhagar-accent font-bold text-xs' : 'text-muted-foreground text-xs'}>
-        {BRAND_LABEL[b.type] ?? b.type}
-      </span>
-    ),
-  },
   {
     key: 'description',
     header: 'Description',
@@ -68,8 +52,10 @@ const formFields: FormField[] = [
     label: 'Kind',
     type: 'select',
     required: true,
-    options: Object.entries(BRAND_LABEL).map(([value, label]) => ({ value, label })),
-    help: "Custom is a customer's own brand, made to their order",
+    // Only customers' brands here: the mill's own are under In House Brands.
+    options: [{ value: 'CUSTOM', label: "Customer's brand" }],
+    valueForNew: 'CUSTOM',
+    help: "A customer's own brand, made to their order. Your own brands are under In House Brands.",
   },
   { name: 'description', label: 'Description', type: 'textarea', span: 2 },
   {
@@ -86,11 +72,12 @@ export default function BrandsPage() {
       title="Brands"
       entityName="Brand"
       resource="brands"
+      filters={{ type: 'CUSTOM' }}
       columns={columns}
       formFields={formFields}
       defaultSort="name"
       searchPlaceholder="Search brand name..."
-      emptyMessage="No brands yet. Add LD Cotton Mills and VHAGAR, and any customer brand you make to order."
+      emptyMessage="No customer brands yet. Add each brand a customer has you make to order. Your own brands are under In House Brands."
     />
   )
 }
