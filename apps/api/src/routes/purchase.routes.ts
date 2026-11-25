@@ -1247,8 +1247,18 @@ function poTaxMode(po: {
   return !po.placeOfSupplyCode || theirState === po.placeOfSupplyCode ? 'CGST_SGST' : 'IGST'
 }
 
+/**
+ * The goods can't be wanted before the order is placed (25 Nov 2026). Compared
+ * as calendar days, so an order dated today may be wanted today.
+ */
+function assertDeliveryNotBefore(deliveryDate: Date | null | undefined, poDate: Date) {
+  if (deliveryDate && deliveryDate.toISOString().slice(0, 10) < poDate.toISOString().slice(0, 10))
+    throw new AppError("Delivery can't be before the order date.", 400, 'DELIVERY_BEFORE_ORDER')
+}
+
 router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSchema.parse(req.body)
+  assertDeliveryNotBefore(data.deliveryDate, data.poDate ?? new Date())
   // Each line's pack (2 boxes of 20), its size from the item's list; never 2.5 boxes ordered.
   const packed = await packLines(prisma, data.lines, ['qty'], 'Order')
 
@@ -1512,6 +1522,11 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     include: poInclude,
   })
   if (!before || before.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+  if (data.deliveryDate !== undefined || data.poDate !== undefined)
+    assertDeliveryNotBefore(
+      data.deliveryDate === undefined ? before.deliveryDate : data.deliveryDate,
+      data.poDate ?? before.poDate
+    )
 
   // A draft is our own paper, and an order that has only been sent is paper on
   // the supplier's desk — both can still be corrected, and the buyer is told

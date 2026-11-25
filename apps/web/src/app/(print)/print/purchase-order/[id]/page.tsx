@@ -114,6 +114,7 @@ interface PrintPayload {
   order: {
     poNumber: string
     poDate: string
+    deliveryDate?: string | null
     poType: string | null
     /** A service order prints under its own name. */
     isService?: boolean
@@ -1910,6 +1911,10 @@ export default function PrintPurchaseOrder() {
               <div style={{ flexShrink: 0 }}>
                 <PoLine label="P.O No" value={order.poNumber} mono />
                 <PoLine label="P.O Date" value={shortDate(order.poDate)} mono />
+                {/* When the goods are wanted by, when the order says (25 Nov 2026). */}
+                {order.deliveryDate && (
+                  <PoLine label="Delivery by" value={shortDate(order.deliveryDate)} mono />
+                )}
                 {/* Their quotation number before our own reference: it is the
                     supplier's way in, and this is the supplier's copy. Shown
                     only when the order carries one, so a sheet for an ordinary
