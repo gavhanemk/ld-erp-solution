@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Pencil, X } from 'lucide-react'
 import type { ChargeTaxSnapshot, GstSplit, PricedCharge } from '@ld-erp/shared'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -8,6 +8,78 @@ import { StepInput } from '@/components/ui/StepInput'
 import { ChargeTaxDialog } from './ChargeTaxDialog'
 import { chargeGstLabel } from './chargeRules'
 import type { HsnOption } from './TaxBreakdown'
+
+/**
+ * A charge's GST %, typed right in its row (25 Nov 2026). Enter or leaving
+ * the box saves it to Masters → Charges as well, so every new order and bill
+ * takes it; orders already saved keep the rate they were saved with.
+ */
+function MasterRateBox({
+  name,
+  rate,
+  onSave,
+}: {
+  name: string
+  rate: number
+  onSave: (rate: number) => Promise<void>
+}) {
+  const [value, setValue] = useState(String(rate))
+  const [state, setState] = useState<'idle' | 'saving' | 'saved' | string>('idle')
+  // A new rate from outside (another row, a reload) shows here unless the box is being typed in.
+  useEffect(() => {
+    setValue(String(rate))
+  }, [rate])
+  const commit = async () => {
+    const next = Number(value)
+    if (value.trim() === '' || !Number.isFinite(next) || next === rate) {
+      setValue(String(rate))
+      return
+    }
+    setState('saving')
+    try {
+      await onSave(next)
+      setState('saved')
+    } catch (e) {
+      setState(e instanceof Error ? e.message : 'Could not save to Masters → Charges')
+      setValue(String(rate))
+    }
+  }
+  return (
+    <div>
+      <div className="flex items-center gap-1">
+        <StepInput
+          decimals
+          max={100}
+          className="form-input h-8 w-16 px-2 text-right text-sm"
+          value={value}
+          disabled={state === 'saving'}
+          onValueChange={setValue}
+          onBlur={() => void commit()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              void commit()
+            }
+          }}
+          aria-label={`${name} GST %`}
+          title="Changes this charge here and in Masters → Charges for new orders"
+        />
+        <span className="text-muted-foreground text-sm">%</span>
+      </div>
+      {state === 'saved' && (
+        <span className="text-primary block whitespace-nowrap text-[11px]" title="Saved to Masters → Charges">
+          ✓ Saved to master
+        </span>
+      )}
+      {state === 'saving' && <span className="text-muted-foreground block text-[11px]">Saving…</span>}
+      {state !== 'idle' && state !== 'saved' && state !== 'saving' && (
+        <span className="warn-text block text-[11px]" role="alert">
+          {state}
+        </span>
+      )}
+    </div>
+  )
+}
 
 export interface ChargeTableRow {
   key: string
@@ -49,6 +121,7 @@ export function PurchaseChargesTable({
   onAdd,
   onTaxChange,
   preview,
+  onMasterRate,
   emptyHint,
   footer,
 }: {
@@ -67,6 +140,12 @@ export function PurchaseChargesTable({
   /** null: back to the setting the charge had before this form changed it. */
   onTaxChange: (key: string, config: ChargeTaxSnapshot | null) => void
   preview: (key: string, config: ChargeTaxSnapshot) => { rate: string; tax: number }
+  /**
+   * Saves a GST % typed in the row to Masters → Charges and puts this charge
+   * on it. Offered with `canChangeTax` only — the master is not everyone's to
+   * change.
+   */
+  onMasterRate?: (key: string, rate: number) => Promise<void>
   emptyHint?: ReactNode
   footer?: ReactNode
 }) {
@@ -93,6 +172,17 @@ export function PurchaseChargesTable({
             <tbody>
               {rows.map((r) => {
                 const gst = chargeGstLabel(r.config, r.priced, split, { savedAs: r.savedAs })
+                // The rate actually applied — what the box must show. A charge
+                // spread over goods at two rates has no single rate to type.
+                const partRates = [...new Set((r.priced?.parts ?? []).map((p) => p.gstRate))]
+                const applied =
+                  r.config.gstApplicable === false || r.config.treatment === 'NON_TAXABLE'
+                    ? 0
+                    : partRates.length === 1
+                      ? partRates[0]
+                      : partRates.length === 0
+                        ? Number(r.config.ownRate) || 0
+                        : null
                 return (
                   <tr key={r.key} className="border-border/60 border-b align-top last:border-0">
                     <td className="text-foreground py-2 pr-2 pt-3.5">{r.name}</td>
@@ -154,7 +244,11 @@ export function PurchaseChargesTable({
                       )}
                     </td>
                     <td className="px-2 py-2 pt-2.5">
-                      <span className="text-foreground block tabular-nums">{gst.rate}</span>
+                      {canChangeTax && onMasterRate && split !== 'NONE' && applied !== null ? (
+                        <MasterRateBox name={r.name} rate={applied} onSave={(rate) => onMasterRate(r.key, rate)} />
+                      ) : (
+                        <span className="text-foreground block tabular-nums">{gst.rate}</span>
+                      )}
                       {gst.source && (
                         <span
                           className={`block text-[11px] leading-snug ${gst.changed ? 'warn-text' : 'text-muted-foreground'}`}
@@ -177,7 +271,7 @@ export function PurchaseChargesTable({
                             type="button"
                             onClick={() => setTaxFor(r.key)}
                             className="btn-ghost text-muted-foreground hover:text-foreground p-1.5"
-                            title={`Change the tax on ${r.name} for this document`}
+                            title={`Change the tax on ${r.name} for this order only (with a reason) — Masters → Charges is not changed`}
                             aria-label={`Change tax on ${r.name}`}
                           >
                             <Pencil size={14} />

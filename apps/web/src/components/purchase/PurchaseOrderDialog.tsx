@@ -4052,6 +4052,32 @@ export function PurchaseOrderDialog({
                       })
                     }
                     preview={previewCharge}
+                    onMasterRate={async (id, rate) => {
+                      // Masters → Charges first: if that is refused, nothing here changes.
+                      try {
+                        await api.patch(`/masters/charge-types/${id}`, {
+                          defaultGstMode: 'MANUAL',
+                          defaultGstRate: rate,
+                          purchaseGstApplicability: 'APPLICABLE',
+                        })
+                      } catch (err) {
+                        throw new Error(apiErrorMessage(err, 'Could not save to Masters → Charges'))
+                      }
+                      setChargeTypes((prev) =>
+                        prev.map((t) =>
+                          t.id === id
+                            ? { ...t, defaultGstMode: 'MANUAL', defaultGstRate: rate, defaultHsnCodeId: null, defaultHsnCode: null, purchaseGstApplicability: 'APPLICABLE' }
+                            : t
+                        )
+                      )
+                      // This charge now takes the master's new setting, as a fresh entry.
+                      setChargeOverrides((prev) => {
+                        const next = { ...prev }
+                        delete next[id]
+                        return next
+                      })
+                      setFreshCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
+                    }}
                     emptyHint={
                       chargeTypes.length === 0 ? (
                         <p className="text-muted-foreground text-xs">

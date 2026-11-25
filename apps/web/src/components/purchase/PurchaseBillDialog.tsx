@@ -3319,6 +3319,34 @@ export function PurchaseBillDialog({
                         )
                       }
                       preview={previewBillCharge}
+                      onMasterRate={async (key, rate) => {
+                        const id = charges[Number(key)]?.chargeTypeId
+                        if (!id) return
+                        try {
+                          await api.patch(`/masters/charge-types/${id}`, {
+                            defaultGstMode: 'MANUAL',
+                            defaultGstRate: rate,
+                            purchaseGstApplicability: 'APPLICABLE',
+                          })
+                        } catch (err) {
+                          throw new Error(apiErrorMessage(err, 'Could not save to Masters → Charges'))
+                        }
+                        setChargeTypes((prev) =>
+                          prev.map((t) =>
+                            t.id === id
+                              ? { ...t, defaultGstMode: 'MANUAL', defaultGstRate: rate, defaultHsnCodeId: null, defaultHsnCode: null, purchaseGstApplicability: 'APPLICABLE' }
+                              : t
+                          )
+                        )
+                        // Every row of this charge on the bill takes the new setting.
+                        setCharges((rows) =>
+                          rows.map((x) =>
+                            x.chargeTypeId === id
+                              ? { ...x, taxOverride: undefined, taxSnapshot: undefined, fresh: true }
+                              : x
+                          )
+                        )
+                      }}
                       emptyHint={
                         charges.length === 0 ? (
                           <p className="text-muted-foreground text-xs">
