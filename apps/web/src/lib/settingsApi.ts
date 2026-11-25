@@ -194,6 +194,8 @@ export const settingsApi = {
     resetPassword: (id: string, password: string) =>
       api.post<{ success: boolean; message: string }>(`/settings/users/${id}/reset-password`, { password }),
     deactivate: (id: string) => api.delete<{ success: boolean; message: string }>(`/settings/users/${id}`),
+    /** Deletes outright; refused for anyone the ERP has a record of. */
+    remove: (id: string) => api.delete<{ success: boolean; message: string }>(`/settings/users/${id}/permanent`),
   },
 
   roles: {

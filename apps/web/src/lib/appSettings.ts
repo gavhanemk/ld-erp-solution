@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { api } from './api'
+import { makeLogoMark } from './logoMark'
 
 /**
  * Display preferences, shared by every screen.
@@ -22,7 +23,8 @@ export interface AppSettings {
   companyName: string | null
   /** A fingerprint of the logo: the picture is fetched again only when it changes. */
   logoKey: string | null
-  logoUrl: string | null
+  /** The logo cut and sized for the menu (see logoMark.ts), kept small. */
+  logoMark: string | null
 }
 
 /** Matches the defaults in the API's preference catalogue. */
@@ -33,7 +35,7 @@ const FALLBACK: AppSettings = {
   issueByScanOnly: false,
   companyName: null,
   logoKey: null,
-  logoUrl: null,
+  logoMark: null,
 }
 
 const STORAGE_KEY = 'app_settings'
@@ -73,7 +75,7 @@ function normalise(raw: Record<string, unknown> | null | undefined): AppSettings
     issueByScanOnly: raw.issueByScanOnly === true,
     companyName: typeof raw.companyName === 'string' && raw.companyName ? raw.companyName : null,
     logoKey: typeof raw.logoKey === 'string' && raw.logoKey ? raw.logoKey : null,
-    logoUrl: typeof raw.logoUrl === 'string' && raw.logoUrl ? raw.logoUrl : null,
+    logoMark: typeof raw.logoMark === 'string' && raw.logoMark ? raw.logoMark : null,
   }
 }
 
@@ -99,15 +101,17 @@ export async function loadAppSettings(force = false): Promise<AppSettings> {
   try {
     const res = await api.get<{ success: boolean; data: Record<string, unknown> }>('/settings/app')
     const next = normalise(res.data)
-    // The logo comes by itself, and only when it is not the one already kept.
-    if (!next.logoKey) next.logoUrl = null
-    else if (next.logoKey === current.logoKey && current.logoUrl) next.logoUrl = current.logoUrl
+    // The logo comes by itself, and only when it is not the one already
+    // kept; the menu's cut of it is made here once and kept instead of it.
+    if (!next.logoKey) next.logoMark = null
+    else if (next.logoKey === current.logoKey && current.logoMark) next.logoMark = current.logoMark
     else {
       try {
         const logo = await api.get<{ data: { logoUrl: string | null } }>('/settings/app/logo')
-        next.logoUrl = logo.data?.logoUrl ?? null
+        const url = logo.data?.logoUrl ?? null
+        next.logoMark = url ? ((await makeLogoMark(url)) ?? url) : null
       } catch {
-        next.logoUrl = null
+        next.logoMark = null
       }
     }
     apply(next)

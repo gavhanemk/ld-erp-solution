@@ -231,7 +231,7 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
   // Every group starts shut; the user opens the one they want.
   const [openMenus, setOpenMenus] = useState<string[]>([])
   const [user, setUser] = useState<{ name?: string; role?: string } | null>(null)
-  const { qcInDailyProduction, logoUrl, companyName } = useAppSettings()
+  const { qcInDailyProduction, logoMark, companyName } = useAppSettings()
 
   // A mill that records output without a per-day QC entry should not be looking
   // at a menu item it never uses. Settings → Preferences controls this.
@@ -315,16 +315,16 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
       <div className="flex items-center gap-3 px-4 h-16 border-b border-[hsl(var(--sidebar-border))] shrink-0">
         {/* The company's own logo once one is saved in Settings → Documents,
             on white as it is printed; the LD monogram until then. */}
-        {logoUrl ? (
+        {logoMark ? (
           <div
             className={cn(
-              'flex shrink-0 items-center justify-center overflow-hidden rounded-lg bg-white p-1 ring-1 ring-white/10',
-              collapsed ? 'h-9 w-9' : 'h-11 w-14',
+              'flex shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white p-[3px] shadow-sm ring-1 ring-white/10',
+              collapsed ? 'h-9 w-9' : 'h-10 w-10',
             )}
           >
-            {/* A data URL kept in the browser, so next/image has nothing to add. */}
+            {/* Cut and sized for this tile in the browser (lib/logoMark.ts), so next/image has nothing to add. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={logoUrl} alt={`${companyName ?? 'Company'} logo`} className="max-h-full max-w-full object-contain" />
+            <img src={logoMark} alt={`${companyName ?? 'Company'} logo`} className="max-h-full max-w-full object-contain" />
           </div>
         ) : (
           <div className="w-9 h-9 rounded-xl bg-teal-500/10 border border-teal-500/20 flex items-center justify-center shrink-0">

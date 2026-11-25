@@ -257,6 +257,114 @@ router.delete('/users/:id', requirePermission(ADMIN, 'delete'), async (req: Auth
   res.json({ success: true, message: `${after.name} can no longer sign in.`, data: after })
 })
 
+/**
+ * Everything in the ERP that names a person, counted.
+ *
+ * Read from the database's own list of links to the users table rather than
+ * kept by hand: there are a hundred of them, and a new one added next month
+ * must stop a delete without anybody remembering to add it here. Half of them
+ * would not even refuse a delete — they are set to blank instead, so an
+ * approved order would quietly stop saying who approved it. Their own
+ * notifications and assistant chats are left out: those are theirs, and go
+ * with them.
+ */
+const PERSONAL_TABLES = new Set(['notifications', 'ai_conversations'])
+
+async function recordsNaming(userId: string): Promise<Array<{ table: string; count: number }>> {
+  const links = await prisma.$queryRaw<Array<{ table: string; column: string }>>`
+    SELECT cl.relname AS "table", att.attname AS "column"
+    FROM pg_constraint c
+    JOIN pg_class cl ON cl.oid = c.conrelid
+    JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+    JOIN pg_attribute att ON att.attrelid = c.conrelid AND att.attnum = ANY(c.conkey)
+    WHERE c.contype = 'f' AND c.confrelid = 'ld_erp.users'::regclass AND ns.nspname = 'ld_erp'`
+  const checked = links.filter((l) => !PERSONAL_TABLES.has(l.table))
+  if (!checked.length) return []
+  // The names come from the database's own catalogue, never from the request,
+  // and are quoted as identifiers; the id is the one bound parameter.
+  const ident = (s: string) => `"${s.replace(/"/g, '""')}"`
+  const sql = checked
+    .map(
+      (l, i) =>
+        `SELECT ${i} AS i, COUNT(*)::int AS n FROM "ld_erp".${ident(l.table)} WHERE ${ident(l.column)} = $1`,
+    )
+    .join(' UNION ALL ')
+  const counts = await prisma.$queryRawUnsafe<Array<{ i: number; n: number }>>(sql, userId)
+  const byTable = new Map<string, number>()
+  for (const c of counts) {
+    if (!c.n) continue
+    const table = checked[c.i].table
+    byTable.set(table, (byTable.get(table) ?? 0) + c.n)
+  }
+  return [...byTable.entries()]
+    .map(([table, count]) => ({ table, count }))
+    .sort((a, b) => b.count - a.count)
+}
+
+/** "purchase_orders" as people say it. */
+const TABLE_WORDS: Record<string, string> = {
+  audit_logs: 'activity log entries',
+  grn: 'goods receipts',
+  customer_grn: 'customer material receipts',
+  purchase_invoices: 'purchase bills',
+  material_requisitions: 'requisitions',
+  bom: 'bills of materials',
+  wip_events: 'production entries',
+  garment_events: 'garment records',
+  stock_package_moves: 'package movements',
+  acc_vouchers: 'vouchers',
+}
+const tableWords = (t: string) => TABLE_WORDS[t] ?? t.replace(/^acc_/, '').replace(/_/g, ' ')
+
+/**
+ * Deleting a person outright — for an account made by mistake or a test
+ * sign-in that never did anything. Anyone the ERP has a record of is refused,
+ * with what was found, and is to be made inactive instead: their name has to
+ * stay on what they did.
+ */
+router.delete('/users/:id/permanent', requirePermission(ADMIN, 'delete'), async (req: AuthRequest, res) => {
+  const before = await prisma.user.findUnique({ where: { id: req.params.id }, select: userView })
+  if (!before) throw new AppError('User not found', 404, 'NOT_FOUND')
+
+  if (req.user?.id === before.id) {
+    throw new AppError('You cannot delete your own account.', 400, 'SELF_DELETE')
+  }
+  if (before.role.name === SUPER_ROLE && before.status === 'ACTIVE') await assertAnotherAdminRemains(before.id)
+
+  const found = await recordsNaming(before.id)
+  if (found.length) {
+    const total = found.reduce((t, f) => t + f.count, 0)
+    const list = found
+      .slice(0, 3)
+      .map((f) => `${tableWords(f.table)} (${f.count.toLocaleString('en-IN')})`)
+      .join(', ')
+    throw new AppError(
+      `${before.name} cannot be deleted: the ERP has ${total.toLocaleString('en-IN')} ${total === 1 ? 'record' : 'records'} with their name on — ${list}${found.length > 3 ? ' and more' : ''}. Deleting would lose who made them. Make the account inactive instead; it then cannot sign in.`,
+      409,
+      'USER_HAS_RECORDS',
+    )
+  }
+
+  await prisma.$transaction(async (tx) => {
+    const convs = await tx.aIConversation.findMany({ where: { userId: before.id }, select: { id: true } })
+    if (convs.length) await tx.aIMessage.deleteMany({ where: { conversationId: { in: convs.map((c) => c.id) } } })
+    await tx.aIConversation.deleteMany({ where: { userId: before.id } })
+    await tx.notification.deleteMany({ where: { userId: before.id } })
+    await tx.user.delete({ where: { id: before.id } })
+  })
+
+  await writeAuditLog(req, {
+    module: ADMIN,
+    action: 'DELETE',
+    entityType: 'User',
+    entityId: before.id,
+    before,
+    after: { deleted: true },
+  })
+
+  res.json({ success: true, message: `${before.name} has been deleted.` })
+})
+
 async function assertAnotherAdminRemains(excludingUserId: string): Promise<void> {
   const others = await prisma.user.count({
     where: {
