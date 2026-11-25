@@ -56,6 +56,7 @@ import { storageConfigured } from './lib/storage'
 import { authMiddleware } from './middleware/auth'
 import { logger } from './utils/logger'
 import { keepAwake } from './lib/keepAwake'
+import { apiListenHost } from './lib/pilot'
 import { prisma } from '@ld-erp/database'
 
 const app = express()
@@ -350,7 +351,7 @@ app.use('*', (req, res) => res.status(404).json({ error: 'Route not found', path
 app.use(errorHandler)
 
 const PORT = process.env.PORT || 5000
-httpServer.listen(Number(PORT), process.env.SAMPLING_ENABLED === 'true' ? '127.0.0.1' : '0.0.0.0', () => {
+httpServer.listen(Number(PORT), apiListenHost(), () => {
   logger.info(`🚀 LD ERP Solution API → http://localhost:${PORT}`)
   logger.info(`📡 Socket.io ready | 🌍 ${process.env.NODE_ENV}`)
   keepAwake()
