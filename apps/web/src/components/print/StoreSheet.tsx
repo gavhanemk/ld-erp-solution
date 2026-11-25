@@ -239,6 +239,11 @@ export function StoreSheet({
                 {address}
               </div>
             )}
+            {company.headOffice && (
+              <div style={{ fontSize: '10.5px', color: GREY, lineHeight: 1.6, maxWidth: '86%' }}>
+                <span style={{ fontWeight: 700 }}>HO:</span> {company.headOffice}
+              </div>
+            )}
           </div>
           <div style={{ flexShrink: 0 }}>
             <HeadRow label="Email" value={company.email} />

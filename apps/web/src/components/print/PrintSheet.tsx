@@ -255,6 +255,7 @@ export function PrintSheet({
                 .filter(Boolean)
                 .join(', ')}
             </div>
+            {company.headOffice && <div>HO: {company.headOffice}</div>}
             <div>
               {[company.gstin && `GSTIN: ${company.gstin}`, company.pan && `PAN: ${company.pan}`]
                 .filter(Boolean)

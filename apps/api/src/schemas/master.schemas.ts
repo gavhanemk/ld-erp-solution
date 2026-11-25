@@ -784,6 +784,8 @@ export const updateCompanySchema = z.object({
   state: z.string().max(100).optional().nullable(),
   stateCode,
   pincode,
+  /** The head office, printed as "HO: …" under the address on every letterhead. */
+  headOffice: z.string().trim().max(300).optional().nullable(),
   gstin,
   pan,
   /** Needed on TDS challans and to issue Form 16A. */

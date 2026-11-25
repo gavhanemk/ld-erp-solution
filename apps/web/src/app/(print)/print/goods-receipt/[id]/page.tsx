@@ -44,6 +44,8 @@ interface Company {
   city: string | null
   state: string | null
   pincode: string | null
+  /** The head office: "HO: …" under the address. */
+  headOffice?: string | null
   gstin: string | null
   pan: string | null
   phone: string | null
@@ -488,6 +490,11 @@ export default function PrintGoodsReceipt() {
                 }}
               >
                 {companyAddress}
+              </div>
+            )}
+            {company.headOffice && (
+              <div style={{ fontSize: '10.5px', color: GREY, lineHeight: 1.6, maxWidth: '86%' }}>
+                <span style={{ fontWeight: 700 }}>HO:</span> {company.headOffice}
               </div>
             )}
           </div>

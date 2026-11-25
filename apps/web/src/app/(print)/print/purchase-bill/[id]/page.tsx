@@ -467,6 +467,11 @@ export default function PurchaseBillPrintPage() {
                   {l}
                 </div>
               ))}
+              {company.headOffice && (
+                <div style={{ textTransform: 'uppercase' }}>
+                  <span style={{ fontWeight: 700 }}>HO:</span> {company.headOffice}
+                </div>
+              )}
             </div>
 
             <div

@@ -18,6 +18,8 @@ export interface PrintHeader {
     state: string | null
     stateCode: string | null
     pincode: string | null
+    /** The head office: "HO: …" under the address. */
+    headOffice: string | null
     gstin: string | null
     pan: string | null
     phone: string | null
@@ -115,6 +117,7 @@ export async function getPrintHeader(docType: string): Promise<PrintHeader> {
       state: company.state,
       stateCode: company.stateCode,
       pincode: company.pincode,
+      headOffice: company.headOffice,
       gstin: company.gstin,
       pan: company.pan,
       phone: company.phone,

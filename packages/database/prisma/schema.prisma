@@ -473,6 +473,9 @@ model Company {
   city           String?
   state          String?
   pincode        String?
+  /// The head office, printed as "HO: …" under the address above on every
+  /// document's letterhead.
+  headOffice     String?
   gstin          String?   @unique
   /// Two-digit GST state code, e.g. "27" for Maharashtra. Place of supply is
   /// decided by comparing this against the customer's, so it cannot be free text.

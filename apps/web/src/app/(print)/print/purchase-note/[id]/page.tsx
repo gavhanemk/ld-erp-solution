@@ -319,6 +319,11 @@ export default function PurchaseNotePrintPage() {
             <div style={{ marginTop: '7px', fontSize: '9.5px', color: GREY, lineHeight: 1.55 }}>
               {addressLines(company).join(', ')}
             </div>
+            {company.headOffice && (
+              <div style={{ marginTop: '2px', fontSize: '9.5px', color: GREY, lineHeight: 1.55 }}>
+                <span style={{ fontWeight: 700 }}>HO:</span> {company.headOffice}
+              </div>
+            )}
             <div style={{ marginTop: '3px', fontSize: '9.5px', color: GREY }}>
               {[company.phone, company.email].filter(Boolean).join('  |  ')}
             </div>

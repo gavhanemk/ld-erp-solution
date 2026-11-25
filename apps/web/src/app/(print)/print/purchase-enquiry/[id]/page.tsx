@@ -343,6 +343,11 @@ export default function PurchaseRequisitionPrintPage() {
                   {[co.address, co.city, co.state, co.pincode].filter(Boolean).join(', ')}
                 </p>
               )}
+              {co.headOffice && (
+                <p style={{ margin: '2px 0 0', fontSize: 11.5, color: GREY, lineHeight: 1.45 }}>
+                  <span style={{ fontWeight: 700 }}>HO:</span> {co.headOffice}
+                </p>
+              )}
               <div
                 style={{
                   margin: '7px 0 0',
