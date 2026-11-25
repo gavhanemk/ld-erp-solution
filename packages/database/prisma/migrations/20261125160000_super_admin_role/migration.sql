@@ -14,12 +14,15 @@ SET "roleId" = (SELECT "id" FROM "roles" WHERE "name" = 'Super Admin'), "updated
 WHERE "roleId" = (SELECT "id" FROM "roles" WHERE "name" = 'Admin');
 
 -- 3. Admin holds every module-wide permission, so it starts with full access
---    now that it no longer bypasses the matrix.
+--    now that it no longer bypasses the matrix. Super Admin gets them too: it
+--    needs none under the new code, but the code still running when this is
+--    applied reads each person's rights from their role, and without these
+--    everyone just moved to Super Admin would be shut out until it deploys.
 INSERT INTO "role_permissions" ("id", "roleId", "permissionId")
 SELECT 'rp_' || md5(r."id" || ':' || p."id"), r."id", p."id"
 FROM "roles" r
 CROSS JOIN "permissions" p
-WHERE r."name" = 'Admin' AND p."module" NOT LIKE '%.%'
+WHERE r."name" IN ('Admin', 'Super Admin') AND p."module" NOT LIKE '%.%'
 ON CONFLICT ("roleId", "permissionId") DO NOTHING;
 
 UPDATE "roles"

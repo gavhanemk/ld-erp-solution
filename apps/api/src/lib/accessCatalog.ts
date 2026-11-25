@@ -209,6 +209,11 @@ export const ACCESS_CATALOG: AccessModule[] = [
     ],
   },
   {
+    key: 'sampling',
+    label: 'Sampling',
+    screens: [s('sampling', 'Sampling', DOC, ['/sampling'], ['/api/sampling'], 'Sample requests, sourcing, making, review and cost')],
+  },
+  {
     key: 'accounts',
     label: 'Accounts',
     screens: [
