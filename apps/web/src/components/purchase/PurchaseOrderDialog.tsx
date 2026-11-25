@@ -36,6 +36,7 @@ import {
   ChevronUp,
   ChevronDown,
   Copy,
+  Layers,
 } from 'lucide-react'
 import { Section } from '@/components/purchase/Section'
 import type { EnquiryQuote, EnquiryRecord as EnquiryLite } from '@/components/purchase/enquiryTypes'
@@ -46,9 +47,18 @@ import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } from '@/components/purchase/IndentItemsDialog'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
+import { SampleNeedsDialog, type SamplePick, type SampleStore } from '@/components/purchase/SampleNeedsDialog'
+import {
+  isSampleStore,
+  needsOverReason,
+  sampleLabelOf,
+  sampleLineLabel,
+  sampleReference,
+  type SampleMaterialRef,
+} from '@/components/purchase/sampleLines'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
-import { priceDocument, chargeConfigOf, chargeSnapshot, savedChargeConfig, type ChargeMasterConfig, type ChargeTaxSnapshot, type ChargeGstMode } from '@ld-erp/shared'
+import { priceDocument, chargeConfigOf, chargeSnapshot, savedChargeConfig, SAMPLE_OVER_REASON_MIN, type ChargeMasterConfig, type ChargeTaxSnapshot, type ChargeGstMode, type SampleNeed } from '@ld-erp/shared'
 import { ChargeGstControl, TaxBreakdown, type HsnOption } from '@/components/purchase/TaxBreakdown'
 
 /**
@@ -116,6 +126,32 @@ export interface PoLine {
    * back, and what stops the same quote being ordered twice.
    */
   enquiryLineId?: string | null
+  /**
+   * The sample BOM line this buys for, when it came off the sample needs
+   * (here, or Sampling's own "Raise purchase order") rather than being typed.
+   *
+   * Carried so the sample knows what has been bought for it, and so the goods
+   * are received into a sample store and nowhere else. Sent back on every
+   * save: the server rebuilds an order's lines wholesale, so a line that
+   * forgot it would quietly stop counting for the sample.
+   */
+  sampleMaterialId?: string | null
+  /**
+   * Why this line orders more than the sample still needs. Required by the
+   * server only while it does; kept by it only while it does.
+   */
+  sampleOverReason?: string | null
+  /** "SMP-2627-0012 · Body", for the note under the row. Browser only. */
+  sampleRef?: string | null
+  /**
+   * What the sample still needed when this line was picked, to know when the
+   * quantity has gone past it. Browser only, and unknown (null) on an order
+   * reopened for editing — by then the sample's figure already counts this
+   * order's own line, so it cannot say what is "more".
+   */
+  sampleOpen?: number | null
+  /** Set by the server on a saved line that buys for a sample. */
+  sampleMaterial?: SampleMaterialRef | null
   /**
    * Whether `discount` is a percentage or a number of rupees.
    *
@@ -333,6 +369,28 @@ interface Option {
   /** On an item: the style it is a garment of, as the item master sends it. */
   styleId?: string | null
   style?: { id: string; code: string; name: string } | null
+  /** On a store: SAMPLING for a sample store, GENERAL (or nothing) for any other. */
+  purpose?: string | null
+}
+
+/**
+ * Whether the sampling module is switched on for this mill. Read once: Next
+ * writes the value in when the app is built, so it cannot change while the
+ * form is open. Off, the form has no sample needs to offer.
+ */
+const SAMPLING_ON = process.env.NEXT_PUBLIC_SAMPLING_ENABLED === 'true'
+
+/**
+ * Everything that ties a row to a sample, taken off. For a copied row, and
+ * for a row whose item is changed by hand: a sample line is for one material,
+ * and the same link on another item would be refused by the server anyway.
+ */
+const SAMPLE_UNLINKED: Partial<PoLine> = {
+  sampleMaterialId: null,
+  sampleOverReason: null,
+  sampleRef: null,
+  sampleOpen: null,
+  sampleMaterial: null,
 }
 
 interface Attachment {
@@ -516,6 +574,7 @@ export function PurchaseOrderDialog({
   onSaved,
   record,
   fromEnquiry,
+  fromSample,
   service,
 }: {
   open: boolean
@@ -541,6 +600,17 @@ export function PurchaseOrderDialog({
    * from the recorded document rather than from a form.
    */
   fromEnquiry?: { enquiry: EnquiryLite; quote: EnquiryQuote } | null
+  /**
+   * The sample lines this order is being raised for, from Sampling's "Raise
+   * purchase order".
+   *
+   * A new order opens with one row per line, each at what the sample still
+   * needs, delivered to `sampleStoreId` (the sample store its goods must be
+   * received into) and referenced by the samples' numbers. Ignored when
+   * `record` is set, like `fromEnquiry`: an order already saved keeps its own
+   * lines.
+   */
+  fromSample?: { needs: SampleNeed[]; sampleStoreId: string | null } | null
 }) {
   const isEdit = Boolean(record)
   const serviceMode = Boolean(service) || Boolean(record?.isService)
@@ -549,6 +619,18 @@ export function PurchaseOrderDialog({
   const enquiry = source?.enquiry ?? null
   /** Whose answer the order is being built on — the rates come off this. */
   const quote = source?.quote ?? null
+  /** Only for a new order, and never for a service order — see the prop's note. */
+  const sampleSource = isEdit || serviceMode ? null : (fromSample ?? null)
+  /*
+   * What the form resets on, rather than the object itself. A page that
+   * writes `fromSample={{ needs, sampleStoreId }}` hands over a new object on
+   * every render, and resetting on that would wipe the order every time
+   * anything on the page behind it changed. The lines and the store are what
+   * make it a different order.
+   */
+  const sampleSourceKey = sampleSource
+    ? `${sampleSource.needs.map((n) => n.sampleMaterialId).join(',')}|${sampleSource.sampleStoreId ?? ''}`
+    : ''
 
   const [suppliers, setSuppliers] = useState<Option[]>([])
   // "Add new supplier" from the supplier list: the name typed in its search,
@@ -568,6 +650,7 @@ export function PurchaseOrderDialog({
   const [supplierId, setSupplierId] = useState('')
   const [poType, setPoType] = useState<PoType>('NONE')
   const [indentOpen, setIndentOpen] = useState(false)
+  const [sampleNeedsOpen, setSampleNeedsOpen] = useState(false)
   /**
    * Which row asked for an item the master does not hold yet.
    *
@@ -587,6 +670,8 @@ export function PurchaseOrderDialog({
   /// The indent lines taken onto this order, and the reference they last wrote:
   /// the box follows them until somebody types in it themselves.
   const [indentRows, setIndentRows] = useState<IndentRow[]>([])
+  /// The same for the sample lines taken onto it: the reference names the samples.
+  const [sampleTaken, setSampleTaken] = useState<Array<{ sampleMaterialId: string; requestNumber: string }>>([])
   const [autoReference, setAutoReference] = useState<string | null>(null)
   /// Internal. Unlike `notes` it is not printed on the supplier's copy, which
   /// is the whole reason the two are separate fields.
@@ -767,11 +852,19 @@ export function PurchaseOrderDialog({
           ? record.poType
           : 'ITEM_LEVEL'
     )
-    setWarehouseId(record?.deliveryWarehouseId ?? '')
+    // An order raised for samples goes to the sample store: its goods can be
+    // received nowhere else.
+    setWarehouseId(record?.deliveryWarehouseId ?? sampleSource?.sampleStoreId ?? '')
     setPoDate(record?.poDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10))
-    setReference(record?.reference ?? '')
+    // Raised for samples, the reference names them — and keeps following the
+    // lines added after, until somebody types over it.
+    const sampleRefText = sampleSource ? sampleReference(sampleSource.needs) : ''
+    setReference(record?.reference ?? sampleRefText)
     setIndentRows([])
-    setAutoReference(null)
+    setSampleTaken(
+      (sampleSource?.needs ?? []).map((n) => ({ sampleMaterialId: n.sampleMaterialId, requestNumber: n.requestNumber }))
+    )
+    setAutoReference(sampleRefText || null)
     setRemark(record?.remark ?? '')
     setDeliveryCustomerId(record?.deliveryCustomerId ?? '')
     setDeliverTo(record?.deliveryCustomerId ? 'CUSTOMER' : 'ORGANIZATION')
@@ -819,6 +912,16 @@ export function PurchaseOrderDialog({
               // the edit path must keep it, or correcting an order would cut
               // every line loose from the enquiry it was quoted on.
               enquiryLineId: l.enquiryLineId ?? null,
+              // Kept for the same reason as the indent's: the server rebuilds
+              // the lines from what is sent, so a line that came back without
+              // its sample would stop counting for it, and its goods could
+              // then be received into the main store. The reason it gave for
+              // ordering more stays with it. What the sample still needs is
+              // not known here — see `sampleOpen`.
+              sampleMaterialId: l.sampleMaterialId ?? l.sampleMaterial?.id ?? null,
+              sampleOverReason: l.sampleOverReason ?? null,
+              sampleRef: l.sampleMaterial ? sampleLabelOf(l.sampleMaterial, l.item?.name ?? '') : null,
+              sampleOpen: null,
             }
           })
         : enquiry?.lines?.length
@@ -873,8 +976,11 @@ export function PurchaseOrderDialog({
                 enquiryLineId: l.id,
               }
             })
-          : // Always one row to type into. An empty table has nowhere to start.
-            [blankLine()]
+          : sampleSource?.needs.length
+            ? // Raised from Sampling: a row per sample line, at what it still needs.
+              sampleSource.needs.map((n) => lineFromNeed(n, n.toBuy, ''))
+            : // Always one row to type into. An empty table has nowhere to start.
+              [blankLine()]
     )
     setCharges(
       Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(savedChargeConfig(c).inputAmount)]))
@@ -925,8 +1031,9 @@ export function PurchaseOrderDialog({
     setSaving(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- categories is
     // read for the category dropdowns and would re-run this reset every time
-    // the master list loads, wiping what the buyer had typed.
-  }, [open, record, enquiry, quote])
+    // the master list loads, wiping what the buyer had typed. The sample
+    // source is followed by its key, for the reason given where it is made.
+  }, [open, record, enquiry, quote, sampleSourceKey])
 
   // His PI scan comes with the order raised from it, so nobody uploads it twice.
   useEffect(() => {
@@ -1286,7 +1393,52 @@ export function PurchaseOrderDialog({
     mrLineId: null,
     mrNumber: null,
     enquiryLineId: null,
+    sampleMaterialId: null,
+    sampleOverReason: null,
+    sampleRef: null,
+    sampleOpen: null,
   })
+
+  /**
+   * A row buying for one sample line: its item, filed where the item is,
+   * the GST the item carries, the style the sample is of, and the link back
+   * to the sample with what it still needed at the moment it was picked.
+   *
+   * The rate is left blank, as it is for an indent's line: what the supplier
+   * quotes is the only rate an order carries, and the sample's estimate is the
+   * merchandiser's guess, not his price.
+   *
+   * Declared up here, before the form's early return, because the reset
+   * effect builds the rows of an order raised from Sampling with it — and
+   * that effect can run on a render that stopped at the return.
+   */
+  const lineFromNeed = (need: SampleNeed, qty: number, reason: string): PoLine => {
+    const cat = categories.find((c) => c.id === (itemById.get(need.item.id)?.categoryId ?? need.item.categoryId))
+    return {
+      ...blankLine(),
+      itemId: need.item.id,
+      codeText: need.item.code,
+      ...(cat
+        ? cat.parentId
+          ? { categoryId: cat.parentId, subcategoryId: cat.id }
+          : { categoryId: cat.id, subcategoryId: '' }
+        : {}),
+      qty: qty > 0 ? String(qty) : '',
+      gstRate: need.item.taxRate ? String(Number(need.item.taxRate.rate)) : '',
+      // The garment the sample is of. Linked straight off the sample, not
+      // matched by its code, so it reconciles against the right style.
+      ...(need.style ? { styleNo: need.style.code, styleId: need.style.id } : {}),
+      sampleMaterialId: need.sampleMaterialId,
+      sampleOverReason: reason.trim() || null,
+      sampleRef: sampleLineLabel({
+        requestNumber: need.requestNumber,
+        component: need.component,
+        colour: need.colour,
+        itemName: need.item.name,
+      }),
+      sampleOpen: need.toBuy,
+    }
+  }
 
   /*
    * A service order's rows open on the expense heads, as an expense bill's do:
@@ -1629,13 +1781,61 @@ export function PurchaseOrderDialog({
       // 2.5 cartons: a whole number for an item counted whole.
       badQty: !!lineQtyProblem(l),
       noRate: String(l.unitRate).trim() === '',
+      /*
+       * A sample's line ordering more than the sample still needs, without
+       * saying why. The server refuses it, so the form says so first. Only
+       * where "more" is known — on a reopened order it is not, and the
+       * server is left to judge.
+       */
+      noReason:
+        Boolean(l.sampleMaterialId) &&
+        needsOverReason(num(l.qty), l.sampleOpen) &&
+        (l.sampleOverReason ?? '').trim().length < SAMPLE_OVER_REASON_MIN,
     }))
-    .filter((r) => r.noQty || r.badQty || r.noRate)
+    .filter((r) => r.noQty || r.badQty || r.noRate || r.noReason)
 
   if (!open || !mounted) return null
 
   const setLine = (index: number, patch: Partial<PoLine>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
+
+  /**
+   * "Why more than the sample needs", under a row bought for a sample.
+   *
+   * Shown once the quantity goes past what the sample still needed when the
+   * line was picked — then it is required, and the row is held back from
+   * saving until it says why — or while the row already carries a reason.
+   * On an order reopened for editing "more" cannot be worked out here (see
+   * `sampleOpen`), so the box is offered on every sample row and marked
+   * optional; if the order does go over, the server asks for it by name.
+   * Everywhere else it stays out of the way, which is most of the time.
+   */
+  const sampleWhyBox = (line: PoLine, i: number, cell: string) => {
+    if (!line.sampleMaterialId) return null
+    const unknown = line.sampleOpen == null
+    const over = needsOverReason(num(line.qty), line.sampleOpen)
+    const reason = line.sampleOverReason ?? ''
+    if (!over && !unknown && !reason) return null
+    const short = over && reason.trim().length < SAMPLE_OVER_REASON_MIN
+    return (
+      <div className="mt-1">
+        <input
+          className={`${cell} ${short ? 'border-amber-500/70' : ''}`}
+          maxLength={300}
+          placeholder={over || !unknown ? 'Why more than the sample needs' : 'Why more than the sample needs (optional)'}
+          value={reason}
+          onChange={(e) => setLine(i, { sampleOverReason: e.target.value })}
+          aria-label={`Row ${i + 1}: why more than the sample needs`}
+        />
+        {short && (
+          <p className="warn-text mt-0.5 text-[10px] leading-tight">
+            {Number((num(line.qty) - (line.sampleOpen ?? 0)).toFixed(3))} more than the sample still needs. Say
+            why — at least {SAMPLE_OVER_REASON_MIN} letters.
+          </p>
+        )}
+      </div>
+    )
+  }
 
   /**
    * Whether an item is filed under a category choice: the category itself or
@@ -1673,6 +1873,8 @@ export function PurchaseOrderDialog({
       codeText: '',
       gstRate: '',
       ...(itemStyle && line.styleNo === itemStyle ? { styleNo: '', styleId: '' } : {}),
+      // The item it bought for the sample has gone, so the link goes with it.
+      ...(line.sampleMaterialId ? SAMPLE_UNLINKED : {}),
     })
   }
 
@@ -1698,7 +1900,7 @@ export function PurchaseOrderDialog({
     }
 
     if (!itemId) {
-      setLine(index, { itemId: '', codeText: '' })
+      setLine(index, { itemId: '', codeText: '', ...(lines[index]?.sampleMaterialId ? SAMPLE_UNLINKED : {}) })
       return
     }
 
@@ -1770,6 +1972,15 @@ export function PurchaseOrderDialog({
         : item?.taxRate && String(line.gstRate).trim() === ''
           ? { gstRate: String(Number(item.taxRate.rate)) }
           : {}),
+      /*
+       * A different item picked by hand on a row bought for a sample takes
+       * the sample off the row. The sample line is for one material; the
+       * server would refuse the link on any other item (SAMPLE_WRONG_ITEM),
+       * and an order that will not save over a link nobody can see is worse
+       * than a row that simply stops counting for the sample. The sample's
+       * need comes back on the list, to be picked again if it was wanted.
+       */
+      ...(line.sampleMaterialId && line.itemId !== itemId ? SAMPLE_UNLINKED : {}),
     })
   }
 
@@ -1930,6 +2141,51 @@ export function PurchaseOrderDialog({
   }
 
   /**
+   * Drops the lines picked off the sample needs onto the order.
+   *
+   * The same as the indent's: blank rows go, one row per sample line — two
+   * samples needing the same rib are two rows, each counting for its own
+   * sample — and the rate is left for the supplier's quote.
+   *
+   * The goods can only be received into a sample store, so unless the order
+   * is already going to one it is pointed at the first. Delivered straight to
+   * a customer makes no sense for a sample's cloth either, so that goes back
+   * to our own store too.
+   */
+  const addFromSample = (picks: SamplePick[], stores: SampleStore[]) => {
+    setLines((prev) => [...prev.filter((l) => l.itemId), ...picks.map((p) => lineFromNeed(p.need, p.qty, p.reason))])
+    // Pointed at the sample store only while nothing else on the order decides
+    // where it goes: an order already carrying other goods keeps its delivery,
+    // and the sample lines are booked into the sample store when they arrive.
+    const others = lines.some((l) => l.itemId && !l.sampleMaterialId)
+    let note: string | null = null
+    if (stores.length && (deliverTo === 'CUSTOMER' || !stores.some((s) => s.id === warehouseId))) {
+      if (!others || (deliverTo !== 'CUSTOMER' && !warehouseId)) {
+        setDeliverTo('ORGANIZATION')
+        setWarehouseId(stores[0].id)
+      } else
+        note =
+          deliverTo === 'CUSTOMER'
+            ? 'This order goes straight to a customer, and a sample’s material cannot: deliver it to our own store, or raise the sample lines on an order of their own.'
+            : `This order is delivered to ${warehouses.find((w) => w.id === warehouseId)?.name ?? 'another store'}. The sample lines are booked into ${stores[0].name} when they arrive.`
+    }
+    // The reference names the samples — filled while the box is empty or
+    // still says what it was given, never over something typed.
+    const taken = [
+      ...sampleTaken.filter((t) => !picks.some((p) => p.need.sampleMaterialId === t.sampleMaterialId)),
+      ...picks.map((p) => ({ sampleMaterialId: p.need.sampleMaterialId, requestNumber: p.need.requestNumber })),
+    ]
+    setSampleTaken(taken)
+    if (!reference.trim() || reference === autoReference) {
+      const text = sampleReference(taken)
+      setReference(text)
+      setAutoReference(text)
+    }
+    setSampleNeedsOpen(false)
+    setError(note)
+  }
+
+  /**
    * Removing the last row leaves a blank one behind rather than an empty
    * table: there is nowhere to start typing otherwise, and "add a row" would
    * be a second thing to discover before any work could be done.
@@ -1942,8 +2198,8 @@ export function PurchaseOrderDialog({
 
   /**
    * Puts a copy of one row directly under it — everything typed on it, but
-   * none of what ties it to a saved line, an indent or an enquiry, so the copy
-   * is never counted against the request the original fulfils.
+   * none of what ties it to a saved line, an indent, an enquiry or a sample,
+   * so the copy is never counted against the request the original fulfils.
    */
   const copyLine = (index: number) =>
     setLines((prev) => {
@@ -1963,6 +2219,8 @@ export function PurchaseOrderDialog({
         mrNumber: null,
         mrLine: null,
         enquiryLineId: null,
+        // A copy never counts against the sample, and is not received into its store.
+        ...SAMPLE_UNLINKED,
         receivedQty: undefined,
         pendingQty: undefined,
         shortClosed: undefined,
@@ -2188,6 +2446,10 @@ export function PurchaseOrderDialog({
       styleId: (l.styleId as string) || null,
       mrLineId: l.mrLineId || null,
       enquiryLineId: l.enquiryLineId || null,
+      // Both, on every line, every time: the server rebuilds the lines from
+      // this, and a link left off is a link lost. The reason only with a link.
+      sampleMaterialId: l.sampleMaterialId || null,
+      sampleOverReason: l.sampleMaterialId ? (l.sampleOverReason ?? '').trim() || null : null,
       qty: num(l.qty),
       // The pack the quantity and rate are in; the server knows its size.
       uomId: l.uomId || null,
@@ -2308,6 +2570,11 @@ export function PurchaseOrderDialog({
       onSaved()
       onClose()
     } catch (err) {
+      // Another order took part of a sample's need since its line was picked:
+      // what is still needed is no longer known here, so every sample row
+      // offers its reason box again for the buyer to say why.
+      if (err instanceof ApiError && err.code === 'SAMPLE_OVER_ORDER')
+        setLines((prev) => prev.map((l) => (l.sampleMaterialId ? { ...l, sampleOpen: null } : l)))
       setError(apiErrorMessage(err, 'Could not save. Is the API running?'))
     } finally {
       setSaving(null)
@@ -2568,9 +2835,11 @@ export function PurchaseOrderDialog({
                       onChange={(e) => setWarehouseId(e.target.value)}
                     >
                       <option value="">Head office</option>
+                      {/* A sample store says so: goods bought for a sample
+                        go there, and only those. */}
                       {warehouses.map((w) => (
                         <option key={w.id} value={w.id}>
-                          {w.name}
+                          {isSampleStore(w) ? `${w.name} (sample store)` : w.name}
                         </option>
                       ))}
                     </SmartSelect>
@@ -2851,6 +3120,18 @@ export function PurchaseOrderDialog({
                       <ClipboardList size={14} /> Select from indent
                     </button>
                   )}
+                  {/* The sampling room's needs, beside the indent's, where the
+                    sampling module is switched on. A service order buys
+                    labour, never a sample's material. */}
+                  {!serviceMode && SAMPLING_ON && (
+                    <button
+                      type="button"
+                      className="btn-secondary h-7 px-2.5 text-xs"
+                      onClick={() => setSampleNeedsOpen(true)}
+                    >
+                      <Layers size={14} /> Select from sample needs
+                    </button>
+                  )}
                   <label htmlFor="po-type" className="text-muted-foreground text-xs">
                     Order type
                   </label>
@@ -3098,8 +3379,10 @@ export function PurchaseOrderDialog({
                               where it came off one. Both belong beside the
                               name rather than in columns of their own — they
                               are read, never typed, and neither is worth 100px
-                              of a row that already has eleven cells. */}
-                            {(item?.hsnCode || line.mrNumber) && (
+                              of a row that already has eleven cells. The
+                              sample it buys for sits here for the same
+                              reason. */}
+                            {(item?.hsnCode || line.mrNumber || line.sampleRef) && (
                               <p className="mt-0.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
                                 {item?.hsnCode && (
                                   <span className="text-muted-foreground">HSN {item.hsnCode}</span>
@@ -3112,8 +3395,14 @@ export function PurchaseOrderDialog({
                                     {line.mrNumber}
                                   </span>
                                 )}
+                                {line.sampleRef && (
+                                  <span className="text-primary" title={`Bought for sample ${line.sampleRef}`}>
+                                    {line.sampleRef}
+                                  </span>
+                                )}
                               </p>
                             )}
+                            {sampleWhyBox(line, i, cell)}
                           </td>
 
                           <td className={COL.style}>
@@ -3422,7 +3711,7 @@ export function PurchaseOrderDialog({
                             ))}
                           </SmartSelect>
                         </div>
-                        {(item?.hsnCode || line.mrNumber) && (
+                        {(item?.hsnCode || line.mrNumber || line.sampleRef) && (
                           <p className="flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
                             {item?.hsnCode && (
                               <span className="text-muted-foreground">HSN {item.hsnCode}</span>
@@ -3435,8 +3724,14 @@ export function PurchaseOrderDialog({
                                 {line.mrNumber}
                               </span>
                             )}
+                            {line.sampleRef && (
+                              <span className="text-primary" title={`Bought for sample ${line.sampleRef}`}>
+                                {line.sampleRef}
+                              </span>
+                            )}
                           </p>
                         )}
+                        {sampleWhyBox(line, i, cell)}
                       </div>
 
                       <div className="mt-2 grid grid-cols-2 gap-2">
@@ -4315,7 +4610,12 @@ export function PurchaseOrderDialog({
                           .slice(0, 3)
                           .map(
                             (r) =>
-                              `${r.name} (${[r.noQty && 'quantity', r.badQty && 'a whole-number quantity', r.noRate && 'rate']
+                              `${r.name} (${[
+                                r.noQty && 'quantity',
+                                r.badQty && 'a whole-number quantity',
+                                r.noRate && 'rate',
+                                r.noReason && 'why more than the sample needs',
+                              ]
                                 .filter(Boolean)
                                 .join(' and ')})`
                           )
@@ -4805,6 +5105,14 @@ export function PurchaseOrderDialog({
         />
       )}
 
+      {sampleNeedsOpen && (
+        <SampleNeedsDialog
+          onClose={() => setSampleNeedsOpen(false)}
+          onAdd={addFromSample}
+          alreadyPicked={new Set(lines.map((l) => l.sampleMaterialId).filter(Boolean) as string[])}
+        />
+      )}
+
       {newItemFor !== null && (
         <NewItemDialog
           categories={categories.map((c) => ({
@@ -4859,6 +5167,8 @@ export function PurchaseOrderDialog({
             setLine(index, {
               itemId: option.id,
               codeText: option.code ?? '',
+              // A new item is not the sample's material: the row stops buying for it.
+              ...(lines[index]?.sampleMaterialId ? SAMPLE_UNLINKED : {}),
               ...(cat
                 ? cat.parentId
                   ? { categoryId: cat.parentId, subcategoryId: cat.id }

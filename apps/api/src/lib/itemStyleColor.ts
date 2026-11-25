@@ -1,5 +1,6 @@
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
+import { styleInDevelopment } from './styleStage'
 
 /**
  * A finished good is one style in one colour. Zod can check the shape of
@@ -37,9 +38,12 @@ export async function assertItemStyleColorValid(
 
   const style = await prisma.style.findUnique({
     where: { id: styleId },
-    select: { name: true, colors: true },
+    select: { code: true, name: true, colors: true, stage: true },
   })
   if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')
+  // A finished good is what orders and stock are kept in; a style still in
+  // sampling has neither until it is handed over.
+  if (style.stage === 'DEVELOPMENT') throw styleInDevelopment(style.code)
 
   if (style.colors.length === 0) {
     throw new AppError(

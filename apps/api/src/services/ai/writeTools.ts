@@ -8,6 +8,7 @@ import { typeFitsGroup } from '@ld-erp/shared'
 import { groupOfCategory, typeMismatchMessage } from '../itemGroups.service'
 import { logger } from '../../utils/logger'
 import { AppError } from '../../middleware/errorHandler'
+import { assertGeneralStores } from '../../lib/sampleStore'
 import { approveSalesOrder, rejectSalesOrder } from '../salesOrder.service'
 import {
   createCustomerSchema,
@@ -933,6 +934,10 @@ const WRITES: WriteDefinition[] = [
         String(a.warehouse),
       )
       if (!warehouse) throw new Error(`No store called "${a.warehouse}".`)
+      if (warehouse.purpose === 'SAMPLING')
+        throw new Error(
+          `${warehouse.name} is a sample store: what is bought for samples is issued by Sampling, not on a requisition. Name a general store.`,
+        )
 
       const chunks = String(a.items)
         .split(';')
@@ -975,6 +980,12 @@ const WRITES: WriteDefinition[] = [
     commit: async ({ payload }, ctx) => {
       const lines = payload.lines as Array<{ itemId: string; qty: number }>
       const mr = await prisma.$transaction(async (tx) => {
+        // The same rule a requisition raised on the screen meets (createRequisition).
+        await assertGeneralStores(
+          tx,
+          [String(payload.warehouseId)],
+          'Ask for material from a general store; Sampling issues what it bought itself.',
+        )
         await assertQtyFitsUnits(tx, lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Asked for' })))
         const mrNumber = await nextDocumentNumber(tx, 'MR')
         return tx.materialRequisition.create({

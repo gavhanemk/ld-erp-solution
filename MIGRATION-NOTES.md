@@ -7,6 +7,61 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 25 Nov 2026 — Sampling: the module's tables, and four columns elsewhere
+
+**Migrations (eleven, in this order):**
+`20261125100000_sampling_pilot`, `20261125100100_sampling_list_state`,
+`20261125100200_sampling_numbering_and_guards`, `20261125100300_sampling_intake`,
+`20261125100400_sampling_request_style_backfill`,
+`20261125100500_sampling_spec_bom_route`, `20261125100600_sampling_sourcing`,
+`20261125100700_sampling_pool`, `20261125100800_sampling_making`,
+`20261125100900_sampling_review`, `20261125101000_sampling_cost`.
+They were written 14–21 Nov on the local pilot and renamed to 25 Nov when
+`main` was merged in, so they sort after main's newest
+(`20261124160000_fg_cartons`). Their contents did not change.
+**Branch:** `feat/sampling-local`
+**Status: not applied to the shared database.** Apply with
+`prisma migrate deploy` on the day the pull request is merged, after telling
+the team. Never with `migrate dev` or `db push`.
+
+Tried both ways on a scratch database, never the shared one: main's 114
+migrations first and then these eleven (the order the shared database will
+see), and all 125 from empty. Both end equal to `schema.prisma`, apart from
+three differences that were there on `main` before (the
+`purchase_order_lines.shortClosedById` and `supplier_payments.reversedById`
+foreign keys, the `grn_lines.packQtys` default).
+
+### What changed
+
+New tables, all Sampling's own: `sample_requests`, `sample_rounds`,
+`sample_stages`, `sample_materials`, `sample_events`, `sample_attachments`,
+`sample_closeouts`, `sample_works`, `sample_transfers`, `sample_job_works`,
+`sample_job_returns`, `sample_dispatches`, `sample_charges`.
+
+Existing tables:
+
+| Table | Change |
+|---|---|
+| `styles` | `stage` (new enum `StyleStage`: DEVELOPMENT, PRODUCTION), not null, **default PRODUCTION**, indexed. Every existing style is PRODUCTION, so nothing changes for them. |
+| `warehouses` | `purpose` (new enum `WarehousePurpose`: GENERAL, SAMPLING), not null, **default GENERAL**. Every existing store stays GENERAL. |
+| `purchase_order_lines` | `sampleMaterialId` (nullable, indexed, foreign key to `sample_materials`, on delete restrict) and `sampleOverReason` (nullable text). Empty on every existing line. |
+| `permissions` | Seven rows for module `sampling` (view, create, edit, delete, approve, export, post); skipped if already there. |
+| `number_series` | `SAMPLE` and `SDC` (sample delivery challan) for each company, starting at 0; skipped where a company has one. |
+
+The other `UPDATE`s touch only the new sample tables, which are empty on the
+shared database.
+
+### What you have to do
+
+Nothing until it is applied. After that, nothing changes for anyone:
+Sampling stays off until a server sets `SAMPLING_ENABLED=true` (API) and
+`NEXT_PUBLIC_SAMPLING_ENABLED=true` (web). How to switch it on is in
+[the sampling handover](docs/10-sampling-handover.md#13-what-is-left-before-switching-it-on).
+If your branch has its own migrations dated after 25 Nov 10:10, nothing to
+do; if earlier, `prisma migrate deploy` still applies both sets.
+
+---
+
 ## 15 Oct 2026 — routings: fabric, who made and changed each one
 
 **Migration:** `20261020100000_routing_fabric_and_editor`. The folder is dated

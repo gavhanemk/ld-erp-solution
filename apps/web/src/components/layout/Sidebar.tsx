@@ -154,6 +154,9 @@ export const navItems: NavItem[] = [
     ],
   },
   {
+    label: 'Sampling', href: '/sampling', icon: Layers,
+  },
+  {
     label: 'Accounts', icon: BookOpen,
     children: [
       { label: 'Dashboard', href: '/accounts/dashboard' },
@@ -233,9 +236,10 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
   // A mill that records output without a per-day QC entry should not be looking
   // at a menu item it never uses. Settings → Preferences controls this.
   const items = useMemo(() => {
-    if (qcInDailyProduction) return navItems
+    const enabledItems = navItems.filter(i => i.href !== '/sampling' || process.env.NEXT_PUBLIC_SAMPLING_ENABLED === 'true')
+    if (qcInDailyProduction) return enabledItems
 
-    return navItems.map((item) =>
+    return enabledItems.map((item) =>
       item.label === 'Production' && item.children
         ? { ...item, children: item.children.filter((c) => c.href !== '/production/qc') }
         : item,

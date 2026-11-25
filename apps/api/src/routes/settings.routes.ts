@@ -8,6 +8,7 @@ import { formatDocumentNumber } from '../lib/docNumber'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
+import { samplingEnabled } from '../lib/pilot'
 import { updateCompanySchema } from '../schemas/master.schemas'
 import {
   PREFERENCES,
@@ -318,6 +319,7 @@ const MODULE_LABELS: Record<string, string> = {
   purchase: 'Purchase',
   inventory: 'Inventory',
   production: 'Production',
+  sampling: 'Sampling',
   accounts: 'Accounts',
   hr: 'HR & Payroll',
   vhagar: 'VHAGAR brand',
@@ -1068,6 +1070,13 @@ const DOC_TYPES = [
   { docType: 'QT', label: 'Quotation', defaultTitle: 'QUOTATION' },
   { docType: 'CN', label: 'Credit Note', defaultTitle: 'CREDIT NOTE' },
 ] as const
+/** Printed only where sampling runs (the local pilot until it is rolled out). */
+const SAMPLING_DOC_TYPES = [
+  { docType: 'SDC', label: 'Sample Delivery Challan', defaultTitle: 'SAMPLE DELIVERY CHALLAN' },
+  { docType: 'SCS', label: 'Sample Charges', defaultTitle: 'SAMPLE CHARGES' },
+] as const
+const docTypes = (): ReadonlyArray<{ docType: string; label: string; defaultTitle: string }> =>
+  samplingEnabled() ? [...DOC_TYPES, ...SAMPLING_DOC_TYPES] : DOC_TYPES
 
 const documentTemplateSchema = z.object({
   title: z.string().min(1, 'A heading is required').max(80),
@@ -1133,7 +1142,7 @@ router.get('/documents', requirePermission(SETTINGS, 'view'), async (_req, res) 
       },
       // Every document type is listed whether or not it has been set up, so the
       // screen shows the full set rather than only what happens to exist.
-      documents: DOC_TYPES.map((t) => {
+      documents: docTypes().map((t) => {
         const row = byType.get(t.docType)
         return {
           docType: t.docType,
@@ -1183,7 +1192,7 @@ router.patch('/documents/branding', requirePermission(SETTINGS, 'edit'), async (
 
 router.patch('/documents/:docType', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
   const docType = req.params.docType.toUpperCase()
-  const known = DOC_TYPES.find((t) => t.docType === docType)
+  const known = docTypes().find((t) => t.docType === docType)
   if (!known) throw new AppError(`There is no ${docType} document`, 404, 'UNKNOWN_DOC_TYPE')
 
   const data = documentTemplateSchema.parse(req.body)

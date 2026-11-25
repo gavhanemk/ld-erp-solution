@@ -378,6 +378,9 @@ export const WASH_CARE = [
   'NO_DRY_CLEAN',
 ] as const
 
+// No `stage` here, on purpose: a style is made DEVELOPMENT only by sampling and
+// becomes PRODUCTION only when its sample is handed over, so the Styles master
+// can neither make nor promote one. Zod drops a stage sent in the body.
 export const createStyleSchema = z.object({
   // Made by the server from brand, garment type and season (LD-SH-2606);
   // still accepted when given, as an import of existing styles does.
@@ -563,6 +566,20 @@ export const createWarehouseSchema = z.object({
   name,
   address: optionalText,
   isActive,
+  /*
+   * What the store is for: bulk stock, or material bought for samples, kept
+   * apart from it. A sample store is offered only where sampling is switched
+   * on, and a store cannot change over while it holds stock.
+   */
+  // A form that never showed the choice sends it blank: that leaves it as it is.
+  purpose: z.preprocess(
+    (v) => (v === '' || v === null ? undefined : v),
+    z
+      .enum(['GENERAL', 'SAMPLING'], {
+        errorMap: () => ({ message: 'Say whether the store holds bulk stock or sample material' }),
+      })
+      .optional()
+  ),
 })
 export const updateWarehouseSchema = createWarehouseSchema.partial()
 

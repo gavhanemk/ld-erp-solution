@@ -6,6 +6,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
+import { assertStylesInProduction } from '../lib/styleStage'
 import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
 import { ensureJobCards, jobCardSchema, updateJobCard } from '../services/jobCard.service'
@@ -113,6 +114,8 @@ async function shapeLines(tx: Prisma.TransactionClient, soId: string, input: z.i
     })
     .filter((x): x is NonNullable<typeof x> => !!x)
   if (!shaped.length) throw new AppError('Put the pieces to make against at least one line', 400, 'NOTHING_TO_MAKE')
+  // Nothing goes to the floor in a style still being sampled.
+  await assertStylesInProduction(tx, shaped.map((s) => s.line.style!.id))
 
   return {
     so,

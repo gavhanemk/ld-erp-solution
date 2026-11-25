@@ -141,7 +141,8 @@ export function bucketOf(type: string, ref: string | null): Bucket {
     case 'TRANSFER':
       return ref?.startsWith('JOB_WORK') ? 'jobwork' : 'transfer'
     case 'RETURN':
-      return ref?.startsWith('CUSTOMER') ? 'customer' : 'purchase'
+      // A sample giving back what it was issued is the issue undone, not a purchase return.
+      return ref === 'SAMPLING' ? 'issue' : ref?.startsWith('CUSTOMER') ? 'customer' : 'purchase'
     default:
       return 'adjustment'
   }
@@ -202,8 +203,9 @@ export async function documentNumbers(
   const jwr = ids((t) => t === 'JOB_WORK_RETURN')
   const pret = ids((t) => t === 'PurchaseReturn')
   const note = ids((t) => t === 'PurchaseNote')
+  const sample = ids((t) => t === 'SAMPLING')
 
-  const [a, b, c, d, e, f, g, h, i, j] = await Promise.all([
+  const [a, b, c, d, e, f, g, h, i, j, k] = await Promise.all([
     grn.length ? tx.gRN.findMany({ where: { id: { in: grn } }, select: { id: true, grnNumber: true } }) : [],
     adj.length
       ? tx.stockAdjustment.findMany({ where: { id: { in: adj } }, select: { id: true, adjustmentNumber: true } })
@@ -232,6 +234,13 @@ export async function documentNumbers(
     note.length
       ? tx.purchaseNote.findMany({ where: { id: { in: note } }, select: { id: true, noteNumber: true } })
       : [],
+    // A sample's movements carry its round: the request's number is what is quoted.
+    sample.length
+      ? tx.sampleRound.findMany({
+          where: { id: { in: sample } },
+          select: { id: true, request: { select: { number: true } } },
+        })
+      : [],
   ])
   put(a.map((r) => ({ id: r.id, n: r.grnNumber })))
   put(b.map((r) => ({ id: r.id, n: r.adjustmentNumber })))
@@ -243,6 +252,7 @@ export async function documentNumbers(
   put(h.map((r) => ({ id: r.id, n: r.returnNumber })))
   put(i.map((r) => ({ id: r.id, n: r.returnNumber })))
   put(j.map((r) => ({ id: r.id, n: r.noteNumber })))
+  put(k.map((r) => ({ id: r.id, n: r.request.number })))
   // Opening stock brought in from the sheet: its OPS number.
   const ops = ids((t) => t === 'OPENING_IMPORT')
   if (ops.length) put((await tx.openingStock.findMany({ where: { id: { in: ops } }, select: { id: true, number: true } })).map((r) => ({ id: r.id, n: r.number })))

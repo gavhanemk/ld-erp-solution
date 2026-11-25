@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client'
 import type { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
+import { styleInDevelopment } from '../lib/styleStage'
 import { checkRouteSteps } from './route.service'
 import type { createRoutingSchema, routingStepSchema, updateRoutingSchema } from '../schemas/master.schemas'
 
@@ -193,9 +194,10 @@ const ordered = <T extends { sequence: number }>(steps: T[]) => [...steps].sort(
  */
 /**
  * A step's contractor must still be there and must do that step's process:
- * a stitching contractor is not picked for cutting.
+ * a stitching contractor is not picked for cutting. A sample round's route
+ * keeps the same rule (sampling.service).
  */
-async function assertContractorsFit(db: Db, steps: Array<{ operationId: string; contractorId?: string | null }>): Promise<void> {
+export async function assertContractorsFit(db: Db, steps: Array<{ operationId: string; contractorId?: string | null }>): Promise<void> {
   const ids = [...new Set(steps.map((s) => s.contractorId).filter(Boolean))] as string[]
   if (!ids.length) return
   const found = await db.contractor.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, operationIds: true } })
@@ -217,8 +219,10 @@ async function assertRoutingRefsExist(
 ): Promise<void> {
   await assertContractorsFit(db, steps)
   if (styleId) {
-    const style = await db.style.findUnique({ where: { id: styleId }, select: { id: true } })
+    const style = await db.style.findUnique({ where: { id: styleId }, select: { id: true, code: true, stage: true } })
     if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')
+    // A production route is fixed at handover, not while the style is being sampled.
+    if (style.stage === 'DEVELOPMENT') throw styleInDevelopment(style.code)
   }
 
   const operationIds = [...new Set(steps.map((s) => s.operationId))]

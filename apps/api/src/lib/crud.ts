@@ -135,6 +135,50 @@ export interface CrudFilter {
 
 const MAX_PAGE_SIZE = 200
 
+/**
+ * Refuses a value another record of this master already has, naming that
+ * record. Compared without regard to capitals or spaces at the ends. The
+ * factory's create and edit check here, and so does anything else that adds
+ * to a master outside the factory (a sample's quick-add of a material), so
+ * the rule and its words are the same wherever a record is made.
+ */
+export async function assertUniqueFields(
+  model: string,
+  uniqueFields: string[],
+  data: Record<string, unknown>,
+  exceptId?: string,
+  before?: Record<string, unknown>,
+) {
+  // Reached by name, as the factory reaches every delegate; see crudRouter.
+  const delegate = (prisma as unknown as Record<string, any>)[model]
+  const same = (a: unknown, b: unknown) =>
+    typeof a === 'string' && typeof b === 'string' && a.trim().toLowerCase() === b.trim().toLowerCase()
+  for (const field of uniqueFields) {
+    const value = data[field]
+    if (typeof value !== 'string' || !value.trim()) continue
+    // Unchanged on an edit: a pair that was duplicated before this rule
+    // existed can still be edited (and one of them renamed).
+    if (before && same(value, before[field])) continue
+    const clash = await delegate.findFirst({
+      where: {
+        [field]: { equals: value.trim(), mode: 'insensitive' },
+        ...(exceptId ? { NOT: { id: exceptId } } : {}),
+      },
+    })
+    if (clash) {
+      const label = clash.code ? ` (${clash.code})` : ''
+      const inactive = clash.isActive === false ? ', inactive — edit it to bring it back' : ''
+      // A name clashes with a name; anything else (a GSTIN) is said with the
+      // name of the record that already has it.
+      const message =
+        field === 'name'
+          ? `${clash.name}${label} already exists${inactive}. If it is a different one, add something to tell them apart, such as the town.`
+          : `${clash[field]} is already on ${clash.name ?? 'another record'}${label}${inactive}`
+      throw new ZodError([{ code: 'custom', path: [field], message }])
+    }
+  }
+}
+
 /** ['1 item', '2 machines', '1 operation'] → '1 item, 2 machines and 1 operation' */
 function sentence(parts: string[]): string {
   return parts.length <= 1 ? (parts[0] ?? '') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`
@@ -193,38 +237,11 @@ export function crudRouter(options: CrudOptions): Router {
   const delegate = () => (prisma as unknown as Record<string, any>)[model]
 
   /** Refuses a value another record already has, naming that record. */
-  const assertUnique = async (
+  const assertUnique = (
     data: Record<string, unknown>,
     exceptId?: string,
     before?: Record<string, unknown>,
-  ) => {
-    const same = (a: unknown, b: unknown) =>
-      typeof a === 'string' && typeof b === 'string' && a.trim().toLowerCase() === b.trim().toLowerCase()
-    for (const field of uniqueFields) {
-      const value = data[field]
-      if (typeof value !== 'string' || !value.trim()) continue
-      // Unchanged on an edit: a pair that was duplicated before this rule
-      // existed can still be edited (and one of them renamed).
-      if (before && same(value, before[field])) continue
-      const clash = await delegate().findFirst({
-        where: {
-          [field]: { equals: value.trim(), mode: 'insensitive' },
-          ...(exceptId ? { NOT: { id: exceptId } } : {}),
-        },
-      })
-      if (clash) {
-        const label = clash.code ? ` (${clash.code})` : ''
-        const inactive = clash.isActive === false ? ', inactive — edit it to bring it back' : ''
-        // A name clashes with a name; anything else (a GSTIN) is said with the
-        // name of the record that already has it.
-        const message =
-          field === 'name'
-            ? `${clash.name}${label} already exists${inactive}. If it is a different one, add something to tell them apart, such as the town.`
-            : `${clash[field]} is already on ${clash.name ?? 'another record'}${label}${inactive}`
-        throw new ZodError([{ code: 'custom', path: [field], message }])
-      }
-    }
-  }
+  ) => assertUniqueFields(model, uniqueFields, data, exceptId, before)
 
   /**
    * The where clause for a list request: active flag, search, and every

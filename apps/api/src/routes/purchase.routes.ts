@@ -25,6 +25,16 @@ import {
   storagePathFor,
 } from '../lib/storage'
 import { assertStockUnused, recordMovement } from '../services/stock.service'
+import {
+  assertGrnSampleStores,
+  assertSampleLines,
+  assertSampleReopen,
+  sampleLineSelect,
+  sampleNeeds,
+} from '../services/sampleSourcing.service'
+import { activeSampleStores } from '../lib/sampleStore'
+import { assertPoolsHold, lockRequests, requestsOfGrnLines } from '../services/samplePool.service'
+import { samplingEnabled } from '../lib/pilot'
 import { lockRow } from '../lib/lockRow'
 import { rateFor, sectionTermsOn, tdsOn } from '../services/tds.service'
 import { withHsnRates } from '../lib/hsn'
@@ -90,6 +100,14 @@ const lineSchema = z.object({
    * line cannot quietly claim quantity off somebody else's enquiry.
    */
   enquiryLineId: z.string().optional().nullable(),
+  /*
+   * The sample BOM line this buys for, when it was taken off a sample's needs
+   * (Sampling's "Raise purchase order", or "Select from sample needs" here).
+   * Checked on the way in: the same material, a released round still being
+   * made, and a reason whenever it orders more than the line still needs.
+   */
+  sampleMaterialId: z.string().optional().nullable(),
+  sampleOverReason: z.string().trim().max(300).optional().nullable(),
 })
 
 /**
@@ -241,6 +259,8 @@ const poInclude = {
           mr: { select: { id: true, mrNumber: true } },
         },
       },
+      // The sample it buys for, said on the line as "SMP-… · Body".
+      sampleMaterial: { select: sampleLineSelect },
       shortClosedBy: { select: { id: true, name: true } },
       // The pack the line was ordered in (a box of 20 pcs); qty is in the item's own unit.
       uom: { select: { id: true, symbol: true, decimalPlaces: true } },
@@ -293,6 +313,8 @@ const poReceivingInclude = {
     orderBy: { sortOrder: 'asc' as const },
     include: {
       shortClosedBy: { select: { id: true, name: true } },
+      // A sample's material is received into a sample store, and only there.
+      sampleMaterial: { select: sampleLineSelect },
       // The pack the line was ordered in (a box of 20 pcs); qty is in the item's own unit.
       uom: { select: { id: true, symbol: true, decimalPlaces: true } },
       item: {
@@ -893,6 +915,33 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
   res.json({ success: true, data: rows.map((r, i) => ({ ...r, item: items[i] })) })
 })
 
+/**
+ * What samples still need bought, for "Select from sample needs" on the order
+ * form: each released round's bought material, with what is already on order
+ * and received, summed off the order lines (never kept as a counter). The
+ * same list Sampling raises its orders from, and the sample stores the goods
+ * are delivered to. Empty, not an error, where sampling is not switched on.
+ */
+router.get('/sample-needs', requirePermission(MODULE, 'view'), async (req, res) => {
+  if (!samplingEnabled()) return res.json({ success: true, data: { needs: [], sampleStores: [] } })
+  const q = z
+    .object({
+      requestId: z.string().trim().max(100).optional(),
+      q: z.string().trim().max(100).default(''),
+      includeDone: z.enum(['true', 'false']).optional(),
+    })
+    .parse(req.query)
+  const [needs, sampleStores] = await Promise.all([
+    sampleNeeds(prisma, { requestId: q.requestId, q: q.q, includeDone: q.includeDone === 'true' }),
+    activeSampleStores(prisma),
+  ])
+  const items = await withHsnRates(prisma, needs.map((n) => n.item as unknown as Record<string, unknown>))
+  res.json({
+    success: true,
+    data: { needs: needs.map((n, i) => ({ ...n, item: items[i] })), sampleStores },
+  })
+})
+
 router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
@@ -1316,6 +1365,10 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
     }
 
     await assertIndentLines(tx, data.lines)
+    const sampleReasons = await assertSampleLines(tx, data.lines, {
+      isService: data.isService ?? false,
+      toCustomer: Boolean(data.deliveryCustomerId),
+    })
 
     const charges = await resolveCharges(tx, data.charges ?? [], { canOverride: userCan(req.user, 'masters', 'edit') })
 
@@ -1375,6 +1428,8 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
             styleId: l.styleId || null,
             mrLineId: l.mrLineId || null,
             enquiryLineId: l.enquiryLineId || null,
+            sampleMaterialId: l.sampleMaterialId || null,
+            sampleOverReason: l.sampleMaterialId ? (sampleReasons.get(l.sampleMaterialId) ?? null) : null,
             hsnCode: hsnById.get(l.itemId) ?? null,
             // Stored in the item's own unit; the pack and its size kept beside it.
             qty: toStock(l.qty, packed[i].pack),
@@ -1520,6 +1575,15 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     ...(data.terms !== undefined ? { terms: data.terms ?? null } : {}),
   }
 
+  // Sent to a customer by a header-only edit: a sample's material still has to come here.
+  if (!data.lines && data.deliveryCustomerId && before.lines.some((l) => l.sampleMaterialId)) {
+    throw new AppError(
+      'Lines of this order are bought for a sample, which has to come to our sample store, not straight to a customer.',
+      400,
+      'SAMPLE_TO_CUSTOMER'
+    )
+  }
+
   const after = await prisma.$transaction(async (tx) => {
     if (data.lines) {
       // The delivery address is resolved again rather than carried over from
@@ -1579,6 +1643,18 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       })), { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
 
       await assertIndentLines(tx, data.lines, before.id)
+      // Each line keeps the sample it buys for, checked again against what
+      // the sample still needs from orders other than this one.
+      const sampleReasons = await assertSampleLines(tx, data.lines, {
+        isService: before.isService,
+        toCustomer: Boolean(customerId),
+        exceptPoId: before.id,
+        alreadyLinked: new Map(
+          before.lines
+            .filter((l): l is typeof l & { sampleMaterialId: string } => Boolean(l.sampleMaterialId))
+            .map((l) => [l.sampleMaterialId, Number(l.qty)]),
+        ),
+      })
 
       const priced = priceOrder(
         data.lines,
@@ -1608,6 +1684,8 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
           styleId: l.styleId || null,
           mrLineId: l.mrLineId || null,
           enquiryLineId: l.enquiryLineId || null,
+          sampleMaterialId: l.sampleMaterialId || null,
+          sampleOverReason: l.sampleMaterialId ? (sampleReasons.get(l.sampleMaterialId) ?? null) : null,
           hsnCode: hsnById.get(l.itemId) ?? null,
           qty: toStock(l.qty, packed![i].pack),
           uomId: packed![i].pack.uomId,
@@ -1866,6 +1944,8 @@ router.patch(
       const line = po.lines.find((l) => l.id === req.params.lineId)
       if (!line) throw new AppError('That line is not on this order', 404, 'NOT_FOUND')
       if (!line.shortClosed) throw new AppError('This line is not closed short', 400, 'NOT_CLOSED')
+      // A sample's line counts its whole quantity again: the sample must still need it.
+      await assertSampleReopen(tx, line)
 
       await tx.purchaseOrderLine.update({
         where: { id: line.id },
@@ -2112,14 +2192,51 @@ router.post(
   '/recycle-bin/:id/restore',
   requirePermission(MODULE, 'delete'),
   async (req: AuthRequest, res) => {
-    const order = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } })
+    const order = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.id },
+      include: { lines: true },
+    })
     if (!order || !order.deletedAt) {
       throw new AppError('That order is not in the recycle bin', 404, 'NOT_IN_BIN')
     }
 
-    const after = await prisma.purchaseOrder.update({
-      where: { id: order.id },
-      data: { deletedAt: null, deletedById: null },
+    const after = await prisma.$transaction(async (tx) => {
+      // Back on the books, its sample lines count as ordered again: checked as
+      // if they were raised now, so a sample cancelled or bought elsewhere
+      // since is not bought twice. A cancelled order counts for nothing.
+      if (order.status !== 'CANCELLED') {
+        try {
+          await assertSampleLines(
+            tx,
+            order.lines.map((l) => ({
+              itemId: l.itemId,
+              qty: Number(l.qty),
+              mrLineId: l.mrLineId,
+              sampleMaterialId: l.sampleMaterialId,
+              sampleOverReason: l.sampleOverReason,
+            })),
+            { isService: order.isService, toCustomer: Boolean(order.deliveryCustomerId), exceptPoId: order.id },
+          )
+        } catch (err) {
+          // Putting it back takes no edits, so the advice is a new order, not a reason.
+          if (err instanceof AppError && ['SAMPLE_OVER_ORDER', 'SAMPLE_NOT_OPEN'].includes(err.code ?? '')) {
+            throw new AppError(
+              `${order.poNumber} cannot be put back: ${
+                err.code === 'SAMPLE_OVER_ORDER'
+                  ? 'the sample it bought for has been ordered on other orders since'
+                  : err.message.replace(/\.$/, '').replace(/^./, (c) => c.toLowerCase())
+              }. Raise a new order for anything still needed.`,
+              409,
+              err.code,
+            )
+          }
+          throw err
+        }
+      }
+      return tx.purchaseOrder.update({
+        where: { id: order.id },
+        data: { deletedAt: null, deletedById: null },
+      })
     })
 
     // And an order put back stands on it again.
@@ -2788,6 +2905,8 @@ interface BookablePoLine {
   uomFactor?: Prisma.Decimal | number | string
   shortClosed: boolean
   item: { name: string }
+  /** Set when the line buys for a sample: it is received into a sample store only. */
+  sampleMaterialId?: string | null
 }
 
 interface GrnLineInput {
@@ -3429,6 +3548,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
     const { prepared } = prepareGrnLines(poLines, already, data.lines, data.overReceiptReason)
 
     await assertWarehousesUsable(tx, [...new Set(prepared.map((p) => p.warehouseId))])
+    await assertGrnSampleStores(tx, prepared)
 
     const grnNumber = await nextDocumentNumber(tx, 'GRN', when)
 
@@ -3583,6 +3703,9 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       include: { lines: true },
     })
     if (!before) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+    // A sample that has issued what this receipt brought in keeps it (samplePool).
+    const sampleRequests = await requestsOfGrnLines(tx, before.lines.map((l) => l.id))
+    await lockRequests(tx, sampleRequests)
     if (before.status === 'CANCELLED') {
       throw new AppError(
         `${before.grnNumber} is cancelled — raise a fresh receipt rather than correcting this one.`,
@@ -3688,6 +3811,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     }
 
     await assertWarehousesUsable(tx, [...new Set(prepared.map((p) => p.warehouseId))])
+    await assertGrnSampleStores(tx, prepared)
 
     const supplierAddress = data.supplierAddressId
       ? await supplierBillingAddress(tx, po.supplierId, data.supplierAddressId)
@@ -3897,6 +4021,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     // packed differently has its stickers made again from its packages.
     await trimGrnStickers(tx, before, req.user?.id ?? null)
     await repackGrnStickers(tx, before, repacked, req.user?.id ?? null)
+    await assertPoolsHold(tx, sampleRequests, `Correcting ${before.grnNumber}`)
 
     return tx.gRN.findUniqueOrThrow({ where: { id: before.id }, include: grnInclude })
   })
@@ -3935,6 +4060,9 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
     await lockRow(tx, 'grn', req.params.id)
     const grn = await tx.gRN.findUnique({ where: { id: req.params.id }, include: { lines: true } })
     if (!grn) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+    // Found before its lines go: a sample that issued them keeps them (samplePool).
+    const sampleRequests = await requestsOfGrnLines(tx, grn.lines.map((l) => l.id))
+    await lockRequests(tx, sampleRequests)
 
     // Asked as a question rather than left to the foreign key to answer. The
     // key does refuse — `PurchaseInvoiceLine.grnLineId` is Restrict — but it
@@ -3987,6 +4115,7 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
     }
 
     await syncOrderFromReceipts(tx, grn.poId)
+    await assertPoolsHold(tx, sampleRequests, `Deleting ${grn.grnNumber}`)
 
     return grn
   })
@@ -4167,6 +4296,9 @@ router.patch(
         include: { lines: true },
       })
       if (!before) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+      // A sample that has issued what this receipt brought in keeps it (samplePool).
+      const sampleRequests = await requestsOfGrnLines(tx, before.lines.map((l) => l.id))
+      await lockRequests(tx, sampleRequests)
 
       if (before.status === 'CANCELLED') {
         throw new AppError(`${before.grnNumber} is already cancelled.`, 400, 'ALREADY_CANCELLED')
@@ -4211,6 +4343,7 @@ router.patch(
       })
 
       await syncOrderFromReceipts(tx, before.poId)
+      await assertPoolsHold(tx, sampleRequests, `Cancelling ${before.grnNumber}`)
 
       return cancelled
     })

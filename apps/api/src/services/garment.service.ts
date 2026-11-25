@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { assertStylesInProduction } from '../lib/styleStage'
 
 /*
  * Individual finished garments, each with its own QR label.
@@ -57,6 +58,8 @@ export async function generateGarments(
   if (!mo.tagGarments) {
     throw new AppError(`${mo.moNumber} is not set for garment tags. Switch "Tag garments" on for it first.`, 400, 'NOT_TAGGED_ORDER')
   }
+  // A tag marks a saleable garment; a style still in sampling has none.
+  await assertStylesInProduction(tx, mo.lines.map((l) => l.styleId))
 
   const receipts = await tx.finishedGoodsReceipt.findMany({
     where: { moId, cancelledAt: null },

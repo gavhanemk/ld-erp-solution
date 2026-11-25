@@ -546,8 +546,28 @@ export function KeyboardLayer() {
         if (!line || !remove) return
         e.preventDefault()
         const at = rows.filter((r) => kindOf(r) === '').indexOf(line)
+        const gone = line
         remove.click()
-        setTimeout(() => {
+        /*
+         * A line with something typed in it asks first, in a window over the
+         * grid. Focus is left in that window until it closes (a grid inside a
+         * window of its own is not waiting on one); then, if the line went,
+         * the line that took its place gets the cursor. Kept, the window's own
+         * close already put focus back in the box Alt+Delete was pressed in.
+         */
+        let waited = 0
+        let asked = false
+        const t = setInterval(() => {
+          const top = topDialog()
+          const asking = !!top && !top.contains(grid)
+          if (asking) asked = true
+          // Still asking (for up to five minutes), or the question not drawn yet.
+          if (asking && ++waited < 3750) return
+          if (!asking && !asked && gone.isConnected && ++waited < 5) return
+          clearInterval(t)
+          if (asking || gone.isConnected) return
+          const focused = document.activeElement
+          if (focused && focused !== document.body && focused.isConnected && !grid.contains(focused)) return
           const now = [...grid.querySelectorAll<HTMLElement>('[data-grid-row]')].filter(shown).filter((r) => kindOf(r) === '')
           const next = now[Math.min(at, now.length - 1)]
           if (next) cells(next)[0]?.focus()

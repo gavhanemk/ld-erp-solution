@@ -1,6 +1,7 @@
 import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
+  distDir: process.env.SAMPLING_WEB_DIST === '.next-sampling' ? '.next-sampling' : '.next',
   // The shared package is TypeScript source (one purchase pricing calculation
   // used here and by the API), so Next compiles it like its own code.
   transpilePackages: ['@ld-erp/shared'],

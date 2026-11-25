@@ -144,7 +144,8 @@ export function FinishedGoodsDialog({
       try {
         const [it, st, sg, wh, so, lastIn] = await Promise.all([
           fetchEveryPage<ItemOption>((p) => `/masters/items?type=FINISHED_GOOD&active=true&limit=200&page=${p}&sort=name&order=asc`),
-          fetchEveryPage<StyleOption>((p) => `/masters/styles?limit=200&page=${p}`),
+          // Production styles only: one still in sampling cannot be received as finished goods.
+          fetchEveryPage<StyleOption>((p) => `/masters/styles?limit=200&stage=PRODUCTION&page=${p}`),
           fetchEveryPage<SizeGroupOption>((p) => `/masters/size-groups?limit=200&page=${p}`),
           api.get<{ data: WarehouseOption[] }>('/masters/warehouses?active=true&limit=100'),
           api.get<{ data: OrderOption[] }>('/sales/orders/options?open=1').catch(() => ({ data: [] as OrderOption[] })),
