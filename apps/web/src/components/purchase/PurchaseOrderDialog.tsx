@@ -3,7 +3,10 @@
 import { packsFor, packText } from '@ld-erp/shared'
 import { useQtyRules } from '@/lib/qtyRules'
 import { QtyProblem } from '@/components/ui/QtyProblem'
-import { ChargeTaxDetails, taxOverridePayload } from './ChargeTaxDetails'
+import { taxOverridePayload } from './ChargeTaxDetails'
+import { PurchaseChargesTable, type ChargeTableRow } from './PurchaseChargesTable'
+import { PurchaseSummary } from './PurchaseSummary'
+import { chargeGstLabel } from './chargeRules'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -37,6 +40,7 @@ import {
   ChevronDown,
   Copy,
   Layers,
+  Receipt,
 } from 'lucide-react'
 import { Section } from '@/components/purchase/Section'
 import type { EnquiryQuote, EnquiryRecord as EnquiryLite } from '@/components/purchase/enquiryTypes'
@@ -546,15 +550,6 @@ function NotBuiltNote({ children }: { children: React.ReactNode }) {
 const isOtherChargesType = (t: { name: string }) =>
   t.name.replace(/\s+/g, '').toLowerCase() === 'othercharges'
 
-function Row({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="text-foreground tabular-nums">{inr(value)}</span>
-    </div>
-  )
-}
-
 /** The last rate an item was bought at, under its rate box; one press to take it while the box is empty. */
 function LastRate({ rate, use }: { rate: number; use?: () => void }) {
   return use ? (
@@ -744,6 +739,7 @@ export function PurchaseOrderDialog({
     setChargeGstMode(drop)
     setChargeHsnId(drop)
     setChargeGstRate(drop)
+    setChargeOverrides(drop)
   }
 
   /*
@@ -1594,6 +1590,32 @@ export function PurchaseOrderDialog({
     return { ...base, amountMode: chargeUnit[id] === '%' ? 'PERCENT' : 'FIXED', inputAmount: num(charges[id]) }
   }
   const chargeRateOf = (id: string) => configForCharge(id).ownRate
+  /**
+   * What one charge would come to under a tax configuration not yet applied —
+   * the "Change tax" window's preview. The same goods, discount and split as
+   * the totals below, so the figure previewed is the figure Apply gives.
+   */
+  const previewCharge = (id: string, config: ChargeTaxSnapshot) => {
+    const priced = priceDocument({
+      lines: activeLines.map((l) => ({
+        qty: num(l.qty),
+        rate: num(l.unitRate),
+        discountPct: lineDiscountOf(l),
+        gstRate: num(l.gstRate),
+      })),
+      orderDiscount,
+      split: taxMode ?? 'CGST_SGST',
+      charges: [
+        {
+          key: id,
+          amount: num(charges[id]),
+          gstRate: config.ownRate,
+          config: { ...config, amountMode: chargeUnit[id] === '%' ? 'PERCENT' : 'FIXED', inputAmount: num(charges[id]) },
+        },
+      ],
+    }).charges[0]
+    return { rate: chargeGstLabel(config, priced, taxMode).rate, tax: priced?.tax ?? 0 }
+  }
 
   /*
    * Every figure on the form, from the one calculation.
@@ -3898,6 +3920,22 @@ export function PurchaseOrderDialog({
                 >
                   <Plus size={14} /> Add item row
                 </button>
+                {/* A discount on the goods as a whole, so it sits with the goods. */}
+                {poType === 'ORDER_LEVEL' && (
+                  <div className="flex items-center gap-2">
+                    <label htmlFor="po-discount" className="text-muted-foreground text-xs">
+                      Discount on the whole order (₹)
+                    </label>
+                    <StepInput
+                      id="po-discount"
+                      decimals
+                      className="form-input h-9 w-32 text-right"
+                      placeholder="0.00"
+                      value={discountAmount}
+                      onValueChange={setDiscountAmount}
+                    />
+                  </div>
+                )}
                 {/* True as of 19 Sep 2026. It used to say indents were not
                   built, which stopped being true the day the button above it
                   appeared — and a form that tells the buyer a feature is
@@ -3931,6 +3969,73 @@ export function PurchaseOrderDialog({
                 whole row, and the form scrolling for no reason. The terms and
                 the note move up into that space instead. */}
               <div className="min-w-0 space-y-3">
+                {/* The extra charges, one row each: pick the charge, type the
+                  amount. The GST comes from Masters → Charges and each row says
+                  where its rate comes from; changing it is a separate step
+                  behind the pencil, for users allowed to. */}
+                <Section icon={Receipt} title="Charges">
+                  <PurchaseChargesTable
+                    rows={totals.chargeRows.map(
+                      (c): ChargeTableRow => ({
+                        key: c.chargeTypeId,
+                        name: c.name,
+                        unit: c.unit,
+                        typed: charges[c.chargeTypeId] ?? '',
+                        enteredAmount: c.enteredAmount,
+                        config: c.config,
+                        priced: c.priced,
+                        unsavedChange: c.chargeTypeId in chargeOverrides,
+                      })
+                    )}
+                    split={taxMode}
+                    goodsValue={totals.grossTotal}
+                    canChangeTax={can('masters', 'edit')}
+                    hsnOptions={hsnCodes}
+                    addOptions={chargeTypes.filter((t) => !shownCharges.includes(t.id))}
+                    onAmount={(id, v) => setCharges((prev) => ({ ...prev, [id]: v }))}
+                    onUnit={(id, unit, typed) => {
+                      setCharges((prev) => ({ ...prev, [id]: typed }))
+                      setChargeUnit((prev) => ({ ...prev, [id]: unit }))
+                    }}
+                    onRemove={removeCharge}
+                    onAdd={addCharge}
+                    onTaxChange={(id, config) =>
+                      setChargeOverrides((prev) => {
+                        const next = { ...prev }
+                        if (config) next[id] = config
+                        else delete next[id]
+                        return next
+                      })
+                    }
+                    preview={previewCharge}
+                    emptyHint={
+                      chargeTypes.length === 0 ? (
+                        <p className="text-muted-foreground text-xs">
+                          No purchase charges are set up yet — add them under{' '}
+                          <a href="/masters/charges" target="_blank" rel="noreferrer" className="text-primary underline">
+                            Masters → Charges
+                          </a>
+                          .
+                        </p>
+                      ) : totals.chargeRows.length === 0 ? (
+                        <p className="text-muted-foreground text-xs">
+                          Freight, transport, packing… Type each as the figure before GST; its GST is added on top.
+                        </p>
+                      ) : null
+                    }
+                    footer={
+                      retiredCharges.length > 0 ? (
+                        <p className="warn-text text-xs">
+                          {retiredCharges.map((c) => `${c.chargeType?.name ?? 'A charge'} (₹${Number(c.amount)})`).join(', ')}{' '}
+                          {retiredCharges.length === 1 ? 'is' : 'are'} no longer a purchase charge in the master, so{' '}
+                          {retiredCharges.length === 1 ? 'it is' : 'they are'} left off when you save. Add it again
+                          under another charge if it still applies.
+                        </p>
+                      ) : null
+                    }
+                  />
+                </Section>
+
                 <Section icon={Truck} title="Attachments &amp; Deliver To">
                   <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                     <div className="space-y-2">
@@ -4345,251 +4450,10 @@ export function PurchaseOrderDialog({
                 </Section>
               </div>
 
-              {/* The calculation, beside the delivery box as the old ERP had it.
-
-                In its order: the discount, the gross, one row per charge on
-                this order with its own GST %, what GST is worked out on, where
-                the GST comes from rate by rate, the tax split, and what the
-                order comes to. Every figure is read from priceDocument(), the
-                same sum the server saves and the bill books. The charges
-                offered are read from the charge master rather than written
-                into this form, so adding one there offers it here. */}
-              <Section icon={Calculator} title="Totals">
-                <div className="space-y-1.5 text-sm">
-                  {/* Where the discount sits follows the dropdown at the top of
-                    the items box. On an item-level order this is the sum of
-                    the per-line discounts and cannot be typed into; on an
-                    order-level order it is the one figure taken off the whole
-                    order, and the per-line boxes are the ones switched off. */}
-                  {poType === 'ORDER_LEVEL' ? (
-                    <div className="flex items-center justify-between gap-3">
-                      <label htmlFor="po-discount" className="text-muted-foreground">
-                        Total discount
-                      </label>
-                      <input
-                        id="po-discount"
-                        type="number"
-                        step="any"
-                        min={0}
-                        className="form-input h-8 w-28 text-right"
-                        placeholder="0.00"
-                        value={discountAmount}
-                        onChange={(e) => setDiscountAmount(e.target.value)}
-                      />
-                    </div>
-                  ) : (
-                    <Row label="Total discount" value={totals.totalDiscount} />
-                  )}
-
-                  <Row label="Gross total" value={totals.grossTotal} />
-
-                  {/* The GST on the goods, one line per rate, so the tax rows
-                    below can be traced back to what made them. It also says
-                    so when the supplier is not registered. */}
-                  <TaxBreakdown result={totals.result} split={taxMode} />
-
-                  {/* SGST + CGST within the state, IGST across a state line —
-                    never both, and never two halves of a tax the supplier
-                    cannot charge. Until a supplier is chosen the tax is
-                    previewed as SGST + CGST; the note under the grand total
-                    says the split is still to come. */}
-                  {(taxMode === 'CGST_SGST' || taxMode === null) && (
-                    <>
-                      <Row label="SGST" value={totals.sgst} />
-                      <Row label="CGST" value={totals.cgst} />
-                    </>
-                  )}
-                  {taxMode === 'IGST' && <Row label="IGST" value={totals.igst} />}
-
-                  <Row label="Total tax" value={totals.tax} />
-
-                  {/* Each charge, typed before GST — freight at ₹1,200 is
-                    ₹1,200 — with its own GST chosen below it and worked into
-                    the Total tax row above, same as the goods'. Only the
-                    charges this order carries; "+ Add a charge" offers the
-                    purchase charges from Masters → Charges that are not on it
-                    yet. */}
-                  {chargeTypes.length === 0 ? (
-                    <p className="text-muted-foreground py-1 text-xs">
-                      No purchase charges are set up yet — add them under{' '}
-                      <a
-                        href="/masters/charges"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary underline"
-                      >
-                        Masters → Charges
-                      </a>
-                      .
-                    </p>
-                  ) : (
-                    <div className="space-y-1.5 pt-0.5">
-                      <div className="flex items-center justify-between border-t border-border/60 pt-3 pb-1">
-                        <span className="text-foreground text-xs font-semibold">Additional charges</span>
-                      </div>
-                      {totals.chargeRows.map((c) => (
-                        <div key={c.chargeTypeId} className="rounded-lg border border-border/60 bg-secondary/20 p-3">
-                          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-                            {/* The name keeps a floor it will not shrink under,
-                              so a long one wraps the boxes onto their own line
-                              rather than breaking mid-word beside them. */}
-                            <span className="text-muted-foreground min-w-[9rem] flex-1">{c.name}</span>
-                            <div className="ml-auto flex shrink-0 items-center gap-1">
-                              <StepInput
-                                decimals
-                                max={c.unit === '%' ? 100 : undefined}
-                                className="form-input h-8 w-28 text-right"
-                                placeholder="0.00"
-                                value={charges[c.chargeTypeId] ?? ''}
-                                onValueChange={(v) =>
-                                  setCharges((prev) => ({ ...prev, [c.chargeTypeId]: v }))
-                                }
-                                aria-label={`${c.name} ${c.unit === '%' ? 'percent' : 'amount'}`}
-                              />
-                              {/* Rupees or percent, as two buttons side by side
-                                rather than a dropdown — a dropdown showing "₹"
-                                was read as a label, and "10" typed into the
-                                box went in as ₹10. Both are always in sight
-                                and the one in use is lit.
-
-                                Pressing % keeps the number already typed as
-                                the percentage (10 becomes 10%), unless it is
-                                over 100 — a rupee figure like 1,200 is not a
-                                percentage, and the box starts empty instead.
-                                Pressing ₹ keeps what the % came to, so the
-                                figure can be rounded off by hand. */}
-                              <div
-                                role="group"
-                                aria-label={`${c.name} in rupees or percent`}
-                                className="border-border flex h-8 shrink-0 overflow-hidden rounded-lg border"
-                              >
-                                {(['INR', '%'] as const).map((unit) => (
-                                  <button
-                                    key={unit}
-                                    type="button"
-                                    aria-pressed={c.unit === unit}
-                                    title={
-                                      unit === '%'
-                                        ? `Type ${c.name} as a % of the goods value`
-                                        : `Type ${c.name} as an amount in ₹`
-                                    }
-                                    onClick={() => {
-                                      if (unit === c.unit) return
-                                      const typed = charges[c.chargeTypeId] ?? ''
-                                      setCharges((prev) => ({
-                                        ...prev,
-                                        [c.chargeTypeId]:
-                                          unit === '%'
-                                            ? num(typed) > 0 && num(typed) <= 100
-                                              ? typed
-                                              : ''
-                                            : c.amount
-                                              ? String(c.enteredAmount)
-                                              : '',
-                                      }))
-                                      setChargeUnit((prev) => ({ ...prev, [c.chargeTypeId]: unit }))
-                                    }}
-                                    className={`w-8 text-sm font-semibold transition-colors ${
-                                      c.unit === unit
-                                        ? 'bg-primary/15 text-primary'
-                                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-                                    }`}
-                                  >
-                                    {unit === '%' ? '%' : '₹'}
-                                  </button>
-                                ))}
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => removeCharge(c.chargeTypeId)}
-                                className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
-                                title={`Take ${c.name} off this order`}
-                                aria-label={`Remove ${c.name}`}
-                              >
-                                <X size={14} />
-                              </button>
-                            </div>
-                          </div>
-                          {/* The working, in figures, so a percentage is never
-                            one more number to take on trust. */}
-                          {c.unit === '%' && (
-                            <p className="text-muted-foreground mt-0.5 text-right text-[11px] tabular-nums">
-                              {totals.grossTotal > 0 ? (
-                                <>
-                                  {num(charges[c.chargeTypeId])}% of goods ₹{inr(totals.grossTotal)} ={' '}
-                                  <span className="text-foreground font-medium">₹{inr(c.enteredAmount)}</span>
-                                </>
-                              ) : (
-                                'Add the goods first — the % is worked out on their value.'
-                              )}
-                            </p>
-                          )}
-                          <ChargeTaxDetails config={c.config} priced={c.priced} hsnOptions={hsnCodes}
-                            onOverride={value => setChargeOverrides(prev => ({ ...prev, [c.chargeTypeId]: value }))} />
-                        </div>
-                      ))}
-                      {chargeTypes.some((t) => !shownCharges.includes(t.id)) && (
-                        <SmartSelect
-                          className="form-input h-8 w-full text-xs"
-                          value=""
-                          onChange={(e) => {
-                            if (e.target.value) addCharge(e.target.value)
-                          }}
-                          aria-label="Add a charge"
-                        >
-                          <option value="">+ Add charge</option>
-                          {chargeTypes
-                            .filter((t) => !shownCharges.includes(t.id))
-                            .map((t) => (
-                              <option key={t.id} value={t.id}>
-                                {t.name}
-                              </option>
-                            ))}
-                        </SmartSelect>
-                      )}
-                      {retiredCharges.length > 0 && (
-                        <p className="warn-text text-xs">
-                          {retiredCharges
-                            .map((c) => `${c.chargeType?.name ?? 'A charge'} (₹${Number(c.amount)})`)
-                            .join(', ')}{' '}
-                          {retiredCharges.length === 1 ? 'is' : 'are'} no longer a purchase charge in
-                          the master, so {retiredCharges.length === 1 ? 'it is' : 'they are'} left off
-                          when you save. Add it again under another charge if it still applies.
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Only an old order whose charge master has no "Other
-                    Charges" row to move the figure onto. Added as it is, like
-                    any other charge. */}
-                  {totals.untaxedExtra > 0 && (
-                    <Row label="Other charges" value={totals.untaxedExtra} />
-                  )}
-
-                  {/* Shown whenever the total was rounded, and only then.
-                    The grand total is taken to the nearest rupee, which is how
-                    an Indian document is normally settled — but without this
-                    row the figures above it add up to something else and
-                    nothing on the screen says why. The printed sheet has
-                    carried this line all along; the form had not. */}
-                  {Math.abs(totals.roundOff) >= 0.005 && (
-                    <Row label="Rounding" value={totals.roundOff} />
-                  )}
-
-                  <div className="border-primary/20 bg-primary/5 mt-2 flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
-                    <span className="text-foreground font-semibold">Grand total</span>
-                    <span className="text-foreground whitespace-nowrap text-lg font-semibold tabular-nums">
-                      ₹{inr(totals.total)}
-                    </span>
-                  </div>
-
-                  {taxMode === null && (
-                    <p className="text-muted-foreground pt-1 text-xs">
-                      Pick the supplier to see whether this is CGST + SGST or IGST.
-                    </p>
-                  )}
-                </div>
+              {/* The figures, read-only, every one from priceDocument() — the
+                same sum the server saves and the print shows. */}
+              <Section icon={Calculator} title="Summary">
+                <PurchaseSummary result={totals.result} split={taxMode} />
               </Section>
             </div>
           </div>
