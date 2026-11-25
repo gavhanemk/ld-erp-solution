@@ -35,7 +35,7 @@ for (const o of c.pos) {
   }
   await h.beat(2500)
   const number = await po.getByLabel('Purchase order*').inputValue()
-  await po.getByRole('button', { name: 'Save', exact: true }).first().click()
+  await po.getByRole('button', { name: 'Confirm order', exact: true }).first().click()
   await h.waitClosed()
   S.pos.push(number)
   out.push(`${number} → ${o.supplier}: ${(await h.dlg().count()) ? 'STILL OPEN ' + (await h.describe()).slice(0, 600) : 'saved'}`)

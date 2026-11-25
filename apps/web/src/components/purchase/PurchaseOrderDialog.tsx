@@ -796,6 +796,8 @@ export function PurchaseOrderDialog({
   const [dragOver, setDragOver] = useState(false)
 
   const [saving, setSaving] = useState<'draft' | 'send' | 'print' | null>(null)
+  /** A save was pressed on an incomplete order: say what is missing, and stay saying it. */
+  const [showMissing, setShowMissing] = useState(false)
   const qtyRules = useQtyRules()
   const [error, setError] = useState<string | null>(null)
   const [mounted, setMounted] = useState(false)
@@ -829,6 +831,7 @@ export function PurchaseOrderDialog({
     setWarehouseId(record?.deliveryWarehouseId ?? sampleSource?.sampleStoreId ?? '')
     setPoDate(record?.poDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10))
     setDeliveryDate(record?.deliveryDate?.slice(0, 10) ?? '')
+    setShowMissing(false)
     // Raised for samples, the reference names them — and keeps following the
     // lines added after, until somebody types over it.
     const sampleRefText = sampleSource ? sampleReference(sampleSource.needs) : ''
@@ -1779,6 +1782,7 @@ export function PurchaseOrderDialog({
 
   const unfinished = activeLines
     .map((l) => ({
+      line: l,
       name: itemById.get(l.itemId)?.name ?? 'A line',
       noQty: num(l.qty) <= 0,
       // 2.5 cartons: a whole number for an item counted whole.
@@ -2571,64 +2575,93 @@ export function PurchaseOrderDialog({
    * From the body there is nothing above it to get in the way.
    */
   /*
-   * Save, written once and shown twice.
-   *
-   * The form is long enough to scroll, so there is one at the top as well as
-   * at the bottom and finishing an order never means scrolling back to look
-   * for it. Written once because the disabled state is the part that must
-   * never disagree: a Save that looks live at the top and dead at the bottom
-   * is worse than either.
-   *
-   * Only this one is repeated. All three sat in the header and all four in the
-   * footer, which is seven buttons for four actions — and the two at the top
-   * that were not Save had no reason to be there, since choosing between
-   * draft, print and send is the last decision made about an order, not the
-   * first. The header keeps Save; the footer keeps the choice.
+   * The buttons stay pressable while the order is incomplete. Pressed then,
+   * nothing is sent: the bar says what is missing and the first missing box
+   * is scrolled to and given the cursor — a greyed button that says nothing
+   * leaves the clerk hunting (6 Nov 2026). Disabled only while saving, which
+   * is also what stops a second press sending the order twice.
    */
-  const primarySave = (
+  const revealMissing = () => {
+    setShowMissing(true)
+    const shown = (selector: string) =>
+      [...(dialogRef.current?.querySelectorAll<HTMLElement>(selector) ?? [])].find(
+        (el) => el.offsetParent !== null
+      )
+    const first = unfinished[0]
+    const at = first ? lines.indexOf(first.line) + 1 : 1
+    const target = !supplierId
+      ? shown('#po-supplier')
+      : deliveryEarly
+        ? shown('#po-delivery')
+        : activeLines.length === 0
+          ? shown('[aria-label="Row 1 item"]')
+          : first
+            ? shown(
+                first.noQty || first.badQty
+                  ? `[aria-label="Row ${at} quantity"]`
+                  : first.noRate
+                    ? `[aria-label="Row ${at} rate"]`
+                    : `[aria-label="Row ${at}: why more than the sample needs"]`
+              )
+            : undefined
+    target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    target?.focus({ preventScroll: true })
+  }
+  const attempt = (mode: 'draft' | 'send' | 'print') => {
+    if (incomplete) revealMissing()
+    else void save(mode)
+  }
+
+  /*
+   * One bar of buttons, at the foot only.
+   *
+   * A draft (or new) order: Save as draft (Ctrl+S) · Save and print ·
+   * Confirm order, which saves and sends it. An order already sent can still
+   * be changed until goods or a bill arrive, and stays sent — the server has
+   * no way back to draft — so there it is Save and print · Save changes,
+   * with Ctrl+S on Save changes.
+   */
+  const isSent = Boolean(isEdit && record?.status && record.status !== 'DRAFT')
+  const primarySave = isSent ? (
     <button
       type="button"
-      onClick={() => void save('send')}
+      onClick={() => attempt('draft')}
       className="btn-primary"
-      disabled={busy || incomplete}
+      disabled={busy}
+      data-hotkey="save"
+      aria-keyshortcuts="Control+S Meta+S"
+      title="Save changes (Ctrl+S)"
     >
+      {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <SaveIcon size={15} />}
+      Save changes
+    </button>
+  ) : (
+    <button type="button" onClick={() => attempt('send')} className="btn-primary" disabled={busy}>
       {saving === 'send' ? <Loader2 size={15} className="animate-spin" /> : <SaveIcon size={15} />}
-      Save
+      Confirm order
     </button>
   )
 
   const saveActions = (
     <>
-      <button
-        type="button"
-        onClick={() => void save('draft')}
-        className="btn-secondary"
-        disabled={busy || incomplete}
-        data-hotkey="save"
-        aria-keyshortcuts="Control+S Meta+S"
-        title="Save as draft (Ctrl+S)"
-      >
-        {saving === 'draft' ? (
-          <Loader2 size={15} className="animate-spin" />
-        ) : (
-          <SaveIcon size={15} />
-        )}
-        {/* Short on a phone, so the three choices share one row. */}
-        <span className="sm:hidden">Draft</span>
-        <span className="hidden sm:inline">Save as draft</span>
-      </button>
-      <button
-        type="button"
-        onClick={() => void save('print')}
-        className="btn-secondary"
-        disabled={busy || incomplete}
-        title="Save and print"
-      >
-        {saving === 'print' ? (
-          <Loader2 size={15} className="animate-spin" />
-        ) : (
-          <Printer size={15} />
-        )}
+      {!isSent && (
+        <button
+          type="button"
+          onClick={() => attempt('draft')}
+          className="btn-secondary"
+          disabled={busy}
+          data-hotkey="save"
+          aria-keyshortcuts="Control+S Meta+S"
+          title="Save as draft (Ctrl+S)"
+        >
+          {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <SaveIcon size={15} />}
+          {/* Short on a phone, so the choices share one row. */}
+          <span className="sm:hidden">Draft</span>
+          <span className="hidden sm:inline">Save as draft</span>
+        </button>
+      )}
+      <button type="button" onClick={() => attempt('print')} className="btn-secondary" disabled={busy} title="Save and print">
+        {saving === 'print' ? <Loader2 size={15} className="animate-spin" /> : <Printer size={15} />}
         <span className="sm:hidden">Print</span>
         <span className="hidden sm:inline">Save and print</span>
       </button>
@@ -2828,9 +2861,9 @@ export function PurchaseOrderDialog({
                     wide
                     stacked
                   />
-                  {/* A prompt, not an alarm. Every Save on this form is
-                    disabled while the supplier is empty, so this still says
-                    which field is holding them back — but in the same grey a
+                  {/* A prompt, not an alarm. Saving without a supplier only
+                    shows what is missing, so this still says which field is
+                    holding the order back — but in the same grey a
                     blank box on a form nobody has filled in yet gets
                     everywhere else on this screen. Red is for a mistake
                     already made, and choosing nothing on a form just opened
@@ -4158,13 +4191,18 @@ export function PurchaseOrderDialog({
 
           {/* Footer — stays put, so Save never has to be hunted for at the bottom of a long form */}
           <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-3 py-2.5 sm:gap-3 sm:px-5 sm:py-3.5">
-            {incomplete && (
-              <p className="warn-text mr-auto flex max-w-xl basis-full items-start gap-1.5 text-xs sm:basis-auto">
+            {showMissing && incomplete && (
+              <p
+                role="alert"
+                className="warn-text mr-auto flex max-w-xl basis-full items-start gap-1.5 text-xs sm:basis-auto"
+              >
                 <AlertCircle size={13} className="mt-px shrink-0" />
                 <span>
                   {!supplierId
                     ? 'Choose a supplier to save this order.'
-                    : activeLines.length === 0
+                    : deliveryEarly
+                      ? "Delivery can't be before the order date."
+                      : activeLines.length === 0
                       ? 'Add at least one item to save this order.'
                       : /* Named, with the empty cell outlined in the table, so a
                        long order does not have to be read twice to find it. */
