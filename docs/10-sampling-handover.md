@@ -13,10 +13,13 @@ each rule, where the code is, what it changed in other modules, how to run and
 test it, what is left, and the traps.
 
 **Status.** All nine phases (0–8) are built, reviewed and committed on the
-branch `feat/sampling-local`, which branches from `main` at `2a47e65`.
-**Nothing is pushed or merged.** It has run only against the isolated local
-pilot database, never the shared one. What is left before the pull request to
-`main` is in [section 13](#13-what-is-left-before-merging).
+branch `feat/sampling-local`, which branched from `main` at `2a47e65`. On
+25 November `main` (then `3c8cb6b`) was merged in, the sampling migrations were
+renamed to sort after `main`'s, and the branch went up as a pull request to
+`main`. It has run only against the isolated local pilot database, never the
+shared one. Merging it switches nothing on: Sampling stays off on a server
+until `SAMPLING_ENABLED` is set. What is left, and how to switch it on, is in
+[section 13](#13-what-is-left-before-switching-it-on).
 
 | Phase | Commit | Date | What it built |
 |---|---|---|---|
@@ -53,7 +56,7 @@ engine.
 10. [Running it on your machine](#10-running-it-on-your-machine)
 11. [The runnable checks](#11-the-runnable-checks)
 12. [Traps](#12-traps)
-13. [What is left before merging](#13-what-is-left-before-merging)
+13. [What is left before switching it on](#13-what-is-left-before-switching-it-on)
 14. [Open questions](#14-open-questions)
 15. [Where to start](#15-where-to-start)
 
@@ -169,12 +172,18 @@ The rebuild turns it into one connected flow:
 - Database work for sampling happens **only** on the pilot cluster
   (`127.0.0.1:55439`, database `lderp_sampling`) or a scratch database on the
   same cluster.
-- Every pilot-only feature (the sampling routes, local file storage) asks one
-  gate, `samplingPilotEnabled()` in [`lib/pilot.ts`](../apps/api/src/lib/pilot.ts):
-  the flag must be on, the server must not be in production mode, and **both**
-  database URLs must point at loopback `lderp_sampling` with no `?host=` or
-  `?hostaddr=` override. A flag left on against the live connection string
-  switches nothing on.
+- Two gates in [`lib/pilot.ts`](../apps/api/src/lib/pilot.ts). While the
+  module was built, both were one strict pilot gate; they were split when it
+  went up for merging, so the live server can run it:
+  - `samplingEnabled()` — the module's switch, `SAMPLING_ENABLED=true`. The
+    sampling routes, Sample Stores, sample needs in Purchase, the PO-line link
+    and the `SAMPLE`/`SDC` series in Settings ask it. Off unless set. The
+    screens ask `NEXT_PUBLIC_SAMPLING_ENABLED`, set beside it.
+  - `samplingPilotEnabled()` — files on local disk only. The switch must be on,
+    the server must not be in production mode, and **both** database URLs must
+    point at loopback `lderp_sampling` with no `?host=` or `?hostaddr=`
+    override. A flag left on against the live connection string puts no file
+    on anybody's disk; the live server uses the storage bucket.
 - Every check script asserts `current_database() = 'lderp_sampling'` before it
   writes anything.
 
@@ -452,8 +461,8 @@ details, files, style or costs.
 - `Style.stage` (DEVELOPMENT | PRODUCTION, default PRODUCTION); `CREATE_STYLE`,
   `LINK_STYLE`, `UPDATE_STYLE`; development styles refused across sales,
   production and Masters (see step 1).
-- Migrations `20261116100000_sampling_intake` (additive) and
-  `20261116110000_sampling_request_style_backfill` (data only, pilot rows).
+- Migrations `20261125100300_sampling_intake` (additive) and
+  `20261125100400_sampling_request_style_backfill` (data only, pilot rows).
 
 ### Phase 2 — Specification (`66d2d7b`)
 
@@ -464,7 +473,7 @@ details, files, style or costs.
   master checked by the routing rules; quick-add of a material.
 - Five-tab specification editor.
 - Departments used by sample steps or lines cannot be deleted permanently.
-- Migration `20261116120000_sampling_spec_bom_route` (sample tables only).
+- Migration `20261125100500_sampling_spec_bom_route` (sample tables only).
 
 ### Phase 3 — Sourcing (`31834e2`)
 
@@ -482,7 +491,7 @@ details, files, style or costs.
 - Needs (`GET /sampling/needs`, `GET /purchase/sample-needs`), the Sourcing
   section, "Raise purchase order", "Select from sample needs", sample labels on
   order lines, receipt store choices by line, and what a store holds in Masters.
-- Migration `20261117100000_sampling_sourcing` (additive).
+- Migration `20261125100600_sampling_sourcing` (additive).
 
 ### Phase 4 — The request's pool (`ccc0ce8`)
 
@@ -496,7 +505,7 @@ details, files, style or costs.
   more than it holds** (`assertPoolsHold`).
 - The stock ledger and stock reports name a sample's movements by request and
   buyer (`movementDocs.service`, `inventory-shared` report bucket).
-- Migration `20261117120000_sampling_pool` (sample tables only).
+- Migration `20261125100700_sampling_pool` (sample tables only).
 
 ### Phase 5 — Making (`2f78836`)
 
@@ -507,7 +516,7 @@ details, files, style or costs.
   pilot could not).
 - A line is no longer waived once making starts; a request with pieces still
   at an outside unit cannot be cancelled (`PIECES_OUT`).
-- Migration `20261117140000_sampling_making`: `sample_works`,
+- Migration `20261125100800_sampling_making`: `sample_works`,
   `sample_transfers`, `sample_job_works`, `sample_job_returns`, labour on
   steps; steps recorded whole before are marked `wholeStep`.
 
@@ -520,7 +529,7 @@ details, files, style or costs.
 - Rounds inspected, submitted and decided whole before this are read in the new
   shape (`normaliseQc`, `normaliseDecision` in
   [`packages/shared/src/sampleReview.ts`](../packages/shared/src/sampleReview.ts)).
-- Migration `20261117160000_sampling_review`: `sample_dispatches`, the state
+- Migration `20261125100900_sampling_review`: `sample_dispatches`, the state
   CHECKs widened for `QC_FAILED`, and the `SDC` number series inserted for every
   company (inert until used, like `SAMPLE`).
 
@@ -531,7 +540,7 @@ details, files, style or costs.
   `REOPEN_COST` and the cost lock; the Costing section; the internal cost sheet
   and the buyer's Sample charges statement (print types `SCOST` and `SCS`).
 - Handover now waits for finalised costs (`COST_NOT_FINAL`).
-- Migration `20261121100000_sampling_cost`: `costSheet`, `costFinalisedAt`,
+- Migration `20261125101000_sampling_cost`: `costSheet`, `costFinalisedAt`,
   `costFinalisedBy` on `sample_requests` (CHECK: all set or none), and
   `sample_charges` (CHECK on kind, amount > 0, and removal with a reason).
 
@@ -632,18 +641,25 @@ Columns added to existing tables: `styles.stage`, `warehouses.purpose`,
 `purchase_order_lines.sampleMaterialId` and `sampleOverReason`. Rows added:
 the Merchandiser role (seed), the `SDC` number series (migration and seed).
 
-Eight migrations, all hand-written and additive:
+Eleven migrations, all hand-written and additive: the old pilot's three, then
+the rebuild's eight. They were written 14–21 Nov and renamed to 25 Nov when
+`main` was merged in, so they sort after `main`'s own (the newest then was
+`20261124160000_fg_cartons`): a fresh database applies them in the order the
+shared one will. Their contents did not change.
 
 | Migration | Changes |
 |---|---|
-| `20261116100000_sampling_intake` | `sample_attachments`; request fields; `styles.stage` |
-| `20261116110000_sampling_request_style_backfill` | Data only (pilot rows) |
-| `20261116120000_sampling_spec_bom_route` | BOM-line and route-step columns on sample tables |
-| `20261117100000_sampling_sourcing` | `warehouses.purpose`; PO-line link |
-| `20261117120000_sampling_pool` | `sample_closeouts`; waive columns; drops `issued <= planned` |
-| `20261117140000_sampling_making` | Works, transfers, job works and returns; labour |
-| `20261117160000_sampling_review` | `sample_dispatches`; state CHECKs for `QC_FAILED`; `SDC` series |
-| `20261121100000_sampling_cost` | Cost columns; `sample_charges` |
+| `20261125100000_sampling_pilot` | The sample tables: requests, rounds, stages, materials, events |
+| `20261125100100_sampling_list_state` | `sample_requests.state` for the register; sampling permissions |
+| `20261125100200_sampling_numbering_and_guards` | `SAMPLE` number series; non-negative and state CHECKs |
+| `20261125100300_sampling_intake` | `sample_attachments`; request fields; `styles.stage` |
+| `20261125100400_sampling_request_style_backfill` | Data only (pilot rows) |
+| `20261125100500_sampling_spec_bom_route` | BOM-line and route-step columns on sample tables |
+| `20261125100600_sampling_sourcing` | `warehouses.purpose`; PO-line link |
+| `20261125100700_sampling_pool` | `sample_closeouts`; waive columns; drops `issued <= planned` |
+| `20261125100800_sampling_making` | Works, transfers, job works and returns; labour |
+| `20261125100900_sampling_review` | `sample_dispatches`; state CHECKs for `QC_FAILED`; `SDC` series |
+| `20261125101000_sampling_cost` | Cost columns; `sample_charges` |
 
 ### Numbers and prints
 
@@ -831,10 +847,25 @@ in the pilot (Prepare clears them).
 | `node tools/check-sampling-ui.cjs` | 96 | The screens' rules: flow and sections, material actions, cost and handover arithmetic, history wording |
 | `node tools/check-local-storage.cjs` | 74 | Local file storage and the pilot gate (no database) |
 
-Before merging, the plan also asks for the shared-module regressions on the
-demo database (not the pilot): `check-grn`, `check-stock-documents`,
-`check-job-work`, purchase pricing, accounts posting and the e2e walk steps
-09–14 (MR → PO → GRN → issue); and the API build and `next build`.
+The shared-module regressions, run on 25 November after `main` was merged in,
+against a scratch database on the pilot cluster seeded with `seed.ts` and
+`seed-demo.ts` (the demo database was not running), the built API on port
+5000 with Sampling off — as the live server will be the day it merges:
+
+| Check | Result | On `main`'s own code, same data |
+|---|---|---|
+| `check-grn.mjs` | 14 passed, 6 failed | the same 14 and the same 6 |
+| `check-stock-documents.mjs` | 20 passed, 1 failed | the same |
+| `check-job-work.mjs` | 9 passed, 5 failed | the same |
+| `check-purchase-pricing.ts` | 18 passed | — |
+| `check-accounts-posting.ts` | 7 passed (rolled back) | — |
+
+The failures are the same check for check on `main` without sampling, so
+they are those scripts lagging behind `main` (a receipt's rejections moved to
+QC, for one), not this branch. The API build (`scripts/build.cjs`, which now
+loads the shared package's compiled copy) and `next build` both pass. The
+e2e walk (steps 09–14) was not run: it needs the demo database, which copies
+masters from the live one.
 
 ---
 
@@ -890,25 +921,40 @@ demo database (not the pilot): `check-grn`, `check-stock-documents`,
 
 ---
 
-## 13. What is left before merging
+## 13. What is left before switching it on
 
-1. **MIGRATION-NOTES.md**: one consolidated entry for the eight sampling
-   migrations — what each changes, that all are additive, the `SDC` series
-   insert, and the dry run.
-2. **Phase 3 leftovers**:
+**Merging.** The pull request carries the eleven migrations (see
+[MIGRATION-NOTES.md](../MIGRATION-NOTES.md), 25 Nov entry). The team rule
+holds: tell the team, apply them to the shared database with
+`prisma migrate deploy` and merge on the same day. Merged and migrated,
+nothing changes for anyone until Sampling is switched on.
+
+**Switching it on in live**, when the business is ready:
+
+1. API server (Render): `SAMPLING_ENABLED=true`. Web (Vercel):
+   `NEXT_PUBLIC_SAMPLING_ENABLED=true`, then redeploy — the screens read it at
+   build time. Leave `STORAGE_DRIVER` alone; files go to the bucket as
+   everyone else's do.
+2. Masters → Warehouses: a Sample Store, purpose Sampling.
+3. Settings: a Merchandiser role with the rights `seed-core.ts` gives it (the
+   seed is never run against the shared database, so it is made by hand), and
+   its users. The sampling permissions themselves come with the migrations.
+4. Settings → Number series: `SAMPLE` and `SDC` are there from the
+   migrations; check their prefixes.
+
+**Still open:**
+
+1. **Phase 3 leftovers**:
    - on a purchase order that has both indent lines and sample lines, the
      indent reference and the sample reference overwrite each other;
    - the "+ another store" button on a receipt is a dead end when there is only
      one Sample Store;
    - the reason box when an order line is reopened.
-3. **The shared-module regressions and builds** listed at the end of
-   [section 11](#11-the-runnable-checks).
-4. **Merchandiser testing** on the pilot with a real tech pack, in light mode,
-   at narrow width and with the keyboard.
-5. **The pull request to `main`.** The migrations then reach the shared
-   database: tell the team first, migrate and merge on the same day, and set up
-   a Sample Store (Masters → Warehouses, purpose Sampling) and the Merchandiser
-   role's users before anyone uses it.
+2. **The e2e walk, steps 09–14**, on the demo database (see the end of
+   [section 11](#11-the-runnable-checks)).
+3. **Merchandiser testing** with a real tech pack, in light mode, at narrow
+   width and with the keyboard — on the pilot, or on the live server once
+   switched on for a trial.
 
 ---
 
