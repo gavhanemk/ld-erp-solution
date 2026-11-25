@@ -3799,6 +3799,11 @@ export function PurchaseOrderDialog({
                         config: c.config,
                         priced: c.priced,
                         unsavedChange: c.chargeTypeId in chargeOverrides,
+                        savedAs:
+                          !(c.chargeTypeId in chargeOverrides) &&
+                          record?.charges?.some((s) => s.chargeTypeId === c.chargeTypeId)
+                            ? 'as saved on this order'
+                            : undefined,
                       })
                     )}
                     split={taxMode}
@@ -3963,9 +3968,7 @@ export function PurchaseOrderDialog({
                   foldable
                   openByDefault={false}
                   summary={
-                    fileCount + pendingFiles.length + carriedFiles.length > 0
-                      ? `${fileCount + pendingFiles.length + carriedFiles.length} attached`
-                      : 'None'
+                    fileCount > 0 ? `${fileCount} attached` : 'None'
                   }
                 >
                     <div className="space-y-2">

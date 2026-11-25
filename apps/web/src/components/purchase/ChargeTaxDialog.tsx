@@ -117,14 +117,16 @@ export function ChargeTaxDialog({
                     onChange={() =>
                       set({
                         mode: m.value,
-                        hsnCodeId: m.value === 'HSN' ? (draft.hsnCodeId ?? hsnOptions[0]?.id ?? null) : null,
+                        // Nothing is chosen for the person: a code is picked, and a
+                        // charge without GST is classed, by them — never defaulted.
+                        hsnCodeId: m.value === 'HSN' ? draft.hsnCodeId : null,
                         taxCategory:
                           m.value === 'NONE'
                             ? draft.taxCategory === 'TAXABLE'
-                              ? 'EXEMPT'
+                              ? 'UNSPECIFIED'
                               : draft.taxCategory
-                            : draft.taxCategory === 'UNSPECIFIED' || draft.mode === 'NONE'
-                              ? 'TAXABLE'
+                            : draft.mode === 'NONE'
+                              ? 'UNSPECIFIED'
                               : draft.taxCategory,
                       })
                     }
@@ -254,7 +256,7 @@ export function ChargeTaxDialog({
         <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-4 py-3">
           {canReset && (
             <button type="button" className="btn-ghost mr-auto text-xs" onClick={onReset}>
-              Back to the master&apos;s setting
+              Undo this change
             </button>
           )}
           <button type="button" className="btn-secondary" onClick={onClose}>

@@ -3269,6 +3269,12 @@ export function PurchaseBillDialog({
                           config: configForCharge(c),
                           priced: priced.charges[i],
                           unsavedChange: Boolean(c.taxOverride),
+                          savedAs:
+                            c.taxOverride || !c.taxSnapshot
+                              ? undefined
+                              : c.sourceChargeId
+                                ? 'as on the order'
+                                : 'as saved on this bill',
                         })
                       )}
                       split={taxMode}

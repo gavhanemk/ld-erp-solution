@@ -121,4 +121,18 @@ check('11. a configuration reads back as the draft that would make it', () => {
   assert.equal(draftFromConfig({ ...base, overrideReason: 'old' }).reason, '')
 })
 
+check('12. a rate priced from what was saved does not claim the master', () => {
+  // A reopened order keeps the rate it was saved at, whatever the master says now.
+  assert.equal(chargeGstLabel(base, at5, 'IGST', { savedAs: 'as saved on this order' }).source, 'as saved on this order')
+  // Following the goods, a code, or a change made here still say what they are.
+  assert.equal(chargeGstLabel({ ...base, followsGoodsRate: true }, { gstRate: 18, parts: [part(18, 216)], tax: 216 }, 'IGST', { savedAs: 'as saved on this order' }).source, 'follows the goods')
+  assert.equal(chargeGstLabel({ ...base, hsnCodeId: 'h1', hsnCode: '996511' }, at5, 'IGST', { savedAs: 'as saved on this order' }).source, 'HSN / SAC 996511')
+  assert.equal(chargeGstLabel({ ...base, overrideReason: 'GTA under RCM' }, at5, 'IGST', { savedAs: 'as saved on this order' }).source, 'Changed: GTA under RCM')
+})
+
+check('13. a charge typed with its GST included says so', () => {
+  assert.equal(chargeGstLabel({ ...base, treatment: 'INCLUSIVE' }, at5, 'IGST').source, 'Masters → Charges · GST included')
+  assert.equal(chargeGstLabel({ ...base, treatment: 'INCLUSIVE', overrideReason: 'Bill shows GST inside' }, at5, 'IGST').source, 'Changed: Bill shows GST inside · GST included')
+})
+
 console.log(`\n${passed} passed`)

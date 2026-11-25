@@ -12,7 +12,13 @@ import type { HsnOption } from './TaxBreakdown'
 export function chargeGstLabel(
   config: ChargeTaxSnapshot,
   priced: Pick<PricedCharge, 'gstRate' | 'parts' | 'tax'> | undefined,
-  split: GstSplit | null
+  split: GstSplit | null,
+  /**
+   * `savedAs`: the charge is priced from what a saved document holds, not from
+   * today's master — say so ("as saved on this order") rather than naming a
+   * master that may since have changed.
+   */
+  opts: { savedAs?: string } = {}
 ): { rate: string; source: string; changed: boolean } {
   if (split === 'NONE') return { rate: 'No GST', source: 'No GST — supplier not registered', changed: false }
   const reason = config.overrideReason?.trim()
@@ -31,13 +37,15 @@ export function chargeGstLabel(
     : config.followsGoodsRate
       ? 'goods’ rate'
       : `${config.ownRate}%`
-  const source = changed
+  const from = changed
     ? `Changed: ${reason}`
     : config.followsGoodsRate
       ? 'follows the goods'
       : config.hsnCode
         ? `HSN / SAC ${config.hsnCode}`
-        : 'Masters → Charges'
+        : (opts.savedAs ?? 'Masters → Charges')
+  // The figure typed already holds its GST: said, so the total is not misread.
+  const source = config.treatment === 'INCLUSIVE' ? `${from} · GST included` : from
   return { rate, source, changed }
 }
 

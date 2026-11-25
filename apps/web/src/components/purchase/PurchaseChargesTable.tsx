@@ -19,8 +19,10 @@ export interface ChargeTableRow {
   enteredAmount: number
   config: ChargeTaxSnapshot
   priced?: PricedCharge
-  /** Changed in this form and not yet saved — "Back to the master's setting" is offered. */
+  /** Changed in this form and not yet saved — "Undo this change" is offered. */
   unsavedChange: boolean
+  /** Priced from a saved document rather than today's master: what to call that. */
+  savedAs?: string
 }
 
 const inr = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -88,7 +90,7 @@ export function PurchaseChargesTable({
             </thead>
             <tbody>
               {rows.map((r) => {
-                const gst = chargeGstLabel(r.config, r.priced, split)
+                const gst = chargeGstLabel(r.config, r.priced, split, { savedAs: r.savedAs })
                 return (
                   <tr key={r.key} className="border-border/60 border-b align-top last:border-0">
                     <td className="text-foreground py-2 pr-2 pt-3.5">{r.name}</td>
