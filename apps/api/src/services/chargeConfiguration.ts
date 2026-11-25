@@ -6,6 +6,13 @@ import { AppError } from '../middleware/errorHandler'
 export const chargeEntryFields = {
   sourceChargeId: z.string().optional(),
   amountMode: z.enum(['FIXED', 'PERCENT']).optional(),
+  /**
+   * A charge taken off a saved document and added again (25 Nov 2026): it is
+   * a new entry, so it takes today's master setting rather than the saved
+   * row's. Without it a charge of a type the document already had is matched
+   * to that saved row and keeps the rate it was saved with.
+   */
+  fresh: z.boolean().optional(),
   taxOverride: z
     .object({
       gstApplicable: z.boolean().optional(),
@@ -59,12 +66,14 @@ export async function resolveChargeConfigurations(
       const type = byId.get(c.chargeTypeId)
       if (!type) throw new AppError('That charge no longer exists.', 400, 'INVALID_CHARGE')
       const candidates = (opts.saved ?? []).filter((s) => s.chargeTypeId === c.chargeTypeId)
-      const saved = c.sourceChargeId
-        ? candidates.find((s) => s.id === c.sourceChargeId)
-        : candidates.length === 1
-          ? candidates[0]
-          : undefined
-      if (c.sourceChargeId && !saved)
+      const saved = c.fresh
+        ? undefined
+        : c.sourceChargeId
+          ? candidates.find((s) => s.id === c.sourceChargeId)
+          : candidates.length === 1
+            ? candidates[0]
+            : undefined
+      if (c.sourceChargeId && !c.fresh && !saved)
         throw new AppError(
           'This charge does not belong to the linked document.',
           400,

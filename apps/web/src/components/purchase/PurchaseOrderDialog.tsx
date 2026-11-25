@@ -680,6 +680,13 @@ export function PurchaseOrderDialog({
    * it reopens in rupees.
    */
   const [chargeOverrides, setChargeOverrides] = useState<Record<string, ChargeTaxSnapshot>>({})
+  /**
+   * Charge types taken off this order in this form (25 Nov 2026). Added
+   * again, such a charge is a new entry: it takes today's Masters → Charges
+   * setting, not the one the saved order holds — the saved setting stays only
+   * on an entry that was kept.
+   */
+  const [freshCharges, setFreshCharges] = useState<string[]>([])
   const [chargeUnit, setChargeUnit] = useState<Record<string, '%' | 'INR'>>({})
   /**
    * Each charge's GST, keyed by charge type id: where the rate comes from
@@ -717,6 +724,7 @@ export function PurchaseOrderDialog({
     setChargeHsnId(drop)
     setChargeGstRate(drop)
     setChargeOverrides(drop)
+    setFreshCharges((prev) => (prev.includes(id) ? prev : [...prev, id]))
   }
 
   /*
@@ -963,6 +971,7 @@ export function PurchaseOrderDialog({
       Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(savedChargeConfig(c).inputAmount)]))
     )
     setChargeOverrides({})
+    setFreshCharges([])
     setChargeUnit(Object.fromEntries((record?.charges ?? []).map(c => [c.chargeTypeId, savedChargeConfig(c).amountMode === 'PERCENT' ? '%' : 'INR'])))
     setShownCharges(
       (record?.charges ?? []).filter((c) => Number(c.amount) > 0).map((c) => c.chargeTypeId)
@@ -1567,7 +1576,8 @@ export function PurchaseOrderDialog({
   const configForCharge = (id: string): ChargeTaxSnapshot => {
     const saved = record?.charges?.find(c => c.chargeTypeId === id)
     const type = chargeTypes.find(t => t.id === id)
-    const base = chargeOverrides[id] ?? (saved ? savedChargeConfig(saved) : chargeConfigOf(type ?? { name: 'Charge', defaultGstRate: 0 }, 'purchase'))
+    const kept = saved && !freshCharges.includes(id) ? saved : undefined
+    const base = chargeOverrides[id] ?? (kept ? savedChargeConfig(kept) : chargeConfigOf(type ?? { name: 'Charge', defaultGstRate: 0 }, 'purchase'))
     return { ...base, amountMode: chargeUnit[id] === '%' ? 'PERCENT' : 'FIXED', inputAmount: num(charges[id]) }
   }
   const chargeRateOf = (id: string) => configForCharge(id).ownRate
@@ -1706,6 +1716,7 @@ export function PurchaseOrderDialog({
     poType,
     chargeTypes,
     shownCharges,
+    freshCharges,
     charges,
     chargeUnit,
     chargeOverrides,
@@ -2426,7 +2437,10 @@ export function PurchaseOrderDialog({
         chargeTypeId: c.chargeTypeId,
         amount: num(charges[c.chargeTypeId]),
         amountMode: c.unit === '%' ? 'PERCENT' : 'FIXED',
-        sourceChargeId: record?.charges?.find(x => x.chargeTypeId === c.chargeTypeId)?.id,
+        sourceChargeId: freshCharges.includes(c.chargeTypeId)
+          ? undefined
+          : record?.charges?.find((x) => x.chargeTypeId === c.chargeTypeId)?.id,
+        fresh: freshCharges.includes(c.chargeTypeId) || undefined,
         taxOverride: taxOverridePayload(chargeOverrides[c.chargeTypeId]),
         gstMode: c.gstMode,
         hsnCodeId: c.gstMode === 'HSN' ? c.hsnCodeId : null,
@@ -4011,6 +4025,7 @@ export function PurchaseOrderDialog({
                         unsavedChange: c.chargeTypeId in chargeOverrides,
                         savedAs:
                           !(c.chargeTypeId in chargeOverrides) &&
+                          !freshCharges.includes(c.chargeTypeId) &&
                           record?.charges?.some((s) => s.chargeTypeId === c.chargeTypeId)
                             ? 'as saved on this order'
                             : undefined,
@@ -4396,7 +4411,12 @@ export function PurchaseOrderDialog({
                 same sum the server saves and the print shows. */}
               <div className="lg:sticky lg:top-0">
                 <Section icon={Calculator} title="Summary">
-                  <PurchaseSummary result={totals.result} split={taxMode} />
+                  <PurchaseSummary
+                    result={totals.result}
+                    split={taxMode}
+                    itemNames={activeLines.map((l) => itemById.get(l.itemId)?.name ?? 'Item')}
+                    chargeNames={totals.chargeRows.map((c) => c.name)}
+                  />
                 </Section>
               </div>
             </div>

@@ -107,6 +107,8 @@ export interface BillCharge {
   taxSnapshot?: ChargeTaxSnapshot | null
   amountMode?: 'FIXED' | 'PERCENT'
   taxOverride?: ChargeTaxSnapshot
+  /** Added in this form: takes today's Masters → Charges setting, never a saved row's. */
+  fresh?: boolean
   chargeTypeId: string
   amount: number | string
   /** Where gstRate comes from — see resolveBillCharges on the server. */
@@ -1989,7 +1991,7 @@ export function PurchaseBillDialog({
         .map((c) => ({
           chargeTypeId: c.chargeTypeId,
           amount: num(c.amount),
-          amountMode: c.amountMode ?? 'FIXED', sourceChargeId: c.sourceChargeId, taxOverride: taxOverridePayload(c.taxOverride),
+          amountMode: c.amountMode ?? 'FIXED', sourceChargeId: c.fresh ? undefined : c.sourceChargeId, fresh: c.fresh || undefined, taxOverride: taxOverridePayload(c.taxOverride),
           gstMode: c.gstMode,
           hsnCodeId: c.gstMode === 'HSN' ? c.hsnCodeId || null : null,
           gstRate: chargeRateOf(c),
@@ -3303,6 +3305,7 @@ export function PurchaseBillDialog({
                           ...rows,
                           {
                             chargeTypeId: id,
+                            fresh: true,
                             amount: '',
                             gstMode: mode,
                             hsnCodeId: mode === 'HSN' ? (type?.defaultHsnCodeId ?? '') : '',
@@ -3384,6 +3387,8 @@ export function PurchaseBillDialog({
                     result={priced}
                     split={taxMode}
                     totalLabel="Bill total"
+                    itemNames={lines.map((l) => itemById.get(l.itemId)?.name ?? l.description ?? 'Line')}
+                    chargeNames={charges.map((c, i) => c.taxSnapshot?.name ?? chargeTypes.find((ct) => ct.id === c.chargeTypeId)?.name ?? `Charge ${i + 1}`)}
                     extra={
                       <>
                         {isReverseCharge && totals.tax > 0 && (
