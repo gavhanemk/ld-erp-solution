@@ -287,7 +287,7 @@ await check('a purchase order with two item lines, made and saved as a draft by 
   await wait(1200)
   const fill = async (n) => {
     const row = page.locator('tbody[data-grid] > [data-grid-row]').nth(n)
-    await row.locator('button[role="combobox"]').nth(3).focus() // the item box
+    await row.getByLabel(/^Row \d+ item$/).focus() // the item box
     await key('Enter')
     await wait(200)
     await type('button')
@@ -358,7 +358,7 @@ await check('Alt+C copies a PO line under it: quantity carried, item left to pic
   await page.locator('[aria-labelledby="po-dialog-title"]').waitFor({ timeout: 8000 })
   await wait(1500)
   const row = page.locator('tbody[data-grid] > [data-grid-row]').first()
-  const itemBox = row.locator('button[role="combobox"]').nth(3)
+  const itemBox = row.getByLabel(/^Row \d+ item$/)
   await itemBox.focus()
   await key('Enter')
   await wait(200)
@@ -373,7 +373,7 @@ await check('Alt+C copies a PO line under it: quantity carried, item left to pic
   const lines = page.locator('tbody[data-grid] > [data-grid-row]')
   const count = await lines.count()
   const item1 = (await itemBox.innerText()).trim()
-  const item2 = (await lines.nth(1).locator('button[role="combobox"]').nth(3).innerText()).trim()
+  const item2 = (await lines.nth(1).getByLabel(/^Row \d+ item$/).innerText()).trim()
   const qty2 = await lines.nth(1).getByLabel(/quantity/i).inputValue()
   const inLine2 = await page.evaluate(() => {
     const rows = [...document.querySelectorAll('tbody[data-grid] > [data-grid-row]')]

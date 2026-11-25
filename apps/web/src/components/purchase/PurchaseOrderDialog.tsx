@@ -484,8 +484,7 @@ const COL = {
   num: 'w-8',
   // Remove and copy, side by side.
   remove: 'w-16',
-  item: 'w-64',
-  category: 'w-40',
+  item: 'w-80',
   // Wide enough for a whole style code (LD-SH-2601) now that it fills in
   // from the item; at w-24 its last digit was cut off.
   style: 'w-28',
@@ -1306,48 +1305,52 @@ export function PurchaseOrderDialog({
     for (const c of categories) if (c.parentId && heads.has(c.parentId)) heads.add(c.id)
     return heads
   }, [categories])
-  const offersExpenses = serviceMode || lines.some((l) => expenseCategoryIds.has(l.categoryId ?? ''))
-  const topCategories = useMemo(
-    () => categories.filter((c) => !c.parentId && (offersExpenses || !expenseCategoryIds.has(c.id))),
-    [categories, offersExpenses, expenseCategoryIds]
-  )
-
-  /** The children of one category, for that row's second dropdown. */
-  const subCategoriesOf = (categoryId?: string | null) =>
-    categoryId ? categories.filter((c) => c.parentId === categoryId) : []
+  /** "Raw Materials › Fabric" — where an item is filed, for the line under it. */
+  const categoryPathOf = (categoryId?: string | null) => {
+    const c = categories.find((x) => x.id === categoryId)
+    if (!c) return ''
+    const parent = c.parentId ? categories.find((x) => x.id === c.parentId) : undefined
+    return parent ? `${parent.name} › ${c.name}` : c.name
+  }
 
   /**
-   * The items one row may choose from, narrowed by whichever category level
-   * that row has picked. Narrowing is per row on purpose: a fabric line and a
-   * button line sit on the same order and were never looking at the same list.
+   * Every item a row may pick, for its one search box (25 Nov 2026 — it
+   * replaced the category, sub-category, code and name dropdowns). The search
+   * matches the code, the name and the category under it, so narrowing by
+   * category is typing it.
+   *
+   * The same rule as before: a goods order does not offer expense heads'
+   * items (one already on the row stays); a service order offers everything,
+   * its expense heads first, since its rows start on them.
    */
-  const itemsFor = (line: PoLine) => {
-    const childIds = new Set(subCategoriesOf(line.categoryId).map((c) => c.id))
-    const inCategory = items.filter((it) => {
-      // A goods order's rows do not list expense heads' items; one already on the row stays.
-      if (!serviceMode && it.id !== line.itemId && expenseCategoryIds.has(it.categoryId ?? '')) return false
-      if (line.subcategoryId) return it.categoryId === line.subcategoryId
-      if (line.categoryId) {
-        return it.categoryId === line.categoryId || childIds.has(it.categoryId ?? '')
-      }
-      return true
-    })
-
-    /*
-     * A half-typed code narrows the list as well.
-     *
-     * Only while the row has no item yet. Once one is chosen the code box
-     * holds that item's exact code, and narrowing by it would leave the Item
-     * dropdown with a single option — so changing your mind about the item
-     * would mean clearing the code box first.
-     */
-    const typed = (line.codeText ?? '').trim().toLowerCase()
-    if (line.itemId || !typed) return inCategory
-
-    return inCategory.filter(
-      (it) => (it.code ?? '').toLowerCase().includes(typed) || it.name.toLowerCase().includes(typed)
-    )
+  const itemChoices = (line: PoLine) => {
+    const isExpense = (it: Option) => expenseCategoryIds.has(it.categoryId ?? '')
+    const list = items.filter((it) => serviceMode || it.id === line.itemId || !isExpense(it))
+    return serviceMode ? [...list.filter(isExpense), ...list.filter((it) => !isExpense(it))] : list
   }
+
+  /** The row's one item box: code and name to pick by, category and unit under each. */
+  const itemSelect = (line: PoLine, i: number, className: string) => (
+    <SmartSelect
+      className={className}
+      value={line.itemId}
+      onChange={(e) => pickItemFor(i, e.target.value)}
+      aria-label={`Row ${i + 1} item`}
+    >
+      <option value="">Search code, name or category…</option>
+      {/* Only on an empty row: on a chosen one it would quietly replace the item. */}
+      {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
+      {itemChoices(line).map((it) => (
+        <option
+          key={it.id}
+          value={it.id}
+          data-sub={[categoryPathOf(it.categoryId), it.uom?.symbol].filter(Boolean).join(' · ') || undefined}
+        >
+          {it.code ? `${it.code} — ${it.name}` : it.name}
+        </option>
+      ))}
+    </SmartSelect>
+  )
 
   /** A fresh, empty row. The table always has at least one. */
   const blankLine = (): PoLine => ({
@@ -1835,47 +1838,6 @@ export function PurchaseOrderDialog({
         )}
       </div>
     )
-  }
-
-  /**
-   * Whether an item is filed under a category choice: the category itself or
-   * one of its sub-categories, or — with a sub-category picked — that one.
-   */
-  const itemFits = (itemId: string, categoryId: string, subcategoryId: string) => {
-    const item = itemId ? itemById.get(itemId) : undefined
-    if (!item) return true
-    if (subcategoryId) return item.categoryId === subcategoryId
-    if (!categoryId) return true
-    const filed = categories.find((c) => c.id === item.categoryId)
-    return item.categoryId === categoryId || filed?.parentId === categoryId
-  }
-
-  /**
-   * Picks a row's category, or its sub-category under the same category.
-   *
-   * An item that is not filed under the new choice goes, with what came with
-   * it — its code, its GST rate and a style it filled in. Left in place it
-   * read "Buttons & Fasteners" beside Cotton Oxford: a row contradicting
-   * itself, and an order that would go out with the wrong thing on it. What
-   * was typed by hand (quantity, rate, description) stays.
-   */
-  const chooseCategory = (index: number, categoryId: string, subcategoryId = '') => {
-    const line = lines[index]
-    if (itemFits(line.itemId, categoryId, subcategoryId)) {
-      setLine(index, { categoryId, subcategoryId })
-      return
-    }
-    const itemStyle = itemById.get(line.itemId)?.style?.code ?? ''
-    setLine(index, {
-      categoryId,
-      subcategoryId,
-      itemId: '',
-      codeText: '',
-      gstRate: '',
-      ...(itemStyle && line.styleNo === itemStyle ? { styleNo: '', styleId: '' } : {}),
-      // The item it bought for the sample has gone, so the link goes with it.
-      ...(line.sampleMaterialId ? SAMPLE_UNLINKED : {}),
-    })
   }
 
   /**
@@ -3190,24 +3152,27 @@ export function PurchaseOrderDialog({
                 {poType === 'ITEM_LEVEL'
                   ? 'A discount per line, in the Discount column — percent or rupees.'
                   : poType === 'ORDER_LEVEL'
-                    ? 'One discount off the whole order, entered as Total discount on the right. The per-line Discount cells are switched off.'
-                    : 'No discount on this order. Both the per-line cells and the order-level box are switched off.'}
+                    ? 'One discount off the whole order, typed under the table.'
+                    : 'No discount on this order.'}
               </p>
 
               <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
-                <table className="w-full min-w-[1180px] table-fixed border-collapse text-sm">
+                <table
+                  className={`w-full table-fixed border-collapse text-sm ${
+                    poType === 'ITEM_LEVEL' ? 'min-w-[1040px]' : 'min-w-[900px]'
+                  }`}
+                >
                   <thead>
                     <tr className="bg-secondary">
                       {[
                         ['#', `${COL.num} sticky left-0 z-20 bg-secondary`, 'left'],
                         ['', `${COL.remove} sticky left-8 z-20 bg-secondary`, 'left'],
-                        ['Category', COL.category, 'left'],
                         ['Item', `${COL.item} border-border border-r`, 'left'],
                         ['Style no.', COL.style, 'left'],
                         ['Description', COL.description, 'left'],
                         ['Qty', COL.qty, 'right'],
                         ['Rate', COL.rate, 'right'],
-                        ['Discount', COL.discount, 'right'],
+                        ...(poType === 'ITEM_LEVEL' ? [['Discount', COL.discount, 'right']] : []),
                         ['Tax %', COL.tax, 'right'],
                         ['Amount', COL.amount, 'right'],
                       ].map(([label, width, align], i) => (
@@ -3226,26 +3191,6 @@ export function PurchaseOrderDialog({
                     {lines.map((line, i) => {
                       const item = itemById.get(line.itemId)
 
-                      /*
-                       * Where this row's item is actually filed, used when the
-                       * row has not narrowed anything itself.
-                       *
-                       * Worked out here rather than stored on the line, because
-                       * the category list arrives from the server after the form
-                       * has already been filled from the record — an order
-                       * opened for editing in that first moment would have shown
-                       * "All / None" beside an item that is plainly under Fabric.
-                       * Derived, it is right whenever the list arrives.
-                       */
-                      const filed = categories.find((c) => c.id === item?.categoryId)
-                      const view = {
-                        ...line,
-                        categoryId: line.categoryId || filed?.parentId || filed?.id || '',
-                        subcategoryId: line.subcategoryId || (filed?.parentId ? filed.id : ''),
-                      }
-
-                      const subs = subCategoriesOf(view.categoryId)
-                      const choices = itemsFor(view)
                       const money = priceOf(line)
                       // Outlined only once the row has an item — a blank row is
                       // not unfinished, it is just empty.
@@ -3300,111 +3245,13 @@ export function PurchaseOrderDialog({
                             </div>
                           </td>
 
-                          {/* First, because it is the first thing decided.
-                            It was the fourth column, after the item it exists
-                            to narrow, which read as a label on a choice already
-                            made rather than the filter it is — a buyer scrolled
-                            the whole master looking for a button because the
-                            box that would have cut it to eleven rows was past
-                            the thing they were hunting through. */}
-                          <td className={COL.category}>
-                            <div className="space-y-1">
-                              <SmartSelect
-                                className={cell}
-                                value={view.categoryId}
-                                onChange={(e) =>
-                                  // Clearing the subcategory with it: the one
-                                  // chosen a moment ago belongs to the category
-                                  // just replaced. An item from another
-                                  // category goes too — see chooseCategory.
-                                  chooseCategory(i, e.target.value)
-                                }
-                                aria-label={`Row ${i + 1} category`}
-                              >
-                                <option value="">All categories</option>
-                                {topCategories.map((c) => (
-                                  <option key={c.id} value={c.id}>
-                                    {c.name}
-                                  </option>
-                                ))}
-                              </SmartSelect>
-                              {/* Always here, greyed where the category has no
-                                subcategories rather than vanishing. Hiding it
-                                made the row change shape as the category was
-                                picked, and left the buyer wondering where the
-                                box had gone — which is worse than a box that
-                                is plainly not needed yet. */}
-                              <SmartSelect
-                                className={cell}
-                                value={view.subcategoryId}
-                                disabled={subs.length === 0}
-                                onChange={(e) => chooseCategory(i, view.categoryId, e.target.value)}
-                                aria-label={`Row ${i + 1} subcategory`}
-                              >
-                                {/* Short, because this box is half the width of
-                                  the words. It sits directly under the category
-                                  it belongs to, so "All" is not ambiguous. */}
-                                <option value="">{subs.length === 0 ? 'None' : 'All'}</option>
-                                {subs.map((c) => (
-                                  <option key={c.id} value={c.id}>
-                                    {c.name}
-                                  </option>
-                                ))}
-                              </SmartSelect>
-                            </div>
-                          </td>
-
                           <td className={`${COL.item} border-border border-r`}>
-                            {/* The code and the name are one cell, as they are
-                              on the mill's old form.
-
-                              They were two columns of 128px each, which is
-                              enough for neither: an item code was cut off at
-                              "PKG-TAPE-(" and the name at "Choose an it". They
-                              name the same thing, so one wide cell shows both
-                              whole and gives the table back a column. */}
-                            <div className="space-y-1">
-                              {/* The code, as the same searchable dropdown as
-                                every other on the form: type a code or part of
-                                the name and the list narrows, each code with its
-                                item's name under it. Picking one picks the item.
-                                One list per row, because each row narrows its
-                                items by its own category. */}
-                              <SmartSelect
-                                className={`${cell} font-mono`}
-                                value={line.itemId}
-                                onChange={(e) => pickItemFor(i, e.target.value)}
-                                aria-label={`Row ${i + 1} item code`}
-                              >
-                                <option value="">Item code</option>
-                                {choices.map((it) => (
-                                  <option key={it.id} value={it.id} data-sub={it.name}>
-                                    {it.code ?? it.name}
-                                  </option>
-                                ))}
-                              </SmartSelect>
-                              <SmartSelect
-                                className={cell}
-                                value={line.itemId}
-                                onChange={(e) => pickItemFor(i, e.target.value)}
-                                aria-label={`Row ${i + 1} item`}
-                              >
-                                <option value="">
-                                  {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
-                                </option>
-                                {/* A chosen item stands alone here — its code already decided it.
-                                    The code list still offers the rest, and "Choose an item..." clears
-                                    the row to show every name again. Adding a new item is offered
-                                    only on an empty row: on a chosen one it would quietly replace
-                                    the item, code and all. */}
-                                {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
-                                {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
-                                  <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
-                                    {it.name}
-                                  </option>
-                                ))}
-                              </SmartSelect>
-                            </div>
+                            {itemSelect(line, i, cell)}
+                            {item && (
+                              <p className="text-muted-foreground mt-0.5 truncate text-[10px] leading-tight" title={categoryPathOf(item.categoryId)}>
+                                {[categoryPathOf(item.categoryId), item.uom?.symbol].filter(Boolean).join(' · ')}
+                              </p>
+                            )}
                             {/* What the row is, under what it is called: the
                               HSN the tax hangs off, and the indent it answers
                               where it came off one. Both belong beside the
@@ -3528,6 +3375,7 @@ export function PurchaseOrderDialog({
                             )}
                           </td>
 
+                          {poType === 'ITEM_LEVEL' && (
                           <td className={COL.discount}>
                             {/* Percent or rupees, as the mill's old form
                               allowed. Both sit in the cell, so which one this
@@ -3557,6 +3405,7 @@ export function PurchaseOrderDialog({
                               </SmartSelect>
                             </div>
                           </td>
+                          )}
 
                           <td className={COL.tax}>
                             <StepInput
@@ -3631,14 +3480,6 @@ export function PurchaseOrderDialog({
               <div className="space-y-3 sm:hidden">
                 {lines.map((line, i) => {
                   const item = itemById.get(line.itemId)
-                  const filed = categories.find((c) => c.id === item?.categoryId)
-                  const view = {
-                    ...line,
-                    categoryId: line.categoryId || filed?.parentId || filed?.id || '',
-                    subcategoryId: line.subcategoryId || (filed?.parentId ? filed.id : ''),
-                  }
-                  const subs = subCategoriesOf(view.categoryId)
-                  const choices = itemsFor(view)
                   const money = priceOf(line)
                   const needsQty = Boolean(line.itemId) && num(line.qty) <= 0
                   const needsRate = Boolean(line.itemId) && String(line.unitRate).trim() === ''
@@ -3663,85 +3504,14 @@ export function PurchaseOrderDialog({
                         </button>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="space-y-1">
-                          <label className={fieldLabel}>Category</label>
-                          <SmartSelect
-                            className={cell}
-                            value={view.categoryId}
-                            onChange={(e) => chooseCategory(i, e.target.value)}
-                            aria-label={`Row ${i + 1} category`}
-                          >
-                            <option value="">All categories</option>
-                            {topCategories.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </SmartSelect>
-                        </div>
-                        <div className="space-y-1">
-                          <label className={fieldLabel}>Sub-category</label>
-                          <SmartSelect
-                            className={cell}
-                            value={view.subcategoryId}
-                            disabled={subs.length === 0}
-                            onChange={(e) => chooseCategory(i, view.categoryId, e.target.value)}
-                            aria-label={`Row ${i + 1} subcategory`}
-                          >
-                            <option value="">{subs.length === 0 ? 'None' : 'All'}</option>
-                            {subs.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </SmartSelect>
-                        </div>
-                      </div>
-
-                      <div className="mt-2 space-y-1">
+                      <div className="space-y-1">
                         <label className={fieldLabel}>Item</label>
-                        {/* Code and name side by side rather than stacked — the
-                          code is short enough that giving it a full row of its
-                          own on a phone was one more screen of scrolling per
-                          line for nothing the width needed. */}
-                        <div className="flex gap-1.5">
-                          {/* `cell` carries `w-full`, which would fight a
-                            flex-basis override here — spelled out without it
-                            so the fixed code column and the flexible name
-                            column actually hold the widths they are given. */}
-                          <SmartSelect
-                            className="form-input h-9 w-28 shrink-0 px-2 font-mono text-xs"
-                            value={line.itemId}
-                            onChange={(e) => pickItemFor(i, e.target.value)}
-                            aria-label={`Row ${i + 1} item code`}
-                          >
-                            <option value="">Code</option>
-                            {choices.map((it) => (
-                              <option key={it.id} value={it.id} data-sub={it.name}>
-                                {it.code ?? it.name}
-                              </option>
-                            ))}
-                          </SmartSelect>
-                          <SmartSelect
-                            className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
-                            value={line.itemId}
-                            onChange={(e) => pickItemFor(i, e.target.value)}
-                            aria-label={`Row ${i + 1} item`}
-                          >
-                            <option value="">
-                              {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
-                            </option>
-                            {/* As on the desktop row: a chosen item stands alone, and a new
-                                item is offered only on an empty row. */}
-                            {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
-                            {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
-                              <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
-                                {it.name}
-                              </option>
-                            ))}
-                          </SmartSelect>
-                        </div>
+                        {itemSelect(line, i, cell)}
+                        {item && (
+                          <p className="text-muted-foreground text-[10px] leading-tight">
+                            {[categoryPathOf(item.categoryId), item.uom?.symbol].filter(Boolean).join(' · ')}
+                          </p>
+                        )}
                         {(item?.hsnCode || line.mrNumber || line.sampleRef) && (
                           <p className="flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
                             {item?.hsnCode && (
@@ -3832,6 +3602,7 @@ export function PurchaseOrderDialog({
                       </div>
 
                       <div className="mt-2 grid grid-cols-2 gap-2">
+                        {poType === 'ITEM_LEVEL' && (
                         <div className="space-y-1">
                           <label className={fieldLabel}>Discount</label>
                           {/* `cell` carries `w-full`, which fights a
@@ -3865,6 +3636,7 @@ export function PurchaseOrderDialog({
                             </SmartSelect>
                           </div>
                         </div>
+                        )}
                         <div className="space-y-1">
                           <label className={fieldLabel}>Tax %</label>
                           <StepInput
@@ -4924,10 +4696,8 @@ export function PurchaseOrderDialog({
              * list is fetched once, when the form opens.
              *
              * `categoryId` is spelled out because this form's items carry the
-             * id flat while the master returns the category nested, and
-             * `itemsFor` narrows on the flat one. Without it the new item
-             * would sit outside every category and vanish the moment the row
-             * it was made for narrowed to the category it was filed under.
+             * id flat while the master returns the category nested, and the
+             * item box reads the flat one for the "Category › Sub" line.
              */
             const option: Option = {
               id: created.id,
