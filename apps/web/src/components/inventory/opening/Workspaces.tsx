@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState, type ReactNode } from 'react'
-import { ExternalLink, Factory, Package, Plus, Search, Shirt, Trash2 } from 'lucide-react'
+import { ExternalLink, Factory, Package, Plus, Search, Shirt, Tag, Trash2, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
@@ -136,18 +136,15 @@ export function FinishedGoods({ garments, onChange, ...shared }: Shared & { garm
   }
   return (
     <section className="space-y-3" aria-label="Finished goods by style">
-      <div className="glass-card flex flex-wrap items-center gap-3 px-4 py-3">
-        <span className="text-foreground flex items-center gap-2 text-sm font-semibold">
-          <Search size={15} className="text-primary" /> Add a style
-        </span>
+      <Toolbar icon={Search} title="Add a style" hint="By style, item code or item name">
         <StyleSearch options={options} taken={taken} onPick={add} />
         {garments.length > 0 && (
-          <span className="text-muted-foreground text-xs">
+          <span className="badge-neutral">
             {garments.length} {garments.length === 1 ? 'style' : 'styles'} added
           </span>
         )}
-      </div>
-      {garments.length === 0 && <Empty icon={Shirt} text="Pick a style to enter its finished pieces: a box for each of its colours and sizes." />}
+      </Toolbar>
+      {garments.length === 0 && <Empty icon={Shirt} title="No styles yet" text="Pick a style above to enter its finished pieces: a box for each of its colours and sizes." />}
       {garments.map((g) => {
         const st = options.styles.find((x) => x.id === g.styleId)
         if (!st) return null
@@ -211,12 +208,32 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
   }
   return (
     <section className="space-y-3" aria-label="Semi-finished goods by style and process">
-      <div className="glass-card space-y-2 p-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <Factory size={16} className="text-primary" />
-          <span className="text-foreground text-sm font-semibold">Add a style at a process</span>
+      <Toolbar
+        icon={Factory}
+        title="Add a style at a process"
+        hint="Style, then where its pieces are"
+        footer={
+          <>
+            {style && !style.route && (
+              <p className="flex flex-wrap items-center gap-x-2 text-sm text-amber-600">
+                {style.code} has no route yet, so where its pieces can be is not known. Set one up, then reload.
+                <a className="text-primary inline-flex items-center gap-1 font-medium hover:underline" href="/masters/routings" target="_blank" rel="noreferrer">
+                  Open Routings <ExternalLink size={12} />
+                </a>
+                <ReloadButton busy={busy} onClick={() => void reload()} />
+              </p>
+            )}
+            {style?.route && (
+              <p className="text-muted-foreground text-xs">
+                {style.code}&apos;s route{style.routeFrom?.applies === 'CATEGORY' ? ' (its category’s)' : style.routeFrom?.applies === 'ANY' ? ' (the one for any style)' : ''}:{' '}
+                {style.route.map((p) => p.name).join(' → ')}. Only these processes can hold its pieces.
+              </p>
+            )}
+          </>
+        }
+      >
           <SmartSelect
-            className="form-input h-9 w-72"
+            className="form-input h-10 w-64"
             value={styleId}
             onChange={(e) => {
               // A new style: its route and its items, so the process and item chosen for the last one go.
@@ -233,7 +250,7 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
               </option>
             ))}
           </SmartSelect>
-          <SmartSelect className="form-input h-9 w-64" value={itemId} onChange={(e) => setItemId(e.target.value)} disabled={!style || !(style.items ?? []).length} aria-label="Item (optional)">
+          <SmartSelect className="form-input h-10 w-60" value={itemId} onChange={(e) => setItemId(e.target.value)} disabled={!style || !(style.items ?? []).length} aria-label="Item (optional)">
             <option value="">{style ? `All its items (${(style.items ?? []).length})` : 'Item: pick a style first'}</option>
             {(style?.items ?? []).map((i) => (
               <option key={i.id} value={i.id} data-sub={[i.name, i.colour, i.description].filter(Boolean).join(' · ')}>
@@ -241,7 +258,7 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
               </option>
             ))}
           </SmartSelect>
-          <SmartSelect className="form-input h-9 w-64" value={processId} onChange={(e) => setProcessId(e.target.value)} disabled={!style || !style.route} aria-label="Process">
+          <SmartSelect className="form-input h-10 w-60" value={processId} onChange={(e) => setProcessId(e.target.value)} disabled={!style || !style.route} aria-label="Process">
             <option value="">{style ? '2. Where are the pieces?' : '2. Pick a style first'}</option>
             {route.map((p) => (
               <option key={p.id} value={p.id}>
@@ -249,27 +266,11 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
               </option>
             ))}
           </SmartSelect>
-          <button type="button" className="btn-primary h-9 text-sm" disabled={!style || !processId} onClick={add}>
+          <button type="button" className="btn-primary h-10 text-sm" disabled={!style || !processId} onClick={add}>
             <Plus size={14} /> Add
           </button>
-        </div>
-        {style && !style.route && (
-          <p className="flex flex-wrap items-center gap-x-2 text-sm text-amber-600">
-            {style.code} has no route yet, so where its pieces can be is not known. Set one up, then reload.
-            <a className="text-primary inline-flex items-center gap-1 font-medium hover:underline" href="/masters/routings" target="_blank" rel="noreferrer">
-              Open Routings <ExternalLink size={12} />
-            </a>
-            <ReloadButton busy={busy} onClick={() => void reload()} />
-          </p>
-        )}
-        {style?.route && (
-          <p className="text-muted-foreground text-xs">
-            {style.code}&apos;s route{style.routeFrom?.applies === 'CATEGORY' ? ' (its category’s)' : style.routeFrom?.applies === 'ANY' ? ' (the one for any style)' : ''}:{' '}
-            {style.route.map((p) => p.name).join(' → ')}. Only these processes can hold its pieces.
-          </p>
-        )}
-      </div>
-      {garments.length === 0 && <Empty icon={Factory} text="Pick a style and the process its pieces are at: a box for each of its colours and sizes." />}
+      </Toolbar>
+      {garments.length === 0 && <Empty icon={Factory} title="No styles yet" text="Pick a style and the process its pieces are at: a box for each of its colours and sizes." />}
       {garments.map((g) => {
         const st = options.styles.find((x) => x.id === g.styleId)
         const p = options.processes.find((x) => x.id === g.processId) ?? st?.route?.find((x) => x.id === g.processId)
@@ -342,11 +343,9 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
   const categoryName = (id: string) => options.categories.find((c) => c.id === id)?.name ?? ''
   return (
     <section className="space-y-3" aria-label="Raw materials by item">
-      <div className="glass-card flex flex-wrap items-center gap-3 p-3">
-        <Package size={16} className="text-primary" />
-        <span className="text-foreground text-sm font-semibold">Add a material</span>
+      <Toolbar icon={Package} title="Add a material" hint="Category, then its item">
         <SmartSelect
-          className="form-input h-9 w-64"
+          className="form-input h-10 w-64"
           value={categoryId}
           onChange={(e) => {
             // Another category: its own items, so the item picked goes.
@@ -362,7 +361,7 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
             </option>
           ))}
         </SmartSelect>
-        <SmartSelect className="form-input h-9 min-w-72 flex-1" value={itemId} onChange={(e) => setItemId(e.target.value)} disabled={!categoryId} aria-label="Item">
+        <SmartSelect className="form-input h-10 min-w-72 flex-1" value={itemId} onChange={(e) => setItemId(e.target.value)} disabled={!categoryId} aria-label="Item">
           <option value="">{categoryId ? (inCategory.length ? '2. The item…' : 'Every item here is already added') : '2. Pick a category first'}</option>
           {inCategory.map((i) => (
             <option key={i.id} value={i.id} data-sub={`${i.code}${i.unit ? ` · in ${i.unit}` : ''}`}>
@@ -370,11 +369,11 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
             </option>
           ))}
         </SmartSelect>
-        <button type="button" className="btn-primary h-9 text-sm" disabled={!itemId} onClick={add}>
+        <button type="button" className="btn-primary h-10 text-sm" disabled={!itemId} onClick={add}>
           <Plus size={14} /> Add
         </button>
-      </div>
-      {materials.length === 0 && <Empty icon={Package} text="Pick a category, then its item: a row for each lot or roll, in the item's own unit." />}
+      </Toolbar>
+      {materials.length === 0 && <Empty icon={Package} title="No materials yet" text="Pick a category, then its item: a row for each lot or roll, in the item's own unit." />}
       {materials.map((m) => {
         const it = options.items.find((x) => x.id === m.itemId)
         if (!it) return null
@@ -387,18 +386,26 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
             key={m.key}
             label={`Item ${it.code}`}
             title={
-              <>
-                <span className="font-mono font-semibold text-teal-400">{it.code}</span> <span className="text-foreground">{it.name}</span>
-                <span className="text-muted-foreground ml-2 text-xs">
-                  {categoryName(it.categoryId)} · in {it.unit ?? '—'}
-                </span>
-              </>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-foreground text-base font-semibold leading-tight">{it.name}</span>
+                  <span className="bg-primary/10 rounded-md px-1.5 py-0.5 font-mono text-xs font-semibold text-teal-400">{it.code}</span>
+                  {it.tracked && (
+                    <span className="badge-neutral">
+                      <Tag size={11} /> Labelled by package
+                    </span>
+                  )}
+                </div>
+                <div className="text-muted-foreground mt-0.5 text-xs">
+                  {categoryName(it.categoryId)} · counted in {it.unit ?? '—'} · {m.lots.length} {m.lots.length === 1 ? 'lot' : 'lots'}
+                </div>
+              </div>
             }
             totals={<BlockTotals pieces={qty} value={value} unit={it.unit ?? ''} />}
             problems={lotProblems.length ? lotProblems : undefined}
             onRemove={() => onChange(materials.filter((x) => x.key !== m.key))}
           >
-            <LotRows item={it} lots={m.lots} problems={shared.problems} onChange={setLots} />
+            <LotRows item={it} lots={m.lots} problems={shared.problems} onChange={setLots} qty={qty} value={value} />
           </Block>
         )
       })}
@@ -406,64 +413,116 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
   )
 }
 
-function LotRows({ item, lots, problems, onChange }: { item: MaterialOption; lots: Lot[]; problems: Map<string, string[]>; onChange: (lots: Lot[]) => void }) {
+function LotRows({
+  item,
+  lots,
+  problems,
+  onChange,
+  qty,
+  value,
+}: {
+  item: MaterialOption
+  lots: Lot[]
+  problems: Map<string, string[]>
+  onChange: (lots: Lot[]) => void
+  qty: number
+  value: number
+}) {
   const set = (key: string, change: Partial<Lot>) => onChange(lots.map((l) => (l.key === key ? { ...l, ...change } : l)))
+  const unit = item.unit ?? ''
   return (
-    <div className="space-y-2">
-      <table className="subtable w-full text-sm">
+    <div className="border-border overflow-x-auto rounded-lg border">
+      <table className="w-full text-sm">
         <thead>
-          <tr className="text-muted-foreground text-left text-[11px] font-semibold uppercase tracking-wide">
-            <th className="py-1.5 pr-2">Lot / Batch / Roll No.</th>
-            <th className="px-2 py-1.5">Bundle / Barcode No.</th>
-            <th className="w-40 px-2 py-1.5 text-right">Opening Qty</th>
-            <th className="w-32 px-2 py-1.5 text-right">Unit Rate ₹</th>
-            <th className="w-32 px-2 py-1.5 text-right">Opening Value</th>
-            {item.tracked && <th className="w-44 px-2 py-1.5">Packed as</th>}
-            <th className="w-8" />
+          <tr className="bg-secondary text-muted-foreground text-left text-[11px] font-semibold uppercase tracking-wide">
+            <th className="w-10 px-3 py-2">#</th>
+            <th className="min-w-[10rem] px-2 py-2">Lot / Batch / Roll No.</th>
+            <th className="min-w-[10rem] px-2 py-2">Bundle / Barcode No.</th>
+            <th className="w-44 px-2 py-2 text-right">Opening Qty</th>
+            <th className="w-36 px-2 py-2 text-right">Unit Rate</th>
+            <th className="w-32 px-3 py-2 text-right">Value</th>
+            {item.tracked && <th className="w-52 px-2 py-2">Packed as</th>}
+            <th className="w-10" />
           </tr>
         </thead>
         <tbody>
           {lots.map((l, i) => (
             <tr key={l.key} className={cn('border-border border-t', problems.get(l.key) && 'bg-red-500/5')}>
-              <td className="py-1.5 pr-2">
-                <input className="form-input" value={l.lot} onChange={(e) => set(l.key, { lot: e.target.value })} placeholder="Optional" aria-label={`Lot of ${item.code}, row ${i + 1}`} />
+              <td className="text-muted-foreground px-3 py-1.5 text-xs tabular-nums">{i + 1}</td>
+              <td className="px-2 py-1.5">
+                <input className="form-input h-9" value={l.lot} onChange={(e) => set(l.key, { lot: e.target.value })} placeholder="Optional" aria-label={`Lot of ${item.code}, row ${i + 1}`} />
               </td>
               <td className="px-2 py-1.5">
-                <input className="form-input" value={l.bundle} onChange={(e) => set(l.key, { bundle: e.target.value })} placeholder="Optional" aria-label={`Bundle of ${item.code}, row ${i + 1}`} />
+                <input className="form-input h-9" value={l.bundle} onChange={(e) => set(l.key, { bundle: e.target.value })} placeholder="Optional" aria-label={`Bundle of ${item.code}, row ${i + 1}`} />
               </td>
               <td className="px-2 py-1.5">
-                <div className="flex items-center gap-1">
-                  <StepInput className="form-input text-right" value={l.qty} decimals={item.decimals > 0} onValueChange={(v) => set(l.key, { qty: v })} aria-label={`Quantity of ${item.code}, row ${i + 1}`} />
-                  <span className="text-muted-foreground w-9 text-xs">{item.unit ?? ''}</span>
+                <div className="relative">
+                  <StepInput
+                    className="form-input h-9 pr-12 text-right"
+                    value={l.qty}
+                    decimals={item.decimals > 0}
+                    onValueChange={(v) => set(l.key, { qty: v })}
+                    aria-label={`Quantity of ${item.code}, row ${i + 1}`}
+                  />
+                  <span className="text-muted-foreground pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs">{unit}</span>
                 </div>
               </td>
               <td className="px-2 py-1.5">
-                <StepInput
-                  className="form-input text-right"
-                  value={l.rate}
-                  decimals
-                  onValueChange={(v) => set(l.key, { rate: v })}
-                  aria-label={`Rate of ${item.code}, row ${i + 1}`}
-                />
+                <div className="relative">
+                  <span className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-xs">₹</span>
+                  <StepInput
+                    className="form-input h-9 pl-7 text-right"
+                    value={l.rate}
+                    decimals
+                    onValueChange={(v) => set(l.key, { rate: v })}
+                    placeholder="Optional"
+                    aria-label={`Rate of ${item.code}, row ${i + 1}`}
+                  />
+                </div>
               </td>
-              <td className="text-foreground px-2 py-1.5 text-right font-semibold tabular-nums">{money(Number(l.qty || 0) * Number(l.rate || 0))}</td>
+              <td className="text-foreground px-3 py-1.5 text-right font-semibold tabular-nums">{money(Number(l.qty || 0) * Number(l.rate || 0))}</td>
               {item.tracked && (
                 <td className="px-2 py-1.5">
                   <PackedAs item={item} lot={l} row={i + 1} onChange={(pack) => set(l.key, { pack })} />
                 </td>
               )}
-              <td className="py-1.5">
-                <button type="button" className="btn-ghost p-1" disabled={lots.length === 1} onClick={() => onChange(lots.filter((x) => x.key !== l.key))} aria-label={`Remove row ${i + 1} of ${item.code}`}>
+              <td className="py-1.5 pr-2">
+                <button
+                  type="button"
+                  className="btn-ghost text-muted-foreground hover:text-destructive p-1.5"
+                  disabled={lots.length === 1}
+                  onClick={() => onChange(lots.filter((x) => x.key !== l.key))}
+                  aria-label={`Remove row ${i + 1} of ${item.code}`}
+                >
                   <Trash2 size={14} />
                 </button>
               </td>
             </tr>
           ))}
         </tbody>
+        <tfoot>
+          <tr className="border-border bg-secondary/40 border-t">
+            <td colSpan={3} className="px-3 py-2">
+              <button type="button" className="text-primary flex items-center gap-1 text-xs font-semibold hover:underline" onClick={() => onChange([...lots, newLot()])}>
+                <Plus size={13} /> Add another lot or roll of {item.code}
+              </button>
+            </td>
+            <td className="text-foreground px-2 py-2 text-right text-sm font-semibold tabular-nums">
+              {qty ? (
+                <>
+                  {num(qty)} <span className="text-muted-foreground text-xs font-normal">{unit}</span>
+                </>
+              ) : (
+                '—'
+              )}
+            </td>
+            <td />
+            <td className="text-foreground px-3 py-2 text-right text-sm font-semibold tabular-nums">{value ? money(value) : '—'}</td>
+            {item.tracked && <td />}
+            <td />
+          </tr>
+        </tfoot>
       </table>
-      <button type="button" className="text-primary flex items-center gap-1 text-xs font-medium hover:underline" onClick={() => onChange([...lots, newLot()])}>
-        <Plus size={12} /> Add another lot or roll of {item.code}
-      </button>
     </div>
   )
 }
@@ -530,23 +589,46 @@ function Block({
 }) {
   return (
     <div className={cn('glass-card overflow-hidden p-0', problems && 'ring-1 ring-red-500/50')} aria-label={label}>
-      <div className="border-border flex flex-wrap items-center gap-3 border-b px-4 py-3">
+      <div className="border-border flex flex-wrap items-center gap-4 border-b px-5 py-3.5">
         <div className="min-w-0 flex-1 text-sm">{title}</div>
         {totals}
         <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1.5" onClick={onRemove} aria-label={`Remove ${label}`} title="Remove from this entry">
           <Trash2 size={15} />
         </button>
       </div>
-      <div className="space-y-3 p-4">
+      <div className="space-y-3 p-5">
         {children}
         {problems && (
-          <ul className="space-y-0.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400" aria-label="Problems">
+          <ul className="space-y-1 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-xs text-red-400" aria-label="Problems">
             {problems.map((p) => (
-              <li key={p}>{p}</li>
+              <li key={p} className="border-l-2 border-red-500/60 pl-2.5">
+                {p}
+              </li>
             ))}
           </ul>
         )}
       </div>
+    </div>
+  )
+}
+
+/** The bar a kind's lines are added from: what it adds and how, then its choices. */
+function Toolbar({ icon: Icon, title, hint, footer, children }: { icon: LucideIcon; title: string; hint: string; footer?: ReactNode; children: ReactNode }) {
+  return (
+    <div className="glass-card px-4 py-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex min-w-[12rem] items-center gap-3 pr-1">
+          <span className="bg-primary/10 text-primary flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
+            <Icon size={18} />
+          </span>
+          <div className="leading-tight">
+            <div className="text-foreground text-sm font-semibold">{title}</div>
+            <div className="text-muted-foreground text-xs">{hint}</div>
+          </div>
+        </div>
+        {children}
+      </div>
+      {footer && <div className="mt-2.5 sm:pl-12">{footer}</div>}
     </div>
   )
 }
@@ -564,11 +646,14 @@ function BlockTotals({ pieces, value, unit = 'pcs' }: { pieces: number; value: n
   )
 }
 
-function Empty({ icon: Icon, text }: { icon: typeof Package; text: string }) {
+function Empty({ icon: Icon, title, text }: { icon: LucideIcon; title: string; text: string }) {
   return (
-    <div className="border-border text-muted-foreground flex items-center gap-3 rounded-xl border border-dashed p-6 text-sm">
-      <Icon size={20} />
-      {text}
+    <div className="border-border bg-card/40 flex flex-col items-center gap-2 rounded-xl border border-dashed px-6 py-10 text-center">
+      <span className="bg-primary/10 text-primary flex h-11 w-11 items-center justify-center rounded-full">
+        <Icon size={20} />
+      </span>
+      <p className="text-foreground text-sm font-semibold">{title}</p>
+      <p className="text-muted-foreground max-w-md text-sm">{text}</p>
     </div>
   )
 }
