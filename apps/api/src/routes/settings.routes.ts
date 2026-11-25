@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
 import bcrypt from 'bcryptjs'
@@ -1015,10 +1016,25 @@ router.delete('/tds-sections/:id', requirePermission(SETTINGS, 'delete'), async 
 const DISPLAY_PREFERENCE_KEYS = ['rowsPerPage', 'dateFormat', 'qcInDailyProduction', 'issueByScanOnly'] as const
 
 router.get('/app', async (_req, res) => {
-  const values = await getPreferences()
+  const [values, company] = await Promise.all([
+    getPreferences(),
+    prisma.company.findFirst({ select: { name: true, logoUrl: true } }),
+  ])
   const data: Record<string, unknown> = {}
   for (const key of DISPLAY_PREFERENCE_KEYS) data[key] = values[key]
+  // The menu carries the company's own name and logo. The logo is kept as a
+  // picture of up to 400 KB, so only a fingerprint of it travels here, on
+  // every screen; the picture itself comes from /app/logo when it changes.
+  data.companyName = company?.name ?? null
+  data.logoKey = company?.logoUrl ? createHash('sha1').update(company.logoUrl).digest('hex').slice(0, 12) : null
   res.json({ success: true, data })
+})
+
+// The logo for the menu. Open to anyone signed in, like /app: it is printed on
+// every document the mill sends out, so there is nothing in it to withhold.
+router.get('/app/logo', async (_req, res) => {
+  const company = await prisma.company.findFirst({ select: { logoUrl: true } })
+  res.json({ success: true, data: { logoUrl: company?.logoUrl ?? null } })
 })
 
 router.get('/preferences', requirePermission(SETTINGS, 'view'), async (_req, res) => {

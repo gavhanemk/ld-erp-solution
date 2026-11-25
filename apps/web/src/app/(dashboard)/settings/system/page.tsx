@@ -1,10 +1,10 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { CheckCircle2, XCircle, RefreshCw, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react'
+import { CheckCircle2, XCircle, RefreshCw, ChevronLeft, ChevronRight, Loader2, Plug, Lock, History } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { settingsApi, type ActivityEntry, type SystemStatus } from '@/lib/settingsApi'
-import { Field, LoadingRow, Notice, SettingsCard } from '@/components/settings/ui'
+import { Field, FieldGrid, LoadingRow, Notice, SettingsCard } from '@/components/settings/ui'
 import { formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
@@ -50,6 +50,7 @@ function Connections() {
 
   return (
     <SettingsCard
+      icon={Plug}
       title="Connections"
       description="What the ERP is talking to right now. Each one is checked when this page loads, not assumed."
       actions={
@@ -69,44 +70,42 @@ function Connections() {
             {status.connections.map((c) => (
               <div
                 key={c.key}
-                className="flex items-start gap-3 p-3 rounded-lg border border-border bg-secondary/30"
+                className={`flex items-start gap-3 rounded-lg border p-3 ${
+                  c.connected ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-border/70'
+                }`}
               >
                 {c.connected ? (
-                  <CheckCircle2 size={16} className="text-emerald-400 mt-0.5 shrink-0" />
+                  <CheckCircle2 size={16} className="text-emerald-500 mt-0.5 shrink-0" />
                 ) : (
                   <XCircle size={16} className="text-muted-foreground mt-0.5 shrink-0" />
                 )}
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium text-foreground">{c.name}</p>
                   <p className="text-xs text-muted-foreground">{c.detail}</p>
                 </div>
+                <span className={c.connected ? 'badge-success shrink-0' : 'badge-neutral shrink-0'}>
+                  {c.connected ? 'Connected' : 'Not set up'}
+                </span>
               </div>
             ))}
           </div>
 
-          <div className="flex flex-wrap gap-x-8 gap-y-2 pt-4 border-t border-border text-xs text-muted-foreground">
-            <span>
-              Company: <span className="text-foreground">{status.company ?? 'Not set'}</span>
-            </span>
-            <span>
-              Financial year:{' '}
-              <span className="text-foreground">{status.financialYear ?? 'Not set'}</span>
-            </span>
-            <span>
-              People who can sign in:{' '}
-              <span className="text-foreground">{status.counts.activeUsers}</span>
-            </span>
-            <span>
-              Roles: <span className="text-foreground">{status.counts.roles}</span>
-            </span>
-            <span>
-              Recorded changes:{' '}
-              <span className="text-foreground">{status.counts.auditEntries.toLocaleString('en-IN')}</span>
-            </span>
-            <span>
-              Server: <span className="text-foreground">{status.server.environment}</span>, up{' '}
-              {formatUptime(status.server.uptimeSeconds)}
-            </span>
+          <div className="border-border/70 grid grid-cols-2 gap-3 border-t pt-4 md:grid-cols-3 xl:grid-cols-6">
+            {[
+              ['Company', status.company ?? 'Not set'],
+              ['Financial year', status.financialYear ?? 'Not set'],
+              ['People who can sign in', String(status.counts.activeUsers)],
+              ['Roles', String(status.counts.roles)],
+              ['Recorded changes', status.counts.auditEntries.toLocaleString('en-IN')],
+              ['Server', `${status.server.environment}, up ${formatUptime(status.server.uptimeSeconds)}`],
+            ].map(([label, value]) => (
+              <div key={label} className="bg-secondary/50 min-w-0 rounded-lg px-3 py-2">
+                <p className="text-muted-foreground text-[11px]">{label}</p>
+                <p className="text-foreground truncate text-sm font-semibold" title={value}>
+                  {value}
+                </p>
+              </div>
+            ))}
           </div>
         </div>
       ) : null}
@@ -158,14 +157,15 @@ function ChangeOwnPassword() {
 
   return (
     <SettingsCard
+      icon={Lock}
       title="Your password"
       description="Changes only your own sign-in. To reset someone else's, use the People tab."
     >
-      <form onSubmit={submit} className="space-y-4 max-w-xl">
+      <form onSubmit={submit} className="space-y-4">
         {message && <Notice kind={message.kind}>{message.text}</Notice>}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Field label="Current password" htmlFor="pw-current" required span={2}>
+        <FieldGrid>
+          <Field label="Current password" htmlFor="pw-current" required>
             <input
               id="pw-current"
               type="password"
@@ -207,9 +207,9 @@ function ChangeOwnPassword() {
               onChange={(e) => setConfirm(e.target.value)}
             />
           </Field>
-        </div>
+        </FieldGrid>
 
-        <div className="flex justify-end">
+        <div className="border-border/70 flex justify-end border-t pt-4">
           <button
             type="submit"
             className="btn-primary"
@@ -284,6 +284,7 @@ function ActivityTrail() {
 
   return (
     <SettingsCard
+      icon={History}
       title="Activity"
       description="Every change anyone has made, with who made it and when."
       actions={

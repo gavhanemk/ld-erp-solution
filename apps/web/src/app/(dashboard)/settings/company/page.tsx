@@ -2,8 +2,9 @@
 
 import { Suspense, useCallback, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { Plus, Pencil, X, Check, Ban, Building2, Hash, Percent, Receipt } from 'lucide-react'
+import { Plus, Pencil, X, Check, Ban, Building2, Hash, Percent, Receipt, Landmark, MapPin, Tag, CalendarDays } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { loadAppSettings } from '@/lib/appSettings'
 import { cn } from '@/lib/utils'
 import {
   settingsApi,
@@ -11,7 +12,7 @@ import {
   type NumberSeries,
   type TaxRate,
 } from '@/lib/settingsApi'
-import { Field, LoadingRow, Notice, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
+import { Field, FieldGrid, LoadingRow, Notice, SaveBar, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { TdsSections } from '@/components/settings/TdsSections'
 
@@ -61,7 +62,7 @@ function CompanySettings() {
       <div
         role="tablist"
         aria-label="Company settings"
-        className="border-border flex gap-1 overflow-x-auto border-b"
+        className="border-border bg-card no-scrollbar flex w-fit max-w-full gap-1 overflow-x-auto rounded-xl border p-1 shadow-sm"
       >
         {SECTIONS.map((s) => {
           const Icon = s.icon
@@ -76,10 +77,10 @@ function CompanySettings() {
               aria-controls={`company-panel-${s.key}`}
               onClick={() => open(s.key)}
               className={cn(
-                '-mb-px flex shrink-0 items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors',
+                'flex shrink-0 items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors',
                 on
-                  ? 'border-teal-500 text-teal-400'
-                  : 'text-muted-foreground hover:text-foreground border-transparent'
+                  ? 'bg-primary text-primary-foreground shadow-sm'
+                  : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
               )}
             >
               <Icon size={15} />
@@ -243,6 +244,8 @@ function CompanyProfile() {
     try {
       const res = await settingsApi.company.update(payload as Partial<Company>)
       setCompany(res.data)
+      // The menu shows the company's name, so it is told straight away.
+      await loadAppSettings(true)
       setMessage({ kind: 'success', text: 'Company details saved.' })
     } catch (err) {
       if (err instanceof ApiError) {
@@ -261,7 +264,7 @@ function CompanyProfile() {
 
   if (loading) {
     return (
-      <SettingsCard title="Company details">
+      <SettingsCard title="Company details" icon={Building2}>
         <LoadingRow />
       </SettingsCard>
     )
@@ -269,44 +272,59 @@ function CompanyProfile() {
 
   const startMonth = Number(values.fyStartMonth) || 4
 
+  /** A text box for one company field. */
+  const text = (key: string, opts: { mono?: boolean; placeholder?: string; upper?: boolean; digits?: boolean; maxLength?: number; type?: string } = {}) => (
+    <input
+      id={key}
+      type={opts.type ?? 'text'}
+      className={cn('form-input', opts.mono && 'font-mono')}
+      placeholder={opts.placeholder}
+      maxLength={opts.maxLength}
+      inputMode={opts.digits ? 'numeric' : undefined}
+      value={values[key] ?? ''}
+      onChange={(e) => {
+        let v = e.target.value
+        if (opts.upper) v = v.toUpperCase()
+        if (opts.digits) v = v.replace(/\D/g, '')
+        set(key, v)
+      }}
+    />
+  )
+
   return (
-    <SettingsCard
-      title="Company details"
-      description="Printed on every invoice, challan and purchase order."
-    >
-      <form onSubmit={submit} className="space-y-6">
-        {message && <Notice kind={message.kind}>{message.text}</Notice>}
+    <form onSubmit={submit} className="space-y-5">
+      {message && <Notice kind={message.kind}>{message.text}</Notice>}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Field label="Company name" htmlFor="name" required error={errors.name} span={2}>
-            <input
-              id="name"
-              className="form-input"
-              value={values.name ?? ''}
-              onChange={(e) => set('name', e.target.value)}
-            />
+      <SettingsCard
+        icon={Building2}
+        title="Business identity"
+        description="The names printed at the head of every invoice, challan and purchase order."
+      >
+        <FieldGrid>
+          <Field label="Company name" htmlFor="name" required error={errors.name} help="The trading name, as people know you">
+            {text('name')}
           </Field>
-
-          <Field
-            label="Legal name"
-            htmlFor="legalName"
-            error={errors.legalName}
-            help="As registered, if different from the trading name"
-            span={2}
-          >
-            <input
-              id="legalName"
-              className="form-input"
-              value={values.legalName ?? ''}
-              onChange={(e) => set('legalName', e.target.value)}
-            />
+          <Field label="Legal name" htmlFor="legalName" error={errors.legalName} help="As registered, if different from the trading name">
+            {text('legalName')}
           </Field>
+          <Field label="Website" htmlFor="website" error={errors.website}>
+            {text('website', { placeholder: 'https://ldcottonmills.com' })}
+          </Field>
+        </FieldGrid>
+      </SettingsCard>
 
+      <SettingsCard
+        icon={Landmark}
+        title="Tax registration"
+        description="GST, income-tax and MSME numbers, printed on documents and used to work out the tax."
+      >
+        <FieldGrid>
           <Field label="GSTIN" htmlFor="gstin" error={errors.gstin} help="15 characters">
             <input
               id="gstin"
               className="form-input font-mono"
               placeholder="27AAFFL6946D1Z7"
+              maxLength={15}
               value={values.gstin ?? ''}
               onChange={(e) => {
                 const gstin = e.target.value.toUpperCase()
@@ -318,92 +336,34 @@ function CompanyProfile() {
               }}
             />
           </Field>
-
           <Field
-            label="GST State Code"
+            label="GST state code"
             htmlFor="stateCode"
             error={errors.stateCode}
-            help="Taken from your GSTIN. This decides whether a sale is taxed CGST+SGST or IGST."
+            help="Taken from your GSTIN. Decides whether a sale is CGST+SGST or IGST."
           >
-            <input
-              id="stateCode"
-              className="form-input font-mono"
-              placeholder="27"
-              maxLength={2}
-              value={values.stateCode ?? ''}
-              onChange={(e) => set('stateCode', e.target.value.replace(/\D/g, ''))}
-            />
+            {text('stateCode', { mono: true, placeholder: '27', digits: true, maxLength: 2 })}
           </Field>
-
           <Field label="PAN" htmlFor="pan" error={errors.pan}>
-            <input
-              id="pan"
-              className="form-input font-mono"
-              placeholder="AAFFL6946D"
-              value={values.pan ?? ''}
-              onChange={(e) => set('pan', e.target.value.toUpperCase())}
-            />
+            {text('pan', { mono: true, placeholder: 'AAFFL6946D', upper: true, maxLength: 10 })}
           </Field>
-
-          <Field
-            label="TAN"
-            htmlFor="tan"
-            error={errors.tan}
-            help="Needed to deduct TDS and to issue Form 16A to your contractors"
-          >
-            <input
-              id="tan"
-              className="form-input font-mono"
-              placeholder="PNEL06861B"
-              value={values.tan ?? ''}
-              onChange={(e) => set('tan', e.target.value.toUpperCase())}
-            />
+          <Field label="TAN" htmlFor="tan" error={errors.tan} help="Needed to deduct TDS and issue Form 16A to contractors">
+            {text('tan', { mono: true, placeholder: 'PNEL06861B', upper: true, maxLength: 10 })}
           </Field>
-
           <Field
-            label="MSME / Udyam Number"
+            label="MSME / Udyam number"
             htmlFor="msmeNumber"
             error={errors.msmeNumber}
             help="Optional. Registered suppliers must be paid within 45 days by law."
           >
-            <input
-              id="msmeNumber"
-              className="form-input font-mono"
-              placeholder="UDYAM-MH-00-0000000"
-              value={values.msmeNumber ?? ''}
-              onChange={(e) => set('msmeNumber', e.target.value.toUpperCase())}
-            />
+            {text('msmeNumber', { mono: true, placeholder: 'UDYAM-MH-00-0000000', upper: true })}
           </Field>
+        </FieldGrid>
+      </SettingsCard>
 
-          <Field label="Phone" htmlFor="phone" error={errors.phone}>
-            <input
-              id="phone"
-              className="form-input"
-              value={values.phone ?? ''}
-              onChange={(e) => set('phone', e.target.value)}
-            />
-          </Field>
-
-          <Field label="Email" htmlFor="email" error={errors.email}>
-            <input
-              id="email"
-              className="form-input"
-              value={values.email ?? ''}
-              onChange={(e) => set('email', e.target.value)}
-            />
-          </Field>
-
-          <Field label="Website" htmlFor="website" error={errors.website} span={2}>
-            <input
-              id="website"
-              className="form-input"
-              placeholder="https://ldcottonmills.com"
-              value={values.website ?? ''}
-              onChange={(e) => set('website', e.target.value)}
-            />
-          </Field>
-
-          <Field label="Address" htmlFor="address" error={errors.address} span={2}>
+      <SettingsCard icon={MapPin} title="Address and contact" description="Where you are and how customers and suppliers reach you.">
+        <FieldGrid>
+          <Field label="Address" htmlFor="address" error={errors.address} span={3}>
             <textarea
               id="address"
               rows={2}
@@ -412,152 +372,103 @@ function CompanyProfile() {
               onChange={(e) => set('address', e.target.value)}
             />
           </Field>
-
           <Field label="City" htmlFor="city" error={errors.city}>
-            <input
-              id="city"
-              className="form-input"
-              value={values.city ?? ''}
-              onChange={(e) => set('city', e.target.value)}
-            />
+            {text('city')}
           </Field>
-
           <Field label="State" htmlFor="state" error={errors.state}>
-            <input
-              id="state"
-              className="form-input"
-              value={values.state ?? ''}
-              onChange={(e) => set('state', e.target.value)}
-            />
+            {text('state')}
           </Field>
-
           <Field label="PIN code" htmlFor="pincode" error={errors.pincode}>
-            <input
-              id="pincode"
-              className="form-input font-mono"
-              placeholder="395010"
-              value={values.pincode ?? ''}
-              onChange={(e) => set('pincode', e.target.value)}
-            />
+            {text('pincode', { mono: true, placeholder: '421302', digits: true, maxLength: 6 })}
           </Field>
-        </div>
+          <Field label="Phone" htmlFor="phone" error={errors.phone}>
+            {text('phone', { type: 'tel' })}
+          </Field>
+          <Field label="Email" htmlFor="email" error={errors.email} span={2}>
+            {text('email', { type: 'email' })}
+          </Field>
+        </FieldGrid>
+      </SettingsCard>
 
-        {/* What a garment's retail tag carries from the company. */}
-        <div className="pt-4 border-t border-border space-y-4">
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Retail labels</h3>
-            <p className="text-xs text-muted-foreground mt-1">
-              The EAN-13 barcodes on retail tags are built from the GS1 prefix, and the tags carry the country of origin and the
-              customer-care line. Without a prefix, tags get store barcodes starting 200: they scan at your own counter, but outside
-              shops and marketplaces need GS1 ones.
-            </p>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Field label="GS1 company prefix" htmlFor="gs1Prefix" error={errors.gs1Prefix} help="7 to 10 digits, from the GS1 India certificate. Leave empty until you have it">
-              <input
-                id="gs1Prefix"
-                className="form-input font-mono"
-                placeholder="e.g. 8901234"
-                inputMode="numeric"
-                maxLength={10}
-                value={values.gs1Prefix ?? ''}
-                onChange={(e) => set('gs1Prefix', e.target.value.replace(/\D/g, ''))}
-              />
+      {/* What a garment's retail tag carries from the company. */}
+      <SettingsCard
+        icon={Tag}
+        title="Retail labels"
+        description="EAN-13 barcodes on retail tags are built from the GS1 prefix. Without one, tags get store barcodes starting 200: they scan at your own counter, but outside shops and marketplaces need GS1 ones."
+      >
+        <div className="space-y-4">
+          <FieldGrid>
+            <Field
+              label="GS1 company prefix"
+              htmlFor="gs1Prefix"
+              error={errors.gs1Prefix}
+              help="7 to 10 digits, from the GS1 India certificate. Leave empty until you have it"
+            >
+              {text('gs1Prefix', { mono: true, placeholder: 'e.g. 8901234', digits: true, maxLength: 10 })}
             </Field>
             <Field label="Country of origin" htmlFor="countryOfOrigin" error={errors.countryOfOrigin}>
-              <input
-                id="countryOfOrigin"
-                className="form-input"
-                placeholder="India"
-                value={values.countryOfOrigin ?? ''}
-                onChange={(e) => set('countryOfOrigin', e.target.value)}
-              />
+              {text('countryOfOrigin', { placeholder: 'India' })}
             </Field>
             <Field
               label="Customer care"
               htmlFor="customerCare"
               error={errors.customerCare}
-              span={2}
               help="Printed on retail tags. Empty: the phone and email above"
             >
-              <input
-                id="customerCare"
-                className="form-input"
-                placeholder="e.g. care@ldcottonmills.com · +91 98765 43210"
-                value={values.customerCare ?? ''}
-                onChange={(e) => set('customerCare', e.target.value)}
-              />
+              {text('customerCare', { placeholder: 'care@ldcottonmills.com · +91 98765 43210' })}
             </Field>
-          </div>
+          </FieldGrid>
           <StoreBarcodes gs1Prefix={company?.gs1Prefix} />
         </div>
+      </SettingsCard>
 
-        <div className="pt-4 border-t border-border space-y-4">
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Financial year
-            </h3>
-            <p className="text-xs text-muted-foreground mt-1">
-              Document numbers are counted per financial year, so this decides when the counters
-              start again from one.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Field
-              label="Current financial year"
-              htmlFor="currentFY"
-              error={errors.currentFY}
-              help={describeFY(values.currentFY || null, startMonth)}
+      <SettingsCard
+        icon={CalendarDays}
+        title="Financial year"
+        description="Document numbers are counted per financial year, so this decides when the counters start again from one."
+      >
+        <FieldGrid>
+          <Field
+            label="Current financial year"
+            htmlFor="currentFY"
+            error={errors.currentFY}
+            help={describeFY(values.currentFY || null, startMonth)}
+          >
+            {text('currentFY', { mono: true, placeholder: '2425', digits: true, maxLength: 4 })}
+          </Field>
+          <Field label="Year starts in" htmlFor="fyStartMonth" error={errors.fyStartMonth}>
+            <SmartSelect
+              id="fyStartMonth"
+              className="form-input"
+              value={String(startMonth)}
+              onChange={(e) => set('fyStartMonth', e.target.value)}
             >
-              <input
-                id="currentFY"
-                className="form-input font-mono"
-                placeholder="2425"
-                maxLength={4}
-                value={values.currentFY ?? ''}
-                onChange={(e) => set('currentFY', e.target.value.replace(/\D/g, ''))}
-              />
-            </Field>
+              {MONTHS.map((m, i) => (
+                <option key={m} value={i + 1}>
+                  {m}
+                </option>
+              ))}
+            </SmartSelect>
+          </Field>
+          <Field
+            label="Books start from"
+            htmlFor="booksStartDate"
+            error={errors.booksStartDate}
+            help="Nothing can be dated before this. Set it to the day you start using the ERP."
+          >
+            <input
+              id="booksStartDate"
+              type="date"
+              className="form-input"
+              value={(values.booksStartDate ?? '').slice(0, 10)}
+              onChange={(e) => set('booksStartDate', e.target.value)}
+            />
+          </Field>
+        </FieldGrid>
+      </SettingsCard>
 
-            <Field label="Year starts in" htmlFor="fyStartMonth" error={errors.fyStartMonth}>
-              <SmartSelect
-                id="fyStartMonth"
-                className="form-input"
-                value={String(startMonth)}
-                onChange={(e) => set('fyStartMonth', e.target.value)}
-              >
-                {MONTHS.map((m, i) => (
-                  <option key={m} value={i + 1}>
-                    {m}
-                  </option>
-                ))}
-              </SmartSelect>
-            </Field>
-
-            <Field
-              label="Books start from"
-              htmlFor="booksStartDate"
-              error={errors.booksStartDate}
-              help="Nothing can be dated before this. Set it to the day you start using the ERP."
-              span={2}
-            >
-              <input
-                id="booksStartDate"
-                type="date"
-                className="form-input"
-                value={(values.booksStartDate ?? '').slice(0, 10)}
-                onChange={(e) => set('booksStartDate', e.target.value)}
-              />
-            </Field>
-          </div>
-        </div>
-
-        <div className="flex justify-end pt-2 border-t border-border">
-          <SaveButton saving={saving} />
-        </div>
-      </form>
-    </SettingsCard>
+      <SaveBar saving={saving} note="Printed on every document from the next one you make." />
+    </form>
   )
 }
 
@@ -636,6 +547,7 @@ function DocumentNumbering() {
 
   return (
     <SettingsCard
+      icon={Hash}
       title="Document numbering"
       description="What a sales order, invoice or purchase order is called when it is created."
     >
@@ -692,7 +604,7 @@ function DocumentNumbering() {
                           aria-label={`${s.label} prefix`}
                         />
                       ) : (
-                        <span className="font-mono text-teal-400">{s.prefix}</span>
+                        <span className="font-mono font-semibold text-primary">{s.prefix}</span>
                       )}
                     </td>
                     <td>
@@ -867,6 +779,7 @@ function TaxRates() {
 
   return (
     <SettingsCard
+      icon={Percent}
       title="GST rates"
       description="The rates offered when a document is priced, so nobody types a percentage by hand."
       actions={
@@ -947,7 +860,7 @@ function TaxRates() {
                 <span className="badge-info">Default</span>
               ) : (
                 <button
-                  className="text-xs text-muted-foreground hover:text-teal-400 transition-colors"
+                  className="text-xs text-muted-foreground hover:text-primary transition-colors"
                   onClick={() => void makeDefault(r)}
                   disabled={busy}
                 >

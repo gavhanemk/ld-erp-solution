@@ -18,6 +18,11 @@ export interface AppSettings {
   qcInDailyProduction: boolean
   /** Stickered stock is issued by scanning its packages; only stock without a sticker can be typed. */
   issueByScanOnly: boolean
+  /** The company's own name and logo, for the top of the menu. */
+  companyName: string | null
+  /** A fingerprint of the logo: the picture is fetched again only when it changes. */
+  logoKey: string | null
+  logoUrl: string | null
 }
 
 /** Matches the defaults in the API's preference catalogue. */
@@ -26,6 +31,9 @@ const FALLBACK: AppSettings = {
   dateFormat: 'DD-MMM-YYYY',
   qcInDailyProduction: true,
   issueByScanOnly: false,
+  companyName: null,
+  logoKey: null,
+  logoUrl: null,
 }
 
 const STORAGE_KEY = 'app_settings'
@@ -63,6 +71,9 @@ function normalise(raw: Record<string, unknown> | null | undefined): AppSettings
         ? raw.qcInDailyProduction
         : FALLBACK.qcInDailyProduction,
     issueByScanOnly: raw.issueByScanOnly === true,
+    companyName: typeof raw.companyName === 'string' && raw.companyName ? raw.companyName : null,
+    logoKey: typeof raw.logoKey === 'string' && raw.logoKey ? raw.logoKey : null,
+    logoUrl: typeof raw.logoUrl === 'string' && raw.logoUrl ? raw.logoUrl : null,
   }
 }
 
@@ -88,6 +99,17 @@ export async function loadAppSettings(force = false): Promise<AppSettings> {
   try {
     const res = await api.get<{ success: boolean; data: Record<string, unknown> }>('/settings/app')
     const next = normalise(res.data)
+    // The logo comes by itself, and only when it is not the one already kept.
+    if (!next.logoKey) next.logoUrl = null
+    else if (next.logoKey === current.logoKey && current.logoUrl) next.logoUrl = current.logoUrl
+    else {
+      try {
+        const logo = await api.get<{ data: { logoUrl: string | null } }>('/settings/app/logo')
+        next.logoUrl = logo.data?.logoUrl ?? null
+      } catch {
+        next.logoUrl = null
+      }
+    }
     apply(next)
     loaded = true
 

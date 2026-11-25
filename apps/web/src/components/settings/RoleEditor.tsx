@@ -223,7 +223,7 @@ export function RoleEditor({
                         type="button"
                         onClick={() => toggleAction(a.action)}
                         disabled={readOnly}
-                        className="text-xs font-medium text-muted-foreground hover:text-teal-400 transition-colors disabled:hover:text-muted-foreground"
+                        className="text-xs font-medium text-muted-foreground hover:text-primary transition-colors disabled:hover:text-muted-foreground"
                         title={`Tick ${a.label} everywhere`}
                       >
                         {a.label}
@@ -245,10 +245,10 @@ export function RoleEditor({
                           type="button"
                           onClick={() => toggleModule(m)}
                           disabled={readOnly}
-                          className="text-left hover:text-teal-400 transition-colors disabled:hover:text-foreground"
+                          className="text-left hover:text-primary transition-colors disabled:hover:text-foreground"
                           title="Tick everything on this module"
                         >
-                          <span className={allOn ? 'text-teal-400' : someOn ? 'text-foreground' : ''}>
+                          <span className={allOn ? 'text-primary' : someOn ? 'text-foreground' : ''}>
                             {m.label}
                           </span>
                         </button>

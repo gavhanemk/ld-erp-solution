@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, Pencil, KeyRound, Ban, RotateCcw, Search, Trash2, Users2 } from 'lucide-react'
+import { Plus, Pencil, KeyRound, Ban, RotateCcw, Search, ShieldCheck, Trash2, Users2 } from 'lucide-react'
 import { ApiError, currentUser } from '@/lib/api'
 import { settingsApi, type PermissionModule, type SettingsRole, type SettingsUser } from '@/lib/settingsApi'
 import { LoadingRow, Notice, SettingsCard } from '@/components/settings/ui'
@@ -22,6 +22,7 @@ export default function PeopleSettingsPage() {
   const [actions, setActions] = useState<{ action: string; label: string }[]>([])
 
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
@@ -41,31 +42,62 @@ export default function PeopleSettingsPage() {
     setSelfId(currentUser()?.id ?? null)
   }, [])
 
+  /**
+   * The people, the roles and the permission list, each asked for on its own.
+   *
+   * They used to go together, so one failed answer blanked all three and the
+   * screen said only "Could not load users and roles." — with no way to tell
+   * a refusal from a dropped connection. Now what did arrive is shown, a
+   * dropped connection (a server waking up) is tried once more by itself, and
+   * anything still missing is named, with the reason and a button to retry.
+   */
   const load = useCallback(async () => {
     setLoading(true)
-    try {
-      const [u, r, p] = await Promise.all([
-        settingsApi.users.list(),
-        settingsApi.roles.list(),
-        settingsApi.permissions(),
-      ])
-      setUsers(u.data)
-      setRoles(r.data)
-      setModules(p.data)
-      setActions(p.actions)
-    } catch (err) {
-      setMessage({
-        kind: 'error',
-        text:
-          err instanceof ApiError
-            ? err.status === 403
-              ? 'Your role does not allow managing people. Ask an administrator.'
-              : err.message
-            : 'Could not load users and roles.',
-      })
-    } finally {
-      setLoading(false)
+    setLoadError(null)
+    const fetchOnce = async <T extends { data?: unknown }>(fn: () => Promise<T>): Promise<T> => {
+      const check = (res: T) => {
+        if (!res || !Array.isArray(res.data)) throw new Error('the server sent back an empty answer')
+        return res
+      }
+      try {
+        return check(await fn())
+      } catch (err) {
+        if (err instanceof ApiError) throw err
+        await new Promise((r) => setTimeout(r, 1500))
+        return check(await fn())
+      }
     }
+    const [u, r, p] = await Promise.allSettled([
+      fetchOnce(() => settingsApi.users.list()),
+      fetchOnce(() => settingsApi.roles.list()),
+      fetchOnce(() => settingsApi.permissions()),
+    ])
+    if (u.status === 'fulfilled') setUsers(u.value.data)
+    if (r.status === 'fulfilled') setRoles(r.value.data)
+    if (p.status === 'fulfilled') {
+      setModules(p.value.data)
+      setActions(p.value.actions ?? [])
+    }
+
+    const missing = [
+      u.status === 'rejected' && { what: 'people', why: u.reason },
+      r.status === 'rejected' && { what: 'roles', why: r.reason },
+      p.status === 'rejected' && { what: 'the permission list', why: p.reason },
+    ].filter(Boolean) as Array<{ what: string; why: unknown }>
+    if (missing.length) {
+      const why = missing[0].why
+      const what = missing.map((m) => m.what).join(', ')
+      setLoadError(
+        why instanceof ApiError
+          ? why.status === 403
+            ? 'Your role does not allow managing people. Ask an administrator.'
+            : `Could not load ${what}: ${why.message}`
+          : `Could not load ${what}: the server did not answer${
+              why instanceof Error && why.message ? ` (${why.message})` : ''
+            }. Check the internet connection and try again.`,
+      )
+    }
+    setLoading(false)
   }, [])
 
   useEffect(() => {
@@ -117,12 +149,29 @@ export default function PeopleSettingsPage() {
     : users
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
+      {loadError && (
+        <Notice
+          kind="error"
+          action={
+            <button type="button" className="btn-secondary h-8 shrink-0 text-xs" onClick={() => void load()} disabled={loading}>
+              <RotateCcw size={13} /> Try again
+            </button>
+          }
+        >
+          {loadError}
+        </Notice>
+      )}
       {message && <Notice kind={message.kind}>{message.text}</Notice>}
 
       <SettingsCard
+        icon={Users2}
         title="People"
-        description="Everyone who can sign in to the ERP."
+        description={
+          loading
+            ? 'Everyone who can sign in to the ERP.'
+            : `Everyone who can sign in to the ERP · ${users.filter((u) => u.status === 'ACTIVE').length} active of ${users.length}`
+        }
         actions={
           <button
             className="btn-primary text-xs"
@@ -139,7 +188,7 @@ export default function PeopleSettingsPage() {
           <LoadingRow />
         ) : (
           <>
-            <div className="flex items-center gap-2 px-3 py-2 mb-4 rounded-lg bg-secondary border border-border max-w-sm">
+            <div className="border-border bg-card focus-within:border-primary focus-within:ring-primary/20 mb-4 flex h-9 max-w-sm items-center gap-2 rounded-lg border px-3 shadow-sm focus-within:ring-2">
               <Search size={14} className="text-muted-foreground" />
               <input
                 className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
@@ -175,16 +224,25 @@ export default function PeopleSettingsPage() {
                       return (
                         <tr key={u.id} data-row tabIndex={i === 0 ? 0 : -1}>
                           <td>
-                            <div className="font-medium text-foreground">
-                              {u.name}
-                              {isSelf && <span className="badge-info ml-2">You</span>}
-                            </div>
-                            <div className="text-xs text-muted-foreground">{u.email}</div>
-                            {u.employeeCode && (
-                              <div className="text-xs text-muted-foreground font-mono">
-                                {u.employeeCode}
+                            <div className="flex items-center gap-3">
+                              <span className="bg-primary/10 text-primary flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold">
+                                {u.name
+                                  .split(/\s+/)
+                                  .slice(0, 2)
+                                  .map((w) => w.charAt(0).toUpperCase())
+                                  .join('')}
+                              </span>
+                              <div className="min-w-0">
+                                <div className="font-medium text-foreground">
+                                  {u.name}
+                                  {isSelf && <span className="badge-info ml-2">You</span>}
+                                </div>
+                                <div className="text-xs text-muted-foreground">{u.email}</div>
+                                {u.employeeCode && (
+                                  <div className="text-xs text-muted-foreground font-mono">{u.employeeCode}</div>
+                                )}
                               </div>
-                            )}
+                            </div>
                           </td>
                           <td>{u.role.name}</td>
                           <td>
@@ -254,6 +312,7 @@ export default function PeopleSettingsPage() {
       </SettingsCard>
 
       <SettingsCard
+        icon={ShieldCheck}
         title="Roles"
         description="A role decides what someone can see and do. Change the role, and everyone on it changes with it."
         actions={
@@ -272,7 +331,7 @@ export default function PeopleSettingsPage() {
             {roles.map((role) => (
               <div
                 key={role.id}
-                className="p-4 rounded-lg border border-border bg-secondary/30 flex flex-col gap-3"
+                className="border-border/70 hover:border-primary/40 flex flex-col gap-3 rounded-lg border p-4 transition-colors"
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">

@@ -1,14 +1,15 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Upload, Trash2, FileText } from 'lucide-react'
+import { Upload, Trash2, FileText, Stamp, CheckCircle2, Image as ImageIcon } from 'lucide-react'
 import { ApiError } from '@/lib/api'
+import { loadAppSettings } from '@/lib/appSettings'
 import {
   settingsApi,
   type DocumentBranding,
   type DocumentTemplate,
 } from '@/lib/settingsApi'
-import { Field, LoadingRow, Notice, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
+import { Field, FieldGrid, FieldGroup, LoadingRow, Notice, SaveButton, SettingsCard, ToggleRow } from '@/components/settings/ui'
 
 /**
  * What appears on your printed papers.
@@ -75,6 +76,8 @@ export default function DocumentSettingsPage() {
         bankIFSC: branding.bankIFSC ?? '',
         upiId: branding.upiId ?? '',
       })
+      // The menu shows the logo, so it is told straight away rather than at the next reload.
+      await loadAppSettings(true)
       setMessage({ kind: 'success', text: 'Letterhead and bank details saved.' })
     } catch (err) {
       if (err instanceof ApiError) {
@@ -127,23 +130,25 @@ export default function DocumentSettingsPage() {
 
   if (loading) {
     return (
-      <SettingsCard title="Printed documents">
+      <SettingsCard title="Printed documents" icon={FileText}>
         <LoadingRow />
       </SettingsCard>
     )
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {message && <Notice kind={message.kind}>{message.text}</Notice>}
 
       <form onSubmit={saveBranding}>
         <SettingsCard
+          icon={Stamp}
           title="Letterhead and bank details"
-          description="The same on every paper you print."
+          description="The same on every paper you print. The logo also shows at the top of the menu."
+          footer={<SaveButton saving={savingBranding}>Save letterhead</SaveButton>}
         >
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="space-y-5">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <ImagePicker
                 label="Company logo"
                 help="Printed at the top of every document. PNG or JPG, under 400 KB."
@@ -160,15 +165,8 @@ export default function DocumentSettingsPage() {
               />
             </div>
 
-            <div className="pt-5 border-t border-border">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">
-                Bank details
-              </h3>
-              <p className="text-xs text-muted-foreground mb-4">
-                Printed on the invoice so a customer knows where to pay.
-              </p>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <FieldGroup title="Bank details" description="Printed on the invoice so a customer knows where to pay.">
+              <FieldGrid>
                 <Field label="Bank name" htmlFor="bankName" error={errors.bankName}>
                   <input
                     id="bankName"
@@ -200,17 +198,12 @@ export default function DocumentSettingsPage() {
                     id="bankIFSC"
                     className="form-input font-mono"
                     placeholder="HDFC0001234"
+                    maxLength={11}
                     value={branding?.bankIFSC ?? ''}
                     onChange={(e) => setBrand('bankIFSC', e.target.value.toUpperCase())}
                   />
                 </Field>
-                <Field
-                  label="UPI ID"
-                  htmlFor="upiId"
-                  error={errors.upiId}
-                  help="Optional. For smaller customers who pay by phone."
-                  span={2}
-                >
+                <Field label="UPI ID" htmlFor="upiId" error={errors.upiId} help="Optional. For smaller customers who pay by phone.">
                   <input
                     id="upiId"
                     className="form-input font-mono"
@@ -219,198 +212,161 @@ export default function DocumentSettingsPage() {
                     onChange={(e) => setBrand('upiId', e.target.value)}
                   />
                 </Field>
-              </div>
-            </div>
-
-            <div className="flex justify-end pt-3 border-t border-border">
-              <SaveButton saving={savingBranding} />
-            </div>
+              </FieldGrid>
+            </FieldGroup>
           </div>
         </SettingsCard>
       </form>
 
       <form onSubmit={saveDoc}>
         <SettingsCard
+          icon={FileText}
           title="Each document"
-          description="The heading, the terms and which blocks are printed."
+          description="Pick a document on the left to set its heading, its terms and which blocks are printed."
+          footer={current && <SaveButton saving={savingDoc}>Save {current.label}</SaveButton>}
         >
-          <div className="flex flex-wrap gap-1 p-1 mb-5 rounded-lg border border-border bg-secondary/40 w-fit">
-            {documents.map((d) => (
-              <button
-                key={d.docType}
-                type="button"
-                onClick={() => setSelected(d.docType)}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-                  selected === d.docType
-                    ? 'bg-teal-500/15 text-teal-400 border border-teal-500/25'
-                    : 'text-muted-foreground hover:text-foreground border border-transparent'
-                }`}
-              >
-                <FileText size={13} />
-                {d.label}
-                {!d.configured && <span className="text-[9px] opacity-60">not set</span>}
-              </button>
-            ))}
-          </div>
-
-          {current && (
-            <div className="space-y-5">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <Field
-                  label="Heading"
-                  htmlFor="doc-title"
-                  required
-                  help="Printed in large type at the top"
-                  span={2}
-                >
-                  <input
-                    id="doc-title"
-                    className="form-input"
-                    value={current.title}
-                    onChange={(e) => setDoc({ title: e.target.value })}
-                  />
-                </Field>
-
-                <Field
-                  label="Terms and conditions"
-                  htmlFor="doc-terms"
-                  help="Printed at the foot. One point per line."
-                  span={2}
-                >
-                  <textarea
-                    id="doc-terms"
-                    rows={4}
-                    className="form-input"
-                    placeholder={
-                      current.docType === 'PO'
-                        ? 'Goods must match the approved sample.\nDelivery within the agreed date.\nPayment 30 days from bill date.'
-                        : 'Interest at 18% per annum on overdue amounts.\nGoods once sold will not be taken back.'
-                    }
-                    value={current.termsText ?? ''}
-                    onChange={(e) => setDoc({ termsText: e.target.value })}
-                  />
-                </Field>
-
-                <Field
-                  label="Declaration"
-                  htmlFor="doc-declaration"
-                  help="The line certifying the particulars are true. Your accountant will give you the exact wording."
-                  span={2}
-                >
-                  <textarea
-                    id="doc-declaration"
-                    rows={2}
-                    className="form-input"
-                    placeholder="We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct."
-                    value={current.declaration ?? ''}
-                    onChange={(e) => setDoc({ declaration: e.target.value })}
-                  />
-                </Field>
-
-                <Field
-                  label="Footer line"
-                  htmlFor="doc-footer"
-                  help="A short line right at the bottom"
-                  span={2}
-                >
-                  <input
-                    id="doc-footer"
-                    className="form-input"
-                    placeholder="Subject to Thane jurisdiction"
-                    value={current.footerNote ?? ''}
-                    onChange={(e) => setDoc({ footerNote: e.target.value })}
-                  />
-                </Field>
-              </div>
-
-              <div className="pt-4 border-t border-border">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">
-                  What to print
-                </h3>
-                <div className="divide-y divide-border/60">
-                  <ToggleRow
-                    label="HSN code column"
-                    help="Required on a tax invoice. Check the digits with your accountant."
-                    checked={current.showHsn}
-                    onChange={(v) => setDoc({ showHsn: v })}
-                  />
-                  <ToggleRow
-                    label="Total in words"
-                    help="Rupees Forty-Seven Thousand Two Hundred Fifty Only"
-                    checked={current.showAmountInWords}
-                    onChange={(v) => setDoc({ showAmountInWords: v })}
-                  />
-                  <ToggleRow
-                    label="Bank details"
-                    help="Where the customer should pay. Set them above."
-                    checked={current.showBankDetails}
-                    onChange={(v) => setDoc({ showBankDetails: v })}
-                  />
-                  <ToggleRow
-                    label="Signature block"
-                    help="For and on behalf of, with your signature image"
-                    checked={current.showSignature}
-                    onChange={(v) => setDoc({ showSignature: v })}
-                  />
-                </div>
-              </div>
-
-              <Field
-                label="Copies to print"
-                htmlFor="doc-copies"
-                help="One line per copy. Each is printed on its own page with that label. Leave blank for a single copy."
-              >
-                <textarea
-                  id="doc-copies"
-                  rows={3}
-                  className="form-input font-mono text-xs"
-                  placeholder={'Original for Recipient\nDuplicate for Transporter\nTriplicate for Supplier'}
-                  value={current.copies.join('\n')}
-                  onChange={(e) =>
-                    setDoc({
-                      copies: e.target.value
-                        .split('\n')
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    })
-                  }
-                />
-              </Field>
-
-              <div className="flex justify-end pt-3 border-t border-border">
-                <SaveButton saving={savingDoc}>Save {current.label}</SaveButton>
-              </div>
+          <div className="grid gap-5 lg:grid-cols-[13.5rem_minmax(0,1fr)]">
+            {/* The documents, down the side: eight of them would not fit in a row. */}
+            <div
+              role="tablist"
+              aria-label="Documents"
+              className="no-scrollbar flex gap-1 overflow-x-auto lg:flex-col lg:overflow-visible lg:border-r lg:border-border/70 lg:pr-4"
+            >
+              {documents.map((d) => {
+                const on = selected === d.docType
+                return (
+                  <button
+                    key={d.docType}
+                    type="button"
+                    role="tab"
+                    aria-selected={on}
+                    onClick={() => setSelected(d.docType)}
+                    className={`flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                      on ? 'bg-primary/10 text-primary font-medium' : 'text-foreground hover:bg-secondary'
+                    }`}
+                  >
+                    <FileText size={14} className={`shrink-0 ${on ? 'text-primary' : 'text-muted-foreground'}`} />
+                    <span className="flex-1 whitespace-nowrap">{d.label}</span>
+                    {d.configured ? (
+                      <CheckCircle2 size={13} className="text-emerald-500" aria-label="Set up" />
+                    ) : (
+                      <span className="text-muted-foreground text-[10px]">default</span>
+                    )}
+                  </button>
+                )
+              })}
             </div>
-          )}
+
+            {current && (
+              <div className="min-w-0 space-y-5">
+                <FieldGrid cols={2}>
+                  <Field label="Heading" htmlFor="doc-title" required help="Printed in large type at the top">
+                    <input
+                      id="doc-title"
+                      className="form-input"
+                      value={current.title}
+                      onChange={(e) => setDoc({ title: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Footer line" htmlFor="doc-footer" help="A short line right at the bottom">
+                    <input
+                      id="doc-footer"
+                      className="form-input"
+                      placeholder="Subject to Thane jurisdiction"
+                      value={current.footerNote ?? ''}
+                      onChange={(e) => setDoc({ footerNote: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Terms and conditions" htmlFor="doc-terms" help="Printed at the foot. One point per line.">
+                    <textarea
+                      id="doc-terms"
+                      rows={4}
+                      className="form-input"
+                      placeholder={
+                        current.docType === 'PO'
+                          ? 'Goods must match the approved sample.\nDelivery within the agreed date.\nPayment 30 days from bill date.'
+                          : 'Interest at 18% per annum on overdue amounts.\nGoods once sold will not be taken back.'
+                      }
+                      value={current.termsText ?? ''}
+                      onChange={(e) => setDoc({ termsText: e.target.value })}
+                    />
+                  </Field>
+                  <Field
+                    label="Declaration"
+                    htmlFor="doc-declaration"
+                    help="The line certifying the particulars are true. Your accountant will give you the exact wording."
+                  >
+                    <textarea
+                      id="doc-declaration"
+                      rows={4}
+                      className="form-input"
+                      placeholder="We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct."
+                      value={current.declaration ?? ''}
+                      onChange={(e) => setDoc({ declaration: e.target.value })}
+                    />
+                  </Field>
+                </FieldGrid>
+
+                <FieldGroup title="What to print">
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <ToggleRow
+                      label="HSN code column"
+                      description="Required on a tax invoice. Check the digits with your accountant."
+                      checked={current.showHsn}
+                      onChange={(v) => setDoc({ showHsn: v })}
+                    />
+                    <ToggleRow
+                      label="Total in words"
+                      description="Rupees Forty-Seven Thousand Two Hundred Fifty Only"
+                      checked={current.showAmountInWords}
+                      onChange={(v) => setDoc({ showAmountInWords: v })}
+                    />
+                    <ToggleRow
+                      label="Bank details"
+                      description="Where the customer should pay. Set them above."
+                      checked={current.showBankDetails}
+                      onChange={(v) => setDoc({ showBankDetails: v })}
+                    />
+                    <ToggleRow
+                      label="Signature block"
+                      description="For and on behalf of, with your signature image"
+                      checked={current.showSignature}
+                      onChange={(v) => setDoc({ showSignature: v })}
+                    />
+                  </div>
+                </FieldGroup>
+
+                <FieldGroup
+                  title="Copies to print"
+                  description="One line per copy. Each is printed on its own page with that label. Leave blank for a single copy."
+                >
+                  <textarea
+                    id="doc-copies"
+                    aria-label="Copies to print"
+                    rows={3}
+                    className="form-input font-mono text-xs md:max-w-xl"
+                    placeholder={'Original for Recipient\nDuplicate for Transporter\nTriplicate for Supplier'}
+                    value={current.copies.join('\n')}
+                    onChange={(e) =>
+                      setDoc({
+                        copies: e.target.value
+                          .split('\n')
+                          .map((s) => s.trim())
+                          .filter(Boolean),
+                      })
+                    }
+                  />
+                </FieldGroup>
+              </div>
+            )}
+          </div>
         </SettingsCard>
       </form>
 
-      <p className="text-xs text-muted-foreground max-w-2xl">
+      <p className="text-muted-foreground max-w-2xl text-xs">
         There is no layout designer here on purpose. What has to appear on a tax invoice is fixed by
         law, so the arrangement is not yours to choose — only the wording and which blocks are shown.
       </p>
-    </div>
-  )
-}
-
-function ToggleRow({
-  label,
-  help,
-  checked,
-  onChange,
-}: {
-  label: string
-  help: string
-  checked: boolean
-  onChange: (v: boolean) => void
-}) {
-  return (
-    <div className="flex items-start justify-between gap-6 py-3 first:pt-0">
-      <div>
-        <p className="text-sm font-medium text-foreground">{label}</p>
-        <p className="text-xs text-muted-foreground mt-0.5">{help}</p>
-      </div>
-      <Toggle checked={checked} onChange={onChange} label={label} />
     </div>
   )
 }
@@ -445,21 +401,29 @@ function ImagePicker({
   }
 
   return (
-    <div>
-      <label className="form-label">{label}</label>
+    <div className="border-border/70 flex flex-col gap-4 rounded-lg border p-4 sm:flex-row sm:items-center">
+      {/* White behind it, as it will be on the paper. */}
+      <div className="border-border flex h-24 w-full shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-white p-2 sm:w-40">
+        {value ? (
+          // A data URL, so next/image would gain nothing and needs configuring.
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={value} alt={label} className="max-h-full max-w-full object-contain" />
+        ) : (
+          <span className="flex flex-col items-center gap-1 text-[11px] text-slate-400">
+            <ImageIcon size={20} />
+            No picture yet
+          </span>
+        )}
+      </div>
 
-      <div className="flex items-start gap-4">
-        <div className="w-32 h-20 rounded-lg border border-border bg-secondary/40 flex items-center justify-center overflow-hidden shrink-0">
-          {value ? (
-            // A data URL, so next/image would gain nothing and needs configuring.
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={value} alt={label} className="max-w-full max-h-full object-contain" />
-          ) : (
-            <span className="text-[10px] text-muted-foreground">Nothing yet</span>
-          )}
-        </div>
-
-        <div className="flex flex-col gap-2">
+      <div className="min-w-0 flex-1">
+        <p className="text-foreground text-sm font-medium">{label}</p>
+        {error || localError ? (
+          <p className="mt-0.5 text-xs text-red-500">{error || localError}</p>
+        ) : (
+          <p className="text-muted-foreground mt-0.5 text-xs leading-snug">{help}</p>
+        )}
+        <div className="mt-3 flex flex-wrap gap-2">
           <input
             ref={input}
             type="file"
@@ -471,13 +435,13 @@ function ImagePicker({
               e.target.value = ''
             }}
           />
-          <button type="button" className="btn-secondary text-xs" onClick={() => input.current?.click()}>
-            <Upload size={13} /> Choose picture
+          <button type="button" className="btn-secondary h-8 text-xs" onClick={() => input.current?.click()}>
+            <Upload size={13} /> {value ? 'Change picture' : 'Choose picture'}
           </button>
           {value && (
             <button
               type="button"
-              className="btn-ghost text-xs text-muted-foreground hover:text-red-400"
+              className="btn-ghost h-8 text-xs text-muted-foreground hover:text-red-500"
               onClick={() => onChange(null)}
             >
               <Trash2 size={13} /> Remove
@@ -485,12 +449,6 @@ function ImagePicker({
           )}
         </div>
       </div>
-
-      {error || localError ? (
-        <p className="text-xs text-red-400 mt-2">{error || localError}</p>
-      ) : (
-        <p className="text-xs text-muted-foreground mt-2">{help}</p>
-      )}
     </div>
   )
 }
