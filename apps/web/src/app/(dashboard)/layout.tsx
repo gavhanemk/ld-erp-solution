@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils'
 import { loadAppSettings } from '@/lib/appSettings'
 import { KeyboardLayer } from '@/components/keyboard/KeyboardLayer'
 import { TableScrollLayer } from '@/components/tables/TableScrollLayer'
+import { AccessGate } from '@/components/layout/AccessGate'
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -93,7 +94,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             go narrower than its content's own minimum. */}
         <main className="min-w-0 flex-1 overflow-auto p-4 sm:py-6">
           <div className="min-w-0 animate-fade-in">
-            {children}
+            <AccessGate>{children}</AccessGate>
           </div>
         </main>
       </div>

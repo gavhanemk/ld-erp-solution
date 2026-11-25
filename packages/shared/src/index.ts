@@ -90,7 +90,7 @@ export const formatINR = (amount: number): string => {
 
 export const MODULES = [
   'dashboard', 'masters', 'sales', 'purchase', 'inventory',
-  'production', 'accounts', 'hr', 'vhagar', 'maintenance', 'ai', 'settings', 'admin'
+  'production', 'sampling', 'accounts', 'hr', 'vhagar', 'maintenance', 'ai', 'settings', 'admin'
 ] as const
 
 export type Module = typeof MODULES[number]
@@ -830,3 +830,9 @@ export * from './bomComparison'
 export * from './routingComparison'
 export * from './itemGroups'
 export * from './similarName'
+
+export * from './sampling'
+export * from './sampleMaking'
+export * from './sampleReview'
+export * from './sampleCost'
+export * from './sampleHandover'

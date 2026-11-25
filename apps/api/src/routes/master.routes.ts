@@ -3,6 +3,7 @@ import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
+import { samplingEnabled } from '../lib/pilot'
 import { crudRouter, type DeleteUse } from '../lib/crud'
 import { nextStyleCode } from '../lib/masterCode'
 import { createRouting, deleteRouting, bomFabrics, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
@@ -12,7 +13,7 @@ import { routingsByStyle } from '../services/routingOverview.service'
 import { deletedRoutings, restoreRouting } from '../services/routingRestore.service'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import * as categoryImport from '../services/categoryImport.service'
-import { assertItemFitsCategory, categoryGroupOnSave, itemGroupTree } from '../services/itemGroups.service'
+import { categoryGroupOnSave, itemGroupTree } from '../services/itemGroups.service'
 import * as styleImport from '../services/styleImport.service'
 import * as customerImport from '../services/customerImport.service'
 import * as supplierImport from '../services/supplierImport.service'
@@ -23,7 +24,20 @@ import { writeAuditLog } from '../lib/audit'
 import { findHsn, loadHsnIndex, withHsnRates } from '../lib/hsn'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
-import { assertItemStyleColorValid, rethrowItemStyleColorClash } from '../lib/itemStyleColor'
+import { itemBeforeSave, itemInclude, ITEM_UNIQUE_FIELDS } from '../lib/itemMaster'
+import { styleInDevelopment } from '../lib/styleStage'
+import {
+  assertVersionFree,
+  bomName,
+  costBom,
+  priceBomLines,
+  rethrowVersionClash,
+  round,
+  toLineCreate,
+  versionClash,
+  type IncomingBomLine,
+  type IncomingCostLine,
+} from '../services/bom.service'
 import {
   bomPriceSchema,
   copyBomSchema,
@@ -103,7 +117,10 @@ const noneOr = (field: string) => (values: string[]) => {
  * Everything that can point at a department, and what deleting the
  * department does to it. An item or a BOM line may have no department, so
  * it is left blank. The rest must have one (a requisition has to say who
- * asked), so they move to the department the person picks.
+ * asked), so they move to the department the person picks. A sample's
+ * making step and material line keep the department they were planned and
+ * made with: the record of how the sample was made, which its costing and
+ * handover read later, so a department they name is not deleted.
  */
 const DEPARTMENT_USES: Record<string, DeleteUse> = {
   items: { one: 'item', many: 'items', model: 'item', field: 'departmentId', then: 'blank' },
@@ -116,6 +133,8 @@ const DEPARTMENT_USES: Record<string, DeleteUse> = {
   machines: { one: 'machine', many: 'machines', model: 'machine', field: 'departmentId', then: 'move' },
   routingSteps: { one: 'routing step', many: 'routing steps', model: 'routingStep', field: 'departmentId', then: 'move' },
   productionEntries: { one: 'production entry', many: 'production entries', model: 'productionEntry', field: 'departmentId', then: 'move' },
+  sampleStages: { one: 'sample making step', many: 'sample making steps', then: 'refuse' },
+  sampleMaterials: { one: 'sample material line', many: 'sample material lines', then: 'refuse' },
 }
 
 /*
@@ -619,33 +638,9 @@ router.use(
   }),
 )
 
-/**
- * What an item is sent back with.
- *
- * - taxRate travels with the item so an order form can fill the GST in from
- *   the item itself. Without it the purchase order screen read
- *   `item.taxRate.rate`, found nothing, and left the field blank for someone
- *   to type from memory — and a rate typed from memory is the one thing the
- *   business rules say must never happen. The alternative source, the tax
- *   rate list in Settings, needs a permission a purchase clerk does not have.
- * - The category's parent too, so the form can show a sub-category under the
- *   main one it belongs to.
- * - The style, for a finished good: which garment it is, with the colours it
- *   comes in.
- */
-const itemInclude = {
-  category: { include: { parent: true } },
-  uom: true,
-  taxRate: true,
-  department: { select: { id: true, name: true, code: true } },
-  style: { select: { id: true, code: true, name: true, colors: true } },
-  tdsSection: { select: { id: true, section: true, label: true } },
-  // The packs it is bought in (1 Box = 20 pcs), the usual one first.
-  buyUnits: {
-    select: { id: true, factor: true, isDefault: true, uom: { select: { id: true, name: true, symbol: true, decimalPlaces: true } } },
-    orderBy: [{ isDefault: 'desc' as const }, { factor: 'asc' as const }],
-  },
-}
+// What an item is sent back with, its department from its category, and the
+// finished-good rules live in lib/itemMaster, where a sample's quick-add of a
+// material finds the same rules.
 
 /*
  * The packs an item is bought in, besides its own unit: a box of 20 pcs, a
@@ -693,22 +688,6 @@ router.patch('/items/:id/buy-units', requirePermission(MODULE, 'edit'), async (r
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'Item', entityId: item.id, before: { buyUnits: before }, after: { buyUnits: after } })
   res.json({ success: true, data: after, message: after.length ? `${item.name}: bought in ${after.map((u) => `${u.uom.symbol} of ${Number(u.factor)}`).join(', ')}.` : `${item.name}: bought in ${item.uom.symbol} only.` })
 })
-
-/*
- * An item's department is its category's: the sub-category's own, or else its
- * main category's. The item form does not ask for it. Worked out when an item
- * is added, and again when its category changes; a department sent on purpose
- * is kept, and so is one an item already has while its category stays.
- */
-async function departmentFromCategory(data: Record<string, unknown>, before?: Record<string, unknown>) {
-  if (data.departmentId !== undefined || typeof data.categoryId !== 'string') return data
-  if (before && before.categoryId === data.categoryId && before.departmentId) return data
-  const category = await prisma.itemCategory.findUnique({
-    where: { id: data.categoryId },
-    select: { departmentId: true, parent: { select: { departmentId: true } } },
-  })
-  return { ...data, departmentId: category?.departmentId ?? category?.parent?.departmentId ?? null }
-}
 
 /*
  * How finely each unit is counted, and the few items counted differently
@@ -837,7 +816,7 @@ router.use(
     createSchema: createItemSchema,
     updateSchema: updateItemSchema,
     // No two with the same name (ignoring capitals and spaces).
-    uniqueFields: ['name'],
+    uniqueFields: ITEM_UNIQUE_FIELDS,
     // Typing "linen" finds linen items by their category as well as their
     // name; "cutting" finds what the cutting floor uses.
     searchFields: [
@@ -877,30 +856,9 @@ router.use(
     // master, in `taxRate` where every order and bill form already looks.
     afterRead: (rows) => withHsnRates(prisma, rows),
     // A finished good is one style in one colour, and the colour must be one
-    // of that style's own. Checked here because it needs the style looked up,
-    // which a schema cannot do. On an edit the saved type, style and colour
-    // stand in for whatever the edit leaves out.
-    beforeSave: async (data, before) => {
-      data = await departmentFromCategory(data, before)
-      // A finished good is never filed under Fabric, nor a button under Finished Goods.
-      await assertItemFitsCategory(data, before)
-      const checked = await assertItemStyleColorValid(
-        String(data.type ?? before?.type ?? ''),
-        (data.styleId !== undefined ? data.styleId : before?.styleId) as string | null | undefined,
-        (data.color !== undefined ? data.color : before?.color) as string | null | undefined,
-        before?.id as string | undefined,
-      )
-      return {
-        data: { ...data, styleId: checked.styleId, color: checked.color },
-        // Two people saving the same style and colour at once: the database
-        // catches the second, and this says so in words.
-        onSaveError: (err) => {
-          if (checked.styleName && checked.color) {
-            rethrowItemStyleColorClash(err, checked.styleName, checked.color)
-          }
-        },
-      }
-    },
+    // of that style's own; the department comes from the category, and the
+    // item has to fit its category (lib/itemMaster).
+    beforeSave: itemBeforeSave,
   }),
 )
 
@@ -963,11 +921,40 @@ router.post('/styles/import', requirePermission(MODULE, 'create'), async (req: A
 router.patch('/styles/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, _res, next) => {
   const style = await prisma.style.findUnique({
     where: { id: req.params.id },
-    select: { code: true, sizeGroupId: true, colors: true },
+    select: { code: true, sizeGroupId: true, colors: true, stage: true, brandId: true, brandType: true, isActive: true },
   })
   if (!style) return next()
-  const body = (req.body ?? {}) as { sizeGroupId?: string | null; colors?: unknown }
+  const body = (req.body ?? {}) as {
+    sizeGroupId?: string | null
+    colors?: unknown
+    brandId?: string | null
+    brandType?: unknown
+    isActive?: unknown
+  }
   const live = { styleId: req.params.id, status: { not: 'OBSOLETE' as const } }
+
+  // A style still in sampling is changed from its sample request, where the
+  // request's lock, its rules on what a released round was made in, and its
+  // history all apply. Here only what sampling does not rely on: fabric, fit,
+  // GSM and the like. The full form sends every field, so only a change counts.
+  if (style.stage === 'DEVELOPMENT') {
+    const sameColours = (list: unknown) =>
+      Array.isArray(list) &&
+      JSON.stringify(list.map((c) => String(c).trim()).sort()) === JSON.stringify([...style.colors].sort())
+    const reshaped =
+      (body.brandId !== undefined && (body.brandId || null) !== style.brandId) ||
+      (body.brandType !== undefined && body.brandId === undefined && body.brandType !== style.brandType) ||
+      (body.sizeGroupId !== undefined && (body.sizeGroupId || null) !== style.sizeGroupId) ||
+      (body.colors !== undefined && !sameColours(body.colors))
+    if (reshaped) {
+      throw new AppError(
+        `${style.code} is still in sampling. Change its brand, size run or colours from its sample request.`,
+        409,
+        'STYLE_IN_SAMPLING',
+      )
+    }
+    if (body.isActive === false && style.isActive) await assertNotSampling(req.params.id, style.code)
+  }
 
   if (body.sizeGroupId !== undefined && (body.sizeGroupId || null) !== style.sizeGroupId) {
     const sized = await prisma.bOM.count({
@@ -1003,6 +990,30 @@ router.patch('/styles/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       }
     }
   }
+  next()
+})
+
+/*
+ * Switching off a style an open sample request is developing would leave the
+ * request sampling a style it can no longer release. That request is
+ * cancelled instead; once none is open, the style can be switched off here.
+ */
+async function assertNotSampling(styleId: string, code: string) {
+  const open = await prisma.sampleRequest.findFirst({
+    where: { styleId, cancelledAt: null },
+    select: { number: true },
+  })
+  if (open) {
+    throw new AppError(
+      `${code} is still in sampling on ${open.number}. Cancel that request rather than switching the style off.`,
+      409,
+      'STYLE_IN_SAMPLING',
+    )
+  }
+}
+router.delete('/styles/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, _res, next) => {
+  const style = await prisma.style.findUnique({ where: { id: req.params.id }, select: { code: true, stage: true } })
+  if (style?.stage === 'DEVELOPMENT') await assertNotSampling(req.params.id, style.code)
   next()
 })
 
@@ -1044,6 +1055,13 @@ router.use(
     },
     filters: {
       brandType: { where: (v) => ({ brandType: { in: v } }), facets: ['brandType'] },
+      // DEVELOPMENT (still in sampling) or PRODUCTION. Left out lists both, as
+      // the Styles master does; order, BOM and production pickers ask for
+      // PRODUCTION. A value that is neither matches nothing.
+      stage: {
+        where: (v) => ({ stage: { in: v.filter((x) => x === 'DEVELOPMENT' || x === 'PRODUCTION') } }),
+        facets: ['stage'],
+      },
       category: textFilter('category'),
       season: textFilter('season'),
       fabricType: textFilter('fabricType'),
@@ -1070,7 +1088,7 @@ router.use(
         facets: ['colour'],
       },
     },
-    facets: ['brandType', 'category', 'season', 'fabricType', 'fit', 'sizeGroupId', 'colour'],
+    facets: ['brandType', 'stage', 'category', 'season', 'fabricType', 'fit', 'sizeGroupId', 'colour'],
     // Colours are a list on each style, so they are counted one by one: a
     // style in White and Navy counts once under each.
     customFacets: {
@@ -1278,6 +1296,36 @@ router.use(
     defaultSort: { field: 'name', order: 'asc' },
     // Any of it stops a delete; nothing is moved or cleared.
     permanentDelete: WAREHOUSE_USES,
+    beforeSave: async (data, before) => {
+      const purpose = data.purpose as string | undefined
+      if (purpose === 'SAMPLING' && before?.purpose !== 'SAMPLING' && !samplingEnabled()) {
+        throw new AppError(
+          'Sampling is not switched on here, so no store can be a sample store.',
+          400,
+          'SAMPLING_OFF',
+        )
+      }
+      // What a store holds was put there under its old rules: bulk stock in a
+      // sample store would be issued to samples, and a sample's material in a
+      // general store would be drawn by production. Empty it first.
+      if (before && purpose !== undefined && purpose !== before.purpose) {
+        const [held] = await prisma.$queryRaw<Array<{ items: number }>>`
+          SELECT COUNT(*)::int AS items FROM (
+            SELECT 1 FROM ld_erp.stock_ledger
+            WHERE "warehouseId" = ${String(before.id)}
+            GROUP BY "itemId", ownership, "ownerCustomerId", "sizeId", grade
+            HAVING SUM("inQty" - "outQty") <> 0
+          ) AS stock`
+        if ((held?.items ?? 0) > 0) {
+          throw new AppError(
+            `${String(before.name)} still holds stock of ${held.items} ${held.items === 1 ? 'item' : 'items'}. Move it out or use it up before changing what the store is for.`,
+            409,
+            'STORE_HOLDS_STOCK',
+          )
+        }
+      }
+      return { data }
+    },
   }),
 )
 
@@ -2568,168 +2616,6 @@ const BOM_SORT_FIELDS = ['createdAt', 'version', 'color', 'totalCost', 'status',
 const BOM_STATUSES = ['DRAFT', 'APPROVED', 'OBSOLETE']
 
 /**
- * Money is rounded at every step rather than only at the end, so that a clerk
- * checking the screen against a calculator gets the same answer. Quantities
- * keep four places — cloth per garment is measured that finely.
- */
-const round = (value: number, places: number) => Number(value.toFixed(places))
-
-type IncomingBomLineSize = { sizeId: string; qtyPerUnit: number | string }
-
-type IncomingBomLine = {
-  componentItemId: string
-  component?: string | null
-  departmentId?: string | null
-  qtyPerUnit: number | string
-  wastagePercent?: number
-  unitCost?: number | string | null
-  notes?: string | null
-  sortOrder?: number
-  sizes?: IncomingBomLineSize[]
-}
-
-/**
- * Wastage inflates the quantity actually consumed: cutting 1.65 m of fabric per
- * shirt at 5% wastage really draws 1.7325 m. Rates fall back to the item's
- * standard rate so a BOM can be costed before anyone types a price.
- *
- * An item with no rate anywhere now raises a warning instead of costing at
- * zero. A total that quietly leaves a component out looks exactly like a total
- * that is right, which is the worse of the two failures.
- *
- * Sizes are a sparse override: a size with no row of its own consumes what the
- * line consumes. That fallback is what keeps a BOM with no size run behaving
- * exactly as it did before sizes existed.
- */
-async function priceBomLines(lines: IncomingBomLine[]) {
-  const itemIds = [...new Set(lines.map((l) => l.componentItemId))]
-  const items = await prisma.item.findMany({
-    where: { id: { in: itemIds } },
-    select: { id: true, code: true, name: true, standardRate: true },
-  })
-
-  const missing = itemIds.filter((id) => !items.some((i) => i.id === id))
-  if (missing.length > 0) {
-    throw new AppError(`Unknown component item(s): ${missing.join(', ')}`, 400, 'INVALID_ITEM')
-  }
-
-  const byId = new Map(items.map((i) => [i.id, i]))
-  const warnings: Array<{ itemId: string; code: string; name: string }> = []
-
-  const priced = lines.map((line, index) => {
-    const item = byId.get(line.componentItemId)!
-    const qty = Number(line.qtyPerUnit)
-    const wastage = Number(line.wastagePercent ?? 0)
-    const factor = 1 + wastage / 100
-
-    const typed =
-      line.unitCost !== null && line.unitCost !== undefined && line.unitCost !== ''
-        ? Number(line.unitCost)
-        : null
-    const standard = item.standardRate !== null ? Number(item.standardRate) : null
-    const rate = typed ?? standard
-
-    if (rate === null) {
-      warnings.push({ itemId: item.id, code: item.code, name: item.name })
-    }
-
-    const unitCost = round(rate ?? 0, 4)
-    const effectiveQty = round(qty * factor, 4)
-
-    // The line's wastage, not a per-size one: size changes how much cloth a
-    // garment takes, it does not change how badly the cutter wastes it.
-    const sizes = (line.sizes ?? []).map((s) => {
-      const sizeQty = Number(s.qtyPerUnit)
-      const sizeEffective = round(sizeQty * factor, 4)
-      return {
-        sizeId: s.sizeId,
-        qtyPerUnit: sizeQty,
-        effectiveQty: sizeEffective,
-        totalCost: round(sizeEffective * unitCost, 2),
-      }
-    })
-
-    return {
-      componentItemId: line.componentItemId,
-      component: line.component ?? null,
-      departmentId: line.departmentId || null,
-      qtyPerUnit: qty,
-      wastagePercent: wastage,
-      effectiveQty,
-      unitCost,
-      // Worked out from the rounded quantity and the rounded rate, so that
-      // Effective x Rate really does come to Cost on the screen.
-      totalCost: round(effectiveQty * unitCost, 2),
-      notes: line.notes ?? null,
-      sortOrder: line.sortOrder ?? index,
-      sizes,
-    }
-  })
-
-  const totalCost = round(
-    priced.reduce((sum, l) => sum + l.totalCost, 0),
-    2,
-  )
-
-  return { priced, totalCost, warnings }
-}
-
-type IncomingCostLine = {
-  kind: 'LABOUR' | 'OVERHEAD'
-  name: string
-  departmentId?: string | null
-  basis: 'PER_PIECE' | 'PERCENT'
-  value: number
-}
-
-/**
- * The cost of one garment, built up the way a costing sheet is: material, then
- * labour, then overhead — which may be a percentage of the two before it, as
- * "factory overhead 10%" usually is. Rounded to the paisa at every step, so the
- * build-up on screen adds up on a calculator.
- */
-function costBom(material: number, rows: IncomingCostLine[]) {
-  const labourRows = rows
-    .filter((r) => r.kind === 'LABOUR')
-    .map((r) => ({ ...r, amount: round(r.value, 2) }))
-  const labourCost = round(
-    labourRows.reduce((sum, r) => sum + r.amount, 0),
-    2,
-  )
-
-  const base = round(material + labourCost, 2)
-  const overheadRows = rows
-    .filter((r) => r.kind === 'OVERHEAD')
-    .map((r) => ({
-      ...r,
-      amount: r.basis === 'PERCENT' ? round((base * r.value) / 100, 2) : round(r.value, 2),
-    }))
-  const overheadCost = round(
-    overheadRows.reduce((sum, r) => sum + r.amount, 0),
-    2,
-  )
-
-  // Kept in the order they were typed, labour first, so the list reads the
-  // same way the form does.
-  const priced = [...labourRows, ...overheadRows].map((r, index) => ({
-    kind: r.kind,
-    name: r.name,
-    departmentId: r.departmentId || null,
-    basis: r.basis,
-    value: round(r.value, 2),
-    amount: r.amount,
-    sortOrder: index,
-  }))
-
-  return {
-    rows: priced,
-    labourCost,
-    overheadCost,
-    costPerPiece: round(material + labourCost + overheadCost, 2),
-  }
-}
-
-/**
  * Margin is a share of the selling price: at 20%, a ₹473.53 shirt sells for
  * 473.53 ÷ 0.80. Rounded to the paisa first, so a price that divides exactly is
  * not pushed up a rupee by floating-point dust, then up to the next rupee.
@@ -2802,8 +2688,6 @@ function assertMayCost(req: AuthRequest, costLines: unknown) {
   }
 }
 
-type PricedLine = Awaited<ReturnType<typeof priceBomLines>>['priced'][number]
-
 type RateWarning = { itemId: string; code: string; name: string }
 
 /**
@@ -2820,12 +2704,6 @@ const rateWarning = (warnings: RateWarning[]): string => {
     warnings.length === 1 ? 'One component has' : `${warnings.length} components have`
   const them = warnings.length === 1 ? 'it' : 'them'
   return `Saved. ${subject} no rate yet — ${names}. The total leaves ${them} out until a rate is set.`
-}
-
-/** Nests the size rows under their line so both are written in one statement. */
-function toLineCreate(line: PricedLine) {
-  const { sizes, ...rest } = line
-  return { ...rest, ...(sizes.length > 0 ? { sizes: { create: sizes } } : {}) }
 }
 
 /**
@@ -2890,9 +2768,12 @@ async function assertBomRefsExist(
 ): Promise<{ code: string }> {
   const style = await prisma.style.findUnique({
     where: { id: styleId },
-    select: { id: true, code: true, sizeGroupId: true, colors: true },
+    select: { id: true, code: true, sizeGroupId: true, colors: true, stage: true },
   })
   if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')
+  // A production BOM is made when a sample is handed over, never while the
+  // style is still being sampled and can change.
+  if (style.stage === 'DEVELOPMENT') throw styleInDevelopment(style.code)
 
   if (colour) {
     const value = colour.value?.trim() || null
@@ -2983,77 +2864,6 @@ async function assertBomRefsExist(
   }
 
   return { code: style.code }
-}
-
-/** "LD-SH-2601 in Dusty Blue", or just the code for a BOM with no colour. */
-const bomName = (styleCode: string, color: string | null | undefined) =>
-  color ? `${styleCode} in ${color}` : styleCode
-
-/**
- * `typed` is false when no version was sent and 1.0 was assumed. The BOM form
- * no longer asks for a version, so "give this one a different version" would be
- * advice with nowhere to act on it — and a second BOM for one colour is meant
- * to start as a copy anyway.
- */
-const versionClash = (
-  styleCode: string,
-  color: string | null | undefined,
-  version: string,
-  typed = true,
-) =>
-  new AppError(
-    typed
-      ? `${bomName(styleCode, color)} already has a BOM at version ${version}. Give this one a different version, or copy the existing one.`
-      : `${bomName(styleCode, color)} already has a BOM. To start a new version, copy that one from the BOM list.`,
-    409,
-    'BOM_VERSION_EXISTS',
-  )
-
-/**
- * Prisma's own message for a repeated version is "styleId,color,version already
- * exists", which is the database talking to itself. This says what to do.
- */
-function rethrowVersionClash(
-  err: unknown,
-  styleCode: string,
-  color: string | null | undefined,
-  version: string,
-  typed = true,
-): never {
-  const code = (err as { code?: string }).code
-  const target = (err as { meta?: { target?: unknown } }).meta?.target
-  const hitVersion = Array.isArray(target)
-    ? target.includes('version')
-    : String(target ?? '').includes('version')
-
-  if (code === 'P2002' && hitVersion) throw versionClash(styleCode, color, version, typed)
-  throw err
-}
-
-/**
- * The unique constraint catches a repeated colour and version, but Postgres
- * counts two blank colours as different, so two colourless BOMs at one version
- * would both save. Checking first closes that gap, and gives the plain message
- * every time rather than only when the database happens to be the one to catch it.
- */
-async function assertVersionFree(
-  styleId: string,
-  color: string | null | undefined,
-  version: string,
-  styleCode: string,
-  excludeId?: string,
-  typed = true,
-): Promise<void> {
-  const clash = await prisma.bOM.findFirst({
-    where: {
-      styleId,
-      color: color || null,
-      version,
-      ...(excludeId ? { id: { not: excludeId } } : {}),
-    },
-    select: { id: true },
-  })
-  if (clash) throw versionClash(styleCode, color, version, typed)
 }
 
 /** The BOM list's dropdown filters, each a comma list in the query. */
@@ -3260,7 +3070,7 @@ router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest
   let useVersion = version ?? '1.0'
   const typedVersion = version !== undefined
 
-  const { priced, totalCost, warnings } = await priceBomLines(lines)
+  const { priced, totalCost, warnings } = await priceBomLines(prisma, lines)
   const costing = costBom(totalCost, costLines ?? (source ? storedCostRows(source.costLines) : []))
 
   let created
@@ -3361,7 +3171,7 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   // changed here — that is what copying to another colour is for — so the check
   // is against the colour the BOM was made for.
   if (version !== undefined && version !== before.version) {
-    await assertVersionFree(before.styleId, before.color, version, before.style.code, before.id)
+    await assertVersionFree(prisma, before.styleId, before.color, version, before.style.code, before.id)
   }
 
   // Lines are replaced wholesale rather than diffed: the header total must stay
@@ -3381,7 +3191,7 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     let material = Number(before.totalCost ?? 0)
 
     if (lines) {
-      const repriced = await priceBomLines(lines)
+      const repriced = await priceBomLines(prisma, lines)
       material = repriced.totalCost
       costs.totalCost = repriced.totalCost
       warnings = repriced.warnings
@@ -3672,7 +3482,7 @@ router.post('/bom/:id/copy', requirePermission(MODULE, 'create'), async (req: Au
     value: targetColour,
     required: true,
   })
-  await assertVersionFree(source.styleId, targetColour, targetVersion, source.style.code)
+  await assertVersionFree(prisma, source.styleId, targetColour, targetVersion, source.style.code)
 
   let created
   try {

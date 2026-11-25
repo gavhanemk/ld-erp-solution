@@ -13,6 +13,424 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+// Sampling is intentionally separate from bulk MOs, WIP and saleable garments.
+// A released round's specification is a snapshot, not a live master lookup.
+model SampleRequest {
+  id          String @id @default(cuid())
+  clientKey   String @unique
+  number      String @unique
+  title       String
+  customerId  String?
+  customer    Customer? @relation(fields: [customerId], references: [id])
+  brandId     String
+  brand       Brand @relation(fields: [brandId], references: [id])
+  buyerRef    String?
+  /// The buyer's own style number, as printed on their tech pack. Usually
+  /// there is no style of ours yet when the request arrives.
+  buyerStyleRef String?
+  season      String?
+  /// Free text from the tech pack (Shirt, Kurta); the style's category is
+  /// taken from it when the request makes its own style.
+  garmentCategory String?
+  /// The style this request samples: one made for it (DEVELOPMENT), or an
+  /// existing one for a re-sample. Fixed once a round has been released.
+  styleId     String?
+  style       Style? @relation(fields: [styleId], references: [id])
+  requiredAt  DateTime?
+  owner       String
+  brief       String
+  state       String @default("DRAFT")
+  version     Int @default(0)
+  cancelledAt DateTime?
+  cancelReason String?
+  /// The cost sheet as it stood when the costs were finalised (FINALISE_COST):
+  /// while it is set, nothing that costs can change until it is reopened.
+  costSheet        Json?
+  costFinalisedAt  DateTime?
+  costFinalisedBy  String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  rounds      SampleRound[]
+  events      SampleEvent[]
+  attachments SampleAttachment[]
+  closeOuts   SampleCloseOut[]
+  charges     SampleCharge[]
+  @@index([state, createdAt])
+  @@index([styleId])
+  @@map("sample_requests")
+}
+
+model SampleRound {
+  id           String @id @default(cuid())
+  requestId    String
+  request      SampleRequest @relation(fields: [requestId], references: [id])
+  revision     Int
+  state        String @default("DRAFT")
+  specification Json
+  releasedAt   DateTime?
+  releasedById String?
+  qc           Json?
+  submission   Json?
+  decision     Json?
+  handover     Json?
+  createdAt    DateTime @default(now())
+  stages       SampleStage[]
+  materials    SampleMaterial[]
+  attachments  SampleAttachment[]
+  closeOuts    SampleCloseOut[]
+  works        SampleWork[]
+  transfers    SampleTransfer[]
+  jobWorks     SampleJobWork[]
+  dispatches   SampleDispatch[]
+  charges      SampleCharge[]
+  @@unique([requestId, revision])
+  @@map("sample_rounds")
+}
+
+model SampleStage {
+  id        String @id @default(cuid())
+  roundId   String
+  round     SampleRound @relation(fields: [roundId], references: [id])
+  sequence  Int
+  name      String
+  /// The step as the round's route named it at release. Null on steps
+  /// released before routes named a process; their name is the record.
+  operationId  String?
+  operation    Operation? @relation(fields: [operationId], references: [id])
+  kind         ProcessKind?
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id])
+  execution    StepExecution @default(IN_HOUSE)
+  /// The floor contractor of an in-house step.
+  contractorId String?
+  contractor   Contractor? @relation(fields: [contractorId], references: [id])
+  /// The outside unit a step done outside goes to.
+  vendorId     String?
+  vendor       Supplier? @relation("SampleStageVendor", fields: [vendorId], references: [id])
+  instructions String?
+  /// What the step's own records add up to (done, rejected, when every piece
+  /// was accounted for), kept up to date by each making action from its
+  /// work, hand-ons and job work (sampleMaking ledger). On a whole step they
+  /// are what was recorded.
+  doneQty   Int?
+  rejectedQty Int?
+  responsible String?
+  reference String?
+  notes     String?
+  completedAt DateTime?
+  /// Recorded in one go before work was recorded by colour and size: its
+  /// figures are the whole step's, and its pieces went on with it.
+  wholeStep Boolean @default(false)
+  /// What the step's own labour cost, as the merchandiser typed it (₹,
+  /// STEP_LABOUR); an outside unit's charge is on its job work's returns.
+  labourAmount Decimal @default(0) @db.Decimal(12,2)
+  labourNote   String?
+  works        SampleWork[]
+  transfersOut SampleTransfer[] @relation("SampleTransferFrom")
+  transfersIn  SampleTransfer[] @relation("SampleTransferTo")
+  jobWorks     SampleJobWork[]
+  @@unique([roundId, sequence])
+  @@map("sample_stages")
+}
+
+/// Pieces worked at a step done on our own floor: done and rejected in each
+/// colour x size cell of the round (STEP_WORK). Rows are kept: one recorded
+/// by mistake is marked undone (MAKING_UNDO) and counts for nothing.
+model SampleWork {
+  id           String @id @default(cuid())
+  roundId      String
+  round        SampleRound @relation(fields: [roundId], references: [id])
+  stageId      String
+  stage        SampleStage @relation(fields: [stageId], references: [id])
+  /// [{ colour, sizeId, done, rejected }], spelt as the round's grid spells them.
+  cells        Json
+  /// Who did the work: the tailor, the contractor's man.
+  doneBy       String
+  workedOn     DateTime
+  notes        String?
+  createdById  String
+  createdAt    DateTime @default(now())
+  undoneAt     DateTime?
+  undoneBy     String?
+  undoneReason String?
+  @@index([roundId])
+  @@map("sample_works")
+}
+
+/// Pieces handed on from one step to the next one on our own floor
+/// (STEP_SEND), and counted in there (STEP_RECEIVE): at once when both steps
+/// are one department's. cells and receivedCells: [{ colour, sizeId, qty }].
+model SampleTransfer {
+  id            String @id @default(cuid())
+  roundId       String
+  round         SampleRound @relation(fields: [roundId], references: [id])
+  fromStageId   String
+  fromStage     SampleStage @relation("SampleTransferFrom", fields: [fromStageId], references: [id])
+  toStageId     String
+  toStage       SampleStage @relation("SampleTransferTo", fields: [toStageId], references: [id])
+  cells         Json
+  sentBy        String
+  sentOn        DateTime
+  /// Null until counted in at the next step.
+  receivedCells Json?
+  receivedBy    String?
+  receivedOn    DateTime?
+  /// Why fewer pieces were counted in than were sent.
+  shortReason   String?
+  notes         String?
+  createdById   String
+  createdAt     DateTime @default(now())
+  undoneAt      DateTime?
+  undoneBy      String?
+  undoneReason  String?
+  @@index([roundId])
+  @@map("sample_transfers")
+}
+
+/// Pieces given to the outside unit of a step done outside, on a job-work
+/// challan numbered from the JW series (JOB_SEND), and what came back
+/// (JOB_RETURN). No stock moves: sample pieces are not stock.
+model SampleJobWork {
+  id           String @id @default(cuid())
+  /// Our challan number, from the job-work series.
+  number       String @unique
+  roundId      String
+  round        SampleRound @relation(fields: [roundId], references: [id])
+  /// The step done outside.
+  stageId      String
+  stage        SampleStage @relation(fields: [stageId], references: [id])
+  vendorId     String
+  vendor       Supplier @relation("SampleJobWorkVendor", fields: [vendorId], references: [id], onDelete: Restrict)
+  /// [{ colour, sizeId, qty }]
+  cells        Json
+  sentBy       String
+  sentOn       DateTime
+  expectedBack DateTime?
+  vehicleNo    String?
+  /// What the challan declares the pieces worth; none: no commercial value.
+  declaredValue Decimal? @db.Decimal(12,2)
+  notes        String?
+  createdById  String
+  createdAt    DateTime @default(now())
+  /// Taken back before anything came back on it; its number stays used.
+  cancelledAt  DateTime?
+  cancelledBy  String?
+  cancelReason String?
+  returns      SampleJobReturn[]
+  @@index([roundId])
+  @@map("sample_job_works")
+}
+
+/// A cost of a sample other than its material, labour and outside units'
+/// charges (ADD_CHARGE): testing, pattern or CAD, a setup, a courier not on a
+/// challan. Kept, not deleted: one put in by mistake is removed with why
+/// (REMOVE_CHARGE) and counts for nothing.
+model SampleCharge {
+  id           String @id @default(cuid())
+  requestId    String
+  request      SampleRequest @relation(fields: [requestId], references: [id])
+  /// The round it was for; none: the request as a whole.
+  roundId      String?
+  round        SampleRound? @relation(fields: [roundId], references: [id])
+  /// COURIER, TESTING, PATTERN, SETUP or OTHER (sample_charge_shape).
+  kind         String
+  description  String
+  amount       Decimal @db.Decimal(12,2)
+  /// The bill or receipt it is on.
+  billRef      String?
+  chargedOn    DateTime
+  createdById  String
+  createdAt    DateTime @default(now())
+  removedAt    DateTime?
+  removedBy    String?
+  removeReason String?
+  @@index([requestId])
+  @@map("sample_charges")
+}
+
+/// Sample pieces sent to the buyer on a Sample Delivery Challan (the SDC
+/// series): which colours and sizes, how and to whom (DISPATCH). Samples are
+/// not stock and not a sale: nothing moves and nothing is billed. Cancelled
+/// while the buyer has decided on none of its colours (DISPATCH_CANCEL).
+model SampleDispatch {
+  id            String @id @default(cuid())
+  number        String @unique
+  roundId       String
+  round         SampleRound @relation(fields: [roundId], references: [id])
+  /// [{ colour, sizeId, qty }], spelt as the round's grid spells them.
+  cells         Json
+  recipient     String
+  address       String?
+  /// COURIER, HAND or TRANSPORT (sample_dispatch_shape).
+  mode          String
+  courier       String?
+  awb           String?
+  sentOn        DateTime
+  /// The buyer is to send the pieces back, by expectedBack when it is given.
+  returnable    Boolean @default(false)
+  expectedBack  DateTime?
+  /// What the challan declares the pieces worth; none: no commercial value.
+  declaredValue Decimal? @db.Decimal(12,2)
+  /// What sending them cost (₹): a sampling charge.
+  courierCharge Decimal @default(0) @db.Decimal(12,2)
+  notes         String?
+  createdById   String
+  createdAt     DateTime @default(now())
+  cancelledAt   DateTime?
+  cancelledBy   String?
+  cancelReason  String?
+  @@index([roundId])
+  @@map("sample_dispatches")
+}
+
+/// Pieces back from the outside unit on one job-work challan: accepted and
+/// rejected in each cell, with what the unit charged for them.
+model SampleJobReturn {
+  id             String @id @default(cuid())
+  jobWorkId      String
+  jobWork        SampleJobWork @relation(fields: [jobWorkId], references: [id])
+  /// [{ colour, sizeId, accepted, rejected }]
+  cells          Json
+  /// The unit's own challan or delivery note number.
+  theirChallanNo String?
+  receivedBy     String
+  receivedOn     DateTime
+  /// What the unit charged for the pieces back on it (₹).
+  chargeAmount   Decimal @default(0) @db.Decimal(12,2)
+  notes          String?
+  createdById    String
+  createdAt      DateTime @default(now())
+  undoneAt       DateTime?
+  undoneBy       String?
+  undoneReason   String?
+  @@index([jobWorkId])
+  @@map("sample_job_returns")
+}
+
+/// One line of a round's sample BOM, from its first draft save. Rows are
+/// updated in place, never written afresh, so what is linked to a line keeps
+/// it; the round's specification carries a copy of them. plannedQty is the
+/// required quantity. source and ownership agree (sample_material_source_owner).
+model SampleMaterial {
+  id          String @id @default(cuid())
+  roundId     String
+  round       SampleRound @relation(fields: [roundId], references: [id])
+  /// The order the lines are listed in.
+  sequence    Int @default(0)
+  /// Which part of the garment it goes into: Body, Collar, Placket.
+  component   String @default("")
+  /// Empty on a draft line whose material is not picked yet.
+  itemId      String?
+  item        Item? @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  /// Null: every colour of the round. Otherwise one of its colours.
+  colour      String?
+  /// Who draws it from the store.
+  departmentId String?
+  department  Department? @relation(fields: [departmentId], references: [id])
+  qtyPerPiece Decimal @default(0) @db.Decimal(10,4)
+  wastagePct  Decimal @default(0) @db.Decimal(5,2)
+  /// plannedQty was typed by hand rather than worked out, with the reason.
+  requiredOverride Boolean @default(false)
+  overrideReason String?
+  /// PURCHASE or BUYER_SUPPLIED (sample_material_source).
+  source      String @default("PURCHASE")
+  /// What one unit is expected to cost, before anything is bought.
+  estRate     Decimal? @db.Decimal(10,4)
+  remarks     String @default("")
+  /// The store it is issued from: chosen at the first issue, then kept.
+  warehouseId String?
+  warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  ownership   StockOwnership
+  plannedQty  Decimal @db.Decimal(10,3)
+  issuedQty   Decimal @default(0) @db.Decimal(10,3)
+  returnedQty Decimal @default(0) @db.Decimal(10,3)
+  usedQty     Decimal @default(0) @db.Decimal(10,3)
+  wasteQty    Decimal @default(0) @db.Decimal(10,3)
+  issuedValue Decimal @default(0) @db.Decimal(14,2)
+  returnedValue Decimal @default(0) @db.Decimal(14,2)
+  /// Set when the line is not needed after all (the buyer dropped the trim,
+  /// another material does): making may start without it. With the reason
+  /// and who said so; cleared if it is needed again.
+  waivedAt     DateTime?
+  waivedReason String?
+  waivedBy     String?
+  /// The purchase order lines buying it (PurchaseOrderLine.sampleMaterialId).
+  poLines     PurchaseOrderLine[]
+  @@index([roundId])
+  @@map("sample_materials")
+}
+
+/// What was left of a request's own material in a sample store, closed out:
+/// used up in the sample (USED: issued and counted as consumed), or moved to a
+/// general store at what it is carried at (MOVED). Each row is the movement's
+/// record, so the request's pool (samplePool.service) can take it off.
+model SampleCloseOut {
+  id            String @id @default(cuid())
+  requestId     String
+  request       SampleRequest @relation(fields: [requestId], references: [id])
+  /// The round the movement is booked against (the latest when it was closed).
+  roundId       String
+  round         SampleRound @relation(fields: [roundId], references: [id])
+  itemId        String
+  item          Item @relation(fields: [itemId], references: [id])
+  /// The sample store it was in.
+  warehouseId   String
+  warehouse     Warehouse @relation("SampleCloseOutFrom", fields: [warehouseId], references: [id])
+  /// USED or MOVED (sample_closeout_kind).
+  kind          String
+  /// The general store it went to, for MOVED.
+  toWarehouseId String?
+  toWarehouse   Warehouse? @relation("SampleCloseOutTo", fields: [toWarehouseId], references: [id], onDelete: Restrict)
+  qty           Decimal @db.Decimal(10,3)
+  /// What it was carried at when it left the sample store.
+  value         Decimal @default(0) @db.Decimal(14,2)
+  reason        String
+  createdById   String
+  createdBy     User @relation("SampleCloseOutBy", fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
+  @@index([requestId])
+  @@map("sample_closeouts")
+}
+
+model SampleEvent {
+  id        String @id @default(cuid())
+  requestId String
+  request   SampleRequest @relation(fields: [requestId], references: [id])
+  version   Int
+  action    String
+  actorId   String
+  detail    Json
+  createdAt DateTime @default(now())
+  @@unique([requestId, version])
+  @@map("sample_events")
+}
+
+/// A tech pack, pattern, photo or approval kept against a sample request, or
+/// against one round of it. Written and removed only through the request's
+/// own actions (ATTACH, DETACH), so each file has its event in the history.
+/// Kinds are checked by the sample_attachment_kind constraint.
+model SampleAttachment {
+  id           String @id @default(cuid())
+  requestId    String
+  request      SampleRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  /// Null for a file of the whole request, such as the buyer's tech pack.
+  roundId      String?
+  round        SampleRound? @relation(fields: [roundId], references: [id])
+  kind         String
+  /// What the person called it; never the storage path.
+  fileName     String
+  storagePath  String @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User @relation("SampleAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+  @@index([requestId])
+  @@index([roundId])
+  @@map("sample_attachments")
+}
+
 // ═══════════════════════════════════════════
 // ENUMS
 // ═══════════════════════════════════════════
@@ -362,6 +780,8 @@ model User {
   styleStepsSkipped    StyleStepRun[]              @relation("StyleStepSkippedBy")
   routingsCreated      Routing[]                   @relation("RoutingCreatedBy")
   routingsUpdated      Routing[]                   @relation("RoutingUpdatedBy")
+  uploadedSampleFiles  SampleAttachment[]          @relation("SampleAttachmentUploadedBy")
+  sampleCloseOuts      SampleCloseOut[]            @relation("SampleCloseOutBy")
 
 
   adjustmentsApproved StockAdjustment[] @relation("AdjustmentApprovedBy")
@@ -530,6 +950,8 @@ model Company {
 }
 
 model Brand {
+  sampleRequests SampleRequest[]
+
   id          String    @id @default(cuid())
   companyId   String
   company     Company   @relation(fields: [companyId], references: [id])
@@ -790,6 +1212,9 @@ model ItemUnit {
 }
 
 model Item {
+  sampleMaterials SampleMaterial[]
+  sampleCloseOuts SampleCloseOut[]
+
   id           String       @id @default(cuid())
   code         String       @unique
   name         String
@@ -888,6 +1313,18 @@ model Item {
   routings Routing[] @relation("RoutingFabric")
 }
 
+/// Whether a style is still being sampled or may be ordered and made.
+enum StyleStage {
+  DEVELOPMENT
+  PRODUCTION
+}
+
+/// What a store is for (Warehouse.purpose).
+enum WarehousePurpose {
+  GENERAL
+  SAMPLING
+}
+
 model Style {
   id          String     @id @default(cuid())
   code        String     @unique
@@ -918,6 +1355,10 @@ model Style {
   composition String?
   /// Wash-care symbols for the label, as codes: WASH_30, NO_BLEACH, IRON_MED…
   washCare    String[]   @default([])
+  /// DEVELOPMENT while the style exists only for sampling: kept off order,
+  /// BOM and production screens and refused by them. Becomes PRODUCTION only
+  /// when its sample is handed over; never set from the Styles master.
+  stage       StyleStage @default(PRODUCTION)
   isActive    Boolean    @default(true)
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
@@ -928,9 +1369,11 @@ model Style {
   items    Item[]
   poLines  PurchaseOrderLine[]
   stepRuns StyleStepRun[]
+  sampleRequests SampleRequest[]
 
   @@index([code])
   @@index([brandId])
+  @@index([stage])
   mrLines MaterialRequisitionLine[] @relation("MRLineStyle")
   @@map("styles")
 }
@@ -1093,6 +1536,8 @@ model BOMLineSize {
 }
 
 model Customer {
+  sampleRequests SampleRequest[]
+
   id                String       @id @default(cuid())
   code              String       @unique
   name              String
@@ -1254,9 +1699,15 @@ model Supplier {
   processTransfers ProcessTransfer[] @relation("TransferVendor")
   jobWorkOrders    JobWorkOrder[]    @relation("JobWorkOrderVendor")
   ledger           Ledger?
+  sampleStages     SampleStage[]     @relation("SampleStageVendor")
+  sampleJobWorks   SampleJobWork[]   @relation("SampleJobWorkVendor")
 }
 
 model Warehouse {
+  sampleMaterials SampleMaterial[]
+  sampleCloseOutsFrom SampleCloseOut[] @relation("SampleCloseOutFrom")
+  sampleCloseOutsTo   SampleCloseOut[] @relation("SampleCloseOutTo")
+
   id        String  @id @default(cuid())
   companyId String
   company   Company @relation(fields: [companyId], references: [id])
@@ -1264,6 +1715,10 @@ model Warehouse {
   code      String  @unique
   address   String?
   isActive  Boolean @default(true)
+  /// GENERAL holds bulk stock. SAMPLING holds material bought for samples, kept
+  /// apart from it: only sample purchases are received there, only Sampling
+  /// issues from it, and general documents cannot draw on it (lib/sampleStore).
+  purpose   WarehousePurpose @default(GENERAL)
   /// Set on a process's own floor (Cutting Floor, Stitching Floor…): the work
   /// in progress at that process is kept here, size by size. Empty for a store
   /// or an outside unit. One floor per process.
@@ -1323,6 +1778,8 @@ model Department {
   bomLines          BOMLine[]
   bomCostLines      BOMCostLine[]
   moSteps           MOStep[]
+  sampleStages      SampleStage[]
+  sampleMaterials   SampleMaterial[]
   /// The process's own floor, where its work in progress is kept as stock.
   floor             Warehouse?         @relation("ProcessFloor")
   openingStockLines OpeningStockLine[] @relation("OpeningStockProcess")
@@ -1356,6 +1813,7 @@ model Operation {
   moSteps           MOStep[]
   styleStepRuns     StyleStepRun[]
   workstations      Workstation[]
+  sampleStages      SampleStage[]
 
   @@map("operations")
 }
@@ -2391,8 +2849,19 @@ model PurchaseOrderLine {
   grnLines  GRNLine[]
   billLines PurchaseInvoiceLine[]
 
+  /// The sample BOM line this buys for, when the material is bought for a
+  /// sample. Received into a sample store only, and what Sampling counts as
+  /// ordered and received for that line. Restrict: a sample line with an
+  /// order against it stays.
+  sampleMaterialId String?
+  sampleMaterial   SampleMaterial? @relation(fields: [sampleMaterialId], references: [id], onDelete: Restrict)
+  /// Why more is ordered than the sample line still needs (a supplier's
+  /// minimum, a full roll). Asked for only then.
+  sampleOverReason String?
+
   @@index([mrLineId])
   @@index([enquiryLineId])
+  @@index([sampleMaterialId])
   @@map("purchase_order_lines")
 }
 
@@ -5046,6 +5515,7 @@ model Contractor {
   routingSteps RoutingStep[]
   moSteps      MOStep[]
   ledger       Ledger?
+  sampleStages SampleStage[]
 
   @@index([operationIds], type: Gin)
   @@map("contractors")

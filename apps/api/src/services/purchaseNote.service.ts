@@ -8,6 +8,7 @@ import type {
 } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { recordMovement } from './stock.service'
+import { assertSampleStoreLines } from './sampleSourcing.service'
 
 /**
  * What a debit or credit note against a supplier actually means.
@@ -912,6 +913,25 @@ export async function moveNoteStock(
 
   const natural = note.effect === 'REDUCES_PAYABLE' ? 'OUT' : 'IN'
   const direction: 'OUT' | 'IN' = mode === 'POST' ? natural : natural === 'OUT' ? 'IN' : 'OUT'
+
+  // A sample's material moves in the sample store it was received into, and
+  // nothing else moves there. Checked when the note is posted; a cancellation
+  // puts back exactly what the posting moved.
+  if (mode === 'POST') {
+    const traced = await tx.purchaseNoteLine.findMany({
+      where: { noteId: note.id },
+      select: { grnLineId: true, billLineId: true, item: { select: { name: true } } },
+    })
+    await assertSampleStoreLines(
+      tx,
+      traced.map((l) => ({
+        warehouseId: note.warehouseId,
+        grnLineId: l.grnLineId,
+        billLineId: l.billLineId,
+        itemName: l.item.name,
+      })),
+    )
+  }
 
   let moved = 0
   for (const line of note.lines) {

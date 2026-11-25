@@ -1,0 +1,333 @@
+SAMPLING MODULE - CURRENT BUILD AND FEEDBACK REFERENCE
+LD ERP Solution | 14 November 2026
+
+Purpose
+-------
+This describes the Sampling functionality built so far, including today's UI
+refinements. Use the section IDs when explaining changes from your discussion
+with the merchandiser. The rules below describe the current pilot; they are
+open to correction based on your actual working process.
+
+CURRENT POSITION
+----------------
+- Sampling is a local pilot on branch feat/sampling-local.
+- Local page: http://localhost:3302/sampling
+- The pilot uses a separate local database with fictional test data.
+- Changes have not been pushed to main or deployed to production.
+- Your personal testing comes first, followed by team feedback and testing.
+- This summary documents existing functionality. It does not implement any
+  of the new requirements from the merchandiser discussion.
+
+HOW THE RECORDS ARE ORGANISED
+---------------------------
+Request: The overall buyer enquiry or internal sample development request.
+It holds the buyer, brand, brief, owner and required date.
+
+Round: One attempt or milestone under that request. A round currently covers
+one style, one colour and one or more sizes. Revisions remain under the same
+request, preserving earlier specifications and buyer decisions.
+
+Milestone: A descriptive name such as Development sample, Fit sample, Size set
+or Pre-production sample. These are examples; the milestone is currently a
+text field, not a fixed sequence of mandatory sample types.
+
+Making step: An operation within a round, such as Cutting, Stitching,
+Embroidery or Finishing. Making steps are different from sample milestones.
+
+Current overall flow:
+Request -> Technical specification and pattern references -> Release ->
+Material issue -> Making steps -> QC -> Buyer submission -> Buyer decision ->
+New round when required, or approved handover -> Production acceptance.
+
+S01. SAMPLE REQUEST / BUYER ENQUIRY
+---------------------------------
+Built:
+- Create a sample request with its own request number and initial draft round.
+- Capture request title, brand, sampling owner and buyer brief/design references.
+- Select a buyer, or use Internal development when there is no buyer.
+- Optionally enter the buyer reference and required date.
+- View requests in a searchable, paginated register.
+
+Current rules and limits:
+- Title, brand, owner and brief are required.
+- The sampling owner is entered as a name, rather than assigned through a
+  dedicated staff allocation or workload screen.
+- A round uses an existing style from the selected brand and that style's
+  existing colours and size run.
+- Request details can be edited from Request & buyer brief, with a reason.
+  Activity shows the previous and updated values. Buyer and brand lock after
+  the first release; all request edits stop after cancellation or handover.
+  Clear and save any selected draft style before changing its brand.
+
+S02. TECHNICAL REVIEW & TECH PACK
+-------------------------------
+Built:
+- Prepare the technical specification before release.
+- Enter the milestone, style, colour and construction instructions.
+- Enter tech-pack reference, pattern reference and optional technical notes.
+- Define sample sizes and piece quantities.
+- Define measurement points for each size, target values, tolerances and units
+  in centimetres or inches.
+- Plan materials and the sequence of making operations.
+
+Current rules and limits:
+- Save draft is available in every preparation section. Incomplete fields and
+  unfinished rows can be saved to the local database and reopened later.
+  Supplied master references and value limits are checked. Release still
+  requires the complete specification and does not accept an incomplete draft.
+- The UI keeps unsaved specification entries when switching workspace sections.
+  This is temporary in-screen state, not automatic saving.
+- Every selected size needs at least one measurement point.
+- Release freezes that round's specification and creates its material and
+  making records. Later technical changes require a new round.
+- Documents are recorded as references; actual file/image uploads are not built.
+
+S03. MATERIAL SOURCING / PREPARATION
+----------------------------------
+Built:
+- Plan fabric, trims, accessories, packing materials and consumables using
+  existing material masters.
+- Choose the store, planned quantity and ownership for each material line.
+- Support company-owned and buyer-owned material.
+- After release, record material issue, use, waste and return, with a reason.
+- Display planned, issued, used, wasted, returned and still-held quantities.
+- Issue and return use the ERP's existing inventory movement system.
+- Material values are shown only to users with accounts viewing permission.
+
+Current rules and limits:
+- Buyer-owned material requires a buyer and uses that buyer's stock.
+- Material issue cannot exceed the released material plan.
+- All planned material must be issued before making is recorded.
+- New issues are allowed before the first making step is completed.
+- Keep the planned material issued until the first making step is recorded;
+  return surplus after that step, or reconcile it when cancelling the request.
+- Recording use or waste accounts for material already issued; it does not
+  deduct stock a second time.
+- Used, wasted and returned quantities cannot exceed what the round holds.
+- Material on earlier rounds can still be reconciled.
+- Dedicated sourcing requests, supplier follow-up and sampling-linked purchase
+  orders are not built. This stage currently plans and handles available stock.
+
+S04. PATTERN DEVELOPMENT
+-----------------------
+Built:
+- Record the pattern version or reference in the technical specification.
+- Include construction, sizes, measurements and planned material quantities.
+- Preserve the released reference when a revised pattern is used in a new round.
+
+Current rules and limits:
+- Pattern development is grouped with technical preparation in the interface.
+- There is no separate pattern assignment, pattern approval or completion screen.
+- Pattern-file upload, CAD integration, marker planning and automatic fabric
+  consumption calculation are not built. Material requirements are entered.
+
+S05. SAMPLE CUTTING
+------------------
+Built:
+- Cutting is the first operation in the making route.
+- Record completed pieces, rejected pieces, responsible person/unit, an optional
+  work reference and notes about the work or rejected-piece disposition.
+
+Current rules and limits:
+- Completed plus rejected pieces must equal the pieces received by the step.
+- Cutting receives the total planned sample quantity across the selected sizes.
+- A step is recorded as a completed batch, not through partial progress entries.
+- Detailed cutting markers, bundle tracking and piece-level custody are not built.
+
+S06. SAMPLE STITCHING
+--------------------
+Built:
+- Stitching is a required operation in the making route.
+- Record the same completion, rejection, responsibility and reference details
+  used for cutting.
+- The next step receives the previous step's completed quantity.
+
+Current rules and limits:
+- Steps must be completed in their configured order.
+- Future-step forms show their prerequisites instead of opening immediately.
+- Detailed line allocation, operator time and stitching labour costs are not built.
+
+S07. FINISHING & SPECIAL PROCESSES
+--------------------------------
+Built:
+- The default making route is Cutting -> Stitching -> Finishing.
+- Additional named steps can be added for washing, printing, embroidery,
+  pressing or other work.
+- The preparation form provides ordered rows to arrange the making sequence.
+- Each operation records completed/rejected quantities, responsibility and notes.
+
+Current rules and limits:
+- Cutting stays first, Stitching must be included and step names must be unique.
+- Finishing is in the default route; it is not enforced as a mandatory final step.
+- Outside processing currently records a responsible unit and work references.
+- Outside-unit challans, dispatch/receipt documents and service costing are not built.
+
+S08. SAMPLE QC & MEASUREMENT
+---------------------------
+Built:
+- QC has its own workspace section after making.
+- Enter actual values against the released measurement targets.
+- Display size, measurement name, unit and whether the value is within tolerance.
+- Record pieces passing workmanship inspection and QC findings/disposition.
+- Measurements outside tolerance keep the round from proceeding to submission.
+- A failed inspection can be followed by a corrected inspection or a new round.
+
+Current rules and limits:
+- Every making operation must be complete before QC.
+- QC cannot pass more pieces than the final making step produced.
+- Every measurement point must have an actual value.
+- For multi-size rounds, the pilot requires the complete size set through making,
+  QC and submission. Partial rejection by size needs separate size rounds.
+- Rework tasks within the same attempt and detailed defect categorisation are
+  not built. QC findings are recorded in notes and the action history.
+
+S09. BUYER SUBMISSION & APPROVAL
+------------------------------
+Built:
+- Submit a QC-passed sample by recording pieces sent, recipient, courier or
+  signed-handover reference, and submission/retained-sample notes.
+- Record the buyer's decision: Approved, Changes required or Rejected.
+- Record the buyer decision maker, evidence/feedback reference and any conditions.
+
+Current rules and limits:
+- Submission quantity cannot exceed the quantity passed by QC.
+- A multi-size round must submit the complete inspected set.
+- Approval cannot have unresolved conditions. Use Changes required while
+  corrections remain outstanding.
+- An authorised ERP user records the buyer's response manually.
+- A buyer portal, automated email submission, courier integration and uploaded
+  approval evidence are not built.
+
+S10. REVISION OR NEXT SAMPLE STAGE
+--------------------------------
+Built:
+- Start a new revision or milestone after buyer review, or after failed QC.
+- Enter the reason and copy the previous specification into a new draft round.
+- Change the milestone, pattern, measurements, materials or making route there.
+- Switch between rounds to review earlier specifications and decisions.
+
+Current rules and limits:
+- Only the latest round can be changed, except material reconciliation on
+  earlier rounds.
+- The software does not force a fixed sequence such as Proto -> Fit -> Size set
+  -> Pre-production. The actual milestone sequence still needs confirmation.
+- Once a round has a prepared handover, new development needs another request.
+
+S11. PRE-PRODUCTION APPROVAL & BULK HANDOVER
+-----------------------------------------
+Built:
+- Prepare a handover after unconditional buyer approval.
+- Select an existing approved production BOM (bill of materials) and an active
+  production routing suitable for the style.
+- Record handover notes and preserve the selected technical information with
+  the sample specification and buyer decision.
+- Record preparation and production acceptance, including the responsible
+  person's name and date.
+
+Current rules and limits:
+- Material must be fully accounted for on every round before handover.
+- Production acceptance requires production approval permission.
+- Handover does not create or release a bulk manufacturing order.
+- The milestone name itself does not enforce a special Pre-production approval
+  gate. The required final milestone and authorised approvers need confirmation.
+- Automatic production-order creation and sales-order linkage are not built.
+
+U01. INTERFACE BUILT AND REFINED TODAY
+------------------------------------
+Sampling register:
+- All requests.
+- In progress: released rounds handling materials, making and QC.
+- Ready for buyer / in review: QC-passed or submitted rounds.
+- Approved & handover: buyer-approved rounds and their handovers.
+- Search, request status, next-action text, CSV export and request opening.
+
+Inside a request:
+1. Request & buyer brief.
+2. Technical review & pattern.
+3. Material preparation.
+4. Sample making, with visible Cutting/Stitching/Finishing or custom steps.
+5. QC & measurements.
+6. Buyer submission & review.
+7. Production handover.
+An additional Activity & request actions section holds history and cancellation.
+
+The interface groups the eleven business stages above into these seven working
+sections. Pattern development is within technical preparation; special processes
+are within making; revision creation is within review or failed QC.
+
+Form improvements:
+- Four preparation sections: Style & construction; Sizes & measurements;
+  Materials & making route; Review & release.
+- A checklist of missing details before saving/releasing.
+- A Next action prompt based on the selected round's current position.
+- Separate completed, current, waiting and upcoming stage indications.
+- Clearer material quantity summaries, measurement sizes/units and field hints.
+- Unsaved specification protection when leaving a request or changing rounds.
+- A standalone printable record covering the request and its rounds.
+
+C01. RECORD PROTECTION, HISTORY AND CANCELLATION
+----------------------------------------------
+- Sampling has separate create, view, edit, approve and export permissions.
+- Material actions also need inventory edit permission.
+- Production acceptance also needs production approve permission.
+- Conflicting saves from another window are refused rather than silently
+  overwriting the newer record.
+- Saved actions record who performed them and when.
+- Released specifications and previous buyer decisions are preserved.
+- Cancellation requires a reason and sample disposition, with material fully
+  accounted for. A request with a prepared handover cannot be cancelled.
+- Sample quantities are separate from bulk production and saleable garments.
+
+N01. MAIN ITEMS NOT YET BUILT
+----------------------------
+- Actual tech-pack, design, pattern, photograph and approval-file uploads.
+- Dedicated sourcing/purchasing links and supplier follow-up.
+- Pattern/marker tools and automatic material-consumption calculations.
+- Detailed piece custody, sample dispatch/return and retained-sample tracking.
+- Outside processing challans and dispatch/receipt workflows.
+- Labour, processing, courier and complete sample costing/accounting.
+- Partial making progress, detailed size-level rejection and rework tasks.
+- Automatic buyer communications or external approval portal.
+- A fixed milestone sequence and a mandatory final pre-production gate.
+- Automatic creation or release of bulk production orders.
+
+T01. TESTING POSITION
+---------------------
+- 122 API/database checks passed after adding partial drafts and request edits.
+- 17 UI workflow-guidance checks passed during the interface refinement.
+- API and web builds and TypeScript checks passed.
+- Local start/stop/restart and HTTP access were checked.
+- Interactive browser behaviour, visual layout and printed-page appearance
+  still need personal review. Automated browser inspection was blocked.
+- These checks do not replace validation by you and the sampling process owners.
+
+F01. HOW TO EXPLAIN THE REQUIRED CHANGES
+--------------------------------------
+Refer to any section ID above and describe the actual work. You do not need to
+use technical language or complete every heading.
+
+Copy this block for each change:
+
+Change number:
+Related section(s), for example S01, S04 or U01:
+What the current build does:
+What the merchandiser actually needs:
+Who performs the work:
+Information or documents entered:
+When this stage starts and what allows it to finish:
+Who approves, if anyone:
+What happens if it fails, is revised, or is cancelled:
+Effect on materials, sample quantities, cost or production:
+Example from a real sampling job:
+Priority: Needed for daily use / Useful next / Later
+
+Useful starting points for the discussion:
+- What triggers a request, and can it contain multiple styles or colours?
+- Which sample types/milestones are actually used, and in what order?
+- What can be saved or started before all technical details are available?
+- Which stages can be skipped, repeated, outsourced or run at the same time?
+- How are fabric, trims, rejected pieces and leftover material handled?
+- How are buyer feedback, retained samples and sample returns tracked?
+- What exactly must be approved before production receives the final package?
+
+END OF CURRENT BUILD SUMMARY

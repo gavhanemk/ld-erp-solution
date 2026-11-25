@@ -43,17 +43,20 @@ import finishedGoodsRoutes from './routes/finishedGoods.routes'
 import productionRoutes from './routes/production.routes'
 import accountsRoutes from './routes/accounts.routes'
 import hrRoutes from './routes/hr.routes'
+import samplingRoutes from './routes/sampling.routes'
 import approvalRoutes from './routes/approvals.routes'
 import aiRoutes from './routes/ai.routes'
 import notificationRoutes from './routes/notification.routes'
 import settingsRoutes from './routes/settings.routes'
 import webhookRoutes from './routes/webhook.routes'
+import localFilesRoutes from './routes/localFiles.routes'
 
 import { errorHandler } from './middleware/errorHandler'
 import { storageConfigured } from './lib/storage'
 import { authMiddleware } from './middleware/auth'
 import { logger } from './utils/logger'
 import { keepAwake } from './lib/keepAwake'
+import { apiListenHost } from './lib/pilot'
 import { prisma } from '@ld-erp/database'
 
 const app = express()
@@ -216,6 +219,20 @@ const addressLimit = rateLimit({
 })
 app.use('/api/', globalLimit)
 
+/*
+ * Files kept on this machine by the local sampling pilot (lib/storage.ts,
+ * STORAGE_DRIVER=local). Answers 404 to everything anywhere else.
+ *
+ * Here rather than with the other routes below, for two reasons. It is above
+ * the body parsers: express.json() would take a file sent as application/json
+ * for a request body, and what was written to disk would not be the file that
+ * was sent. And it is outside authMiddleware: the browser sends the file with
+ * no Authorization header, and the signed token in the link is the whole
+ * authorisation, exactly as with Supabase's own upload link. CORS is already
+ * applied above, so the web app can send and fetch from its own origin.
+ */
+app.use('/api/local-files', localFilesRoutes)
+
 // Body & Logging
 app.use(compression())
 app.use(express.json({ limit: '10mb' }))
@@ -321,6 +338,7 @@ app.use('/api/finished-goods', authMiddleware, finishedGoodsRoutes)
 app.use('/api/production', authMiddleware, productionRoutes)
 app.use('/api/accounts', authMiddleware, accountsRoutes)
 app.use('/api/hr', authMiddleware, hrRoutes)
+app.use('/api/sampling', authMiddleware, samplingRoutes)
 app.use('/api/approvals', authMiddleware, approvalRoutes)
 app.use('/api/ai', authMiddleware, aiRoutes)
 app.use('/api/notifications', authMiddleware, notificationRoutes)
@@ -333,7 +351,7 @@ app.use('*', (req, res) => res.status(404).json({ error: 'Route not found', path
 app.use(errorHandler)
 
 const PORT = process.env.PORT || 5000
-httpServer.listen(PORT, () => {
+httpServer.listen(Number(PORT), apiListenHost(), () => {
   logger.info(`🚀 LD ERP Solution API → http://localhost:${PORT}`)
   logger.info(`📡 Socket.io ready | 🌍 ${process.env.NODE_ENV}`)
   keepAwake()

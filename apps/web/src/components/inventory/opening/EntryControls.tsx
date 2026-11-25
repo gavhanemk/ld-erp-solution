@@ -7,6 +7,7 @@ import { api, ApiError, can, currentUser } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
 import { StepInput } from '@/components/ui/StepInput'
+import { isAdminRole } from '@/lib/access'
 
 /*
  * Opening stock put right after it is in, never deleted: a line that came in
@@ -104,7 +105,7 @@ export function EntryControls({ entryId, onChanged, say }: { entryId: string; on
   const pending = doc.changes.find((c) => c.status === 'PENDING')
   const past = doc.changes.filter((c) => c.status !== 'PENDING')
   const own = pending && pending.requestedById === me?.id
-  const mayDecide = mayApprove && (!own || me?.role === 'Admin')
+  const mayDecide = mayApprove && (!own || isAdminRole(me?.role))
 
   return (
     <section className="glass-card space-y-3 px-4 py-3" aria-label={`Entry ${doc.number}`}>
@@ -186,7 +187,7 @@ export function EntryControls({ entryId, onChanged, say }: { entryId: string; on
                 </button>
               )}
               {!mayDecide && !own && <span className="text-muted-foreground text-xs">Waiting for someone with Inventory → approve.</span>}
-              {mayApprove && own && me?.role !== 'Admin' && <span className="text-muted-foreground text-xs">Someone else approves your own request.</span>}
+              {mayApprove && own && !isAdminRole(me?.role) && <span className="text-muted-foreground text-xs">Someone else approves your own request.</span>}
             </div>
           </div>
         </div>

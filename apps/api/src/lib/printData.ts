@@ -61,6 +61,11 @@ const DEFAULT_TITLES: Record<string, string> = {
   ENQ: 'PURCHASE REQUISITION',
   DC: 'DELIVERY CHALLAN',
   JW: 'DELIVERY CHALLAN (JOB WORK)',
+  // Samples going to the buyer: not stock and not a sale, so not the sales challan.
+  SDC: 'SAMPLE DELIVERY CHALLAN',
+  // What a sample cost: the buyer's statement, and our own sheet line by line.
+  SCS: 'SAMPLE CHARGES',
+  SCOST: 'SAMPLE COST SHEET',
   CMR: 'DELIVERY CHALLAN (RETURN)',
   CGRN: 'CUSTOMER MATERIAL RECEIPT',
   // Our own booking record of a supplier's invoice, not a tax invoice we issue.

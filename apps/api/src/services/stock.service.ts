@@ -1,5 +1,6 @@
 import type { Prisma, StockOwnership, TransactionType } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { SAMPLE_STORE_IDS, sampleStoreMayMove, sampleStoreRefused } from '../lib/sampleStore'
 // package.service imports this file too; each only calls the other from inside a function.
 import { takeFromPackage } from './package.service'
 
@@ -130,6 +131,30 @@ async function lockBalance(tx: Prisma.TransactionClient, key: StockKey): Promise
   ].join('|')
 
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)`
+}
+
+/**
+ * The same lock, and in the same round trip the store's name and whether it
+ * is a sample store: recordMovement checks every movement against that, and
+ * a second query per movement would be paid by every document in the mill.
+ */
+async function lockBalanceAndStore(
+  tx: Prisma.TransactionClient,
+  key: StockKey,
+): Promise<{ purpose: string | null; name: string | null }> {
+  const token = [
+    key.itemId,
+    key.warehouseId,
+    key.ownership ?? 'OWNED',
+    key.ownerCustomerId ?? '',
+    key.sizeId ?? '',
+    key.grade ?? 'A',
+  ].join('|')
+  const rows = await tx.$queryRaw<Array<{ purpose: string | null; name: string | null }>>`
+    SELECT w.purpose::text AS purpose, w.name
+    FROM (SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)) AS held
+    LEFT JOIN ld_erp.warehouses w ON w.id = ${key.warehouseId}`
+  return rows[0] ?? { purpose: null, name: null }
 }
 
 /**
@@ -289,7 +314,12 @@ export async function recordMovement(
     )
   }
 
-  await lockBalance(tx, m)
+  const store = await lockBalanceAndStore(tx, m)
+  // A sample store holds what was bought for samples, apart from bulk stock:
+  // only the documents lib/sampleStore names may move stock in or out of it.
+  if (store.purpose === 'SAMPLING' && !sampleStoreMayMove(m)) {
+    throw sampleStoreRefused(store.name ?? 'That store', m.referenceType, m.ownership ?? 'OWNED')
+  }
 
   const transactionDate = await settleDate(tx, m)
   const before = await balanceOf(tx, m)
@@ -740,7 +770,8 @@ export async function reorderStatus(
     FROM ld_erp.items i
     JOIN ld_erp.uom             u ON u.id = i."uomId"
     JOIN ld_erp.item_categories c ON c.id = i."categoryId"
-    LEFT JOIN ld_erp.stock_ledger s ON s."itemId" = i.id
+    -- Material bought for samples is not stock the mill reorders against.
+    LEFT JOIN ld_erp.stock_ledger s ON s."itemId" = i.id AND s."warehouseId" NOT IN (${SAMPLE_STORE_IDS})
     WHERE i."isActive" = true
       AND i."reorderLevel" > 0
       AND (${filters.itemId ?? null}::text IS NULL OR i.id = ${filters.itemId ?? null})

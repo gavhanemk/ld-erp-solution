@@ -4,8 +4,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError } from '@/lib/api'
 import { loadAppSettings } from '@/lib/appSettings'
 import { settingsApi, type PreferenceDefinition } from '@/lib/settingsApi'
-import { LoadingRow, Notice, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
+import { Boxes, Factory, FileCheck2, LayoutList, MonitorSmartphone, SlidersHorizontal, type LucideIcon } from 'lucide-react'
+import { LoadingRow, Notice, SaveBar, SettingsCard, Toggle } from '@/components/settings/ui'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+
+/** Each group of preferences under the icon of the part of the ERP it changes. */
+const GROUP_ICON: Record<string, LucideIcon> = {
+  'Lists and screens': LayoutList,
+  Stock: Boxes,
+  Production: Factory,
+  Approvals: FileCheck2,
+}
 
 /**
  * Preferences.
@@ -113,30 +122,32 @@ export default function PreferencesPage() {
 
   if (loading) {
     return (
-      <SettingsCard title="Preferences">
+      <SettingsCard title="Preferences" icon={SlidersHorizontal}>
         <LoadingRow />
       </SettingsCard>
     )
   }
 
   return (
-    <form onSubmit={submit} className="space-y-6">
+    <form onSubmit={submit} className="space-y-5">
       {message && <Notice kind={message.kind}>{message.text}</Notice>}
 
       {groups.map(([group, defs]) => (
-        <SettingsCard key={group} title={group}>
+        <SettingsCard key={group} title={group} icon={GROUP_ICON[group] ?? SlidersHorizontal}>
           <div className="divide-y divide-border/60">
             {defs.map((def) => (
               <div
                 key={def.key}
-                className="flex items-start justify-between gap-6 py-4 first:pt-0 last:pb-0"
+                className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between sm:gap-6"
               >
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-foreground">{def.label}</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">{def.help}</p>
-                  <p className="text-[11px] text-muted-foreground/70 mt-1">Affects: {def.affects}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5 leading-snug">{def.help}</p>
+                  <p className="text-muted-foreground mt-2 inline-flex items-center gap-1 rounded-md bg-secondary px-2 py-0.5 text-[11px]">
+                    <MonitorSmartphone size={11} /> {def.affects}
+                  </p>
                   {errors[def.key] && (
-                    <p className="text-xs text-red-400 mt-1">{errors[def.key]}</p>
+                    <p className="text-xs text-red-500 mt-1">{errors[def.key]}</p>
                   )}
                 </div>
 
@@ -182,13 +193,16 @@ export default function PreferencesPage() {
         </SettingsCard>
       ))}
 
-      <div className="flex items-center justify-between gap-4">
-        <p className="text-xs text-muted-foreground max-w-xl">
-          More preferences appear here as the screens that use them are built. A setting is only
-          added once it changes something, so nothing on this page is decoration.
-        </p>
-        <SaveButton saving={saving} disabled={!dirty} />
-      </div>
+      <p className="text-xs text-muted-foreground max-w-2xl">
+        More preferences appear here as the screens that use them are built. A setting is only
+        added once it changes something, so nothing on this page is decoration.
+      </p>
+
+      <SaveBar
+        saving={saving}
+        disabled={!dirty}
+        note={dirty ? 'You have changes that are not saved yet.' : 'Everything here is saved.'}
+      />
     </form>
   )
 }

@@ -16,6 +16,7 @@ Read them in this order. The first two are compulsory before you write any code.
 | 7 | [Business processes](07-business-processes.md) | Before you build a module that isn't Purchase yet. What actually happens at the mill, step by step — Purchase, job work, production, VHAGAR, sales, HR, accounts — and what's still an open question for the business. |
 | 8 | [Inventory handover](08-inventory-handover.md) | Before you touch stock. What the single writer guarantees, what is built, what is left, and the traps. |
 | 9 | [Production handover](09-production-handover.md) | Before you touch production. The floor's ledger, the flow the mill asked for (MO → materials → stages → job cards → cutting sheet → transfers → stage sheets), what is left, and the traps. |
+| 10 | [Sampling handover](10-sampling-handover.md) | Before you touch sampling. Why it was rebuilt, the decisions it was built to, the flow from tech pack to handover, every action and rule, what it changed in Purchase, Inventory and Masters, how to run and test it, what is left. |
 
 ## The short version
 

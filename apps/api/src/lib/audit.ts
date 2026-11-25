@@ -1,6 +1,7 @@
 import { prisma } from '@ld-erp/database'
 import { logger } from '../utils/logger'
 import type { AuthRequest } from '../middleware/auth'
+import { ADMIN_ROLES } from './accessCatalog'
 
 /**
  * Writes one row to the audit trail.
@@ -73,7 +74,7 @@ export async function recordAudit(
  */
 async function tellAdmins(entry: AuditEntry, why: string) {
   try {
-    const admins = await prisma.user.findMany({ where: { role: { name: 'Admin' }, status: 'ACTIVE' }, select: { id: true } })
+    const admins = await prisma.user.findMany({ where: { role: { name: { in: ADMIN_ROLES } }, status: 'ACTIVE' }, select: { id: true } })
     if (!admins.length) return
     await prisma.notification.createMany({
       data: admins.map((a) => ({

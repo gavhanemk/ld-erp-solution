@@ -1,7 +1,7 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useState } from 'react'
-import { Ban, CalendarClock, ChevronDown, ChevronRight, Plus, X } from 'lucide-react'
+import { Ban, CalendarClock, ChevronDown, ChevronRight, Plus, Receipt, X } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { settingsApi, type TdsSection, type TdsSectionRate } from '@/lib/settingsApi'
 import { Field, LoadingRow, Notice, SaveButton, SettingsCard } from '@/components/settings/ui'
@@ -262,6 +262,7 @@ export function TdsSections() {
 
   return (
     <SettingsCard
+      icon={Receipt}
       title="TDS sections"
       description="The tax deducted on service bills: each section's rate and limits, from the date they apply. Your accountant should confirm these against the current law."
       actions={
@@ -365,7 +366,7 @@ export function TdsSections() {
                           {s.section} <span className="text-muted-foreground font-normal">— {s.label}</span>
                         </p>
                         {next && (
-                          <p className="text-[11px] text-teal-400">
+                          <p className="text-[11px] text-primary">
                             {next.rate}% from {formatDate(next.effectiveFrom)}
                           </p>
                         )}

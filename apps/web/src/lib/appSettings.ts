@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { api } from './api'
+import { makeLogoMark } from './logoMark'
 
 /**
  * Display preferences, shared by every screen.
@@ -18,6 +19,12 @@ export interface AppSettings {
   qcInDailyProduction: boolean
   /** Stickered stock is issued by scanning its packages; only stock without a sticker can be typed. */
   issueByScanOnly: boolean
+  /** The company's own name and logo, for the top of the menu. */
+  companyName: string | null
+  /** A fingerprint of the logo: the picture is fetched again only when it changes. */
+  logoKey: string | null
+  /** The logo cut and sized for the menu (see logoMark.ts), kept small. */
+  logoMark: string | null
 }
 
 /** Matches the defaults in the API's preference catalogue. */
@@ -26,6 +33,9 @@ const FALLBACK: AppSettings = {
   dateFormat: 'DD-MMM-YYYY',
   qcInDailyProduction: true,
   issueByScanOnly: false,
+  companyName: null,
+  logoKey: null,
+  logoMark: null,
 }
 
 const STORAGE_KEY = 'app_settings'
@@ -63,6 +73,9 @@ function normalise(raw: Record<string, unknown> | null | undefined): AppSettings
         ? raw.qcInDailyProduction
         : FALLBACK.qcInDailyProduction,
     issueByScanOnly: raw.issueByScanOnly === true,
+    companyName: typeof raw.companyName === 'string' && raw.companyName ? raw.companyName : null,
+    logoKey: typeof raw.logoKey === 'string' && raw.logoKey ? raw.logoKey : null,
+    logoMark: typeof raw.logoMark === 'string' && raw.logoMark ? raw.logoMark : null,
   }
 }
 
@@ -88,6 +101,19 @@ export async function loadAppSettings(force = false): Promise<AppSettings> {
   try {
     const res = await api.get<{ success: boolean; data: Record<string, unknown> }>('/settings/app')
     const next = normalise(res.data)
+    // The logo comes by itself, and only when it is not the one already
+    // kept; the menu's cut of it is made here once and kept instead of it.
+    if (!next.logoKey) next.logoMark = null
+    else if (next.logoKey === current.logoKey && current.logoMark) next.logoMark = current.logoMark
+    else {
+      try {
+        const logo = await api.get<{ data: { logoUrl: string | null } }>('/settings/app/logo')
+        const url = logo.data?.logoUrl ?? null
+        next.logoMark = url ? ((await makeLogoMark(url)) ?? url) : null
+      } catch {
+        next.logoMark = null
+      }
+    }
     apply(next)
     loaded = true
 

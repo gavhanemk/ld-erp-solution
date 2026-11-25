@@ -6,6 +6,7 @@ import { StyleBarcodesDialog } from '@/components/masters/StyleBarcodesDialog'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import { BRAND_LABEL, styleFormFields } from '@/components/masters/styleFormFields'
 import { ImportStylesDialog } from '@/components/masters/ImportStylesDialog'
+import { STYLE_STAGES, STYLE_STAGE_LABEL, type StyleStage } from '@ld-erp/shared'
 
 interface Style {
   id: string
@@ -23,6 +24,8 @@ interface Style {
   sizeGroupId: string | null
   sizeGroup: { id: string; name: string } | null
   colors: string[]
+  /** Set by sampling, never on this form: in sampling until the sample is handed over. */
+  stage: StyleStage
   isActive: boolean
 }
 
@@ -93,6 +96,22 @@ const baseColumns: Column<Style>[] = [
         <span className="text-muted-foreground">—</span>
       ),
   },
+  {
+    key: 'stage',
+    header: 'Stage',
+    render: (s) => (
+      <span
+        className={s.stage === 'DEVELOPMENT' ? 'badge-warning' : 'badge-success'}
+        title={
+          s.stage === 'DEVELOPMENT'
+            ? 'Being sampled. Kept off orders, BOMs and production until its sample is handed over.'
+            : undefined
+        }
+      >
+        {STYLE_STAGE_LABEL[s.stage] ?? s.stage}
+      </span>
+    ),
+  },
   { key: 'isActive', header: 'Status', render: (s) => <ActiveBadge isActive={s.isActive} /> },
 ]
 
@@ -107,6 +126,12 @@ const filterDefs: FilterDef[] = [
     label: 'Brand',
     facet: 'brandType',
     options: Object.entries(BRAND_LABEL).map(([value, label]) => ({ value, label })),
+  },
+  {
+    key: 'stage',
+    label: 'Stage',
+    facet: 'stage',
+    options: STYLE_STAGES.map((value) => ({ value, label: STYLE_STAGE_LABEL[value] })),
   },
   { key: 'category', label: 'Garment', facet: 'category', valuesFromFacet: true, noneLabel: 'Not set' },
   { key: 'season', label: 'Season', facet: 'season', valuesFromFacet: true, noneLabel: 'Not set' },

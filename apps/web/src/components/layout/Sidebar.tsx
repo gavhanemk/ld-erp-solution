@@ -13,6 +13,7 @@ import {
 import { cn } from '@/lib/utils'
 import { api, currentUser, tokens } from '@/lib/api'
 import { useAppSettings } from '@/lib/appSettings'
+import { canDo, canOpen, useAccess } from '@/lib/access'
 import { INVENTORY_SECTIONS } from './inventorySections'
 
 /**
@@ -155,6 +156,9 @@ export const navItems: NavItem[] = [
     ],
   },
   {
+    label: 'Sampling', href: '/sampling', icon: Layers,
+  },
+  {
     label: 'Accounts', icon: BookOpen,
     children: [
       { label: 'Dashboard', href: '/accounts/dashboard' },
@@ -229,19 +233,50 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
   // Every group starts shut; the user opens the one they want.
   const [openMenus, setOpenMenus] = useState<string[]>([])
   const [user, setUser] = useState<{ name?: string; role?: string } | null>(null)
-  const { qcInDailyProduction } = useAppSettings()
+  const { qcInDailyProduction, logoMark, companyName } = useAppSettings()
 
   // A mill that records output without a per-day QC entry should not be looking
   // at a menu item it never uses. Settings → Preferences controls this.
+  const access = useAccess()
   const items = useMemo(() => {
-    if (qcInDailyProduction) return navItems
+    const enabledItems = navItems.filter(i => i.href !== '/sampling' || process.env.NEXT_PUBLIC_SAMPLING_ENABLED === 'true')
+    const shown = qcInDailyProduction
+      ? enabledItems
+      : enabledItems.map((item) =>
+          item.label === 'Production' && item.children
+            ? { ...item, children: item.children.filter((c) => c.href !== '/production/qc') }
+            : item,
+        )
 
-    return navItems.map((item) =>
-      item.label === 'Production' && item.children
-        ? { ...item, children: item.children.filter((c) => c.href !== '/production/qc') }
-        : item,
-    )
-  }, [qcInDailyProduction])
+    // Only what this role may open (Settings → People). A group goes when
+    // every screen in it has; a heading goes with the screens under it.
+    if (!access.loaded || access.superAdmin) return shown
+    const may = (href?: string) =>
+      !href ||
+      // Settings has no page of its own: it is there if any of its sections is.
+      (href === '/settings' ? canOpen('/settings/company') || canOpen('/settings/people') : canOpen(href))
+    return shown.flatMap((item) => {
+      if (!item.children) return may(item.href) ? [item] : []
+      const kids = item.children.filter((c) => may(c.href))
+      if (!kids.length) return []
+      // A heading lives on the first entry of its group; it moves to whichever
+      // entry of the group is now first, and goes if none is left.
+      const groupOf = (i: number) => {
+        for (let j = i; j >= 0; j--) if (item.children![j].heading) return item.children![j].heading
+        return undefined
+      }
+      let lastGroup: string | undefined
+      const withHeadings = kids.map((c) => {
+        const group = groupOf(item.children!.indexOf(c))
+        const first = group !== lastGroup
+        lastGroup = group
+        const rest = { ...c, heading: undefined }
+        return first && group ? { ...rest, heading: group } : rest
+      })
+      return [{ ...item, children: withHeadings }]
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qcInDailyProduction, access])
 
   // localStorage is browser-only, so the signed-in user arrives after mount.
   useEffect(() => {
@@ -310,19 +345,37 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
     >
       {/* Logo */}
       <div className="flex items-center gap-3 px-4 h-16 border-b border-[hsl(var(--sidebar-border))] shrink-0">
-        <div className="w-9 h-9 rounded-xl bg-teal-500/10 border border-teal-500/20 flex items-center justify-center shrink-0">
-          <span className="text-sm font-black gradient-text-teal">LD</span>
-        </div>
+        {/* The company's own logo once one is saved in Settings → Documents,
+            on white as it is printed; the LD monogram until then. */}
+        {logoMark ? (
+          <div
+            className={cn(
+              'flex shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white p-[3px] shadow-sm ring-1 ring-white/10',
+              collapsed ? 'h-9 w-9' : 'h-10 w-10',
+            )}
+          >
+            {/* Cut and sized for this tile in the browser (lib/logoMark.ts), so next/image has nothing to add. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={logoMark} alt={`${companyName ?? 'Company'} logo`} className="max-h-full max-w-full object-contain" />
+          </div>
+        ) : (
+          <div className="w-9 h-9 rounded-xl bg-teal-500/10 border border-teal-500/20 flex items-center justify-center shrink-0">
+            <span className="text-sm font-black gradient-text-teal">LD</span>
+          </div>
+        )}
         {!collapsed && (
-          <div className="overflow-hidden">
-            <p className="text-sm font-bold text-foreground leading-tight whitespace-nowrap">LD ERP Solution</p>
-            <p className="text-xs text-muted-foreground whitespace-nowrap">LD Cotton Mills</p>
+          // The sidebar is dark in both themes, so its text takes fixed light
+          // colours like the menu below it. The theme's foreground turned
+          // near-black in the light theme and the name all but vanished.
+          <div className="min-w-0 overflow-hidden">
+            <p className="text-sm font-bold text-white leading-tight whitespace-nowrap">LD ERP Solution</p>
+            <p className="truncate text-xs font-semibold text-slate-300">{companyName ?? 'LD Cotton Mills'}</p>
           </div>
         )}
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 overflow-y-auto no-scrollbar py-3 px-2">
+      <nav className="sidebar-scroll flex-1 overflow-y-auto py-3 pl-2 pr-0.5">
         <div className="space-y-0.5">
           {items.map((item) => {
             const Icon = item.icon
@@ -472,8 +525,8 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
         </div>
       </nav>
 
-      {/* AI Quick Access */}
-      {!collapsed && (
+      {/* AI Quick Access, for a role that may use the assistant. */}
+      {!collapsed && canDo('ai') && (
         <div className="px-3 py-2">
           <Link
             href="/ai"
@@ -500,16 +553,16 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
               </span>
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-foreground truncate">
+              <p className="text-xs font-semibold text-white truncate">
                 {user?.name ?? 'Signed in'}
               </p>
-              <p className="text-[10px] text-muted-foreground truncate">{user?.role ?? ''}</p>
+              <p className="text-[10px] text-slate-400 truncate">{user?.role ?? ''}</p>
             </div>
             <button
               onClick={() => void signOut()}
               title="Sign out"
               aria-label="Sign out"
-              className="p-1 rounded text-muted-foreground hover:text-red-400 transition-colors"
+              className="p-1 rounded text-slate-400 hover:text-red-400 transition-colors"
             >
               <LogOut size={14} />
             </button>
@@ -520,7 +573,7 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
             68px-wide drawer over a 390px screen is neither. */}
         <button
           onClick={() => onCollapse(!collapsed)}
-          className="btn-ghost hidden w-full justify-center py-2 text-muted-foreground lg:flex"
+          className="btn-ghost hidden w-full justify-center py-2 text-slate-400 hover:text-white lg:flex"
         >
           {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           {!collapsed && <span className="text-xs">Collapse</span>}

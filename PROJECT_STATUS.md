@@ -1,9 +1,47 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Tue 3 Nov 2026 — Accounts, phase 6: dashboard and prints (branch `feat/accounts-posting`)_
+_Last updated: 25 Nov 2026 — Sampling rebuilt, main merged in, up for merging (branch `feat/sampling-local`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Sampling — rebuilt to the merchandiser's process, up for merging (25 Nov 2026)
+
+Branch `feat/sampling-local`, nine phases (0–8), `main` merged in on 25 Nov.
+The whole story — the decisions it was built to, the flow, every rule, what it
+changed elsewhere, how to run and test it — is in
+[the sampling handover](docs/10-sampling-handover.md).
+
+What it does: a buyer's sample from the tech pack to bulk. Request and files,
+a development style, a colour × size specification with a sample BOM and a
+route from the process master; buying on purchase orders linked to the sample,
+received into a Sample Store kept apart from bulk stock; issue from the
+request's own material; making colour by colour and size by size, with
+transfers, outside units and labour; QC, a Sample Delivery Challan and the
+buyer's word per colour; the cost sheet and the buyer's charges statement;
+handover that makes the style production, draft BOMs per approved colour and a
+routing. No MO, no stock for sample pieces.
+
+**Database:** eleven additive migrations (see
+[MIGRATION-NOTES.md](MIGRATION-NOTES.md), 25 Nov). Four columns on existing
+tables, all defaulted or empty: `styles.stage`, `warehouses.purpose`,
+`purchase_order_lines.sampleMaterialId` and `sampleOverReason`.
+
+**Off until switched on.** Merged and migrated, nothing changes for anyone.
+A server runs Sampling only with `SAMPLING_ENABLED=true` (API) and
+`NEXT_PUBLIC_SAMPLING_ENABLED=true` (web); the steps to switch it on are in
+section 13 of the handover.
+
+**Checks:** nine scripts, 706 checks, pass on the isolated pilot
+(`tools/sampling-local.ps1 -Action Prepare`, database `lderp_sampling` on
+127.0.0.1:55439; never the shared database). Type checks, the API build and
+`next build` pass.
+
+**Still open:** merchandiser testing with a real tech pack; three small
+Purchase-screen leftovers from phase 3; the e2e walk on the demo database;
+the CA's word on the sample job-work challan and ITC-04.
 
 ---
 

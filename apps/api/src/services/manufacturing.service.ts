@@ -346,12 +346,13 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     itemIds.length
       ? db.stockLedger.groupBy({
           by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],
-          // Goods a quality check rejected are held apart, not in stock to ask for.
-          where: { itemId: { in: itemIds }, grade: { not: 'R' } },
+          // Goods a quality check rejected are held apart, not in stock to ask for;
+          // so is material bought for samples, kept in a sample store.
+          where: { itemId: { in: itemIds }, grade: { not: 'R' }, warehouse: { purpose: { not: 'SAMPLING' } } },
           _sum: { inQty: true, outQty: true },
         })
       : Promise.resolve([]),
-    db.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    db.warehouse.findMany({ where: { isActive: true, purpose: { not: 'SAMPLING' } }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
     db.materialRequisitionLine.findMany({
       where: { mr: { moId: mo.id, status: { not: 'REJECTED' } } },
       select: {
