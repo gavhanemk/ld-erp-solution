@@ -8,7 +8,7 @@ import { formatDocumentNumber } from '../lib/docNumber'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
-import { samplingPilotEnabled } from '../lib/pilot'
+import { samplingEnabled } from '../lib/pilot'
 import { updateCompanySchema } from '../schemas/master.schemas'
 import {
   PREFERENCES,
@@ -1076,7 +1076,7 @@ const SAMPLING_DOC_TYPES = [
   { docType: 'SCS', label: 'Sample Charges', defaultTitle: 'SAMPLE CHARGES' },
 ] as const
 const docTypes = (): ReadonlyArray<{ docType: string; label: string; defaultTitle: string }> =>
-  samplingPilotEnabled() ? [...DOC_TYPES, ...SAMPLING_DOC_TYPES] : DOC_TYPES
+  samplingEnabled() ? [...DOC_TYPES, ...SAMPLING_DOC_TYPES] : DOC_TYPES
 
 const documentTemplateSchema = z.object({
   title: z.string().min(1, 'A heading is required').max(80),

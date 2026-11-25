@@ -34,7 +34,7 @@ import {
 } from '../services/sampleSourcing.service'
 import { activeSampleStores } from '../lib/sampleStore'
 import { assertPoolsHold, lockRequests, requestsOfGrnLines } from '../services/samplePool.service'
-import { samplingPilotEnabled } from '../lib/pilot'
+import { samplingEnabled } from '../lib/pilot'
 import { lockRow } from '../lib/lockRow'
 import { rateFor, sectionTermsOn, tdsOn } from '../services/tds.service'
 import { withHsnRates } from '../lib/hsn'
@@ -923,7 +923,7 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
  * are delivered to. Empty, not an error, where sampling is not switched on.
  */
 router.get('/sample-needs', requirePermission(MODULE, 'view'), async (req, res) => {
-  if (!samplingPilotEnabled()) return res.json({ success: true, data: { needs: [], sampleStores: [] } })
+  if (!samplingEnabled()) return res.json({ success: true, data: { needs: [], sampleStores: [] } })
   const q = z
     .object({
       requestId: z.string().trim().max(100).optional(),

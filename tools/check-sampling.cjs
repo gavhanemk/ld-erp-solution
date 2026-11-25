@@ -103,16 +103,20 @@ async function main() {
     }
   let r = await call('POST', '', payload, 'sampling:view')
   check('create requires its own permission', () => assert.equal(r.status, 403))
-  const originalEnv = process.env.DIRECT_URL
-  process.env.DIRECT_URL = 'postgresql://blocked.invalid/shared'
+  // Sampling is a server's switch (lib/pilot.ts): off, it refuses before any
+  // query; on, it runs on a production server too. Files on local disk keep
+  // the strict pilot gate (check-local-storage).
+  const originalFlag = process.env.SAMPLING_ENABLED
+  process.env.SAMPLING_ENABLED = 'false'
   r = await call('GET')
-  check('pilot refuses a non-local direct database URL before querying', () =>
+  check('sampling switched off answers 404 before querying', () => {
     assert.equal(r.status, 404)
-  )
-  process.env.DIRECT_URL = originalEnv
+    assert.match(r.body.message, /not switched on/)
+  })
+  process.env.SAMPLING_ENABLED = originalFlag
   process.env.NODE_ENV = 'production'
   r = await call('GET')
-  check('pilot disabled in production', () => assert.equal(r.status, 404))
+  check('switched on, sampling runs on a production server too', () => assert.equal(r.status, 200))
   process.env.NODE_ENV = 'test'
   r = await call('POST', '', payload)
   check('create request and initial draft', () => assert.equal(r.status, 201))

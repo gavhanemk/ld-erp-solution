@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
-import { samplingPilotEnabled } from '../lib/pilot'
+import { samplingEnabled } from '../lib/pilot'
 import { lockRequests, requestPools } from './samplePool.service'
 import {
   SAMPLE_OVER_REASON_MIN,
@@ -128,7 +128,7 @@ export async function assertSampleLines(
   const reasons = new Map<string, string | null>()
   const linked = lines.filter((l) => l.sampleMaterialId)
   if (!linked.length) return reasons
-  if (!samplingPilotEnabled())
+  if (!samplingEnabled())
     throw new AppError(
       'Sampling is not switched on here, so an order line cannot buy for a sample. Take the sample off the line.',
       400,

@@ -42,7 +42,7 @@ process.env.LOCAL_STORAGE_DIR = path.relative(repo, root).split(path.sep).join('
 require('./register-ts.cjs')
 const express = require('express')
 const storage = require('../apps/api/src/lib/storage.ts')
-const { samplingPilotEnabled } = require('../apps/api/src/lib/pilot.ts')
+const { samplingEnabled, samplingPilotEnabled } = require('../apps/api/src/lib/pilot.ts')
 const router = require('../apps/api/src/routes/localFiles.routes.ts').default
 
 const MAX = storage.MAX_FILE_BYTES
@@ -178,10 +178,21 @@ async function main() {
     assert.equal(storage.localStorageActive(), true)
     assert.equal(storage.storageConfigured(), true)
   })
-  await check('sampling routes ask the same gate as file storage', () => {
+  await check('sampling routes ask the module switch; files on this disk keep the pilot gate', async () => {
     const src = fs.readFileSync(path.join(repo, 'apps/api/src/routes/sampling.routes.ts'), 'utf8')
-    assert.match(src, /import \{ samplingPilotEnabled \} from '\.\.\/lib\/pilot'/)
-    assert.match(src, /export function samplingEnabled\(\) \{\s*return samplingPilotEnabled\(\)\s*\}/)
+    assert.match(src, /import \{ samplingEnabled \} from '\.\.\/lib\/pilot'/)
+    // The live server with Sampling switched on: the module runs, but files
+    // still go to the bucket, never to this machine's disk.
+    await withEnv({ NODE_ENV: 'production', DATABASE_URL: SHARED_DB, DIRECT_URL: SHARED_DB }, async () => {
+      assert.equal(samplingEnabled(), true)
+      assert.equal(samplingPilotEnabled(), false)
+      assert.equal(storage.localStorageActive(), false)
+    })
+    // Not switched on: neither.
+    await withEnv({ SAMPLING_ENABLED: undefined }, async () => {
+      assert.equal(samplingEnabled(), false)
+      assert.equal(samplingPilotEnabled(), false)
+    })
   })
 
   // ── Upload, measure, download ─────────────────────────────────────────────

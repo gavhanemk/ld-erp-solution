@@ -1,19 +1,29 @@
 /**
- * The gate for the local sampling pilot.
- *
- * Sampling is being rebuilt against a database on this machine, and nothing
- * the pilot does may reach the shared one. Every pilot-only feature (the
- * sampling routes, and file storage on local disk) asks this one question, so
- * they all close together: the flag has to be on, the server must not be
- * running as production, and both database URLs have to point at the loopback
- * lderp_sampling database. A flag left switched on against the live
- * connection string therefore switches nothing on.
+ * Whether this server runs Sampling: SAMPLING_ENABLED=true. The module's
+ * routes, sample stores, sample needs in Purchase and its number series in
+ * Settings all ask this one question, so they switch on and off together.
+ * Off unless set: a server that has not chosen to run Sampling behaves as it
+ * did before the module came. The screens ask NEXT_PUBLIC_SAMPLING_ENABLED,
+ * which is set beside it.
  *
  * Read on every call rather than once at start-up, so a check script can
- * change the environment and watch the gate close.
+ * change the environment and watch it close.
+ */
+export function samplingEnabled(): boolean {
+  return process.env.SAMPLING_ENABLED === 'true'
+}
+
+/**
+ * The gate for the local sampling pilot's own conveniences — files kept on
+ * this machine's disk instead of the storage bucket. Nothing the pilot keeps
+ * locally may stand in for the shared server's storage, so this is strict:
+ * Sampling has to be on, the server must not be running as production, and
+ * both database URLs have to point at the loopback lderp_sampling database.
+ * A flag left switched on against the live connection string therefore turns
+ * none of this on.
  */
 export function samplingPilotEnabled(): boolean {
-  if (process.env.SAMPLING_ENABLED !== 'true' || process.env.NODE_ENV === 'production') return false
+  if (!samplingEnabled() || process.env.NODE_ENV === 'production') return false
   return ['DATABASE_URL', 'DIRECT_URL'].every((k) => {
     try {
       const u = new URL(process.env[k] ?? '')

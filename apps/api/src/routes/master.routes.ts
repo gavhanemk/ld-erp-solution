@@ -3,7 +3,7 @@ import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
-import { samplingPilotEnabled } from '../lib/pilot'
+import { samplingEnabled } from '../lib/pilot'
 import { crudRouter, type DeleteUse } from '../lib/crud'
 import { nextStyleCode } from '../lib/masterCode'
 import { createRouting, deleteRouting, bomFabrics, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
@@ -1297,7 +1297,7 @@ router.use(
     permanentDelete: WAREHOUSE_USES,
     beforeSave: async (data, before) => {
       const purpose = data.purpose as string | undefined
-      if (purpose === 'SAMPLING' && before?.purpose !== 'SAMPLING' && !samplingPilotEnabled()) {
+      if (purpose === 'SAMPLING' && before?.purpose !== 'SAMPLING' && !samplingEnabled()) {
         throw new AppError(
           'Sampling is not switched on here, so no store can be a sample store.',
           400,

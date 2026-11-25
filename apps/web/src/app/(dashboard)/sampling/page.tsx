@@ -130,7 +130,7 @@ export default function SamplingPage() {
     }
   }
   if (!enabled)
-    return <div className="glass-card p-5">Sampling is available in the isolated local pilot.</div>
+    return <div className="glass-card p-5">Sampling is not switched on here.</div>
   if (selected && lookups)
     return (
       <SampleWorkspace

@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
-import { samplingPilotEnabled } from '../lib/pilot'
+import { samplingEnabled } from '../lib/pilot'
 import { removeObject, signedDownloadUrl, signedUploadUrl, storagePathFor } from '../lib/storage'
 import { nextStyleCode } from '../lib/masterCode'
 import { createItemRecord } from '../lib/itemMaster'
@@ -45,20 +45,13 @@ import { activeSampleStores } from '../lib/sampleStore'
 import { withHsnRates } from '../lib/hsn'
 
 const router = Router()
-/**
- * The pilot must never point at the shared database, even with the flag set.
- * The rule itself lives in lib/pilot.ts, so local file storage asks exactly
- * the same question and cannot drift from it.
- */
-export function samplingEnabled() {
-  return samplingPilotEnabled()
-}
+// Off unless this server has Sampling switched on (lib/pilot.ts).
 router.use((_req, res, next) =>
   samplingEnabled()
     ? next()
     : res.status(404).json({
         success: false,
-        message: 'Sampling is available in the isolated local pilot only.',
+        message: 'Sampling is not switched on on this server.',
       })
 )
 router.use(requirePermission('sampling', 'view'))
