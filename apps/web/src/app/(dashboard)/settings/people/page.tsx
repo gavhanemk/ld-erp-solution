@@ -28,6 +28,15 @@ export default function PeopleSettingsPage() {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string; inactivate?: SettingsUser } | null>(null)
   const [show, setShow] = useState<'all' | 'active' | 'inactive'>('all')
+  // People or Roles & access, kept in the address (?tab=roles) so a link can open either.
+  const [tab, setTabState] = useState<'people' | 'roles'>('people')
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('tab') === 'roles') setTabState('roles')
+  }, [])
+  const setTab = (t: 'people' | 'roles') => {
+    setTabState(t)
+    window.history.replaceState(null, '', t === 'roles' ? '?tab=roles' : window.location.pathname)
+  }
 
   const [userDialog, setUserDialog] = useState<{ open: boolean; user: SettingsUser | null }>({
     open: false,
@@ -219,6 +228,37 @@ This cannot be undone.`,
         </Notice>
       )}
 
+      <div role="tablist" aria-label="People or roles" className="border-border bg-card inline-flex rounded-xl border p-1 shadow-sm">
+        {(
+          [
+            ['people', Users2, 'People', users.length],
+            ['roles', ShieldCheck, 'Roles & access', roles.length],
+          ] as const
+        ).map(([key, Icon, label, n]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={tab === key}
+            onClick={() => setTab(key)}
+            className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+              tab === key ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+            }`}
+          >
+            <Icon size={15} />
+            {label}
+            <span
+              className={`rounded-full px-1.5 py-px text-[11px] tabular-nums ${
+                tab === key ? 'bg-white/20' : 'bg-secondary text-foreground'
+              }`}
+            >
+              {n}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {tab === 'people' && (
       <SettingsCard
         icon={Users2}
         title="People"
@@ -324,7 +364,24 @@ This cannot be undone.`,
                               </div>
                             </div>
                           </td>
-                          <td>{u.role.name}</td>
+                          <td>
+                            <button
+                              type="button"
+                              className="text-foreground hover:text-primary inline-flex items-center gap-1.5 hover:underline"
+                              onClick={() => {
+                                const r = roles.find((x) => x.id === u.roleId)
+                                if (r) setRoleDialog({ open: true, role: r })
+                              }}
+                              title={`See what ${u.role.name} can do`}
+                            >
+                              {u.role.name === 'Super Admin' ? (
+                                <Crown size={13} className="text-amber-500" />
+                              ) : (
+                                <ShieldCheck size={13} className="text-muted-foreground" />
+                              )}
+                              {u.role.name}
+                            </button>
+                          </td>
                           <td>
                             <span className={status.cls}>{status.label}</span>
                           </td>
@@ -396,81 +453,131 @@ This cannot be undone.`,
           </>
         )}
       </SettingsCard>
+      )}
 
-      <SettingsCard
-        icon={ShieldCheck}
-        title="Roles"
-        description="A role decides what someone can see and do. Change the role, and everyone on it changes with it."
-        actions={
-          <button
-            className="btn-secondary text-xs"
-            onClick={() => setRoleDialog({ open: true, role: null })}
-          >
-            <Plus size={14} /> New role
-          </button>
-        }
-      >
-        {loading ? (
-          <LoadingRow />
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            {roles.map((role) => (
-              <div
-                key={role.id}
-                className={`flex flex-col gap-3 rounded-lg border p-4 transition-colors ${
-                  role.unrestricted ? 'border-amber-500/40 bg-amber-500/5' : 'border-border/70 hover:border-primary/40'
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="flex items-center gap-1.5 text-sm font-semibold text-foreground truncate">
-                      {role.unrestricted && <Crown size={14} className="shrink-0 text-amber-500" />}
-                      {role.name}
-                    </p>
-                    <p className="text-xs text-muted-foreground line-clamp-2">
-                      {role.description ?? 'No description'}
-                    </p>
-                  </div>
-                  {role.isSystem && <span className="badge-neutral shrink-0">Built in</span>}
-                </div>
-
-                <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                  <span className="flex items-center gap-1">
-                    <Users2 size={12} />
-                    {role.userCount} {role.userCount === 1 ? 'person' : 'people'}
-                  </span>
-                  <span>
-                    {role.unrestricted
-                      ? 'Every screen, always'
-                      : `${new Set(role.permissions.filter((k) => k.endsWith(':view')).map((k) => k.split(':')[0])).size} screens · ${role.permissions.length} switches on`}
-                  </span>
-                </div>
-
-                <div className="flex items-center gap-2 mt-auto pt-2 border-t border-border/60">
-                  <button
-                    className="btn-ghost text-xs px-2 py-1"
-                    onClick={() => setRoleDialog({ open: true, role })}
-                  >
-                    <Pencil size={13} />
-                    {role.unrestricted ? 'See access' : 'Change access'}
-                  </button>
-
-                  {!role.isSystem && (
-                    <button
-                      className="btn-ghost text-xs px-2 py-1 text-muted-foreground hover:text-red-400 ml-auto"
-                      onClick={() => void deleteRole(role)}
-                      disabled={busy}
-                      aria-label={`Delete role ${role.name}`}
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </SettingsCard>
+      {tab === 'roles' && (
+        <SettingsCard
+          icon={ShieldCheck}
+          title="Roles & access"
+          description="A role decides which screens someone can open and what they can do there. Change a role, and everyone on it changes with it."
+          flush
+          actions={
+            <button className="btn-primary text-xs" onClick={() => setRoleDialog({ open: true, role: null })} data-hotkey="new">
+              <Plus size={14} /> New role
+            </button>
+          }
+        >
+          {loading ? (
+            <div className="p-5">
+              <LoadingRow />
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[760px] text-sm">
+                <thead>
+                  <tr className="border-border bg-secondary/60 border-b">
+                    {['Role', 'People', 'Access', ''].map((h, i) => (
+                      <th
+                        key={i}
+                        className={`text-muted-foreground px-5 py-2.5 text-[11px] font-semibold uppercase tracking-wider ${i === 3 ? 'text-right' : 'text-left'}`}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {roles.map((role, i) => {
+                    const screens = new Set(role.permissions.filter((k) => k.endsWith(':view')).map((k) => k.split(':')[0]))
+                    const modulesOn = new Set([...screens].map((k) => k.split('.')[0]))
+                    const totalScreens = modules.reduce((n, m) => n + m.screens.length, 0)
+                    const share = role.unrestricted ? 100 : totalScreens ? Math.round((screens.size / totalScreens) * 100) : 0
+                    return (
+                      <tr
+                        key={role.id}
+                        data-row
+                        tabIndex={i === 0 ? 0 : -1}
+                        className={`border-border/60 border-b last:border-0 ${role.unrestricted ? 'bg-amber-500/5' : 'hover:bg-secondary/40'}`}
+                      >
+                        <td className="px-5 py-3.5">
+                          <div className="flex items-start gap-3">
+                            <span
+                              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${
+                                role.unrestricted ? 'border-amber-500/30 bg-amber-500/10 text-amber-500' : 'border-primary/20 bg-primary/10 text-primary'
+                              }`}
+                            >
+                              {role.unrestricted ? <Crown size={16} /> : <ShieldCheck size={16} />}
+                            </span>
+                            <div className="min-w-0">
+                              <p className="text-foreground flex items-center gap-2 font-semibold">
+                                {role.name}
+                                {role.isSystem && <span className="badge-neutral">Built in</span>}
+                              </p>
+                              <p className="text-muted-foreground mt-0.5 text-xs">{role.description ?? 'No description'}</p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-5 py-3.5">
+                          <button
+                            type="button"
+                            className="text-foreground hover:text-primary flex items-center gap-1.5 whitespace-nowrap text-sm"
+                            onClick={() => {
+                              setTab('people')
+                              setSearch(role.name)
+                            }}
+                            title="Show the people on this role"
+                          >
+                            <Users2 size={14} className="text-muted-foreground" />
+                            {role.userCount} {role.userCount === 1 ? 'person' : 'people'}
+                          </button>
+                        </td>
+                        <td className="w-72 px-5 py-3.5">
+                          <p className="text-foreground text-xs font-medium">
+                            {role.unrestricted
+                              ? 'Every screen and action, always'
+                              : `${screens.size} of ${totalScreens} screens · ${modulesOn.size} modules`}
+                          </p>
+                          <div className="bg-secondary mt-1.5 h-1.5 rounded-full">
+                            <div
+                              className={`h-1.5 rounded-full ${role.unrestricted ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                              style={{ width: `${Math.max(share ? 3 : 0, share)}%` }}
+                            />
+                          </div>
+                        </td>
+                        <td className="w-56 px-5 py-3.5">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              className={`${role.unrestricted ? 'btn-secondary' : 'btn-primary'} h-8 whitespace-nowrap text-xs`}
+                              onClick={() => setRoleDialog({ open: true, role })}
+                              data-row-open
+                            >
+                              <ShieldCheck size={13} />
+                              {role.unrestricted ? 'See access' : 'Change access'}
+                            </button>
+                            {!role.isSystem && (
+                              <button
+                                type="button"
+                                className="btn-ghost h-8 px-2 text-muted-foreground hover:text-red-500"
+                                onClick={() => void deleteRole(role)}
+                                disabled={busy}
+                                title={`Delete role ${role.name}`}
+                                aria-label={`Delete role ${role.name}`}
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </SettingsCard>
+      )}
 
       <UserDialog
         open={userDialog.open}
@@ -482,6 +589,7 @@ This cannot be undone.`,
           setMessage({ kind: 'success', text })
           void load()
         }}
+        onShowRole={(role) => setRoleDialog({ open: true, role })}
       />
 
       <ResetPasswordDialog

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Crown, Loader2, Search, ShieldCheck } from 'lucide-react'
+import { AlertCircle, ChevronDown, ChevronRight, Crown, Loader2, Search, ShieldCheck } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { settingsApi, type PermissionModule, type SettingsRole } from '@/lib/settingsApi'
 import { FormFrame } from '@/components/ui/FormFrame'
@@ -153,11 +153,11 @@ export function RoleEditor({
   return (
     <FormFrame
       icon={readOnly ? Crown : ShieldCheck}
-      title={role ? `Access: ${role.name}` : 'New role'}
+      title={role ? `Permissions: ${role.name}` : 'New role'}
       subtitle={
-        readOnly
-          ? 'Every screen and every action, always. Nothing here can be switched off.'
-          : 'What people on this role can open and do, screen by screen'
+        <span className="text-[11px] font-semibold uppercase tracking-[0.18em]">
+          Security access matrix{readOnly ? ' · every screen, always' : ''}
+        </span>
       }
       primary={primary}
       footer={
@@ -175,7 +175,7 @@ export function RoleEditor({
       error={formError}
       onClose={onClose}
       busy={saving}
-      width="max-w-6xl"
+      width="max-w-7xl"
     >
       {!readOnly && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -202,8 +202,8 @@ export function RoleEditor({
       )}
 
       <div className="flex flex-wrap items-center gap-2">
-        <div className="border-border bg-card focus-within:border-primary focus-within:ring-primary/20 flex h-9 min-w-0 flex-1 items-center gap-2 rounded-lg border px-3 focus-within:ring-2 sm:max-w-sm">
-          <Search size={14} className="text-muted-foreground" />
+        <div className="border-border bg-secondary/50 focus-within:border-primary focus-within:ring-primary/20 flex h-11 min-w-0 flex-1 items-center gap-2.5 rounded-xl border px-4 focus-within:ring-2">
+          <Search size={16} className="text-muted-foreground" />
           <input
             className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"
             placeholder="Search modules or screens…"
@@ -232,7 +232,7 @@ export function RoleEditor({
       </div>
 
       <div className="border-border overflow-hidden rounded-xl border">
-        <div className="max-h-[58vh] overflow-auto">
+        <div className="max-h-[56vh] overflow-auto">
           <table className="w-full min-w-[820px] border-collapse text-sm">
             <thead className="bg-secondary sticky top-0 z-10">
               <tr className="border-border border-b">
@@ -282,11 +282,19 @@ export function RoleEditor({
         </div>
       </div>
 
-      <p className="text-muted-foreground flex items-start gap-2 text-xs">
-        <ShieldCheck size={14} className="mt-px shrink-0" />
-        View decides which screens appear in the menu. Add, Edit, Delete, Approve, Post and Export are checked on the
-        server for each screen, so a switch left off cannot be worked round.
-      </p>
+      <div className="border-border flex items-start gap-3 rounded-xl border p-4">
+        <span className="border-border bg-secondary flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
+          <AlertCircle size={17} className="text-foreground" />
+        </span>
+        <div className="min-w-0">
+          <p className="text-foreground text-sm font-semibold">Access change notice</p>
+          <p className="text-muted-foreground mt-0.5 text-xs leading-snug">
+            {readOnly
+              ? 'Super Admin always has every screen and every action. Only a Super Admin can give someone this role.'
+              : 'Changes apply to everyone on this role as soon as they are saved — people already signed in are checked again on their next click. View decides which screens appear in their menu; every other switch is enforced by the server.'}
+          </p>
+        </div>
+      </div>
     </FormFrame>
   )
 }
@@ -319,7 +327,7 @@ function ModuleRows({
 
   return (
     <>
-      <tr className="border-border bg-secondary/40 border-b">
+      <tr className="border-border border-b">
         <td className="px-4 py-2.5">
           <div className="flex items-center gap-2.5">
             <Tick
@@ -379,7 +387,7 @@ function ModuleRows({
                     onChange={(on) => set(rowKeys, on)}
                   />
                   <div className="min-w-0">
-                    <p className="text-foreground">{s.label}</p>
+                    <p className="text-muted-foreground font-medium">{s.label}</p>
                     {s.hint && <p className="text-muted-foreground text-[11px] leading-tight">{s.hint}</p>}
                   </div>
                 </div>
