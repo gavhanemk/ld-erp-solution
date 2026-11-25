@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs'
 import type { PackType, Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
-import { fitsPlaces, groupOfType, ITEM_GROUP_LABEL, placesMessage, qtyPlaces, typeFitsGroup, type ItemGroup } from '@ld-erp/shared'
+import { fitsPlaces, groupOfType, ITEM_GROUP_LABEL, looksLikeSameName, placesMessage, qtyPlaces, typeFitsGroup, type ItemGroup } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 import { addDropdowns, addHowToSheet, addTemplateSheet, readSheetRows, type SheetColumn } from '../lib/sheet'
 import { nextDocumentNumber } from '../lib/docNumber'
@@ -9,6 +9,7 @@ import { recordMovement } from './stock.service'
 import { createPackages, packageRules, positionsOf, stickerDefaultsFrom, suggestQtys } from './package.service'
 import { floorFor } from './processFloor.service'
 import { highestCodeNumber, itemPrefix, withGeneratedCode } from '../lib/masterCode'
+import { findHsn, loadHsnIndex } from '../lib/hsn'
 import { trackedRoutings } from './styleTrack.service'
 
 /*
@@ -32,6 +33,8 @@ const REFERENCE = 'OPENING_IMPORT'
 export type OsKey =
   | 'date' | 'process' | 'location' | 'order' | 'style' | 'code' | 'description' | 'category' | 'fabric'
   | 'colour' | 'size' | 'lot' | 'bundle' | 'uom' | 'qty' | 'rate' | 'value' | 'status' | 'remarks'
+  /** Only for an item made on import: its HSN code, and its GST % checked against it. */
+  | 'hsn' | 'gst'
   /** Only on the Semi Finished Goods template: checked against the process. */
   | 'department'
   /** Raw Materials template, optional: how the row's stock is packed. */
@@ -43,8 +46,8 @@ export type OsKey =
  * on their style's route, raw materials in a store. The 19-column sheet holds
  * all three.
  */
-export type OsKind = 'FG' | 'SFG' | 'RM'
-export const KIND_LABEL: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
+export type OsKind = 'FG' | 'SFG' | 'RM' | 'FA'
+export const KIND_LABEL: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials', FA: 'Fixed Assets' }
 
 /**
  * The sheet, exactly: these names, in this order (A to S). A trailing * marks
@@ -71,6 +74,8 @@ export const OS_COLUMNS: SheetColumn<OsKey>[] = [
   { key: 'value', head: 'Opening Value', width: 14, note: 'Optional. Opening Qty × Unit Rate. Either may be left out: the other is worked out.' },
   { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'Optional. OK, Hold, Rejected or B-Grade. Empty is OK.' },
   { key: 'remarks', head: 'Remarks', width: 28, note: 'Optional.' },
+  { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's; with none there either, the item is made without one, to add later." },
+  { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
 ]
 
 /** Each kind's template: only its own columns, in this order. */
@@ -113,10 +118,25 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'packType', head: 'Package Type', width: 12, list: 'packTypes', note: 'Optional: Roll, Box, Carton, Bag, Bundle, Packet or Other. Empty: the item’s usual.' },
     { key: 'packCount', head: 'Package Count', width: 12, note: 'Optional: how many packages. With no sizes, the stock comes in and the stickers wait until the sizes are known — equal sizes are never assumed.' },
     { key: 'packEach', head: 'Qty per Package', width: 13, note: 'Optional: what one full package holds. 1,200 at 500 is 500 + 500 + 200.' },
-    { key: 'packQtys', head: 'Package Quantities', width: 24, note: 'Optional: each package, separated by commas: 200, 250, 150, 180, 220. Less than the row leaves the rest without stickers.' },
+    { key: 'packQtys', head: 'Package Quantities', width: 24, note: 'Optional: each package, separated by commas: 200, 250, 150, 180, 220. They must add up to exactly the row\'s quantity.' },
     { key: 'packRefs', head: 'Package References', width: 22, note: "Optional: each package's own number (the supplier's roll no.), in the same order, separated by commas." },
     { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'Optional. OK, Hold or Rejected. Empty is OK.' },
     { key: 'remarks', head: 'Remarks', width: 24, note: 'Optional.' },
+    { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's; with none there either, the item is made without one, to add later." },
+    { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
+  ],
+  FA: [
+    { key: 'category', head: 'Asset Category', width: 18, list: 'assetCategories', note: "Needed for a new item: its subcategory under Fixed Assets (Machines, Computers…). For an item already there it is checked against the item's category." },
+    { key: 'code', head: 'Item Code', width: 16, note: 'Optional. The ERP gives every item its own code: leave this empty and the item is found by its name, or made new.' },
+    { key: 'description', head: 'Item Name *', width: 30, note: 'Required unless Item Code is given. An item of exactly this name is used, else a new item is made with it.' },
+    { key: 'packRefs', head: 'Serial Numbers', width: 26, note: "Optional: each one's serial number, separated by commas — as many as the quantity. Printed on its asset tag." },
+    { key: 'qty', head: 'Quantity *', width: 10, note: 'Required. How many: each one gets its own asset tag.' },
+    { key: 'rate', head: 'Cost Each', width: 12, note: 'Optional. What one is valued at. Empty: in at nought, valuation pending.' },
+    { key: 'location', head: 'Location', width: 22, list: 'assetPlaces', note: 'Optional. A store, or the department it is installed at (Stitching, Cutting, Accounts…). Empty: the store called Store.' },
+    { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'Optional. OK, Hold or Rejected. Empty is OK.' },
+    { key: 'remarks', head: 'Remarks', width: 24, note: 'Optional.' },
+    { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's; with none there either, the item is made without one, to add later." },
+    { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
   ],
 }
 
@@ -140,6 +160,10 @@ const EXAMPLES: Record<OsKind | 'ALL', Raw> = {
   RM: {
     category: 'Fabric', description: 'Cotton Poplin 58in White', lot: 'ROLL-101', uom: 'mtr', qty: '120.5', rate: '85', location: 'Store',
     packType: 'Roll', status: 'OK', remarks: EXAMPLE_REMARK,
+  },
+  FA: {
+    category: 'Machines', description: 'Single Needle Lockstitch Machine', packRefs: 'SN-1001, SN-1002', qty: '2', rate: '18500', location: 'Stitching',
+    status: 'OK', remarks: EXAMPLE_REMARK,
   },
 }
 const isExample = (raw: Raw, example: Raw) => {
@@ -265,7 +289,12 @@ function planPacks(
   if (input?.qtys?.length) {
     const qtys = input.qtys.map(round3)
     const sum = round3(qtys.reduce((t, q) => t + q, 0))
-    if (sum > ctx.qty + 0.0005) problems.push(`${ctx.L('packQtys')} add up to ${sum} ${ctx.unit}, more than the ${ctx.qty} ${ctx.unit} on the row.`)
+    // All of it on packages, or none of it (packaging pending): never part.
+    if (Math.abs(sum - ctx.qty) > 0.0005) {
+      problems.push(
+        `${ctx.L('packQtys')} add up to ${sum} ${ctx.unit}, but the row has ${ctx.qty} ${ctx.unit}. The packages must hold exactly all of it — or leave the package columns empty for packaging pending.`,
+      )
+    }
     if (input.count && input.count !== qtys.length) problems.push(`${ctx.L('packCount')} says ${input.count}, but ${qtys.length} quantities are given.`)
     const bad = qtys.find((q) => !fits(q))
     if (bad !== undefined) problems.push(`A package of ${bad} ${ctx.unit}: ${placesMessage(ctx.places)}`)
@@ -281,10 +310,14 @@ function planPacks(
     return later(input.count, `Packaging pending: ${packs(input.count, type)}, sizes to give later`)
   }
   if (ctx.bundle) return made([ctx.qty], [null])
-  if (ctx.perPack) return made(suggestQtys(ctx.qty, ctx.perPack), Array.from({ length: suggestQtys(ctx.qty, ctx.perPack).length }, () => null))
+  if (ctx.perPack) {
+    const qtys = suggestQtys(ctx.qty, ctx.perPack)
+    // Each one's own number (a fixed asset's serial numbers), when given.
+    return made(qtys, input?.refs?.length ? refsFor(qtys.length) : Array.from({ length: qtys.length }, () => null))
+  }
   return later(null, 'Packaging pending: give its packages when you know them')
 }
-const TYPE_SHEET: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
+const TYPE_SHEET: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials', FA: 'Fixed Assets' }
 
 type Raw = Partial<Record<OsKey, string>>
 export type OsStatus = 'OK' | 'HOLD' | 'REJECTED' | 'B_GRADE'
@@ -371,7 +404,21 @@ export interface OsRowPlan {
   newFloor: boolean
   item: { code: string; name: string } | null
   /** Not in Items & Products yet: made on import, with its own code. What it will get. */
-  newItem: { name: string; category: string; unit: string; type: string; copiedFrom: string | null } | null
+  newItem: {
+    key: string
+    name: string
+    category: string
+    unit: string
+    type: string
+    tax: string
+    /** The HSN code it is made with; null: none yet, to be added in Items & Products. */
+    hsn: string | null
+    similar: Array<{ id: string; code: string; name: string }>
+    approved: boolean
+    copiedFrom: string | null
+  } | null
+  /** The sheet named an item not in Items & Products, and it was matched to this one instead of being made. */
+  matched?: { key: string; name: string; similar: Array<{ id: string; code: string; name: string }> } | null
   size: string | null
   order: string | null
   lot: string | null
@@ -387,6 +434,8 @@ export interface OsRowPlan {
   pack?: { type: PackType; qtys: number[]; later: boolean; count: number | null; barcode: string | null } | null
   /** Stickers to be made for it now. */
   stickers: number
+  /** No rate given: in at nought, its value to be set later. */
+  valuationPending?: boolean
 }
 
 /** What posting needs for a row the check passed. */
@@ -419,7 +468,7 @@ type Resolved = { plan: OsRowPlan; ready?: Ready }
 interface NewItem {
   key: string
   name: string
-  type: 'RAW_MATERIAL' | 'TRIM' | 'PACKING_MATERIAL' | 'CONSUMABLE' | 'SEMI_FINISHED' | 'FINISHED_GOOD'
+  type: 'RAW_MATERIAL' | 'TRIM' | 'PACKING_MATERIAL' | 'CONSUMABLE' | 'SEMI_FINISHED' | 'FINISHED_GOOD' | 'FIXED_ASSET'
   categoryId: string
   uomId: string
   hsnCode: string | null
@@ -459,7 +508,7 @@ async function loadMasters() {
 async function loadCategories() {
   const all = await prisma.itemCategory.findMany({
     where: { isActive: true },
-    select: { id: true, name: true, itemGroup: true, isActive: true, parentId: true, parent: { select: { name: true, itemGroup: true } } },
+    select: { id: true, name: true, itemGroup: true, isActive: true, parentId: true, hsnCode: true, parent: { select: { name: true, itemGroup: true } } },
   })
   return all.map((c) => ({ ...c, group: (c.itemGroup ?? c.parent?.itemGroup ?? null) as ItemGroup | null }))
 }
@@ -486,14 +535,25 @@ const HOW_TO: Record<OsKind, string[]> = {
     'One row per item and lot or roll: the same item may come in many rows.',
     "Material Category is checked against the item's category (Fabric, Thread, Buttons…).",
     'Item Code may be left empty: the ERP gives every item its own code, and the item is found by its exact Item Name.',
-    'An item not in Items & Products yet is made on import, with its own code: give its Material Category, and its UOM if not the category’s usual one. The check lists every new item first.',
+    'An item not in Items & Products yet is made on import, with its own code: give its Material Category, and its UOM if not the category’s usual one. The check lists every new item, with the items of a similar name, to match or approve first.',
+    "A new item's HSN code: the HSN Code column, else its category's (Masters → Item Categories); with neither, it is made without one, to add in Items & Products later. A code given must be in Masters → HSN / SAC Codes: its GST comes from there, and a GST % given is checked against it.",
     "UOM may be left empty: the item's own unit. Given, it is checked, never converted, so give the quantity in it.",
     'Location may be left empty: the store called Store. Otherwise a store in Masters → Warehouses.',
     'Stickers (where the category is tracked): the five Package columns say how the row is packed — all optional.',
-    'Package Quantities lists each package: 200, 250, 150 makes three stickers. Less than the row leaves the rest without stickers for now.',
+    'Package Quantities lists each package: 200, 250, 150 makes three stickers. They must add up to exactly the row’s quantity: a row is packed in full, or its packaging is pending in full.',
     'Qty per Package makes full packages and one for the rest: 1,200 at 500 is 500 + 500 + 200.',
     'Package Count alone: the stock comes in and its stickers wait until the sizes are known (Stickers → Make stickers on the line). Equal sizes are never assumed.',
     "Nothing given: a row with its own Bundle / Barcode Number is one package; otherwise the item's usual package size, if it has one; else the stickers wait.",
+    'Stock Status: OK, Hold or Rejected. Empty is OK.',
+  ],
+  FA: [
+    'One row per item and place: 3 machines of one kind in Stitching are one row of quantity 3.',
+    'Every one gets its own asset tag (a QR sticker with its own number), made as it comes in, ready to print.',
+    'Serial Numbers: each one’s, separated by commas, as many as the quantity. Printed on its tag; may be left empty.',
+    'Location: a store, or the department it is installed at — Stitching, Cutting, Accounts. Empty: the store called Store.',
+    'Item Code may be left empty: the item is found by its exact Item Name, or made new under its Asset Category (a subcategory of Fixed Assets in Masters → Item Categories).',
+    "A new item's HSN code: the HSN Code column, else its category's; with neither, it is made without one, to add later. A code given must be in Masters → HSN / SAC Codes.",
+    'Cost Each is optional: without it the asset comes in at nought, its valuation pending, to be set later in Opening Stock.',
     'Stock Status: OK, Hold or Rejected. Empty is OK.',
   ],
 }
@@ -507,19 +567,21 @@ async function buildKindTemplate(kind: OsKind): Promise<Buffer> {
   const columns = TYPE_COLUMNS[kind]
   const wb = new ExcelJS.Workbook()
   const sheet = addTemplateSheet(wb, TYPE_SHEET[kind], columns)
-  const materials = await prisma.itemCategory.findMany({
-    where: { isActive: true, itemGroup: 'RAW_MATERIALS', parentId: { not: null } },
-    select: { name: true },
-    orderBy: { name: 'asc' },
-  })
+  const [materials, assetCategories] = await Promise.all(
+    (['RAW_MATERIALS', 'FIXED_ASSETS'] as const).map((itemGroup) =>
+      prisma.itemCategory.findMany({ where: { isActive: true, itemGroup, parentId: { not: null } }, select: { name: true }, orderBy: { name: 'asc' } }),
+    ),
+  )
   const all: Record<string, string[]> = {
+    assetCategories: assetCategories.map((c) => c.name),
+    assetPlaces: [...m.warehouses.filter((w) => !w.departmentId).map((w) => w.name).sort(), ...m.departments.map((d) => d.name).sort()],
     styles: m.styles.filter((st) => st.isActive).map((st) => st.code).sort(),
     processes: m.departments.filter((d) => d.operations.length > 0).map((d) => d.name).sort(),
     stores: m.warehouses.filter((w) => !w.departmentId).map((w) => w.name).sort(),
     locations: m.warehouses.map((w) => w.name).sort(),
     materials: materials.map((c) => c.name),
     units: m.units.map((u) => u.symbol).sort(),
-    statuses: kind === 'RM' ? ['OK', 'Hold', 'Rejected'] : Object.values(STATUS_LABEL),
+    statuses: kind === 'RM' || kind === 'FA' ? ['OK', 'Hold', 'Rejected'] : Object.values(STATUS_LABEL),
     packTypes: ['Roll', 'Box', 'Carton', 'Bag', 'Bundle', 'Packet', 'Other'],
   }
   const used = new Set(columns.map((c) => c.list).filter(Boolean) as string[])
@@ -563,7 +625,8 @@ export async function buildTemplate(kind?: OsKind): Promise<Buffer> {
     'Process may be left empty: the stock is then in a store. Otherwise Store, Finished Goods for finished garments in a store, or the process (' + processes.join(', ') + ') for work in progress.',
     "Department / Location may be left empty: the store called Store (finished garments: the finished goods store), or for work in progress that process's own floor (made if it has none yet). Name a store or outside unit from Masters → Warehouses to put it there.",
     'Item Code may be left empty: the ERP gives every item its own code. The item is found by its exact description (a finished garment by Style / Article No. and Colour).',
-    'An item not in Items & Products yet is made on import, with its own code: give its Item Category (Fabric, Thread…), and its UOM if not the category’s usual one. The check lists every new item before anything is brought in.',
+    'An item not in Items & Products yet is made on import, with its own code: give its Item Category (Fabric, Thread…), and its UOM if not the category’s usual one. The check lists every new item, with the items of a similar name, to match or approve before anything is brought in.',
+    "A new item's HSN code: the HSN Code column, else its category's (Masters → Item Categories); a new colour of a style takes the style's other colours'. With none, it is made without one, to add in Items & Products later. A code given must be in Masters → HSN / SAC Codes: its GST comes from there, and a GST % given is checked against it.",
     "UOM may be left empty: the item's own unit. Given, it is checked and never converted, so give the quantity in the item's own unit.",
     "Size: needed for garments that come in sizes, from the style's size run (S, M, L…). Raw materials have no size.",
     'Unit Rate and Opening Value are optional: give either, or both (they must agree, Qty × Rate); with neither the stock comes in at nought.',
@@ -599,7 +662,7 @@ export function asNineteen(rows: Array<{ row: number; raw: Raw }>, kind: OsKind,
     if (Object.values(r.raw).every((v) => !(v ?? '').trim())) continue
     r.raw.date = openingDate
     if (kind === 'FG') r.raw.process = 'Finished Goods'
-    if (kind === 'RM') r.raw.process = 'Store'
+    if (kind === 'RM' || kind === 'FA') r.raw.process = 'Store'
   }
   return rows
 }
@@ -632,8 +695,21 @@ export function rowsFromEntry(lines: Array<Record<string, unknown>>): Array<{ ro
  */
 export async function planImport(
   rows: Array<{ row: number; raw: Raw; pack?: PackInput | null }>,
-  /** makeItems: an item not in Items & Products yet is made on import (a sheet; never lines typed on the screen). */
-  opts: { rowWord?: 'row' | 'line'; kind?: OsKind; labels?: Partial<Record<OsKey, string>>; makeItems?: boolean } = {},
+  /**
+   * makeItems: an item not in Items & Products yet is made on import (a
+   * sheet; never lines typed on the screen). resolve: what was decided for
+   * each such item, by its key — 'NEW' to make it, or the id of an item
+   * already there to use instead.
+   */
+  opts: {
+    rowWord?: 'row' | 'line'
+    kind?: OsKind
+    labels?: Partial<Record<OsKey, string>>
+    makeItems?: boolean
+    resolve?: Record<string, string>
+    /** An HSN code typed for a new item on the review, by its key: before the sheet's and the category's. */
+    hsn?: Record<string, string>
+  } = {},
 ): Promise<Resolved[]> {
   const m = await loadMasters()
   const L = (k: OsKey) => opts.labels?.[k] ?? plainHead(OS_COLUMNS.find((c) => c.key === k)?.head ?? k)
@@ -735,9 +811,42 @@ export async function planImport(
     return likeCache.get(categoryId)!
   }
   const garmentCache = new Map<string, ReturnType<typeof garmentTemplate>>()
+  const hsnIndex = opts.makeItems ? await loadHsnIndex(prisma) : new Map()
+  const taxRates = opts.makeItems ? await prisma.taxRate.findMany({ where: { isActive: true }, select: { id: true, rate: true } }) : []
+  /**
+   * A new item's HSN code — typed for it on the review, else the sheet's,
+   * else what it is made like (a style's other colours, its category) —
+   * always one in the HSN list, whose GST it carries; a GST % on the sheet
+   * only checked against it. With none anywhere it is still made, without an
+   * HSN code (as Items & Products allows), and said so: never refused for it.
+   */
+  const taxOf = (key: string, raw: Raw, base: { hsnCode: string | null; from: string }, problems: string[]) => {
+    const typed = (opts.hsn?.[key] ?? '').replace(/\s+/g, '')
+    const sheetHsn = (raw.hsn ?? '').replace(/\s+/g, '')
+    const hsnCode = typed || sheetHsn || (base.hsnCode ?? '').replace(/\s+/g, '')
+    const from = typed ? 'the HSN code typed for it' : sheetHsn ? `the ${L('hsn')} column` : base.from
+    if (!hsnCode) return { hsnCode: null, taxRateId: null, said: 'No HSN code yet: add it in Items & Products before it is bought or sold' }
+    const hsn = findHsn(hsnIndex, hsnCode)
+    if (!hsn) {
+      problems.push(`HSN ${hsnCode} (from ${from}) is not in Masters → HSN / SAC Codes, so its GST is not known: add it there with its rate.`)
+      return null
+    }
+    const rate = Number(hsn.gstRate)
+    const gstText = (raw.gst ?? '').replace(/[%\s]/g, '')
+    if (gstText) {
+      const given = Number(gstText)
+      if (Number.isNaN(given)) problems.push(`${L('gst')} "${raw.gst}" is not a rate.`)
+      else if (Math.abs(given - rate) > 0.001) problems.push(`HSN ${hsnCode} carries GST ${rate}% in Masters → HSN / SAC Codes, not ${given}%.`)
+    }
+    return {
+      hsnCode,
+      taxRateId: taxRates.find((t) => Math.abs(Number(t.rate) - rate) < 0.001)?.id ?? null,
+      said: `HSN ${hsnCode} · GST ${rate}% (from ${from})`,
+    }
+  }
   const madeNew = new Map<string, { item: MasterItem; spec: NewItem; row: number; said: NonNullable<OsRowPlan['newItem']> }>()
   /** The new item as the rest of the check sees an item: its category, unit and style. */
-  const keep = (spec: NewItem, cat: Category, unit: Unit, style: (typeof m.styles)[number] | null, row: number, copiedFrom: string | null) => {
+  const keep = (spec: NewItem, cat: Category, unit: Unit, style: (typeof m.styles)[number] | null, row: number, copiedFrom: string | null, tax: string) => {
     const item = {
       id: `${NEW}${spec.key}`, code: spec.name, name: spec.name, type: spec.type, color: spec.color, styleId: spec.styleId, decimalPlaces: null,
       categoryId: spec.categoryId, packType: null, packQty: null,
@@ -746,16 +855,29 @@ export async function planImport(
       style: style ? { code: style.code, name: style.name, sizeGroupId: style.sizeGroupId } : null,
     } as unknown as MasterItem
     const said = {
+      key: spec.key,
       name: spec.name,
       category: [cat.parent?.name, cat.name].filter(Boolean).join(' › '),
       unit: unit.symbol,
       type: cat.group ? ITEM_GROUP_LABEL[cat.group] : '',
+      tax,
+      hsn: spec.hsnCode,
+      // A garment's new colour is named for its style: no other item is spelt like it.
+      similar: spec.styleId ? [] : similarTo(spec.name, spec.categoryId),
+      approved: opts.resolve?.[spec.key] === 'NEW',
       copiedFrom,
     }
     madeNew.set(spec.key, { item, spec, row, said })
     return { item, spec }
   }
   const rowWord = opts.rowWord ?? 'row'
+  /** Items already there whose name looks like this one typed again: a spelling slip, not a new item. */
+  const similarTo = (name: string, categoryId: string | null) =>
+    m.items
+      .filter((i) => looksLikeSameName(name, i.name))
+      .sort((a, b) => (a.categoryId === categoryId ? 0 : 1) - (b.categoryId === categoryId ? 0 : 1))
+      .slice(0, 5)
+      .map((i) => ({ id: i.id, code: i.code, name: i.name }))
 
   /** A finished garment not made yet in this colour: made like the style's other colours. */
   const newGarment = async (style: (typeof m.styles)[number], colourText: string, raw: Raw, row: number, problems: string[]) => {
@@ -789,11 +911,14 @@ export async function planImport(
       problems.push(`${style.code}'s finished items are filed under a category or unit that is switched off: put that right in Items & Products first.`)
       return null
     }
+    const name = `${style.name} — ${colour}`
+    const tax = taxOf(key, raw, { hsnCode: t.template.hsnCode, from: t.hsnFrom }, problems)
+    if (!tax) return null
     const spec: NewItem = {
-      key, name: `${style.name} — ${colour}`, type: 'FINISHED_GOOD', categoryId: cat.id, uomId: unit.id,
-      hsnCode: t.template.hsnCode, taxRateId: t.template.taxRateId, standardRate: t.template.standardRate, styleId: style.id, color: colour, description: null,
+      key, name, type: 'FINISHED_GOOD', categoryId: cat.id, uomId: unit.id,
+      hsnCode: tax.hsnCode, taxRateId: tax.taxRateId, standardRate: t.template.standardRate, styleId: style.id, color: colour, description: null,
     }
-    return keep(spec, cat, unit, style, row, t.copiedFrom)
+    return keep(spec, cat, unit, style, row, t.copiedFrom, tax.said)
   }
 
   /** Any other item not in Items & Products yet: made from its name, category and unit. */
@@ -831,8 +956,8 @@ export async function planImport(
       problems.push(`A new finished item is made from its ${L('style')} and ${L('colour')}, like the style's other colours: give both.`)
       return null
     }
-    if (cat.group !== 'RAW_MATERIALS' && cat.group !== 'SEMI_FINISHED') {
-      problems.push(`${cat.name} is ${cat.group === 'EXPENSES' ? 'an expense head' : 'not under Raw Materials, Semi-Finished or Finished Goods'}, not stock.`)
+    if (cat.group !== 'RAW_MATERIALS' && cat.group !== 'SEMI_FINISHED' && cat.group !== 'FIXED_ASSETS') {
+      problems.push(`${cat.name} is ${cat.group === 'EXPENSES' ? 'an expense head' : 'not under Raw Materials, Semi-Finished Goods, Finished Goods or Fixed Assets'}, not stock.`)
       return null
     }
     const like = await likeIn(cat.id)
@@ -842,12 +967,16 @@ export async function planImport(
       problems.push(uomText ? `No unit "${uomText}" in Masters → Units.` : `Give the ${L('uom')} the new item "${name}" is counted in.`)
       return null
     }
-    const type = (like && typeFitsGroup(like.type, cat.group) ? like.type : cat.group === 'SEMI_FINISHED' ? 'SEMI_FINISHED' : 'RAW_MATERIAL') as NewItem['type']
+    const type = (
+      like && typeFitsGroup(like.type, cat.group) ? like.type : cat.group === 'SEMI_FINISHED' ? 'SEMI_FINISHED' : cat.group === 'FIXED_ASSETS' ? 'FIXED_ASSET' : 'RAW_MATERIAL'
+    ) as NewItem['type']
+    const tax = taxOf(key, raw, { hsnCode: cat.hsnCode, from: `the category ${cat.name}` }, problems)
+    if (!tax) return null
     const spec: NewItem = {
-      key, name: name.slice(0, 200), type, categoryId: cat.id, uomId: unit.id, hsnCode: like?.hsnCode ?? null, taxRateId: like?.taxRateId ?? null,
+      key, name: name.slice(0, 200), type, categoryId: cat.id, uomId: unit.id, hsnCode: tax.hsnCode, taxRateId: tax.taxRateId,
       standardRate: null, styleId: null, color: (raw.colour ?? '').trim() || null, description: (raw.fabric ?? '').trim() || null,
     }
-    return keep(spec, cat, unit, null, row, like?.code ?? null)
+    return keep(spec, cat, unit, null, row, like?.code ?? null, tax.said)
   }
 
   // The end of today in India: a sheet dated today is never "later than
@@ -908,6 +1037,9 @@ export async function planImport(
     let warehouseId: string | null = null
     let floorOf: string | null = null
     let needsStore = false
+    // A department named as the place: only a fixed asset may be installed there.
+    // floor: the process floor's own name was given, not the department's.
+    let atDepartment: { id: string; name: string; floor?: string } | null = null
     const locText = squash(raw.location)
     if (kind === 'PROCESS' && process) {
       const floor = floorByProcess.get(process.id)
@@ -942,12 +1074,16 @@ export async function planImport(
       if (!locText) needsStore = true
       else {
         const w = warehouseByName.get(locText)
+        const d = w ? undefined : processByName.get(locText)
         if (w && w.departmentId) {
-          problems.push(`${w.name} is a process's floor, not a store. Pieces still at a process are semi-finished goods; give the store the stock is in.`)
+          const dept = departmentById.get(w.departmentId)
+          atDepartment = { id: w.departmentId, name: dept?.name ?? w.name, floor: w.name }
         } else if (w) {
           warehouseId = w.id
           plan.location = w.name
-        } else problems.push(`No store named "${raw.location}". Use one in Masters → Warehouses.`)
+        } else if (d) atDepartment = { id: d.id, name: d.name }
+        else if (opts.kind === 'FA') problems.push(`No store or department named "${raw.location}". Use one in Masters → Warehouses or Departments.`)
+        else problems.push(`No store named "${raw.location}". Use one in Masters → Warehouses.`)
       }
     }
 
@@ -996,11 +1132,20 @@ export async function planImport(
         const asGarment =
           Boolean(style && colourText) &&
           (!nameText || opts.kind === 'FG' || opts.kind === 'SFG' || kind === 'FG' || catGroup === 'FINISHED_GOODS' || (kind === 'PROCESS' && catGroup !== 'RAW_MATERIALS'))
-        const made = asGarment ? await newGarment(style!, colourText, raw, row, problems) : await newNamed(nameText, raw, row, problems)
-        if (made) {
-          item = made.item
-          newItem = made.spec
-          plan.newItem = madeNew.get(made.spec.key)!.said
+        const key = `name:${low(nameText)}`
+        const chosen = !asGarment ? opts.resolve?.[key] : undefined
+        if (chosen && chosen !== 'NEW') {
+          // Matched on the review to an item already there: that item, as if its code were given.
+          item = m.items.find((i) => i.id === chosen) ?? null
+          if (!item) problems.push(`The item chosen for "${nameText}" is no longer in Items & Products: choose again.`)
+          else plan.matched = { key, name: nameText, similar: similarTo(nameText, item.categoryId) }
+        } else {
+          const made = asGarment ? await newGarment(style!, colourText, raw, row, problems) : await newNamed(nameText, raw, row, problems)
+          if (made) {
+            item = made.item
+            newItem = made.spec
+            plan.newItem = madeNew.get(made.spec.key)!.said
+          }
         }
       }
     }
@@ -1018,9 +1163,12 @@ export async function planImport(
       // Finished Goods rows hold finished goods; each kind holds its own.
       if (kind === 'FG' && group !== 'FINISHED_GOODS') problems.push(`A Finished Goods row, but ${item.code} is ${ITEM_GROUP_LABEL[group].toLowerCase()}.`)
       if (opts.kind === 'RM' && group !== 'RAW_MATERIALS') {
-        problems.push(`${item.code} is ${ITEM_GROUP_LABEL[group].toLowerCase()}, not a raw material: enter it under ${group === 'FINISHED_GOODS' ? 'Finished Goods' : 'Semi Finished Goods'}.`)
+        problems.push(`${item.code} is ${ITEM_GROUP_LABEL[group].toLowerCase()}, not a raw material: enter it under ${ITEM_GROUP_LABEL[group] === 'Semi-Finished Goods' ? 'Semi Finished Goods' : ITEM_GROUP_LABEL[group]}.`)
       }
       if (opts.kind === 'SFG' && group === 'RAW_MATERIALS') problems.push(`${item.code} is a raw material: enter it under Raw Materials.`)
+      if (opts.kind === 'FA' && group !== 'FIXED_ASSETS') problems.push(`${item.code} is ${ITEM_GROUP_LABEL[group].toLowerCase()}, not a fixed asset.`)
+      if (opts.kind !== 'FA' && opts.kind && group === 'FIXED_ASSETS') problems.push(`${item.code} is a fixed asset: enter it under Fixed Assets.`)
+      if (kind === 'PROCESS' && group === 'FIXED_ASSETS') problems.push(`${item.code} is a fixed asset, not work in progress: give the department it is at as its Location, with Process Store.`)
 
       // A garment at a process: on its style's route, and not an order already on the Production Floor.
       const routeStyle = item.styleId ? styleById.get(item.styleId) : style
@@ -1058,8 +1206,8 @@ export async function planImport(
       // Size: garments and parts by size; raw materials have none.
       const sizeText = squash(raw.size)
       const run = item.style?.sizeGroupId ?? (style?.sizeGroupId ?? null)
-      if (group === 'RAW_MATERIALS') {
-        if (sizeText) problems.push(`${item.code} is a raw material, which is kept without sizes. Leave Size empty, or put it in Remarks.`)
+      if (group === 'RAW_MATERIALS' || group === 'FIXED_ASSETS') {
+        if (sizeText) problems.push(`${item.code} is ${group === 'FIXED_ASSETS' ? 'a fixed asset' : 'a raw material'}, which is kept without sizes. Leave Size empty, or put it in Remarks.`)
       } else if (sizeText) {
         if (run) {
           const s = sizesOfGroup.get(run)?.get(sizeText)
@@ -1114,6 +1262,7 @@ export async function planImport(
         plan.rate = 0
         plan.value = 0
       }
+      if (plan.rate === 0) plan.valuationPending = true
     }
 
     // Stock Status.
@@ -1122,7 +1271,7 @@ export async function planImport(
     if (!status) problems.push(`${L('status')} "${raw.status}" is not one of: OK, Hold, Rejected, B-Grade.`)
     else {
       plan.status = STATUS_LABEL[status]
-      if (status === 'B_GRADE' && plan.group === 'RAW_MATERIALS') problems.push('B-Grade is for semi-finished and finished goods, not raw materials.')
+      if (status === 'B_GRADE' && (plan.group === 'RAW_MATERIALS' || plan.group === 'FIXED_ASSETS')) problems.push('B-Grade is for semi-finished and finished goods only.')
     }
 
     // Its stickers: raw materials of a category labelled by package, kept without sizes.
@@ -1137,12 +1286,34 @@ export async function planImport(
           problems,
         )
         plan.packing = pack.said
+        // A fixed asset: one asset tag each.
+        if (plan.group === 'FIXED_ASSETS' && !pack.later) plan.packing = `${pack.qtys.length} asset ${pack.qtys.length === 1 ? 'tag' : 'tags'}${pack.refs.some(Boolean) ? ', each with its serial number' : ''}`
         // Stickers to print: a package keeping its own barcode needs none.
         plan.stickers = pack.qtys.length - (pack.barcode ? 1 : 0)
         plan.pack = { type: pack.packType, qtys: pack.qtys, later: pack.later, count: pack.count, barcode: pack.barcode }
         // A lot's own barcode, not one of the ERP's sticker numbers (checked against other packages after the repeats).
         if (pack.barcode && /^PK-\d+$/i.test(pack.barcode)) problems.push(`${L('bundle')} ${pack.barcode} is an ERP sticker number, not the lot's own barcode.`)
       } else if (packInput) problems.push(`${item.code} is filed under ${item.category?.name}, which is not labelled by package: leave its package columns empty.`)
+    }
+
+    if (atDepartment) {
+      if (plan.group !== 'FIXED_ASSETS') {
+        problems.push(
+          atDepartment.floor
+            ? `${atDepartment.floor} is a process's floor, not a store. Pieces still at a process are semi-finished goods; give the store the stock is in.`
+            : `${atDepartment.name} is a department: only a fixed asset is kept at a department. Give the store the stock is in${plan.group === 'SEMI_FINISHED' || plan.group === 'FINISHED_GOODS' ? ', or the process for pieces still being made' : ''}.`,
+        )
+      } else {
+        const floor = floorByProcess.get(atDepartment.id)
+        if (floor) {
+          warehouseId = floor.id
+          plan.location = floor.name
+        } else {
+          floorOf = atDepartment.id
+          plan.location = `${atDepartment.name} Floor`
+          plan.newFloor = true
+        }
+      }
     }
 
     // No Location: the store called Store; finished garments, the finished goods store.
@@ -1221,7 +1392,7 @@ async function checkDuplicates(resolved: Resolved[], rowWord: 'row' | 'line', bu
   const [trading, openings, floors] = await Promise.all([
     prisma.stockLedger.groupBy({
       by: ['itemId', 'warehouseId', 'sizeId', 'grade', 'orderNo'],
-      where: { itemId: { in: itemIds }, warehouseId: { in: warehouseIds }, NOT: { referenceType: REFERENCE } },
+      where: { itemId: { in: itemIds }, warehouseId: { in: warehouseIds }, referenceType: { notIn: [REFERENCE, 'OPENING_CORRECTION', 'OPENING_REVERSAL'] } },
       _min: { transactionDate: true },
     }),
     prisma.stockLedger.groupBy({
@@ -1322,6 +1493,29 @@ export function summarise(resolved: Resolved[]) {
     floorsToMake: [...new Set(lines.filter((r) => r.plan.newFloor).map((r) => r.plan.location))],
     /** Items not in Items & Products yet, made on import with their own codes. */
     itemsToMake: [...new Map(lines.filter((r) => r.ready?.newItem).map((r) => [r.ready!.newItem!.key, r.plan.newItem!])).values()],
+    /** Each item the sheet names that is not in Items & Products: to make, or matched to one already there. */
+    decisions: [
+      ...new Map(
+        resolved
+          .filter((r) => r.plan.newItem || r.plan.matched)
+          .map((r) => {
+            const n = r.plan.newItem
+            const m = r.plan.matched
+            return [
+              n?.key ?? m!.key,
+              n
+                ? { key: n.key, name: n.name, category: n.category, unit: n.unit, tax: n.tax, hsn: n.hsn, similar: n.similar, decision: n.approved ? 'NEW' : 'PENDING', matched: null }
+                : { key: m!.key, name: m!.name, category: '', unit: r.plan.unit ?? '', tax: '', hsn: null, similar: m!.similar, decision: 'MATCHED', matched: r.plan.item },
+            ] as const
+          }),
+      ).values(),
+    ],
+    /** New items made without an HSN code: it is added in Items & Products later. */
+    noHsn: [...new Set(resolved.filter((r) => r.plan.newItem && !r.plan.newItem.hsn).map((r) => r.plan.newItem!.key))].length,
+    /** Lines coming in without a rate: valuation pending until it is set. */
+    valuationPending: lines.filter((r) => r.plan.valuationPending).length,
+    /** New items still to be approved or matched: nothing is brought in until there are none. */
+    undecided: [...new Set(resolved.filter((r) => r.plan.newItem && !r.plan.newItem.approved).map((r) => r.plan.newItem!.key))].length,
     /** Stickers to print; packages keeping their own barcode; rows whose packaging is pending. */
     stickers: lines.reduce((t, r) => t + (r.ready?.pack ? r.ready.pack.qtys.length - (r.ready.pack.barcode ? 1 : 0) : 0), 0),
     kept: lines.filter((r) => r.ready?.pack?.barcode).length,
@@ -1359,6 +1553,14 @@ export async function runImport(
   }
   const rows = resolved.filter((r) => r.ready)
   if (!rows.length) throw new AppError(byHand ? 'Nothing to save: enter a quantity on at least one line.' : 'The sheet has no rows to bring in.', 400, 'NOTHING_TO_IMPORT')
+  const undecided = new Set(rows.filter((r) => r.ready!.newItem && !r.plan.newItem?.approved).map((r) => r.ready!.newItem!.key))
+  if (undecided.size) {
+    throw new AppError(
+      `${undecided.size} new ${undecided.size === 1 ? 'item is' : 'items are'} not decided yet: approve making ${undecided.size === 1 ? 'it' : 'each'}, or match ${undecided.size === 1 ? 'it' : 'each'} to an item already in Items & Products.`,
+      400,
+      'NEW_ITEMS_UNDECIDED',
+    )
+  }
 
   try {
     return await postImport(rows, opts, byHand)
@@ -1427,7 +1629,7 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
 
       const items = await tx.item.findMany({
         where: { id: { in: [...new Set(rows.map((r) => r.ready!.itemId))] } },
-        select: { id: true, name: true, categoryId: true, packType: true, packQty: true, uom: { select: { symbol: true, name: true } } },
+        select: { id: true, name: true, type: true, categoryId: true, packType: true, packQty: true, uom: { select: { symbol: true, name: true } } },
       })
       const itemById = new Map(items.map((i) => [i.id, i]))
       const ruleOf = await packageRules(tx)
@@ -1440,7 +1642,7 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
       for (const r of ordered) {
         const d = r.ready!
         const note = [`${number} ${byHand ? 'line' : 'row'} ${r.plan.row}`, d.bundleNo ? `bundle ${d.bundleNo}` : null, (d.raw.remarks ?? '').trim() || null].filter(Boolean).join(' · ')
-        await recordMovement(tx, {
+        const posted = await recordMovement(tx, {
           itemId: d.itemId,
           warehouseId: d.warehouseId!,
           transactionType: 'OPENING',
@@ -1491,6 +1693,9 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
             packType: d.pack?.packType ?? null,
             packCount: d.pack?.count ?? null,
             dedupeKey: dedupeKey(d, d.warehouseId!),
+            // In without a rate: valued at nought until its rate is set.
+            valuationPending: d.rate === 0,
+            ledgerId: posted.ledgerId,
           },
         })
 
@@ -1501,7 +1706,7 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
             spot: { itemId: d.itemId, warehouseId: d.warehouseId!, ownership: 'OWNED', ownerCustomerId: null },
             packType: d.pack.packType,
             qtys: d.pack.qtys,
-            notesEach: d.pack.refs.map((ref) => (ref ? `Ref ${ref}`.slice(0, 120) : null)),
+            notesEach: d.pack.refs.map((ref) => (ref ? `${item.type === 'FIXED_ASSET' ? 'S/N' : 'Ref'} ${ref}`.slice(0, 120) : null)),
             barcodesEach: [d.pack.barcode],
             lotNo: d.lotNo,
             notes: d.bundleNo ? `Barcode ${d.bundleNo}`.slice(0, 120) : null,
@@ -1546,7 +1751,15 @@ export async function colourItem(input: { styleId: string; colour: string; categ
 
   const found = await garmentTemplate(style, input.categoryId)
   if ('needCategory' in found) return found
-  const { template, copiedFrom } = found
+  const { copiedFrom, hsnFrom } = found
+  const template = { ...found.template }
+  // Its HSN code from the style's other colours or its category, and one in the HSN list: its GST comes from there.
+  // None anywhere: made without one (as Items & Products allows), to be added there later.
+  const hsn = template.hsnCode ? findHsn(await loadHsnIndex(prisma), template.hsnCode) : null
+  if (template.hsnCode && !hsn) throw new AppError(`HSN ${template.hsnCode} (from ${hsnFrom}) is not in Masters → HSN / SAC Codes, so its GST is not known: add it there first.`, 400, 'HSN_NOT_LISTED')
+  if (!template.taxRateId && hsn) {
+    template.taxRateId = (await prisma.taxRate.findFirst({ where: { isActive: true, rate: Number(hsn.gstRate) }, select: { id: true } }))?.id ?? null
+  }
   const name = input.name?.trim() || `${style.name} — ${colour}`
 
   // Shown first, created only when asked: everything the new item gets, and where it comes from.
@@ -1602,14 +1815,18 @@ type GarmentTemplate = { categoryId: string; uomId: string; hsnCode: string | nu
 async function garmentTemplate(
   style: { id: string; name: string; category: string | null },
   categoryId?: string | null,
-): Promise<{ template: GarmentTemplate; copiedFrom: string | null } | { needCategory: true; categories: Array<{ id: string; name: string }> }> {
+): Promise<{ template: GarmentTemplate; copiedFrom: string | null; hsnFrom: string } | { needCategory: true; categories: Array<{ id: string; name: string }> }> {
   const sibling = await prisma.item.findFirst({
     where: { styleId: style.id, type: 'FINISHED_GOOD' },
     orderBy: { createdAt: 'asc' },
     select: { code: true, categoryId: true, uomId: true, hsnCode: true, taxRateId: true, standardRate: true },
   })
-  // The item its details are copied from, said in the preview.
-  if (sibling) return { template: sibling, copiedFrom: sibling.code }
+  // The style's own items: a new colour is the same garment, so the same HSN code.
+  if (sibling?.hsnCode) return { template: sibling, copiedFrom: sibling.code, hsnFrom: `the style's ${sibling.code}` }
+  if (sibling) {
+    const own = await prisma.itemCategory.findUnique({ where: { id: sibling.categoryId }, select: { name: true, hsnCode: true } })
+    return { template: { ...sibling, hsnCode: own?.hsnCode ?? null, taxRateId: null }, copiedFrom: sibling.code, hsnFrom: `the category ${own?.name ?? ''}` }
+  }
   const finished = await prisma.itemCategory.findMany({
     where: { isActive: true, itemGroup: 'FINISHED_GOODS', parentId: { not: null } },
     select: { id: true, name: true },
@@ -1623,15 +1840,15 @@ async function garmentTemplate(
     if (hits.length === 1) chosen = hits[0].id
   }
   if (!chosen || !finished.some((c) => c.id === chosen)) return { needCategory: true, categories: finished }
-  const like = await prisma.item.findFirst({
-    where: { categoryId: chosen, type: 'FINISHED_GOOD' },
-    orderBy: { createdAt: 'desc' },
-    select: { code: true, uomId: true, hsnCode: true, taxRateId: true },
-  })
+  // Its unit as the category's garments are counted; its HSN code the category's own.
+  const [like, category] = await Promise.all([
+    prisma.item.findFirst({ where: { categoryId: chosen, type: 'FINISHED_GOOD' }, orderBy: { createdAt: 'desc' }, select: { code: true, uomId: true } }),
+    prisma.itemCategory.findUnique({ where: { id: chosen }, select: { name: true, hsnCode: true } }),
+  ])
   const pcs = like?.uomId ?? (await prisma.uOM.findFirst({ where: { symbol: { equals: 'pcs', mode: 'insensitive' } }, select: { id: true } }))?.id
   if (!pcs) throw new AppError('There is no "pcs" unit to count garments in. Add it in Masters → Units.', 400, 'NO_PCS_UNIT')
-  const template: GarmentTemplate = { categoryId: chosen, uomId: pcs, hsnCode: like?.hsnCode ?? null, taxRateId: like?.taxRateId ?? null, standardRate: null }
-  return { template, copiedFrom: like?.code ?? null }
+  const template: GarmentTemplate = { categoryId: chosen, uomId: pcs, hsnCode: category?.hsnCode ?? null, taxRateId: null, standardRate: null }
+  return { template, copiedFrom: null, hsnFrom: `the category ${category?.name ?? ''}` }
 }
 
 /**
@@ -1700,7 +1917,7 @@ export async function packLine(lineId: string, input: PackInput, userId: string 
         openingStock: { select: { id: true, number: true } },
         item: {
           select: {
-            id: true, code: true, name: true, categoryId: true, packType: true, packQty: true, decimalPlaces: true,
+            id: true, code: true, name: true, categoryId: true, packType: true, packQty: true, decimalPlaces: true, type: true,
             uom: { select: { symbol: true, name: true, decimalPlaces: true } },
           },
         },
@@ -1726,7 +1943,7 @@ export async function packLine(lineId: string, input: PackInput, userId: string 
       spot: { itemId: line.itemId, warehouseId: line.warehouseId, ownership: 'OWNED', ownerCustomerId: null },
       packType: plan.packType,
       qtys: plan.qtys,
-      notesEach: plan.refs.map((ref) => (ref ? `Ref ${ref}`.slice(0, 120) : null)),
+      notesEach: plan.refs.map((ref) => (ref ? `${line.item.type === 'FIXED_ASSET' ? 'S/N' : 'Ref'} ${ref}`.slice(0, 120) : null)),
       lotNo: line.lotNo,
       notes: line.bundleNo ? `Barcode ${line.bundleNo}`.slice(0, 120) : null,
       sourceType: 'OPENING',

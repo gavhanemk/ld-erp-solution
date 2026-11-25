@@ -1,6 +1,7 @@
 'use client'
 
 import { PrintToolbar } from '@/components/print/PrintSheet'
+import { SecondAddress } from '@/components/print/SecondAddress'
 
 /**
  * The store's printed papers: issue slip, transfer note, count sheet.
@@ -237,6 +238,11 @@ export function StoreSheet({
             {address && (
               <div style={{ fontSize: '10.5px', color: GREY, lineHeight: 1.6, marginTop: '4px', maxWidth: '86%' }}>
                 {address}
+              </div>
+            )}
+            {company.address2 && (
+              <div style={{ fontSize: '10.5px', color: GREY, lineHeight: 1.6, maxWidth: '86%' }}>
+                <SecondAddress text={company.address2} />
               </div>
             )}
           </div>

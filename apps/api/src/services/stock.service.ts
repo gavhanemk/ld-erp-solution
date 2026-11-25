@@ -295,7 +295,7 @@ async function settleDate(
 export async function recordMovement(
   tx: Prisma.TransactionClient,
   m: Movement,
-): Promise<{ balance: Balance; unitRate: number }> {
+): Promise<{ balance: Balance; unitRate: number; ledgerId: string }> {
   if (!(m.qty > 0)) {
     throw new AppError('A stock movement must be for more than zero', 400, 'INVALID_QTY')
   }
@@ -428,7 +428,8 @@ export async function recordMovement(
 
   const closing = round3(m.direction === 'IN' ? before.qty + qty : before.qty - qty)
 
-  await tx.stockLedger.create({
+  const row = await tx.stockLedger.create({
+    select: { id: true },
     data: {
       itemId: m.itemId,
       warehouseId: m.warehouseId,
@@ -455,7 +456,7 @@ export async function recordMovement(
 
   if (m.direction === 'OUT' && (m.stickers ?? 'auto') === 'auto' && !m.sizeId) await keepStickersInStep(tx, m)
 
-  return { balance: await balanceOf(tx, m), unitRate }
+  return { balance: await balanceOf(tx, m), unitRate, ledgerId: row.id }
 }
 
 /**

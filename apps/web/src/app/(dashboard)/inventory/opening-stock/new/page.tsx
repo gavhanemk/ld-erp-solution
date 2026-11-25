@@ -1,15 +1,16 @@
 'use client'
 
-import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { AlertCircle, ArrowLeft, ArrowRight, CheckCircle2, FileSpreadsheet, Loader2, Printer, RotateCcw } from 'lucide-react'
+import { AlertCircle, ArrowLeft, ArrowRight, CheckCircle2, ClipboardList, FileSpreadsheet, Loader2, Printer, RotateCcw } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { cn, newRequestId } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { KINDS, kindOf, money, num, STATUSES, todayInIndia, cellKey, styleRows, type FormOptions, type Kind } from '@/components/inventory/opening/kinds'
 import { FinishedGoods, RawMaterials, SemiFinished, type Garment, type Material } from '@/components/inventory/opening/Workspaces'
 import { packInputOf } from '@/components/packages/PackagingEditor'
+import { Banner, ChoiceCard, DoneCard, MiniField, PageHead, Panel, StatTile, Stats } from '@/components/inventory/opening/Frame'
 import { StickersReady } from '@/components/packages/StickersReady'
 
 /*
@@ -49,6 +50,8 @@ interface PlanRow {
   /** Raw materials labelled by package: what its stickers will be. */
   packing?: string | null
   stickers?: number
+  /** No rate: in at nought, its value to be set later (Opening Stock → Set rate). */
+  valuationPending?: boolean
 }
 type EntryLine = Record<string, string | number | ReturnType<typeof packInputOf>>
 interface Saved {
@@ -99,6 +102,17 @@ const dropDraft = (k: Kind) => {
 const LABELS: Record<Kind, Record<string, string>> = {
   FG: { date: 'Opening date', location: 'Store', code: 'Item', qty: 'Pieces', rate: 'Rate per piece', status: 'Stock status', style: 'Style' },
   SFG: { date: 'Opening date', process: 'Process', location: 'Location', code: 'Item', qty: 'Pieces', rate: 'Rate per piece', status: 'Stock status', style: 'Style' },
+  FA: {
+    date: 'Opening date',
+    location: 'Location',
+    code: 'Item',
+    qty: 'Quantity',
+    rate: 'Cost each',
+    status: 'Stock status',
+    uom: 'Unit',
+    packQtys: 'Asset tags',
+    packRefs: 'Serial numbers',
+  },
   RM: {
     date: 'Opening date',
     location: 'Store',
@@ -116,10 +130,18 @@ const LABELS: Record<Kind, Record<string, string>> = {
 }
 
 const STEPS = ['What you are entering', 'Enter the stock', 'Review', 'Saved']
+/** What each step of the entry is for, in a line under the title. */
+const STEP_LINE = [
+  'Enter the stock you had on the day, one kind at a time. Pick what you are entering.',
+  'Everything here is kept on this computer until you save it or throw it away.',
+  'Checked by the same rules as an Excel import. Nothing is saved until every line is right.',
+  'In stock now, by item, size and place.',
+]
 
 /** The store an entry most likely goes to: the finished goods store, or the raw material one. */
 function likelyStore(o: FormOptions, k: Kind) {
   const by = (re: RegExp) => o.stores.find((s) => re.test(s.name))?.id
+  if (k === 'FA') return by(/^store$/i) ?? o.stores[0]?.id ?? ''
   return (k === 'FG' ? (by(/finish|\bfg\b/i) ?? by(/^store$/i)) : (by(/raw|fabric|main/i) ?? by(/^store$/i))) ?? o.stores[0]?.id ?? ''
 }
 
@@ -212,7 +234,10 @@ function AddOpeningStock() {
     const refs: Array<{ key: string; label: string; style?: string; colour?: string }> = []
     let value = 0
     if (!draft || !options) return { lines, refs, value, pieces: 0 }
-    const storeName = options.stores.find((s) => s.id === draft.storeId)?.name ?? ''
+    // A fixed asset may be at a department: its place is kept as "dept:<id>".
+    const storeName = draft.storeId.startsWith('dept:')
+      ? (options.departments?.find((d) => `dept:${d.id}` === draft.storeId)?.name ?? '')
+      : (options.stores.find((s) => s.id === draft.storeId)?.name ?? '')
     const base = { date: draft.date, status: draft.status }
     let pieces = 0
     for (const g of draft.kind === 'RM' ? [] : draft.garments) {
@@ -245,14 +270,17 @@ function AddOpeningStock() {
         }
       }
     }
-    for (const m of draft.kind === 'RM' ? draft.materials : []) {
+    for (const m of draft.kind === 'RM' || draft.kind === 'FA' ? draft.materials : []) {
       const it = options.items.find((x) => x.id === m.itemId)
       if (!it) continue
-      const category = options.categories.find((c) => c.id === it.categoryId)?.name ?? ''
+      const asset = draft.kind === 'FA'
+      const category = (asset ? (options.assetCategories ?? []) : options.categories).find((c) => c.id === it.categoryId)?.name ?? ''
       for (const l of m.lots) {
         const q = Number(l.qty || 0)
         if (!(q > 0)) continue
         value += q * Number(l.rate || 0)
+        // A fixed asset: one tag each, with its serial numbers.
+        const serials = asset ? l.lot.split(/[,;\n]+/).map((t) => t.trim()).filter(Boolean) : []
         lines.push({
           ...base,
           process: 'Store',
@@ -262,10 +290,16 @@ function AddOpeningStock() {
           uom: it.unit ?? '',
           qty: q,
           rate: l.rate,
-          lot: l.lot.trim(),
-          bundle: l.bundle.trim(),
+          lot: asset ? '' : l.lot.trim(),
+          bundle: asset ? '' : l.bundle.trim(),
           // Its packing, when one was chosen; else the save goes by the item's usual.
-          ...(it.tracked && l.pack ? { pack: packInputOf(l.pack, q, it.unit ?? '', it.decimals) } : {}),
+          ...(asset
+            ? Number.isInteger(q)
+              ? { pack: { type: 'OTHER', qtys: Array.from({ length: q }, () => 1), ...(serials.length ? { refs: serials } : {}) } }
+              : {}
+            : it.tracked && l.pack
+              ? { pack: packInputOf(l.pack, q, it.unit ?? '', it.decimals) }
+              : {}),
         })
         refs.push({ key: l.key, label: `${it.code}${l.lot.trim() ? ` lot ${l.lot.trim()}` : ''}${l.bundle.trim() ? ` · ${l.bundle.trim()}` : ''}` })
       }
@@ -275,7 +309,7 @@ function AddOpeningStock() {
 
   const review = async () => {
     if (!draft) return
-    if (draft.kind !== 'SFG' && !draft.storeId) return setError('Pick the store the stock is in.')
+    if (draft.kind !== 'SFG' && !draft.storeId) return setError(draft.kind === 'FA' ? 'Pick where the assets are: a store or a department.' : 'Pick the store the stock is in.')
     if (!built.lines.length) {
       return setError(draft.kind === 'RM' ? 'Enter a quantity for at least one lot or roll.' : 'Enter pieces for at least one colour and size.')
     }
@@ -344,31 +378,8 @@ function AddOpeningStock() {
   const bad = (plan ?? []).filter((r) => r.problems.length).length
 
   return (
-    <div className="space-y-4" style={{ ['--field' as string]: 'var(--card)' }}>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0">
-          <Link href="/inventory/opening-stock" className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-xs">
-            <ArrowLeft size={12} /> Opening Stock
-          </Link>
-          <h1 className="page-title">Add Opening Stock{k ? ` — ${k.label}` : ''}</h1>
-        </div>
-        <ol className="flex flex-wrap items-center gap-1 text-xs" aria-label="Steps">
-          {STEPS.map((label, i) => (
-            <li key={label} className="flex items-center gap-1">
-              <span
-                className={cn(
-                  'flex items-center gap-1.5 rounded-full border px-2.5 py-1',
-                  i === stepIndex ? 'border-primary bg-primary/10 text-primary font-semibold' : i < stepIndex ? 'border-border text-foreground' : 'border-border text-muted-foreground',
-                )}
-                aria-current={i === stepIndex ? 'step' : undefined}
-              >
-                <span className="tabular-nums">{i + 1}</span> {label}
-              </span>
-              {i < STEPS.length - 1 && <span className="text-muted-foreground">›</span>}
-            </li>
-          ))}
-        </ol>
-      </div>
+    <div className="space-y-5" style={{ ['--field' as string]: 'var(--card)' }}>
+      <PageHead title={`Add Opening Stock${k ? ` — ${k.label}` : ''}`} subtitle={STEP_LINE[stepIndex]} steps={STEPS} current={stepIndex} />
 
       {!mayAdd && <Banner tone="warn">Adding opening stock needs Inventory → create. Ask an administrator for it.</Banner>}
       {error && <Banner tone="bad">{error}</Banner>}
@@ -376,45 +387,37 @@ function AddOpeningStock() {
       {/* 1. What is being entered. */}
       {!kind && (
         <div className="space-y-4">
-          <div className="grid gap-4 lg:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             {KINDS.map((t) => {
               const waiting = typeof window !== 'undefined' ? readDraft(t.key) : null
               return (
-                <button
+                <ChoiceCard
                   key={t.key}
-                  type="button"
+                  icon={t.icon}
+                  label={t.label}
+                  short={t.short}
+                  text={t.text}
+                  cta={`Enter ${t.label}`}
+                  ariaLabel={`Enter ${t.label}`}
                   onClick={() => router.push(`/inventory/opening-stock/new?type=${t.key}`)}
-                  className="glass-card hover:border-primary group flex flex-col gap-3 border p-5 text-left transition-colors"
-                  aria-label={`Enter ${t.label}`}
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="bg-primary/10 text-primary rounded-xl p-3">
-                      <t.icon size={22} />
-                    </span>
-                    <div>
-                      <div className="text-foreground text-lg font-semibold">{t.label}</div>
-                      <div className="text-muted-foreground text-xs font-semibold">{t.short}</div>
-                    </div>
-                  </div>
-                  <p className="text-muted-foreground text-sm">{t.text}</p>
-                  <div className="flex flex-wrap items-center gap-1 text-xs">
+                  <ol className="flex flex-wrap items-center gap-1 text-[11px]" aria-label="What you choose, in order">
                     {t.steps.map((s, i) => (
-                      <span key={s} className="flex items-center gap-1">
-                        <span className="badge-neutral">{s}</span>
+                      <li key={s} className="flex items-center gap-1">
+                        <span className="border-border text-foreground rounded-md border px-1.5 py-0.5">{s}</span>
                         {i < t.steps.length - 1 && <ArrowRight size={11} className="text-muted-foreground" />}
-                      </span>
+                      </li>
                     ))}
-                  </div>
+                  </ol>
                   {waiting && <span className="badge-warning w-fit">An unsaved entry is waiting</span>}
-                  <span className="text-primary mt-auto text-sm font-semibold group-hover:underline">Enter {t.label} →</span>
-                </button>
+                </ChoiceCard>
               )
             })}
           </div>
-          <p className="text-muted-foreground text-sm">
-            A lot to enter?{' '}
-            <Link href="/inventory/opening-stock/import" className="text-primary inline-flex items-center gap-1 font-medium hover:underline">
-              <FileSpreadsheet size={14} /> Import it from Excel instead
+          <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
+            <FileSpreadsheet size={14} /> A lot to enter?{' '}
+            <Link href="/inventory/opening-stock/import" className="text-primary font-medium hover:underline">
+              Import it from Excel instead
             </Link>
           </p>
         </div>
@@ -430,11 +433,15 @@ function AddOpeningStock() {
       {kind && draft && options && step !== 'saved' && (
         <>
           {restored && step === 'enter' && (draft.garments.length > 0 || draft.materials.length > 0) && (
-            <Banner tone="info">
-              Your unsaved {k?.label.toLowerCase()} entry is back, as you left it.{' '}
-              <button type="button" className="text-primary font-medium hover:underline" onClick={startAgain}>
-                Start fresh instead
-              </button>
+            <Banner
+              tone="info"
+              action={
+                <button type="button" className="text-primary text-sm font-semibold hover:underline" onClick={startAgain}>
+                  Start fresh instead
+                </button>
+              }
+            >
+              Your unsaved {k?.label.toLowerCase()} entry is back, as you left it.
             </Banner>
           )}
 
@@ -443,46 +450,57 @@ function AddOpeningStock() {
           )}
 
           <fieldset disabled={step === 'review' || busy} className={cn('space-y-3', step === 'review' && 'opacity-60')}>
-            {/* Where and when, for the whole entry. */}
-            <section className="glass-card grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-5" aria-label="Where and when">
-              <h2 className="text-foreground text-sm font-semibold sm:col-span-2 lg:col-span-5">Stock details</h2>
-              <label className="space-y-1 text-sm">
-                <span className="text-foreground font-medium">Opening date</span>
-                <input type="date" className="form-input" value={draft.date} max={todayInIndia()} onChange={(e) => set({ date: e.target.value })} aria-label="Opening date" />
-              </label>
-              {kind !== 'SFG' && (
-                <label className="space-y-1 text-sm">
-                  <span className="text-foreground font-medium">{kind === 'FG' ? 'Finished goods store' : 'Store'}</span>
-                  <SmartSelect className="form-input" value={draft.storeId} onChange={(e) => set({ storeId: e.target.value })} aria-label="Store">
-                    <option value="">Pick the store…</option>
-                    {options.stores.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name}
+            {/* Where and when, for the whole entry: one slim bar. */}
+            <section className="glass-card px-4 py-3" aria-label="Where and when">
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="flex min-w-[12rem] items-center gap-3 self-center pr-1">
+                  <span className="bg-primary/10 text-primary flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
+                    <ClipboardList size={18} />
+                  </span>
+                  <div className="leading-tight">
+                    <div className="text-foreground text-sm font-semibold">Stock details</div>
+                    <div className="text-muted-foreground text-xs">For every line below</div>
+                  </div>
+                </div>
+                <MiniField label="Opening date" required className="w-40">
+                  <input type="date" className="form-input h-9" value={draft.date} max={todayInIndia()} onChange={(e) => set({ date: e.target.value })} aria-label="Opening date" />
+                </MiniField>
+                {kind !== 'SFG' && (
+                  <MiniField label={kind === 'FG' ? 'Finished goods store' : kind === 'FA' ? 'Location' : 'Store'} required className="w-52">
+                    <SmartSelect className="form-input h-9" value={draft.storeId} onChange={(e) => set({ storeId: e.target.value })} aria-label={kind === 'FA' ? 'Location' : 'Store'}>
+                      <option value="">{kind === 'FA' ? 'A store or a department…' : 'Pick the store…'}</option>
+                      {options.stores.map((s) => (
+                        <option key={s.id} value={s.id} data-sub={kind === 'FA' ? 'Store' : undefined}>
+                          {s.name}
+                        </option>
+                      ))}
+                      {kind === 'FA' &&
+                        (options.departments ?? []).map((d) => (
+                          <option key={d.id} value={`dept:${d.id}`} data-sub="Department: installed there">
+                            {d.name}
+                          </option>
+                        ))}
+                    </SmartSelect>
+                  </MiniField>
+                )}
+                <MiniField label="Stock status" className="w-48">
+                  <SmartSelect className="form-input h-9" value={draft.status} onChange={(e) => set({ status: e.target.value })} aria-label="Stock status">
+                    {STATUSES.filter((s) => (kind !== 'RM' && kind !== 'FA') || s.value !== 'B-Grade').map((s) => (
+                      <option key={s.value} value={s.value}>
+                        {s.label}
                       </option>
                     ))}
                   </SmartSelect>
-                </label>
-              )}
-              <label className="space-y-1 text-sm">
-                <span className="text-foreground font-medium">Stock status</span>
-                <SmartSelect className="form-input" value={draft.status} onChange={(e) => set({ status: e.target.value })} aria-label="Stock status">
-                  {STATUSES.filter((s) => kind !== 'RM' || s.value !== 'B-Grade').map((s) => (
-                    <option key={s.value} value={s.value}>
-                      {s.label}
-                    </option>
-                  ))}
-                </SmartSelect>
-              </label>
-              {kind === 'FG' && (
-                <label className="space-y-1 text-sm">
-                  <span className="text-foreground font-medium">Order No.</span>
-                  <input className="form-input" value={draft.orderNo} onChange={(e) => set({ orderNo: e.target.value })} placeholder="Optional" aria-label="Order No." />
-                </label>
-              )}
-              <label className={cn('space-y-1 text-sm', kind === 'SFG' ? 'lg:col-span-3' : kind === 'RM' ? 'lg:col-span-2' : '')}>
-                <span className="text-foreground font-medium">Remarks</span>
-                <input className="form-input" value={draft.notes} onChange={(e) => set({ notes: e.target.value })} placeholder="Optional: who counted it, anything to remember" aria-label="Remarks" />
-              </label>
+                </MiniField>
+                {kind === 'FG' && (
+                  <MiniField label="Order No." className="w-40">
+                    <input className="form-input h-9" value={draft.orderNo} onChange={(e) => set({ orderNo: e.target.value })} placeholder="Optional" aria-label="Order No." />
+                  </MiniField>
+                )}
+                <MiniField label="Remarks" className="min-w-48 flex-1">
+                  <input className="form-input h-9" value={draft.notes} onChange={(e) => set({ notes: e.target.value })} placeholder="Optional: who counted it" aria-label="Remarks" />
+                </MiniField>
+              </div>
             </section>
 
             {(() => {
@@ -514,7 +532,7 @@ function AddOpeningStock() {
               }
               if (kind === 'FG') return <FinishedGoods {...shared} garments={draft.garments} onChange={(garments) => set({ garments })} />
               if (kind === 'SFG') return <SemiFinished {...shared} garments={draft.garments} onChange={(garments) => set({ garments })} />
-              return <RawMaterials {...shared} materials={draft.materials} onChange={(materials) => set({ materials })} />
+              return <RawMaterials {...shared} asset={kind === 'FA'} materials={draft.materials} onChange={(materials) => set({ materials })} />
             })()}
           </fieldset>
 
@@ -529,7 +547,7 @@ function AddOpeningStock() {
                 </p>
                 {built.lines.length > 0 && (
                   <dl className="flex items-center gap-5 text-sm" aria-label="Entry summary">
-                    <Stat label={kind === 'RM' ? 'Materials' : 'Styles'} value={String(kind === 'RM' ? draft.materials.length : draft.garments.length)} />
+                    <Stat label={kind === 'RM' ? 'Materials' : kind === 'FA' ? 'Assets' : 'Styles'} value={String(kind === 'RM' || kind === 'FA' ? draft.materials.length : draft.garments.length)} />
                     <Stat label="Lines" value={String(built.lines.length)} />
                     {kind !== 'RM' && <Stat label="Pieces" value={num(built.pieces)} />}
                     <Stat label="Stock value" value={money(built.value)} />
@@ -583,40 +601,50 @@ function AddOpeningStock() {
 
       {/* 4. Saved. */}
       {kind && step === 'saved' && saved && (
-        <div className="glass-card space-y-4 p-6">
-          <div className="flex items-start gap-3">
-            <CheckCircle2 size={28} className="shrink-0 text-emerald-500" />
-            <div>
-              <h2 className="text-foreground text-lg font-semibold">
-                {saved.again ? 'Already saved' : 'Saved'} as <span className="font-mono text-teal-400">{saved.number}</span>
-              </h2>
-              <p className="text-muted-foreground text-sm" role="status">
-                {saved.message}
-              </p>
-              <p className="text-foreground mt-1 text-sm">
+        <DoneCard
+          title={
+            <>
+              {saved.again ? 'Already saved' : 'Saved'} as <span className="font-mono text-teal-400">{saved.number}</span>
+            </>
+          }
+          message={
+            <>
+              {saved.message}{' '}
+              <span className="text-foreground">
                 {saved.lines} {saved.lines === 1 ? 'line' : 'lines'} of {k?.label.toLowerCase()} · {money(saved.value)} — in stock now, by item, size and place.
                 {(saved.kept ?? 0) > 0 && ` ${saved.kept} ${saved.kept === 1 ? 'package keeps its' : 'packages keep their'} own barcode: nothing to print for ${saved.kept === 1 ? 'it' : 'them'}.`}
-              </p>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button type="button" className="btn-primary" onClick={startAgain}>
-              <RotateCcw size={15} /> Enter more {k?.label}
-            </button>
-            <Link href={`/inventory/opening-stock?entry=${saved.id}`} className="btn-secondary">
-              See these lines
-            </Link>
-            {saved.stickers > 0 && (
-              <button type="button" className="btn-secondary" onClick={() => setPrinting(true)}>
-                <Printer size={15} /> Print {saved.stickers} {saved.stickers === 1 ? 'sticker' : 'stickers'}
+              </span>
+            </>
+          }
+          stats={
+            <Stats label="Saved">
+              <StatTile label="Lines" value={num(saved.lines)} />
+              <StatTile label="Stock value" value={money(saved.value)} />
+              <StatTile label="Stickers to print" value={num(saved.stickers)} />
+              <StatTile label="Kind" value={<span className="text-base">{k?.label}</span>} />
+            </Stats>
+          }
+          actions={
+            <>
+              <button type="button" className="btn-primary" onClick={startAgain}>
+                <RotateCcw size={15} /> Enter more {k?.label}
               </button>
-            )}
-            <Link href="/inventory/opening-stock/new" className="btn-ghost">
-              Enter another kind
-            </Link>
-          </div>
+              <Link href={`/inventory/opening-stock?entry=${saved.id}`} className="btn-secondary">
+                See these lines
+              </Link>
+              {saved.stickers > 0 && (
+                <button type="button" className="btn-secondary" onClick={() => setPrinting(true)}>
+                  <Printer size={15} /> Print {saved.stickers} {saved.stickers === 1 ? 'sticker' : 'stickers'}
+                </button>
+              )}
+              <Link href="/inventory/opening-stock/new" className="btn-ghost">
+                Enter another kind
+              </Link>
+            </>
+          }
+        >
           {printing && <StickersReady source={{ type: 'OPENING', id: saved.id }} onClose={() => setPrinting(false)} />}
-        </div>
+        </DoneCard>
       )}
     </div>
   )
@@ -642,105 +670,127 @@ function ReviewPanel({
 }) {
   if (bad) {
     return (
-      <section className="space-y-2 rounded-xl border border-red-500/40 bg-red-500/10 p-4" aria-label="Review">
-        <p className="flex items-center gap-2 text-sm font-semibold text-red-400">
-          <AlertCircle size={16} /> {bad} {bad === 1 ? 'line' : 'lines'} of {plan.length} {bad === 1 ? 'needs' : 'need'} putting right. Nothing is saved until every line is right.
-        </p>
-        <ul className="space-y-0.5 text-xs text-red-400">
+      <section className="glass-card overflow-hidden border-red-500/40" aria-label="Review">
+        <div className="flex items-start gap-3 border-b border-red-500/30 bg-red-500/10 px-5 py-3.5">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500/15 text-red-400">
+            <AlertCircle size={18} />
+          </span>
+          <div>
+            <h2 className="text-sm font-semibold text-red-400">
+              {bad} {bad === 1 ? 'line' : 'lines'} of {plan.length} {bad === 1 ? 'needs' : 'need'} putting right. Nothing is saved until every line is right.
+            </h2>
+            <p className="text-muted-foreground mt-0.5 text-xs">Go back to the entry: each line in trouble is marked in red there.</p>
+          </div>
+        </div>
+        <ul className="space-y-1 px-5 py-4 text-xs text-red-400">
           {[...problems.values()].flat().map((p) => (
-            <li key={p}>• {p}</li>
+            <li key={p} className="border-l-2 border-red-500/60 pl-2.5">
+              {p}
+            </li>
           ))}
         </ul>
-        <p className="text-muted-foreground text-xs">Go back to the entry: each line in trouble is marked in red there.</p>
       </section>
     )
   }
-  const garments = kind !== 'RM'
+  const garments = kind !== 'RM' && kind !== 'FA'
+  const stickers = plan.reduce((t, r) => t + (r.stickers ?? 0), 0)
+  const places = [...new Set(plan.map((r) => r.location))]
   return (
-    <section className="glass-card space-y-3 p-4" aria-label="Review">
-      <p className="flex items-center gap-2 text-sm font-semibold text-emerald-500">
-        <CheckCircle2 size={16} /> All {plan.length} {plan.length === 1 ? 'line is' : 'lines are'} right. Check them, then confirm.
-      </p>
-      <div className="flex flex-wrap gap-2 text-sm">
-        <span className="badge-success">{plan.length} lines</span>
-        {garments && <span className="badge-neutral">{num(pieces)} pcs</span>}
-        <span className="badge-info">{money(value)}</span>
-        {!garments && plan.some((r) => r.stickers) && (
-          <span className="badge-neutral">
-            {plan.reduce((t, r) => t + (r.stickers ?? 0), 0)} stickers to print
-          </span>
-        )}
-        {[...new Set(plan.map((r) => r.location))].map((l) => (
-          <span key={l} className="badge-neutral">
-            into {l}
-            {plan.some((r) => r.location === l && r.newFloor) ? ' (made on save)' : ''}
-          </span>
-        ))}
-      </div>
-      <div className="max-h-80 overflow-auto">
+    <Panel
+      icon={CheckCircle2}
+      title={
+        <span className="text-emerald-500">
+          All {plan.length} {plan.length === 1 ? 'line is' : 'lines are'} right. Check them, then confirm.
+        </span>
+      }
+      description={
+        <>
+          {places.map((l, i) => (
+            <span key={l}>
+              {i > 0 && ', '}into {l}
+              {plan.some((r) => r.location === l && r.newFloor) ? ' (made on save)' : ''}
+            </span>
+          ))}
+          {!garments && stickers > 0 && ` · ${stickers} stickers to print`}
+          {plan.some((r) => r.valuationPending) && ` · ${plan.filter((r) => r.valuationPending).length} without a rate: valuation pending, set later in Opening Stock`}
+        </>
+      }
+      label="Review"
+      bodyClassName="space-y-4"
+    >
+      <Stats label="Review figures">
+        <StatTile label="Lines" value={num(plan.length)} tone="good" />
+        <StatTile label={garments ? 'Pieces' : 'Places'} value={garments ? num(pieces) : num(places.length)} />
+        <StatTile label="Stock value" value={money(value)} />
+        <StatTile label="Stickers to print" value={garments ? '—' : num(stickers)} />
+      </Stats>
+      <div className="border-border max-h-80 overflow-auto rounded-lg border">
         <table className="w-full text-xs">
           <thead>
             <tr className="text-muted-foreground text-left text-[10px] font-semibold uppercase tracking-wide">
               {garments ? (
                 <>
-                  <th className="px-2 py-1.5">Style</th>
-                  <th className="px-2 py-1.5">Item</th>
-                  <th className="px-2 py-1.5">Colour</th>
-                  <th className="px-2 py-1.5">Size</th>
-                  {kind === 'SFG' && <th className="px-2 py-1.5">Process</th>}
+                  <th className="px-3 py-2">Style</th>
+                  <th className="px-3 py-2">Item</th>
+                  <th className="px-3 py-2">Colour</th>
+                  <th className="px-3 py-2">Size</th>
+                  {kind === 'SFG' && <th className="px-3 py-2">Process</th>}
                 </>
               ) : (
                 <>
-                  <th className="px-2 py-1.5">Item</th>
-                  <th className="px-2 py-1.5">Lot / Roll</th>
-                  <th className="px-2 py-1.5">Bundle</th>
+                  <th className="px-3 py-2">Item</th>
+                  <th className="px-3 py-2">Lot / Roll</th>
+                  <th className="px-3 py-2">Bundle</th>
                 </>
               )}
-              <th className="px-2 py-1.5">Location</th>
-              <th className="px-2 py-1.5 text-right">Qty</th>
-              <th className="px-2 py-1.5 text-right">Rate</th>
-              <th className="px-2 py-1.5 text-right">Value</th>
-              {!garments && <th className="px-2 py-1.5">Stickers</th>}
+              <th className="px-3 py-2">Location</th>
+              <th className="px-3 py-2 text-right">Qty</th>
+              <th className="px-3 py-2 text-right">Rate</th>
+              <th className="px-3 py-2 text-right">Value</th>
+              {!garments && <th className="px-3 py-2">Stickers</th>}
             </tr>
           </thead>
           <tbody>
             {plan.map((r) => {
               const l = lines[r.row - 1] ?? {}
               return (
-                <tr key={r.row} className="border-border border-t">
+                <tr key={r.row} className="border-border border-b last:border-b-0">
                   {garments ? (
                     <>
-                      <td className="px-2 py-1">{String(l.style ?? '')}</td>
-                      <td className="px-2 py-1">
+                      <td className="px-3 py-1.5">{String(l.style ?? '')}</td>
+                      <td className="px-3 py-1.5">
                         <span className="font-mono text-teal-400">{r.item?.code}</span> {r.item?.name}
                       </td>
-                      <td className="px-2 py-1">{String(l.colour ?? '')}</td>
-                      <td className="px-2 py-1 font-semibold">{r.size}</td>
-                      {kind === 'SFG' && <td className="px-2 py-1">{r.process}</td>}
+                      <td className="px-3 py-1.5">{String(l.colour ?? '')}</td>
+                      <td className="text-foreground px-3 py-1.5 font-semibold">{r.size}</td>
+                      {kind === 'SFG' && <td className="px-3 py-1.5">{r.process}</td>}
                     </>
                   ) : (
                     <>
-                      <td className="px-2 py-1">
+                      <td className="px-3 py-1.5">
                         <span className="font-mono text-teal-400">{r.item?.code}</span> {r.item?.name}
                       </td>
-                      <td className="px-2 py-1">{String(l.lot || '—')}</td>
-                      <td className="px-2 py-1">{String(l.bundle || '—')}</td>
+                      <td className="px-3 py-1.5">{String(l.lot || '—')}</td>
+                      <td className="px-3 py-1.5">{String(l.bundle || '—')}</td>
                     </>
                   )}
-                  <td className="px-2 py-1">{r.location}</td>
-                  <td className="px-2 py-1 text-right tabular-nums">
+                  <td className="px-3 py-1.5">{r.location}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">
                     {num(r.qty ?? 0)} {r.unit}
                   </td>
-                  <td className="px-2 py-1 text-right tabular-nums">{money(r.rate ?? 0)}</td>
-                  <td className="text-foreground px-2 py-1 text-right font-semibold tabular-nums">{money(r.value ?? 0)}</td>
-                  {!garments && <td className="text-muted-foreground px-2 py-1">{r.packing ?? '—'}</td>}
+                  <td className="px-3 py-1.5 text-right tabular-nums">
+                    {money(r.rate ?? 0)}
+                    {r.valuationPending && <div className="text-[10px] font-semibold text-amber-600">Valuation pending</div>}
+                  </td>
+                  <td className="text-foreground px-3 py-1.5 text-right font-semibold tabular-nums">{money(r.value ?? 0)}</td>
+                  {!garments && <td className="text-muted-foreground px-3 py-1.5">{r.packing ?? '—'}</td>}
                 </tr>
               )
             })}
           </tbody>
         </table>
       </div>
-    </section>
+    </Panel>
   )
 }
 
@@ -750,22 +800,6 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="leading-tight">
       <dt className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wide">{label}</dt>
       <dd className="text-foreground font-semibold tabular-nums">{value}</dd>
-    </div>
-  )
-}
-
-function Banner({ tone, children }: { tone: 'bad' | 'warn' | 'info'; children: ReactNode }) {
-  return (
-    <div
-      className={cn(
-        'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm',
-        tone === 'bad' && 'border-red-500/30 bg-red-500/10 text-red-400',
-        tone === 'warn' && 'border-amber-500/30 bg-amber-500/10 text-amber-600',
-        tone === 'info' && 'border-primary/30 bg-primary/10 text-foreground',
-      )}
-      role={tone === 'bad' ? 'alert' : 'status'}
-    >
-      <AlertCircle size={15} className="shrink-0" /> <span>{children}</span>
     </div>
   )
 }

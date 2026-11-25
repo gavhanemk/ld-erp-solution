@@ -67,6 +67,7 @@ export const navItems: NavItem[] = [
       { label: 'Units of Measure', href: '/masters/units' },
       { label: 'Expense Heads', href: '/masters/expense-heads' },
       { label: 'Styles & SKU', href: '/masters/styles' },
+      { label: 'In House Brands', href: '/masters/in-house-brands' },
       { label: 'Brands', href: '/masters/brands' },
       { label: 'Bill of Materials', href: '/masters/bom' },
       { label: 'Size Runs', href: '/masters/size-runs' },

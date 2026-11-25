@@ -8,6 +8,7 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import type { TaxByRate } from '@ld-erp/shared'
+import { SecondAddress } from '@/components/print/SecondAddress'
 
 /**
  * The printed purchase bill.
@@ -467,6 +468,11 @@ export default function PurchaseBillPrintPage() {
                   {l}
                 </div>
               ))}
+              {company.address2 && (
+                <div style={{ textTransform: 'uppercase' }}>
+                  <SecondAddress text={company.address2} />
+                </div>
+              )}
             </div>
 
             <div

@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Printer, ArrowLeft, Download, X } from 'lucide-react'
 import Link from 'next/link'
+import { SecondAddress } from '@/components/print/SecondAddress'
 
 /**
  * The shared skeleton of a printed document.
@@ -255,6 +256,11 @@ export function PrintSheet({
                 .filter(Boolean)
                 .join(', ')}
             </div>
+            {company.address2 && (
+              <div>
+                <SecondAddress text={company.address2} />
+              </div>
+            )}
             <div>
               {[company.gstin && `GSTIN: ${company.gstin}`, company.pan && `PAN: ${company.pan}`]
                 .filter(Boolean)

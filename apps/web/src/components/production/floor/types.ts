@@ -176,6 +176,8 @@ export interface Flow {
   mo: {
     id: string
     moNumber: string
+    /** The own brand the order is made under. */
+    brand?: { name: string; type: string } | null
     status: string
     progress: string | null
     held: { at: string; reason: string | null; by: string | null } | null

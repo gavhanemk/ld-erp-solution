@@ -69,6 +69,7 @@ const TYPES: Array<{ value: string; label: string; hint: string }> = [
   { value: 'CONSUMABLE', label: 'Consumable', hint: 'Used up, not part of the product' },
   { value: 'SEMI_FINISHED', label: 'Semi finished', hint: 'Part-made, going back out' },
   { value: 'FINISHED_GOOD', label: 'Finished good', hint: 'Ready to sell' },
+  { value: 'FIXED_ASSET', label: 'Fixed asset', hint: 'A machine, computer or furniture: kept, not used up' },
 ]
 
 export function NewItemDialog<T = NewItem>({

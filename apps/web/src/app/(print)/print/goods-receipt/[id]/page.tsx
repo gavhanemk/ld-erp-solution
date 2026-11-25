@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
+import { SecondAddress } from '@/components/print/SecondAddress'
 
 /**
  * The printed goods receipt note.
@@ -44,6 +45,8 @@ interface Company {
   city: string | null
   state: string | null
   pincode: string | null
+  /** The second address (HO): under the address. */
+  address2?: string | null
   gstin: string | null
   pan: string | null
   phone: string | null
@@ -488,6 +491,11 @@ export default function PrintGoodsReceipt() {
                 }}
               >
                 {companyAddress}
+              </div>
+            )}
+            {company.address2 && (
+              <div style={{ fontSize: '10.5px', color: GREY, lineHeight: 1.6, maxWidth: '86%' }}>
+                <SecondAddress text={company.address2} />
               </div>
             )}
           </div>

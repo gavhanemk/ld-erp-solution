@@ -1280,6 +1280,10 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
       }
       if (pkg.status === 'SPLIT' || pkg.status === 'MERGED') throw new AppError(await retiredMessage(tx, pkg, unit, 'Nothing was issued.'), 409, 'STICKER_RETIRED')
       if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is withdrawn; nothing can be issued from it.`, 400, 'NOT_IN_STOCK')
+      // A machine is not used up: it moves to the department it works at.
+      if (pkg.item.type === 'FIXED_ASSET') {
+        throw new AppError(`${pkg.code} is a fixed asset (${pkg.item.code}). It is not issued: move it to the department it goes to, with Move.`, 400, 'FIXED_ASSET')
+      }
       // A held roll stays on the rack until an approver releases it or it goes back to the customer.
       if (pkg.grade === 'R') {
         throw new AppError(`${pkg.code} is on hold: rejected at receipt${pkg.sourceRef ? ` on ${pkg.sourceRef}` : ''}. It cannot be issued until an approver releases it.`, 409, 'HELD')

@@ -32,12 +32,17 @@ type Tx = Prisma.TransactionClient
 // STOCK
 // ═══════════════════════════════════════════
 
-/** What inventory holds at the end of a day: the mill's own stock, at the rate of each movement. */
+/**
+ * What inventory holds at the end of a day: the mill's own stock, at the rate
+ * of each movement. Fixed assets are not stock-in-trade: a machine is in the
+ * Fixed Assets ledger, not in closing stock.
+ */
 export async function inventoryValue(tx: Tx, day: string): Promise<number> {
   const rows = await tx.$queryRawUnsafe<Array<{ value: number | null }>>(
-    `SELECT COALESCE(SUM(("inQty" - "outQty") * COALESCE("unitRate", 0)), 0)::float8 AS value
-       FROM ld_erp.stock_ledger
-      WHERE ownership = 'OWNED' AND "transactionDate" <= $1`,
+    `SELECT COALESCE(SUM((l."inQty" - l."outQty") * COALESCE(l."unitRate", 0)), 0)::float8 AS value
+       FROM ld_erp.stock_ledger l
+       JOIN ld_erp.items i ON i.id = l."itemId"
+      WHERE l.ownership = 'OWNED' AND l."transactionDate" <= $1 AND i.type::text <> 'FIXED_ASSET'`,
     new Date(`${day}T23:59:59.999+05:30`),
   )
   return r2(rows[0]?.value ?? 0)

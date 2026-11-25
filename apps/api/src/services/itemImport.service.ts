@@ -62,6 +62,9 @@ const TYPES: Record<string, string> = {
   packing: 'PACKING_MATERIAL',
   'packing material': 'PACKING_MATERIAL',
   trim: 'TRIM',
+  'fixed asset': 'FIXED_ASSET',
+  'fixed assets': 'FIXED_ASSET',
+  asset: 'FIXED_ASSET',
 }
 /** How each type is shown, the same words the item list uses. */
 const TYPE_LABEL: Record<string, string> = {
@@ -71,6 +74,7 @@ const TYPE_LABEL: Record<string, string> = {
   CONSUMABLE: 'Consumable',
   PACKING_MATERIAL: 'Packing',
   TRIM: 'Trim',
+  FIXED_ASSET: 'Fixed Asset',
 }
 const TYPE_LABELS = Object.values(TYPE_LABEL)
 

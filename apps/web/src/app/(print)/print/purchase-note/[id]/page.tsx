@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import type { PurchaseNote } from '@/components/purchase/noteTypes'
+import { SecondAddress } from '@/components/print/SecondAddress'
 
 /**
  * The printed debit or supplier credit note.
@@ -319,6 +320,11 @@ export default function PurchaseNotePrintPage() {
             <div style={{ marginTop: '7px', fontSize: '9.5px', color: GREY, lineHeight: 1.55 }}>
               {addressLines(company).join(', ')}
             </div>
+            {company.address2 && (
+              <div style={{ marginTop: '2px', fontSize: '9.5px', color: GREY, lineHeight: 1.55 }}>
+                <SecondAddress text={company.address2} />
+              </div>
+            )}
             <div style={{ marginTop: '3px', fontSize: '9.5px', color: GREY }}>
               {[company.phone, company.email].filter(Boolean).join('  |  ')}
             </div>

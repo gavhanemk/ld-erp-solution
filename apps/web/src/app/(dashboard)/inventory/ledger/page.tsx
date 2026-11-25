@@ -177,6 +177,7 @@ const TYPE_LABEL: Record<string, string> = {
   CONSUMABLE: 'Consumable',
   PACKING_MATERIAL: 'Packing',
   TRIM: 'Trim',
+  FIXED_ASSET: 'Fixed Asset',
 }
 
 /*

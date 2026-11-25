@@ -30,10 +30,13 @@ export function ChangeStickers({
   line,
   onClose,
   onDone,
+  part = true,
 }: {
   line: StickerLine
   onClose: () => void
   onDone: (message: string, ids: string[]) => void
+  /** New stickers may hold less than these did, the rest left pending; opening stock is all or nothing. */
+  part?: boolean
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -74,6 +77,7 @@ export function ChangeStickers({
       total={line.qty}
       unit={line.unit}
       places={places}
+      part={part}
       laterText="Takes these stickers off: the stock stays in the store with packaging pending until new ones are made (Stickers → Packaging pending)."
       busy={busy}
       error={error}

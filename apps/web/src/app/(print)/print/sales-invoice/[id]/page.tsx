@@ -26,6 +26,8 @@ import {
 } from '@/components/print/StoreSheet'
 
 interface Payload {
+  /** The own brand the order is made under, carried from start to end. */
+  brand?: { name: string; type: string } | null
   company: Record<string, string | null>
   template: {
     title: string
@@ -288,6 +290,7 @@ export default function PrintSalesInvoice() {
             <>
               <Fact label="Due date" value={longDate(inv.dueDate)} />
               <Fact label="Our order" value={inv.so ? `${inv.so.soNumber}, ${longDate(inv.so.orderDate)}` : null} mono />
+              <Fact label="Brand" value={data.brand?.name ?? null} />
               <Fact
                 label="Your PO"
                 value={

@@ -92,7 +92,7 @@ import {
   stateCode,
 } from '../schemas/master.schemas'
 
-const ITEM_GROUPS = new Set(['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS', 'EXPENSES'])
+const ITEM_GROUPS = new Set(['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS', 'FIXED_ASSETS', 'EXPENSES'])
 
 const ITEM_TYPES = new Set([
   'RAW_MATERIAL',
@@ -101,6 +101,7 @@ const ITEM_TYPES = new Set([
   'CONSUMABLE',
   'PACKING_MATERIAL',
   'TRIM',
+  'FIXED_ASSET',
 ])
 
 /** A filter on an optional link, where the choice 'none' means "not set". */
@@ -1817,6 +1818,10 @@ router.use(
     searchFields: ['name', 'description'],
     sortableFields: ['name', 'createdAt'],
     defaultSort: { field: 'name', order: 'asc' },
+    // In House Brands (LD Cotton Mills, VHAGAR) and customers' brands (Custom) are listed apart.
+    filters: {
+      type: { where: (v) => ({ type: { in: v.filter((t) => ['LD_COTTON_MILLS', 'VHAGAR', 'CUSTOM'].includes(t)) } }) },
+    },
   }),
 )
 

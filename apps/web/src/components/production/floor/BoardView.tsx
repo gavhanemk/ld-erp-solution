@@ -77,7 +77,7 @@ export interface BoardCard {
   jobCardNumber: string
   designNo: string | null
   line: { id: string; color: string; totalQty: number; style: { code: string; name: string } }
-  mo: { id: string; moNumber: string; held: boolean; due: string | null; so: { soNumber: string; customer: { name: string } } | null }
+  mo: { id: string; moNumber: string; brand?: { name: string; type: string } | null; held: boolean; due: string | null; so: { soNumber: string; customer: { name: string } } | null }
   state: 'NO_STAGES' | 'DONE' | 'IN_PROGRESS' | 'NOT_STARTED'
   withCutters: number
   /** Fabric given to its cutting contractors, used, wasted and left over. */
@@ -222,6 +222,7 @@ function BoardRow({ c, h }: { c: BoardCard; h: Handlers }) {
           <p className="text-muted-foreground mt-0.5 text-xs">
             {c.mo.moNumber}
             {c.mo.so ? ` · ${c.mo.so.soNumber} · ${c.mo.so.customer.name}` : ''}
+            {c.mo.brand ? ` · ${c.mo.brand.name}` : ''}
             {c.mo.due ? ` · due ${formatDate(c.mo.due)}` : ''} · cut {pcs(c.cut)} · packed {pcs(c.packed)} of {pcs(c.line.totalQty)}
           </p>
         </div>

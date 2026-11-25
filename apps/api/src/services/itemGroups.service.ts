@@ -21,6 +21,7 @@ const TYPE_LABEL: Record<string, string> = {
   CONSUMABLE: 'consumable',
   PACKING_MATERIAL: 'packing material',
   TRIM: 'trim',
+  FIXED_ASSET: 'fixed asset',
 }
 
 /**
@@ -28,9 +29,9 @@ const TYPE_LABEL: Record<string, string> = {
  * one of them. The expense heads keep a main category of their own, made by the
  * Expense Heads screen.
  */
-export const MAIN_CATEGORIES = ['Raw Materials', 'Semi-Finished Goods', 'Finished Goods']
+export const MAIN_CATEGORIES = ['Raw Materials', 'Semi-Finished Goods', 'Finished Goods', 'Fixed Assets']
 
-/** Whether a main category of this name may be made: one of the three, or the expense heads'. */
+/** Whether a main category of this name may be made: one of the four, or the expense heads'. */
 export function mainNameAllowed(name: string) {
   const n = name.trim().toLowerCase()
   return /expense/.test(n) || MAIN_CATEGORIES.some((m) => m.toLowerCase() === n)
@@ -41,6 +42,7 @@ export function defaultGroupForName(name: string): ItemGroup {
   if (/expense/i.test(name)) return 'EXPENSES'
   if (/^\s*semi/i.test(name)) return 'SEMI_FINISHED'
   if (/^\s*finished/i.test(name)) return 'FINISHED_GOODS'
+  if (/fixed\s*asset/i.test(name)) return 'FIXED_ASSETS'
   return 'RAW_MATERIALS'
 }
 
@@ -109,7 +111,7 @@ export async function assertItemFitsCategory(data: Record<string, unknown>, befo
  */
 export async function categoryGroupOnSave(data: Record<string, unknown>, before?: Record<string, unknown>) {
   const parentId = (data.parentId !== undefined ? data.parentId : before?.parentId) as string | null | undefined
-  // A new main category, or a sub-category made into one, has to be one of the three.
+  // A new main category, or a sub-category made into one, has to be one of the four.
   const becomingMain = !parentId && (!before || before.parentId)
   const name = String(data.name ?? before?.name ?? '')
   if (becomingMain && !mainNameAllowed(name)) {
@@ -117,7 +119,7 @@ export async function categoryGroupOnSave(data: Record<string, unknown>, before?
       {
         code: 'custom',
         path: ['parentId'],
-        message: `Items & Products has three categories: ${MAIN_CATEGORIES.join(', ')}. Pick the one ${name || 'this'} goes under.`,
+        message: `Items & Products has four categories: ${MAIN_CATEGORIES.join(', ')}. Pick the one ${name || 'this'} goes under.`,
       },
     ])
   }

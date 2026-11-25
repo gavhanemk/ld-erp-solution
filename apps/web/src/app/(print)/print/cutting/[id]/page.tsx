@@ -6,6 +6,8 @@ import { api, ApiError } from '@/lib/api'
 import { StoreSheet, Fact, Eyebrow, qty, longDate, CODE, GREY, INK, MUTED, NAVY, RULE, TINT, type SheetColumn } from '@/components/print/StoreSheet'
 
 interface Payload {
+  /** The own brand the order is made under, carried from start to end. */
+  brand?: { name: string; type: string } | null
   company: Record<string, string | null>
   template: { title: string; footerNote: string | null }
   waitingAtCutting: number
@@ -106,6 +108,7 @@ export default function PrintCutting() {
           body: (
             <>
               <Fact label="Mfg. order" value={c.mo.moNumber} mono />
+              <Fact label="Brand" value={data.brand?.name ?? null} />
               <Fact label="Order no." value={c.mo.so ? `${c.mo.so.soNumber}${c.mo.so.customerPORef ? ` · PO ${c.mo.so.customerPORef}` : ''}` : null} />
               <Fact label="Customer" value={c.mo.so?.customer.name ?? null} />
               <Fact label="Description" value={c.moLine?.style.name ?? null} />

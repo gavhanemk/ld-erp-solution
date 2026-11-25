@@ -104,6 +104,7 @@ const ITEM_TYPES: Record<string, string> = {
   CONSUMABLE: 'Consumables',
   PACKING_MATERIAL: 'Packing',
   TRIM: 'Trims',
+  FIXED_ASSET: 'Fixed assets',
 }
 
 /** Which permission lets somebody see a module's lines in the activity feed. */

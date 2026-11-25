@@ -7,7 +7,7 @@ export type SalesOrderStatus = 'DRAFT' | 'CONFIRMED' | 'IN_PRODUCTION' | 'PARTIA
 export type PurchaseOrderStatus = 'DRAFT' | 'SENT' | 'PARTIALLY_RECEIVED' | 'COMPLETED' | 'CANCELLED'
 export type MOStatus = 'DRAFT' | 'RELEASED' | 'CUTTING' | 'STITCHING' | 'FINISHING' | 'QC' | 'PACKING' | 'COMPLETED' | 'CLOSED'
 export type BrandType = 'LD_COTTON_MILLS' | 'VHAGAR' | 'CUSTOM'
-export type ItemType = 'RAW_MATERIAL' | 'SEMI_FINISHED' | 'FINISHED_GOOD' | 'CONSUMABLE' | 'PACKING_MATERIAL' | 'TRIM'
+export type ItemType = 'RAW_MATERIAL' | 'SEMI_FINISHED' | 'FINISHED_GOOD' | 'CONSUMABLE' | 'PACKING_MATERIAL' | 'TRIM' | 'FIXED_ASSET'
 export type PaymentMode = 'CASH' | 'CHEQUE' | 'NEFT' | 'RTGS' | 'UPI' | 'PDC'
 
 export interface User {
@@ -829,6 +829,7 @@ export * from './quantity'
 export * from './bomComparison'
 export * from './routingComparison'
 export * from './itemGroups'
+export * from './similarName'
 
 export * from './sampling'
 export * from './sampleMaking'

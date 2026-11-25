@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Calculator, Copy, FileText, Hash, Loader2, Lock, Package, Pencil, Plus, Save, Send, StickyNote, Trash2, User, X } from 'lucide-react'
+import { AlertCircle, Calculator, Copy, FileText, Hash, Loader2, Lock, Package, Pencil, Plus, Save, Send, StickyNote, Tag, Trash2, User, X } from 'lucide-react'
+import { loadInHouseBrands, otherBrandLines, suggestedBrand, type OwnBrand } from '@/components/sales/brand'
 import { api, ApiError, can } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatRupees } from '@/lib/utils'
@@ -125,7 +126,23 @@ function bomNote(st: StyleOption) {
   return 'No BOM yet'
 }
 
-function Field({ label, icon: Icon, htmlFor, required, className = '', children }: { label: string; icon?: React.ElementType; htmlFor?: string; required?: boolean; className?: string; children: React.ReactNode }) {
+function Field({
+  label,
+  icon: Icon,
+  htmlFor,
+  required,
+  className = '',
+  help,
+  children,
+}: {
+  label: string
+  icon?: React.ElementType
+  htmlFor?: string
+  required?: boolean
+  className?: string
+  help?: React.ReactNode
+  children: React.ReactNode
+}) {
   return (
     <div className={`min-w-0 ${className}`}>
       <label className="form-label" htmlFor={htmlFor}>
@@ -140,6 +157,7 @@ function Field({ label, icon: Icon, htmlFor, required, className = '', children 
       ) : (
         children
       )}
+      {help && <p className="text-muted-foreground mt-1 text-[11px] leading-snug">{help}</p>}
     </div>
   )
 }
@@ -184,6 +202,11 @@ export function QuotationDialog({
   const [bomLoading, setBomLoading] = useState<string | null>(null)
   const [saved, setSaved] = useState<SavedQuote | null>(null)
   const [customerId, setCustomerId] = useState('')
+  // The own brand the quotation (and the order it becomes) is under.
+  const [brands, setBrands] = useState<OwnBrand[]>([])
+  const [brandId, setBrandId] = useState('')
+  /** Picked by hand, or from the saved quotation: no longer follows the styles. */
+  const [brandPicked, setBrandPicked] = useState(false)
   const [quoteDate, setQuoteDate] = useState(today())
   const [validUntil, setValidUntil] = useState(inDays(15))
   const [isJobWork, setIsJobWork] = useState(false)
@@ -226,6 +249,8 @@ export function QuotationDialog({
     setError(null)
     setSaved(null)
     setCustomerId('')
+    setBrandId('')
+    setBrandPicked(false)
     setQuoteDate(today())
     setValidUntil(inDays(15))
     setIsJobWork(false)
@@ -239,7 +264,7 @@ export function QuotationDialog({
     setLoading(true)
     void (async () => {
       try {
-        const [c, it, st, q, ct, hsn] = await Promise.all([
+        const [c, it, st, q, ct, hsn, ownBrands] = await Promise.all([
           fetchEveryPage<CustomerOption>((p) => `/masters/customers?active=true&limit=200&page=${p}`),
           fetchEveryPage<ItemOption>((p) => `/masters/items?type=FINISHED_GOOD&active=true&limit=200&page=${p}&sort=name&order=asc`),
           api.get<{ data: StyleOption[] }>('/sales/quotations/styles'),
@@ -249,9 +274,11 @@ export function QuotationDialog({
           fetchEveryPage<{ code: string; gstRate: string | number; isActive?: boolean }>((p) => `/masters/hsn-codes?limit=200&page=${p}`).catch(() => ({
             rows: [] as Array<{ code: string; gstRate: string | number; isActive?: boolean }>,
           })),
+          loadInHouseBrands().catch(() => [] as OwnBrand[]),
         ])
         if (!alive) return
         setCustomers([...c.rows].sort((x, y) => x.name.localeCompare(y.name)))
+        setBrands(ownBrands)
         setItems(it.rows)
         setStyles(st.data)
         setChargeTypes(ct.rows.filter((x) => x.isActive && x.applyOnSale).sort((x, y) => x.name.localeCompare(y.name)))
@@ -260,6 +287,8 @@ export function QuotationDialog({
           const s = q.data
           setSaved(s)
           setCustomerId(s.customerId)
+          setBrandId(s.brandId)
+          setBrandPicked(true)
           setQuoteDate(day(s.quoteDate))
           setValidUntil(day(s.validUntil))
           setIsJobWork(s.isJobWork)
@@ -319,6 +348,26 @@ export function QuotationDialog({
   const chargeTypeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
 
   const styleByCode = useMemo(() => new Map(styles.map((st) => [st.code.toLowerCase(), st])), [styles])
+  /** Whose style each garment is (LD Cotton Mills or VHAGAR), for the brand it is suggested under. */
+  const lineBrandTypes = useMemo(
+    () =>
+      lines
+        .filter((l) => l.itemId || l.styleCode.trim())
+        .map((l) => {
+          const typed = l.styleCode.trim().toLowerCase()
+          const style = typed ? styleByCode.get(typed) : styles.find((x) => x.items.some((i) => i.id === l.itemId))
+          return style?.brandType ?? null
+        }),
+    [lines, styleByCode, styles]
+  )
+  // Until someone picks a brand, it follows the garments: VHAGAR styles, VHAGAR.
+  useEffect(() => {
+    if (brandPicked || !brands.length) return
+    const next = suggestedBrand(brands, lineBrandTypes, isJobWork)
+    if (next && next !== brandId) setBrandId(next)
+  }, [brandPicked, brands, lineBrandTypes, isJobWork, brandId])
+  const brand = brands.find((b) => b.id === brandId)
+  const otherBrand = otherBrandLines(brand, lineBrandTypes)
 
   const setLine = (key: string, patch: Partial<LineDraft>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)))
   /** A copy of a line, put just under it. */
@@ -463,6 +512,7 @@ export function QuotationDialog({
     setError(null)
     const body = {
       customerId,
+      brandId: brandId || null,
       quoteDate,
       validUntil: validUntil || null,
       isJobWork,
@@ -558,6 +608,38 @@ export function QuotationDialog({
                       ))}
                     </SmartSelect>
                   </Field>
+                  <Field
+                    label="Brand"
+                    icon={Tag}
+                    htmlFor="qt-brand"
+                    required
+                    help={
+                      otherBrand > 0 ? (
+                        <span className="warn-text">
+                          {otherBrand} {otherBrand === 1 ? 'garment is' : 'garments are'} another brand&apos;s style
+                        </span>
+                      ) : brandPicked ? undefined : (
+                        'Follows the styles until you pick one'
+                      )
+                    }
+                  >
+                    <SmartSelect
+                      id="qt-brand"
+                      className="form-input pl-9"
+                      value={brandId}
+                      onChange={(e) => {
+                        setBrandId(e.target.value)
+                        setBrandPicked(true)
+                      }}
+                    >
+                      {!brandId && <option value="">Choose the brand</option>}
+                      {brands.map((b) => (
+                        <option key={b.id} value={b.id} data-sub={b.type === 'VHAGAR' ? 'VHAGAR' : 'LD Cotton Mills'}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </SmartSelect>
+                  </Field>
                   <Field label="Type" htmlFor="qt-type">
                     <SmartSelect id="qt-type" className="form-input" value={isJobWork ? 'job' : 'own'} onChange={(e) => setIsJobWork(e.target.value === 'job')}>
                       <option value="own">Own order</option>
@@ -567,7 +649,7 @@ export function QuotationDialog({
                   <Field label="Valid until" htmlFor="qt-valid">
                     <input id="qt-valid" type="date" className="form-input" value={validUntil} min={quoteDate} onChange={(e) => setValidUntil(e.target.value)} />
                   </Field>
-                  <Field label="Buyer's reference" htmlFor="qt-ref" className="sm:col-span-2 lg:col-span-3">
+                  <Field label="Buyer's reference" htmlFor="qt-ref" className="sm:col-span-2">
                     <input id="qt-ref" className="form-input" maxLength={80} value={customerRef} placeholder="Their enquiry, email or tech pack" onChange={(e) => setCustomerRef(e.target.value)} />
                   </Field>
                   <Field label="Salesperson" htmlFor="qt-sp" className="sm:col-span-2">

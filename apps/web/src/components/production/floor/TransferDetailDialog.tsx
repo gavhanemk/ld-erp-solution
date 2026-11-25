@@ -18,7 +18,7 @@ export type TransferRow = Omit<FlowTransfer, 'toStep' | 'fromStep'> & {
   fromStep: { id: string; name: string; department?: { name: string } }
   toStep: { id: string; name: string; kind: string; isQcStep: boolean; department?: { name: string } }
   vehicleNo?: string | null
-  mo: { id: string; moNumber: string; so: { soNumber: string; customer: { name: string } } | null }
+  mo: { id: string; moNumber: string; brand?: { name: string; type: string } | null; so: { soNumber: string; customer: { name: string } } | null }
   jobCard: { id: string; jobCardNumber: string; designNo: string | null; moLine: { color: string; style: { code: string } } } | null
   createdBy?: { name: string } | null
   /** Stages it went past on the route — only on cards made before the route's order was kept. */
@@ -55,6 +55,7 @@ export function TransferDetailDialog({
   const facts: Array<[string, React.ReactNode]> = [
     ['Job card', t.jobCard ? `${t.jobCard.jobCardNumber} · ${t.jobCard.moLine.style.code} ${t.jobCard.moLine.color}` : t.mo.moNumber],
     ['Order', `${t.mo.moNumber}${t.mo.so ? ` · ${t.mo.so.customer.name}` : ''}`],
+    ['Brand', t.mo.brand?.name ?? '—'],
     ['From', `${t.fromStep.name}${t.fromStep.department ? ` (${t.fromStep.department.name})` : ''}`],
     ['To', t.vendor ? `${t.toStep.name} at ${t.vendor.name} (outside unit)` : `${t.toStep.name}${t.toStep.department ? ` (${t.toStep.department.name})` : ''}`],
     ['Sent on', formatDate(t.dispatchDate)],

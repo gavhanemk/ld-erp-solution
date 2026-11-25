@@ -53,7 +53,7 @@ const lineSchema = z.object({
 export const quoteSchema = z
   .object({
     customerId: z.string().min(1, 'Pick a customer'),
-    /** Not asked on the form: worked out from the styles, as on an order. */
+    /** Picked on the form (an in-house brand); left out, worked out from the styles, as on an order. */
     brandId: z.string().min(1).optional().nullable(),
     quoteDate: z.coerce.date().optional(),
     validUntil: z.coerce.date().optional().nullable(),

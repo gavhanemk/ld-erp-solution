@@ -12,6 +12,7 @@ import { CountInDialog } from '@/components/production/floor/CountInDialog'
 import { SettleDialog } from '@/components/production/floor/SettleDialog'
 import { transferStatus } from '@/components/production/floor/transferStatus'
 import { BoardView } from '@/components/production/floor/BoardView'
+import { BrandTag } from '@/components/sales/brand'
 import { TransferDetailDialog, mayTakeBack, type TransferRow } from '@/components/production/floor/TransferDetailDialog'
 import { pcs, sheetHref, type FlowTransfer, type JobCardDetail } from '@/components/production/floor/types'
 
@@ -486,6 +487,7 @@ export function TransfersPanel({
                         </td>
                         <td>
                           <span className="text-primary font-mono text-xs">{t.jobCard?.jobCardNumber ?? t.mo.moNumber}</span>
+                          <BrandTag brand={t.mo.brand} className="ml-1.5" />
                           <span className="text-muted-foreground block text-[11px]">
                             {t.jobCard ? `${t.jobCard.moLine.style.code} · ${t.jobCard.moLine.color}` : ''}
                             {t.mo.so ? ` · ${t.mo.so.customer.name}` : ''}

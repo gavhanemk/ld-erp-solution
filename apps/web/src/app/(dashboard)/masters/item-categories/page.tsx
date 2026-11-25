@@ -21,6 +21,7 @@ import {
   RefreshCw,
   Search,
   Shirt,
+  Wrench,
   Trash2,
   X,
 } from 'lucide-react'
@@ -34,6 +35,7 @@ import { ImportCategoriesDialog } from '@/components/masters/ImportCategoriesDia
 import { ITEM_TYPE_LABEL, itemFormFields } from '@/components/masters/itemFormFields'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { processOrChosen } from '@/components/masters/processDepartments'
+import { createHsnFrom } from '@/components/masters/hsnFormFields'
 
 /**
  * Item categories: the three categories — Raw Materials, Semi-Finished Goods
@@ -53,16 +55,17 @@ import { processOrChosen } from '@/components/masters/processDepartments'
  * screen, so it is not shown here.
  */
 
-type Group = 'RAW_MATERIALS' | 'SEMI_FINISHED' | 'FINISHED_GOODS'
-const GROUPS: Group[] = ['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS']
+type Group = 'RAW_MATERIALS' | 'SEMI_FINISHED' | 'FINISHED_GOODS' | 'FIXED_ASSETS'
+const GROUPS: Group[] = ['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS', 'FIXED_ASSETS']
 
 const SECTIONS: Array<{ key: Group; slug: string; label: string; hint: string; icon: typeof Package }> = [
   { key: 'RAW_MATERIALS', slug: 'raw', label: 'Raw Materials', hint: 'Fabric, thread, trims, labels, packing', icon: Package },
   { key: 'SEMI_FINISHED', slug: 'semi', label: 'Semi-Finished Goods', hint: 'Cut panels and parts between processes', icon: Layers },
   { key: 'FINISHED_GOODS', slug: 'finished', label: 'Finished Goods', hint: 'Garments, by style and colour', icon: Shirt },
+  { key: 'FIXED_ASSETS', slug: 'assets', label: 'Fixed Assets', hint: 'Machines, computers, furniture', icon: Wrench },
 ]
 
-/** What is shown: one of the three, or all of them. */
+/** What is shown: one of the four, or all of them. */
 type Shown = Group | 'ALL'
 const TOGGLES: Array<{ key: Shown; slug: string; label: string; icon: typeof Package }> = [
   { key: 'ALL', slug: 'all', label: 'All', icon: LayoutGrid },
@@ -160,6 +163,21 @@ const categoryFields: FormField[] = [
     ],
     showIf: (v) => Boolean(v.trackPackages),
     help: 'What one package of these items usually is. It can be changed when the stickers are made.',
+  },
+  {
+    name: 'hsnCode',
+    label: 'HSN Code',
+    placeholder: '52081200',
+    // Offered from the HSN list as you type, with each code's GST beside it.
+    suggestFrom: {
+      resource: 'hsn-codes',
+      valueKey: 'code',
+      label: (r) => `${String(r.description ?? '')} · GST ${Number(r.gstRate)}%`,
+      notListed: (code) => `${code} is not in Masters → HSN / SAC Codes yet, so it carries no GST rate.`,
+    },
+    createFrom: createHsnFrom,
+    showIf: (v) => Boolean(v.parentId),
+    help: 'An item made under it from an opening stock sheet takes this code, and its GST from Masters → HSN / SAC Codes.',
   },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Offered when filing an item' },
 ]
@@ -429,7 +447,7 @@ function ItemCategories() {
 
       {/* All and the three categories side by side. Picking one shows only it,
           so nobody scrolls past the other two; All shows the three. */}
-      <div className="glass-card grid gap-2 p-4 sm:grid-cols-2 xl:grid-cols-4" role="tablist" aria-label="Categories">
+      <div className="glass-card grid gap-2 p-4 sm:grid-cols-3 xl:grid-cols-5" role="tablist" aria-label="Categories">
         {TOGGLES.map((t) => {
           const c = t.key === 'ALL' ? totals : countsOf(t.key)
           return (

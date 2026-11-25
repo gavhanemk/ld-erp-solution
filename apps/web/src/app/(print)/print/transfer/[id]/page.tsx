@@ -16,6 +16,8 @@ interface Line {
   bundle: { id: string; code: string; bundleNo: number; size: { code: string; sequence: number } | null; moLine: { color: string; style: { code: string; name: string } } }
 }
 interface Payload {
+  /** The own brand the order is made under, carried from start to end. */
+  brand?: { name: string; type: string } | null
   company: Record<string, string | null>
   template: { title: string; footerNote: string | null; declaration: string | null }
   goods: Array<{ style: string; color: string; item: string | null; hsnCode: string | null; rate: number }>
@@ -172,6 +174,7 @@ export default function PrintTransfer() {
                 <Fact label="Process" value={`${t.toStep.name}${t.isRework ? ' — to put right' : ''}`} />
                 <Fact label="Job order" value={t.jobWorkOrder?.orderNumber ?? null} mono />
                 <Fact label="Mfg. order" value={t.jobCard ? `${mo.moNumber} · ${t.jobCard.jobCardNumber}` : mo.moNumber} mono />
+                <Fact label="Brand" value={data.brand?.name ?? null} />
                 <Fact label="Design no." value={t.jobCard?.designNo ?? null} mono />
                 <Fact label="Bundles" value={`${lines.length} · ${qty(sent)} pieces`} />
               </>

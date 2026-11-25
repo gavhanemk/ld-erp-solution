@@ -136,7 +136,7 @@ async function tdsPayable(tx: Tx, section: { id: string; section: string } | nul
 
 // ── Purchases by category and expense head ───────────────────
 
-type Category = { id: string; name: string; parentId: string | null }
+type Category = { id: string; name: string; parentId: string | null; itemGroup?: string | null }
 
 /** Spending done to make the goods, filed above gross profit; the rest is overhead. */
 const DIRECT_WORDS = /job ?work|stitch|tailor|print|wash|embroider|dye|dyeing|fabricat|labou?r|wages|freight in|carriage in|cartage|packing charge/i
@@ -150,6 +150,11 @@ async function purchaseLedgerFor(
   const chain: Category[] = []
   for (let c = cats.get(line.item.categoryId); c && chain.length < 10; c = c.parentId ? cats.get(c.parentId) : undefined) chain.push(c)
   const top = chain[chain.length - 1]
+  // A fixed asset bought is capital, not a purchase: its own ledger under Fixed Assets, by its sub-category.
+  if (top?.itemGroup === 'FIXED_ASSETS') {
+    const sub = chain.length > 1 ? chain[chain.length - 2] : top
+    return keyedLedgerId(tx, `FIXED_ASSET_CAT:${sub.id}`, { name: sub.id === top.id ? 'Fixed Assets' : sub.name, group: 'FIXED_ASSETS' })
+  }
   const isExpense = !line.grnLineId && chain.some((c) => /expense/i.test(c.name))
   if (isExpense) {
     return keyedLedgerId(tx, `EXPENSE:${line.item.id}`, { name: line.item.name, group: DIRECT_WORDS.test(line.item.name) ? 'DIRECT_EXPENSES' : 'INDIRECT_EXPENSES' })
@@ -348,7 +353,7 @@ async function planPurchaseBill(tx: Tx, id: string): Promise<Plan | null> {
     },
   })
   if (!b) return null
-  const cats = new Map((await tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true } })).map((c) => [c.id, c]))
+  const cats = new Map((await tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, itemGroup: true } })).map((c) => [c.id, c]))
   const date = istDay(b.billDate)
   const total = n(b.totalAmount)
   const tds = n(b.tdsAmount)

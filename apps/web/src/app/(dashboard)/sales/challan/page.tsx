@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
+import { BrandTag } from '@/components/sales/brand'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { asDate, downloadRows, fetchEveryPage, type ExportColumn, type ExportFormat } from '@/lib/export'
@@ -37,6 +38,7 @@ interface WaitingOrder {
   orderDate: string
   deliveryDate: string | null
   customerPORef: string | null
+  brand?: { name: string; type: string } | null
   customer: { name: string; shippingCity: string | null; billingCity: string | null }
   lines: Array<{ item: { code: string; name: string } }>
   deliveryChallans: Array<{ id: string; dcNumber: string }>
@@ -65,7 +67,7 @@ interface ChallanRow {
   dispatchedAt: string | null
   deliveredAt: string | null
   cancelReason: string | null
-  so: { id: string; soNumber: string; isJobWork: boolean; customerPORef: string | null; customer?: ChallanCustomer | null }
+  so: { id: string; soNumber: string; isJobWork: boolean; customerPORef: string | null; brand?: { name: string; type: string } | null; customer?: ChallanCustomer | null }
   customer: ChallanCustomer | null
   warehouse: { id: string; name: string } | null
   /** The live invoice billing it, if any. */
@@ -319,6 +321,7 @@ export default function DeliveryChallanPage() {
     { header: 'Date', value: (c) => asDate(c.dcDate) },
     { header: 'Status', value: (c) => challanStatus(c.status).label },
     { header: 'Order', value: (c) => c.so.soNumber },
+    { header: 'Brand', value: (c) => c.so.brand?.name ?? '' },
     { header: 'Buyer PO', value: (c) => c.so.customerPORef ?? '' },
     { header: 'Customer', value: (c) => customerName(c) },
     { header: 'Town', value: (c) => town(challanCustomer(c)) },
@@ -511,6 +514,7 @@ export default function DeliveryChallanPage() {
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="text-foreground font-mono text-xs font-semibold">{o.soNumber}</span>
+                            <BrandTag brand={o.brand} />
                             <span className={salesOrderStatus(o).cls}>{salesOrderStatus(o).label}</span>
                             {o.isJobWork && <span className="badge-purple">Job work</span>}
                           </div>
@@ -578,6 +582,7 @@ export default function DeliveryChallanPage() {
                         <tr key={o.id} data-row tabIndex={i === 0 ? 0 : -1}>
                           <td className="whitespace-nowrap">
                             <span className="text-foreground font-mono text-xs font-semibold">{o.soNumber}</span>
+                            <BrandTag brand={o.brand} className="ml-1.5" />
                             <div className="text-muted-foreground flex items-center gap-1 text-[11px]">
                               <CalendarDays size={11} className="shrink-0" />
                               {formatDate(o.orderDate)}
@@ -658,6 +663,7 @@ export default function DeliveryChallanPage() {
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-foreground font-mono text-xs font-semibold">{c.dcNumber}</span>
                           <span className={s.cls}>{s.label}</span>
+                          <BrandTag brand={c.so.brand} />
                         </div>
                         <p className="text-foreground mt-1 font-medium leading-snug">{customerName(c)}</p>
                         <p className="text-muted-foreground text-[11px]">
@@ -733,6 +739,7 @@ export default function DeliveryChallanPage() {
                           <a href={`/sales/orders?q=${encodeURIComponent(c.so.soNumber)}`} className="text-primary font-mono hover:underline">
                             {c.so.soNumber}
                           </a>
+                          <BrandTag brand={c.so.brand} className="ml-1.5" />
                           {c.so.customerPORef && <div className="text-muted-foreground text-[11px]">PO {c.so.customerPORef}</div>}
                         </td>
                         <td className="col-wide text-xs">{c.warehouse?.name ?? '—'}</td>

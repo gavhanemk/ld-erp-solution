@@ -7,6 +7,8 @@ import { StoreSheet, Fact, Eyebrow, qty, longDate, GREY, INK, MUTED, RULE, TINT,
 import { refNo, type JobCardDetail } from '@/components/production/floor/types'
 
 interface Payload {
+  /** The own brand the order is made under, carried from start to end. */
+  brand?: { name: string; type: string } | null
   company: Record<string, string | null>
   template: { title: string; footerNote: string | null }
   detail: JobCardDetail
@@ -60,6 +62,7 @@ export default function PrintJobCard() {
               <Fact label="Order no." value={c.orderNo ?? c.so?.customerPORef ?? null} />
               <Fact label="Project ID" value={c.projectId} />
               <Fact label="Mfg. order" value={d.mo.moNumber} mono />
+              <Fact label="Brand" value={data.brand?.name ?? null} />
               <Fact label="Customer" value={d.mo.so?.customer.name ?? null} />
             </>
           ),
