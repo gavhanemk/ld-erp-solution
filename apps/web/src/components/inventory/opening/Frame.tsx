@@ -115,6 +115,19 @@ export function Field({ label, required, hint, className, children }: { label: s
   )
 }
 
+/** A small labelled box for a bar: its name in small type above, nothing under. */
+export function MiniField({ label, required, className, children }: { label: string; required?: boolean; className?: string; children: ReactNode }) {
+  return (
+    <label className={cn('flex min-w-0 flex-col gap-1', className)}>
+      <span className="text-muted-foreground text-[11px] font-semibold">
+        {label}
+        {required && <span className="text-primary"> *</span>}
+      </span>
+      {children}
+    </label>
+  )
+}
+
 /** Figures in a row of tiles. */
 export function Stats({ children, label }: { children: ReactNode; label?: string }) {
   return (

@@ -6,7 +6,8 @@ import { cn } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { StyleGrid, ReloadButton } from './StyleGrid'
-import { cellKey, money, num, styleRows, type FormOptions, type MaterialOption, type StyleOption } from './kinds'
+import { MiniField } from './Frame'
+import { cellKey, money, num, styleRows, type FormOptions, type MaterialOption, type StyleItem, type StyleOption } from './kinds'
 import { newPack, packText, PackagingDialog, planOf, type PackValue } from '@/components/packages/PackagingEditor'
 
 /*
@@ -63,40 +64,53 @@ const piecesOf = (g: Garment) => Object.values(g.qty).reduce((n, v) => n + Numbe
 const valueOf = (g: Garment, st: StyleOption | undefined) =>
   (st ? styleRows(st) : []).reduce((n, r) => n + (st?.sizes ?? []).reduce((m, s) => m + Number(g.qty[cellKey(r.key, s.id)] || 0) * Number(g.rates[s.id] || 0), 0), 0)
 
-/**
- * One search for what to enter: a style (its colours and sizes come with it),
- * or one of its items by code or name (its style comes, showing that item).
- */
-function StyleSearch({ options, taken, onPick }: { options: FormOptions; taken: Set<string>; onPick: (styleId: string, itemId: string) => void }) {
+/** The style box: every style, the one picked kept in view so its items can be picked beside it. */
+function StyleSearch({ options, value, taken, onPick }: { options: FormOptions; value: string; taken: Set<string>; onPick: (styleId: string) => void }) {
   return (
-    <SmartSelect
-      className="form-input h-10 min-w-0 flex-1"
-      value=""
-      onChange={(e) => {
-        const [kind, id] = e.target.value.split(':')
-        if (kind === 'style') onPick(id, '')
-        if (kind === 'item') {
-          const st = options.styles.find((x) => (x.items ?? []).some((i) => i.id === id))
-          if (st) onPick(st.id, id)
-        }
-      }}
-      aria-label="Add a style"
-    >
-      <option value="">Search a style, item code or item name…</option>
-      {options.styles
-        .filter((st) => !taken.has(st.id))
-        .map((st) => (
-          <option key={st.id} value={`style:${st.id}`} data-sub={`Style · ${st.colours.length} ${st.colours.length === 1 ? 'colour' : 'colours'} · ${st.sizes.length} sizes`}>
-            {`${st.code} — ${st.name}`}
-          </option>
-        ))}
-      {options.styles.flatMap((st) =>
-        (st.items ?? []).map((i) => (
-          <option key={i.id} value={`item:${i.id}`} data-sub={['Item of ' + st.code, i.colour, i.description].filter(Boolean).join(' · ')}>
-            {`${i.code} — ${i.name}`}
-          </option>
-        )),
-      )}
+    <SmartSelect className="form-input h-9 w-full" value={value} onChange={(e) => onPick(e.target.value)} aria-label="Add a style">
+      <option value="">Search a style…</option>
+      {options.styles.map((st) => (
+        <option
+          key={st.id}
+          value={st.id}
+          data-sub={`${st.name} · ${st.colours.length} ${st.colours.length === 1 ? 'colour' : 'colours'} · ${st.sizes.length} sizes${taken.has(st.id) ? ' · added' : ''}`}
+        >
+          {st.code}
+        </option>
+      ))}
+    </SmartSelect>
+  )
+}
+
+/**
+ * Item Code, Item Name and Item Description beside the style: the style's
+ * own items (every style's, with none picked), all three on the same item.
+ */
+function ItemPick({
+  label,
+  field,
+  items,
+  value,
+  onPick,
+}: {
+  label: string
+  field: 'code' | 'name' | 'description'
+  items: Array<StyleItem & { style: string }>
+  value: string
+  onPick: (itemId: string) => void
+}) {
+  return (
+    <SmartSelect className="form-input h-9 w-full" value={value} onChange={(e) => onPick(e.target.value)} disabled={!items.length} aria-label={`Pick by ${label.toLowerCase()}`}>
+      <option value="">{items.length ? `Any item (${items.length})` : 'No items yet'}</option>
+      {items.map((i) => (
+        <option
+          key={i.id}
+          value={i.id}
+          data-sub={[field !== 'code' && i.code, field !== 'name' && i.name, i.colour, i.style].filter(Boolean).join(' · ')}
+        >
+          {field === 'code' ? i.code : field === 'name' ? i.name : i.description || `No description (${i.code})`}
+        </option>
+      ))}
     </SmartSelect>
   )
 }
@@ -125,21 +139,52 @@ function StyleTitle({ st, extra }: { st: StyleOption; extra?: ReactNode }) {
 export function FinishedGoods({ garments, onChange, ...shared }: Shared & { garments: Garment[]; onChange: (g: Garment[]) => void }) {
   const { options } = shared
   const taken = new Set(garments.map((g) => g.styleId))
-  const add = (styleId: string, item = '') => {
-    if (!styleId) return
-    // Found by its item: the style's block, already there or added, shows that item.
-    if (taken.has(styleId)) {
-      if (item) onChange(garments.map((g) => (g.styleId === styleId ? { ...g, item } : g)))
+  // The style picked in the bar: its items are offered beside it.
+  const [styleId, setStyleId] = useState('')
+  const barStyle = options.styles.find((x) => x.id === styleId)
+  const items = useMemo(
+    () =>
+      (barStyle ? [barStyle] : options.styles).flatMap((st) => (st.items ?? []).map((i) => ({ ...i, style: barStyle ? '' : `Style ${st.code}` }))),
+    [barStyle, options.styles],
+  )
+  const shownItem = garments.find((g) => g.styleId === styleId)?.item ?? ''
+  /** A style, and one of its items or all: its card added, or the card already there showing it. */
+  const add = (sid: string, item = '') => {
+    if (!sid) return
+    setStyleId(sid)
+    if (taken.has(sid)) {
+      onChange(garments.map((g) => (g.styleId === sid ? { ...g, item } : g)))
       return
     }
-    onChange([...garments, { key: newKey(), styleId, processId: '', locationId: '', orderNo: '', bundle: '', rates: {}, qty: {}, item }])
+    onChange([...garments, { key: newKey(), styleId: sid, processId: '', locationId: '', orderNo: '', bundle: '', rates: {}, qty: {}, item }])
+  }
+  const pickItem = (itemId: string) => {
+    if (!itemId) {
+      if (styleId) add(styleId, '')
+      return
+    }
+    const st = options.styles.find((x) => (x.items ?? []).some((i) => i.id === itemId))
+    if (st) add(st.id, itemId)
   }
   return (
     <section className="space-y-3" aria-label="Finished goods by style">
-      <Toolbar icon={Search} title="Add a style" hint="By style, item code or item name">
-        <StyleSearch options={options} taken={taken} onPick={add} />
+      <Toolbar icon={Search} title="Add finished goods" hint="A style, then one of its items if you like">
+        <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1.2fr)_minmax(0,1.2fr)]">
+          <MiniField label="Style">
+            <StyleSearch options={options} value={styleId} taken={taken} onPick={(sid) => (sid ? add(sid, taken.has(sid) ? (garments.find((g) => g.styleId === sid)?.item ?? '') : '') : setStyleId(''))} />
+          </MiniField>
+          <MiniField label="Item Code">
+            <ItemPick label="Item Code" field="code" items={items} value={shownItem} onPick={pickItem} />
+          </MiniField>
+          <MiniField label="Item Name">
+            <ItemPick label="Item Name" field="name" items={items} value={shownItem} onPick={pickItem} />
+          </MiniField>
+          <MiniField label="Item Description">
+            <ItemPick label="Item Description" field="description" items={items} value={shownItem} onPick={pickItem} />
+          </MiniField>
+        </div>
         {garments.length > 0 && (
-          <span className="badge-neutral">
+          <span className="badge-neutral self-center">
             {garments.length} {garments.length === 1 ? 'style' : 'styles'} added
           </span>
         )}
@@ -232,8 +277,9 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
           </>
         }
       >
+          <MiniField label="Style" className="w-64">
           <SmartSelect
-            className="form-input h-10 w-64"
+            className="form-input h-9 w-full"
             value={styleId}
             onChange={(e) => {
               // A new style: its route and its items, so the process and item chosen for the last one go.
@@ -250,7 +296,9 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
               </option>
             ))}
           </SmartSelect>
-          <SmartSelect className="form-input h-10 w-60" value={itemId} onChange={(e) => setItemId(e.target.value)} disabled={!style || !(style.items ?? []).length} aria-label="Item (optional)">
+          </MiniField>
+          <MiniField label="Item (optional)" className="w-60">
+          <SmartSelect className="form-input h-9 w-full" value={itemId} onChange={(e) => setItemId(e.target.value)} disabled={!style || !(style.items ?? []).length} aria-label="Item (optional)">
             <option value="">{style ? `All its items (${(style.items ?? []).length})` : 'Item: pick a style first'}</option>
             {(style?.items ?? []).map((i) => (
               <option key={i.id} value={i.id} data-sub={[i.name, i.colour, i.description].filter(Boolean).join(' · ')}>
@@ -258,7 +306,9 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
               </option>
             ))}
           </SmartSelect>
-          <SmartSelect className="form-input h-10 w-60" value={processId} onChange={(e) => setProcessId(e.target.value)} disabled={!style || !style.route} aria-label="Process">
+          </MiniField>
+          <MiniField label="Process" className="w-60">
+          <SmartSelect className="form-input h-9 w-full" value={processId} onChange={(e) => setProcessId(e.target.value)} disabled={!style || !style.route} aria-label="Process">
             <option value="">{style ? '2. Where are the pieces?' : '2. Pick a style first'}</option>
             {route.map((p) => (
               <option key={p.id} value={p.id}>
@@ -266,7 +316,8 @@ export function SemiFinished({ garments, onChange, ...shared }: Shared & { garme
               </option>
             ))}
           </SmartSelect>
-          <button type="button" className="btn-primary h-10 text-sm" disabled={!style || !processId} onClick={add}>
+          </MiniField>
+          <button type="button" className="btn-primary h-9 text-sm" disabled={!style || !processId} onClick={add}>
             <Plus size={14} /> Add
           </button>
       </Toolbar>
@@ -344,8 +395,9 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
   return (
     <section className="space-y-3" aria-label="Raw materials by item">
       <Toolbar icon={Package} title="Add a material" hint="Category, then its item">
+        <MiniField label="Material category" className="w-64">
         <SmartSelect
-          className="form-input h-10 w-64"
+          className="form-input h-9 w-full"
           value={categoryId}
           onChange={(e) => {
             // Another category: its own items, so the item picked goes.
@@ -361,7 +413,9 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
             </option>
           ))}
         </SmartSelect>
-        <SmartSelect className="form-input h-10 min-w-72 flex-1" value={itemId} onChange={(e) => setItemId(e.target.value)} disabled={!categoryId} aria-label="Item">
+        </MiniField>
+        <MiniField label="Item" className="min-w-72 flex-1">
+        <SmartSelect className="form-input h-9 w-full" value={itemId} onChange={(e) => setItemId(e.target.value)} disabled={!categoryId} aria-label="Item">
           <option value="">{categoryId ? (inCategory.length ? '2. The item…' : 'Every item here is already added') : '2. Pick a category first'}</option>
           {inCategory.map((i) => (
             <option key={i.id} value={i.id} data-sub={`${i.code}${i.unit ? ` · in ${i.unit}` : ''}`}>
@@ -369,7 +423,8 @@ export function RawMaterials({ materials, onChange, ...shared }: Shared & { mate
             </option>
           ))}
         </SmartSelect>
-        <button type="button" className="btn-primary h-10 text-sm" disabled={!itemId} onClick={add}>
+        </MiniField>
+        <button type="button" className="btn-primary h-9 text-sm" disabled={!itemId} onClick={add}>
           <Plus size={14} /> Add
         </button>
       </Toolbar>
@@ -616,8 +671,8 @@ function Block({
 function Toolbar({ icon: Icon, title, hint, footer, children }: { icon: LucideIcon; title: string; hint: string; footer?: ReactNode; children: ReactNode }) {
   return (
     <div className="glass-card px-4 py-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex min-w-[12rem] items-center gap-3 pr-1">
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="flex min-w-[12rem] items-center gap-3 self-center pr-1">
           <span className="bg-primary/10 text-primary flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
             <Icon size={18} />
           </span>

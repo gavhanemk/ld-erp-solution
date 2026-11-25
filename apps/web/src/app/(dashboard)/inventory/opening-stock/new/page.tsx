@@ -10,7 +10,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { KINDS, kindOf, money, num, STATUSES, todayInIndia, cellKey, styleRows, type FormOptions, type Kind } from '@/components/inventory/opening/kinds'
 import { FinishedGoods, RawMaterials, SemiFinished, type Garment, type Material } from '@/components/inventory/opening/Workspaces'
 import { packInputOf } from '@/components/packages/PackagingEditor'
-import { Banner, ChoiceCard, DoneCard, Field, PageHead, Panel, StatTile, Stats } from '@/components/inventory/opening/Frame'
+import { Banner, ChoiceCard, DoneCard, MiniField, PageHead, Panel, StatTile, Stats } from '@/components/inventory/opening/Frame'
 import { StickersReady } from '@/components/packages/StickersReady'
 
 /*
@@ -424,15 +424,24 @@ function AddOpeningStock() {
           )}
 
           <fieldset disabled={step === 'review' || busy} className={cn('space-y-3', step === 'review' && 'opacity-60')}>
-            {/* Where and when, for the whole entry. */}
-            <Panel icon={ClipboardList} title="Stock details" description="These apply to every line of this entry." label="Where and when">
-              <div className={cn('grid gap-4 sm:grid-cols-2', kind === 'SFG' ? 'lg:grid-cols-3' : kind === 'FG' ? 'lg:grid-cols-5' : 'lg:grid-cols-4')}>
-                <Field label="Opening date" required hint="The day the stock was counted.">
-                  <input type="date" className="form-input h-10" value={draft.date} max={todayInIndia()} onChange={(e) => set({ date: e.target.value })} aria-label="Opening date" />
-                </Field>
+            {/* Where and when, for the whole entry: one slim bar. */}
+            <section className="glass-card px-4 py-3" aria-label="Where and when">
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="flex min-w-[12rem] items-center gap-3 self-center pr-1">
+                  <span className="bg-primary/10 text-primary flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
+                    <ClipboardList size={18} />
+                  </span>
+                  <div className="leading-tight">
+                    <div className="text-foreground text-sm font-semibold">Stock details</div>
+                    <div className="text-muted-foreground text-xs">For every line below</div>
+                  </div>
+                </div>
+                <MiniField label="Opening date" required className="w-40">
+                  <input type="date" className="form-input h-9" value={draft.date} max={todayInIndia()} onChange={(e) => set({ date: e.target.value })} aria-label="Opening date" />
+                </MiniField>
                 {kind !== 'SFG' && (
-                  <Field label={kind === 'FG' ? 'Finished goods store' : 'Store'} required hint="Where the stock is kept.">
-                    <SmartSelect className="form-input h-10" value={draft.storeId} onChange={(e) => set({ storeId: e.target.value })} aria-label="Store">
+                  <MiniField label={kind === 'FG' ? 'Finished goods store' : 'Store'} required className="w-52">
+                    <SmartSelect className="form-input h-9" value={draft.storeId} onChange={(e) => set({ storeId: e.target.value })} aria-label="Store">
                       <option value="">Pick the store…</option>
                       {options.stores.map((s) => (
                         <option key={s.id} value={s.id}>
@@ -440,27 +449,27 @@ function AddOpeningStock() {
                         </option>
                       ))}
                     </SmartSelect>
-                  </Field>
+                  </MiniField>
                 )}
-                <Field label="Stock status" hint="OK is ready to use; Hold keeps it back.">
-                  <SmartSelect className="form-input h-10" value={draft.status} onChange={(e) => set({ status: e.target.value })} aria-label="Stock status">
+                <MiniField label="Stock status" className="w-48">
+                  <SmartSelect className="form-input h-9" value={draft.status} onChange={(e) => set({ status: e.target.value })} aria-label="Stock status">
                     {STATUSES.filter((s) => kind !== 'RM' || s.value !== 'B-Grade').map((s) => (
                       <option key={s.value} value={s.value}>
                         {s.label}
                       </option>
                     ))}
                   </SmartSelect>
-                </Field>
+                </MiniField>
                 {kind === 'FG' && (
-                  <Field label="Order No." hint="Optional: the order these pieces are for.">
-                    <input className="form-input h-10" value={draft.orderNo} onChange={(e) => set({ orderNo: e.target.value })} placeholder="Optional" aria-label="Order No." />
-                  </Field>
+                  <MiniField label="Order No." className="w-40">
+                    <input className="form-input h-9" value={draft.orderNo} onChange={(e) => set({ orderNo: e.target.value })} placeholder="Optional" aria-label="Order No." />
+                  </MiniField>
                 )}
-                <Field label="Remarks" hint="Optional.">
-                  <input className="form-input h-10" value={draft.notes} onChange={(e) => set({ notes: e.target.value })} placeholder="Who counted it, anything to remember" aria-label="Remarks" />
-                </Field>
+                <MiniField label="Remarks" className="min-w-48 flex-1">
+                  <input className="form-input h-9" value={draft.notes} onChange={(e) => set({ notes: e.target.value })} placeholder="Optional: who counted it" aria-label="Remarks" />
+                </MiniField>
               </div>
-            </Panel>
+            </section>
 
             {(() => {
               const shared = {
