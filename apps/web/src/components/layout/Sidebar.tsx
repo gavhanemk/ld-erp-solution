@@ -374,7 +374,7 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 overflow-y-auto no-scrollbar py-3 px-2">
+      <nav className="sidebar-scroll flex-1 overflow-y-auto py-3 pl-2 pr-0.5">
         <div className="space-y-0.5">
           {items.map((item) => {
             const Icon = item.icon
