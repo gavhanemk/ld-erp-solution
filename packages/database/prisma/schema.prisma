@@ -282,6 +282,9 @@ enum BOMCostBasis {
 model User {
   id           String     @id @default(cuid())
   openingStocks OpeningStock[] @relation("OpeningStockCreatedBy")
+  openingStocksReversed OpeningStock[] @relation("OpeningStockReversedBy")
+  openingChangesAsked   OpeningStockChange[] @relation("OpeningChangeRequestedBy")
+  openingChangesDecided OpeningStockChange[] @relation("OpeningChangeDecidedBy")
   employeeCode String?    @unique
   name         String
   email        String     @unique
@@ -715,6 +718,10 @@ model ItemCategory {
   /// starts with it. Optional; cleared if the department goes.
   departmentId String?
   department   Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  /// The HSN code an item made under this category takes when nothing more
+  /// particular is given (an opening stock sheet's own column). Its GST comes
+  /// from Masters → HSN / SAC Codes, as every item's does.
+  hsnCode      String?
   isActive Boolean        @default(true)
   /// Stock of these items is kept as labelled packages — rolls, boxes, cartons —
   /// each with its own QR sticker, scanned to issue and move it. On unless
@@ -2970,14 +2977,48 @@ model OpeningStock {
   createdById String?
   createdBy   User?    @relation("OpeningStockCreatedBy", fields: [createdById], references: [id])
   createdAt   DateTime @default(now())
+  /// Taken back as a whole by an approved reversal: its stock went out again, its stickers were voided.
+  reversedAt   DateTime?
+  reversedById String?
+  reversedBy   User?    @relation("OpeningStockReversedBy", fields: [reversedById], references: [id])
 
-  lines OpeningStockLine[]
+  lines   OpeningStockLine[]
+  changes OpeningStockChange[]
 
   @@map("opening_stocks")
 }
 
 /// One row of the opening-stock sheet: the 19 columns as typed, and the item,
 /// process, location and size they were matched to.
+/// A correction to opening stock lines, or the reversal of a whole entry:
+/// asked for with a reason, posted only once someone with Inventory → approve
+/// approves it (not the one who asked, unless an Admin). Nothing is deleted:
+/// a correction posts the difference, a reversal posts the stock out again.
+model OpeningStockChange {
+  id             String       @id @default(cuid())
+  number         String       @unique
+  openingStockId String
+  openingStock   OpeningStock @relation(fields: [openingStockId], references: [id])
+  /// CORRECTION (lines' quantity or rate) or REVERSAL (the whole entry).
+  kind           String
+  /// PENDING, APPROVED, REJECTED or WITHDRAWN.
+  status         String       @default("PENDING")
+  reason         String
+  /// A correction's lines: [{ lineId, qty, rate }] — what each line is to become.
+  lines          Json?
+  requestedById  String?
+  requestedBy    User?        @relation("OpeningChangeRequestedBy", fields: [requestedById], references: [id])
+  requestedAt    DateTime     @default(now())
+  decidedById    String?
+  decidedBy      User?        @relation("OpeningChangeDecidedBy", fields: [decidedById], references: [id])
+  decidedAt      DateTime?
+  decisionNote   String?
+
+  @@index([openingStockId])
+  @@index([status])
+  @@map("opening_stock_changes")
+}
+
 model OpeningStockLine {
   id             String       @id @default(cuid())
   openingStockId String
@@ -3029,6 +3070,10 @@ model OpeningStockLine {
   /// Item, location, size, grade, order, lot and bundle in one: no two opening
   /// lines may share it, on one sheet or across uploads.
   dedupeKey      String       @unique
+  /// Came in without a rate (valued at nought): its value is to be set.
+  valuationPending Boolean    @default(false)
+  /// The stock movement this line posted, for a later revaluation or correction.
+  ledgerId       String?
 
   @@index([openingStockId])
   @@index([itemId, warehouseId])

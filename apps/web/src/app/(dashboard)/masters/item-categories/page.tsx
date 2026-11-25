@@ -34,6 +34,7 @@ import { ImportCategoriesDialog } from '@/components/masters/ImportCategoriesDia
 import { ITEM_TYPE_LABEL, itemFormFields } from '@/components/masters/itemFormFields'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { processOrChosen } from '@/components/masters/processDepartments'
+import { createHsnFrom } from '@/components/masters/hsnFormFields'
 
 /**
  * Item categories: the three categories — Raw Materials, Semi-Finished Goods
@@ -160,6 +161,21 @@ const categoryFields: FormField[] = [
     ],
     showIf: (v) => Boolean(v.trackPackages),
     help: 'What one package of these items usually is. It can be changed when the stickers are made.',
+  },
+  {
+    name: 'hsnCode',
+    label: 'HSN Code',
+    placeholder: '52081200',
+    // Offered from the HSN list as you type, with each code's GST beside it.
+    suggestFrom: {
+      resource: 'hsn-codes',
+      valueKey: 'code',
+      label: (r) => `${String(r.description ?? '')} · GST ${Number(r.gstRate)}%`,
+      notListed: (code) => `${code} is not in Masters → HSN / SAC Codes yet, so it carries no GST rate.`,
+    },
+    createFrom: createHsnFrom,
+    showIf: (v) => Boolean(v.parentId),
+    help: 'An item made under it from an opening stock sheet takes this code, and its GST from Masters → HSN / SAC Codes.',
   },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Offered when filing an item' },
 ]

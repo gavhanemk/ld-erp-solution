@@ -39,7 +39,7 @@ import {
 import { ApiError, can, masterResource, type Paginated, type Single } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
-import { looksLikeSameName } from '@/lib/similarName'
+import { looksLikeSameName } from '@ld-erp/shared'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'

@@ -28,6 +28,7 @@ import { assertNotCancelling, soOfMo } from '../services/orderCancel.service'
 import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
 import * as openingStock from '../services/openingStock.service'
+import * as openingControl from '../services/openingControl.service'
 import * as processStock from '../services/processStock.service'
 import { floorFor, processLadder } from '../services/processFloor.service'
 import { trackedRoutings } from '../services/styleTrack.service'
@@ -5366,6 +5367,8 @@ const openingImportBody = customerMaterialImport.importBody.extend({
   requestKey: zod.string().min(8).max(100).optional(),
   /** Packing changed on the review, by sheet row: it replaces what the sheet's package columns say. */
   packs: zod.record(zod.string().regex(/^\d+$/), packInputSchema).optional(),
+  /** What was decided for each new item on the review: 'NEW' to make it, or an item already there to use. */
+  resolve: zod.record(zod.string().max(300), zod.string().max(60)).optional(),
 })
 async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
   await sheetIsFor(body)
@@ -5377,7 +5380,7 @@ async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
   const packs = body.packs ?? {}
   return openingStock.planImport(
     rows.map((r) => (packs[String(r.row)] ? { ...r, pack: packs[String(r.row)] } : r)),
-    { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true },
+    { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true, resolve: body.resolve },
   )
 }
 
@@ -5427,7 +5430,7 @@ router.post('/opening-stock/import/report', requirePermission(MODULE, 'create'),
     if (!body.openingDate) throw new AppError('Pick the opening date for the sheet.', 400, 'NEEDS_DATE')
     openingStock.asNineteen(rows, body.kind, body.openingDate)
   }
-  const resolved = await openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true })
+  const resolved = await openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true, resolve: body.resolve })
   const buffer = await openingStock.errorReport(raw, resolved, body.kind)
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', `attachment; filename="${body.fileName.replace(/\.xlsx?$/i, '').replace(/[^\w.-]+/g, '-')}-problems.xlsx"`)
@@ -5913,11 +5916,84 @@ router.get('/opening-stock', requirePermission(MODULE, 'view'), async (_req, res
   })
 })
 
+/*
+ * Opening stock put right, never deleted: a line that came in without a rate
+ * valued (Inventory → approve); a correction or a whole entry's reversal
+ * asked for with a reason, and posted once approved by someone else with
+ * Inventory → approve (an Admin may approve their own).
+ */
+const openingRateBody = zod.object({ rate: zod.number().positive('Give the rate: more than nought').max(10_000_000) })
+router.post('/opening-stock/lines/:id/rate', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { rate } = openingRateBody.parse(req.body)
+  const done = await openingControl.setOpeningRate(req.params.id, rate, req.user?.id ?? null)
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'OpeningStockLine', entityId: req.params.id, before: { valuationPending: true }, after: { rate: done.rate, value: done.value, repriced: done.repriced } })
+  res.json({
+    success: true,
+    message: `${done.number} row ${done.row} (${done.item}) valued at ₹${done.rate}: ₹${done.value.toLocaleString('en-IN', { minimumFractionDigits: 2 })} from the opening date.${done.repriced ? ` ${done.repriced} later ${done.repriced === 1 ? 'movement' : 'movements'} priced again.` : ''}`,
+    data: done,
+  })
+})
+
+const openingChangeBody = zod.object({
+  kind: zod.enum(['CORRECTION', 'REVERSAL']),
+  reason: zod.string().trim().min(3, 'Say why').max(500),
+  lines: zod
+    .array(zod.object({ lineId: zod.string().min(1), qty: zod.number().min(0).nullish(), rate: zod.number().min(0).nullish() }))
+    .max(3000)
+    .optional(),
+})
+router.post('/opening-stock/:id/changes', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const body = openingChangeBody.parse(req.body)
+  const made = await openingControl.requestChange({ openingStockId: req.params.id, ...body }, req.user?.id ?? null)
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'OpeningStockChange', entityId: made.id, after: { number: made.number, kind: body.kind, reason: body.reason, lines: body.lines?.length ?? 0 } })
+  res.status(201).json({
+    success: true,
+    message: `${made.number}: ${body.kind === 'REVERSAL' ? 'reversal' : 'correction'} asked for. It is posted once someone with Inventory → approve approves it.`,
+    data: made,
+  })
+})
+
+router.get('/opening-stock/changes', requirePermission(MODULE, 'view'), async (req, res) => {
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  res.json({ success: true, data: await openingControl.listChanges({ openingStockId: text(req.query.entry), status: text(req.query.status) }) })
+})
+
+const openingDecisionBody = zod.object({ note: zod.string().trim().max(500).optional().nullable() })
+router.post('/opening-stock/changes/:id/approve', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { note } = openingDecisionBody.parse(req.body ?? {})
+  const done = await openingControl.approveChange(req.params.id, { id: req.user!.id, isAdmin: isAdmin(req.user) }, note)
+  await writeAuditLog(req, { module: MODULE, action: 'APPROVE', entityType: 'OpeningStockChange', entityId: done.id, after: { number: done.number, kind: done.kind, entry: done.entry, repriced: done.repriced } })
+  res.json({
+    success: true,
+    message: `${done.number} approved: ${done.entry} ${done.kind === 'REVERSAL' ? 'taken back — its stock out again, its stickers voided' : 'corrected'}.${done.repriced ? ` ${done.repriced} later ${done.repriced === 1 ? 'movement' : 'movements'} priced again.` : ''}`,
+    data: done,
+  })
+})
+router.post('/opening-stock/changes/:id/reject', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const note = zod.object({ note: zod.string().trim().min(3, 'Say why it is turned down').max(500) }).parse(req.body ?? {}).note
+  const done = await openingControl.rejectChange(req.params.id, req.user!.id, note)
+  await writeAuditLog(req, { module: MODULE, action: 'REJECT', entityType: 'OpeningStockChange', entityId: done.id, after: { number: done.number, note } })
+  res.json({ success: true, message: `${done.number} turned down: nothing was posted.`, data: done })
+})
+router.post('/opening-stock/changes/:id/withdraw', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const done = await openingControl.withdrawChange(req.params.id, { id: req.user!.id, isAdmin: isAdmin(req.user) })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'OpeningStockChange', entityId: done.id, after: { number: done.number, status: done.status } })
+  res.json({ success: true, message: `${done.number} withdrawn: nothing was posted.`, data: done })
+})
+
 router.get('/opening-stock/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const doc = await prisma.openingStock.findUnique({
     where: { id: req.params.id },
     include: {
       createdBy: { select: { name: true } },
+      reversedBy: { select: { name: true } },
+      changes: {
+        orderBy: { requestedAt: 'desc' },
+        select: {
+          id: true, number: true, kind: true, status: true, reason: true, lines: true, requestedAt: true, decidedAt: true, decisionNote: true,
+          requestedById: true, requestedBy: { select: { name: true } }, decidedBy: { select: { name: true } },
+        },
+      },
       lines: {
         orderBy: { rowNo: 'asc' },
         include: {
