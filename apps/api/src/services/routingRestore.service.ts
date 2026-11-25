@@ -35,6 +35,7 @@ interface SnapStep {
 }
 
 interface Snapshot {
+  copiedFrom?: Prisma.InputJsonValue
   id: string
   code: string
   name: string
@@ -77,6 +78,7 @@ export async function deletedRoutings(db: Db) {
         routingId: d.entityId,
         name: r.name,
         code: r.code,
+        ...(r.copiedFrom ? { copiedFrom: r.copiedFrom } : {}),
         version: r.version,
         style: r.style ? { code: r.style.code, name: r.style.name } : null,
         category: r.category,
@@ -139,6 +141,7 @@ export async function restoreRouting(tx: Tx, auditId: string, userId: string) {
   const restored = await tx.routing.update({
     where: { id: routing.id },
     data: {
+      ...(r.copiedFrom ? { copiedFrom: r.copiedFrom } : {}),
       version: r.version,
       createdAt: new Date(r.createdAt),
       updatedAt: new Date(r.updatedAt),

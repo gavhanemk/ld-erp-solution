@@ -1,3 +1,4 @@
+import { assertQtyFitsUnits } from '../services/unitQuantity.service'
 import { Router } from 'express'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
@@ -28,7 +29,7 @@ import {
   effectFor,
   GST_TREATMENTS,
   moveNoteStock,
-  priceNote,
+  notePacks, priceNote,
   REASON_RULES,
   syncBillAdjustments,
   taxContextFor,
@@ -118,6 +119,9 @@ const noteInclude = {
       originalRate: true,
       qty: true,
       unitPrice: true,
+      // The pack the price is per (qty is in pieces), and its symbol.
+      uomFactor: true,
+      uom: { select: { id: true, symbol: true } },
       taxableValue: true,
       gstRate: true,
       cgst: true,
@@ -561,7 +565,8 @@ export async function createPurchaseNoteIn(tx: Prisma.TransactionClient, data: z
 
   const isIntraState = await taxContextFor(tx, supplierId, data.billId)
   const priced = priceNote({
-    lines: data.lines,
+    // Each line per the pack of the bill or receipt line it corrects.
+    lines: await notePacks(tx, data.lines),
     isIntraState,
     otherCharges: data.otherCharges,
     discountAmount: data.discountAmount,
@@ -642,6 +647,8 @@ export async function createPurchaseNoteIn(tx: Prisma.TransactionClient, data: z
           originalRate: l.originalRate ?? null,
           qty: l.qty,
           unitPrice: l.unitPrice,
+          uomId: l.uomId ?? null,
+          uomFactor: l.uomFactor ?? 1,
           taxableValue: l.taxableValue,
           gstRate: l.gstRate,
           cgst: l.cgst,
@@ -675,6 +682,12 @@ async function supplierFromGrn(tx: Prisma.TransactionClient, grnId: string): Pro
 
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createNoteSchema.parse(req.body)
+  // A quantity copied unchanged from the bill or receipt it corrects stands as it was.
+  if (data.lines)
+    await assertQtyFitsUnits(
+      prisma,
+      data.lines.filter((l) => l.originalQty == null || Math.abs(Number(l.qty) - Number(l.originalQty)) > 1e-9).map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'On the note' })),
+    )
 
   const note = await prisma.$transaction((tx) => createPurchaseNoteIn(tx, data, req.user!.id))
 
@@ -695,6 +708,12 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
 
 router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateNoteSchema.parse(req.body)
+  // A quantity copied unchanged from the bill or receipt it corrects stands as it was.
+  if (data.lines)
+    await assertQtyFitsUnits(
+      prisma,
+      data.lines.filter((l) => l.originalQty == null || Math.abs(Number(l.qty) - Number(l.originalQty)) > 1e-9).map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'On the note' })),
+    )
 
   const note = await prisma.$transaction(async (tx) => {
     const before = await tx.purchaseNote.findUnique({
@@ -775,7 +794,7 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
 
     const isIntraState = await taxContextFor(tx, supplierId, data.billId)
     const priced = priceNote({
-      lines: data.lines,
+      lines: await notePacks(tx, data.lines),
       isIntraState,
       otherCharges: data.otherCharges,
       discountAmount: data.discountAmount,
@@ -854,6 +873,8 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
             originalRate: l.originalRate ?? null,
             qty: l.qty,
             unitPrice: l.unitPrice,
+            uomId: l.uomId ?? null,
+            uomFactor: l.uomFactor ?? 1,
             taxableValue: l.taxableValue,
             gstRate: l.gstRate,
             cgst: l.cgst,

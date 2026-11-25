@@ -26,7 +26,8 @@ export interface SheetImportConfig<R extends SheetRowPlan, S extends SheetSummar
   importPath: string
   /** The API path of the template; `current` asks for the one listing what is there. */
   templatePath: (current: boolean) => string
-  templates: { blank: { title: string; text: string }; current: { title: string; text: string } }
+  /** `current` is left out where there is nothing already in to list. */
+  templates: { blank: { title: string; text: string }; current?: { title: string; text: string } }
   /** The preview's columns after Row, before Problem. */
   columns: Array<{ head: string; width?: number; cell: (r: R) => ReactNode }>
   /** The summary badges over the preview. */
@@ -179,7 +180,7 @@ export function SheetImportDialog<R extends SheetRowPlan, S extends SheetSummary
   )
 
   const templateCard = (current: boolean) => {
-    const t = current ? config.templates.current : config.templates.blank
+    const t = (current ? config.templates.current : undefined) ?? config.templates.blank
     return (
       <button
         type="button"
@@ -242,7 +243,7 @@ export function SheetImportDialog<R extends SheetRowPlan, S extends SheetSummary
           <Section icon={Download} title="1. Get the sheet">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               {templateCard(false)}
-              {templateCard(true)}
+              {config.templates.current && templateCard(true)}
             </div>
           </Section>
 

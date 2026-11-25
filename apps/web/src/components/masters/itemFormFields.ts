@@ -1,6 +1,7 @@
 import type { FormField } from '@/components/masters/MasterFormDialog'
-import { createUomFrom } from '@/components/masters/uomFormFields'
+import { createUomFrom, QTY_PLACES_OPTIONS } from '@/components/masters/uomFormFields'
 import { createHsnFrom } from '@/components/masters/hsnFormFields'
+import { groupOfType } from '@ld-erp/shared'
 
 /*
  * The Items master's form, in one place: Masters → Items shows it, and a BOM
@@ -46,6 +47,18 @@ export const itemFormFields: FormField[] = [
     placeholder: 'Cotton Poplin 40s',
     section: 'Identity',
     span: 2,
+    // Warns against the other items filed under the same category (a
+    // sub-category wins over its main category, the same rule the save
+    // itself follows) and of the same type, so a raw material is never
+    // compared against a finished good of a similar name.
+    duplicateCheck: {
+      resource: 'items',
+      paramsFrom: (v) => {
+        const categoryId = (v.subCategoryId || v.mainCategoryId) as string | undefined
+        const type = v.type as string | undefined
+        return categoryId && type ? { categoryId, type } : null
+      },
+    },
   },
   {
     name: 'type',
@@ -54,6 +67,11 @@ export const itemFormFields: FormField[] = [
     required: true,
     section: 'Identity',
     options: Object.entries(ITEM_TYPE_LABEL).map(([value, v]) => ({ value, label: v.label })),
+    // The category list follows the type's tab of Items & Products, so a
+    // category from another tab is cleared; a raw material becoming a trim
+    // keeps its category.
+    resets: ['mainCategoryId', 'subCategoryId'],
+    resetsWhen: (before, after) => groupOfType(String(before.type ?? '')) !== groupOfType(String(after.type ?? '')),
   },
   {
     name: 'uomId',
@@ -73,7 +91,12 @@ export const itemFormFields: FormField[] = [
     section: 'Identity',
     sendAs: 'categoryId',
     resets: ['subCategoryId'],
-    optionsFrom: { resource: 'item-categories', filter: isMain },
+    // Main categories of the type's tab: a finished good is never offered Fabric.
+    optionsFrom: {
+      resource: 'item-categories',
+      filter: (row, values) =>
+        isMain(row) && (!values.type || !row.itemGroup || row.itemGroup === groupOfType(String(values.type))),
+    },
     initial: (r) => {
       const c = r.category as { parentId?: string | null } | null
       return c?.parentId ?? r.categoryId
@@ -201,6 +224,38 @@ export const itemFormFields: FormField[] = [
     placeholder: 'pcs',
     showIf: (v) => v.type !== 'FINISHED_GOOD',
     help: 'pcs, m, gross… Empty means pcs',
+  },
+  // Two stickers on every carton (one each side): copies of each of its stickers.
+  {
+    name: 'labelCopies',
+    label: 'Sticker Copies',
+    type: 'select',
+    section: 'Costing & Stock',
+    noneLabel: 'As Sticker settings say',
+    options: [
+      { value: '1', label: 'One' },
+      { value: '2', label: 'Two' },
+      { value: '3', label: 'Three' },
+      { value: '4', label: 'Four' },
+      { value: '5', label: 'Five' },
+    ],
+    nullWhenEmpty: true,
+    initial: (r) => (r.labelCopies == null ? '' : String(r.labelCopies)),
+    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    help: 'How many copies of each of its stickers print',
+  },
+  // Whether 2.5 of it can be asked for, issued or bought; normally its unit decides.
+  {
+    name: 'decimalPlaces',
+    label: 'Quantities',
+    type: 'select',
+    section: 'Costing & Stock',
+    noneLabel: 'As its unit',
+    options: QTY_PLACES_OPTIONS,
+    nullWhenEmpty: true,
+    initial: (r) => (r.decimalPlaces == null ? '' : String(r.decimalPlaces)),
+    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    help: 'Leave as its unit unless this one item is counted differently',
   },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new documents' },
 ]

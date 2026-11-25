@@ -41,6 +41,9 @@ export interface NoteLine {
   originalRate: string | number | null
   qty: string | number
   unitPrice: string | number
+  /** The pack unitPrice is per (a box of 20 pcs), from the bill or receipt line; qty is in pieces. */
+  uomFactor?: string | number
+  uom?: { id?: string; symbol: string } | null
   taxableValue: string | number
   gstRate: string | number
   cgst: string | number

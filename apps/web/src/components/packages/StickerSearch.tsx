@@ -51,7 +51,7 @@ const asCode = (t: string) => {
   return m ? `PK-${String(Number(m[1])).padStart(4, '0')}` : null
 }
 /** What a scanner gun or a phone's QR reader sends: left alone, never second-guessed. */
-const looksScanned = (t: string) => /^https?:\/\//i.test(t.trim()) || /^(PK|G)-?\d{4,}$/i.test(t.trim())
+const looksScanned = (t: string) => /^https?:\/\//i.test(t.trim()) || /^(PK|G|CT)-?\d{4,}$/i.test(t.trim())
 
 /**
  * The scan box, with the stickers that match what is being typed listed under

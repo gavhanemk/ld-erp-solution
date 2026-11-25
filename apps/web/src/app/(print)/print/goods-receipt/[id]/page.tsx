@@ -1,5 +1,6 @@
 'use client'
 
+import { inPack, ratePer } from '@/lib/packs'
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
@@ -64,6 +65,9 @@ interface GrnLine {
   discountAmount: number
   taxable: number
   item: { code: string; name: string; hsnCode: string | null; uom: { symbol: string } | null }
+  /** The order's pack (a box of 20 pcs): quantities are in pieces, the rate per pack. */
+  uomFactor?: string | number
+  uom?: { symbol: string } | null
   warehouse: { name: string } | null
   poLine: { description: string | null; hsnCode: string | null } | null
   /** How it came packed: one sticker per roll, bale or box. */
@@ -660,7 +664,14 @@ export default function PrintGoodsReceipt() {
                     {line.item.uom?.symbol ?? '—'}
                   </td>
                   <td style={{ ...cell('right'), ...NUM, color: GREY }}>{qty(line.orderedQty)}</td>
-                  <td style={{ ...cell('right'), ...NUM }}>{qty(line.receivedQty)}</td>
+                  <td style={{ ...cell('right'), ...NUM }}>
+                    {qty(line.receivedQty)}
+                    {inPack({ ...line, qty: line.receivedQty }).pieces && (
+                      <div style={{ fontSize: '9px', color: '#64748b' }}>
+                        = {qty(inPack({ ...line, qty: line.receivedQty }).qty)} {inPack({ ...line, qty: line.receivedQty }).unit}
+                      </div>
+                    )}
+                  </td>
                   {/* Rejected goods are printed in red and never in grey.
                       This is the number the driver is going to be asked about
                       at the gate. */}
@@ -677,7 +688,10 @@ export default function PrintGoodsReceipt() {
                   <td style={{ ...cell('right'), ...NUM, fontWeight: 700 }}>
                     {qty(line.acceptedQty)}
                   </td>
-                  <td style={{ ...cell('right'), ...NUM }}>{money(line.unitRate)}</td>
+                  <td style={{ ...cell('right'), ...NUM }}>
+                    {money(line.unitRate)}
+                    {ratePer(line) && <div style={{ fontSize: '9px', color: '#64748b' }}>{ratePer(line)}</div>}
+                  </td>
                   <td style={{ ...cell('right'), ...NUM, fontWeight: 600 }}>
                     {money(line.taxable)}
                   </td>

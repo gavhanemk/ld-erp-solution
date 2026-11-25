@@ -63,9 +63,27 @@ export function RecordQuoteDialog({
   const [validUntil, setValidUntil] = useState(iso(quote.piValidUntil))
   const [remark, setRemark] = useState(quote.remark ?? '')
 
+  /*
+   * The enquiry's lines in the pack each is asked in: 40 pcs asked in boxes of
+   * 20 read as 2 box here, so what the supplier quotes — a rate per box, the
+   * boxes he can supply — is typed as he says it. The server keeps quantities
+   * in pieces.
+   */
+  const lines = useMemo(
+    () =>
+      enquiry.lines.map((l) => {
+        const f = Number(l.uomFactor ?? 1) || 1
+        if (f === 1 || !l.uom) return l
+        return { ...l, qty: String(Math.round((Number(l.qty) / f) * 1000) / 1000), item: { ...l.item, uom: { symbol: l.uom.symbol } } }
+      }),
+    [enquiry.lines],
+  )
+  /** What one of a line's pack holds, to read a stored offer (in pieces) back in packs. */
+  const packOf = (lineId: string) => Number(enquiry.lines.find((x) => x.id === lineId)?.uomFactor ?? 1) || 1
+
   const [rows, setRows] = useState<Record<string, RateRow>>(() =>
     Object.fromEntries(
-      enquiry.lines.map((l) => {
+      lines.map((l) => {
         const ql = quote.lines.find((x) => x.enquiryLineId === l.id)
         return [
           l.id,
@@ -75,7 +93,7 @@ export function RecordQuoteDialog({
             // Starts at the full quantity asked, as a real value the buyer can
             // edit or scroll down from. A placeholder looked filled in but could
             // not be touched, and the wheel started it from 0.
-            offeredQty: String(Number(ql?.offeredQty ?? l.qty)),
+            offeredQty: String(ql?.offeredQty != null ? Math.round((Number(ql.offeredQty) / packOf(l.id)) * 1000) / 1000 : Number(l.qty)),
             remark: ql?.remark ?? '',
           },
         ]
@@ -93,7 +111,7 @@ export function RecordQuoteDialog({
   /** What his rates add up to, before tax. */
   const fromRates = useMemo(
     () =>
-      enquiry.lines.reduce((t, l) => {
+      lines.reduce((t, l) => {
         const r = rows[l.id]?.quotedRate
         if (r === '' || r == null) return t
         // Priced on what he can actually supply, not on what was asked. A rate
@@ -102,11 +120,11 @@ export function RecordQuoteDialog({
         const useQty = q === '' || q == null ? Number(l.qty) : num(q)
         return t + useQty * num(r)
       }, 0),
-    [enquiry.lines, rows]
+    [lines, rows]
   )
 
 
-  const priced = enquiry.lines.filter((l) => rows[l.id]?.quotedRate !== '').length
+  const priced = lines.filter((l) => rows[l.id]?.quotedRate !== '').length
 
   const problems = useMemo(() => {
     const out: string[] = []
@@ -115,7 +133,7 @@ export function RecordQuoteDialog({
     if (validUntil && piDate && validUntil < piDate) {
       out.push('The PI cannot expire before the date on it')
     }
-    for (const l of enquiry.lines) {
+    for (const l of lines) {
       const o = rows[l.id]?.offeredQty
       if (o !== '' && o != null && num(o) > Number(l.qty)) {
         out.push('He cannot offer more of ' + l.item.name + ' than was asked for')
@@ -123,7 +141,7 @@ export function RecordQuoteDialog({
       }
     }
     return out
-  }, [piNumber, piDate, validUntil, enquiry.lines, rows])
+  }, [piNumber, piDate, validUntil, lines, rows])
 
   const save = useCallback(async () => {
     if (problems.length) return
@@ -137,7 +155,7 @@ export function RecordQuoteDialog({
           piDate,
           validUntil: validUntil || null,
           remark: remark.trim() || null,
-          rates: enquiry.lines.map((l) => {
+          rates: lines.map((l) => {
             const r = rows[l.id]
             return {
               lineId: l.id,
@@ -300,7 +318,7 @@ export function RecordQuoteDialog({
                   </tr>
                 </thead>
                 <tbody>
-                  {enquiry.lines.map((l) => {
+                  {lines.map((l) => {
                     const r = rows[l.id]
                     const expected = l.expectedRate == null ? null : Number(l.expectedRate)
                     const quoted = r?.quotedRate === '' ? null : num(r?.quotedRate ?? '')
@@ -452,7 +470,7 @@ export function RecordQuoteDialog({
         <div className="border-border flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-5 py-3.5">
           <div className="min-w-0">
             <p className="text-muted-foreground text-[11px]">
-              {priced} of {enquiry.lines.length} lines priced
+              {priced} of {lines.length} lines priced
             </p>
             <p className="text-foreground text-sm font-semibold tabular-nums">
               ₹{money(fromRates)}

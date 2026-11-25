@@ -1,5 +1,6 @@
 'use client'
 
+import { ratePer } from '@/lib/packs'
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
@@ -487,7 +488,10 @@ export default function PurchaseNotePrintPage() {
                   {qtyFmt(l.qty)}
                   {l.item.uom ? ` ${l.item.uom.symbol}` : ''}
                 </td>
-                <td style={{ ...td, textAlign: 'right', ...NUM }}>{money(l.unitPrice)}</td>
+                <td style={{ ...td, textAlign: 'right', ...NUM }}>
+                  {money(l.unitPrice)}
+                  {ratePer(l) && <div style={{ fontSize: '9px', color: '#64748b' }}>{ratePer(l)}</div>}
+                </td>
                 <td style={{ ...td, textAlign: 'center', ...NUM }}>{Number(l.gstRate)}</td>
                 <td style={{ ...td, textAlign: 'right', fontWeight: 600, ...NUM }}>
                   {money(l.taxableValue)}

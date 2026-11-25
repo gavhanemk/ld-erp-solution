@@ -312,6 +312,10 @@ export const createItemSchema = z
     // What one unit holds, printed on its stickers: a box of 144 pcs.
     contentQty: nonNegativeDecimal,
     contentUnit: z.preprocess((v) => (v === '' ? null : v), z.string().trim().max(20).optional().nullable()),
+    // How many copies of each of its stickers print. Empty: as Sticker settings say.
+    labelCopies: z.preprocess((v) => (v === '' ? null : v), z.coerce.number().int().min(1, 'At least one copy').max(5, 'At most 5 copies').optional().nullable()),
+    // Its own places after the point, when it differs from its unit's. Empty: the unit's.
+    decimalPlaces: z.preprocess((v) => (v === '' ? null : v), z.coerce.number().int().min(0).max(3).optional().nullable()),
     imageUrl: z.string().url().optional().nullable(),
     // Which garment this is, for a finished good. Shape only, here — whether
     // the colour is actually one of the style's own colours needs a database
@@ -502,6 +506,7 @@ export const bomPriceSchema = z
   })
 
 export const createBomSchema = z.object({
+  copiedFromId: z.string().min(1).optional(),
   styleId: z.string().min(1, 'Style is required'),
   /**
    * One BOM per colour. Whether it is required depends on the style — one with
@@ -658,6 +663,8 @@ export const createUomSchema = z.object({
     .max(20)
     .optional()
     .transform((v) => v || undefined),
+  // Places after the point a quantity in this unit may carry: 0 = whole numbers only.
+  decimalPlaces: z.coerce.number().int().min(0, 'Choose how quantities are counted').max(3).optional(),
   isActive,
 })
 export const updateUomSchema = createUomSchema.partial()
@@ -758,6 +765,9 @@ export const createItemCategorySchema = z.object({
   // what one package usually is. A sub-category follows its main category.
   trackPackages: z.boolean().optional(),
   packType: z.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).optional().nullable(),
+  // Which tab of Items & Products a main category is under. A sub-category
+  // takes its main category's, whatever is sent.
+  itemGroup: z.enum(['RAW_MATERIALS', 'SEMI_FINISHED', 'FINISHED_GOODS', 'EXPENSES']).optional(),
   isActive,
 })
 export const updateItemCategorySchema = createItemCategorySchema.partial()
@@ -974,13 +984,32 @@ export const createChargeTypeSchema = z.object({
    * no GST at all (outside the taxable value). Inclusive and no-GST both leave
    * the figure as typed, but only an inclusive charge carries GST to report.
    */
-  taxTreatment: z.enum(['INCLUSIVE', 'EXCLUSIVE', 'NON_TAXABLE']).default('INCLUSIVE'),
+  taxTreatment: z.enum(['INCLUSIVE', 'EXCLUSIVE', 'NON_TAXABLE']).default('EXCLUSIVE'),
   /*
    * On a sale, taxed at the goods' rate: billed with the goods it is part of
    * what they are sold for (CGST Act s.15(2)(c)). Off: a supply of its own,
    * at the GST rate above.
    */
-  followsGoodsRate: z.boolean().default(true),
+  followsGoodsRate: z.boolean().default(false),
+  /*
+   * How a purchase order or bill starts this charge's GST, unless the row is
+   * changed there: an HSN / SAC code, a rate typed by hand, or not
+   * applicable — see PurchaseOrderCharge.gstMode, which every row starts at.
+   */
+  defaultGstMode: z.enum(['HSN', 'MANUAL', 'NONE', 'INHERIT']).default('MANUAL'),
+  /*
+   * The HSN / SAC code a purchase row starts with when defaultGstMode is HSN.
+   * Checked against the master in the route's beforeSave, where the two
+   * fields can be read together even on an edit that sends only one of them.
+   */
+  defaultHsnCodeId: z.string().min(1).optional().nullable(),
+  salesHsnCodeId: z.string().min(1).optional().nullable(),
+  purchaseTaxTreatment: z.enum(['INCLUSIVE', 'EXCLUSIVE']).default('EXCLUSIVE'),
+  salesGstApplicability: z.enum(['APPLICABLE', 'NONE']).default('APPLICABLE'),
+  purchaseGstApplicability: z.enum(['APPLICABLE', 'NONE']).default('APPLICABLE'),
+  salesTaxCategory: z.enum(['TAXABLE', 'EXEMPT', 'NIL_RATED', 'NON_GST', 'UNSPECIFIED']).default('TAXABLE'),
+  purchaseTaxCategory: z.enum(['TAXABLE', 'EXEMPT', 'NIL_RATED', 'NON_GST', 'UNSPECIFIED']).default('TAXABLE'),
+  taxReviewRequired: z.boolean().default(false),
   applyOnSale: z.boolean().default(true),
   applyOnPurchase: z.boolean().default(false),
   isActive,
@@ -1022,6 +1051,7 @@ const routingFields = z.object({
   steps: z
     .array(routingStepSchema)
     .min(1, 'A routing needs at least one step')
+    .max(200, 'A routing can contain up to 200 steps')
     // Two steps at the same position have no defined order, and the database
     // rejects it anyway — catching it here gives a readable message.
     .refine((steps) => new Set(steps.map((s) => s.sequence)).size === steps.length, {
@@ -1032,7 +1062,16 @@ const routingFields = z.object({
 const oneTarget = (v: { styleId?: string | null; category?: string | null }) => !(v.styleId && v.category?.trim())
 const oneTargetIssue = { message: 'A routing is for one style or for a category, not both', path: ['category'] }
 
-export const createRoutingSchema = routingFields.refine(oneTarget, oneTargetIssue)
+export const createRoutingSchema = routingFields.extend({
+  creationKey: z.string().uuid().optional(),
+  copiedFromId: z.string().min(1).optional(),
+  copiedFromVersion: z.number().int().positive().optional(),
+  copiedFromUpdatedAt: z.string().datetime().optional(),
+}).refine(oneTarget, oneTargetIssue)
+
+export const routingSimilaritySchema = routingFields.pick({ styleId: true, category: true, fabricItemId: true })
+  .extend({ steps: z.array(routingStepSchema).max(200).default([]), excludeId: z.string().optional() })
+  .refine(oneTarget, oneTargetIssue)
 
 export const updateRoutingSchema = routingFields
   .partial()

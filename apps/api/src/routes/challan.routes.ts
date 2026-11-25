@@ -13,6 +13,7 @@ import { lockRow } from '../lib/lockRow'
 import { OPEN_ORDER_STATUSES } from '../services/salesOrder.service'
 import { closeCheck } from '../services/reconciliation.service'
 import { afterChallanCancelled, afterChallanDispatched } from '../services/garmentHooks.service'
+import { cartonsAfterCancel, cartonsAfterDispatch, cartonsOnChallan } from '../services/fgCartonHooks.service'
 import { netSizeChanges } from '../services/sizeChanges.service'
 
 /**
@@ -276,9 +277,10 @@ router.get('/waiting', requirePermission(MODULE, 'view'), async (req, res) => {
   })
 })
 
+const challanCustomerSelect = { id: true, name: true, gstin: true, billingCity: true, shippingCity: true } as const
 const challanInclude = {
-  so: { select: { id: true, soNumber: true, status: true, isJobWork: true, customerPORef: true } },
-  customer: { select: { id: true, name: true, gstin: true, billingCity: true, shippingCity: true } },
+  so: { select: { id: true, soNumber: true, status: true, isJobWork: true, customerPORef: true, customer: { select: challanCustomerSelect } } },
+  customer: { select: challanCustomerSelect },
   warehouse: { select: { id: true, name: true } },
   createdBy: { select: { id: true, name: true } },
   dispatchedBy: { select: { id: true, name: true } },
@@ -292,6 +294,17 @@ const challanInclude = {
   },
   /** The invoice billing it, if any: a challan is billed once. */
   invoices: { where: { status: { not: 'CANCELLED' } }, select: { id: true, invoiceNumber: true } },
+  /** The cartons loaded on it, for its packing list. */
+  fgCartons: {
+    select: {
+      code: true,
+      lines: {
+        select: { qty: true, grade: true, item: { select: { code: true, name: true, color: true, style: { select: { code: true } } } }, size: { select: { code: true, sequence: true } } },
+        orderBy: [{ item: { code: 'asc' as const } }, { size: { sequence: 'asc' as const } }],
+      },
+    },
+    orderBy: { code: 'asc' as const },
+  },
 } satisfies Prisma.DeliveryChallanInclude
 
 /** GET /api/sales/challans — filters: q, status, customerId, soId, from, to, page, limit. */
@@ -306,6 +319,7 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
         { dcNumber: { contains: q, mode: 'insensitive' } },
         { so: { soNumber: { contains: q, mode: 'insensitive' } } },
         { customer: { name: { contains: q, mode: 'insensitive' } } },
+        { customerId: null, so: { customer: { name: { contains: q, mode: 'insensitive' } } } },
         { lrNumber: { contains: q, mode: 'insensitive' } },
         { vehicleNumber: { contains: q, mode: 'insensitive' } },
       ],
@@ -319,7 +333,7 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     and.push({ status: status as ChallanStatus })
   }
   const customerId = text(req.query.customerId)
-  if (customerId) and.push({ customerId })
+  if (customerId) and.push({ OR: [{ customerId }, { customerId: null, so: { customerId } }] })
   const soId = text(req.query.soId)
   if (soId) and.push({ soId })
   const from = text(req.query.from)
@@ -341,7 +355,9 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     }),
     prisma.deliveryChallan.count({ where }),
   ])
-  const data = rows.map((r) => ({ ...r, pieces: r.lines.reduce((s, l) => s + Number(l.qty), 0) }))
+  // Legacy challans predate the direct customer link. Resolve from the order on
+  // read, retaining any explicitly recorded customer and leaving history intact.
+  const data = rows.map((r) => ({ ...r, customer: r.customer ?? r.so.customer, pieces: r.lines.reduce((s, l) => s + Number(l.qty), 0) }))
   res.json({ success: true, data, pagination: { page, limit, total, pages: Math.ceil(total / limit) } })
 })
 
@@ -349,7 +365,7 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
 router.get('/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const dc = await prisma.deliveryChallan.findUnique({ where: { id: req.params.id }, include: challanInclude })
   if (!dc) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
-  res.json({ success: true, data: dc })
+  res.json({ success: true, data: { ...dc, customer: dc.customer ?? dc.so.customer } })
 })
 
 type ChallanInput = z.infer<typeof challanSchema>
@@ -467,6 +483,8 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
         notes: `Dispatched on ${dc.dcNumber}`,
         // A draft dated last week and sent today goes out today in the ledger.
         earlierDate: 'move-up',
+        // Pieces sealed in the cartons loaded on it leave with them.
+        cartonsOn: dc.id,
       })
       if (part.sizeId) {
         await tx.salesOrderLineSize.updateMany({
@@ -504,6 +522,8 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
   })
   // Tagged pieces scanned onto it are gone with it.
   await afterChallanDispatched(tx, dc.id, userId)
+  // And the cartons loaded on it.
+  await cartonsAfterDispatch(tx, dc.id)
 }
 
 /** Writes a challan's header and lines; the number is the caller's. */
@@ -605,6 +625,9 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
       if (!before) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
       if (before.status !== 'DRAFT') throw new AppError(`${before.dcNumber} has gone; it can no longer be changed`, 409, 'NOT_DRAFT')
       if (data.soId !== before.soId) throw new AppError('A challan cannot move to another order', 400, 'ORDER_CHANGED')
+      if (await cartonsOnChallan(tx, before.id)) {
+        throw new AppError(`${before.dcNumber}'s lines come from the cartons loaded on it: change them on Inventory → Finished Goods → Cartons → Dispatch.`, 409, 'HAS_CARTONS')
+      }
       const order = await loadOpenOrder(tx, before.soId)
       await writeChallan(tx, order, data, { id: before.id }, req.user!.id)
       if (data.dispatch) await dispatchChallan(tx, before.id, req.user!.id)
@@ -746,6 +769,8 @@ export async function cancelChallan(tx: Prisma.TransactionClient, dcId: string, 
 
   // Its tagged pieces are back in the store and free for another challan.
   await afterChallanCancelled(tx, before.id, userId)
+  // Its cartons stay sealed in the store, free for another challan.
+  await cartonsAfterCancel(tx, before.id)
   const after = await tx.deliveryChallan.update({
     where: { id: before.id },
     data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId, cancelReason: reason },
@@ -786,23 +811,13 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
  * at the order's rates — the figure an e-way bill is judged on.
  */
 router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const printCustomerSelect = { name: true, gstin: true, phone: true, billingAddress: true, billingCity: true, billingState: true, billingStateCode: true, billingPincode: true } as const
   const dc = await prisma.deliveryChallan.findUnique({
     where: { id: req.params.id },
     include: {
       ...challanInclude,
-      so: { select: { id: true, soNumber: true, orderDate: true, customerPORef: true, customerPODate: true, isJobWork: true, placeOfSupplyCode: true } },
-      customer: {
-        select: {
-          name: true,
-          gstin: true,
-          phone: true,
-          billingAddress: true,
-          billingCity: true,
-          billingState: true,
-          billingStateCode: true,
-          billingPincode: true,
-        },
-      },
+      so: { select: { id: true, soNumber: true, orderDate: true, customerPORef: true, customerPODate: true, isJobWork: true, placeOfSupplyCode: true, customer: { select: printCustomerSelect } } },
+      customer: { select: printCustomerSelect },
     },
   })
   if (!dc) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
@@ -822,7 +837,7 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
   )
   res.json({
     success: true,
-    data: { ...header, challan: dc, value, gst, valueInWords: amountInWords(round2(value + gst)) },
+    data: { ...header, challan: { ...dc, customer: dc.customer ?? dc.so.customer }, value, gst, valueInWords: amountInWords(round2(value + gst)) },
   })
 })
 

@@ -6,6 +6,7 @@ import {
   X,
   Loader2,
   AlertCircle,
+  AlertTriangle,
   Save,
   Boxes,
   Building2,
@@ -38,6 +39,7 @@ import {
 import { ApiError, can, masterResource, type Paginated, type Single } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
+import { looksLikeSameName } from '@/lib/similarName'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
@@ -186,6 +188,12 @@ export interface FormField {
   /** Fields emptied when this one changes, as a sub-category is when its category does. */
   resets?: string[]
   /**
+   * Empties `resets` only when this says so, given the values before and after:
+   * an item's category is cleared when its type moves to another tab, not when
+   * a raw material becomes a trim.
+   */
+  resetsWhen?: (before: Record<string, unknown>, after: Record<string, unknown>) => boolean
+  /**
    * Fills another field from the row picked here: a sub-category fills the
    * item's department with its own. Only over a value it filled itself, or
    * an empty one, so a department chosen by hand is never overwritten.
@@ -248,6 +256,25 @@ export interface FormField {
     label: (row: Record<string, unknown>) => string
     /** Said under the box when what is typed is not in the list: what follows from that, and where to add it. */
     notListed?: (typed: string) => string
+  }
+  /**
+   * Warns when what is typed here is close enough to another record's own
+   * value that the two are probably one thing entered twice — a raw material
+   * added under two spellings of the same name. Candidates are read once per
+   * change of what `paramsFrom` returns, the same as `suggestFrom`'s list, not
+   * on every keystroke; `looksLikeSameName` then compares them against what
+   * is typed as it changes. Never blocks Save: it only says what it found, so
+   * a name that is genuinely new, however close, still goes through.
+   */
+  duplicateCheck?: {
+    /** Master endpoint the candidates are read from. */
+    resource: string
+    /**
+     * The query candidates are read with, from this form's current values —
+     * an item's category and type, say, so only items filed the same way are
+     * compared. Null while there is not enough on the form yet to scope by.
+     */
+    paramsFrom: (values: Record<string, unknown>) => Record<string, string> | null
   }
   /** Forces capitals as you type — GSTIN, PAN, IFSC and codes are never lower case. */
   uppercase?: boolean
@@ -465,6 +492,54 @@ export function MasterFormDialog<T extends { id: string }>({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, fields, watchedKey])
 
+  // Candidates a duplicateCheck field is compared against, keyed by field
+  // name. Read once per change of what its paramsFrom returns, not on every
+  // keystroke — dupScopeKey stands in for those params the same way
+  // watchedKey stands in for optionsFromField's above.
+  const [dupCandidates, setDupCandidates] = useState<Record<string, Record<string, unknown>[]>>({})
+  const dupScopeKey = fields
+    .filter((f) => f.duplicateCheck)
+    .map((f) => {
+      const params = f.duplicateCheck!.paramsFrom(values)
+      return `${f.name}:${params ? Object.entries(params).sort().map(([k, v]) => `${k}=${v}`).join('&') : ''}`
+    })
+    .join('|')
+
+  useEffect(() => {
+    if (!open) return
+
+    const dupFields = fields.filter((f) => f.duplicateCheck)
+    if (dupFields.length === 0) return
+
+    let cancelled = false
+
+    void Promise.all(
+      dupFields.map(async (f) => {
+        const params = f.duplicateCheck!.paramsFrom(values)
+        if (!params) return [f.name, []] as const
+        try {
+          const res = (await masterResource<Record<string, unknown>>(f.duplicateCheck!.resource).list({
+            ...params,
+            limit: 200,
+            active: true,
+          })) as Paginated<Record<string, unknown>>
+          return [f.name, res.data] as const
+        } catch {
+          return [f.name, []] as const
+        }
+      }),
+    ).then((entries) => {
+      if (!cancelled) setDupCandidates(Object.fromEntries(entries))
+    })
+
+    return () => {
+      cancelled = true
+    }
+    // dupScopeKey stands in for the actual scoped values here on purpose —
+    // see the comment above it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, fields, dupScopeKey])
+
   // Escape closes this form only — opened over another dialog, the one
   // underneath stays open.
   useEscape(() => {
@@ -511,7 +586,9 @@ export function MasterFormDialog<T extends { id: string }>({
 
     setValues((v) => {
       const updated = { ...v, [name]: next }
-      for (const r of field?.resets ?? []) updated[r] = ''
+      if (!field?.resetsWhen || field.resetsWhen(v, updated)) {
+        for (const r of field?.resets ?? []) updated[r] = ''
+      }
 
       if (field?.fills && field.optionsFrom && typeof next === 'string' && next) {
         const { valueKey = 'id' } = field.optionsFrom
@@ -712,6 +789,21 @@ export function MasterFormDialog<T extends { id: string }>({
     return acc
   }, {})
 
+  /**
+   * Which of a duplicateCheck field's already-read candidates look like what
+   * is typed here now — never the record this form is itself editing. Up to
+   * three: enough to show the person what it found without the warning
+   * itself taking over the form.
+   */
+  const duplicatesFor = (f: FormField): Record<string, unknown>[] => {
+    if (!f.duplicateCheck) return []
+    const typed = String(values[f.name] ?? '').trim()
+    if (!typed) return []
+    return (dupCandidates[f.name] ?? [])
+      .filter((row) => row.id !== record?.id && looksLikeSameName(typed, String(row.name ?? '')))
+      .slice(0, 3)
+  }
+
   const HeaderIcon = RESOURCE_ICONS[resource] ?? Database
   const heading = isEdit ? `Edit ${title}` : `New ${title}`
   const code = isEdit ? (fields.find((f) => f.generated) ?? null) : null
@@ -842,6 +934,7 @@ export function MasterFormDialog<T extends { id: string }>({
                         ? (typed) => setAdding({ field: f, typed })
                         : undefined
                     }
+                    duplicates={duplicatesFor(f)}
                   />
                 ))}
               </div>
@@ -914,6 +1007,7 @@ function Field({
   onChange,
   onCreate,
   readout,
+  duplicates,
 }: {
   /** The box's id, unique on the page even with a second form open over this one. */
   id: string
@@ -929,6 +1023,8 @@ function Field({
   onCreate?: (typed: string) => void
   /** What a 'readout' field shows. */
   readout?: React.ReactNode
+  /** Existing records (see duplicateCheck) that what is typed here looks like. */
+  duplicates?: Record<string, unknown>[]
 }) {
   const type = field.type ?? 'text'
   // A description or an address is read as a paragraph, so it takes the whole
@@ -1114,6 +1210,29 @@ function Field({
       ) : (field.liveHelp?.(value) ?? field.help) ? (
         <p className="form-help">{field.liveHelp?.(value) ?? field.help}</p>
       ) : null}
+
+      {/* Never in place of the help above — both can matter at once, an empty
+        box and a possible duplicate are different things to fix. Named
+        records, not a bare count, so the warning can be checked rather than
+        taken on faith. */}
+      {duplicates && duplicates.length > 0 && (
+        <div className="mt-1.5 rounded-lg border border-amber-500/40 bg-amber-500/5 p-2.5">
+          <p className="flex items-start gap-1.5 text-xs font-medium text-amber-500">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+            {duplicates.length === 1 ? 'This looks like one already here:' : 'These look like ones already here:'}
+          </p>
+          <ul className="text-muted-foreground mt-1 space-y-0.5 pl-[19px] text-xs">
+            {duplicates.map((row) => (
+              <li key={String(row.id)}>
+                <span className="text-foreground font-mono">{String(row.code ?? '')}</span> — {String(row.name ?? '')}
+              </li>
+            ))}
+          </ul>
+          <p className="text-muted-foreground mt-1 pl-[19px] text-xs">
+            Check before saving another — a name typed differently is still a new record.
+          </p>
+        </div>
+      )}
     </div>
   )
 }

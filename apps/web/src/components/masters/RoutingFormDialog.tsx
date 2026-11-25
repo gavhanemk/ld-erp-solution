@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, CircleCheck, GripVertical, Info, ListOrdered, Loader2, Lock, Plus, Route, Save, Trash2, Truck } from 'lucide-react'
 import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -15,6 +15,7 @@ import { processFormFields } from '@/components/masters/processFormFields'
 import { lineFormFields } from '@/components/masters/lineFormFields'
 import { contractorFormFields } from '@/components/masters/contractorFormFields'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
+import { RoutingReusePanel, type RoutingReuseHandle } from './RoutingReusePanel'
 import { fetchEveryPage } from '@/lib/export'
 
 /**
@@ -68,6 +69,7 @@ export interface Routing {
   id: string
   /** Made by the system from the style; no longer typed or shown here. */
   code: string
+  copiedFrom?: { id: string; code: string; name: string; version: number } | null
   name: string
   styleId: string | null
   category: string | null
@@ -149,6 +151,7 @@ interface BomFabrics {
 
 type Applies = 'STYLE' | 'CATEGORY' | 'ANY'
 interface Row {
+  departmentId?: string
   key: string
   operationId: string
   workstationId: string
@@ -186,17 +189,18 @@ let seq = 0
 const blank = (): Row => ({ key: `n${++seq}`, operationId: '', workstationId: '', contractorId: '', execution: 'IN_HOUSE', skip: 'NEVER', isQcStep: false, smv: '', ratePerPiece: '', instructions: '' })
 const num = (v: string | number | null | undefined) => (v == null || v === '' ? '' : String(Number(v)))
 const figure = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 })
-const rowsOf = (steps: RoutingStep[] | undefined): Row[] =>
+const rowsOf = (steps: RoutingStep[] | undefined, preserveSkip = false): Row[] =>
   steps?.length
     ? [...steps]
         .sort((a, b) => a.sequence - b.sequence)
         .map((s) => ({
           key: `s${++seq}`,
           operationId: s.operationId,
+          departmentId: s.departmentId,
           workstationId: s.workstationId ?? '',
           contractorId: s.contractorId ?? '',
           execution: s.execution ?? 'IN_HOUSE',
-          skip: skipOf(s.skip),
+          skip: preserveSkip ? s.skip ?? 'NEVER' : s.operation?.kind === 'CUTTING' ? 'NEVER' : skipOf(s.skip),
           isQcStep: s.isQcStep,
           smv: num(s.smv),
           ratePerPiece: num(s.ratePerPiece),
@@ -222,7 +226,12 @@ export function RoutingFormDialog({
    */
   preset?: { styleId?: string; from?: Routing | null } | null
 }) {
-  const isEdit = Boolean(record)
+  const [creatingCopy, setCreatingCopy] = useState(false)
+  const [source, setSource] = useState<Routing | null>(null)
+  const reuseRef = useRef<RoutingReuseHandle>(null)
+  const creationKey = useRef('')
+  const savingRef = useRef(false)
+  const isEdit = Boolean(record) && !creatingCopy
   const [ops, setOps] = useState<Operation[]>([])
   const [units, setUnits] = useState<Unit[]>([])
   const [contractors, setContractors] = useState<Contractor[]>([])
@@ -267,15 +276,18 @@ export function RoutingFormDialog({
   useEffect(() => {
     if (!open) return
     setTried(false)
+    setCreatingCopy(false)
+    setSource(record ? null : preset?.from ?? null)
+    creationKey.current = crypto.randomUUID()
     const from = record ?? preset?.from ?? null
     setName(record?.name ?? (preset?.from ? preset.from.name : ''))
     setFabricItemId(from?.fabricItemId ?? '')
-    setApplies(record ? (record.styleId ? 'STYLE' : record.category ? 'CATEGORY' : 'ANY') : 'STYLE')
-    setStyleId(record?.styleId ?? preset?.styleId ?? '')
-    setCategory(record?.category ?? '')
-    setNotes(record?.notes ?? '')
-    setIsActive(record?.isActive ?? true)
-    setRows(rowsOf(from?.steps))
+    setApplies(preset?.styleId && !record ? 'STYLE' : from ? (from.styleId ? 'STYLE' : from.category ? 'CATEGORY' : 'ANY') : 'STYLE')
+    setStyleId(record?.styleId ?? preset?.styleId ?? from?.styleId ?? '')
+    setCategory(from?.category ?? '')
+    setNotes(from?.notes ?? '')
+    setIsActive(from?.isActive ?? true)
+    setRows(rowsOf(from?.steps, !record))
     setOpenKey(null)
     setError(null)
     setAllStyles(false)
@@ -338,7 +350,7 @@ export function RoutingFormDialog({
   // marked, for the step to be changed or taken off.
   const opById = useMemo(() => {
     const map = new Map<string, Operation>(ops.map((o) => [o.id, o]))
-    for (const s of (record ?? preset?.from)?.steps ?? []) {
+    for (const s of (source ?? record ?? preset?.from)?.steps ?? []) {
       if (map.has(s.operationId) || !s.operation) continue
       map.set(s.operationId, {
         id: s.operationId,
@@ -355,7 +367,7 @@ export function RoutingFormDialog({
       })
     }
     return map
-  }, [ops, record, preset])
+  }, [ops, record, preset, source])
   const processOptions = useMemo(() => [...opById.values()], [opById])
   // Where a process comes in the Process Master: the order it offers them in.
   const rank = useMemo(() => new Map(ops.map((o, i) => [o.id, i])), [ops])
@@ -370,10 +382,10 @@ export function RoutingFormDialog({
       list.push({ ...f, onHand: 0, customers: 0 })
       have.add(f.id)
     }
-    const own = (record ?? preset?.from)?.fabric
+    const own = (source ?? record ?? preset?.from)?.fabric
     if (own && !have.has(own.id)) list.push({ id: own.id, code: own.code, name: own.name, uom: own.uom?.symbol ?? '', onHand: 0, customers: 0, missing: true })
     return list
-  }, [fabrics, bomFab, record, preset])
+  }, [fabrics, bomFab, record, preset, source])
   // A style's BOM fabrics (with the colours whose BOM has each), and a fabric's styles. Where a
   // BOM exists the other list narrows to it; where none does, everything is offered.
   const fabricsOfStyle = useMemo(() => {
@@ -431,6 +443,7 @@ export function RoutingFormDialog({
     const o = given ?? opById.get(operationId)
     return {
       operationId,
+      departmentId: o?.departmentId,
       workstationId: '',
       contractorId: '',
       execution: o?.defaultExecution ?? 'IN_HOUSE',
@@ -528,7 +541,8 @@ export function RoutingFormDialog({
             : null
   const bad = (on: boolean | string | null) => (on ? 'border-red-500/70 ring-1 ring-red-500/30' : '')
 
-  const save = async () => {
+  const save = async (reviewed = false) => {
+    if (savingRef.current) return
     if (blocker) {
       // Not a silent grey button: mark what is missing, and take the eye to the first of it.
       setTried(true)
@@ -539,10 +553,16 @@ export function RoutingFormDialog({
       }, 0)
       return
     }
+    if (!reviewed && reuseRef.current) {
+      await reuseRef.current.checkBeforeSave(() => { void save(true) })
+      return
+    }
+    savingRef.current = true
     setSaving(true)
     setError(null)
     // No code: the API makes one from the style.
     const payload = {
+      ...(!isEdit ? { creationKey: creationKey.current, ...(source ? { copiedFromId: source.id, copiedFromVersion: source.version, copiedFromUpdatedAt: source.updatedAt } : {}) } : {}),
       name: name.trim(),
       styleId: applies === 'STYLE' ? styleId : null,
       category: applies === 'CATEGORY' ? category.trim() : null,
@@ -552,11 +572,11 @@ export function RoutingFormDialog({
       steps: rows.map((r, i) => ({
         sequence: i + 1,
         operationId: r.operationId,
-        departmentId: opById.get(r.operationId)!.departmentId,
+        departmentId: r.departmentId || opById.get(r.operationId)!.departmentId,
         workstationId: r.workstationId || null,
         contractorId: r.contractorId || null,
         execution: r.execution,
-        skip: kinds[i] === 'CUTTING' ? 'NEVER' : r.skip,
+        skip: r.skip,
         isQcStep: r.isQcStep,
         smv: r.smv === '' ? null : Number(r.smv),
         ratePerPiece: r.ratePerPiece === '' ? null : Number(r.ratePerPiece),
@@ -570,21 +590,51 @@ export function RoutingFormDialog({
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save. Is the API running?')
     } finally {
+      savingRef.current = false
       setSaving(false)
     }
   }
 
+  const copyRouting = (from: Routing) => {
+    setCreatingCopy(true)
+    setSource(from)
+    setName(`${from.name} - copy`)
+    if (!(applies === 'STYLE' && styleId) && !(applies === 'CATEGORY' && category)) {
+      setApplies(from.styleId ? 'STYLE' : from.category ? 'CATEGORY' : 'ANY')
+      setStyleId(from.styleId ?? '')
+      setCategory(from.category ?? '')
+    }
+    setFabricItemId(from.fabricItemId ?? '')
+    setNotes(from.notes ?? '')
+    setIsActive(from.isActive)
+    setRows(rowsOf(from.steps, true))
+    setFilled(null)
+    setAllStyles(true)
+    setAllFabrics(true)
+    setOpenKey(null)
+    setError(null)
+    setTried(false)
+  }
+
   const unitsFor = (r: Row) => {
     const o = opById.get(r.operationId)
+    const own = (source ?? record ?? preset?.from)?.steps?.find((s) => s.workstationId === r.workstationId)?.workstation
+    const available = own && !units.some((u) => u.id === own.id)
+      ? [...units, { ...own, departmentId: r.departmentId || o?.departmentId || '', type: own.type as Unit['type'] }]
+      : units
     // A line tied to one process is offered for that process only; the rest for any of their department's.
-    return units.filter(
+    return available.filter(
       (u) =>
         (u.operationId ? u.operationId === r.operationId : u.departmentId === o?.departmentId) &&
         (r.execution === 'OUTSOURCED' ? u.type === 'JOB_WORK' : u.type === 'IN_HOUSE'),
     )
   }
   /** The contractors who take on this step's process. */
-  const contractorsFor = (r: Row) => contractors.filter((c) => c.operationIds?.includes(r.operationId))
+  const contractorsFor = (r: Row) => {
+    const own = (source ?? record ?? preset?.from)?.steps?.find((s) => s.contractorId === r.contractorId)?.contractor
+    const available = own && !contractors.some((c) => c.id === own.id) ? [...contractors, { ...own, operationIds: [r.operationId] }] : contractors
+    return available.filter((c) => c.operationIds?.includes(r.operationId) || c.id === r.contractorId)
+  }
 
   // The route's totals, for the line above the steps.
   const minutes = rows.reduce((t, r) => t + (Number(r.smv) || 0), 0)
@@ -625,12 +675,26 @@ export function RoutingFormDialog({
           Cancel
         </button>
       }
-      footerNote={blocker ? <span className="warn-text">{blocker}</span> : `${rows.length} ${rows.length === 1 ? 'step' : 'steps'} · saving makes a new version for orders to come`}
+      footerNote={blocker ? <span className="warn-text">{blocker}</span> : `${rows.length} ${rows.length === 1 ? 'step' : 'steps'} · ${isEdit ? 'changes apply to future orders' : 'saves as a new, independent routing'}`}
       error={error}
       onClose={onClose}
       busy={saving}
     >
-      {record?.isLocked && (
+      <RoutingReusePanel
+        key={creationKey.current}
+        ref={reuseRef}
+        current={{
+          style: styles.find((s) => s.id === styleId), fabric: fabricOptions.find((f) => f.id === fabricItemId),
+          styleId: applies === 'STYLE' ? styleId : null, category: applies === 'CATEGORY' ? category : null, fabricItemId: fabricItemId || null,
+          steps: rows.map((r, i) => ({ ...r, sequence: i + 1, departmentId: r.departmentId || opById.get(r.operationId)?.departmentId || '', smv: r.smv === '' ? null : Number(r.smv), ratePerPiece: r.ratePerPiece === '' ? null : Number(r.ratePerPiece), operation: opById.get(r.operationId), workstation: units.find((u) => u.id === r.workstationId) ?? (source ?? record ?? preset?.from)?.steps?.find((s) => s.workstationId === r.workstationId)?.workstation, contractor: contractors.find((c) => c.id === r.contractorId) ?? (source ?? record ?? preset?.from)?.steps?.find((s) => s.contractorId === r.contractorId)?.contractor })),
+        }}
+        revision={JSON.stringify({ name, notes, isActive })}
+        excludeId={isEdit ? record?.id : source?.id}
+        source={source} editing={isEdit} disabled={saving} allowCopy={mayAdd}
+        onCopy={copyRouting}
+      />
+      {isEdit && record?.copiedFrom && <p className="text-muted-foreground text-xs">Created from {record.copiedFrom.code} · v{record.copiedFrom.version} · {record.copiedFrom.name}</p>}
+      {isEdit && record?.isLocked && (
         <p className="warn-text flex items-start gap-1.5 text-xs">
           <Lock size={13} className="mt-px shrink-0" /> Locked: its steps cannot change until it is unlocked.
         </p>
@@ -980,12 +1044,13 @@ export function RoutingFormDialog({
                     <span className="form-label lg:sr-only">Skipping</span>
                     <SmartSelect
                       className="form-input h-9"
-                      value={isCut ? 'NEVER' : r.skip}
+                      value={r.skip}
                       disabled={isCut}
                       onChange={(e) => set(r.key, { skip: e.target.value as Skip })}
                       aria-label={`Step ${i + 1} who may skip it`}
                       title={isCut ? 'Cutting makes the pieces, so it is never skipped' : SKIPS.find((s) => s.value === r.skip)?.help}
                     >
+                      {r.skip === 'OPTIONAL' && <option value="OPTIONAL">Optional (legacy)</option>}
                       {SKIPS.map((s) => (
                         <option key={s.value} value={s.value}>
                           {s.label}

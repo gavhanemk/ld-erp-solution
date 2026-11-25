@@ -1,3 +1,4 @@
+import { chargeSnapshot } from '@ld-erp/shared'
 import { Router } from 'express'
 import type { InvoiceStatus, Prisma } from '@prisma/client'
 import { z } from 'zod'
@@ -218,6 +219,9 @@ export function chargesStillToBill(dc: Billable) {
         amount: round2(Math.max(0, Number(c.amount) - (billed.get(c.chargeTypeId) ?? 0))),
         gstRate: Number(c.gstRate),
         taxTreatment: c.taxTreatment,
+        sourceChargeId: c.id, taxSnapshot: c.taxSnapshot,
+        amountMode: chargeSnapshot(c.taxSnapshot)?.amountMode ?? 'FIXED',
+        inputAmount: chargeSnapshot(c.taxSnapshot)?.amountMode === 'PERCENT' ? chargeSnapshot(c.taxSnapshot)!.inputAmount : round2(Math.max(0, Number(c.amount) - (billed.get(c.chargeTypeId) ?? 0))),
       }))
       .filter((c) => c.amount > 0),
     otherCharges: round2(Math.max(0, Number(dc.so.otherCharges) - otherBilled)),
@@ -228,7 +232,7 @@ export function chargesStillToBill(dc: Billable) {
  * Prices an invoice for a challan. The server's figures are the record; the
  * form shows the same sums as a preview.
  */
-async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: InvoiceInput) {
+async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: InvoiceInput, canOverride = false) {
   const order = dc.so
   const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, order.customerId, order.placeOfSupplyCode)
   const bills = billLines(dc)
@@ -285,7 +289,7 @@ async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: In
   // the rest — exactly the figure typed when that figure includes GST.
   const goods = lines.map((l) => ({ taxable: l.taxableValue, gstRate: l.gstRate }))
   const treatmentByType = new Map(order.charges.map((c) => [c.chargeTypeId, c.taxTreatment]))
-  const charges = await priceSalesCharges(tx, data.charges, isIntraState, goods, { split: true, treatmentByType })
+  const charges = await priceSalesCharges(tx, data.charges, isIntraState, goods, { split: true, treatmentByType, saved: order.charges, canOverride })
   const chargeTotal = round2(charges.reduce((s, c) => s + c.netAmount, 0))
   const sum = (k: 'cgst' | 'sgst' | 'igst') =>
     round2(lines.reduce((s, l) => s + l[k], 0) + charges.reduce((s, c) => s + c[k], 0))
@@ -665,10 +669,10 @@ router.get('/:id/print', async (req: AuthRequest, res) => {
  * never takes a number.
  */
 /** Bills a challan inside the caller's transaction. Exported for the checks that roll it back. */
-export async function createInvoice(tx: Prisma.TransactionClient, data: InvoiceInput, userId: string) {
+export async function createInvoice(tx: Prisma.TransactionClient, data: InvoiceInput, userId: string, canOverride = false) {
   const dc = await loadBillable(tx, data.dcId)
   const order = dc.so
-  const priced = await priceInvoice(tx, dc, data)
+  const priced = await priceInvoice(tx, dc, data, canOverride)
   const invoiceDate = data.invoiceDate ?? new Date()
   if (invoiceDate < new Date(order.orderDate.toDateString())) {
     throw new AppError(`The invoice cannot be dated before the order, ${order.soNumber}`, 400, 'BEFORE_ORDER')
@@ -741,7 +745,7 @@ export async function createInvoice(tx: Prisma.TransactionClient, data: InvoiceI
  */
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = invoiceSchema.parse(req.body)
-  const invoice = await prisma.$transaction((tx) => createInvoice(tx, data, req.user!.id), { timeout: 30_000 })
+  const invoice = await prisma.$transaction((tx) => createInvoice(tx, data, req.user!.id, userCan(req.user, 'masters', 'edit')), { timeout: 30_000 })
   await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'SalesInvoice', entityId: invoice.id, after: invoice })
   res.status(201).json({
     success: true,

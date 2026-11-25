@@ -1,8 +1,11 @@
+import { assertQtyFitsUnits, assertRequisitionFitsUnits } from '../unitQuantity.service'
 import { prisma } from '@ld-erp/database'
 import { recordAudit } from '../../lib/audit'
 import { nextDocumentNumber } from '../../lib/docNumber'
 import { withGeneratedCode } from '../../lib/masterCode'
 import { assertItemStyleColorValid } from '../../lib/itemStyleColor'
+import { typeFitsGroup } from '@ld-erp/shared'
+import { groupOfCategory, typeMismatchMessage } from '../itemGroups.service'
 import { logger } from '../../utils/logger'
 import { AppError } from '../../middleware/errorHandler'
 import { assertGeneralStores } from '../../lib/sampleStore'
@@ -650,6 +653,9 @@ const WRITES: WriteDefinition[] = [
           `I cannot tell what kind of item goes in "${category.name}". Is it a raw material, a trim, packing material, a consumable, or a finished good?`,
         )
       }
+      // The type has to fit the category's tab of Items & Products, as on screen.
+      const filed = await groupOfCategory(category.id)
+      if (filed && !typeFitsGroup(type, filed.group)) throw new Error(typeMismatchMessage(type, filed.name, filed.group))
 
       // A finished good is one style in one colour. Neither question makes
       // sense until we know it is a finished good, so they are only asked
@@ -948,6 +954,12 @@ const WRITES: WriteDefinition[] = [
         const item = await findItem(match[1].trim())
         lines.push({ itemId: item.id, name: item.name, code: item.code, qty })
       }
+      // Said before anything is confirmed: no 2.5 cartons, the same rule as the screen.
+      try {
+        await assertQtyFitsUnits(prisma, lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Asked for' })))
+      } catch (e) {
+        throw new Error(e instanceof Error ? e.message : String(e))
+      }
 
       return {
         title: 'Raise a material requisition',
@@ -974,6 +986,7 @@ const WRITES: WriteDefinition[] = [
           [String(payload.warehouseId)],
           'Ask for material from a general store; Sampling issues what it bought itself.',
         )
+        await assertQtyFitsUnits(tx, lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Asked for' })))
         const mrNumber = await nextDocumentNumber(tx, 'MR')
         return tx.materialRequisition.create({
           data: {
@@ -1118,6 +1131,8 @@ async function findDocument(number: string) {
         if (mr.status !== 'PENDING') {
           throw new Error(`${mr.mrNumber} is already ${mr.status.toLowerCase()}.`)
         }
+        // As on the requisitions screen: 2.1 cartons is refused, not approved.
+        if (approve) await assertRequisitionFitsUnits(prisma, mr.id)
         return prisma.materialRequisition.update({
           where: { id: mr.id },
           data: approve

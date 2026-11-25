@@ -105,12 +105,17 @@ export const MOVEMENT_DOC_JOIN = Prisma.sql`
       JOIN ld_erp.sample_requests sr ON sr.id = rd."requestId"
       LEFT JOIN ld_erp.customers cu ON cu.id = sr."customerId"
       WHERE s."referenceType" = 'SAMPLING' AND rd.id = s."referenceId"
+    UNION ALL
+    SELECT os.number, NULL, NULL, NULL
+      FROM ld_erp.opening_stocks os
+      WHERE s."referenceType" = 'OPENING_IMPORT' AND os.id = s."referenceId"
     LIMIT 1
   ) p ON TRUE`
 
 /** What a movement's document is, in words, for a printed statement. */
 export const DOCUMENT_LABEL: Record<string, string> = {
   OPENING_STOCK: 'Opening stock',
+  OPENING_IMPORT: 'Opening stock',
   GRN: 'Goods receipt',
   GRN_EDITED: 'Goods receipt corrected',
   GRN_CANCELLED: 'Goods receipt cancelled',

@@ -24,6 +24,13 @@ await h.type(d.locator('textarea').last(), 'Cutting and Fusing in-house, stitchi
 await h.beat(2500)
 await d.getByRole('button', { name: 'Create routing' }).first().click()
 await h.sleep(2000)
+// A routing much like an existing one asks first: review the matches, or make a new one anyway.
+const makeNew = d.getByRole('button', { name: 'Create New Routing' })
+if (await makeNew.count()) {
+  await h.beat(2000)
+  await makeNew.first().click()
+  await h.sleep(2000)
+}
 await h.beat(2500)
 if (await h.dlg().count()) return 'STILL OPEN ' + (await h.describe())
 return 'routing created: ' + (await page.locator('tbody tr').filter({ hasText: c.styleCode }).first().innerText()).replace(/\s+/g, ' ').slice(0, 200)

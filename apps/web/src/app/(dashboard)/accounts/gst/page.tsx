@@ -63,6 +63,8 @@ interface G3 {
   period: { from: string; to: string }
   outward: Tax
   nilRated: number
+  nonGst?: number
+  unclassifiedCharges?: number
   rcmInward: Tax
   toUnregistered: Array<{ pos: string; taxable: number; igst: number }>
   itc: { rcm: Heads; other: Heads; reversed: Heads; net: Heads }
@@ -496,6 +498,9 @@ export default function GstPage() {
                   <td>(d) Inward supplies liable to reverse charge</td>
                   <TaxCells t={g3.rcmInward} />
                 </tr>
+                <tr><td>(e) Non-GST outward charges</td><TaxCells t={{ taxable: g3.nonGst ?? 0, igst: 0, cgst: 0, sgst: 0 }} /></tr>
+                {(g3.unclassifiedCharges ?? 0) !== 0 && <tr><td colSpan={5} className="warn-text">Unclassified historical charges: {inr(g3.unclassifiedCharges ?? 0)}. Review before filing.</td></tr>}
+
               </tbody>
               <tfoot>
                 <tr>

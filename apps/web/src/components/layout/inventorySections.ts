@@ -20,8 +20,11 @@ export const INVENTORY_SECTIONS: InventorySection[] = [
       { label: 'Stock', href: '/inventory/stock' },
       { label: 'Stock Documents', href: '/inventory/documents' },
       { label: 'Stock Count', href: '/inventory/count' },
+      { label: 'Opening Stock', href: '/inventory/opening-stock' },
     ],
   },
+  // Work in progress and finished goods by process and size, moved process to process.
+  { label: 'Process Stock', tabs: [{ label: 'Process Stock', href: '/inventory/process-stock' }] },
   // Every movement in and out, with its document and party: its own line, so
   // "where did it go" is one click from anywhere.
   { label: 'Inward & Outward', tabs: [{ label: 'Inward & Outward', href: '/inventory/ledger' }] },
@@ -39,6 +42,7 @@ export const INVENTORY_SECTIONS: InventorySection[] = [
       { label: 'Finished Goods In', href: '/inventory/finished-goods' },
       { label: 'Garment Tags', href: '/inventory/garment-tags' },
       { label: 'Garment In / Out', href: '/inventory/garment-moves' },
+      { label: 'Cartons', href: '/inventory/cartons' },
       { label: 'Track & Trace', href: '/inventory/trace' },
     ],
   },

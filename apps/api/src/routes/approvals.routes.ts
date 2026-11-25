@@ -1,3 +1,4 @@
+import { assertRequisitionFitsUnits } from '../services/unitQuantity.service'
 import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
@@ -136,6 +137,8 @@ async function approve(
       'SELF_APPROVAL',
     )
   }
+  // As on the requisitions screen: 2.1 cartons is refused, not approved.
+  await assertRequisitionFitsUnits(prisma, id)
 
   await decidePending(id, before.mrNumber, {
     status: 'APPROVED',

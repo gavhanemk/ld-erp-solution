@@ -21,6 +21,8 @@ const lineSchema = z.object({
   poLineId: z.string().min(1, 'Every line has to say which order line it is against'),
   warehouseId: z.string().min(1, 'Pick the store the goods went into'),
   receivedQty: qty,
+  /** The quantities are in the item's own unit (a loose delivery), not the pack the order was placed in. */
+  inStockUnit: z.boolean().optional(),
   /*
    * Still accepted from the wire, still ignored.
    *

@@ -1,5 +1,8 @@
 'use client'
 
+import { inPack } from '@/lib/packs'
+import { chargeSnapshot } from '@ld-erp/shared'
+
 import { Fragment, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
@@ -80,6 +83,9 @@ interface BillLine {
   igst: string
   amount: string
   item: { code: string; name: string; uom?: { symbol: string } | null }
+  /** The pack it was billed in (a box of 20 pcs); qty is in the item's own unit. */
+  uomFactor?: string | number
+  uom?: { symbol: string } | null
   grnLine?: { grn: { grnNumber: string } } | null
 }
 
@@ -118,6 +124,7 @@ interface PrintData {
     createdBy: { name: string } | null
     lines: BillLine[]
     charges: Array<{
+      taxSnapshot?: unknown
       id: string
       amount: string
       gstRate: string
@@ -256,7 +263,7 @@ export default function PurchaseBillPrintPage() {
     const namesAt = (rate: number) =>
       live
         .filter((c) => Number(c.gstRate) === rate)
-        .map((c) => c.chargeType.name)
+        .map((c) => (chargeSnapshot(c.taxSnapshot)?.name ?? c.chargeType.name))
         .join(', ') || 'Charges'
     const round2 = (n: number) => Math.round(n * 100) / 100
 
@@ -630,8 +637,9 @@ export default function PurchaseBillPrintPage() {
                 </td>
                 <td style={{ ...td, textAlign: 'center', ...NUM }}>{l.hsnCode || '—'}</td>
                 <td style={{ ...td, textAlign: 'center', ...NUM }}>
-                  {qtyFmt(l.qty)}
-                  {l.item.uom?.symbol ? ` (${l.item.uom.symbol})` : ''}
+                  {qtyFmt(inPack(l).qty)}
+                  {inPack(l).unit ? ` (${inPack(l).unit})` : ''}
+                  {inPack(l).pieces && <div style={{ fontSize: '9.5px', color: '#64748b' }}>= {inPack(l).pieces}</div>}
                 </td>
                 <td style={{ ...td, textAlign: 'right', ...NUM }}>{money(l.unitPrice)}</td>
                 <td style={{ ...td, textAlign: 'right', ...NUM }}>{money(l.discount)}</td>
@@ -647,7 +655,7 @@ export default function PurchaseBillPrintPage() {
               <tr key={c.id}>
                 <td style={{ ...td, textAlign: 'center', ...NUM }}>{bill.lines.length + i + 1}</td>
                 <td style={td}>
-                  <div style={{ fontWeight: 700, color: NAVY }}>{c.chargeType.name}</div>
+                  <div style={{ fontWeight: 700, color: NAVY }}>{(chargeSnapshot(c.taxSnapshot)?.name ?? c.chargeType.name)}</div>
                 </td>
                 <td style={{ ...td, textAlign: 'center' }}>—</td>
                 <td style={{ ...td, textAlign: 'center' }} />

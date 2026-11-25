@@ -130,6 +130,9 @@ interface AdjustableLine {
   gstRate: number
   billedQty: number
   billedRate: number
+  /** The pack billedRate is per (quantities are in pieces): a box of 20 is 20. */
+  packSymbol?: string | null
+  packFactor?: number
   billedTaxable: number
   adjustedQty: number
   adjustedValue: number
@@ -178,6 +181,9 @@ interface AdjustableGrnLine {
   gstRate: number
   rejectedQty: number
   rejectedRate: number
+  /** The pack rejectedRate is per: a box of 20 is 20. */
+  packSymbol?: string | null
+  packFactor?: number
   receivedQty: number
   acceptedQty: number
   notedQty: number
@@ -223,6 +229,16 @@ const inr = (v: number) =>
 const qtyFmt = (v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 3 })
 
 const round2 = (n: number) => Math.round(n * 100) / 100
+
+/** What one of the pack a line's price is per holds (20 for a box of 20); 1 for a typed line. */
+const packOfLine = (l: Pick<FormLine, 'meta' | 'grnMeta'>) => l.meta?.packFactor ?? l.grnMeta?.packFactor ?? 1
+/** A line's value: pieces ÷ what one pack holds × the price per pack. 10 pcs at ₹99 a box of 20 is ₹49.50. */
+const lineValue = (l: Pick<FormLine, 'qty' | 'unitPrice' | 'meta' | 'grnMeta'>) => round2((num(l.qty) / packOfLine(l)) * num(l.unitPrice))
+/** " / box" after a price, for a line priced per pack. */
+const perPack = (l: Pick<FormLine, 'meta' | 'grnMeta'>) => {
+  const sym = l.meta?.packSymbol ?? l.grnMeta?.packSymbol
+  return sym && packOfLine(l) !== 1 ? ` / ${sym}` : ''
+}
 
 /**
  * The GST % box on a typed line. The line holds the rate as a number, so the
@@ -789,7 +805,7 @@ export function PurchaseNoteDialog({
     let igst = 0
 
     for (const l of picked) {
-      const value = round2(num(l.qty) * num(l.unitPrice))
+      const value = lineValue(l)
       const tax = round2(value * (l.gstRate / 100))
       taxable += value
       if (intra) {
@@ -835,7 +851,7 @@ export function PurchaseNoteDialog({
       if (rule?.consumesQty && qty > l.meta.remainingQty + 0.0005) {
         return `Only ${qtyFmt(l.meta.remainingQty)}${l.meta.uom ? ` ${l.meta.uom}` : ''} left to adjust`
       }
-      const value = round2(qty * num(l.unitPrice))
+      const value = lineValue(l)
       if (value > l.meta.remainingValue + 0.005) {
         return `That comes to ₹${inr(value)}; only ₹${inr(l.meta.remainingValue)} of this line is still adjustable`
       }
@@ -1531,7 +1547,7 @@ export function PurchaseNoteDialog({
                             {formLines.map((l, i) => {
                               const g = l.grnMeta
                               const problem = problems[i]
-                              const value = round2(num(l.qty) * num(l.unitPrice))
+                              const value = lineValue(l)
                               const item = itemById.get(l.itemId)
                               return (
                                 <tr key={i} data-grid-row className="border-border/60 border-b last:border-0">
@@ -1803,7 +1819,7 @@ export function PurchaseNoteDialog({
                           {formLines.map((l, i) => {
                             const m = l.meta!
                             const problem = problems[i]
-                            const value = round2(num(l.qty) * num(l.unitPrice))
+                            const value = lineValue(l)
                             return (
                               <tr
                                 key={l.billLineId ?? i}
@@ -1866,7 +1882,7 @@ export function PurchaseNoteDialog({
                                         {m.uom ? ` ${m.uom}` : ''} billed
                                       </span>
                                       <span className="text-muted-foreground block text-[11px] opacity-70">
-                                        @ ₹{inr(m.billedRate)}
+                                        @ ₹{inr(m.billedRate)}{m.packSymbol && (m.packFactor ?? 1) !== 1 ? ` / ${m.packSymbol}` : ''}
                                       </span>
                                     </>
                                   )}
@@ -1955,7 +1971,7 @@ export function PurchaseNoteDialog({
                                   ) : (
                                     <>
                                       {qtyFmt(m.billedQty)}
-                                      {m.uom ? ` ${m.uom}` : ''} billed @ ₹{inr(m.billedRate)}
+                                      {m.uom ? ` ${m.uom}` : ''} billed @ ₹{inr(m.billedRate)}{m.packSymbol && (m.packFactor ?? 1) !== 1 ? ` / ${m.packSymbol}` : ''}
                                     </>
                                   )}{' '}
                                   ·{' '}
@@ -2441,7 +2457,7 @@ export function PurchaseNoteDialog({
                           ₹{inr(num(l.unitPrice))}
                         </td>
                         <td className="text-foreground px-2.5 py-1.5 text-right font-medium tabular-nums">
-                          ₹{inr(round2(num(l.qty) * num(l.unitPrice)))}
+                          ₹{inr(lineValue(l))}
                         </td>
                       </tr>
                     ))}

@@ -196,7 +196,8 @@ export const goodsReceiptRegister: ReportDefinition = {
             rejectedQty: true,
             acceptedQty: true,
             unitRate: true,
-            poLine: { select: { unitRate: true, discount: true } },
+            uomFactor: true,
+            poLine: { select: { unitRate: true, discount: true, uomFactor: true } },
             billLines: {
               where: { bill: { status: { not: 'CANCELLED' } } },
               select: {
@@ -222,11 +223,12 @@ export const goodsReceiptRegister: ReportDefinition = {
         const unbilledQty = cancelledReceipt ? 0 : round2(Math.max(0, received - billedQty))
         // The receipt's own rate, falling back to the order line's net of its
         // discount for a receipt booked before receipts carried one.
-        const receiptRate = Number(l.unitRate)
+        // Quantities here are in pieces; a line bought in a pack is priced per it, so its rate per piece.
+        const receiptRate = Number(l.unitRate) / (Number(l.uomFactor) || 1)
         const rate =
           receiptRate > 0
             ? receiptRate
-            : round2(Number(l.poLine?.unitRate ?? 0) * (1 - Number(l.poLine?.discount ?? 0) / 100))
+            : round2((Number(l.poLine?.unitRate ?? 0) / (Number(l.poLine?.uomFactor ?? 1) || 1)) * (1 - Number(l.poLine?.discount ?? 0) / 100))
         const day = new Date(g.grnDate.getFullYear(), g.grnDate.getMonth(), g.grnDate.getDate())
         return {
           grnDate: g.grnDate,

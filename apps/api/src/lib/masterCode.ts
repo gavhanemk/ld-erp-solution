@@ -219,15 +219,19 @@ export async function nextMasterCode(
     select: { code: true },
   })
 
-  const highest = rows.reduce((max, row) => {
-    // Only the tail after the last dash counts, so an imported FAB-COT-001
-    // still reads as 1 rather than as nothing.
-    const tail = row.code.slice(row.code.lastIndexOf('-') + 1)
-    const n = Number.parseInt(tail, 10)
+  return `${prefix}-${String(highestCodeNumber(rows.map((r) => r.code)) + 1 + attempt).padStart(3, '0')}`
+}
+
+/**
+ * The highest number among codes of one prefix. Only the tail after the last
+ * dash counts, so an imported FAB-COT-001 still reads as 1 rather than as
+ * nothing.
+ */
+export function highestCodeNumber(codes: string[]): number {
+  return codes.reduce((max, code) => {
+    const n = Number.parseInt(code.slice(code.lastIndexOf('-') + 1), 10)
     return Number.isFinite(n) && n > max ? n : max
   }, 0)
-
-  return `${prefix}-${String(highest + 1 + attempt).padStart(3, '0')}`
 }
 
 /** Whether this register has its codes made up for it. */

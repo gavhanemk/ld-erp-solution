@@ -1,4 +1,5 @@
 import { packCount } from '@/components/packages/packageTypes'
+import { qtyPlaces, roundDownToPlaces, roundUpToPlaces } from '@ld-erp/shared'
 
 /**
  * What the store can do with a requisition, line by line: what is still owed,
@@ -20,7 +21,9 @@ export interface ProcessLine {
     id: string
     code: string
     name: string
-    uom: { symbol: string }
+    /** Places after the point its quantities may carry; empty: its unit's. */
+    decimalPlaces?: number | null
+    uom: { symbol: string; decimalPlaces?: number }
     category?: { name: string; parent: { name: string } | null } | null
   }
   warehouse: { id: string; name: string }
@@ -61,6 +64,8 @@ export const r3 = (v: number) => Math.round(v * 1000) / 1000
 /** One item's figures, the same on every tab. */
 export function planRows<L extends ProcessLine>(lines: L[], data: FulfilData) {
   return lines.map((l) => {
+    // 0 for cartons and pieces: only whole ones leave a rack, and what is short is bought whole.
+    const places = qtyPlaces(l.item)
     const f = data.lines.find((x) => x.id === l.id)
     const asked = Number(f?.requestedQty ?? l.requestedQty)
     const issued = Number(f?.issuedQty ?? l.issuedQty)
@@ -92,7 +97,8 @@ export function planRows<L extends ProcessLine>(lines: L[], data: FulfilData) {
         )
         return {
           ...s,
-          free: r3(Math.max(0, s.onHand - s.others)),
+          // What can be handed over: 0.6 of a carton on the rack is none.
+          free: roundDownToPlaces(r3(Math.max(0, s.onHand - s.others)), places),
           racks: p?.racks ?? [],
           // "3 rolls" only when the rolls are all of the stock there; a rejected roll held apart would make it a wrong count.
           packs: p && Math.abs(p.qty - s.onHand) < 0.001 ? packCount(p.n, p.packType) : null,
@@ -104,6 +110,7 @@ export function planRows<L extends ProcessLine>(lines: L[], data: FulfilData) {
     return {
       l,
       unit: l.item.uom.symbol,
+      places,
       category: cat ? (cat.parent ? `${cat.parent.name} › ${cat.name}` : cat.name) : null,
       asked,
       issued,
@@ -127,7 +134,7 @@ export type PlanRow<L extends ProcessLine = ProcessLine> = ReturnType<typeof pla
 const fmtQty = (v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 3 })
 
 /** What the store cannot give of what is still owed. */
-export const shortOf = (r: PlanRow) => r3(Math.max(0, r.owed - r.free))
+export const shortOf = (r: PlanRow) => roundUpToPlaces(r3(Math.max(0, r.owed - r.free)), r.places)
 /** Already on a PO for at least what is short: nothing more to buy. */
 export const coveredByPo = (r: PlanRow) => r.ordered > 0 && r.owed > 0 && r.ordered + 1e-9 >= shortOf(r)
 /** No indent box on the Buy tab: nothing owed, the customer's own, or a PO covers it. */
@@ -144,7 +151,7 @@ export function startingQty(rows: PlanRow[], canIssue: boolean) {
   const buy: Record<string, string> = {}
   for (const r of rows) {
     const onOrder = Math.max(0, r.ordered - r.received)
-    const give = canIssue ? Math.max(0, Math.min(r.owed - onOrder, r.free)) : 0
+    const give = canIssue ? roundDownToPlaces(Math.max(0, Math.min(r.owed - onOrder, r.free)), r.places) : 0
     issue[r.l.id] = give > 0 ? String(r3(give)) : ''
     reserve[r.l.id] = r.reserved > 0 ? String(r.reserved) : ''
     // Only what is short, never below what is already on a PO. Where nothing

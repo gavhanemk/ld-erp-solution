@@ -36,9 +36,25 @@ interface Label {
   styleNo?: string | null
   /** Bundle 2 of 5, when a receipt line came in more than one. */
   seq?: { n: number; of: number } | null
+  rack?: string | null
+  /** Its item's own number of copies, when not its kind's usual. */
+  copies?: number | null
+}
+/** How a kind of package's sticker looks, from Stickers → Sticker settings. */
+interface Template {
+  size: 'sheet' | 'roll' | 'small' | 'custom'
+  width?: number | null
+  height?: number | null
+  codes: 'both' | 'qr' | 'barcode'
+  fields: string[]
+  font: 'S' | 'M' | 'L'
+  logo: boolean
+  copies: number
 }
 interface Payload {
   company: string
+  logo?: string | null
+  templates?: Record<string, Template>
   packages: Label[]
 }
 /** A label for stock going out: what left, on which document, to whom. */
@@ -56,23 +72,34 @@ interface OutLabel {
   date: string
 }
 
-type Layout = 'sheet' | 'roll' | 'small'
-/** What a sticker is scanned by: a QR for a phone camera, a barcode for a handheld scanner, or both. */
-type Codes = 'both' | 'qr' | 'bar'
-const CODES: Record<Codes, string> = { both: 'QR code and barcode', qr: 'QR code only', bar: 'Barcode only' }
+type Layout = 'sheet' | 'roll' | 'small' | 'custom'
+/** What a sticker is scanned by: a QR for a phone camera, a barcode for a handheld scanner, or both — or as each kind is set. */
+type Codes = 'kind' | 'both' | 'qr' | 'bar'
+const CODES: Record<Codes, string> = { kind: 'As set for each kind', both: 'QR code and barcode', qr: 'QR code only', bar: 'Barcode only' }
+const FROM_TEMPLATE: Record<Template['codes'], Exclude<Codes, 'kind'>> = { both: 'both', qr: 'qr', barcode: 'bar' }
+const FONT: Record<Template['font'], number> = { S: 0.85, M: 1, L: 1.15 }
+/** A sticker's template: its kind's, else "Any package", else everything shown. */
+const templateOf = (t: Payload['templates'], packType: string): Template | null => t?.[packType] ?? t?.DEFAULT ?? null
+const shows = (t: Template | null, field: string) => !t || t.fields.includes(field)
 
 const day = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' })
 
 /** Type sizes per layout, so the three stickers share one design at three scales. */
 // `qrBoth` is the QR's size with a barcode under it; `bar` the barcode's height
 // beside a QR, `barOnly` without one.
-const DIM: Record<
-  Layout,
-  { qr: string; qrBoth: string; bar: string; barOnly: string; id: string; tag: string; item: string; code: string; qty: string; unit: string; line: string; foot: string | null; gap: string }
-> = {
+type Dim = { qr: string; qrBoth: string; bar: string; barOnly: string; id: string; tag: string; item: string; code: string; qty: string; unit: string; line: string; foot: string | null; gap: string }
+const DIM: Record<Exclude<Layout, 'custom'>, Dim> = {
   sheet: { qr: '23mm', qrBoth: '18mm', bar: '5.5mm', barOnly: '7mm', id: '10.5pt', tag: '6pt', item: '8pt', code: '6.3pt', qty: '15pt', unit: '8pt', line: '6pt', foot: '5.5pt', gap: '2mm' },
   roll: { qr: '33mm', qrBoth: '22mm', bar: '7mm', barOnly: '11mm', id: '14pt', tag: '7.5pt', item: '10.5pt', code: '7.8pt', qty: '22pt', unit: '10pt', line: '7.4pt', foot: '7pt', gap: '3mm' },
   small: { qr: '15.5mm', qrBoth: '11.5mm', bar: '4.5mm', barOnly: '6mm', id: '8.5pt', tag: '5pt', item: '6.6pt', code: '5.4pt', qty: '11pt', unit: '6.4pt', line: '5.3pt', foot: null, gap: '1.5mm' },
+}
+/** A custom size takes the design of the nearest of the three. */
+const nearest = (w: number, h: number): Exclude<Layout, 'custom'> => (w * h >= 2900 ? 'roll' : w * h >= 1600 ? 'sheet' : 'small')
+/** The type in a size scaled for the kind's font setting; codes keep their size. */
+const scaled = (d: Dim, f: number): Dim => {
+  if (f === 1) return d
+  const pt = (v: string) => `${(parseFloat(v) * f).toFixed(2)}pt`
+  return { ...d, id: pt(d.id), tag: pt(d.tag), item: pt(d.item), code: pt(d.code), qty: pt(d.qty), unit: pt(d.unit), line: pt(d.line), foot: d.foot ? pt(d.foot) : null }
 }
 
 /**
@@ -82,20 +109,46 @@ const DIM: Record<
  * at the left, the barcode along the bottom, or both; the ID is also printed
  * in full in the header, so a sticker the scanner cannot read can be typed.
  */
-function Sticker({ p, company, layout, codes }: { p: Label; company: string; layout: Layout; codes: Codes }) {
-  const d = DIM[layout]
+function Sticker({
+  p,
+  company,
+  layout,
+  codes: chosen,
+  template: t,
+  logo,
+  custom,
+}: {
+  p: Label
+  company: string
+  layout: Layout
+  codes: Codes
+  template: Template | null
+  logo: string | null
+  custom: { w: number; h: number }
+}) {
+  const base = layout === 'custom' ? nearest(custom.w, custom.h) : layout
+  const d = scaled(DIM[base], FONT[t?.font ?? 'M'])
+  const codes: Exclude<Codes, 'kind'> = chosen === 'kind' ? FROM_TEMPLATE[t?.codes ?? 'both'] : chosen
   const roll = p.packType === 'ROLL'
-  const tight = layout === 'small'
+  const tight = base === 'small'
   const qrSize = codes === 'both' ? d.qrBoth : d.qr
   // With a barcode along the bottom there is less height: one line of name
   // where the sticker is wide enough.
   const nameLines = tight || codes === 'bar' || (layout === 'sheet' && codes === 'both') ? 1 : 2
   const foot = codes === 'qr' && d.foot
-  const codeLine = [p.itemCode, p.styleNo ? `Style ${p.styleNo}` : null].filter(Boolean).join(' · ')
-  const lotLine = [p.lotNo ? `Lot ${p.lotNo}` : roll ? 'No lot' : null, p.challanNo ? `Challan ${p.challanNo}` : null].filter(Boolean).join(' · ')
-  const docLine = [p.grnNumber ?? 'Labelled', day(p.date), p.poNumber].filter(Boolean).join(' · ')
+  // What the kind is set to show (Stickers → Sticker settings); everything when not set.
+  const codeLine = [shows(t, 'itemCode') ? p.itemCode : null, shows(t, 'style') && p.styleNo ? `Style ${p.styleNo}` : null].filter(Boolean).join(' · ')
+  const lotLine = [
+    shows(t, 'lot') ? (p.lotNo ? `Lot ${p.lotNo}` : roll ? 'No lot' : null) : null,
+    shows(t, 'challan') && p.challanNo ? `Challan ${p.challanNo}` : null,
+    shows(t, 'rack') && p.rack ? `Rack ${p.rack}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  const docLine = [shows(t, 'document') ? (p.grnNumber ?? 'Labelled') : null, shows(t, 'document') ? day(p.date) : null, shows(t, 'po') ? p.poNumber : null].filter(Boolean).join(' · ')
+  const note = shows(t, 'notes') ? p.note : null
   // A customer's material says so across the top, so it is never taken for ours.
-  const where = p.store
+  const where = shows(t, 'store') ? p.store : ''
   return (
     <div className="sticker pk">
       {p.held && (
@@ -109,6 +162,10 @@ function Sticker({ p, company, layout, codes }: { p: Label; company: string; lay
         </div>
       )}
       <div className="pk-head">
+        {t?.logo && logo && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={logo} alt="" className="pk-logo" style={{ height: d.id }} />
+        )}
         <span className="pk-id" style={{ fontSize: d.id }}>{p.code}</span>
         {!foot && !tight && (
           <span className="pk-where" style={{ fontSize: d.tag }}>
@@ -117,7 +174,7 @@ function Sticker({ p, company, layout, codes }: { p: Label; company: string; lay
         )}
         <span className="pk-tag" style={{ fontSize: d.tag }}>
           {packLabel(p.packType).toUpperCase()}
-          {p.seq ? ` ${p.seq.n}/${p.seq.of}` : ''}
+          {p.seq && shows(t, 'packNo') ? ` ${p.seq.n}/${p.seq.of}` : ''}
         </span>
       </div>
       <div className="pk-body" style={{ gap: d.gap }}>
@@ -133,7 +190,7 @@ function Sticker({ p, company, layout, codes }: { p: Label; company: string; lay
             <span style={{ fontSize: d.qty, fontWeight: 800, lineHeight: 1 }}>{roll ? p.qty.toFixed(2) : qtyText(p.qty)}</span>
             <span style={{ fontSize: d.unit, fontWeight: 700 }}>{p.unit}</span>
             {/* What is inside: "1 box · 144 pcs". */}
-            {p.content && (
+            {p.content && shows(t, 'contents') && (
               <span style={{ fontSize: d.unit, fontWeight: 700, whiteSpace: 'nowrap' }}>
                 · {qtyText(p.content.qty)} {p.content.unit}
               </span>
@@ -142,19 +199,19 @@ function Sticker({ p, company, layout, codes }: { p: Label; company: string; lay
           {tight ? (
             // Room for one line: the lot first, as it is what a roll is picked by.
             <div style={{ fontSize: d.line, ...clip }}>
-              {p.lotNo ? <b>Lot {p.lotNo} · </b> : null}
-              {p.grnNumber ?? day(p.date)}
+              {p.lotNo && shows(t, 'lot') ? <b>Lot {p.lotNo} · </b> : null}
+              {shows(t, 'document') ? (p.grnNumber ?? day(p.date)) : null}
             </div>
           ) : (
             <>
               {/* The receipt's note on this package rides on the lot line, so no other line is pushed off. */}
-              {(lotLine || p.note) && (
+              {(lotLine || note) && (
                 <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>
                   {lotLine}
-                  {p.note && <i>{lotLine ? ' · ' : ''}{p.note}</i>}
+                  {note && <i>{lotLine ? ' · ' : ''}{note}</i>}
                 </div>
               )}
-              <div style={{ fontSize: d.line, ...clip }}>{docLine}</div>
+              {docLine && <div style={{ fontSize: d.line, ...clip }}>{docLine}</div>}
             </>
           )}
         </div>
@@ -167,7 +224,7 @@ function Sticker({ p, company, layout, codes }: { p: Label; company: string; lay
       {foot && (
         <div className="pk-foot" style={{ fontSize: foot }}>
           {/* Who sent it, when it came from a supplier: every sticker is ours anyway. */}
-          <span style={clip}>{p.supplier ?? company}</span>
+          <span style={clip}>{(shows(t, 'supplier') ? p.supplier : null) ?? company}</span>
           <span style={{ ...clip, textAlign: 'right' }}>{where}</span>
         </div>
       )}
@@ -182,8 +239,10 @@ const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis
  * too, then what it is, how much, and where it is going. Same sizes and lines
  * as a package sticker, so one sheet can carry both.
  */
-function OutSticker({ o, company, layout, codes }: { o: OutLabel; company: string; layout: Layout; codes: Codes }) {
-  const d = DIM[layout]
+function OutSticker({ o, company, layout, codes: chosen, custom }: { o: OutLabel; company: string; layout: Layout; codes: Codes; custom: { w: number; h: number } }) {
+  const base = layout === 'custom' ? nearest(custom.w, custom.h) : layout
+  const d = DIM[base]
+  const codes: Exclude<Codes, 'kind'> = chosen === 'kind' ? 'both' : chosen
   const qrSize = codes === 'both' ? d.qrBoth : d.qr
   const foot = codes === 'qr' && d.foot
   return (
@@ -206,14 +265,14 @@ function OutSticker({ o, company, layout, codes }: { o: OutLabel; company: strin
           </div>
         )}
         <div className="pk-info">
-          <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: layout === 'small' || codes === 'bar' || (layout === 'sheet' && codes === 'both') ? 1 : 2 }}>{o.item}</div>
+          <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: base === 'small' || codes === 'bar' || (base === 'sheet' && codes === 'both') ? 1 : 2 }}>{o.item}</div>
           <div style={{ fontSize: d.code, fontFamily: 'ui-monospace, monospace', ...clip }}>{o.itemCode}</div>
           <div className="pk-qty">
             <span style={{ fontSize: d.qty, fontWeight: 800, lineHeight: 1 }}>{qtyText(o.qty)}</span>
             <span style={{ fontSize: d.unit, fontWeight: 700 }}>{o.unit}</span>
           </div>
           <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>To {o.to}</div>
-          {layout !== 'small' && (
+          {base !== 'small' && (
             <div style={{ fontSize: d.line, ...clip }}>
               From {o.from} · {day(o.date)}
             </div>
@@ -235,10 +294,17 @@ function OutSticker({ o, company, layout, codes }: { o: OutLabel; company: strin
   )
 }
 
-const SIZES: Record<Layout, { label: string; page: string }> = {
+const SIZES: Record<Exclude<Layout, 'custom'>, { label: string; page: string }> = {
   sheet: { label: 'A4 sheet, 24 a page (70 × 37 mm)', page: 'A4' },
   roll: { label: 'Label printer, 75 × 50 mm', page: '75mm 50mm' },
   small: { label: 'Label printer, 50 × 25 mm', page: '50mm 25mm' },
+}
+/** The kind most of these packages are, whose settings choose the size. */
+function usualTemplate(d: Payload): Template | null {
+  const count = new Map<string, number>()
+  for (const p of d.packages) count.set(p.packType, (count.get(p.packType) ?? 0) + 1)
+  const top = [...count.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]
+  return top ? templateOf(d.templates, top) : null
 }
 
 /**
@@ -260,17 +326,23 @@ function Stickers() {
   const marked = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [layout, setLayout] = useState<Layout>('sheet')
-  const [codes, setCodes] = useState<Codes>('both')
-  const [copies, setCopies] = useState(1)
+  const [codes, setCodes] = useState<Codes>('kind')
+  // 0: as set for each kind (and each item's own number); else that many of every one.
+  const [copies, setCopies] = useState(0)
+  const [custom, setCustom] = useState({ w: 70, h: 37 })
+  const savedLayout = useRef<Layout | null>(null)
 
   useEffect(() => {
     try {
       const saved = localStorage.getItem('package-label-layout') as Layout | null
-      if (saved && saved in SIZES) setLayout(saved)
+      if (saved && (saved in SIZES || saved === 'custom')) {
+        savedLayout.current = saved
+        setLayout(saved)
+      }
       const savedCodes = localStorage.getItem('package-label-codes') as Codes | null
       if (savedCodes && savedCodes in CODES) setCodes(savedCodes)
     } catch {
-      /* no storage: keep the sheet, with both codes */
+      /* no storage: the sticker settings decide */
     }
   }, [])
 
@@ -286,7 +358,12 @@ function Stickers() {
     ])
       .then(([pk, ow]) => {
         setOutward(ow?.labels ?? [])
-        setData({ company: pk?.company || ow?.company || '', packages: pk?.packages ?? [] })
+        const loaded: Payload = { company: pk?.company || ow?.company || '', logo: pk?.logo ?? null, templates: pk?.templates, packages: pk?.packages ?? [] }
+        setData(loaded)
+        // The size this computer picked before; else the one the usual kind is set to.
+        const usual = usualTemplate(loaded)
+        if (usual?.size === 'custom' && usual.width && usual.height) setCustom({ w: usual.width, h: usual.height })
+        if (!savedLayout.current && usual) setLayout(usual.size === 'custom' && !(usual.width && usual.height) ? 'sheet' : usual.size)
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the stickers.'))
   }, [ids, out, q])
@@ -326,15 +403,17 @@ function Stickers() {
   if (!data.packages.length && !outward.length) return <p style={{ padding: 48, color: '#fff' }}>No packages to print.</p>
 
   // Labels for what went out first, then the new stickers for parts that moved.
+  // Copies: as chosen, else each item's own number, else its kind's.
+  const copiesOf = (p: Label) => copies || p.copies || templateOf(data.templates, p.packType)?.copies || 1
   const all = [
-    ...outward.flatMap((o) => Array.from({ length: copies }, (_, i) => ({ o, p: null, key: `out-${o.key}-${i}` }))),
-    ...data.packages.flatMap((p) => Array.from({ length: copies }, (_, i) => ({ o: null, p, key: `${p.id}-${i}` }))),
+    ...outward.flatMap((o) => Array.from({ length: copies || 1 }, (_, i) => ({ o, p: null, key: `out-${o.key}-${i}` }))),
+    ...data.packages.flatMap((p) => Array.from({ length: copiesOf(p) }, (_, i) => ({ o: null, p, key: `${p.id}-${i}` }))),
   ]
   const one = ({ o, p, key }: (typeof all)[number]) =>
     o ? (
-      <OutSticker key={key} o={o} company={data.company} layout={layout} codes={codes} />
+      <OutSticker key={key} o={o} company={data.company} layout={layout} codes={codes} custom={custom} />
     ) : (
-      <Sticker key={key} p={p!} company={data.company} layout={layout} codes={codes} />
+      <Sticker key={key} p={p!} company={data.company} layout={layout} codes={codes} template={templateOf(data.templates, p!.packType)} logo={data.logo ?? null} custom={custom} />
     )
   const sheets: Array<typeof all> = []
   for (let i = 0; i < all.length; i += 24) sheets.push(all.slice(i, i + 24))
@@ -381,27 +460,33 @@ function Stickers() {
         .roll .sticker { width: 75mm; height: 50mm; padding: 2.5mm 3mm; border: 0.2mm dashed #bbb; }
         .small { display: flex; flex-direction: column; align-items: center; gap: 8px; }
         .small .sticker { width: 50mm; height: 25mm; padding: 1.5mm 2mm; border: 0.2mm dashed #bbb; }
+        .custom { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+        .custom .sticker { width: ${custom.w}mm; height: ${custom.h}mm; padding: 2mm 2.5mm; border: 0.2mm dashed #bbb; }
+        .pk-logo { width: auto; max-width: 18mm; object-fit: contain; flex-shrink: 0; }
         @media print {
           .no-print { display: none !important; }
           html, body { background: #fff !important; }
           .sheet { margin: 0; break-after: page; }
           .sheet .sticker { border: 0; }
-          .roll, .small { gap: 0; }
-          .roll .sticker, .small .sticker { border: 0; break-after: page; }
+          .roll, .small, .custom { gap: 0; }
+          .roll .sticker, .small .sticker, .custom .sticker { border: 0; break-after: page; }
           .sticker, .sticker * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
         }
-        @page { size: ${SIZES[layout].page}; margin: 0; }
+        @page { size: ${layout === 'custom' ? `${custom.w}mm ${custom.h}mm` : SIZES[layout].page}; margin: 0; }
       `}</style>
       <PrintToolbar backHref="/inventory/packages" backLabel="Packages" copies={1} fileName={`Stickers ${outward[0]?.docNumber ?? data.packages[0]?.code ?? ''}`} />
       <div className="no-print sticker-options">
         <label>
           Stickers on
           <select value={layout} onChange={(e) => pick(e.target.value as Layout)}>
-            {(Object.keys(SIZES) as Layout[]).map((l) => (
+            {(Object.keys(SIZES) as Array<keyof typeof SIZES>).map((l) => (
               <option key={l} value={l}>
                 {SIZES[l].label}
               </option>
             ))}
+            <option value="custom">
+              Label printer, {custom.w} × {custom.h} mm
+            </option>
           </select>
         </label>
         <label>
@@ -417,8 +502,10 @@ function Stickers() {
         <label>
           {outward.length ? 'Copies' : 'Per package'}
           <select value={copies} onChange={(e) => setCopies(Number(e.target.value))}>
+            <option value={0}>As set</option>
             <option value={1}>One</option>
             <option value={2}>Two</option>
+            <option value={3}>Three</option>
           </select>
         </label>
         <span style={{ color: '#5a6880', fontSize: 12 }}>

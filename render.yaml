@@ -12,6 +12,10 @@ services:
   - type: web
     name: ld-erp-api
     runtime: node
+    # The free plan stops the service after 15 minutes without a request, and
+    # the next page then waits about a minute for it to start. The API calls
+    # its own address every 10 minutes so that never happens
+    # (apps/api/src/lib/keepAwake.ts). On a paid plan, set KEEP_AWAKE=off.
     plan: free
     # Closest region to Bhiwandi, so the mill is not talking to another continent.
     region: singapore

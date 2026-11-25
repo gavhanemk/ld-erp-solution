@@ -1,6 +1,7 @@
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { createItemSchema } from '../schemas/master.schemas'
+import { assertItemFitsCategory } from '../services/itemGroups.service'
 import { assertUniqueFields } from './crud'
 import { assertItemStyleColorValid, rethrowItemStyleColorClash } from './itemStyleColor'
 import { isGeneratedCode, withGeneratedCode } from './masterCode'
@@ -33,6 +34,11 @@ export const itemInclude = {
   department: { select: { id: true, name: true, code: true } },
   style: { select: { id: true, code: true, name: true, colors: true } },
   tdsSection: { select: { id: true, section: true, label: true } },
+  // The packs it is bought in (1 Box = 20 pcs), the usual one first.
+  buyUnits: {
+    select: { id: true, factor: true, isDefault: true, uom: { select: { id: true, name: true, symbol: true, decimalPlaces: true } } },
+    orderBy: [{ isDefault: 'desc' as const }, { factor: 'asc' as const }],
+  },
 }
 
 /*
@@ -56,7 +62,7 @@ export async function departmentFromCategory(
 
 /**
  * The checks an item needs that a schema cannot make, on adding and on
- * editing. A finished good is one style in one colour, and the colour must be
+ * editing. Its type has to fit its category's tab. A finished good is one style in one colour, and the colour must be
  * one of that style's own. Checked here because it needs the style looked up,
  * which a schema cannot do. On an edit the saved type, style and colour stand
  * in for whatever the edit leaves out.
@@ -66,6 +72,8 @@ export async function itemBeforeSave(
   before?: Record<string, unknown>,
 ): Promise<{ data: Record<string, unknown>; onSaveError: (err: unknown) => void }> {
   data = await departmentFromCategory(data, before)
+  // A finished good is never filed under Fabric, nor a button under Finished Goods.
+  await assertItemFitsCategory(data, before)
   const checked = await assertItemStyleColorValid(
     String(data.type ?? before?.type ?? ''),
     (data.styleId !== undefined ? data.styleId : before?.styleId) as string | null | undefined,

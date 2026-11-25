@@ -1,13 +1,15 @@
 'use client'
 
 import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
-import { uomFormFields } from '@/components/masters/uomFormFields'
+import { QTY_PLACES_LABEL, uomFormFields } from '@/components/masters/uomFormFields'
 
 interface Uom {
   id: string
   name: string
   symbol: string
   isActive: boolean
+  /** Places after the point a quantity in this unit may carry: 0 = whole numbers only. */
+  decimalPlaces: number
   /** How many items are counted in this unit. */
   _count?: { items?: number }
 }
@@ -19,6 +21,14 @@ const columns: Column<Uom>[] = [
     header: 'Symbol',
     sortable: true,
     className: 'whitespace-nowrap font-mono text-xs text-teal-400',
+  },
+  // Whether 2.5 of it can be asked for, issued or bought.
+  {
+    key: 'decimalPlaces',
+    header: 'Quantities',
+    render: (u) => (
+      <span className={u.decimalPlaces === 0 ? 'text-foreground' : 'text-muted-foreground'}>{QTY_PLACES_LABEL[u.decimalPlaces] ?? '—'}</span>
+    ),
   },
   // Before a unit is switched off, how many items would be left counted in it.
   {

@@ -456,6 +456,17 @@ enum ItemType {
   TRIM
 }
 
+/// The three tabs of Masters → Items & Products, set on a main category and
+/// taken by everything under it. Raw Materials takes raw materials, trims,
+/// packing and consumables; the other two their own type. EXPENSES is the
+/// expense heads' category, which has a screen of its own.
+enum ItemGroup {
+  RAW_MATERIALS
+  SEMI_FINISHED
+  FINISHED_GOODS
+  EXPENSES
+}
+
 enum CustomerType {
   DOMESTIC
   EXPORT
@@ -688,6 +699,7 @@ enum BOMCostBasis {
 
 model User {
   id           String     @id @default(cuid())
+  openingStocks OpeningStock[] @relation("OpeningStockCreatedBy")
   employeeCode String?    @unique
   name         String
   email        String     @unique
@@ -792,6 +804,7 @@ model User {
   fgReceiptsMade       FinishedGoodsReceipt[] @relation("FGRCreatedBy")
   fgReceiptsCancelled  FinishedGoodsReceipt[] @relation("FGRCancelledBy")
   challansMade         DeliveryChallan[]      @relation("DCCreatedBy")
+  fgCartonsPacked      FgCarton[]             @relation("FgCartonPackedBy")
   challansDispatched   DeliveryChallan[]      @relation("DCDispatchedBy")
   challansCancelled    DeliveryChallan[]      @relation("DCCancelledBy")
   mosHeld              ManufacturingOrder[]   @relation("MOHeldBy")
@@ -1002,6 +1015,7 @@ enum HsnKind {
 /// Only the total rate is stored. Within the state it is split half CGST and
 /// half SGST, across states it is all IGST, so the three can never disagree.
 model HsnCode {
+  salesChargeTypes ChargeType[] @relation("SalesChargeHsn")
   id          String  @id @default(cuid())
   code        String  @unique
   description String
@@ -1020,6 +1034,8 @@ model HsnCode {
 
   purchaseOrderCharges   PurchaseOrderCharge[]
   purchaseInvoiceCharges PurchaseInvoiceCharge[]
+  /// Charge types that start a purchase row on this code (ChargeType.defaultHsnCodeId).
+  chargeTypeDefaults     ChargeType[]
 
   @@index([isActive])
   @@map("hsn_codes")
@@ -1129,6 +1145,9 @@ model ItemCategory {
   trackPackages Boolean   @default(true)
   /// What one package of these items usually is: a roll of fabric, a box of tape.
   packType      PackType?
+  /// Which tab of Items & Products it is under. Set on a main category; a
+  /// sub-category always carries its main category's, kept equal on save.
+  itemGroup     ItemGroup @default(RAW_MATERIALS)
 
   items Item[]
 
@@ -1141,11 +1160,43 @@ model UOM {
   name     String  @unique
   symbol   String  @unique
   isActive Boolean @default(true)
+  /// How many places after the point a quantity in this unit may carry: 0 for
+  /// things that only come whole (pieces, boxes, sets), up to 3 (the stock
+  /// columns' own precision) for things measured out (metres, kilograms).
+  /// An item may set its own instead (Item.decimalPlaces).
+  decimalPlaces Int @default(3)
 
   items        Item[]
   challanLines DeliveryChallanLine[]
+  itemUnits    ItemUnit[]
+  enquiryLines PurchaseEnquiryLine[]
+  poLines      PurchaseOrderLine[]
+  grnLines     GRNLine[]
+  billLines    PurchaseInvoiceLine[]
+  returnLines  PurchaseReturnLine[]
+  noteLines    PurchaseNoteLine[]
 
   @@map("uom")
+}
+
+/// A pack an item is bought in, besides its own unit: a box of 20 pcs, a gross
+/// of 144. Purchase lines may count in it; stock, requisitions and issues stay
+/// in the item's own unit, so a box received puts its 20 pcs into stock.
+model ItemUnit {
+  id        String   @id @default(cuid())
+  itemId    String
+  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  uomId     String
+  uom       UOM      @relation(fields: [uomId], references: [id])
+  /// How many of the item's own unit one of this holds: 20 for a box of 20 pcs.
+  factor    Decimal  @db.Decimal(12, 4)
+  /// The one a new purchase line starts in. At most one per item.
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([itemId, uomId])
+  @@map("item_units")
 }
 
 model Item {
@@ -1198,13 +1249,23 @@ model Item {
   /// this only says what is inside, so a sticker can read "1 box · 144 pcs".
   contentQty   Decimal?     @db.Decimal(12, 3)
   contentUnit  String?
+  /// How many copies of each of its stickers to print, when not the package
+  /// type's usual number (a roll labelled at both ends: 2).
+  labelCopies  Int?
+  /// This item's own places after the point, when it differs from its unit's
+  /// (rolls are measured in parts, but one item's rolls may only go out
+  /// whole). Empty means the unit's (UOM.decimalPlaces).
+  decimalPlaces Int?
   isActive     Boolean      @default(true)
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
+  /// The packs it is bought in besides its own unit: 1 Box = 20 pcs, 1 Gross = 144 pcs.
+  buyUnits      ItemUnit[]
   barcodes      RetailBarcode[]           @relation("ItemBarcodes")
   bomComponents BOMLine[]                 @relation("ComponentItem")
   stockLedger   StockLedger[]
+  openingStockLines OpeningStockLine[]    @relation("OpeningStockItem")
   enquiryLines  PurchaseEnquiryLine[]
   poLines       PurchaseOrderLine[]
   soLines       SalesOrderLine[]
@@ -1236,6 +1297,7 @@ model Item {
   quoteLines          SalesQuotationLine[]       @relation("QuoteLineItem")
   packages StockPackage[] @relation("ItemPackages")
   garments Garment[] @relation("GarmentItem")
+  cartonLines FgCartonLine[] @relation("FgCartonLineItem")
   routings Routing[] @relation("RoutingFabric")
 }
 
@@ -1645,8 +1707,14 @@ model Warehouse {
   /// apart from it: only sample purchases are received there, only Sampling
   /// issues from it, and general documents cannot draw on it (lib/sampleStore).
   purpose   WarehousePurpose @default(GENERAL)
+  /// Set on a process's own floor (Cutting Floor, Stitching Floor…): the work
+  /// in progress at that process is kept here, size by size. Empty for a store
+  /// or an outside unit. One floor per process.
+  departmentId String?     @unique
+  department   Department? @relation("ProcessFloor", fields: [departmentId], references: [id])
 
   stockLedger       StockLedger[]
+  openingStockLines OpeningStockLine[] @relation("OpeningStockLocation")
   mrLines           MaterialRequisitionLine[]
   grnLines          GRNLine[]
   /// Enquiries that name this store as where the goods are wanted.
@@ -1675,6 +1743,7 @@ model Warehouse {
   packages StockPackage[] @relation("WarehousePackages")
   stockCounts StockCount[] @relation("WarehouseCounts")
   garments Garment[] @relation("GarmentStore")
+  fgCartons FgCarton[] @relation("FgCartonStore")
 }
 
 model Department {
@@ -1699,6 +1768,9 @@ model Department {
   moSteps           MOStep[]
   sampleStages      SampleStage[]
   sampleMaterials   SampleMaterial[]
+  /// The process's own floor, where its work in progress is kept as stock.
+  floor             Warehouse?         @relation("ProcessFloor")
+  openingStockLines OpeningStockLine[] @relation("OpeningStockProcess")
 
   @@map("departments")
 }
@@ -1765,6 +1837,8 @@ model Machine {
 model SalesOrder {
   id                String           @id @default(cuid())
   soNumber          String           @unique
+  /// Cartons packed for this order: its buyer and number on their stickers.
+  fgCartons         FgCarton[]       @relation("FgCartonOrder")
   brandId           String
   brand             Brand            @relation(fields: [brandId], references: [id])
   customerId        String
@@ -2076,6 +2150,8 @@ model DeliveryChallan {
   @@index([customerId])
   @@map("delivery_challans")
   garments Garment[] @relation("GarmentChallan")
+  /// Cartons loaded on it, scanned or picked: its lines come from their contents.
+  fgCartons FgCarton[] @relation("FgCartonChallan")
 }
 
 model DeliveryChallanLine {
@@ -2365,6 +2441,13 @@ model PurchaseEnquiryLine {
   enquiry     PurchaseEnquiry @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
   itemId      String
   item        Item            @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
   /// What we asked for in our own words, when it differs from the item name.
   description String?
   /// Copied from the item when the enquiry is raised, so correcting the master
@@ -2682,6 +2765,13 @@ model PurchaseOrderLine {
   po          PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
   itemId      String
   item        Item          @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
   /// What we asked for in our own words, when it differs from the item name.
   description String?
   /// The garment style this material is being bought for, both ways round.
@@ -2911,6 +3001,13 @@ model GRNLine {
   poLine       PurchaseOrderLine? @relation(fields: [poLineId], references: [id], onDelete: Restrict)
   itemId       String
   item         Item               @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
   warehouseId  String
   warehouse    Warehouse          @relation(fields: [warehouseId], references: [id])
   orderedQty   Decimal            @db.Decimal(10, 3)
@@ -3139,10 +3236,15 @@ model StockLedger {
   /// "A" for first quality, "B" for B-grade finished goods, kept apart from
   /// good ones. Everything that is not a graded garment is "A".
   grade           String          @default("A")
+  /// The order the pieces belong to (SO or MO number, or an order from before
+  /// the ERP), on work in progress and finished goods moved process to process.
+  /// Not part of the balance: it splits a process's size-wise stock by order.
+  orderNo         String?
   @@index([itemId, warehouseId])
   @@index([transactionDate])
   @@index([ownership, ownerCustomerId])
   @@index([itemId, warehouseId, sizeId])
+  @@index([orderNo])
   @@map("stock_ledger")
 }
 
@@ -3318,6 +3420,91 @@ model MaterialRequisitionLine {
   @@map("material_requisition_lines")
 }
 
+/// Opening stock, one per save or upload, numbered OPS-2627-0001: entered by
+/// hand or from a sheet (the mill's 19-column one, or the Finished Goods, Semi
+/// Finished Goods or Raw Materials template). Raw materials go into their
+/// store, semi-finished goods onto their process's floor and finished goods
+/// into their store, size by size; each row is kept as typed beside what it
+/// was matched to, so every opening quantity traces back to its line.
+model OpeningStock {
+  id          String   @id @default(cuid())
+  number      String   @unique
+  fileName    String?
+  notes       String?
+  /// FG, SFG or RM as the entry was made; empty for the 19-column sheet, which holds all three.
+  kind        String?
+  /// The key the screen sends with a save: the same save sent again (a retry,
+  /// a second click, a refresh) finds this entry instead of posting twice.
+  requestKey  String?  @unique
+  createdById String?
+  createdBy   User?    @relation("OpeningStockCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+
+  lines OpeningStockLine[]
+
+  @@map("opening_stocks")
+}
+
+/// One row of the opening-stock sheet: the 19 columns as typed, and the item,
+/// process, location and size they were matched to.
+model OpeningStockLine {
+  id             String       @id @default(cuid())
+  openingStockId String
+  openingStock   OpeningStock @relation(fields: [openingStockId], references: [id], onDelete: Cascade)
+  /// The row on the sheet.
+  rowNo          Int
+  openingDate    DateTime     @db.Date
+  /// Column B as typed, and the process it was matched to (none for a store).
+  processText    String?
+  departmentId   String?
+  department     Department?  @relation("OpeningStockProcess", fields: [departmentId], references: [id])
+  /// Column C as typed, and where the stock was put: a store, an outside unit
+  /// or the process's own floor.
+  locationText   String?
+  warehouseId    String
+  warehouse      Warehouse    @relation("OpeningStockLocation", fields: [warehouseId], references: [id])
+  orderNo        String?
+  styleText      String?
+  itemId         String
+  item           Item         @relation("OpeningStockItem", fields: [itemId], references: [id])
+  itemCodeText   String?
+  description    String?
+  categoryText   String?
+  fabricText     String?
+  colour         String?
+  sizeId         String?
+  size           Size?        @relation("OpeningStockSize", fields: [sizeId], references: [id])
+  sizeText       String?
+  lotNo          String?
+  bundleNo       String?
+  uomText        String?
+  qty            Decimal      @db.Decimal(12, 3)
+  unitRate       Decimal      @db.Decimal(12, 2)
+  value          Decimal      @db.Decimal(14, 2)
+  /// OK, HOLD, REJECTED or B_GRADE, as column R said; `grade` is what the stock
+  /// went in as: A usable, R held (not issued until released), B second quality.
+  status         String
+  grade          String
+  remarks        String?
+  /// The sticker made for this row (a roll or a box), when its category is
+  /// labelled by package. A row packed in several has its stickers found by
+  /// their sourceLineId.
+  packageId      String?
+  /// How the row said its stock is packed: the package type, and how many
+  /// packages there are when their sizes were left to give later — the
+  /// stock comes in either way, its stickers made when the sizes are known.
+  packType       PackType?
+  packCount      Int?
+  /// Item, location, size, grade, order, lot and bundle in one: no two opening
+  /// lines may share it, on one sheet or across uploads.
+  dedupeKey      String       @unique
+
+  @@index([openingStockId])
+  @@index([itemId, warehouseId])
+  @@index([orderNo])
+  @@map("opening_stock_lines")
+}
+
 /// Moving our own stock from one of our stores to another.
 ///
 /// The movement used to leave nothing behind but ledger rows tagged with the
@@ -3374,6 +3561,11 @@ model StockTransferLine {
   /// A finished garment's size; empty for anything without one.
   sizeId          String?
   size            Size?          @relation("TransferLineSize", fields: [sizeId], references: [id])
+  /// On a move from one process's floor to the next: the order, lot and
+  /// bundle the pieces belong to, so they can be traced from cutting to packing.
+  orderNo         String?
+  lotNo           String?
+  bundleNo        String?
   @@map("stock_transfer_lines")
 }
 
@@ -5180,6 +5372,10 @@ model Workstation {
 /// editing a routing later never changes an order already on the floor.
 model Routing {
   id           String   @id @default(cuid())
+  /// Stable request key prevents duplicate creations after retries or double clicks.
+  creationKey  String?  @unique
+  /// Immutable source ID, reference, name and version. Survives source deletion.
+  copiedFrom   Json?
   /// Made by the system from the style (RT-<style code>) and no longer typed:
   /// orders, BOMs and messages still name a routing by it.
   code         String   @unique
@@ -5246,6 +5442,7 @@ model RoutingStep {
   instructions  String?
 
   @@unique([routingId, sequence])
+  @@index([operationId])
   @@map("routing_steps")
 }
 /// A contractor on the floor: a cutting master, a stitching contractor and
@@ -5349,6 +5546,7 @@ model Size {
   bomLineSizes BOMLineSize[]
   baseSizeBoms BOM[]
   stockLedger  StockLedger[]
+  openingStockLines OpeningStockLine[] @relation("OpeningStockSize")
   fgrLines     FinishedGoodsReceiptLine[]
   challanSizes DeliveryChallanLineSize[]
   creditSizes  CreditNoteLineSize[]
@@ -5364,6 +5562,7 @@ model Size {
   @@map("sizes")
   garments Garment[] @relation("GarmentSize")
   barcodes RetailBarcode[] @relation("SizeBarcodes")
+  cartonLines FgCartonLine[] @relation("FgCartonLineSize")
 }
 
 model SalesOrderLineSize {
@@ -5437,6 +5636,13 @@ model PurchaseInvoiceLine {
   bill         PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Cascade)
   itemId       String
   item         Item            @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
   /// The receipt line this bill line settles, which is what makes the
   /// three-way match possible: ordered, received and billed have to agree one
   /// row at a time. Held per line rather than once on the bill, because a
@@ -5507,11 +5713,29 @@ model ChargeType {
   /// top (EXCLUSIVE), or there is no GST at all (NON_TAXABLE: outside the
   /// value GST is worked out on). Every charge type started INCLUSIVE on
   /// 9 Nov 2026: a charge is typed as the final figure, as on purchases.
-  taxTreatment     ChargeTaxTreatment @default(INCLUSIVE)
+  taxTreatment     ChargeTaxTreatment @default(EXCLUSIVE)
   /// On a sale, taxed at the goods' rate: part of the value of the goods it
   /// is billed with (CGST Act s.15(2)(c)), shared across their rates by
   /// value. Off: a supply of its own, at defaultGstRate.
-  followsGoodsRate Boolean            @default(true)
+  followsGoodsRate Boolean            @default(false)
+  /// How a purchase order or bill starts this charge's GST unless the row is
+  /// changed: an HSN / SAC code, a rate typed by hand, or not applicable —
+  /// see PurchaseOrderCharge.gstMode, which every row starts at. Every charge
+  /// type existing before 14 Nov 2026 starts MANUAL, the one every row
+  /// already defaulted to.
+  defaultGstMode   ChargeGstMode      @default(MANUAL)
+  /// The HSN / SAC code a purchase row starts with when defaultGstMode is
+  /// HSN — Transport Charges always being billed under SAC 9965, say.
+  defaultHsnCodeId String?
+  defaultHsnCode   HsnCode?           @relation(fields: [defaultHsnCodeId], references: [id])
+  purchaseTaxTreatment ChargeTaxTreatment @default(EXCLUSIVE)
+  salesHsnCodeId String?
+  salesHsnCode HsnCode? @relation("SalesChargeHsn", fields: [salesHsnCodeId], references: [id])
+  salesGstApplicability String @default("APPLICABLE")
+  purchaseGstApplicability String @default("APPLICABLE")
+  salesTaxCategory String @default("TAXABLE")
+  purchaseTaxCategory String @default("TAXABLE")
+  taxReviewRequired Boolean @default(false)
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
 
@@ -5525,6 +5749,8 @@ model ChargeType {
 }
 
 model SalesInvoiceCharge {
+  /// Frozen configuration, input unit and calculated tax allocations. Null on historical rows.
+  taxSnapshot Json?
   id           String       @id @default(cuid())
   invoiceId    String
   invoice      SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
@@ -5561,6 +5787,8 @@ model SalesInvoiceCharge {
 /// order would have been quicker to write and would have baked today's GST
 /// rates into column names; the mill has renamed and re-rated these before.
 model PurchaseOrderCharge {
+  /// Frozen configuration, input unit and calculated tax allocations. Null on historical rows.
+  taxSnapshot Json?
   id           String        @id @default(cuid())
   poId         String
   po           PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
@@ -5592,6 +5820,8 @@ model PurchaseOrderCharge {
 /// A charge on a sales order — transport, freight, packing. The same shape as
 /// the purchase order's, so the invoice raised later can carry it line for line.
 model SalesOrderCharge {
+  /// Frozen configuration, input unit and calculated tax allocations. Null on historical rows.
+  taxSnapshot Json?
   id           String     @id @default(cuid())
   soId         String
   so           SalesOrder @relation(fields: [soId], references: [id], onDelete: Cascade)
@@ -5638,6 +5868,8 @@ model SalesOrderAttachment {
 }
 
 model PurchaseInvoiceCharge {
+  /// Frozen configuration, input unit and calculated tax allocations. Null on historical rows.
+  taxSnapshot Json?
   id           String          @id @default(cuid())
   billId       String
   bill         PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Cascade)
@@ -5733,6 +5965,8 @@ model SalesQuotationLine {
 /// A charge on a quotation (transport, packing), priced exactly as it will
 /// be on the order the quotation becomes, and carried onto that order.
 model SalesQuotationCharge {
+  /// Frozen configuration, input unit and calculated tax allocations. Null on historical rows.
+  taxSnapshot Json?
   id           String             @id @default(cuid())
   quoteId      String
   quote        SalesQuotation     @relation(fields: [quoteId], references: [id], onDelete: Cascade)
@@ -5920,6 +6154,7 @@ enum ChargeTaxTreatment {
 /// Where a purchase charge's GST rate comes from. See
 /// `PurchaseOrderCharge.gstMode`.
 enum ChargeGstMode {
+  INHERIT
   HSN
   MANUAL
   NONE
@@ -6219,6 +6454,13 @@ model PurchaseReturnLine {
 
   itemId String
   item   Item   @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
 
   /// The bill line the goods were charged on. Required: a return with nothing
   /// to be returned against cannot be valued, and cannot be checked against
@@ -6259,6 +6501,13 @@ model PurchaseNoteLine {
   note   PurchaseNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
   itemId String
   item   Item         @relation(fields: [itemId], references: [id])
+  /// The unit this line counts in, when it is bought in a pack rather than the
+  /// item's own unit (a box of 20 pcs). Empty: the item's own unit.
+  uomId     String?
+  uom       UOM?    @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  /// How many of the item's own unit one of this line's unit holds: 20 for a
+  /// box of 20 pcs, 1 in the item's own unit. Stock moves by qty × this.
+  uomFactor Decimal @default(1) @db.Decimal(12, 4)
 
   /// The bill line this adjusts, which is the whole basis of the balance
   /// check: what is left to adjust is that line's quantity less every note
@@ -6496,6 +6745,9 @@ enum PackageStatus {
   SPLIT
   /// Label withdrawn: printed by mistake, or the package is not on the rack.
   VOID
+  /// Put together with other packages of the same stock into one, which has
+  /// its own label; nothing left in it.
+  MERGED
 }
 
 enum PackageMoveType {
@@ -6512,6 +6764,12 @@ enum PackageMoveType {
   PRINTED
   /// Taken off hold: rejected at receipt, then passed for use.
   RELEASED
+  /// Put into another package with its contents (this one is retired).
+  MERGED_INTO
+  /// Made by putting other packages together.
+  MERGED_FROM
+  /// Its details corrected — lot, package type or note — not its quantity.
+  EDITED
 }
 
 /// One physical package of stock — a roll, a box, a carton — with the QR
@@ -6529,6 +6787,10 @@ model StockPackage {
   id              String         @id @default(cuid())
   /// What the QR sticker carries, and what a person reads off it: PK-000123.
   code            String         @unique
+  /// The barcode already on it when it came in (an opening lot's own, from
+  /// the old system): scanning it finds this package, and no second package
+  /// may carry it.
+  barcode         String?        @unique
   itemId          String
   item            Item           @relation("ItemPackages", fields: [itemId], references: [id])
   warehouseId     String
@@ -6566,9 +6828,16 @@ model StockPackage {
   printCount      Int            @default(0)
   lastPrintedAt   DateTime?
   grnLineId       String?
+  /// The line of the document it was labelled from, where that is not a GRN
+  /// line: an opening stock line. Tells which line's stock is on stickers.
+  sourceLineId    String?
   parentId        String?
   parent          StockPackage?  @relation("PackageSplit", fields: [parentId], references: [id])
   children        StockPackage[] @relation("PackageSplit")
+  /// Merged into another package: the one that now holds its contents.
+  mergedIntoId    String?
+  mergedInto      StockPackage?  @relation("PackageMerge", fields: [mergedIntoId], references: [id])
+  mergedFrom      StockPackage[] @relation("PackageMerge")
   createdById     String?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
@@ -6579,6 +6848,8 @@ model StockPackage {
   @@index([itemId, warehouseId, status])
   @@index([sourceType, sourceId])
   @@index([parentId])
+  @@index([mergedIntoId])
+  @@index([sourceLineId])
   @@index([warehouseId, rack])
   @@map("stock_packages")
 }
@@ -6760,4 +7031,71 @@ model RetailBarcode {
 
   @@unique([itemId, sizeId])
   @@map("retail_barcodes")
+}
+
+// ═══════════════════════════════════════════
+// FINISHED GOODS CARTONS — packed in the store, dispatched by scanning
+// ═══════════════════════════════════════════
+
+/// A carton of finished garments in a store, with its own sticker (CT-0001):
+/// its pieces by item, size and grade. Packed from the store's finished
+/// stock, which the stock ledger still holds — cartons never hold more than
+/// it. It leaves on a delivery challan by being scanned or picked onto it.
+model FgCarton {
+  id            String           @id @default(cuid())
+  code          String           @unique
+  warehouseId   String
+  warehouse     Warehouse        @relation("FgCartonStore", fields: [warehouseId], references: [id])
+  status        FgCartonStatus   @default(PACKED)
+  /// The order it is packed for: its buyer and order number print on the sticker.
+  soId          String?
+  so            SalesOrder?      @relation("FgCartonOrder", fields: [soId], references: [id])
+  /// The challan it is loaded on (a draft), then left with.
+  dcId          String?
+  dc            DeliveryChallan? @relation("FgCartonChallan", fields: [dcId], references: [id])
+  notes         String?
+  printCount    Int              @default(0)
+  lastPrintedAt DateTime?
+  dispatchedAt  DateTime?
+  /// Opened: its pieces back in the store, loose.
+  openedAt      DateTime?
+  openReason    String?
+  createdById   String?
+  createdBy     User?            @relation("FgCartonPackedBy", fields: [createdById], references: [id])
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  lines FgCartonLine[]
+
+  @@index([warehouseId, status])
+  @@index([dcId])
+  @@index([soId])
+  @@map("fg_cartons")
+}
+
+/// What one carton holds of one item in one size and grade.
+model FgCartonLine {
+  id       String   @id @default(cuid())
+  cartonId String
+  carton   FgCarton @relation(fields: [cartonId], references: [id], onDelete: Cascade)
+  itemId   String
+  item     Item     @relation("FgCartonLineItem", fields: [itemId], references: [id])
+  sizeId   String
+  size     Size     @relation("FgCartonLineSize", fields: [sizeId], references: [id])
+  /// "A" first quality, "B" B-grade.
+  grade    String   @default("A")
+  qty      Int
+
+  @@index([cartonId])
+  @@index([itemId, sizeId])
+  @@map("fg_carton_lines")
+}
+
+enum FgCartonStatus {
+  /// Sealed in its store; on a draft challan until that is dispatched.
+  PACKED
+  /// Gone on its delivery challan.
+  DISPATCHED
+  /// Unpacked: its pieces are loose in the store again.
+  OPENED
 }

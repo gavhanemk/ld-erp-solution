@@ -6,6 +6,7 @@ import {
   Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer, FileText,
   Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock, Undo2, ThumbsUp, Factory } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
+import { indexRequisitions, searchRequisitions } from '@/lib/requisitionSearch'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { ProcessDialog, type ProcessTab } from '@/components/inventory/ProcessDialog'
 import { BulkRequisitionDialog, type BulkAction } from '@/components/inventory/BulkRequisitionDialog'
@@ -77,7 +78,7 @@ interface Requisition {
   issuedAt: string | null
   rejectionReason: string | null
   notes: string | null
-  department: { id: string; name: string }
+  department: { id: string; name: string; code?: string }
   raisedBy: { id: string; name: string } | null
   approvedBy: { id: string; name: string } | null
   /** The sales order the material is for, and its customer. */
@@ -315,10 +316,22 @@ function RequisitionsScreen() {
   const [exporting, setExporting] = useState(false)
 
   const [search, setSearch] = useState('')
+  const [appliedSearch, setAppliedSearch] = useState('')
+  useEffect(() => {
+    const timer = window.setTimeout(() => setAppliedSearch(search), 250)
+    return () => window.clearTimeout(timer)
+  }, [search])
+  const changeSearch = (value: string) => {
+    setSearch(value)
+    if (!value.trim()) setAppliedSearch('')
+  }
   // Arriving from a manufacturing order, which links to its requisitions by number.
   useEffect(() => {
     const q = new URLSearchParams(window.location.search).get('q')
-    if (q) setSearch(q)
+    if (q) {
+      setSearch(q)
+      setAppliedSearch(q)
+    }
   }, [])
   const [picked, setPicked] = useState<Partial<Record<FilterKey, string[]>>>({})
   const [from, setFrom] = useState('')
@@ -364,6 +377,7 @@ function RequisitionsScreen() {
       const all: Requisition[] = []
       for (let p = 1; ; p++) {
         const res = await api.get<Paginated<Requisition>>(`/inventory/requisitions?limit=200&page=${p}`)
+        if (id !== latest.current) return
         all.push(...res.data)
         if (p >= res.pagination.pages) break
       }
@@ -400,7 +414,7 @@ function RequisitionsScreen() {
 
   useEffect(() => {
     setPage(1)
-  }, [search, picked, from, to])
+  }, [appliedSearch, picked, from, to])
 
   /* ── what each row is, worked out once ── */
   const facts = useMemo(() => {
@@ -446,17 +460,14 @@ function RequisitionsScreen() {
     { key: 'need', label: 'Needed by', labelOf: (_, v) => NEED_LABEL[v as NeedKey], order: Object.keys(NEED_LABEL) },
   ]
 
-  const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const searchIndex = useMemo(
+    () => indexRequisitions(rows, (mr) => STAGE[facts.get(mr.id)!.stage].label),
+    [rows, facts],
+  )
+  const matchingIds = useMemo(() => searchRequisitions(searchIndex, appliedSearch), [searchIndex, appliedSearch])
   const matchesSearch = useCallback(
-    (mr: Requisition) => {
-      if (!words.length) return true
-      const hay = `${mr.mrNumber} ${mr.department.name} ${mr.so?.soNumber ?? ''} ${mr.so?.customer.name ?? ''} ${mr.raisedBy?.name ?? ''} ${mr.approvedBy?.name ?? ''} ${mr.notes ?? ''} ${mr.lines
-        .map((l) => `${l.item.code} ${l.item.name} ${l.purpose ?? ''} ${l.ownerCustomer?.name ?? ''}`)
-        .join(' ')}`.toLowerCase()
-      return words.every((w) => hay.includes(w))
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [search],
+    (mr: Requisition) => matchingIds.has(mr.id),
+    [matchingIds],
   )
   const inPeriod = useCallback(
     (mr: Requisition) => {
@@ -517,10 +528,10 @@ function RequisitionsScreen() {
     const choices = choicesFor(f.key) ?? []
     return values.map((v) => ({ key: f.key, value: v, text: `${f.label}: ${choices.find((c) => c.value === v)?.label ?? '…'}` }))
   })
-  const narrowed = chips.length > 0 || words.length > 0 || !!from || !!to
+  const narrowed = chips.length > 0 || !!appliedSearch.trim() || !!from || !!to
   const clearAll = () => {
     setPicked({})
-    setSearch('')
+    changeSearch('')
     setFrom('')
     setTo('')
     setPreset('all')
@@ -1150,13 +1161,19 @@ function RequisitionsScreen() {
               className="min-w-0 flex-1 border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
               placeholder="Search MR, MO, order, item..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => changeSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  setAppliedSearch(search)
+                }
+              }}
               aria-label="Search requisitions"
               title="Search by requisition, MO, sales order, customer, department or item"
               data-hotkey="search"
             />
             {search && (
-              <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
+              <button type="button" onClick={() => changeSearch('')} aria-label="Clear search" className="text-muted-foreground">
                 <X size={14} />
               </button>
             )}

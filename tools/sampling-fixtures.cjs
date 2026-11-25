@@ -192,6 +192,20 @@ async function seed() {
     update: {},
     create: { id: 'sample-category', name: 'Sample Fabric', trackPackages: false },
   })
+  // A garment's own category, under Finished Goods where there is one: an item
+  // has to fit its category's tab, and a finished good is never filed as fabric.
+  const finishedTop = await db.itemCategory.findFirst({ where: { name: 'Finished Goods', parentId: null }, select: { id: true } })
+  await db.itemCategory.upsert({
+    where: { name: 'Sample Garments' },
+    update: {},
+    create: {
+      id: 'sample-category-garments',
+      name: 'Sample Garments',
+      trackPackages: false,
+      itemGroup: 'FINISHED_GOODS',
+      parentId: finishedTop?.id ?? null,
+    },
+  })
   await db.item.upsert({
     where: { code: 'EX-FAB-001' },
     update: {},

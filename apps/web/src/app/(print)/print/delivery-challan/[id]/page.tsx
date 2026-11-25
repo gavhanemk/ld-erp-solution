@@ -75,6 +75,11 @@ interface Payload {
       item: { code: string; name: string; color: string | null; hsnCode: string | null }
       sizes: Array<{ id: string; qty: string; size: { code: string; sequence: number } }>
     }>
+    /** The cartons loaded on it, scanned or picked: its packing list. */
+    fgCartons?: Array<{
+      code: string
+      lines: Array<{ qty: number; grade: string; item: { code: string; name: string; color: string | null; style: { code: string } | null }; size: { code: string; sequence: number } }>
+    }>
   }
 }
 
@@ -220,9 +225,44 @@ export default function PrintDeliveryChallan() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
               <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
                 <Eyebrow style={{ color: GREY }}>Packing</Eyebrow>
-                <div style={{ fontSize: '10px', color: dc.packingNote ? INK : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
-                  {dc.packingNote ?? 'None.'}
-                </div>
+                {dc.fgCartons?.length ? (
+                  // Carton by carton: what is in each, by style, item and size.
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '9.5px', color: INK, marginTop: '4px' }}>
+                    <thead>
+                      <tr style={{ textAlign: 'left', color: GREY }}>
+                        <th style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}` }}>Carton</th>
+                        <th style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}` }}>Style · Item</th>
+                        <th style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}` }}>Sizes × pcs</th>
+                        <th style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}`, textAlign: 'right' }}>Pcs</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dc.fgCartons.map((c) => {
+                        const items = new Map<string, { label: string; sizes: string[]; pcs: number }>()
+                        for (const l of c.lines) {
+                          const k = `${l.item.code}|${l.grade}`
+                          const it = items.get(k) ?? { label: `${l.item.style?.code ? `${l.item.style.code} · ` : ''}${l.item.code} ${l.item.color ?? ''}${l.grade === 'B' ? ' (B)' : ''}`, sizes: [], pcs: 0 }
+                          it.sizes.push(`${l.size.code}×${l.qty}`)
+                          it.pcs += l.qty
+                          items.set(k, it)
+                        }
+                        return [...items.values()].map((it, i) => (
+                          <tr key={`${c.code}-${i}`}>
+                            <td style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}`, fontWeight: 700 }}>{i === 0 ? c.code : ''}</td>
+                            <td style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}` }}>{it.label}</td>
+                            <td style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}` }}>{it.sizes.join('  ')}</td>
+                            <td style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}`, textAlign: 'right', ...NUM }}>{it.pcs}</td>
+                          </tr>
+                        ))
+                      })}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div style={{ fontSize: '10px', color: dc.packingNote ? INK : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
+                    {dc.packingNote ?? 'None.'}
+                  </div>
+                )}
+                {dc.fgCartons?.length && dc.packingNote ? <div style={{ fontSize: '10px', color: INK, marginTop: '4px', lineHeight: 1.55 }}>{dc.packingNote}</div> : null}
               </div>
               {dc.notes && (
                 <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>

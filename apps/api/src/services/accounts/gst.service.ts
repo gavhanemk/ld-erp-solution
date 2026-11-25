@@ -63,6 +63,7 @@ interface OutDoc {
   pos: string
   inter: boolean
   rates: RateRow[]
+  zeroCharges?: { nil: number; exempt: number; nonGst: number; unclassified: number }
   hsn: HsnRow[]
   /** For a credit note: the invoice it is against. */
   invoice?: { number: string; date: string; value: number } | null
@@ -77,6 +78,7 @@ function shape(
   lines: Array<{ hsnCode: string | null; gstRate: unknown; qty: unknown; taxableValue: unknown; cgst: unknown; sgst: unknown; igst: unknown; item: { name: string; uom: { symbol: string } | null } }>,
   charges: ChargeRow[],
 ) {
+  const zeroCharges = { nil: 0, exempt: 0, nonGst: 0, unclassified: 0 }
   const rates = new Map<number, RateRow>()
   const hsn = new Map<string, HsnRow>()
   const goods = lines.map((l) => ({ hsnCode: l.hsnCode, gstRate: Number(l.gstRate), taxable: Number(l.taxableValue), cgst: Number(l.cgst), sgst: Number(l.sgst), igst: Number(l.igst) }))
@@ -92,16 +94,22 @@ function shape(
     hsn.set(key, h)
   })
   for (const c of charges) {
+    if (c.taxSnapshot && c.cgst + c.sgst + c.igst === 0) {
+      const category = c.taxSnapshot.taxCategory
+      const key = category === 'EXEMPT' ? 'exempt' : category === 'NON_GST' ? 'nonGst' : category === 'NIL_RATED' ? 'nil' : 'unclassified'
+      zeroCharges[key] = r2(zeroCharges[key] + c.netAmount)
+      continue
+    }
     if (c.treatment === 'NON_TAXABLE') continue
     addTo(rateOf(c.gstRate), { taxable: c.netAmount, igst: c.igst, cgst: c.cgst, sgst: c.sgst })
   }
   for (const sh of chargeShares(goods, charges)) {
     const key = [...hsn.keys()].find((k) => k.startsWith(`${sh.hsn}|${sh.rate}|`)) ?? `${sh.hsn}|${sh.rate}|OTH`
-    const h = hsn.get(key) ?? { hsn: sh.charge ? '' : sh.hsn, desc: sh.hsn, uqc: 'OTH', qty: 0, rate: sh.rate, ...zero() }
+    const h = hsn.get(key) ?? { hsn: /^\d+$/.test(sh.hsn) ? sh.hsn : '', desc: sh.hsn, uqc: 'OTH', qty: 0, rate: sh.rate, ...zero() }
     addTo(h, { taxable: sh.taxable, igst: sh.igst, cgst: sh.cgst, sgst: sh.sgst })
     hsn.set(key, h)
   }
-  return { rates: [...rates.values()], hsn: [...hsn.values()] }
+  return { rates: [...rates.values()], hsn: [...hsn.values()], zeroCharges }
 }
 
 /** Every invoice and credit note in the period, with what each is made of. */
@@ -120,7 +128,7 @@ async function outward(tx: Tx, from: string, to: string, ourState: string) {
         placeOfSupplyCode: true,
         customer: { select: { name: true, gstin: true, billingStateCode: true } },
         lines: { select: lineSelect },
-        charges: { select: { amount: true, netAmount: true, taxTreatment: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } } },
+        charges: { select: { taxSnapshot: true, amount: true, netAmount: true, taxTreatment: true, gstRate: true, cgst: true, sgst: true, igst: true, chargeType: { select: { name: true } } } },
       },
     }),
     tx.creditNote.findMany({
@@ -229,10 +237,17 @@ export async function gstr1(tx: Tx, from: string, to: string) {
   smallNotes.forEach((d) => intoB2cs(d, -1))
 
   // Nil-rated: every rate-0 row, by registered or not and inside the state or across it.
-  const nil = new Map<string, number>()
-  for (const d of docs) for (const r of d.rates.filter((x) => x.rate === 0)) {
-    const k = `${d.inter ? 'INTR' : 'INTRA'}${d.gstin ? 'B2B' : 'B2C'}`
-    nil.set(k, r2((nil.get(k) ?? 0) + r.taxable))
+  const nil = new Map<string, { amount: number; nilAmount: number; exemptAmount: number; nonGstAmount: number; unclassifiedAmount: number }>()
+  for (const [list, sign] of [[docs, 1], [credit, -1]] as const) for (const d of list) {
+    const k = `${d.inter ? 'INTER' : 'INTRA'}${d.gstin ? 'B2B' : 'B2C'}`
+    const v = nil.get(k) ?? { amount: 0, nilAmount: 0, exemptAmount: 0, nonGstAmount: 0, unclassifiedAmount: 0 }
+    const goodsNil = d.rates.filter(r => r.rate === 0).reduce((n, r) => n + r.taxable, 0)
+    v.nilAmount = r2(v.nilAmount + sign * (goodsNil + (d.zeroCharges?.nil ?? 0)))
+    v.exemptAmount = r2(v.exemptAmount + sign * (d.zeroCharges?.exempt ?? 0))
+    v.nonGstAmount = r2(v.nonGstAmount + sign * (d.zeroCharges?.nonGst ?? 0))
+    v.unclassifiedAmount = r2(v.unclassifiedAmount + sign * (d.zeroCharges?.unclassified ?? 0))
+    v.amount = r2(v.nilAmount + v.exemptAmount + v.nonGstAmount)
+    if (v.amount || v.unclassifiedAmount) nil.set(k, v)
   }
 
   // HSN summary, sales to the registered apart from the rest, credit notes taken off.
@@ -262,7 +277,7 @@ export async function gstr1(tx: Tx, from: string, to: string) {
     b2cs: [...b2csMap.values()].filter((r) => r.taxable !== 0).sort((a, b) => a.pos.localeCompare(b.pos) || a.rate - b.rate),
     cdnr,
     cdnur,
-    nil: [...nil.entries()].map(([type, amount]) => ({ type, amount })),
+    nil: [...nil.entries()].map(([type, amounts]) => ({ type, ...amounts })),
     hsnB2b,
     hsnB2c,
     docs: { invoices: series(issued, cancelled), notes: series(notesIssued, cancelledNotes) },
@@ -338,7 +353,7 @@ export function gstr1Json(g: Awaited<ReturnType<typeof gstr1>>) {
       : {}),
     ...(g.cdnur.length ? { cdnur: g.cdnur.map((d) => ({ typ: 'B2CL', ntty: 'C', nt_num: d.number, nt_dt: portalDate(d.date), val: r2(d.value), pos: d.pos, itms: itm(d.rates, true) })) } : {}),
     ...(g.nil.length
-      ? { nil: { inv: g.nil.map((x) => ({ sply_ty: x.type, nil_amt: x.amount, expt_amt: 0, ngsup_amt: 0 })) } }
+      ? { nil: { inv: g.nil.map((x) => ({ sply_ty: x.type, nil_amt: x.nilAmount, expt_amt: x.exemptAmount, ngsup_amt: x.nonGstAmount })) } }
       : {}),
     hsn: { ...(g.hsnB2b.length ? { hsn_b2b: hsn(g.hsnB2b) } : {}), ...(g.hsnB2c.length ? { hsn_b2c: hsn(g.hsnB2c) } : {}) },
     ...(docDet.length ? { doc_issue: { doc_det: docDet } } : {}),
@@ -355,7 +370,7 @@ export async function gstr3b(tx: Tx, from: string, to: string) {
   const g = await gstr1(tx, from, to)
   // 3.1(a): taxable outward supplies, less credit notes; (c): nil-rated.
   const outward = g.totals.net
-  const nilRated = r2(g.nil.reduce((t, x) => t + x.amount, 0))
+  const nilRated = r2(g.nil.reduce((t, x) => t + x.nilAmount + x.exemptAmount, 0))
   // 3.2: inter-state supplies to the unregistered, by place of supply.
   const toUnregistered = new Map<string, { pos: string; taxable: number; igst: number }>()
   for (const r of g.b2cs.filter((x) => x.inter)) {
@@ -421,6 +436,8 @@ export async function gstr3b(tx: Tx, from: string, to: string) {
     period: g.period,
     outward,
     nilRated,
+    nonGst: r2(g.nil.reduce((t, x) => t + x.nonGstAmount, 0)),
+    unclassifiedCharges: r2(g.nil.reduce((t, x) => t + x.unclassifiedAmount, 0)),
     rcmInward: rcm,
     toUnregistered: [...toUnregistered.values()].filter((x) => x.taxable !== 0),
     itc: { rcm: { igst: rcm.igst, cgst: rcm.cgst, sgst: rcm.sgst }, other: { igst: itcOther.igst, cgst: itcOther.cgst, sgst: itcOther.sgst }, reversed: { igst: reversed.igst, cgst: reversed.cgst, sgst: reversed.sgst }, net: itc },

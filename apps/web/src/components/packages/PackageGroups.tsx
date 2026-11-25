@@ -2,10 +2,11 @@
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { ChevronDown, ChevronRight, ChevronUp, Loader2, Printer } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { ChevronDown, ChevronRight, ChevronUp, Combine, Loader2, Printer } from 'lucide-react'
+import { api, ApiError, can } from '@/lib/api'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
-import { STATUS, openPrintTab, packCount, packLabel, printLabels, qtyText } from './packageTypes'
+import { SmartSelect } from '@/components/ui/SmartSelect'
+import { PACK_TYPES, STATUS, openPrintTab, packCount, packLabel, printLabels, qtyText } from './packageTypes'
 
 /** One item in one store, with how many packages of it there are. */
 export interface PackageGroup {
@@ -25,6 +26,10 @@ export interface PackageGroup {
   lots: string[]
   racks: string[]
   lastAt: string
+  /** Its stock in that store without a sticker. */
+  loose?: number
+  /** Its stickers printed, then changed: to print again. */
+  changed?: number
 }
 
 interface PackageRow {
@@ -51,17 +56,26 @@ export function PackageGroups({
   groups,
   filters,
   emptyText,
+  changedIds,
+  onChanged,
 }: {
   groups: PackageGroup[]
   /** The list's own filters, applied to the packages shown under each item too. */
   filters: { q: string; status: string }
   emptyText: string
+  /** Stickers printed, then changed: marked "Reprint". */
+  changedIds?: Set<string>
+  /** Stickers were put together: what happened, for the page to say and reload. */
+  onChanged?: (message: string, ids: string[]) => void
 }) {
   const [open, setOpen] = useState<Set<string>>(new Set())
   const [rows, setRows] = useState<Record<string, PackageRow[]>>({})
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [picked, setPicked] = useState<Set<string>>(new Set())
+  // Putting the picked stickers together: asked first, with what they become.
+  const [merging, setMerging] = useState<{ type: string } | null>(null)
+  const [busy, setBusy] = useState(false)
   // Each item's line, to bring it back into view when it is opened or closed.
   const lineRefs = useRef(new Map<string, HTMLTableRowElement>())
   const showLine = (key: string) =>
@@ -163,6 +177,30 @@ export function PackageGroups({
 
   if (!groups.length) return <div className="p-10 text-center text-muted-foreground">{emptyText}</div>
 
+  // The picked stickers as rows, for what putting them together makes.
+  const pickedRows = Object.values(rows)
+    .flat()
+    .filter((p, i, all) => picked.has(p.id) && all.findIndex((x) => x.id === p.id) === i)
+  const pickedQty = Math.round(pickedRows.reduce((t, p) => t + p.qty, 0) * 1000) / 1000
+  const merge = async (andPrint: boolean) => {
+    if (!merging) return
+    const tab = andPrint ? openPrintTab() : null
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await api.post<{ message: string; data: { id: string } }>('/packages/merge', { ids: [...picked], packType: merging.type })
+      if (andPrint) printLabels([res.data.id], tab)
+      setMerging(null)
+      setPicked(new Set())
+      onChanged?.(res.message, [res.data.id])
+    } catch (err) {
+      tab?.close()
+      setError(err instanceof ApiError ? err.message : 'Could not put them together.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div>
       {error && <p className="px-4 pt-3 text-sm text-red-400">{error}</p>}
@@ -174,9 +212,44 @@ export function PackageGroups({
           <button className="btn-primary h-9" onClick={() => printLabels([...picked])}>
             <Printer size={15} /> Print {picked.size === 1 ? 'its sticker' : `${picked.size} stickers`}
           </button>
+          {picked.size > 1 && can('inventory', 'edit') && (
+            <button
+              className="btn-secondary h-9"
+              onClick={() => setMerging({ type: pickedRows[0]?.packType ?? 'OTHER' })}
+              title="Two rolls or boxes of the same item and lot made one: one new sticker for both"
+            >
+              <Combine size={15} /> Put together
+            </button>
+          )}
           <button className="btn-ghost h-9" onClick={() => setPicked(new Set())}>
             Clear
           </button>
+        </div>
+      )}
+      {merging && picked.size > 1 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border bg-amber-500/5 px-4 py-2 text-sm" role="dialog" aria-label="Put together">
+          <span className="text-foreground">
+            Put {picked.size} stickers together: <b>{qtyText(pickedQty)} {pickedRows[0]?.unit ?? ''}</b> on one new sticker, as one
+          </span>
+          <SmartSelect className="form-input h-8 w-32" value={merging.type} onChange={(e) => setMerging({ type: e.target.value })} aria-label="What the new package is">
+            {PACK_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </SmartSelect>
+          <span className="text-muted-foreground">The old stickers are retired; scanned, they name the new one. They must be the same item, store, lot and grade.</span>
+          <span className="ml-auto flex gap-2">
+            <button className="btn-ghost h-8" onClick={() => setMerging(null)} disabled={busy}>
+              Cancel
+            </button>
+            <button className="btn-secondary h-8" onClick={() => void merge(true)} disabled={busy}>
+              <Printer size={14} /> Put together &amp; print
+            </button>
+            <button className="btn-primary h-8" onClick={() => void merge(false)} disabled={busy}>
+              {busy ? <Loader2 size={14} className="animate-spin" /> : <Combine size={14} />} Put together
+            </button>
+          </span>
         </div>
       )}
       <ScrollableTable>
@@ -224,6 +297,16 @@ export function PackageGroups({
                     <td className="whitespace-nowrap text-right font-semibold tabular-nums">{packCount(g.packages, g.packTypes[0] ?? 'OTHER')}</td>
                     <td className="whitespace-nowrap text-right font-semibold tabular-nums">
                       {qtyText(g.qty)} <span className="text-xs font-normal text-muted-foreground">{g.unit}</span>
+                      {(g.loose ?? 0) > 0.0005 && (
+                        <div className="warn-text text-xs font-normal" title="In this store without a sticker: configure its packages from Packaging pending">
+                          + {qtyText(g.loose!)} {g.unit} packaging pending
+                        </div>
+                      )}
+                      {(g.changed ?? 0) > 0 && (
+                        <div className="text-xs font-normal">
+                          <span className="badge-warning">{g.changed} to reprint</span>
+                        </div>
+                      )}
                     </td>
                     <td className="max-w-[200px] truncate text-sm" title={g.lots.join(', ')}>
                       {g.lots.length ? g.lots.join(', ') : <span className="text-muted-foreground">—</span>}
@@ -302,10 +385,18 @@ export function PackageGroups({
                                           <Link href={`/inventory/scan?code=${p.code}`} className="font-mono text-sm font-semibold text-primary hover:underline">
                                             {p.code}
                                           </Link>
+                                          {changedIds?.has(p.id) && (
+                                            <span className="badge-warning ml-1.5" title="Changed since its sticker was printed: print it again">
+                                              Reprint
+                                            </span>
+                                          )}
                                         </td>
                                         <td className="whitespace-nowrap text-sm">{packLabel(p.packType)}</td>
                                         <td className="whitespace-nowrap text-right font-semibold tabular-nums">
                                           {qtyText(p.qty)} <span className="text-xs font-normal text-muted-foreground">{p.unit}</span>
+                                          {p.status === 'IN_STOCK' && Math.abs(p.qty - p.initialQty) > 0.0005 && (
+                                            <div className="text-[11px] font-normal text-muted-foreground">of {qtyText(p.initialQty)}</div>
+                                          )}
                                         </td>
                                         <td className="whitespace-nowrap text-right text-sm tabular-nums text-muted-foreground">{qtyText(p.initialQty)}</td>
                                         <td className="whitespace-nowrap text-sm">{p.lotNo ?? <span className="text-muted-foreground">—</span>}</td>

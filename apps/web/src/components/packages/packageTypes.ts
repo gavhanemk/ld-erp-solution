@@ -23,6 +23,7 @@ export const STATUS: Record<string, { label: string; cls: string }> = {
   IN_STOCK: { label: 'In stock', cls: 'badge-success' },
   EMPTY: { label: 'Empty', cls: 'badge-neutral' },
   SPLIT: { label: 'Retired (split)', cls: 'badge-info' },
+  MERGED: { label: 'Retired (put together)', cls: 'badge-info' },
   VOID: { label: 'Withdrawn', cls: 'badge-danger' },
 }
 
@@ -30,10 +31,16 @@ export const qtyText = (n: number) => Number(n.toFixed(3)).toLocaleString('en-IN
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000
 
-/** `total` over `n` stickers, all the same but the last, which takes what does not divide: 100 over 3 is 33.333, 33.333, 33.334. */
-export function splitEvenly(total: number, n: number): number[] {
+/**
+ * `total` over `n` stickers, all the same but the last, which takes what does
+ * not divide: 100 metres over 3 is 33.333, 33.333, 33.334. `places` is how
+ * finely the item is counted: pieces and cartons (0) split whole, 10 over 3
+ * being 3, 3 and 4 — never 3.333 of a carton.
+ */
+export function splitEvenly(total: number, n: number, places = 3): number[] {
   if (!(n >= 1) || !(total > 0)) return []
-  const each = Math.floor((total / n) * 1000) / 1000
+  const f = 10 ** places
+  const each = Math.floor((total / n) * f + 1e-9) / f
   return [...Array<number>(n - 1).fill(each), round3(total - each * (n - 1))]
 }
 
@@ -121,8 +128,20 @@ export interface PackageDetail {
   ownerCustomer: { id: string; name: string } | null
   parent: { id: string; code: string } | null
   children: Array<{ id: string; code: string; qty: string | number; status: string }>
-  /** A retired sticker (status SPLIT): the stickers now on what is left of its roll. */
+  /** A retired sticker (split or put together): the stickers now on its stock. */
   replacedBy?: Array<{ code: string; qty: number }>
+  /** Put together into this one. */
+  mergedInto?: { id: string; code: string } | null
+  /** Made by putting these together. */
+  mergedFrom?: Array<{ id: string; code: string; initialQty: number | string }>
+  /** Held: not issued until released. */
+  held?: boolean
+  /** The barcode it already carried when it came in: scanning it finds this package. */
+  barcode?: string | null
+  /** Printed, then changed: what changed, to print again. */
+  changedSincePrint?: string[]
+  printCount?: number
+  lastPrintedAt?: string | null
   grn: { grnNumber: string; grnDate: string; po: { supplier: { name: string } | null } | null } | null
   position: { inStore: number; inPackages: number; packages: number; loose: number }
   stores: Array<{ id: string; name: string }>

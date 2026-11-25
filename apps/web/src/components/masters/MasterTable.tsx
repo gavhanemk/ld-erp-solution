@@ -131,6 +131,10 @@ interface MasterTableProps<T> {
   onNew?: () => void
   /** Likewise for editing a row: the page's own form instead of the generic one. */
   onEdit?: (row: T) => void
+  /** Shown between the heading and the search, for a page's own tabs. */
+  subHeader?: React.ReactNode
+  /** Told when "Active only" is ticked or not, for figures the page shows beside the list. */
+  onActiveOnlyChange?: (activeOnly: boolean) => void
 }
 
 export function MasterTable<T extends { id: string; isActive?: boolean }>({
@@ -155,6 +159,8 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   exportable = false,
   onNew,
   onEdit,
+  subHeader,
+  onActiveOnlyChange,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -203,6 +209,9 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   useEffect(() => {
     setPage(1)
   }, [debouncedSearch, activeOnly, pickedKey])
+  useEffect(() => {
+    onActiveOnlyChange?.(activeOnly)
+  }, [activeOnly, onActiveOnlyChange])
 
   // Everything that narrows the list, as the API takes it. The list and the
   // counts are asked the same question, so they can never disagree.
@@ -491,6 +500,8 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
           )}
         </div>
       </div>
+
+      {subHeader}
 
       {/* Raised above the table so an open dropdown lies over it, not under it. */}
       <div className="glass-card relative z-20 space-y-3 p-4">

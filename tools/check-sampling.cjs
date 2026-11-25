@@ -1902,7 +1902,7 @@ async function main() {
     body: JSON.stringify({
       name: 'Sampling style garment ' + stamp,
       type: 'FINISHED_GOOD',
-      categoryId: 'sample-category',
+      categoryId: 'sample-category-garments',
       uomId: pcs.id,
       styleId: devStyle.id,
       color: 'Navy',
@@ -1976,7 +1976,7 @@ async function main() {
       code: 'EX-FG-T' + stamp,
       name: 'Styleless garment ' + stamp,
       type: 'FINISHED_GOOD',
-      categoryId: 'sample-category',
+      categoryId: 'sample-category-garments',
       uomId: pcs.id,
     },
   })
@@ -2145,7 +2145,7 @@ async function main() {
     path.join(
       __dirname,
       '..',
-      'packages/database/prisma/migrations/20261116110000_sampling_request_style_backfill/migration.sql'
+      'packages/database/prisma/migrations/20261125100400_sampling_request_style_backfill/migration.sql'
     ),
     'utf8'
   )

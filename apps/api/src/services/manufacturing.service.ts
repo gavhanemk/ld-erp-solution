@@ -1,4 +1,5 @@
 import type { MOStatus, Prisma, PrismaClient } from '@prisma/client'
+import { qtyPlaces, roundUpToPlaces } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 import { netSizeChanges } from './sizeChanges.service'
 
@@ -236,7 +237,8 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
                       code: true,
                       name: true,
                       type: true,
-                      uom: { select: { symbol: true } },
+                      decimalPlaces: true,
+                      uom: { select: { symbol: true, decimalPlaces: true } },
                       category: { select: { name: true, parent: { select: { name: true } } } },
                     },
                   },
@@ -275,7 +277,8 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     baseKey: string
     /** Whose the plan would say without the switch. */
     defaultOwnership: 'OWNED' | 'CUSTOMER_OWNED'
-    item: { id: string; code: string; name: string; type: string; uom: string | null; category: string }
+    /** places: how many after the point its quantities may carry (0: whole numbers only). */
+    item: { id: string; code: string; name: string; type: string; uom: string | null; places: number; category: string }
     ownership: 'OWNED' | 'CUSTOMER_OWNED'
     ownerCustomerId: string | null
     department: { id: string; name: string } | null
@@ -323,6 +326,7 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
           name: b.componentItem.name,
           type: b.componentItem.type,
           uom: b.componentItem.uom?.symbol ?? null,
+          places: qtyPlaces(b.componentItem),
           category: [cat?.parent?.name, cat?.name].filter(Boolean).join(' › '),
         },
         ownership,
@@ -393,8 +397,11 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     const requested = round3(mine.reduce((s, a) => s + Number(a.mr.closedAt ? a.issuedQty : a.requestedQty), 0))
     // Issued less what came back from the floor unused.
     const issued = round3(mine.reduce((s, a) => s + Number(a.issuedQty) - Number(a.returnedQty), 0))
-    const required = round3(r.required)
-    const toRequest = round3(Math.max(0, required - requested))
+    // Up to what can actually be handed over: a carton for every 24 shirts on
+    // 50 shirts is 2.08 cartons, asked for as 3; metres stay as worked out.
+    const required = roundUpToPlaces(round3(r.required), r.item.places)
+    // Also up: an older requisition asked for 2.1 of 3 cartons leaves 1 to ask, not 0.9.
+    const toRequest = roundUpToPlaces(round3(Math.max(0, required - requested)), r.item.places)
     return {
       key: r.key,
       baseKey: r.baseKey,

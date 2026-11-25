@@ -69,6 +69,11 @@ export interface Movement extends StockKey {
   referenceType: string
   referenceId: string
   batchNumber?: string | null
+  /**
+   * The order the pieces belong to, on work in progress and finished goods
+   * moved process to process. Written on the row; not part of the balance.
+   */
+  orderNo?: string | null
   transactionDate?: Date
   notes?: string | null
   /**
@@ -80,6 +85,11 @@ export interface Movement extends StockKey {
   earlierDate?: 'refuse' | 'move-up'
   /** Requisition lines whose own holds this movement may take: an issue uses up its own reservation. */
   reservedFor?: string[]
+  /**
+   * A delivery challan whose loaded cartons' pieces this movement may take:
+   * pieces sealed in any other carton stay in the store until it is opened.
+   */
+  cartonsOn?: string
   /** A check or a count found it: the stock is what it is, holds or not. */
   ignoreReservations?: boolean
   /**
@@ -385,6 +395,32 @@ export async function recordMovement(
         )
       }
     }
+    // Pieces sealed in a carton are not free either: they leave with their
+    // carton on its challan, or the carton is opened first. A check or a count
+    // states a fact, and is not refused for it.
+    if (!m.ignoreReservations && (m.ownership ?? 'OWNED') === 'OWNED' && m.sizeId) {
+      const sealed = await tx.$queryRaw<Array<{ qty: number; codes: string[] | null }>>`
+        SELECT COALESCE(SUM(l.qty), 0)::float8 AS qty, array_agg(DISTINCT c.code ORDER BY c.code) AS codes
+        FROM ld_erp.fg_carton_lines l JOIN ld_erp.fg_cartons c ON c.id = l."cartonId"
+        WHERE c.status::text = 'PACKED' AND l."itemId" = ${m.itemId} AND c."warehouseId" = ${m.warehouseId}
+          AND l."sizeId" = ${m.sizeId} AND l.grade = ${m.grade ?? 'A'}
+          AND (c."dcId" IS NULL OR c."dcId" <> ${m.cartonsOn ?? ''})`
+      const packed = round3(Number(sealed[0]?.qty ?? 0))
+      const free = round3(Math.max(0, before.qty - packed))
+      if (packed > 0 && qty > free + 1e-9) {
+        const [item, warehouse, size] = await Promise.all([
+          tx.item.findUnique({ where: { id: m.itemId }, select: { name: true } }),
+          tx.warehouse.findUnique({ where: { id: m.warehouseId }, select: { name: true } }),
+          tx.size.findUnique({ where: { id: m.sizeId }, select: { code: true } }),
+        ])
+        const codes = (sealed[0]?.codes ?? []).filter(Boolean)
+        throw new AppError(
+          `Only ${free} pcs of ${item?.name ?? 'that item'} size ${size?.code ?? ''} in ${warehouse?.name ?? 'that store'} are loose: ${packed} are sealed in ${codes.length === 1 ? 'carton' : 'cartons'} ${codes.slice(0, 6).join(', ')}${codes.length > 6 ? '…' : ''}. Load the cartons on the challan (Finished Goods → Cartons → Dispatch), or open a carton first.`.replace(/\s+/g, ' '),
+          400,
+          'PACKED_IN_CARTONS',
+        )
+      }
+    }
     // Stock leaves at what it is carried at. Any other rate would leave value
     // behind that no quantity accounts for.
     unitRate = before.avgRate
@@ -400,6 +436,7 @@ export async function recordMovement(
       referenceType: m.referenceType,
       referenceId: m.referenceId,
       batchNumber: m.batchNumber ?? null,
+      orderNo: m.orderNo ?? null,
       ownership: m.ownership ?? 'OWNED',
       ownerCustomerId: m.ownerCustomerId ?? null,
       sizeId: m.sizeId ?? null,
@@ -603,6 +640,9 @@ export async function transferStock(
     /** A finished garment's size: it moves as that size, and arrives as it. */
     sizeId?: string | null
     grade?: string | null
+    /** The lot and the order travel with the pieces, written on both rows. */
+    batchNumber?: string | null
+    orderNo?: string | null
     transactionDate?: Date
     notes?: string | null
     /** As on a single movement: see `Movement`. Stickers and holds apply to the side it leaves. */
@@ -632,6 +672,8 @@ export async function transferStock(
     ownerCustomerId: args.ownerCustomerId,
     sizeId: args.sizeId,
     grade: args.grade,
+    batchNumber: args.batchNumber,
+    orderNo: args.orderNo,
     transactionDate: args.transactionDate,
     notes: args.notes,
     stickers: args.stickers,
@@ -667,6 +709,8 @@ export async function transferStock(
     ownerCustomerId: args.ownerCustomerId,
     sizeId: args.sizeId,
     grade: args.grade,
+    batchNumber: args.batchNumber,
+    orderNo: args.orderNo,
     transactionDate: args.transactionDate,
     notes: args.notes,
     earlierDate: args.earlierDate,

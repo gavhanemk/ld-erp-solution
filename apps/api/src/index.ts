@@ -35,6 +35,7 @@ import statementRoutes from './routes/statements.routes'
 import packageRoutes from './routes/packages.routes'
 import retailRoutes from './routes/retail.routes'
 import garmentRoutes from './routes/garments.routes'
+import fgCartonRoutes from './routes/fgCartons.routes'
 import traceRoutes from './routes/trace.routes'
 import searchRoutes from './routes/search.routes'
 import stockCountRoutes from './routes/stockCount.routes'
@@ -54,6 +55,7 @@ import { errorHandler } from './middleware/errorHandler'
 import { storageConfigured } from './lib/storage'
 import { authMiddleware } from './middleware/auth'
 import { logger } from './utils/logger'
+import { keepAwake } from './lib/keepAwake'
 import { prisma } from '@ld-erp/database'
 
 const app = express()
@@ -323,6 +325,7 @@ app.use('/api/packages', authMiddleware, packageRoutes)
 app.use('/api/retail', authMiddleware, retailRoutes)
 // One QR tag per finished garment: tag an order's pieces, print, scan.
 app.use('/api/garments', authMiddleware, garmentRoutes)
+app.use('/api/fg-cartons', authMiddleware, fgCartonRoutes)
 app.use('/api/trace', authMiddleware, traceRoutes)
 // The Ctrl+K palette's record search, across every module the user may see.
 app.use('/api/search', authMiddleware, searchRoutes)
@@ -350,6 +353,7 @@ const PORT = process.env.PORT || 5000
 httpServer.listen(Number(PORT), process.env.SAMPLING_ENABLED === 'true' ? '127.0.0.1' : '0.0.0.0', () => {
   logger.info(`🚀 LD ERP Solution API → http://localhost:${PORT}`)
   logger.info(`📡 Socket.io ready | 🌍 ${process.env.NODE_ENV}`)
+  keepAwake()
 })
 
 export default app

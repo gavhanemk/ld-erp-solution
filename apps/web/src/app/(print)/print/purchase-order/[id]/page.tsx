@@ -1,5 +1,8 @@
 'use client'
 
+import { inPack } from '@/lib/packs'
+import { chargeSnapshot } from '@ld-erp/shared'
+
 import { useCallback, useEffect, useState } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
@@ -78,6 +81,9 @@ interface Line {
   style: { code: string; name: string } | null
   hsnCode: string | null
   qty: string
+  /** The pack it is ordered in (a box of 20 pcs); qty is in the item's own unit. */
+  uomFactor?: string | number
+  uom?: { symbol: string } | null
   unitRate: string
   discount: string
   gstRate: string
@@ -133,6 +139,7 @@ interface PrintPayload {
     /// to invoice them, and a total that included charges the sheet did not
     /// name would be queried on every order.
     charges: {
+      taxSnapshot?: unknown
       amount: string
       gstRate: string
       chargeType: { name: string }
@@ -833,10 +840,11 @@ function LineTable({ lines, startIndex }: { lines: Line[]; startIndex: number })
               {line.hsnCode || <Dash />}
             </td>
             <td style={{ ...td, ...NUM, textAlign: 'right', fontWeight: 700, color: NAVY }}>
-              {money(line.qty)}
+              {money(inPack(line).qty)}
+              {inPack(line).pieces && <div style={{ fontSize: '9.5px', fontWeight: 400, color: GREY }}>= {inPack(line).pieces}</div>}
             </td>
             <td style={{ ...td, textAlign: 'center', color: GREY }}>
-              {line.item.uom?.symbol || <Dash />}
+              {inPack(line).unit || <Dash />}
             </td>
             <td style={{ ...td, ...NUM, textAlign: 'right' }}>₹{money(line.unitRate)}</td>
             <td
@@ -1280,8 +1288,8 @@ export default function PrintPurchaseOrder() {
   const chargeLines = (sheetOrder.charges ?? []).map((c) => ({
     label:
       taxMode !== 'NONE' && Number(c.gstRate) > 0
-        ? `${c.chargeType.name} @${Number(c.gstRate)}%`
-        : c.chargeType.name,
+        ? `${(chargeSnapshot(c.taxSnapshot)?.name ?? c.chargeType.name)} @${Number(c.gstRate)}%`
+        : (chargeSnapshot(c.taxSnapshot)?.name ?? c.chargeType.name),
     value: money(c.amount),
   }))
 
@@ -1447,7 +1455,7 @@ export default function PrintPurchaseOrder() {
      */
     ...(Number(order.otherCharges) > 0
       ? [{ label: 'Other Charges', value: money(order.otherCharges) }]
-      : (sheetOrder.charges ?? []).some((c) => c.chargeType.name === 'Other Charges')
+      : (sheetOrder.charges ?? []).some((c) => (chargeSnapshot(c.taxSnapshot)?.name ?? c.chargeType.name) === 'Other Charges')
         ? []
         : [{ label: 'Other Charges', value: money(0) }]),
 
