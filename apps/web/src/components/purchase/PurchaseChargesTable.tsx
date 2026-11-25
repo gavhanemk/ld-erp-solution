@@ -75,15 +75,15 @@ export function PurchaseChargesTable({
     <div className="space-y-2">
       {rows.length > 0 && (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[40rem] text-sm">
+          <table className="w-full min-w-[35rem] text-sm">
             <thead>
               <tr className="text-muted-foreground border-border border-b text-left text-[11px] font-semibold uppercase tracking-wider">
                 <th className="py-1.5 pr-2 font-semibold">Charge</th>
-                <th className="w-[11rem] px-2 py-1.5 text-right font-semibold">Amount</th>
-                <th className="w-[10rem] px-2 py-1.5 font-semibold">GST</th>
-                <th className="w-[6.5rem] px-2 py-1.5 text-right font-semibold">Tax</th>
-                <th className="w-[7.5rem] px-2 py-1.5 text-right font-semibold">Total</th>
-                <th className="w-[4.5rem] py-1.5 pl-2" aria-label="Actions" />
+                <th className="w-[9.5rem] px-2 py-1.5 text-right font-semibold">Amount</th>
+                <th className="w-[8.5rem] px-2 py-1.5 font-semibold">GST</th>
+                <th className="w-[5.5rem] px-2 py-1.5 text-right font-semibold">Tax</th>
+                <th className="w-[6.5rem] px-2 py-1.5 text-right font-semibold">Total</th>
+                <th className="w-[4rem] py-1.5 pl-1" aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
@@ -97,7 +97,7 @@ export function PurchaseChargesTable({
                         <StepInput
                           decimals
                           max={r.unit === '%' ? 100 : undefined}
-                          className="form-input h-9 w-24 text-right"
+                          className="form-input h-9 w-[5.5rem] text-right"
                           placeholder="0.00"
                           value={r.typed}
                           onValueChange={(v) => onAmount(r.key, v)}

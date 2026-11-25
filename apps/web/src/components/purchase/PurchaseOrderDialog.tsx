@@ -484,7 +484,7 @@ const COL = {
   num: 'w-8',
   // Remove and copy, side by side.
   remove: 'w-16',
-  item: 'w-80',
+  item: 'w-72',
   // Wide enough for a whole style code (LD-SH-2601) now that it fills in
   // from the item; at w-24 its last digit was cut off.
   style: 'w-28',
@@ -3192,7 +3192,7 @@ export function PurchaseOrderDialog({
               <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
                 <table
                   className={`w-full table-fixed border-collapse text-sm ${
-                    poType === 'ITEM_LEVEL' ? 'min-w-[1040px]' : 'min-w-[900px]'
+                    poType === 'ITEM_LEVEL' ? 'min-w-[1140px]' : 'min-w-[990px]'
                   }`}
                 >
                   <thead>

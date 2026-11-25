@@ -3372,7 +3372,7 @@ export function PurchaseBillDialog({
                 )}
               </div>
 
-              <Section icon={Calculator} title="Totals">
+              <Section icon={Calculator} title="Summary">
                 <div className="space-y-1.5 text-sm">
                   <PurchaseSummary
                     result={priced}
