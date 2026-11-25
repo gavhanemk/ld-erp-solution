@@ -24,13 +24,11 @@ import {
   Truck,
   Paperclip,
   ScrollText,
-  Lock,
   MapPin,
   User,
   MessageSquare,
   UploadCloud,
   Save as SaveIcon,
-  Mail,
   History,
   Pencil,
   MapPinned,
@@ -508,36 +506,13 @@ const COL = {
  */
 export { Section }
 
-/**
- * A control for something the ERP cannot do yet.
- *
- * Shown rather than hidden, because the field is part of the order the mill
- * knows and leaving it out reads as though it had been forgotten. Disabled
- * rather than accepting input, because a box that takes what you type and
- * throws it away is worse than no box — the same reason an unbuilt endpoint
- * here answers 501 instead of an empty list.
- */
-function Faded({ children }: { children: React.ReactNode }) {
-  // 70%, not 50%. Half opacity takes a 7:1 label down to roughly 3:1, which is
-  // below the floor for text of any size — the control read as damaged rather
-  // than switched off. This is still visibly inactive and still legible.
-  return <div className="pointer-events-none select-none opacity-70">{children}</div>
-}
-
-/**
- * One line covering everything in a section that cannot work yet.
- *
- * Shared rather than repeated per field: four of these sat on one screen, and
- * four near-identical apologies read as a broken product instead of an
- * unfinished one.
- */
-function NotBuiltNote({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
-      <Lock size={13} className="mt-0.5 shrink-0" />
-      {children}
-    </p>
-  )
+/** The same badges as the order list, so a status reads the same in both places. */
+const PO_STATUS: Record<string, { label: string; cls: string }> = {
+  DRAFT: { label: 'Draft', cls: 'badge-neutral' },
+  SENT: { label: 'Sent', cls: 'badge-info' },
+  PARTIALLY_RECEIVED: { label: 'Part received', cls: 'badge-warning' },
+  COMPLETED: { label: 'Completed', cls: 'badge-success' },
+  CANCELLED: { label: 'Cancelled', cls: 'badge-danger' },
 }
 
 /**
@@ -657,6 +632,8 @@ export function PurchaseOrderDialog({
   /// The date on the order. Asked for now, so a back-dated order lands in the
   /// right month rather than always taking today.
   const [poDate, setPoDate] = useState('')
+  /** When the goods are wanted by. Optional; printed on the order; never before its date. */
+  const [deliveryDate, setDeliveryDate] = useState('')
   /// The next number, previewed. Read-only: it is allocated by the server when
   /// the order is written, because two people filling this form at once must
   /// not be shown the same number as though it were theirs.
@@ -852,6 +829,7 @@ export function PurchaseOrderDialog({
     // received nowhere else.
     setWarehouseId(record?.deliveryWarehouseId ?? sampleSource?.sampleStoreId ?? '')
     setPoDate(record?.poDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10))
+    setDeliveryDate(record?.deliveryDate?.slice(0, 10) ?? '')
     // Raised for samples, the reference names them — and keeps following the
     // lines added after, until somebody types over it.
     const sampleRefText = sampleSource ? sampleReference(sampleSource.needs) : ''
@@ -2253,10 +2231,9 @@ export function PurchaseOrderDialog({
       return [...prev.slice(0, index + 1), copy, ...prev.slice(index + 1)]
     })
 
-  // poDate and deliveryDate are deliberately absent. The form no longer asks
-  // for either, and omitting them rather than sending a value means a new
-  // order takes today's date from the API, while editing an existing draft
-  // leaves the date it already carries alone instead of overwriting it.
+  // poDate is sent only when set, so a new order without one takes today's
+  // date from the API. deliveryDate (25 Nov 2026: asked for again) is sent
+  // as typed, or null to clear it.
   /**
    * Sends files to storage, then tells the API they landed.
    *
@@ -2428,6 +2405,7 @@ export function PurchaseOrderDialog({
     deliveryWarehouseId: deliverTo === 'CUSTOMER' ? null : warehouseId || null,
     deliveryCustomerId: deliverTo === 'CUSTOMER' ? deliveryCustomerId || null : null,
     poDate: poDate || undefined,
+    deliveryDate: deliveryDate || null,
     // Which of the supplier's addresses. The server renders the text from the
     // row and keeps it on the order, so the words cannot come from here.
     supplierAddressId: supplierAddressId || null,
@@ -2607,7 +2585,9 @@ export function PurchaseOrderDialog({
   // not five of each.
   const fileCount = attachments.length + pendingFiles.length + carriedFiles.length
 
-  const incomplete = !supplierId || activeLines.length === 0 || unfinished.length > 0
+  /** A delivery date before the order's own date — the server refuses it. */
+  const deliveryEarly = Boolean(deliveryDate && poDate && deliveryDate < poDate)
+  const incomplete = !supplierId || activeLines.length === 0 || unfinished.length > 0 || deliveryEarly
   const busy = saving !== null
   const orgAddress = [company?.address, company?.city, company?.pincode].filter(Boolean).join(', ')
   // Where the goods are actually going: the chosen warehouse, or our own
@@ -2733,13 +2713,18 @@ export function PurchaseOrderDialog({
                   className="text-foreground truncate text-xl font-semibold tracking-tight"
                 >
                   {serviceMode ? 'Service Purchase Order' : 'Purchase Order'}
+                  {isEdit && record?.status && PO_STATUS[record.status] && (
+                    <span className={`${PO_STATUS[record.status].cls} ml-2 align-middle text-xs font-medium`}>
+                      {PO_STATUS[record.status].label}
+                    </span>
+                  )}
                 </h2>
                 {/* The number moves down here rather than into the heading. The
                   heading says what the form is; the line under it says which
                   one and what may be done to it. */}
                 <p className="text-muted-foreground mt-0.5 text-[13px]">
                   {isEdit
-                    ? `${record?.poNumber} — only a draft order can be changed`
+                    ? `${record?.poNumber} — can be changed until goods are received or billed`
                     : serviceMode
                       ? 'Labour, job charges, repairs — billed when the work is done'
                       : 'New order to a supplier'}
@@ -2747,7 +2732,6 @@ export function PurchaseOrderDialog({
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <div className="hidden md:block">{primarySave}</div>
               <button onClick={onClose} className="btn-ghost p-2" aria-label="Close">
                 <X size={18} />
               </button>
@@ -2825,92 +2809,12 @@ export function PurchaseOrderDialog({
                 )}
               </div>
             )}
-            <Section icon={FileText} title="Basic Details">
-              {/* `auto-fit`, not a fixed two columns: fields pair up only
-                while each box is 160px or more, and drop to one column
-                below that. At 105px a phone paired them and clipped the
-                location and supplier pickers to "Head offic" and "Choose
-                su" — stacking is longer, but every box says what is in it.
-                `order` moves them back into the desktop's three
-                grouped rows (location/number/date, then supplier/
-                reference/remark) without changing the DOM, so tab order
-                still matches what is on screen at every width. */}
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-x-4 gap-y-3 md:grid-cols-3">
-                <div className="order-1 md:order-1">
-                  <label className="form-label" htmlFor="po-location">
-                    Location
-                  </label>
-                  {/* The icon is drawn over the control and the control padded to
-                    clear it, rather than set beside it in a flex row. Outside
-                    the border it would push each control a different distance
-                    from its label and break the line the six fields make. */}
-                  <div className="relative">
-                    <MapPin
-                      size={14}
-                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
-                    />
-                    <SmartSelect
-                      id="po-location"
-                      ref={firstFieldRef}
-                      className="form-input pl-9"
-                      value={warehouseId}
-                      onChange={(e) => setWarehouseId(e.target.value)}
-                    >
-                      <option value="">Head office</option>
-                      {/* A sample store says so: goods bought for a sample
-                        go there, and only those. */}
-                      {warehouses.map((w) => (
-                        <option key={w.id} value={w.id}>
-                          {isSampleStore(w) ? `${w.name} (sample store)` : w.name}
-                        </option>
-                      ))}
-                    </SmartSelect>
-                  </div>
-                </div>
-
-                <div className="order-3 md:order-2">
-                  <label className="form-label" htmlFor="po-number">
-                    Purchase order<span className="ml-0.5 text-red-500">*</span>
-                  </label>
-                  {/* Read-only on purpose. The number comes from the counter in
-                    Settings → Company when the order is written, so that two
-                    clerks filling this form at the same moment cannot both be
-                    handed the same one. What is shown on a new order is a
-                    preview of what is next, not a reservation. */}
-                  <input
-                    id="po-number"
-                    className="form-input font-mono"
-                    value={isEdit ? (record?.poNumber ?? '') : nextPoNumber}
-                    readOnly
-                    placeholder="Allocated on save"
-                    aria-describedby={isEdit ? undefined : 'po-number-note'}
-                  />
-                  {!isEdit && (
-                    <p id="po-number-note" className="text-muted-foreground mt-1 text-xs">
-                      Allocated when you save.
-                    </p>
-                  )}
-                </div>
-
-                <div className="order-4 md:order-3">
-                  <label className="form-label" htmlFor="po-date">
-                    Date
-                  </label>
-                  {/* No calendar glyph of our own on this one. A date input
-                    already draws the browser's picker button at its right end,
-                    and that is the one that opens the calendar — ours sat on
-                    the left doing nothing, so the field carried two calendars
-                    and only one of them worked. */}
-                  <input
-                    id="po-date"
-                    type="date"
-                    className="form-input"
-                    value={poDate}
-                    onChange={(e) => setPoDate(e.target.value)}
-                  />
-                </div>
-
-                <div className="order-2 md:order-4">
+            <Section icon={FileText} title="Order details">
+              {/* Supplier and dates first — what an order is decided by — then
+                where it goes and how it is referred to. DOM order is the
+                order on screen, so Tab follows what the eye reads. */}
+              <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="sm:col-span-2">
                   <label className="form-label" htmlFor="po-supplier">
                     Supplier<span className="ml-0.5 text-red-500">*</span>
                   </label>
@@ -2921,6 +2825,7 @@ export function PurchaseOrderDialog({
                     />
                     <SmartSelect
                       id="po-supplier"
+                      ref={firstFieldRef}
                       className="form-input pl-9"
                       value={supplierId}
                       onChange={(e) => setSupplierId(e.target.value)}
@@ -2975,9 +2880,103 @@ export function PurchaseOrderDialog({
                   ) : null}
                 </div>
 
-                <div className="order-5 md:order-5">
+                <div>
+                  <label className="form-label" htmlFor="po-date">
+                    PO date
+                  </label>
+                  {/* No calendar glyph of our own on this one. A date input
+                    already draws the browser's picker button at its right end,
+                    and that is the one that opens the calendar — ours sat on
+                    the left doing nothing, so the field carried two calendars
+                    and only one of them worked. */}
+                  <input
+                    id="po-date"
+                    type="date"
+                    className="form-input"
+                    value={poDate}
+                    onChange={(e) => setPoDate(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-delivery">
+                    Delivery by
+                  </label>
+                  <input
+                    id="po-delivery"
+                    type="date"
+                    className="form-input"
+                    value={deliveryDate}
+                    min={poDate || undefined}
+                    onChange={(e) => setDeliveryDate(e.target.value)}
+                    aria-invalid={deliveryEarly || undefined}
+                    aria-describedby={deliveryEarly ? 'po-delivery-error' : undefined}
+                  />
+                  {deliveryEarly && (
+                    <p id="po-delivery-error" className="warn-text mt-1 text-xs">
+                      Delivery can&apos;t be before the order date.
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-location">
+                    Location
+                  </label>
+                  {/* The icon is drawn over the control and the control padded to
+                    clear it, rather than set beside it in a flex row. Outside
+                    the border it would push each control a different distance
+                    from its label and break the line the six fields make. */}
+                  <div className="relative">
+                    <MapPin
+                      size={14}
+                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
+                    />
+                    <SmartSelect
+                      id="po-location"
+                      className="form-input pl-9"
+                      value={warehouseId}
+                      onChange={(e) => setWarehouseId(e.target.value)}
+                    >
+                      <option value="">Head office</option>
+                      {/* A sample store says so: goods bought for a sample
+                        go there, and only those. */}
+                      {warehouses.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {isSampleStore(w) ? `${w.name} (sample store)` : w.name}
+                        </option>
+                      ))}
+                    </SmartSelect>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-number">
+                    Purchase order<span className="ml-0.5 text-red-500">*</span>
+                  </label>
+                  {/* Read-only on purpose. The number comes from the counter in
+                    Settings → Company when the order is written, so that two
+                    clerks filling this form at the same moment cannot both be
+                    handed the same one. What is shown on a new order is a
+                    preview of what is next, not a reservation. */}
+                  <input
+                    id="po-number"
+                    className="form-input font-mono"
+                    value={isEdit ? (record?.poNumber ?? '') : nextPoNumber}
+                    readOnly
+                    placeholder="Allocated on save"
+                    aria-describedby={isEdit ? undefined : 'po-number-note'}
+                  />
+                  {!isEdit && (
+                    <p id="po-number-note" className="text-muted-foreground mt-1 text-xs">
+                      Allocated when you save.
+                    </p>
+                  )}
+                </div>
+
+                <div>
                   <label className="form-label" htmlFor="po-reference">
-                    Reference
+                    Order ref
                   </label>
                   <div className="relative">
                     <FileText
@@ -2994,7 +2993,7 @@ export function PurchaseOrderDialog({
                   </div>
                 </div>
 
-                <div className="order-6 md:order-6">
+                <div>
                   <label className="form-label" htmlFor="po-remark">
                     Remark
                   </label>
@@ -3013,6 +3012,16 @@ export function PurchaseOrderDialog({
                   </div>
                 </div>
               </div>
+              {/* Which indents this order fills — read off its lines, never typed. */}
+              {(() => {
+                const mrs = [...new Set(lines.map((l) => l.mrNumber).filter((n): n is string => Boolean(n)))]
+                return mrs.length > 0 ? (
+                  <p className="text-muted-foreground mt-2 text-xs">
+                    Against indent{mrs.length > 1 ? 's' : ''}{' '}
+                    <span className="text-foreground font-mono">{mrs.join(', ')}</span>
+                  </p>
+                ) : null
+              })()}
 
               {/* Who the order is to, filled in from the supplier master.
 
@@ -3959,7 +3968,7 @@ export function PurchaseOrderDialog({
               One row, two boxes: the delivery and its files on the left, the
               calculation on the right — the arrangement the form has always
               had, and the one the clerk checks left to right before saving. */}
-            <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_460px]">
+            <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_22rem] xl:grid-cols-[minmax(0,1fr)_25rem]">
               {/* The left column is stacked rather than left half-empty.
 
                 The calculation beside it runs to a dozen rows once the charge
@@ -4036,11 +4045,125 @@ export function PurchaseOrderDialog({
                   />
                 </Section>
 
-                <Section icon={Truck} title="Attachments &amp; Deliver To">
-                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <Section
+                  icon={Truck}
+                  title="Deliver to"
+                  foldable
+                  openByDefault={false}
+                  summary={
+                    deliverTo === 'CUSTOMER'
+                      ? deliveryCustomer
+                        ? `Customer · ${deliveryCustomer.name}`
+                        : 'Customer · not chosen yet'
+                      : (destination?.name ?? company?.name ?? 'Your company')
+                  }
+                >
                     <div className="space-y-2">
-                      <h4 className="text-foreground text-xs font-semibold">Attachments</h4>
+                      <div className="flex flex-wrap items-center gap-4">
+                        <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="po-deliver-to"
+                            checked={deliverTo === 'ORGANIZATION'}
+                            onChange={() => setDeliverTo('ORGANIZATION')}
+                          />
+                          Organization
+                        </label>
+                        <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="po-deliver-to"
+                            checked={deliverTo === 'CUSTOMER'}
+                            onChange={() => setDeliverTo('CUSTOMER')}
+                          />
+                          Customer
+                        </label>
+                      </div>
 
+                      {deliverTo === 'CUSTOMER' ? (
+                        <>
+                          <SmartSelect
+                            className="form-input"
+                            value={deliveryCustomerId}
+                            onChange={(e) => setDeliveryCustomerId(e.target.value)}
+                            aria-label="Deliver to customer"
+                          >
+                            <option value="">Choose customer</option>
+                            {customers.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.code ? `${c.code} — ${c.name}` : c.name}
+                              </option>
+                            ))}
+                          </SmartSelect>
+
+                          {deliveryCustomer && (
+                            <div className="border-border bg-secondary rounded-lg border px-3 py-2">
+                              <p className="text-foreground text-sm font-medium">
+                                {deliveryCustomer.name}
+                              </p>
+                              <p className="text-muted-foreground text-xs">
+                                {customerAddress || 'No address on this customer.'}
+                              </p>
+                              {/* Said because it used to work the other way. The
+                                supplier still bills us, so the tax follows our
+                                own state wherever the goods are sent — a
+                                customer in another state does not turn it into
+                                IGST (IGST Act s.10(1)(b), bill-to / ship-to). */}
+                              {customerStateCode && (
+                                <p className="text-muted-foreground mt-1 text-xs">
+                                  Delivered in state {customerStateCode}. The supplier
+                                  still bills us, so the GST follows our own state,
+                                  not the customer&apos;s
+                                  {supplier && taxMode === 'CGST_SGST'
+                                    ? ' — CGST + SGST on this order.'
+                                    : supplier && taxMode === 'IGST'
+                                      ? ' — IGST on this order, as the supplier is in another state.'
+                                      : '.'}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        /* Shown, not repeated. An order has one destination, so a
+                         second dropdown for it here would only mirror the Location
+                         field above — change one and the other moves, which reads
+                         as two settings that disagree. */
+                        <div className="border-border bg-secondary rounded-lg border px-3 py-2">
+                          <p className="text-foreground text-sm font-medium">
+                            {destination?.name ?? company?.name ?? 'Your company'}
+                          </p>
+                          <p className="text-muted-foreground text-xs">
+                            {destination?.address ||
+                              orgAddress ||
+                              'Address not set — add it in Settings → Company.'}
+                          </p>
+                          <button
+                            type="button"
+                            className="text-primary mt-1.5 flex items-center gap-1.5 text-xs hover:underline"
+                            onClick={() => document.getElementById('po-location')?.focus()}
+                            title="Delivering somewhere else? Change the Location field above."
+                          >
+                            <MapPin size={12} className="shrink-0" />
+                            Location
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                </Section>
+
+                <Section
+                  icon={Paperclip}
+                  title="Attachments"
+                  foldable
+                  openByDefault={false}
+                  summary={
+                    fileCount + pendingFiles.length + carriedFiles.length > 0
+                      ? `${fileCount + pendingFiles.length + carriedFiles.length} attached`
+                      : 'None'
+                  }
+                >
+                    <div className="space-y-2">
                       {/* One box whether or not the order exists yet. On a new
                         order the files are held and go up the moment it is saved,
                         so nobody has to save, reopen and come back for them. */}
@@ -4188,100 +4311,6 @@ export function PurchaseOrderDialog({
                       </div>
                     </div>
 
-                    <div className="space-y-2">
-                      <h4 className="text-foreground text-xs font-semibold">Deliver to</h4>
-                      <div className="flex flex-wrap items-center gap-4">
-                        <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
-                          <input
-                            type="radio"
-                            name="po-deliver-to"
-                            checked={deliverTo === 'ORGANIZATION'}
-                            onChange={() => setDeliverTo('ORGANIZATION')}
-                          />
-                          Organization
-                        </label>
-                        <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
-                          <input
-                            type="radio"
-                            name="po-deliver-to"
-                            checked={deliverTo === 'CUSTOMER'}
-                            onChange={() => setDeliverTo('CUSTOMER')}
-                          />
-                          Customer
-                        </label>
-                      </div>
-
-                      {deliverTo === 'CUSTOMER' ? (
-                        <>
-                          <SmartSelect
-                            className="form-input"
-                            value={deliveryCustomerId}
-                            onChange={(e) => setDeliveryCustomerId(e.target.value)}
-                            aria-label="Deliver to customer"
-                          >
-                            <option value="">Choose customer</option>
-                            {customers.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.code ? `${c.code} — ${c.name}` : c.name}
-                              </option>
-                            ))}
-                          </SmartSelect>
-
-                          {deliveryCustomer && (
-                            <div className="border-border bg-secondary rounded-lg border px-3 py-2">
-                              <p className="text-foreground text-sm font-medium">
-                                {deliveryCustomer.name}
-                              </p>
-                              <p className="text-muted-foreground text-xs">
-                                {customerAddress || 'No address on this customer.'}
-                              </p>
-                              {/* Said because it used to work the other way. The
-                                supplier still bills us, so the tax follows our
-                                own state wherever the goods are sent — a
-                                customer in another state does not turn it into
-                                IGST (IGST Act s.10(1)(b), bill-to / ship-to). */}
-                              {customerStateCode && (
-                                <p className="text-muted-foreground mt-1 text-xs">
-                                  Delivered in state {customerStateCode}. The supplier
-                                  still bills us, so the GST follows our own state,
-                                  not the customer&apos;s
-                                  {supplier && taxMode === 'CGST_SGST'
-                                    ? ' — CGST + SGST on this order.'
-                                    : supplier && taxMode === 'IGST'
-                                      ? ' — IGST on this order, as the supplier is in another state.'
-                                      : '.'}
-                                </p>
-                              )}
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        /* Shown, not repeated. An order has one destination, so a
-                         second dropdown for it here would only mirror the Location
-                         field above — change one and the other moves, which reads
-                         as two settings that disagree. */
-                        <div className="border-border bg-secondary rounded-lg border px-3 py-2">
-                          <p className="text-foreground text-sm font-medium">
-                            {destination?.name ?? company?.name ?? 'Your company'}
-                          </p>
-                          <p className="text-muted-foreground text-xs">
-                            {destination?.address ||
-                              orgAddress ||
-                              'Address not set — add it in Settings → Company.'}
-                          </p>
-                          <button
-                            type="button"
-                            className="text-primary mt-1.5 flex items-center gap-1.5 text-xs hover:underline"
-                            onClick={() => document.getElementById('po-location')?.focus()}
-                            title="Delivering somewhere else? Change the Location field above."
-                          >
-                            <MapPin size={12} className="shrink-0" />
-                            Location
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
                 </Section>
 
                 {/* 5 — What the order says. Two boxes side by side, as the mockup
@@ -4309,9 +4338,16 @@ export function PurchaseOrderDialog({
                       onChange={(e) => setTerms(e.target.value)}
                       aria-label="Terms and conditions"
                     />
-                    <p className="text-muted-foreground mt-1 text-right text-[11px] tabular-nums">
-                      {terms.length}/{TERMS_MAX}
-                    </p>
+                    <div className="mt-1 flex items-center justify-between gap-3 text-[11px]">
+                      {/* Emailing is not built, so the Template & Email panel is gone;
+                        the wording and printed blocks live in Settings → Documents. */}
+                      <a href="/settings/documents" target="_blank" rel="noreferrer" className="text-primary underline">
+                        Edit the printed wording
+                      </a>
+                      <span className="text-muted-foreground tabular-nums">
+                        {terms.length}/{TERMS_MAX}
+                      </span>
+                    </div>
                   </Section>
 
                   <Section
@@ -4336,125 +4372,15 @@ export function PurchaseOrderDialog({
                   </Section>
                 </div>
 
-                {/* How it goes out, tucked under the terms rather than given a row
-                of its own across the bottom of the form.
-
-                Neither control does anything yet, so a box each would be height
-                spent on two switched-off things. And the calculation beside this
-                column is taller than everything stacked against it, so this is
-                space the form was already paying for either way. */}
-                <Section
-                  icon={Mail}
-                  title="Template &amp; Email"
-                  foldable
-                  openByDefault={false}
-                  summary="One template per document type; emailing is not built yet"
-                >
-                  <div className="space-y-2">
-                    <div className="grid grid-cols-1 items-center gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
-                      {/* A real link, not a greyed box. The wording, the title and
-                    which blocks print are all editable — under Settings →
-                    Documents, per document type. Showing this as "not built"
-                    was wrong: it is built, it just does not live here. */}
-                      <div className="border-border bg-secondary flex items-center justify-between gap-2 rounded-lg border px-3 py-2">
-                        <span className="text-foreground flex min-w-0 items-center gap-2 text-sm">
-                          <FileText size={14} className="text-muted-foreground shrink-0" />
-                          <span className="truncate">Template: Standard</span>
-                        </span>
-                        <a
-                          href="/settings/documents"
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-primary shrink-0 text-xs underline"
-                        >
-                          Edit
-                        </a>
-                      </div>
-
-                      {/* The supplier, not us. This showed `company.email` — our
-                      own accounts address — which is the wrong way round for a
-                      purchase order: the order goes to the supplier, so they
-                      are the recipient. The address comes off the supplier
-                      master, which the form already has loaded for the billing
-                      block above. */}
-                      <Faded>
-                        {/* Both addresses, because once emailing is built both
-                          are wanted: the order goes to the supplier, and
-                          accounts needs to know an order was raised.
-
-                          The mill's old form showed only the second of these
-                          and labelled it "Email To", which is what nobody
-                          could explain — an address that looks like the
-                          recipient but is your own office. Naming the two
-                          separately is the whole fix.
-
-                          Switched off until emailing exists, and then these
-                          are the two lines it sends to. */}
-                        <div className="min-w-0 space-y-1">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <Mail size={14} className="text-muted-foreground shrink-0" />
-                            <span className="text-muted-foreground w-14 shrink-0 text-xs">To</span>
-                            <input
-                              type="checkbox"
-                              checked={Boolean(supplier?.email)}
-                              readOnly
-                              className="shrink-0"
-                            />
-                            {supplier?.email ? (
-                              <span className="text-foreground truncate text-sm">
-                                {supplier.email}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground truncate text-sm">
-                                {supplier
-                                  ? `No email on ${supplier.name}`
-                                  : 'Choose a supplier to see where it would go'}
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="flex min-w-0 items-center gap-2">
-                            {/* Kept clear rather than given an icon of its own,
-                              so the two addresses line up under one heading
-                              instead of reading as two unrelated rows. */}
-                            <span className="w-[14px] shrink-0" aria-hidden />
-                            <span className="text-muted-foreground w-14 shrink-0 text-xs">
-                              Copy to
-                            </span>
-                            <input
-                              type="checkbox"
-                              checked={Boolean(company?.email)}
-                              readOnly
-                              className="shrink-0"
-                            />
-                            {company?.email ? (
-                              <span className="text-foreground truncate text-sm">
-                                {company.email}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground truncate text-sm">
-                                No company email in Settings
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </Faded>
-                    </div>
-
-                    <NotBuiltNote>
-                      Emailing the order is not built yet — print it and send it yourself. There is
-                      one template per document type, so there is nothing to choose here; Edit opens
-                      the wording and the printed blocks in Settings.
-                    </NotBuiltNote>
-                  </div>
-                </Section>
               </div>
 
               {/* The figures, read-only, every one from priceDocument() — the
                 same sum the server saves and the print shows. */}
-              <Section icon={Calculator} title="Summary">
-                <PurchaseSummary result={totals.result} split={taxMode} />
-              </Section>
+              <div className="lg:sticky lg:top-0">
+                <Section icon={Calculator} title="Summary">
+                  <PurchaseSummary result={totals.result} split={taxMode} />
+                </Section>
+              </div>
             </div>
           </div>
 
