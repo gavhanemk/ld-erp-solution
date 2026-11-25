@@ -113,7 +113,7 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'packType', head: 'Package Type', width: 12, list: 'packTypes', note: 'Optional: Roll, Box, Carton, Bag, Bundle, Packet or Other. Empty: the item’s usual.' },
     { key: 'packCount', head: 'Package Count', width: 12, note: 'Optional: how many packages. With no sizes, the stock comes in and the stickers wait until the sizes are known — equal sizes are never assumed.' },
     { key: 'packEach', head: 'Qty per Package', width: 13, note: 'Optional: what one full package holds. 1,200 at 500 is 500 + 500 + 200.' },
-    { key: 'packQtys', head: 'Package Quantities', width: 24, note: 'Optional: each package, separated by commas: 200, 250, 150, 180, 220. Less than the row leaves the rest without stickers.' },
+    { key: 'packQtys', head: 'Package Quantities', width: 24, note: 'Optional: each package, separated by commas: 200, 250, 150, 180, 220. They must add up to exactly the row\'s quantity.' },
     { key: 'packRefs', head: 'Package References', width: 22, note: "Optional: each package's own number (the supplier's roll no.), in the same order, separated by commas." },
     { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'Optional. OK, Hold or Rejected. Empty is OK.' },
     { key: 'remarks', head: 'Remarks', width: 24, note: 'Optional.' },
@@ -265,7 +265,12 @@ function planPacks(
   if (input?.qtys?.length) {
     const qtys = input.qtys.map(round3)
     const sum = round3(qtys.reduce((t, q) => t + q, 0))
-    if (sum > ctx.qty + 0.0005) problems.push(`${ctx.L('packQtys')} add up to ${sum} ${ctx.unit}, more than the ${ctx.qty} ${ctx.unit} on the row.`)
+    // All of it on packages, or none of it (packaging pending): never part.
+    if (Math.abs(sum - ctx.qty) > 0.0005) {
+      problems.push(
+        `${ctx.L('packQtys')} add up to ${sum} ${ctx.unit}, but the row has ${ctx.qty} ${ctx.unit}. The packages must hold exactly all of it — or leave the package columns empty for packaging pending.`,
+      )
+    }
     if (input.count && input.count !== qtys.length) problems.push(`${ctx.L('packCount')} says ${input.count}, but ${qtys.length} quantities are given.`)
     const bad = qtys.find((q) => !fits(q))
     if (bad !== undefined) problems.push(`A package of ${bad} ${ctx.unit}: ${placesMessage(ctx.places)}`)
@@ -490,7 +495,7 @@ const HOW_TO: Record<OsKind, string[]> = {
     "UOM may be left empty: the item's own unit. Given, it is checked, never converted, so give the quantity in it.",
     'Location may be left empty: the store called Store. Otherwise a store in Masters → Warehouses.',
     'Stickers (where the category is tracked): the five Package columns say how the row is packed — all optional.',
-    'Package Quantities lists each package: 200, 250, 150 makes three stickers. Less than the row leaves the rest without stickers for now.',
+    'Package Quantities lists each package: 200, 250, 150 makes three stickers. They must add up to exactly the row’s quantity: a row is packed in full, or its packaging is pending in full.',
     'Qty per Package makes full packages and one for the rest: 1,200 at 500 is 500 + 500 + 200.',
     'Package Count alone: the stock comes in and its stickers wait until the sizes are known (Stickers → Make stickers on the line). Equal sizes are never assumed.',
     "Nothing given: a row with its own Bundle / Barcode Number is one package; otherwise the item's usual package size, if it has one; else the stickers wait.",

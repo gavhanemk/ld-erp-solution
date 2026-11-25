@@ -606,6 +606,14 @@ export async function restickStickers(
   const total = round3(now.reduce((s, p) => s + Number(p.qty), 0))
   const wanted = qtys.map(round3)
   const sum = round3(wanted.reduce((s, q) => s + q, 0))
+  // Opening stock is packed in full or not at all: new stickers for all of it, or all taken off.
+  if (first.sourceType === 'OPENING' && leaveLoose && sum > 0.0005 && Math.abs(sum - total) > 0.0005) {
+    throw new AppError(
+      `Opening stock is packed in full or not at all: the new stickers add up to ${sum} ${unit}, but these hold ${total} ${unit}. Make them match, or take the stickers off (packaging pending).`,
+      400,
+      'NOT_MATCHING',
+    )
+  }
   if (leaveLoose ? sum > total + 0.0005 : Math.abs(sum - total) > 0.0005) {
     throw new AppError(
       leaveLoose

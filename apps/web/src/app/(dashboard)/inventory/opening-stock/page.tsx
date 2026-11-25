@@ -315,6 +315,7 @@ function StickersCell({ line }: { line: Line }) {
           total={s.waiting}
           unit={unit}
           places={qtyRules.places({ uom: { symbol: unit } })}
+          part={false}
           allowLater={false}
           noteLabel="Roll no. / reference (optional)"
           busy={busy}
@@ -328,6 +329,7 @@ function StickersCell({ line }: { line: Line }) {
       {changing && (
         <ChangeStickers
           line={changing}
+          part={false}
           onClose={() => setChanging(null)}
           onDone={(message) => {
             setChanging(null)

@@ -593,6 +593,7 @@ function ImportOpeningStock() {
           initial={packValueOf(packing.pack)}
           total={packing.qty}
           unit={packing.unit ?? ''}
+          part={false}
           places={qtyRules.places({ uom: { symbol: packing.unit ?? '' } })}
           noteLabel="Roll no. / reference (optional)"
           countForLater

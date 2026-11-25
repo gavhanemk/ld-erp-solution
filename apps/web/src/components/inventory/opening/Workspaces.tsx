@@ -610,6 +610,7 @@ function PackedAs({ item, lot, row, onChange }: { item: MaterialOption; lot: Lot
           total={qty}
           unit={unit}
           places={item.decimals}
+          part={false}
           noteLabel="Roll no. / reference (optional)"
           countForLater
           laterText="Saved as stock with packaging pending. Configure the packages later — from Stickers → Packaging pending, or the line in Opening Stock."
