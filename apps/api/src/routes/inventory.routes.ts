@@ -5858,7 +5858,7 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
   const full = await prisma.openingStockLine.findMany({
     where: { id: { in: pageKeys.map((k) => k.id) } },
     include: {
-      openingStock: { select: { id: true, number: true, fileName: true } },
+      openingStock: { select: { id: true, number: true, fileName: true, reversedAt: true } },
       item: {
         select: {
           code: true,
@@ -5896,7 +5896,12 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
 router.get('/opening-stock', requirePermission(MODULE, 'view'), async (_req, res) => {
   const docs = await prisma.openingStock.findMany({
     orderBy: { createdAt: 'desc' },
-    select: { id: true, number: true, fileName: true, notes: true, kind: true, createdAt: true, createdBy: { select: { name: true } } },
+    select: {
+      id: true, number: true, fileName: true, notes: true, kind: true, createdAt: true, createdBy: { select: { name: true } },
+      // Taken back, and any correction or reversal still waiting for approval.
+      reversedAt: true,
+      changes: { where: { status: 'PENDING' }, select: { number: true, kind: true } },
+    },
   })
   const totals = await prisma.openingStockLine.groupBy({
     by: ['openingStockId'],

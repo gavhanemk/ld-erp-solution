@@ -50,6 +50,8 @@ interface PlanRow {
   /** Raw materials labelled by package: what its stickers will be. */
   packing?: string | null
   stickers?: number
+  /** No rate: in at nought, its value to be set later (Opening Stock → Set rate). */
+  valuationPending?: boolean
 }
 type EntryLine = Record<string, string | number | ReturnType<typeof packInputOf>>
 interface Saved {
@@ -680,6 +682,7 @@ function ReviewPanel({
             </span>
           ))}
           {!garments && stickers > 0 && ` · ${stickers} stickers to print`}
+          {plan.some((r) => r.valuationPending) && ` · ${plan.filter((r) => r.valuationPending).length} without a rate: valuation pending, set later in Opening Stock`}
         </>
       }
       label="Review"
@@ -745,7 +748,10 @@ function ReviewPanel({
                   <td className="px-3 py-1.5 text-right tabular-nums">
                     {num(r.qty ?? 0)} {r.unit}
                   </td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{money(r.rate ?? 0)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">
+                    {money(r.rate ?? 0)}
+                    {r.valuationPending && <div className="text-[10px] font-semibold text-amber-600">Valuation pending</div>}
+                  </td>
                   <td className="text-foreground px-3 py-1.5 text-right font-semibold tabular-nums">{money(r.value ?? 0)}</td>
                   {!garments && <td className="text-muted-foreground px-3 py-1.5">{r.packing ?? '—'}</td>}
                 </tr>

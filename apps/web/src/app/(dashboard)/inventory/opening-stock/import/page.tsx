@@ -48,7 +48,11 @@ interface RowPlan {
   newFloor: boolean
   item: { code: string; name: string } | null
   /** Not in Items & Products yet: made on import, with its own code. */
-  newItem?: { name: string; category: string; unit: string; type: string; copiedFrom: string | null } | null
+  newItem?: { key: string; name: string; category: string; unit: string; type: string; tax: string; approved: boolean; copiedFrom: string | null } | null
+  /** Named an item not in Items & Products, and matched to this one instead. */
+  matched?: { key: string; name: string } | null
+  /** No rate: in at nought, its value to be set later. */
+  valuationPending?: boolean
   size: string | null
   order: string | null
   lot: string | null
@@ -73,11 +77,27 @@ interface Summary {
   floorsToMake: string[]
   /** Items not in Items & Products yet, made on import. */
   itemsToMake?: Array<{ name: string; category: string; unit: string }>
+  /** Each item the sheet names that is not in Items & Products: to make, or matched to one already there. */
+  decisions?: Decision[]
+  /** New items still to approve or match. */
+  undecided?: number
+  /** Lines coming in without a rate. */
+  valuationPending?: number
   byGroup: Array<{ group: string; label: string; lines: number; value: number }>
   /** Stickers to print; packages keeping their own barcode; rows whose packaging is pending. */
   stickers?: number
   kept?: number
   waiting?: number
+}
+interface Decision {
+  key: string
+  name: string
+  category: string
+  unit: string
+  tax: string
+  similar: Array<{ id: string; code: string; name: string }>
+  decision: 'PENDING' | 'NEW' | 'MATCHED'
+  matched: { code: string; name: string } | null
 }
 interface Done {
   id: string
@@ -92,7 +112,7 @@ interface Done {
   again?: boolean
 }
 
-const STEPS = ['What the sheet holds', 'Template and upload', 'Check the rows', 'Imported']
+const STEPS = ['Upload Excel', 'Validate data', 'Resolve new items', 'Review stock & packaging', 'Confirm import', 'Import completed']
 const ALL = { key: 'ALL' as const, label: 'All in one sheet', short: '19 columns', text: "Your standard 19-column opening stock sheet, Opening Date to Remarks: finished goods, semi-finished goods and raw materials together.", icon: Rows3 }
 
 /** Each template's columns as the sheet has them, those that must be filled marked. */
@@ -101,6 +121,7 @@ const COLUMNS: Record<Choice, Array<[string, boolean]>> = {
     ['Opening Date', true], ['Process', false], ['Department / Location', false], ['Order No.', false], ['Style / Article No.', false], ['Item Code', false],
     ['Item Description', true], ['Item Category', false], ['Fabric / Material', false], ['Colour', false], ['Size', false], ['Lot / Batch / Roll No.', false],
     ['Bundle / Barcode No.', false], ['UOM', false], ['Opening Qty', true], ['Unit Rate', false], ['Opening Value', false], ['Stock Status', false], ['Remarks', false],
+    ['HSN Code', false], ['GST %', false],
   ],
   FG: [['Style / Article No.', true], ['Item Code', false], ['Colour', true], ['Size', true], ['Opening Quantity', true], ['Rate Per Piece', false], ['Location', false], ['Stock Status', false], ['Remarks', false]],
   SFG: [
@@ -110,7 +131,7 @@ const COLUMNS: Record<Choice, Array<[string, boolean]>> = {
   RM: [
     ['Material Category', false], ['Item Code', false], ['Item Name', true], ['Lot / Batch / Roll Number', false], ['Bundle / Barcode Number', false], ['UOM', false],
     ['Opening Quantity', true], ['Unit Rate', false], ['Location', false], ['Package Type', false], ['Package Count', false], ['Qty per Package', false],
-    ['Package Quantities', false], ['Package References', false], ['Stock Status', false], ['Remarks', false],
+    ['Package Quantities', false], ['Package References', false], ['Stock Status', false], ['Remarks', false], ['HSN Code', false], ['GST %', false],
   ],
 }
 /** What each template is for, in a line. */
@@ -185,6 +206,8 @@ function ImportOpeningStock() {
   const [over, setOver] = useState(false)
   // Packing changed on the review, by sheet row: sent with the check and the import.
   const [packs, setPacks] = useState<Record<string, PackInputBody>>({})
+  // Each new item: 'NEW' to make it, or the id of an item already there to use instead.
+  const [resolve, setResolve] = useState<Record<string, string>>({})
   const [packing, setPacking] = useState<RowPlan | null>(null)
   const qtyRules = useQtyRules()
   const input = useRef<HTMLInputElement>(null)
@@ -196,26 +219,26 @@ function ImportOpeningStock() {
     file: file?.data,
     ...(choice && choice !== 'ALL' ? { kind: choice, openingDate: date } : {}),
     ...(Object.keys(packs).length ? { packs } : {}),
+    ...(Object.keys(resolve).length ? { resolve } : {}),
     ...extra,
   })
 
-  const check = async (f: { name: string; data: string }, onDate = date, withPacks = packs) => {
+  const check = async (f: { name: string; data: string }, onDate = date, withPacks = packs, withResolve = resolve, scroll = true) => {
     setBusy('check')
     setError(null)
-    setSummary(null)
-    setRows([])
     try {
       const res = await api.post<{ data: { summary: Summary; rows: RowPlan[] } }>('/inventory/opening-stock/import', {
         fileName: f.name,
         file: f.data,
         ...(choice && choice !== 'ALL' ? { kind: choice, openingDate: onDate } : {}),
         ...(Object.keys(withPacks).length ? { packs: withPacks } : {}),
+        ...(Object.keys(withResolve).length ? { resolve: withResolve } : {}),
       })
       setSummary(res.data.summary)
       setRows(res.data.rows)
-      setOnly(res.data.summary.problems ? 'bad' : 'all')
+      if (scroll) setOnly(res.data.summary.problems ? 'bad' : 'all')
       // The answer, brought into view under the upload.
-      setTimeout(() => results.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80)
+      if (scroll) setTimeout(() => results.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not check the sheet.')
     } finally {
@@ -229,9 +252,12 @@ function ImportOpeningStock() {
       const f = { name: picked.name, data: await asBase64(picked) }
       setFile(f)
       setRequestKey(newRequestId())
-      // A new sheet: changes made on the last one's rows do not carry over.
+      // A new sheet: changes made on the last one's rows, and decisions on its items, do not carry over.
       setPacks({})
-      await check(f, date, {})
+      setResolve({})
+      setSummary(null)
+      setRows([])
+      await check(f, date, {}, {})
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The file could not be read.')
     } finally {
@@ -268,7 +294,13 @@ function ImportOpeningStock() {
     }
   }
 
-  const stepIndex = !choice ? 0 : done ? 3 : summary ? 2 : 1
+  const undecided = summary?.undecided ?? 0
+  const decide = (next: Record<string, string>) => {
+    setResolve(next)
+    if (file) void check(file, date, packs, next, false)
+  }
+  // Upload, validate, resolve new items, review, confirm, done — as far as this sheet has got.
+  const stepIndex = done ? 5 : busy === 'import' ? 4 : !summary ? 0 : summary.problems ? 1 : undecided ? 2 : 3
   const listed = rows.filter((r) => !r.skipped && (only === 'all' || (only === 'bad' ? r.problems.length > 0 : r.problems.length === 0)))
   const ready = summary ? summary.lines : 0
   const checkedRows = summary ? summary.rows - summary.skipped : 0
@@ -432,6 +464,16 @@ function ImportOpeningStock() {
           </div>
 
           <div ref={results} className="scroll-mt-4" />
+          {summary && (summary.decisions?.length ?? 0) > 0 && (
+            <ResolvePanel
+              decisions={summary.decisions!}
+              resolve={resolve}
+              undecided={undecided}
+              busy={busy !== null}
+              onDecide={(key, value) => decide({ ...resolve, [key]: value })}
+              onApproveAll={() => decide({ ...resolve, ...Object.fromEntries(summary.decisions!.filter((d) => !resolve[d.key]).map((d) => [d.key, 'NEW'])) })}
+            />
+          )}
           {summary && (
             <Panel
               icon={summary.problems ? AlertCircle : CheckCircle2}
@@ -495,6 +537,11 @@ function ImportOpeningStock() {
                 {(summary.kept ?? 0) > 0 && (
                   <span className="badge-neutral" title="A lot's own barcode stays its package's identity: nothing to print for it">
                     {summary.kept} keep their own barcode
+                  </span>
+                )}
+                {(summary.valuationPending ?? 0) > 0 && (
+                  <span className="badge-warning" title="No rate given: in at ₹0, its value to be set later (Opening Stock → Set rate)">
+                    {summary.valuationPending} {summary.valuationPending === 1 ? 'row' : 'rows'}: valuation pending
                   </span>
                 )}
                 {(summary.waiting ?? 0) > 0 && (
@@ -576,9 +623,13 @@ function ImportOpeningStock() {
                   </>
                 )}
               </p>
-              <button type="button" className="btn-primary h-9" disabled={busy !== null || summary.problems > 0 || ready === 0 || !mayImport} onClick={() => void bringIn()}>
+              <button type="button" className="btn-primary h-9" disabled={busy !== null || summary.problems > 0 || undecided > 0 || ready === 0 || !mayImport} onClick={() => void bringIn()}>
                 {busy === 'import' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}{' '}
-                {summary.problems ? 'Correct every row to import' : `Confirm and import ${ready} ${ready === 1 ? 'line' : 'lines'}`}
+                {summary.problems
+                  ? 'Correct every row to import'
+                  : undecided
+                    ? `Decide the ${undecided} new ${undecided === 1 ? 'item' : 'items'} first`
+                    : `Confirm and import ${ready} ${ready === 1 ? 'line' : 'lines'}`}
               </button>
             </div>
           )}
@@ -603,7 +654,7 @@ function ImportOpeningStock() {
             const next = { ...packs, [String(packing.row)]: packInputOf(v, packing.qty!, packing.unit ?? '', qtyRules.places({ uom: { symbol: packing.unit ?? '' } })) }
             setPacks(next)
             setPacking(null)
-            void check(file, date, next)
+            void check(file, date, next, resolve, false)
           }}
           onClose={() => setPacking(null)}
         />
@@ -712,12 +763,14 @@ function CheckRow({ r, changed, onPacking }: { r: RowPlan; changed: boolean; onP
           <div className="text-foreground font-medium">
             {r.item?.name ?? '—'}
             {r.newItem && <span className="badge-warning ml-1.5 align-middle text-[10px]">New item</span>}
+            {r.matched && <span className="badge-info ml-1.5 align-middle text-[10px]">Matched</span>}
           </div>
           {r.newItem && (
             <div className="text-muted-foreground">
-              Made on import: {r.newItem.category} · {r.newItem.unit} · code given by the ERP{r.newItem.copiedFrom ? ` · HSN and GST as ${r.newItem.copiedFrom}` : ''}
+              Made on import: {r.newItem.category} · {r.newItem.unit} · {r.newItem.tax} · code given by the ERP
             </div>
           )}
+          {r.matched && <div className="text-muted-foreground">The sheet says “{r.matched.name}”: brought in on this item instead.</div>}
           <div className="text-muted-foreground">
             {[r.item?.code && <span key="c" className="font-mono text-teal-400">{r.item.code}</span>, r.order && `Order ${r.order}`, r.lot && `Lot ${r.lot}`, r.bundle && `Bundle ${r.bundle}`]
               .filter(Boolean)
@@ -738,7 +791,10 @@ function CheckRow({ r, changed, onPacking }: { r: RowPlan; changed: boolean; onP
         </td>
         <td className="text-foreground px-3 py-2 font-semibold">{r.size ?? ''}</td>
         <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{r.qty !== null ? `${num(r.qty)} ${r.unit ?? ''}` : '—'}</td>
-        <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{r.rate !== null ? money(r.rate) : '—'}</td>
+        <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
+          {r.rate !== null ? money(r.rate) : '—'}
+          {r.valuationPending && !bad && <div className="text-[10px] font-semibold text-amber-600">Valuation pending</div>}
+        </td>
         <td className="text-foreground whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">{r.value !== null ? money(r.value) : '—'}</td>
         <td className="px-3 py-2">{r.status}</td>
         <td className="text-muted-foreground px-3 py-2">
@@ -763,5 +819,89 @@ function CheckRow({ r, changed, onPacking }: { r: RowPlan; changed: boolean; onP
         </tr>
       )}
     </>
+  )
+}
+
+/**
+ * Each item the sheet names that is not in Items & Products: made with its
+ * own code once approved, or matched to an item already there — a spelling
+ * slip of one, say. Items of a similar name are offered first.
+ */
+function ResolvePanel({
+  decisions,
+  resolve,
+  undecided,
+  busy,
+  onDecide,
+  onApproveAll,
+}: {
+  decisions: Decision[]
+  resolve: Record<string, string>
+  undecided: number
+  busy: boolean
+  onDecide: (key: string, value: string) => void
+  onApproveAll: () => void
+}) {
+  return (
+    <Panel
+      icon={PackagePlus}
+      title={
+        undecided ? (
+          <span className="text-amber-600">
+            {undecided} new {undecided === 1 ? 'item' : 'items'} to decide
+          </span>
+        ) : (
+          <span className="text-emerald-500">Every new item decided</span>
+        )
+      }
+      description="Not in Items & Products yet. Match each to an item already there (a spelling slip), or approve making it with its own code."
+      label="Resolve new items"
+      actions={
+        undecided > 0 ? (
+          <button type="button" className="btn-secondary h-8 text-xs" disabled={busy} onClick={onApproveAll}>
+            Approve the rest as new
+          </button>
+        ) : undefined
+      }
+      bodyClassName="p-0"
+    >
+      <ul className="divide-border divide-y">
+        {decisions.map((d) => {
+          const chosen = resolve[d.key] ?? ''
+          return (
+            <li key={d.key} className="grid gap-3 px-5 py-3.5 md:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
+              <div className="min-w-0">
+                <div className="text-foreground flex flex-wrap items-center gap-2 text-sm font-semibold">
+                  {d.name}
+                  {!chosen && <span className="badge-warning text-[10px]">To decide</span>}
+                  {chosen === 'NEW' && <span className="badge-success text-[10px]">Made new</span>}
+                  {chosen && chosen !== 'NEW' && <span className="badge-info text-[10px]">Matched</span>}
+                </div>
+                <div className="text-muted-foreground mt-0.5 text-xs">{[d.category, d.unit, d.tax].filter(Boolean).join(' · ')}</div>
+                {d.similar.length > 0 && !chosen && (
+                  <div className="mt-1 text-xs text-amber-600">
+                    Looks like {d.similar.length === 1 ? 'an item' : `${d.similar.length} items`} already there — check it is not a spelling slip.
+                  </div>
+                )}
+              </div>
+              <div className="space-y-1.5" role="radiogroup" aria-label={`Decide ${d.name}`}>
+                {d.similar.map((m) => (
+                  <label key={m.id} className={cn('border-border flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm', chosen === m.id && 'border-primary bg-primary/5')}>
+                    <input type="radio" name={`decide-${d.key}`} checked={chosen === m.id} disabled={busy} onChange={() => onDecide(d.key, m.id)} aria-label={`Use ${m.code} for ${d.name}`} />
+                    <span className="min-w-0 flex-1 truncate">
+                      Use <span className="font-mono text-xs font-semibold text-teal-400">{m.code}</span> {m.name}
+                    </span>
+                  </label>
+                ))}
+                <label className={cn('border-border flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm', chosen === 'NEW' && 'border-primary bg-primary/5')}>
+                  <input type="radio" name={`decide-${d.key}`} checked={chosen === 'NEW'} disabled={busy} onChange={() => onDecide(d.key, 'NEW')} aria-label={`Make ${d.name} new`} />
+                  <span>Make it new, with its own code</span>
+                </label>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </Panel>
   )
 }
