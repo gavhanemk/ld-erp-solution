@@ -14,6 +14,7 @@ import { PROGRESS } from '@/components/production/floor/types'
 import { ManufacturingOrderDialog } from '@/components/production/ManufacturingOrderDialog'
 import { ManufacturingOrderDetailDialog } from '@/components/production/ManufacturingOrderDetailDialog'
 import { MoDetailsDialog } from '@/components/production/MoDetailsDialog'
+import { BrandTag } from '@/components/sales/brand'
 
 interface MoRow {
   id: string
@@ -350,6 +351,7 @@ export default function ManufacturingOrdersPage() {
                             {s.label}
                           </span>
                           <FloorState mo={mo} />
+                          <BrandTag brand={mo.brand} />
                         </div>
                         <p className="text-foreground mt-1 font-medium leading-snug">{mo.customer ?? '—'}</p>
                         <p className="text-muted-foreground text-[11px]">
@@ -395,6 +397,7 @@ export default function ManufacturingOrdersPage() {
                           <button type="button" className="text-primary font-mono text-xs font-semibold hover:underline" onClick={() => setViewId(mo.id)} data-row-open>
                             {mo.moNumber}
                           </button>
+                          <BrandTag brand={mo.brand} className="ml-1.5" />
                           {mo.plannedStartDate && (
                             <div className="text-muted-foreground flex items-center gap-1 text-[11px]">
                               <CalendarDays size={11} className="shrink-0" />

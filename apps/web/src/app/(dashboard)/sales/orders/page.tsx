@@ -267,7 +267,7 @@ export default function SalesOrdersPage() {
       try {
         const [c, b] = await Promise.all([
           masterResource<{ id: string; name: string }>('customers').list({ limit: 500 }),
-          masterResource<{ id: string; name: string }>('brands').list({ limit: 100 }),
+          masterResource<{ id: string; name: string }>('brands').list({ limit: 100, type: 'LD_COTTON_MILLS,VHAGAR' }),
         ])
         if (cancelled) return
         setCustomers([...c.data].sort((x, y) => x.name.localeCompare(y.name)))

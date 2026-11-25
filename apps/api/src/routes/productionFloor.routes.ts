@@ -44,6 +44,7 @@ import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
 import { contractorsFor, correctLayFabric, createCutting, cuttingContractors, cuttingSchema, cutterIssueSchema, issueToCutter, layFabricSchema } from '../services/cutting.service'
 import { boardCards, ensureJobCards, fillJobCardBlanks, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
+import { orderBrand } from '../lib/orderBrand'
 
 /**
  * The floor: an order's stages, its job cards and their department sheets
@@ -221,7 +222,7 @@ router.get('/orders/:id/flow', requirePermission(MODULE, 'view'), async (req, re
 // ─── Transfer cards ───────────────────────────────────────────
 
 const transferInclude = {
-  mo: { select: { id: true, moNumber: true, so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } } } },
+  mo: { select: { id: true, moNumber: true, brand: { select: { name: true, type: true } }, so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } } } },
   fromStep: { select: { id: true, name: true, departmentId: true, department: { select: { name: true } } } },
   toStep: { select: { id: true, name: true, kind: true, isQcStep: true, departmentId: true, department: { select: { name: true } } } },
   vendor: { select: { id: true, name: true, gstin: true, address: true, city: true, state: true, stateCode: true } },
@@ -430,7 +431,7 @@ router.get('/transfers/:id/print', requirePermission(MODULE, 'view'), async (req
     hsnCode: l.soLine?.item.hsnCode ?? null,
     rate: Number(l.bom?.totalCost ?? l.soLine?.item.standardRate ?? 0),
   }))
-  res.json({ success: true, data: { ...header, transfer: t, goods } })
+  res.json({ success: true, data: { ...header, brand: await orderBrand(prisma, { moId: t.moId }), transfer: t, goods } })
 })
 
 /**
@@ -763,7 +764,7 @@ router.get('/job-cards/:id/print', requirePermission(MODULE, 'view'), async (req
   // The department's challan run on this order, e.g. CUT/2627-0002: its challans are /01, /02 under it.
   const op = step ? await prisma.operation.findUnique({ where: { id: step.operationId }, select: { code: true } }) : null
   const series = step ? `${processCode(op?.code, processCode(step.name, 'GEN'))}/${detail.mo.moNumber.replace(/^MO-/, '')}` : null
-  res.json({ success: true, data: { ...header, detail, series } })
+  res.json({ success: true, data: { ...header, brand: await orderBrand(prisma, { moId: card?.moId }), detail, series } })
 })
 
 router.patch('/job-cards/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
@@ -1043,7 +1044,10 @@ router.get('/cutting/:id/print', requirePermission(MODULE, 'view'), async (req, 
   const steps = await prisma.mOStep.findMany({ where: { moId: cut.mo.id, kind: 'CUTTING' }, select: { id: true } })
   const cuttingStepIds = new Set(steps.map((s) => s.id))
   const waiting = atCutting.filter((r) => cuttingStepIds.has(r.stepId)).reduce((s, r) => s + r.qty, 0)
-  res.json({ success: true, data: { ...(await getPrintHeader('CUT')), cutting: { ...cut, bundles }, madeAsOtherSize, waitingAtCutting: waiting } })
+  res.json({
+    success: true,
+    data: { ...(await getPrintHeader('CUT')), brand: await orderBrand(prisma, { moId: cut.mo.id }), cutting: { ...cut, bundles }, madeAsOtherSize, waitingAtCutting: waiting },
+  })
 })
 
 export default router

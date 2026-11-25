@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
+import { BrandTag } from '@/components/sales/brand'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { asDate, asNumber, downloadRows, fetchEveryPage, type ExportColumn, type ExportFormat } from '@/lib/export'
@@ -55,7 +56,7 @@ interface InvoiceRow {
   eWayBillNumber: string | null
   cancelReason: string | null
   customer: { id: string; name: string; billingCity: string | null; shippingCity: string | null }
-  so: { id: string; soNumber: string; customerPORef: string | null } | null
+  so: { id: string; soNumber: string; customerPORef: string | null; brand?: { name: string; type: string } | null } | null
   dc: { id: string; dcNumber: string } | null
 }
 
@@ -283,6 +284,7 @@ export default function SalesInvoicesPage() {
     { header: 'Customer', value: (i) => i.customer.name },
     { header: 'Town', value: (i) => town(i.customer) },
     { header: 'Order', value: (i) => i.so?.soNumber ?? '' },
+    { header: 'Brand', value: (i) => i.so?.brand?.name ?? '' },
     { header: 'Buyer PO', value: (i) => i.so?.customerPORef ?? '' },
     { header: 'Challan', value: (i) => i.dc?.dcNumber ?? '' },
     { header: 'Taxable', value: (i) => asNumber(i.taxableAmount) },
@@ -717,6 +719,7 @@ export default function SalesInvoicesPage() {
                               {inv.so.soNumber}
                             </a>
                           )}
+                          {inv.so && <BrandTag brand={inv.so.brand} className="ml-1.5" />}
                           {inv.dc && <div className="text-muted-foreground font-mono text-[11px]">{inv.dc.dcNumber}</div>}
                         </td>
                         <td className="text-right font-semibold tabular-nums">₹{money(inv.totalAmount)}</td>

@@ -80,7 +80,11 @@ export function JobCardView({ jobCardId, onClose, onChanged }: { jobCardId: stri
       <FormFrame
         icon={ClipboardList}
         title={d ? `Job card ${d.card.jobCardNumber}` : 'Job card'}
-        subtitle={d ? `${d.line?.style.code} ${d.line?.color} · ${pcs(d.line?.totalQty ?? 0)} pcs · ${d.mo.moNumber}${d.mo.so ? ` · ${d.mo.so.soNumber} · ${d.mo.so.customer.name}` : ''}` : undefined}
+        subtitle={
+          d
+            ? `${d.line?.style.code} ${d.line?.color} · ${pcs(d.line?.totalQty ?? 0)} pcs · ${d.mo.moNumber}${d.mo.so ? ` · ${d.mo.so.soNumber} · ${d.mo.so.customer.name}` : ''}${d.mo.brand ? ` · ${d.mo.brand.name}` : ''}`
+            : undefined
+        }
         width="max-w-6xl"
         primary={
           mayEdit ? (

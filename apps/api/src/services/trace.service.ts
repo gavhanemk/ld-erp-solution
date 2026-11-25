@@ -168,6 +168,7 @@ const garmentBase = (id: string) =>
             select: {
               id: true,
               soNumber: true,
+              brand: { select: { name: true, type: true } },
               orderDate: true,
               deliveryDate: true,
               customerPORef: true,
@@ -605,6 +606,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
   const soSelect = {
     id: true,
     soNumber: true,
+    brand: { select: { name: true, type: true } },
     status: true,
     orderDate: true,
     deliveryDate: true,
@@ -860,6 +862,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
     so: so && {
       id: so.id,
       soNumber: so.soNumber,
+      brand: so.brand,
       status: so.status,
       orderDate: so.orderDate,
       deliveryDate: so.deliveryDate,
@@ -987,6 +990,7 @@ async function orderRows(soIds: string[]) {
       select: {
         id: true,
         soNumber: true,
+        brand: { select: { name: true, type: true } },
         status: true,
         orderDate: true,
         deliveryDate: true,

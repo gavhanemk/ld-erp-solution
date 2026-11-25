@@ -12,6 +12,7 @@ import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
 import { chargeRowOf, foldChargesIntoHsn, priceSalesCharges, saleChargeSchema } from '../services/salesCharges'
 import { orderReconciliation } from '../services/reconciliation.service'
+import { orderBrand } from '../lib/orderBrand'
 
 /**
  * Sales invoices: the tax invoice for goods that have gone out on a challan.
@@ -562,7 +563,7 @@ router.get('/', async (req: AuthRequest, res) => {
       where,
       include: {
         customer: { select: { id: true, name: true, billingCity: true, shippingCity: true } },
-        so: { select: { id: true, soNumber: true, customerPORef: true } },
+        so: { select: { id: true, soNumber: true, customerPORef: true, brand: { select: { name: true, type: true } } } },
         dc: { select: { id: true, dcNumber: true } },
         _count: { select: { lines: true } },
       },
@@ -577,7 +578,7 @@ router.get('/', async (req: AuthRequest, res) => {
 
 const invoiceInclude = {
   customer: true,
-  so: { select: { id: true, soNumber: true, orderDate: true, customerPORef: true, customerPODate: true, isJobWork: true } },
+  so: { select: { id: true, soNumber: true, orderDate: true, customerPORef: true, customerPODate: true, isJobWork: true, brand: { select: { name: true, type: true } } } },
   dc: {
     select: {
       id: true,
@@ -646,6 +647,7 @@ router.get('/:id/print', async (req: AuthRequest, res) => {
     success: true,
     data: {
       ...header,
+      brand: await orderBrand(prisma, { soId: invoice.soId }),
       invoice,
       taxMode,
       placeOfSupplyState: stateName(invoice.placeOfSupplyCode),

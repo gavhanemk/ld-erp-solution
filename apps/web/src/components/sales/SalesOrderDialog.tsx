@@ -22,6 +22,7 @@ import {
   ShieldAlert,
   ShoppingBag,
   StickyNote,
+  Tag,
   Trash2,
   User,
   UserRound,
@@ -38,6 +39,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { loadInHouseBrands, otherBrandLines, suggestedBrand, type OwnBrand } from '@/components/sales/brand'
 import { SizeQtyGrid, type SizeOption } from './SizeQtyGrid'
 import { JOB_WORK_SAC, orderTotals, sacRateIn } from './orderTotals'
 import { SaleCharges, chargeDraftsOf, chargesToPrice, chargesToSave, type SaleChargeDraft } from './SaleCharges'
@@ -75,6 +77,8 @@ interface StyleOption {
   id: string
   code: string
   name: string
+  /** Whose style it is: LD Cotton Mills or VHAGAR. */
+  brandType?: string | null
   sizeGroupId: string | null
   colors: string[] | null
   fabricType: string | null
@@ -394,6 +398,11 @@ export function SalesOrderDialog({
   /** Job work: our own trims used on it covered by the job charge, or billed to the customer, as agreed. */
   const [ownBilling, setOwnBilling] = useState<'IN_JOB_CHARGE' | 'BILLED'>('IN_JOB_CHARGE')
   const [customerId, setCustomerId] = useState('')
+  // The own brand the order is made under, carried by everything made for it.
+  const [brands, setBrands] = useState<OwnBrand[]>([])
+  const [brandId, setBrandId] = useState('')
+  /** Picked by hand (or from a saved order or quotation): no longer follows the styles. */
+  const [brandPicked, setBrandPicked] = useState(false)
   const [orderDate, setOrderDate] = useState(today())
   const [deliveryDate, setDeliveryDate] = useState('')
   const [poRef, setPoRef] = useState('')
@@ -461,6 +470,26 @@ export function SalesOrderDialog({
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
   const styleById = useMemo(() => new Map(styles.map((s) => [s.id, s])), [styles])
   const groupById = useMemo(() => new Map(sizeGroups.map((g) => [g.id, g])), [sizeGroups])
+  /** Whose style each garment on the order is (LD Cotton Mills or VHAGAR), for the brand it is suggested under. */
+  const lineBrandTypes = useMemo(
+    () =>
+      lines
+        .filter((l) => l.itemId || l.styleCode.trim())
+        .map((l) => {
+          const typed = l.styleCode.trim().toLowerCase()
+          const style = styleById.get(l.styleId) ?? (typed ? styles.find((x) => x.code.toLowerCase() === typed) : undefined) ?? styleById.get(itemById.get(l.itemId)?.styleId ?? '')
+          return style?.brandType ?? null
+        }),
+    [lines, styleById, styles, itemById]
+  )
+  // Until someone picks a brand, it follows the garments: VHAGAR styles, VHAGAR.
+  useEffect(() => {
+    if (brandPicked || !brands.length) return
+    const next = suggestedBrand(brands, lineBrandTypes, isJobWork)
+    if (next && next !== brandId) setBrandId(next)
+  }, [brandPicked, brands, lineBrandTypes, isJobWork, brandId])
+  const brand = brands.find((b) => b.id === brandId)
+  const otherBrand = otherBrandLines(brand, lineBrandTypes)
   const sizesOfGroup = useMemo(
     () => new Map(sizeGroups.map((g) => [g.id, [...g.sizes].sort((a, b) => a.sequence - b.sequence)])),
     [sizeGroups]
@@ -490,6 +519,8 @@ export function SalesOrderDialog({
     setIsJobWork(false)
     setOwnBilling('IN_JOB_CHARGE')
     setCustomerId('')
+    setBrandId('')
+    setBrandPicked(false)
     setOrderDate(today())
     setDeliveryDate('')
     setPoRef('')
@@ -521,7 +552,7 @@ export function SalesOrderDialog({
 
     void (async () => {
       try {
-        const [c, br, it, cat, st, sg, ct, hsn, order] = await Promise.all([
+        const [c, br, it, cat, st, sg, ct, hsn, order, ownBrands] = await Promise.all([
           fetchEveryPage<CustomerOption>((p) => `/masters/customers?active=true&limit=200&page=${p}`),
           fetchEveryPage<BrokerOption>((p) => `/masters/brokers?active=true&limit=200&page=${p}`),
           fetchEveryPage<ItemOption>(
@@ -538,6 +569,7 @@ export function SalesOrderDialog({
           // For the rate of a job charge's SAC; without it the usual rate shows.
           fetchEveryPage<HsnOption>((p) => `/masters/hsn-codes?limit=200&page=${p}`).catch(() => ({ rows: [] as HsnOption[] })),
           orderId ? api.get<{ data: SavedOrder }>(`/sales/orders/${orderId}`) : Promise.resolve(null),
+          loadInHouseBrands().catch(() => [] as OwnBrand[]),
         ])
         const quote =
           !orderId && fromQuoteId
@@ -547,6 +579,7 @@ export function SalesOrderDialog({
                     id: string
                     quoteNumber: string
                     customerId: string
+                    brandId: string
                     isJobWork: boolean
                     customerRef: string | null
                     salesperson: string | null
@@ -565,6 +598,7 @@ export function SalesOrderDialog({
         const groupOfSize = new Map(sg.rows.flatMap((g) => g.sizes.map((s) => [s.id, g.id] as const)))
         const customerList = [...c.rows].sort((x, y) => x.name.localeCompare(y.name))
         setCustomers(customerList)
+        setBrands(ownBrands)
         setBrokers([...br.rows].sort((x, y) => x.name.localeCompare(y.name)))
         setItems(it.rows)
         setCategories([...cat.rows].sort((x, y) => x.name.localeCompare(y.name)))
@@ -579,6 +613,8 @@ export function SalesOrderDialog({
         if (order) {
           const o = order.data
           setSaved(o)
+          setBrandId(o.brandId)
+          setBrandPicked(true)
           setIsJobWork(o.isJobWork)
           setOwnBilling(o.ownMaterialBilling ?? 'IN_JOB_CHARGE')
           setCustomerId(o.customerId)
@@ -655,6 +691,11 @@ export function SalesOrderDialog({
             setBrokerPct(cust.brokeragePercent != null ? String(Number(cust.brokeragePercent)) : '')
           }
           setIsJobWork(quote.isJobWork)
+          // The quotation's brand goes on to the order.
+          if (quote.brandId) {
+            setBrandId(quote.brandId)
+            setBrandPicked(true)
+          }
           setReference(quote.quoteNumber)
           setSalesperson(quote.salesperson ?? '')
           setBillDiscount(Number(quote.discountAmount) > 0 ? String(Number(quote.discountAmount)) : '')
@@ -990,6 +1031,7 @@ export function SalesOrderDialog({
     setError(null)
     const body = {
       customerId,
+      brandId: brandId || null,
       isJobWork,
       ownMaterialBilling: isJobWork ? ownBilling : 'IN_JOB_CHARGE',
       orderDate,
@@ -1597,6 +1639,38 @@ export function SalesOrderDialog({
                     </SmartSelect>
                   </Field>
                   <Field
+                    label="Brand"
+                    icon={Tag}
+                    htmlFor="so-brand"
+                    required
+                    help={
+                      otherBrand > 0 ? (
+                        <span className="warn-text">
+                          {otherBrand} {otherBrand === 1 ? 'garment is' : 'garments are'} another brand&apos;s style
+                        </span>
+                      ) : brandPicked ? undefined : (
+                        'Follows the styles until you pick one'
+                      )
+                    }
+                  >
+                    <SmartSelect
+                      id="so-brand"
+                      className="form-input pl-9"
+                      value={brandId}
+                      onChange={(e) => {
+                        setBrandId(e.target.value)
+                        setBrandPicked(true)
+                      }}
+                    >
+                      {!brandId && <option value="">Choose the brand</option>}
+                      {brands.map((b) => (
+                        <option key={b.id} value={b.id} data-sub={b.type === 'VHAGAR' ? 'VHAGAR' : 'LD Cotton Mills'}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </SmartSelect>
+                  </Field>
+                  <Field
                     label="Order type"
                     icon={Package}
                     htmlFor="so-type"
@@ -1676,8 +1750,8 @@ export function SalesOrderDialog({
                   <Field label="Buyer PO date" htmlFor="so-po-date">
                     <input id="so-po-date" type="date" className="form-input" value={poDate} onChange={(e) => setPoDate(e.target.value)} />
                   </Field>
-                  {/* Job work has one field more above, so the salesperson takes one slot and the row stays full. */}
-                  <Field label="Salesperson" icon={UserRound} htmlFor="so-salesperson" className={isJobWork ? '' : 'lg:col-span-2'}>
+                  {/* Job work has one field more above, so the salesperson takes the row to itself; an own order's fills the row. */}
+                  <Field label="Salesperson" icon={UserRound} htmlFor="so-salesperson" className={isJobWork ? 'lg:col-span-5' : ''}>
                     <input
                       id="so-salesperson"
                       className="form-input pl-9"

@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Boxes, ChevronRight, ClipboardList, Factory, Layers } from 'lucide-react'
 import { Timeline } from './Timeline'
+import { BrandTag } from '@/components/sales/brand'
 import { Fact, Go, MaterialsUsed, PiecesBySize, PiecesList, Section } from './TraceBits'
 import { MO_STATUS, SO_STATUS, badge, fmtDay, qty, type MaterialLine, type Pieces, type Step, type Target } from './traceTypes'
 
@@ -35,7 +36,7 @@ export interface OrderItem {
 
 export interface OrderStory {
   kind: 'SO' | 'MO'
-  so: { id: string; soNumber: string; status: string; orderDate: string; deliveryDate: string | null; poRef: string | null; customer: { id: string; name: string; billingCity: string | null } } | null
+  so: { id: string; soNumber: string; brand?: { name: string; type: string } | null; status: string; orderDate: string; deliveryDate: string | null; poRef: string | null; customer: { id: string; name: string; billingCity: string | null } } | null
   mos: Array<{ id: string; moNumber: string; status: string; planned: number; cut: number; packed: number; styles: Array<{ styleId: string; style: string; name: string; color: string; qty: number }> }>
   figures: { ordered: number; cut: number; intoFg: number; tagged: number; inStore: number; despatched: number; scrapped: number; delivered: number | null }
   stages: Array<{
@@ -277,6 +278,7 @@ export function OrderTrace({ o, open }: { o: OrderStory; open: (t: Target) => vo
               </Go>
             </Fact>
           )}
+          <Fact label="Brand">{o.so?.brand ? <BrandTag brand={o.so.brand} /> : '—'}</Fact>
           <Fact label="Their PO">{o.so?.poRef ?? '—'}</Fact>
           <Fact label="Ordered on">{fmtDay(o.so?.orderDate)}</Fact>
           <Fact label="Wanted by">{fmtDay(o.so?.deliveryDate)}</Fact>

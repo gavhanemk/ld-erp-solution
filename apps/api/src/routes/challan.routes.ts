@@ -15,6 +15,7 @@ import { closeCheck } from '../services/reconciliation.service'
 import { afterChallanCancelled, afterChallanDispatched } from '../services/garmentHooks.service'
 import { cartonsAfterCancel, cartonsAfterDispatch, cartonsOnChallan } from '../services/fgCartonHooks.service'
 import { netSizeChanges } from '../services/sizeChanges.service'
+import { orderBrand } from '../lib/orderBrand'
 
 /**
  * Delivery challans: the goods leaving for the buyer against a sales order.
@@ -255,6 +256,7 @@ router.get('/waiting', requirePermission(MODULE, 'view'), async (req, res) => {
       orderDate: true,
       deliveryDate: true,
       customerPORef: true,
+      brand: { select: { name: true, type: true } },
       customer: { select: { name: true, shippingCity: true, billingCity: true } },
       lines: {
         orderBy: { sortOrder: 'asc' },
@@ -279,7 +281,7 @@ router.get('/waiting', requirePermission(MODULE, 'view'), async (req, res) => {
 
 const challanCustomerSelect = { id: true, name: true, gstin: true, billingCity: true, shippingCity: true } as const
 const challanInclude = {
-  so: { select: { id: true, soNumber: true, status: true, isJobWork: true, customerPORef: true, customer: { select: challanCustomerSelect } } },
+  so: { select: { id: true, soNumber: true, status: true, isJobWork: true, customerPORef: true, brand: { select: { name: true, type: true } }, customer: { select: challanCustomerSelect } } },
   customer: { select: challanCustomerSelect },
   warehouse: { select: { id: true, name: true } },
   createdBy: { select: { id: true, name: true } },
@@ -837,7 +839,14 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
   )
   res.json({
     success: true,
-    data: { ...header, challan: { ...dc, customer: dc.customer ?? dc.so.customer }, value, gst, valueInWords: amountInWords(round2(value + gst)) },
+    data: {
+      ...header,
+      brand: await orderBrand(prisma, { soId: dc.soId }),
+      challan: { ...dc, customer: dc.customer ?? dc.so.customer },
+      value,
+      gst,
+      valueInWords: amountInWords(round2(value + gst)),
+    },
   })
 })
 

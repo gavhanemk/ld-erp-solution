@@ -72,6 +72,7 @@ import { onceFor } from '../lib/onceFor'
 import { CGRN_STATUS_LABEL, HELD, heldByLine, postGrnStock, releaseHeld, reverseGrnStock, takeHeldPackages } from '../services/customerGrn.service'
 import { fillJobCardBlanks } from '../services/jobCard.service'
 import { assertLineQtyFitsUnits, assertQtyFitsUnits, assertRequisitionFitsUnits } from '../services/unitQuantity.service'
+import { orderBrand } from '../lib/orderBrand'
 
 /** A customer's receipt's quantities, each against its item: what their challan said, what came, what was refused. */
 const customerGrnQtys = (data: { lines: Array<{ itemId: string; challanQty?: number | null; receivedQty: number; rejectedQty?: number | null }> }) =>
@@ -1197,7 +1198,7 @@ const buyQtyOf = (l: { purchaseQty: Prisma.Decimal | null; fulfilment: string; r
 
 const mrInclude = {
   department: { select: { id: true, name: true, code: true } },
-  mo: { select: { id: true, moNumber: true } },
+  mo: { select: { id: true, moNumber: true, brand: { select: { name: true, type: true } } } },
   // The sales order the material is for, and its customer.
   so: { select: { id: true, soNumber: true, customer: { select: { id: true, name: true } } } },
   raisedBy: { select: { id: true, name: true } },
@@ -2876,7 +2877,7 @@ router.get('/requisitions/:id/print', requirePermission(MODULE, 'view'), async (
   })
 
   const header = await getPrintHeader('MR')
-  res.json({ success: true, data: { ...header, mr, handovers } })
+  res.json({ success: true, data: { ...header, brand: await orderBrand(prisma, { moId: mr.moId, soId: mr.soId }), mr, handovers } })
 })
 
 /** The stock transfer note that goes with the goods. */

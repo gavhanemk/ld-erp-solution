@@ -715,9 +715,13 @@ export async function prepareOrder(
   const itemById = new Map(items.map((i) => [i.id, i]))
 
   const brandId = data.brandId || (await brandOf(tx, data, itemById))
-  const brand = await tx.brand.findUnique({ where: { id: brandId }, select: { name: true, isActive: true } })
+  const brand = await tx.brand.findUnique({ where: { id: brandId }, select: { name: true, isActive: true, type: true } })
   if (!brand) throw new AppError('That brand does not exist', 400, 'BAD_BRAND')
   if (!brand.isActive) throw new AppError(`The brand ${brand.name} is switched off`, 400, 'INACTIVE')
+  // An order is made under one of our own brands; a customer's brand is only printed on their labels.
+  if (brand.type === 'CUSTOM') {
+    throw new AppError(`${brand.name} is a customer's brand. Pick one of your own, from Masters → In House Brands.`, 400, 'NOT_OWN_BRAND')
+  }
 
   const sizeIds = [...new Set(data.lines.flatMap((l) => l.sizes?.map((s) => s.sizeId) ?? []))]
   const sizes = sizeIds.length
@@ -1286,8 +1290,10 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       include: savedOrderInclude,
     })
     // The order's brand is where its invoices' sales are booked; a new brand
-    // moves them, and their credit notes, to the new brand's profit.
+    // moves them, and their credit notes, to the new brand's profit — and its
+    // manufacturing orders go with it, so every stage shows the one brand.
     if (after.brandId !== before.brandId) {
+      await tx.manufacturingOrder.updateMany({ where: { soId: before.id }, data: { brandId: after.brandId } })
       const invoices = await tx.salesInvoice.findMany({ where: { soId: before.id }, select: { id: true, creditNotes: { select: { id: true } } } })
       for (const inv of invoices) {
         await postWithin(tx, 'SALES_INVOICE', inv.id, req.user!.id)
