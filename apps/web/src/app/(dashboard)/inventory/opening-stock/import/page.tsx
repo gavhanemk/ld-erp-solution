@@ -83,6 +83,8 @@ interface Summary {
   undecided?: number
   /** Lines coming in without a rate. */
   valuationPending?: number
+  /** New items made without an HSN code. */
+  noHsn?: number
   byGroup: Array<{ group: string; label: string; lines: number; value: number }>
   /** Stickers to print; packages keeping their own barcode; rows whose packaging is pending. */
   stickers?: number
@@ -95,6 +97,8 @@ interface Decision {
   category: string
   unit: string
   tax: string
+  /** The HSN code it is made with; null: none yet. */
+  hsn: string | null
   similar: Array<{ id: string; code: string; name: string }>
   decision: 'PENDING' | 'NEW' | 'MATCHED'
   matched: { code: string; name: string } | null
@@ -213,6 +217,8 @@ function ImportOpeningStock() {
   const [packs, setPacks] = useState<Record<string, PackInputBody>>({})
   // Each new item: 'NEW' to make it, or the id of an item already there to use instead.
   const [resolve, setResolve] = useState<Record<string, string>>({})
+  // An HSN code typed for a new item, by its key: before the sheet's and its category's.
+  const [hsn, setHsn] = useState<Record<string, string>>({})
   const [packing, setPacking] = useState<RowPlan | null>(null)
   const qtyRules = useQtyRules()
   const input = useRef<HTMLInputElement>(null)
@@ -225,10 +231,11 @@ function ImportOpeningStock() {
     ...(choice && choice !== 'ALL' ? { kind: choice, openingDate: date } : {}),
     ...(Object.keys(packs).length ? { packs } : {}),
     ...(Object.keys(resolve).length ? { resolve } : {}),
+    ...(Object.keys(hsn).length ? { hsn } : {}),
     ...extra,
   })
 
-  const check = async (f: { name: string; data: string }, onDate = date, withPacks = packs, withResolve = resolve, scroll = true) => {
+  const check = async (f: { name: string; data: string }, onDate = date, withPacks = packs, withResolve = resolve, scroll = true, withHsn = hsn) => {
     setBusy('check')
     setError(null)
     try {
@@ -238,6 +245,7 @@ function ImportOpeningStock() {
         ...(choice && choice !== 'ALL' ? { kind: choice, openingDate: onDate } : {}),
         ...(Object.keys(withPacks).length ? { packs: withPacks } : {}),
         ...(Object.keys(withResolve).length ? { resolve: withResolve } : {}),
+        ...(Object.keys(withHsn).length ? { hsn: withHsn } : {}),
       })
       setSummary(res.data.summary)
       setRows(res.data.rows)
@@ -260,9 +268,10 @@ function ImportOpeningStock() {
       // A new sheet: changes made on the last one's rows, and decisions on its items, do not carry over.
       setPacks({})
       setResolve({})
+      setHsn({})
       setSummary(null)
       setRows([])
-      await check(f, date, {}, {})
+      await check(f, date, {}, {}, true, {})
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The file could not be read.')
     } finally {
@@ -303,6 +312,12 @@ function ImportOpeningStock() {
   const decide = (next: Record<string, string>) => {
     setResolve(next)
     if (file) void check(file, date, packs, next, false)
+  }
+  const setItemHsn = (key: string, code: string) => {
+    const next = { ...hsn, [key]: code }
+    if (!code) delete next[key]
+    setHsn(next)
+    if (file) void check(file, date, packs, resolve, false, next)
   }
   // Upload, validate, resolve new items, review, confirm, done — as far as this sheet has got.
   const stepIndex = done ? 5 : busy === 'import' ? 4 : !summary ? 0 : summary.problems ? 1 : undecided ? 2 : 3
@@ -476,6 +491,7 @@ function ImportOpeningStock() {
               undecided={undecided}
               busy={busy !== null}
               onDecide={(key, value) => decide({ ...resolve, [key]: value })}
+              onHsn={setItemHsn}
               onApproveAll={() => decide({ ...resolve, ...Object.fromEntries(summary.decisions!.filter((d) => !resolve[d.key]).map((d) => [d.key, 'NEW'])) })}
             />
           )}
@@ -547,6 +563,11 @@ function ImportOpeningStock() {
                 {(summary.valuationPending ?? 0) > 0 && (
                   <span className="badge-warning" title="No rate given: in at ₹0, its value to be set later (Opening Stock → Set rate)">
                     {summary.valuationPending} {summary.valuationPending === 1 ? 'row' : 'rows'}: valuation pending
+                  </span>
+                )}
+                {(summary.noHsn ?? 0) > 0 && (
+                  <span className="badge-warning" title="Made without an HSN code: add it in Items & Products before the item is bought or sold">
+                    {summary.noHsn} new {summary.noHsn === 1 ? 'item' : 'items'}: no HSN code yet
                   </span>
                 )}
                 {(summary.waiting ?? 0) > 0 && (
@@ -839,6 +860,7 @@ function ResolvePanel({
   busy,
   onDecide,
   onApproveAll,
+  onHsn,
 }: {
   decisions: Decision[]
   resolve: Record<string, string>
@@ -846,6 +868,8 @@ function ResolvePanel({
   busy: boolean
   onDecide: (key: string, value: string) => void
   onApproveAll: () => void
+  /** An HSN code typed for a new item; empty goes back to the sheet's or its category's. */
+  onHsn: (key: string, code: string) => void
 }) {
   return (
     <Panel
@@ -902,6 +926,32 @@ function ResolvePanel({
                   <input type="radio" name={`decide-${d.key}`} checked={chosen === 'NEW'} disabled={busy} onChange={() => onDecide(d.key, 'NEW')} aria-label={`Make ${d.name} new`} />
                   <span>Make it new, with its own code</span>
                 </label>
+                {d.decision !== 'MATCHED' && (
+                  <div className="flex flex-wrap items-center gap-2 pl-1 text-xs">
+                    <span className="text-muted-foreground">HSN code</span>
+                    <input
+                      key={`${d.key}:${d.hsn ?? ''}`}
+                      className="form-input h-8 w-28 font-mono text-xs"
+                      defaultValue={d.hsn ?? ''}
+                      placeholder="e.g. 5208"
+                      inputMode="numeric"
+                      disabled={busy}
+                      aria-label={`HSN code for ${d.name}`}
+                      onBlur={(e) => {
+                        const code = e.target.value.replace(/\s+/g, '')
+                        if (code !== (d.hsn ?? '')) onHsn(d.key, code)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                      }}
+                    />
+                    {d.hsn ? (
+                      <span className="text-muted-foreground">its GST comes from this code</span>
+                    ) : (
+                      <span className="warn-text">None yet: it is made without one. Type it here, or add it later in Items &amp; Products.</span>
+                    )}
+                  </div>
+                )}
               </div>
             </li>
           )

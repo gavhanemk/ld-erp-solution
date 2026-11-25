@@ -77,7 +77,17 @@ async function main() {
     { 'Opening Date': date, 'Item Description': n('Unlisted'), 'Item Category': 'Fabric', 'Opening Qty': 5, 'HSN Code': '99999999' },     // 4: not in the list
     { 'Opening Date': date, 'Item Description': n('Wrong'), 'Item Category': 'Fabric', 'Opening Qty': 5, 'HSN Code': '5208', 'GST %': 12 }, // 5: GST not the code's
   ], `zz-ctrl-tax-${stamp}`))
-  check('no HSN anywhere: refused, saying where to set it', /needs an HSN code to be made: set one on its category/.test(problemsOf(taxCheck, 2)), problemsOf(taxCheck, 2))
+  check('no HSN anywhere: not refused, made without one and said so', problemsOf(taxCheck, 2) === '' && rowOf(taxCheck, 2)?.newItem?.hsn === null && /No HSN code yet/.test(rowOf(taxCheck, 2)?.newItem?.tax ?? ''), rowOf(taxCheck, 2))
+  check('the summary counts the new items with no HSN code', taxCheck.body?.data?.summary?.noHsn === 1, taxCheck.body?.data?.summary?.noHsn)
+  const nohKey = rowOf(taxCheck, 2)?.newItem?.key
+  const typedFile = await sheet([{ 'Opening Date': date, 'Item Description': n('Noh'), 'Item Category': 'Fabric', 'Opening Qty': 5 }], `zz-ctrl-typed-${stamp}`)
+  const typed = await call('POST', '/inventory/opening-stock/import', { ...typedFile, hsn: { [nohKey]: '5208' } })
+  check("an HSN typed for it on the review: taken, with the code's GST", problemsOf(typed, 2) === '' && rowOf(typed, 2)?.newItem?.hsn === '5208' && /HSN 5208 · GST 5% \(from the HSN code typed for it\)/.test(rowOf(typed, 2)?.newItem?.tax ?? ''), rowOf(typed, 2)?.newItem)
+  const typedBad = await call('POST', '/inventory/opening-stock/import', { ...typedFile, hsn: { [nohKey]: '99999999' } })
+  check('an HSN typed that is not in the list: refused', /HSN 99999999 \(from the HSN code typed for it\) is not in Masters → HSN \/ SAC Codes/.test(problemsOf(typedBad, 2)), problemsOf(typedBad, 2))
+  const nohIn = await importApproved(typedFile, `zz-ctrl-noh-${stamp}`)
+  const noh = await prisma.item.findFirst({ where: { name: n('Noh') }, select: { hsnCode: true, taxRateId: true } })
+  check('imported with no HSN: the item is made, its HSN and GST empty', nohIn.status === 201 && !!noh && noh.hsnCode === null && noh.taxRateId === null, { status: nohIn.status, noh })
   check("the sheet's HSN: taken, with the code's GST", problemsOf(taxCheck, 3) === '' && /HSN 5208 · GST 5% \(from the HSN Code column\)/.test(rowOf(taxCheck, 3)?.newItem?.tax ?? ''), rowOf(taxCheck, 3)?.newItem)
   check('an HSN not in the list: refused', /HSN 99999999 .* is not in Masters → HSN \/ SAC Codes/.test(problemsOf(taxCheck, 4)), problemsOf(taxCheck, 4))
   check('a GST % that is not the code’s: refused', /HSN 5208 carries GST 5% in Masters → HSN \/ SAC Codes, not 12%/.test(problemsOf(taxCheck, 5)), problemsOf(taxCheck, 5))

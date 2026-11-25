@@ -74,7 +74,7 @@ export const OS_COLUMNS: SheetColumn<OsKey>[] = [
   { key: 'value', head: 'Opening Value', width: 14, note: 'Optional. Opening Qty × Unit Rate. Either may be left out: the other is worked out.' },
   { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'Optional. OK, Hold, Rejected or B-Grade. Empty is OK.' },
   { key: 'remarks', head: 'Remarks', width: 28, note: 'Optional.' },
-  { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's." },
+  { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's; with none there either, the item is made without one, to add later." },
   { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
 ]
 
@@ -122,7 +122,7 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'packRefs', head: 'Package References', width: 22, note: "Optional: each package's own number (the supplier's roll no.), in the same order, separated by commas." },
     { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'Optional. OK, Hold or Rejected. Empty is OK.' },
     { key: 'remarks', head: 'Remarks', width: 24, note: 'Optional.' },
-    { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's." },
+    { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's; with none there either, the item is made without one, to add later." },
     { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
   ],
   FA: [
@@ -135,7 +135,7 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'location', head: 'Location', width: 22, list: 'assetPlaces', note: 'Optional. A store, or the department it is installed at (Stitching, Cutting, Accounts…). Empty: the store called Store.' },
     { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'Optional. OK, Hold or Rejected. Empty is OK.' },
     { key: 'remarks', head: 'Remarks', width: 24, note: 'Optional.' },
-    { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's." },
+    { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's; with none there either, the item is made without one, to add later." },
     { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
   ],
 }
@@ -404,7 +404,19 @@ export interface OsRowPlan {
   newFloor: boolean
   item: { code: string; name: string } | null
   /** Not in Items & Products yet: made on import, with its own code. What it will get. */
-  newItem: { key: string; name: string; category: string; unit: string; type: string; tax: string; similar: Array<{ id: string; code: string; name: string }>; approved: boolean; copiedFrom: string | null } | null
+  newItem: {
+    key: string
+    name: string
+    category: string
+    unit: string
+    type: string
+    tax: string
+    /** The HSN code it is made with; null: none yet, to be added in Items & Products. */
+    hsn: string | null
+    similar: Array<{ id: string; code: string; name: string }>
+    approved: boolean
+    copiedFrom: string | null
+  } | null
   /** The sheet named an item not in Items & Products, and it was matched to this one instead of being made. */
   matched?: { key: string; name: string; similar: Array<{ id: string; code: string; name: string }> } | null
   size: string | null
@@ -524,7 +536,7 @@ const HOW_TO: Record<OsKind, string[]> = {
     "Material Category is checked against the item's category (Fabric, Thread, Buttons…).",
     'Item Code may be left empty: the ERP gives every item its own code, and the item is found by its exact Item Name.',
     'An item not in Items & Products yet is made on import, with its own code: give its Material Category, and its UOM if not the category’s usual one. The check lists every new item, with the items of a similar name, to match or approve first.',
-    "A new item's HSN code: the HSN Code column, else its category's (Masters → Item Categories). The code must be in Masters → HSN / SAC Codes: its GST comes from there, and a GST % given is checked against it.",
+    "A new item's HSN code: the HSN Code column, else its category's (Masters → Item Categories); with neither, it is made without one, to add in Items & Products later. A code given must be in Masters → HSN / SAC Codes: its GST comes from there, and a GST % given is checked against it.",
     "UOM may be left empty: the item's own unit. Given, it is checked, never converted, so give the quantity in it.",
     'Location may be left empty: the store called Store. Otherwise a store in Masters → Warehouses.',
     'Stickers (where the category is tracked): the five Package columns say how the row is packed — all optional.',
@@ -540,7 +552,7 @@ const HOW_TO: Record<OsKind, string[]> = {
     'Serial Numbers: each one’s, separated by commas, as many as the quantity. Printed on its tag; may be left empty.',
     'Location: a store, or the department it is installed at — Stitching, Cutting, Accounts. Empty: the store called Store.',
     'Item Code may be left empty: the item is found by its exact Item Name, or made new under its Asset Category (a subcategory of Fixed Assets in Masters → Item Categories).',
-    "A new item's HSN code: the HSN Code column, else its category's. The code must be in Masters → HSN / SAC Codes.",
+    "A new item's HSN code: the HSN Code column, else its category's; with neither, it is made without one, to add later. A code given must be in Masters → HSN / SAC Codes.",
     'Cost Each is optional: without it the asset comes in at nought, its valuation pending, to be set later in Opening Stock.',
     'Stock Status: OK, Hold or Rejected. Empty is OK.',
   ],
@@ -614,7 +626,7 @@ export async function buildTemplate(kind?: OsKind): Promise<Buffer> {
     "Department / Location may be left empty: the store called Store (finished garments: the finished goods store), or for work in progress that process's own floor (made if it has none yet). Name a store or outside unit from Masters → Warehouses to put it there.",
     'Item Code may be left empty: the ERP gives every item its own code. The item is found by its exact description (a finished garment by Style / Article No. and Colour).',
     'An item not in Items & Products yet is made on import, with its own code: give its Item Category (Fabric, Thread…), and its UOM if not the category’s usual one. The check lists every new item, with the items of a similar name, to match or approve before anything is brought in.',
-    "A new item's HSN code: the HSN Code column, else its category's (Masters → Item Categories); a new colour of a style takes the style's other colours'. The code must be in Masters → HSN / SAC Codes: its GST comes from there, and a GST % given is checked against it.",
+    "A new item's HSN code: the HSN Code column, else its category's (Masters → Item Categories); a new colour of a style takes the style's other colours'. With none, it is made without one, to add in Items & Products later. A code given must be in Masters → HSN / SAC Codes: its GST comes from there, and a GST % given is checked against it.",
     "UOM may be left empty: the item's own unit. Given, it is checked and never converted, so give the quantity in the item's own unit.",
     "Size: needed for garments that come in sizes, from the style's size run (S, M, L…). Raw materials have no size.",
     'Unit Rate and Opening Value are optional: give either, or both (they must agree, Qty × Rate); with neither the stock comes in at nought.',
@@ -689,7 +701,15 @@ export async function planImport(
    * each such item, by its key — 'NEW' to make it, or the id of an item
    * already there to use instead.
    */
-  opts: { rowWord?: 'row' | 'line'; kind?: OsKind; labels?: Partial<Record<OsKey, string>>; makeItems?: boolean; resolve?: Record<string, string> } = {},
+  opts: {
+    rowWord?: 'row' | 'line'
+    kind?: OsKind
+    labels?: Partial<Record<OsKey, string>>
+    makeItems?: boolean
+    resolve?: Record<string, string>
+    /** An HSN code typed for a new item on the review, by its key: before the sheet's and the category's. */
+    hsn?: Record<string, string>
+  } = {},
 ): Promise<Resolved[]> {
   const m = await loadMasters()
   const L = (k: OsKey) => opts.labels?.[k] ?? plainHead(OS_COLUMNS.find((c) => c.key === k)?.head ?? k)
@@ -794,18 +814,18 @@ export async function planImport(
   const hsnIndex = opts.makeItems ? await loadHsnIndex(prisma) : new Map()
   const taxRates = opts.makeItems ? await prisma.taxRate.findMany({ where: { isActive: true }, select: { id: true, rate: true } }) : []
   /**
-   * A new item's HSN code — the sheet's, else what it is made like (a
-   * style's other colours, its category) — always one in the HSN list, whose
-   * GST it carries; a GST % on the sheet only checked against it.
+   * A new item's HSN code — typed for it on the review, else the sheet's,
+   * else what it is made like (a style's other colours, its category) —
+   * always one in the HSN list, whose GST it carries; a GST % on the sheet
+   * only checked against it. With none anywhere it is still made, without an
+   * HSN code (as Items & Products allows), and said so: never refused for it.
    */
-  const taxOf = (name: string, raw: Raw, base: { hsnCode: string | null; from: string }, problems: string[]) => {
+  const taxOf = (key: string, raw: Raw, base: { hsnCode: string | null; from: string }, problems: string[]) => {
+    const typed = (opts.hsn?.[key] ?? '').replace(/\s+/g, '')
     const sheetHsn = (raw.hsn ?? '').replace(/\s+/g, '')
-    const hsnCode = sheetHsn || (base.hsnCode ?? '').replace(/\s+/g, '')
-    const from = sheetHsn ? `the ${L('hsn')} column` : base.from
-    if (!hsnCode) {
-      problems.push(`"${name}" needs an HSN code to be made: set one on its category in Masters → Item Categories, or give it in the ${L('hsn')} column.`)
-      return null
-    }
+    const hsnCode = typed || sheetHsn || (base.hsnCode ?? '').replace(/\s+/g, '')
+    const from = typed ? 'the HSN code typed for it' : sheetHsn ? `the ${L('hsn')} column` : base.from
+    if (!hsnCode) return { hsnCode: null, taxRateId: null, said: 'No HSN code yet: add it in Items & Products before it is bought or sold' }
     const hsn = findHsn(hsnIndex, hsnCode)
     if (!hsn) {
       problems.push(`HSN ${hsnCode} (from ${from}) is not in Masters → HSN / SAC Codes, so its GST is not known: add it there with its rate.`)
@@ -841,6 +861,7 @@ export async function planImport(
       unit: unit.symbol,
       type: cat.group ? ITEM_GROUP_LABEL[cat.group] : '',
       tax,
+      hsn: spec.hsnCode,
       // A garment's new colour is named for its style: no other item is spelt like it.
       similar: spec.styleId ? [] : similarTo(spec.name, spec.categoryId),
       approved: opts.resolve?.[spec.key] === 'NEW',
@@ -891,7 +912,7 @@ export async function planImport(
       return null
     }
     const name = `${style.name} — ${colour}`
-    const tax = taxOf(name, raw, { hsnCode: t.template.hsnCode, from: t.hsnFrom }, problems)
+    const tax = taxOf(key, raw, { hsnCode: t.template.hsnCode, from: t.hsnFrom }, problems)
     if (!tax) return null
     const spec: NewItem = {
       key, name, type: 'FINISHED_GOOD', categoryId: cat.id, uomId: unit.id,
@@ -949,7 +970,7 @@ export async function planImport(
     const type = (
       like && typeFitsGroup(like.type, cat.group) ? like.type : cat.group === 'SEMI_FINISHED' ? 'SEMI_FINISHED' : cat.group === 'FIXED_ASSETS' ? 'FIXED_ASSET' : 'RAW_MATERIAL'
     ) as NewItem['type']
-    const tax = taxOf(name, raw, { hsnCode: cat.hsnCode, from: `the category ${cat.name}` }, problems)
+    const tax = taxOf(key, raw, { hsnCode: cat.hsnCode, from: `the category ${cat.name}` }, problems)
     if (!tax) return null
     const spec: NewItem = {
       key, name: name.slice(0, 200), type, categoryId: cat.id, uomId: unit.id, hsnCode: tax.hsnCode, taxRateId: tax.taxRateId,
@@ -1483,12 +1504,14 @@ export function summarise(resolved: Resolved[]) {
             return [
               n?.key ?? m!.key,
               n
-                ? { key: n.key, name: n.name, category: n.category, unit: n.unit, tax: n.tax, similar: n.similar, decision: n.approved ? 'NEW' : 'PENDING', matched: null }
-                : { key: m!.key, name: m!.name, category: '', unit: r.plan.unit ?? '', tax: '', similar: m!.similar, decision: 'MATCHED', matched: r.plan.item },
+                ? { key: n.key, name: n.name, category: n.category, unit: n.unit, tax: n.tax, hsn: n.hsn, similar: n.similar, decision: n.approved ? 'NEW' : 'PENDING', matched: null }
+                : { key: m!.key, name: m!.name, category: '', unit: r.plan.unit ?? '', tax: '', hsn: null, similar: m!.similar, decision: 'MATCHED', matched: r.plan.item },
             ] as const
           }),
       ).values(),
     ],
+    /** New items made without an HSN code: it is added in Items & Products later. */
+    noHsn: [...new Set(resolved.filter((r) => r.plan.newItem && !r.plan.newItem.hsn).map((r) => r.plan.newItem!.key))].length,
     /** Lines coming in without a rate: valuation pending until it is set. */
     valuationPending: lines.filter((r) => r.plan.valuationPending).length,
     /** New items still to be approved or matched: nothing is brought in until there are none. */
@@ -1731,12 +1754,10 @@ export async function colourItem(input: { styleId: string; colour: string; categ
   const { copiedFrom, hsnFrom } = found
   const template = { ...found.template }
   // Its HSN code from the style's other colours or its category, and one in the HSN list: its GST comes from there.
+  // None anywhere: made without one (as Items & Products allows), to be added there later.
   const hsn = template.hsnCode ? findHsn(await loadHsnIndex(prisma), template.hsnCode) : null
-  if (!template.hsnCode) {
-    throw new AppError(`A new item needs an HSN code: set one on ${hsnFrom.replace(/^the category /, '')} in Masters → Item Categories first.`, 400, 'NO_HSN')
-  }
-  if (!hsn) throw new AppError(`HSN ${template.hsnCode} (from ${hsnFrom}) is not in Masters → HSN / SAC Codes, so its GST is not known: add it there first.`, 400, 'HSN_NOT_LISTED')
-  if (!template.taxRateId) {
+  if (template.hsnCode && !hsn) throw new AppError(`HSN ${template.hsnCode} (from ${hsnFrom}) is not in Masters → HSN / SAC Codes, so its GST is not known: add it there first.`, 400, 'HSN_NOT_LISTED')
+  if (!template.taxRateId && hsn) {
     template.taxRateId = (await prisma.taxRate.findFirst({ where: { isActive: true, rate: Number(hsn.gstRate) }, select: { id: true } }))?.id ?? null
   }
   const name = input.name?.trim() || `${style.name} — ${colour}`

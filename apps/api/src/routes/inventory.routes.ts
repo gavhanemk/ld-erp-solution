@@ -5369,6 +5369,8 @@ const openingImportBody = customerMaterialImport.importBody.extend({
   packs: zod.record(zod.string().regex(/^\d+$/), packInputSchema).optional(),
   /** What was decided for each new item on the review: 'NEW' to make it, or an item already there to use. */
   resolve: zod.record(zod.string().max(300), zod.string().max(60)).optional(),
+  /** An HSN code typed on the review for a new item, by its key. */
+  hsn: zod.record(zod.string().max(300), zod.string().trim().max(12)).optional(),
 })
 async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
   await sheetIsFor(body)
@@ -5380,7 +5382,7 @@ async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
   const packs = body.packs ?? {}
   return openingStock.planImport(
     rows.map((r) => (packs[String(r.row)] ? { ...r, pack: packs[String(r.row)] } : r)),
-    { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true, resolve: body.resolve },
+    { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true, resolve: body.resolve, hsn: body.hsn },
   )
 }
 
@@ -5430,7 +5432,7 @@ router.post('/opening-stock/import/report', requirePermission(MODULE, 'create'),
     if (!body.openingDate) throw new AppError('Pick the opening date for the sheet.', 400, 'NEEDS_DATE')
     openingStock.asNineteen(rows, body.kind, body.openingDate)
   }
-  const resolved = await openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true, resolve: body.resolve })
+  const resolved = await openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true, resolve: body.resolve, hsn: body.hsn })
   const buffer = await openingStock.errorReport(raw, resolved, body.kind)
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', `attachment; filename="${body.fileName.replace(/\.xlsx?$/i, '').replace(/[^\w.-]+/g, '-')}-problems.xlsx"`)
