@@ -229,7 +229,7 @@ function CompanyProfile() {
     const editable = [
       'name', 'legalName', 'gstin', 'stateCode', 'pan', 'tan', 'msmeNumber',
       'phone', 'email', 'website',
-      'address', 'city', 'state', 'pincode', 'currentFY',
+      'address', 'headOfficeAddress', 'city', 'state', 'pincode', 'currentFY',
       'gs1Prefix', 'countryOfOrigin', 'customerCare',
     ]
     for (const key of editable) {
@@ -438,6 +438,18 @@ function CompanyProfile() {
               placeholder="395010"
               value={values.pincode ?? ''}
               onChange={(e) => set('pincode', e.target.value)}
+            />
+          </Field>
+
+          {/* Printed on purchase orders as "HO: …", under the address above. */}
+          <Field label="Head office address" htmlFor="headOfficeAddress" error={errors.headOfficeAddress} span={2}>
+            <textarea
+              id="headOfficeAddress"
+              rows={2}
+              className="form-input"
+              placeholder="Leave blank if the address above is the head office"
+              value={values.headOfficeAddress ?? ''}
+              onChange={(e) => set('headOfficeAddress', e.target.value)}
             />
           </Field>
         </div>

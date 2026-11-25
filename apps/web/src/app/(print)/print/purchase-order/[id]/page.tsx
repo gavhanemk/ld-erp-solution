@@ -1804,6 +1804,20 @@ export default function PrintPurchaseOrder() {
                     {companyAddress}
                   </div>
                 )}
+                {/* The head office, when it is not the works above (25 Nov 2026). */}
+                {company.headOfficeAddress && (
+                  <div
+                    style={{
+                      fontSize: '10.5px',
+                      color: GREY,
+                      lineHeight: 1.6,
+                      marginTop: '2px',
+                      maxWidth: '86%',
+                    }}
+                  >
+                    <strong style={{ color: NAVY, fontWeight: 700 }}>HO:</strong> {company.headOfficeAddress}
+                  </div>
+                )}
               </div>
               <div style={{ flexShrink: 0 }}>
                 <HeadRow icon="mail" label="Email" value={company.email} />

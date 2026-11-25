@@ -11,6 +11,7 @@ export interface Company {
   name: string
   legalName: string | null
   address: string | null
+  headOfficeAddress: string | null
   city: string | null
   state: string | null
   pincode: string | null

@@ -786,6 +786,8 @@ export const updateCompanySchema = z.object({
   name: name.optional(),
   legalName: z.string().max(200).optional().nullable(),
   address: optionalText,
+  /** Printed under the works address on purchase orders as "HO: …". */
+  headOfficeAddress: optionalText,
   city: z.string().max(100).optional().nullable(),
   state: z.string().max(100).optional().nullable(),
   stateCode,
