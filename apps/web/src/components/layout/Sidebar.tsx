@@ -317,9 +317,12 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
           <span className="text-sm font-black gradient-text-teal">LD</span>
         </div>
         {!collapsed && (
+          // The sidebar is dark in both themes, so its text takes fixed light
+          // colours like the menu below it. The theme's foreground turned
+          // near-black in the light theme and the name all but vanished.
           <div className="overflow-hidden">
-            <p className="text-sm font-bold text-foreground leading-tight whitespace-nowrap">LD ERP Solution</p>
-            <p className="text-xs text-muted-foreground whitespace-nowrap">LD Cotton Mills</p>
+            <p className="text-sm font-bold text-white leading-tight whitespace-nowrap">LD ERP Solution</p>
+            <p className="text-xs font-semibold text-slate-300 whitespace-nowrap">LD Cotton Mills</p>
           </div>
         )}
       </div>
@@ -503,16 +506,16 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
               </span>
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-foreground truncate">
+              <p className="text-xs font-semibold text-white truncate">
                 {user?.name ?? 'Signed in'}
               </p>
-              <p className="text-[10px] text-muted-foreground truncate">{user?.role ?? ''}</p>
+              <p className="text-[10px] text-slate-400 truncate">{user?.role ?? ''}</p>
             </div>
             <button
               onClick={() => void signOut()}
               title="Sign out"
               aria-label="Sign out"
-              className="p-1 rounded text-muted-foreground hover:text-red-400 transition-colors"
+              className="p-1 rounded text-slate-400 hover:text-red-400 transition-colors"
             >
               <LogOut size={14} />
             </button>
@@ -523,7 +526,7 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
             68px-wide drawer over a 390px screen is neither. */}
         <button
           onClick={() => onCollapse(!collapsed)}
-          className="btn-ghost hidden w-full justify-center py-2 text-muted-foreground lg:flex"
+          className="btn-ghost hidden w-full justify-center py-2 text-slate-400 hover:text-white lg:flex"
         >
           {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           {!collapsed && <span className="text-xs">Collapse</span>}
