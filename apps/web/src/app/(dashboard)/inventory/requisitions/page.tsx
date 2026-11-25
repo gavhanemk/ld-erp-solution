@@ -26,6 +26,7 @@ import type { InwardRef } from '@/components/packages/InwardStickers'
 import { StickersReady } from '@/components/packages/StickersReady'
 import { OutwardStickers } from '@/components/packages/OutwardStickers'
 import type { OutwardRef } from '@/components/packages/packageTypes'
+import { BrandTag } from '@/components/sales/brand'
 import { isAdminRole } from '@/lib/access'
 
 /**
@@ -85,7 +86,7 @@ interface Requisition {
   /** The sales order the material is for, and its customer. */
   so?: { id: string; soNumber: string; customer: { id: string; name: string } } | null
   /** The manufacturing order it was raised from, when it was. */
-  mo?: { id: string; moNumber: string } | null
+  mo?: { id: string; moNumber: string; brand?: { name: string; type: string } | null } | null
   issuedBy: { id: string; name: string } | null
   /** Cancelled, or closed with part still owed: nothing more is issued. */
   closedAt: string | null
@@ -892,6 +893,7 @@ function RequisitionsScreen() {
               {mr.mo.moNumber}
             </a>
           )}
+          {mr.mo?.brand && <BrandTag brand={mr.mo.brand} />}
           {mr.so && (
             <>
               {mr.mo && <span className="text-muted-foreground">·</span>}

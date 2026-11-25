@@ -3,10 +3,28 @@
 import { Suspense, useRef, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { AlertCircle, ArrowLeft, CheckCircle2, Download, FileSpreadsheet, Loader2, Printer, Rows3, Upload } from 'lucide-react'
+import {
+  AlertCircle,
+  Asterisk,
+  CalendarDays,
+  CheckCircle2,
+  Download,
+  FileSpreadsheet,
+  Info,
+  Layers,
+  ListChecks,
+  Loader2,
+  PackagePlus,
+  PenLine,
+  Printer,
+  Rows3,
+  ShieldCheck,
+  Upload,
+} from 'lucide-react'
 import { api, ApiError, can, tokens } from '@/lib/api'
 import { cn, newRequestId } from '@/lib/utils'
 import { KINDS, money, num, todayInIndia, type Kind } from '@/components/inventory/opening/kinds'
+import { Banner, ChoiceCard, DoneCard, PageHead, Panel, StatTile, Stats } from '@/components/inventory/opening/Frame'
 import { StickersReady } from '@/components/packages/StickersReady'
 import { PackagingDialog, packInputOf, packValueOf, type PackInputBody } from '@/components/packages/PackagingEditor'
 import { useQtyRules } from '@/lib/qtyRules'
@@ -30,7 +48,11 @@ interface RowPlan {
   newFloor: boolean
   item: { code: string; name: string } | null
   /** Not in Items & Products yet: made on import, with its own code. */
-  newItem?: { name: string; category: string; unit: string; type: string; copiedFrom: string | null } | null
+  newItem?: { key: string; name: string; category: string; unit: string; type: string; tax: string; approved: boolean; copiedFrom: string | null } | null
+  /** Named an item not in Items & Products, and matched to this one instead. */
+  matched?: { key: string; name: string } | null
+  /** No rate: in at nought, its value to be set later. */
+  valuationPending?: boolean
   size: string | null
   order: string | null
   lot: string | null
@@ -55,11 +77,31 @@ interface Summary {
   floorsToMake: string[]
   /** Items not in Items & Products yet, made on import. */
   itemsToMake?: Array<{ name: string; category: string; unit: string }>
+  /** Each item the sheet names that is not in Items & Products: to make, or matched to one already there. */
+  decisions?: Decision[]
+  /** New items still to approve or match. */
+  undecided?: number
+  /** Lines coming in without a rate. */
+  valuationPending?: number
+  /** New items made without an HSN code. */
+  noHsn?: number
   byGroup: Array<{ group: string; label: string; lines: number; value: number }>
   /** Stickers to print; packages keeping their own barcode; rows whose packaging is pending. */
   stickers?: number
   kept?: number
   waiting?: number
+}
+interface Decision {
+  key: string
+  name: string
+  category: string
+  unit: string
+  tax: string
+  /** The HSN code it is made with; null: none yet. */
+  hsn: string | null
+  similar: Array<{ id: string; code: string; name: string }>
+  decision: 'PENDING' | 'NEW' | 'MATCHED'
+  matched: { code: string; name: string } | null
 }
 interface Done {
   id: string
@@ -74,8 +116,40 @@ interface Done {
   again?: boolean
 }
 
-const STEPS = ['What the sheet holds', 'Template and upload', 'Check the rows', 'Imported']
+const STEPS = ['Upload Excel', 'Validate data', 'Resolve new items', 'Review stock & packaging', 'Confirm import', 'Import completed']
 const ALL = { key: 'ALL' as const, label: 'All in one sheet', short: '19 columns', text: "Your standard 19-column opening stock sheet, Opening Date to Remarks: finished goods, semi-finished goods and raw materials together.", icon: Rows3 }
+
+/** Each template's columns as the sheet has them, those that must be filled marked. */
+const COLUMNS: Record<Choice, Array<[string, boolean]>> = {
+  ALL: [
+    ['Opening Date', true], ['Process', false], ['Department / Location', false], ['Order No.', false], ['Style / Article No.', false], ['Item Code', false],
+    ['Item Description', true], ['Item Category', false], ['Fabric / Material', false], ['Colour', false], ['Size', false], ['Lot / Batch / Roll No.', false],
+    ['Bundle / Barcode No.', false], ['UOM', false], ['Opening Qty', true], ['Unit Rate', false], ['Opening Value', false], ['Stock Status', false], ['Remarks', false],
+    ['HSN Code', false], ['GST %', false],
+  ],
+  FG: [['Style / Article No.', true], ['Item Code', false], ['Colour', true], ['Size', true], ['Opening Quantity', true], ['Rate Per Piece', false], ['Location', false], ['Stock Status', false], ['Remarks', false]],
+  SFG: [
+    ['Style / Article No.', true], ['Process', true], ['Colour', true], ['Size', true], ['Opening Quantity', true], ['Rate / Valuation', false], ['Department', false],
+    ['Location', false], ['Order Reference', false], ['Batch / Bundle Reference', false], ['Stock Status', false], ['Remarks', false],
+  ],
+  RM: [
+    ['Material Category', false], ['Item Code', false], ['Item Name', true], ['Lot / Batch / Roll Number', false], ['Bundle / Barcode Number', false], ['UOM', false],
+    ['Opening Quantity', true], ['Unit Rate', false], ['Location', false], ['Package Type', false], ['Package Count', false], ['Qty per Package', false],
+    ['Package Quantities', false], ['Package References', false], ['Stock Status', false], ['Remarks', false], ['HSN Code', false], ['GST %', false],
+  ],
+  FA: [
+    ['Asset Category', false], ['Item Code', false], ['Item Name', true], ['Serial Numbers', false], ['Quantity', true], ['Cost Each', false], ['Location', false],
+    ['Stock Status', false], ['Remarks', false], ['HSN Code', false], ['GST %', false],
+  ],
+}
+/** What each template is for, in a line. */
+const ABOUT: Record<Choice, string> = {
+  ALL: 'Finished goods, semi-finished goods and raw materials together, as your own sheet holds them.',
+  FG: 'One row per style, colour and size, in a finished goods store.',
+  SFG: "One row per style, process, colour and size. The process must be on the style's route.",
+  RM: 'One row per item and lot or roll, in its own unit. How it is packed is optional.',
+  FA: 'One row per item and place — a store, or the department it is installed at. Each one gets its own asset tag.',
+}
 
 const asBase64 = (file: File) =>
   new Promise<string>((resolve, reject) => {
@@ -137,11 +211,18 @@ function ImportOpeningStock() {
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<Done | null>(null)
   const [printing, setPrinting] = useState(false)
+  // A sheet being dragged over the drop box.
+  const [over, setOver] = useState(false)
   // Packing changed on the review, by sheet row: sent with the check and the import.
   const [packs, setPacks] = useState<Record<string, PackInputBody>>({})
+  // Each new item: 'NEW' to make it, or the id of an item already there to use instead.
+  const [resolve, setResolve] = useState<Record<string, string>>({})
+  // An HSN code typed for a new item, by its key: before the sheet's and its category's.
+  const [hsn, setHsn] = useState<Record<string, string>>({})
   const [packing, setPacking] = useState<RowPlan | null>(null)
   const qtyRules = useQtyRules()
   const input = useRef<HTMLInputElement>(null)
+  const results = useRef<HTMLDivElement>(null)
   const mayImport = can('inventory', 'create')
 
   const body = (extra: Record<string, unknown> = {}) => ({
@@ -149,24 +230,28 @@ function ImportOpeningStock() {
     file: file?.data,
     ...(choice && choice !== 'ALL' ? { kind: choice, openingDate: date } : {}),
     ...(Object.keys(packs).length ? { packs } : {}),
+    ...(Object.keys(resolve).length ? { resolve } : {}),
+    ...(Object.keys(hsn).length ? { hsn } : {}),
     ...extra,
   })
 
-  const check = async (f: { name: string; data: string }, onDate = date, withPacks = packs) => {
+  const check = async (f: { name: string; data: string }, onDate = date, withPacks = packs, withResolve = resolve, scroll = true, withHsn = hsn) => {
     setBusy('check')
     setError(null)
-    setSummary(null)
-    setRows([])
     try {
       const res = await api.post<{ data: { summary: Summary; rows: RowPlan[] } }>('/inventory/opening-stock/import', {
         fileName: f.name,
         file: f.data,
         ...(choice && choice !== 'ALL' ? { kind: choice, openingDate: onDate } : {}),
         ...(Object.keys(withPacks).length ? { packs: withPacks } : {}),
+        ...(Object.keys(withResolve).length ? { resolve: withResolve } : {}),
+        ...(Object.keys(withHsn).length ? { hsn: withHsn } : {}),
       })
       setSummary(res.data.summary)
       setRows(res.data.rows)
-      setOnly(res.data.summary.problems ? 'bad' : 'all')
+      if (scroll) setOnly(res.data.summary.problems ? 'bad' : 'all')
+      // The answer, brought into view under the upload.
+      if (scroll) setTimeout(() => results.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not check the sheet.')
     } finally {
@@ -180,9 +265,13 @@ function ImportOpeningStock() {
       const f = { name: picked.name, data: await asBase64(picked) }
       setFile(f)
       setRequestKey(newRequestId())
-      // A new sheet: changes made on the last one's rows do not carry over.
+      // A new sheet: changes made on the last one's rows, and decisions on its items, do not carry over.
       setPacks({})
-      await check(f, date, {})
+      setResolve({})
+      setHsn({})
+      setSummary(null)
+      setRows([])
+      await check(f, date, {}, {}, true, {})
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The file could not be read.')
     } finally {
@@ -206,68 +295,71 @@ function ImportOpeningStock() {
     }
   }
 
-  const stepIndex = !choice ? 0 : done ? 3 : summary ? 2 : 1
+  const getTemplate = async () => {
+    if (!choice) return
+    setBusy('template')
+    setError(null)
+    try {
+      await download(`/inventory/opening-stock/import-template${choice === 'ALL' ? '' : `?type=${choice}`}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The template could not be made.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const undecided = summary?.undecided ?? 0
+  const decide = (next: Record<string, string>) => {
+    setResolve(next)
+    if (file) void check(file, date, packs, next, false)
+  }
+  const setItemHsn = (key: string, code: string) => {
+    const next = { ...hsn, [key]: code }
+    if (!code) delete next[key]
+    setHsn(next)
+    if (file) void check(file, date, packs, resolve, false, next)
+  }
+  // Upload, validate, resolve new items, review, confirm, done — as far as this sheet has got.
+  const stepIndex = done ? 5 : busy === 'import' ? 4 : !summary ? 0 : summary.problems ? 1 : undecided ? 2 : 3
   const listed = rows.filter((r) => !r.skipped && (only === 'all' || (only === 'bad' ? r.problems.length > 0 : r.problems.length === 0)))
   const ready = summary ? summary.lines : 0
+  const checkedRows = summary ? summary.rows - summary.skipped : 0
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0">
-          <Link href="/inventory/opening-stock" className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-xs">
-            <ArrowLeft size={12} /> Opening Stock
-          </Link>
-          <h1 className="page-title">Import Opening Stock{shown ? ` — ${shown.label}` : ''}</h1>
-        </div>
-        <ol className="flex flex-wrap items-center gap-1 text-xs" aria-label="Steps">
-          {STEPS.map((label, i) => (
-            <li key={label} className="flex items-center gap-1">
-              <span
-                className={cn(
-                  'flex items-center gap-1.5 rounded-full border px-2.5 py-1',
-                  i === stepIndex ? 'border-primary bg-primary/10 text-primary font-semibold' : i < stepIndex ? 'border-border text-foreground' : 'border-border text-muted-foreground',
-                )}
-                aria-current={i === stepIndex ? 'step' : undefined}
-              >
-                <span className="tabular-nums">{i + 1}</span> {label}
-              </span>
-              {i < STEPS.length - 1 && <span className="text-muted-foreground">›</span>}
-            </li>
-          ))}
-        </ol>
-      </div>
+    <div className="space-y-5" style={{ ['--field' as string]: 'var(--card)' }}>
+      <PageHead
+        title={`Import Opening Stock${shown ? ` — ${shown.label}` : ''}`}
+        subtitle={!choice ? 'Bring in the stock you had on the day from an Excel sheet. Pick what the sheet holds.' : ABOUT[choice]}
+        steps={STEPS}
+        current={stepIndex}
+      />
 
-      {!mayImport && <Note tone="warn">Importing opening stock needs Inventory → create. Ask an administrator for it.</Note>}
-      {error && <Note tone="bad">{error}</Note>}
+      {!mayImport && <Banner tone="warn">Importing opening stock needs Inventory → create. Ask an administrator for it.</Banner>}
+      {error && <Banner tone="bad">{error}</Banner>}
 
       {/* 1. What the sheet holds. */}
       {!choice && (
-        <div className="space-y-3">
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
             {[...KINDS, ALL].map((t) => (
-              <button
+              <ChoiceCard
                 key={t.key}
-                type="button"
+                icon={t.icon}
+                label={t.label}
+                short={t.short}
+                text={t.text}
+                cta="Use this template"
+                ariaLabel={`Import ${t.label}`}
                 onClick={() => router.push(`/inventory/opening-stock/import?type=${t.key}`)}
-                className="glass-card hover:border-primary group flex flex-col gap-3 border p-5 text-left transition-colors"
-                aria-label={`Import ${t.label}`}
               >
-                <div className="flex items-center gap-3">
-                  <span className="bg-primary/10 text-primary rounded-xl p-3">
-                    <t.icon size={22} />
-                  </span>
-                  <div>
-                    <div className="text-foreground font-semibold">{t.label}</div>
-                    <div className="text-muted-foreground text-xs font-semibold">{t.short}</div>
-                  </div>
-                </div>
-                <p className="text-muted-foreground flex-1 text-sm">{t.text}</p>
-                <span className="text-primary text-sm font-semibold group-hover:underline">Use this template →</span>
-              </button>
+                <p className="text-muted-foreground text-xs">
+                  {COLUMNS[t.key].length} columns · {COLUMNS[t.key].filter(([, must]) => must).length} must be filled
+                </p>
+              </ChoiceCard>
             ))}
           </div>
-          <p className="text-muted-foreground text-sm">
-            Only a few lines?{' '}
+          <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
+            <PenLine size={14} /> Only a few lines?{' '}
             <Link href="/inventory/opening-stock/new" className="text-primary font-medium hover:underline">
               Add them by hand instead
             </Link>
@@ -278,84 +370,179 @@ function ImportOpeningStock() {
       {/* 2. Template, date and upload; then 3. the rows. */}
       {choice && !done && (
         <>
-          <section className="glass-card grid gap-4 p-4 lg:grid-cols-3" aria-label="Template and upload">
-            <div className="space-y-2">
-              <h2 className="text-foreground text-sm font-semibold">1. The template</h2>
-              <p className="text-muted-foreground text-xs">
-                {choice === 'ALL'
-                  ? 'Your 19 columns, Opening Date to Remarks, with dropdowns for process, location, unit and status.'
-                  : choice === 'FG'
-                    ? 'Style / Article No., Item Code, Colour, Size, Opening Quantity, Rate Per Piece, Location — with Stock Status and Remarks at the end.'
-                    : choice === 'SFG'
-                      ? "Style / Article No., Process, Colour, Size, Opening Quantity, Rate / Valuation, Department, Location, Order Reference, Batch / Bundle Reference — the process must be on the style's route."
-                      : 'Material Category, Item Code, Item Name, Lot / Batch / Roll Number, Bundle / Barcode Number, UOM, Opening Quantity, Unit Rate, Location.'}
-              </p>
-              <p className="text-muted-foreground text-xs">
-                Columns marked * must be filled; the rest are optional. Row 2 is an example and is not brought in: add your stock from row 3 on, or delete row 2 first. Item
-                Code can stay empty: an item not in Items &amp; Products yet is made on import, with its own code.
-              </p>
-              <button
-                type="button"
-                className="btn-secondary h-9 text-sm"
-                disabled={busy !== null}
-                onClick={async () => {
-                  setBusy('template')
-                  setError(null)
-                  try {
-                    await download(`/inventory/opening-stock/import-template${choice === 'ALL' ? '' : `?type=${choice}`}`)
-                  } catch (err) {
-                    setError(err instanceof Error ? err.message : 'The template could not be made.')
-                  } finally {
-                    setBusy(null)
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_19rem]">
+            <Panel icon={FileSpreadsheet} title="Prepare and upload the sheet" description="Three steps: the template, then the date, then the filled sheet." label="Template and upload">
+              <div className="divide-border divide-y">
+                <StepRow
+                  n={1}
+                  title="Download the template"
+                  text={`${COLUMNS[choice].length} columns, with dropdowns from your masters, an example on row 2 and a "How to fill" sheet.`}
+                  action={
+                    <button type="button" className="btn-secondary h-9 text-sm" disabled={busy !== null} onClick={() => void getTemplate()}>
+                      {busy === 'template' ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Download the {shown?.label} template
+                    </button>
                   }
-                }}
-              >
-                {busy === 'template' ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Download the {shown?.label} template
-              </button>
-            </div>
-            {choice !== 'ALL' && (
-              <label className="space-y-2 text-sm">
-                <span className="text-foreground block font-semibold">2. Opening date, for the whole sheet</span>
-                <input
-                  type="date"
-                  className="form-input w-48"
-                  value={date}
-                  max={todayInIndia()}
-                  onChange={(e) => {
-                    setDate(e.target.value)
-                    if (file) void check(file, e.target.value)
-                  }}
-                  aria-label="Opening date"
-                />
-              </label>
-            )}
-            <div className="space-y-2">
-              <h2 className="text-foreground text-sm font-semibold">{choice === 'ALL' ? '2.' : '3.'} Upload the filled sheet</h2>
-              <input ref={input} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => void choose(e.target.files?.[0])} aria-label="Choose the sheet" />
-              <button type="button" className="btn-primary h-9 text-sm" disabled={busy !== null || !mayImport} onClick={() => input.current?.click()}>
-                {busy === 'check' ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} {file ? 'Upload a corrected sheet' : 'Choose the sheet'}
-              </button>
-              {file && (
-                <p className="text-muted-foreground flex items-center gap-1 text-xs">
-                  <FileSpreadsheet size={13} /> {file.name}
-                </p>
-              )}
-            </div>
-          </section>
+                >
+                  <ul className="flex flex-wrap gap-1.5" aria-label="Columns in the template">
+                    {COLUMNS[choice].map(([name, must]) => (
+                      <li
+                        key={name}
+                        className={cn(
+                          'rounded-md border px-2 py-0.5 text-[11px]',
+                          must ? 'border-primary/40 bg-primary/10 text-primary font-semibold' : 'border-border text-muted-foreground',
+                        )}
+                      >
+                        {name}
+                        {must && ' *'}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="text-muted-foreground text-[11px]">
+                    <span className="text-primary font-semibold">*</span> must be filled · every other column is optional
+                  </p>
+                </StepRow>
 
+                {choice !== 'ALL' && (
+                  <StepRow n={2} title="Opening date" text="One date for every row of this sheet: the day the stock was counted.">
+                    <div className="relative w-56">
+                      <CalendarDays size={15} className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="date"
+                        className="form-input h-10 pl-9"
+                        value={date}
+                        max={todayInIndia()}
+                        onChange={(e) => {
+                          setDate(e.target.value)
+                          if (file) void check(file, e.target.value)
+                        }}
+                        aria-label="Opening date"
+                      />
+                    </div>
+                  </StepRow>
+                )}
+
+                <StepRow n={choice === 'ALL' ? 2 : 3} title="Upload the filled sheet" text="Every row is checked against your masters before anything is brought in.">
+                  <input ref={input} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => void choose(e.target.files?.[0])} aria-label="Choose the sheet" />
+                  <div
+                    onDragOver={(e) => {
+                      e.preventDefault()
+                      if (!over) setOver(true)
+                    }}
+                    onDragLeave={() => setOver(false)}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      setOver(false)
+                      if (mayImport && busy === null) void choose(e.dataTransfer.files?.[0])
+                    }}
+                    className={cn(
+                      'flex flex-wrap items-center gap-4 rounded-xl border-2 border-dashed px-5 py-5 transition-colors',
+                      over ? 'border-primary bg-primary/5' : file ? 'border-primary/30 bg-primary/[0.03]' : 'border-border',
+                    )}
+                  >
+                    <span className={cn('flex h-11 w-11 shrink-0 items-center justify-center rounded-full', file ? 'bg-emerald-500/15 text-emerald-500' : 'bg-primary/10 text-primary')}>
+                      {busy === 'check' ? <Loader2 size={20} className="animate-spin" /> : file ? <FileSpreadsheet size={20} /> : <Upload size={20} />}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      {file ? (
+                        <>
+                          <p className="text-foreground truncate text-sm font-semibold">{file.name}</p>
+                          <p className="text-muted-foreground text-xs">
+                            {busy === 'check'
+                              ? 'Checking every row…'
+                              : summary
+                                ? `Checked: ${checkedRows} ${checkedRows === 1 ? 'row' : 'rows'}. Corrected it? Upload it again.`
+                                : 'Not checked yet.'}
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-foreground text-sm font-semibold">Drop the filled sheet here</p>
+                          <p className="text-muted-foreground text-xs">.xlsx or .csv · up to 3,000 rows</p>
+                        </>
+                      )}
+                    </div>
+                    <button type="button" className="btn-primary h-9 text-sm" disabled={busy !== null || !mayImport} onClick={() => input.current?.click()}>
+                      <Upload size={15} /> {file ? 'Upload a corrected sheet' : 'Choose the sheet'}
+                    </button>
+                  </div>
+                </StepRow>
+              </div>
+            </Panel>
+
+            <Panel icon={Info} title="Good to know" label="Good to know">
+              <ul className="space-y-3.5 text-xs">
+                <Tip icon={Asterisk}>Columns marked * must be filled. Every other column is optional.</Tip>
+                <Tip icon={ListChecks}>Row 2 is a grey example and is never brought in. Add your stock from row 3, or delete row 2 first.</Tip>
+                <Tip icon={PackagePlus}>Item Code can stay empty. An item not in Items &amp; Products yet is made on import, with its own code — the check lists it first.</Tip>
+                <Tip icon={ShieldCheck}>Nothing is brought in until every row is right. Rows to correct are shown with what is wrong.</Tip>
+                <Tip icon={Layers}>Up to 3,000 rows per upload. A bigger stock goes in several uploads.</Tip>
+              </ul>
+              <Link href="/inventory/opening-stock/new" className="text-primary border-border mt-5 flex items-center gap-1.5 border-t pt-4 text-xs font-semibold hover:underline">
+                <PenLine size={13} /> Only a few lines? Add them by hand
+              </Link>
+            </Panel>
+          </div>
+
+          <div ref={results} className="scroll-mt-4" />
+          {summary && (summary.decisions?.length ?? 0) > 0 && (
+            <ResolvePanel
+              decisions={summary.decisions!}
+              resolve={resolve}
+              undecided={undecided}
+              busy={busy !== null}
+              onDecide={(key, value) => decide({ ...resolve, [key]: value })}
+              onHsn={setItemHsn}
+              onApproveAll={() => decide({ ...resolve, ...Object.fromEntries(summary.decisions!.filter((d) => !resolve[d.key]).map((d) => [d.key, 'NEW'])) })}
+            />
+          )}
           {summary && (
-            <section className="glass-card space-y-3 p-4" aria-label="Check">
-              <div className="flex flex-wrap items-center gap-2">
-                {summary.problems ? (
-                  <span className="flex items-center gap-1.5 text-sm font-semibold text-red-400">
-                    <AlertCircle size={16} /> {summary.problems} {summary.problems === 1 ? 'row' : 'rows'} of {summary.rows - summary.skipped} {summary.problems === 1 ? 'needs' : 'need'} correcting · {ready} ready
+            <Panel
+              icon={summary.problems ? AlertCircle : CheckCircle2}
+              title={
+                summary.problems ? (
+                  <span className="text-red-400">
+                    {summary.problems} {summary.problems === 1 ? 'row' : 'rows'} of {checkedRows} {summary.problems === 1 ? 'needs' : 'need'} correcting · {ready} ready
                   </span>
                 ) : (
-                  <span className="flex items-center gap-1.5 text-sm font-semibold text-emerald-500">
-                    <CheckCircle2 size={16} /> All {ready} {ready === 1 ? 'row is' : 'rows are'} right
+                  <span className="text-emerald-500">
+                    All {ready} {ready === 1 ? 'row is' : 'rows are'} right
                   </span>
-                )}
-                <span className="badge-info">{money(summary.value)}</span>
+                )
+              }
+              description={summary.problems ? 'Nothing is imported until every row is right.' : 'Look them over, then confirm the import at the bottom.'}
+              label="Check"
+              actions={
+                <div className="border-border bg-secondary flex rounded-lg border p-0.5 text-xs" role="tablist" aria-label="Rows">
+                  {(
+                    [
+                      { key: 'all', label: `All (${checkedRows})` },
+                      { key: 'bad', label: `To correct (${summary.problems})` },
+                      { key: 'good', label: `Ready (${ready})` },
+                    ] as const
+                  ).map((t) => (
+                    <button
+                      key={t.key}
+                      type="button"
+                      role="tab"
+                      aria-selected={only === t.key}
+                      onClick={() => setOnly(t.key)}
+                      className={cn('rounded-md px-2.5 py-1', only === t.key ? 'bg-card text-foreground font-medium shadow-sm' : 'text-muted-foreground')}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              }
+              bodyClassName="space-y-4"
+            >
+              <Stats label="Sheet figures">
+                <StatTile label="Rows checked" value={num(checkedRows)} hint={summary.skipped ? `${summary.skipped} empty left out` : undefined} />
+                <StatTile label="Ready" value={num(ready)} tone={ready ? 'good' : undefined} />
+                <StatTile label="To correct" value={num(summary.problems)} tone={summary.problems ? 'bad' : undefined} />
+                <StatTile label="Stock value" value={money(summary.value)} />
+              </Stats>
+
+              <div className="flex flex-wrap items-center gap-2">
                 {summary.byGroup.map((g) => (
                   <span key={g.group} className="badge-neutral">
                     {g.label}: {g.lines}
@@ -373,114 +560,72 @@ function ImportOpeningStock() {
                     {summary.kept} keep their own barcode
                   </span>
                 )}
+                {(summary.valuationPending ?? 0) > 0 && (
+                  <span className="badge-warning" title="No rate given: in at ₹0, its value to be set later (Opening Stock → Set rate)">
+                    {summary.valuationPending} {summary.valuationPending === 1 ? 'row' : 'rows'}: valuation pending
+                  </span>
+                )}
+                {(summary.noHsn ?? 0) > 0 && (
+                  <span className="badge-warning" title="Made without an HSN code: add it in Items & Products before the item is bought or sold">
+                    {summary.noHsn} new {summary.noHsn === 1 ? 'item' : 'items'}: no HSN code yet
+                  </span>
+                )}
                 {(summary.waiting ?? 0) > 0 && (
                   <span className="badge-warning" title="In stock with packaging pending: configure the packages later from Stickers or the opening stock list">
                     {summary.waiting} {summary.waiting === 1 ? 'row' : 'rows'}: packaging pending
                   </span>
                 )}
-                <div className="border-border bg-secondary ml-auto flex rounded-lg border p-0.5 text-xs" role="tablist" aria-label="Rows">
-                  {(
-                    [
-                      { key: 'all', label: `All (${summary.rows - summary.skipped})` },
-                      { key: 'bad', label: `To correct (${summary.problems})` },
-                      { key: 'good', label: `Ready (${ready})` },
-                    ] as const
-                  ).map((t) => (
-                    <button
-                      key={t.key}
-                      type="button"
-                      role="tab"
-                      aria-selected={only === t.key}
-                      onClick={() => setOnly(t.key)}
-                      className={cn('rounded-md px-2.5 py-1', only === t.key ? 'bg-card text-foreground font-medium shadow-sm' : 'text-muted-foreground')}
-                    >
-                      {t.label}
-                    </button>
-                  ))}
-                </div>
               </div>
+
               {summary.problems > 0 && (
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm">
-                  <span className="text-red-400">Nothing is imported until every row is right. Correct the sheet and upload it again — or download the error report, fix the shaded rows there and upload that.</span>
-                  <button
-                    type="button"
-                    className="btn-secondary h-8 text-xs"
-                    disabled={busy !== null}
-                    onClick={async () => {
-                      setBusy('report')
-                      try {
-                        await download('/inventory/opening-stock/import/report', { body: body() })
-                      } catch (err) {
-                        setError(err instanceof Error ? err.message : 'The error report could not be made.')
-                      } finally {
-                        setBusy(null)
-                      }
-                    }}
-                  >
-                    {busy === 'report' ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Download the error report
-                  </button>
-                </div>
+                <Banner
+                  tone="bad"
+                  action={
+                    <button
+                      type="button"
+                      className="btn-secondary h-8 text-xs"
+                      disabled={busy !== null}
+                      onClick={async () => {
+                        setBusy('report')
+                        try {
+                          await download('/inventory/opening-stock/import/report', { body: body() })
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : 'The error report could not be made.')
+                        } finally {
+                          setBusy(null)
+                        }
+                      }}
+                    >
+                      {busy === 'report' ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Download the error report
+                    </button>
+                  }
+                >
+                  Correct the sheet and upload it again — or download the error report, fix the shaded rows there and upload that.
+                </Banner>
               )}
-              <div className="max-h-[28rem] overflow-auto">
+
+              <div className="border-border max-h-[32rem] overflow-auto rounded-lg border">
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="text-muted-foreground text-left text-[10px] font-semibold uppercase tracking-wide">
-                      <th className="px-2 py-1.5">Row</th>
-                      <th className="px-2 py-1.5">Where</th>
-                      <th className="px-2 py-1.5">Item</th>
-                      <th className="px-2 py-1.5">Size</th>
-                      <th className="px-2 py-1.5 text-right">Qty</th>
-                      <th className="px-2 py-1.5 text-right">Rate</th>
-                      <th className="px-2 py-1.5 text-right">Value</th>
-                      <th className="px-2 py-1.5">Status</th>
-                      <th className="px-2 py-1.5">Stickers</th>
-                      <th className="px-2 py-1.5">Problems</th>
+                      <th className="w-12 px-3 py-2">Row</th>
+                      <th className="px-3 py-2">Item</th>
+                      <th className="px-3 py-2">Where</th>
+                      <th className="px-3 py-2">Size</th>
+                      <th className="px-3 py-2 text-right">Qty</th>
+                      <th className="px-3 py-2 text-right">Rate</th>
+                      <th className="px-3 py-2 text-right">Value</th>
+                      <th className="px-3 py-2">Status</th>
+                      <th className="px-3 py-2">Stickers</th>
                     </tr>
                   </thead>
                   <tbody>
                     {listed.map((r) => (
-                      <tr key={r.row} className={cn('border-border border-t align-top', r.problems.length && 'bg-red-500/5')} data-row={r.row}>
-                        <td className="text-muted-foreground px-2 py-1.5 tabular-nums">{r.row}</td>
-                        <td className="px-2 py-1.5">
-                          <div className="text-foreground">{r.process}</div>
-                          <div className="text-muted-foreground">
-                            {r.location || '—'}
-                            {r.newFloor && !r.problems.length && <span className="text-primary"> · made on import</span>}
-                          </div>
-                        </td>
-                        <td className="px-2 py-1.5">
-                          <div className="text-foreground">
-                            {r.item?.name ?? '—'}
-                            {r.newItem && <span className="badge-warning ml-1.5 align-middle text-[10px]">New item</span>}
-                          </div>
-                          {r.newItem && (
-                            <div className="text-muted-foreground">
-                              Made on import: {r.newItem.category} · {r.newItem.unit} · code given by the ERP{r.newItem.copiedFrom ? ` · HSN and GST as ${r.newItem.copiedFrom}` : ''}
-                            </div>
-                          )}
-                          <div className="text-muted-foreground">{[r.item?.code, r.order && `Order ${r.order}`, r.lot && `Lot ${r.lot}`, r.bundle && `Bundle ${r.bundle}`].filter(Boolean).join(' · ')}</div>
-                        </td>
-                        <td className="px-2 py-1.5 font-semibold">{r.size ?? ''}</td>
-                        <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">
-                          {r.qty !== null ? `${num(r.qty)} ${r.unit ?? ''}` : '—'}
-                        </td>
-                        <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">{r.rate !== null ? money(r.rate) : '—'}</td>
-                        <td className="text-foreground whitespace-nowrap px-2 py-1.5 text-right font-semibold tabular-nums">{r.value !== null ? money(r.value) : '—'}</td>
-                        <td className="px-2 py-1.5">{r.status}</td>
-                        <td className="text-muted-foreground px-2 py-1.5">
-                          {r.packing ?? '—'}
-                          {r.pack && r.qty ? (
-                            <button type="button" className="text-primary ml-1.5 text-[11px] font-medium hover:underline" onClick={() => setPacking(r)} aria-label={`Change the packing of row ${r.row}`}>
-                              {packs[String(r.row)] ? 'Changed · change' : 'Change'}
-                            </button>
-                          ) : null}
-                        </td>
-                        <td className="px-2 py-1.5 text-red-400">{r.problems.join(' · ')}</td>
-                      </tr>
+                      <CheckRow key={r.row} r={r} changed={Boolean(packs[String(r.row)])} onPacking={() => setPacking(r)} />
                     ))}
                     {listed.length === 0 && (
                       <tr>
-                        <td colSpan={10} className="text-muted-foreground px-2 py-6 text-center">
+                        <td colSpan={9} className="text-muted-foreground px-3 py-8 text-center">
                           No rows here.
                         </td>
                       </tr>
@@ -488,7 +633,7 @@ function ImportOpeningStock() {
                   </tbody>
                 </table>
               </div>
-            </section>
+            </Panel>
           )}
 
           {summary && (
@@ -504,9 +649,13 @@ function ImportOpeningStock() {
                   </>
                 )}
               </p>
-              <button type="button" className="btn-primary h-9" disabled={busy !== null || summary.problems > 0 || ready === 0 || !mayImport} onClick={() => void bringIn()}>
+              <button type="button" className="btn-primary h-9" disabled={busy !== null || summary.problems > 0 || undecided > 0 || ready === 0 || !mayImport} onClick={() => void bringIn()}>
                 {busy === 'import' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}{' '}
-                {summary.problems ? 'Correct every row to import' : `Confirm and import ${ready} ${ready === 1 ? 'line' : 'lines'}`}
+                {summary.problems
+                  ? 'Correct every row to import'
+                  : undecided
+                    ? `Decide the ${undecided} new ${undecided === 1 ? 'item' : 'items'} first`
+                    : `Confirm and import ${ready} ${ready === 1 ? 'line' : 'lines'}`}
               </button>
             </div>
           )}
@@ -521,6 +670,7 @@ function ImportOpeningStock() {
           initial={packValueOf(packing.pack)}
           total={packing.qty}
           unit={packing.unit ?? ''}
+          part={false}
           places={qtyRules.places({ uom: { symbol: packing.unit ?? '' } })}
           noteLabel="Roll no. / reference (optional)"
           countForLater
@@ -530,7 +680,7 @@ function ImportOpeningStock() {
             const next = { ...packs, [String(packing.row)]: packInputOf(v, packing.qty!, packing.unit ?? '', qtyRules.places({ uom: { symbol: packing.unit ?? '' } })) }
             setPacks(next)
             setPacking(null)
-            void check(file, date, next)
+            void check(file, date, next, resolve, false)
           }}
           onClose={() => setPacking(null)}
         />
@@ -538,52 +688,275 @@ function ImportOpeningStock() {
 
       {/* 4. Imported. */}
       {done && (
-        <div className="glass-card space-y-4 p-6">
-          <div className="flex items-start gap-3">
-            <CheckCircle2 size={28} className="shrink-0 text-emerald-500" />
-            <div>
-              <h2 className="text-foreground text-lg font-semibold">
-                {done.again ? 'Already imported' : 'Imported'} as <span className="font-mono text-teal-400">{done.number}</span>
-              </h2>
-              <p className="text-foreground text-sm" role="status">
-                {done.lines} {done.lines === 1 ? 'line' : 'lines'} of opening stock{summary ? ` · ${money(summary.value)}` : ''} — in stock now, by item, size and place.
-                {done.floorsMade.length > 0 && ` Made ${done.floorsMade.join(', ')}.`}
-                {(done.itemsMade?.length ?? 0) > 0 &&
-                  ` ${done.itemsMade!.length} new ${done.itemsMade!.length === 1 ? 'item' : 'items'} in Items & Products: ${done.itemsMade!.map((i) => `${i.code} ${i.name}`).join(', ')}.`}
-                {(done.kept ?? 0) > 0 && ` ${done.kept} ${done.kept === 1 ? 'package keeps its' : 'packages keep their'} own barcode: nothing to print for ${done.kept === 1 ? 'it' : 'them'}.`}
-              </p>
+        <DoneCard
+          title={
+            <>
+              {done.again ? 'Already imported' : 'Imported'} as <span className="font-mono text-teal-400">{done.number}</span>
+            </>
+          }
+          message={
+            <>
+              {done.lines} {done.lines === 1 ? 'line' : 'lines'} of opening stock{summary ? ` · ${money(summary.value)}` : ''} — in stock now, by item, size and place.
+              {done.floorsMade.length > 0 && ` Made ${done.floorsMade.join(', ')}.`}
+              {(done.kept ?? 0) > 0 && ` ${done.kept} ${done.kept === 1 ? 'package keeps its' : 'packages keep their'} own barcode: nothing to print for ${done.kept === 1 ? 'it' : 'them'}.`}
+            </>
+          }
+          stats={
+            <Stats label="Imported">
+              <StatTile label="Lines" value={num(done.lines)} />
+              <StatTile label="Stock value" value={summary ? money(summary.value) : '—'} />
+              <StatTile label="Stickers to print" value={num(done.stickers)} />
+              <StatTile label="New items" value={num(done.itemsMade?.length ?? 0)} />
+            </Stats>
+          }
+          actions={
+            <>
+              <Link href={`/inventory/opening-stock?entry=${done.id}`} className="btn-primary">
+                See these lines
+              </Link>
+              {done.stickers > 0 && (
+                <button type="button" className="btn-secondary" onClick={() => setPrinting(true)}>
+                  <Printer size={15} /> Print {done.stickers} {done.stickers === 1 ? 'sticker' : 'stickers'}
+                </button>
+              )}
+              <Link href="/inventory/opening-stock/import" className="btn-secondary">
+                Import another sheet
+              </Link>
+            </>
+          }
+        >
+          {(done.itemsMade?.length ?? 0) > 0 && (
+            <div className="border-border rounded-lg border">
+              <p className="text-muted-foreground border-border border-b px-4 py-2 text-[11px] font-semibold uppercase tracking-wide">New in Items &amp; Products</p>
+              <ul className="divide-border divide-y text-sm">
+                {done.itemsMade!.map((i) => (
+                  <li key={i.code} className="flex items-center gap-3 px-4 py-2">
+                    <span className="font-mono text-xs font-semibold text-teal-400">{i.code}</span>
+                    <span className="text-foreground">{i.name}</span>
+                  </li>
+                ))}
+              </ul>
             </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Link href={`/inventory/opening-stock?entry=${done.id}`} className="btn-primary">
-              See these lines
-            </Link>
-            {done.stickers > 0 && (
-              <button type="button" className="btn-secondary" onClick={() => setPrinting(true)}>
-                <Printer size={15} /> Print {done.stickers} {done.stickers === 1 ? 'sticker' : 'stickers'}
-              </button>
-            )}
-            <Link href="/inventory/opening-stock/import" className="btn-secondary">
-              Import another sheet
-            </Link>
-          </div>
+          )}
           {printing && <StickersReady source={{ type: 'OPENING', id: done.id }} onClose={() => setPrinting(false)} />}
-        </div>
+        </DoneCard>
       )}
     </div>
   )
 }
 
-function Note({ tone, children }: { tone: 'bad' | 'warn'; children: ReactNode }) {
+/** One step of preparing the sheet: its number, what to do, and the control for it. */
+function StepRow({ n, title, text, action, children }: { n: number; title: string; text: string; action?: ReactNode; children?: ReactNode }) {
   return (
-    <div
-      className={cn(
-        'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm',
-        tone === 'bad' ? 'border-red-500/30 bg-red-500/10 text-red-400' : 'border-amber-500/30 bg-amber-500/10 text-amber-600',
-      )}
-      role={tone === 'bad' ? 'alert' : 'status'}
-    >
-      <AlertCircle size={15} className="shrink-0" /> <span>{children}</span>
+    <div className="flex gap-4 py-5 first:pt-0 last:pb-0">
+      <span className="border-primary/40 bg-primary/10 text-primary flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold tabular-nums">{n}</span>
+      <div className="min-w-0 flex-1 space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-foreground text-sm font-semibold">{title}</h3>
+            <p className="text-muted-foreground mt-0.5 text-xs">{text}</p>
+          </div>
+          {action}
+        </div>
+        {children}
+      </div>
     </div>
+  )
+}
+
+function Tip({ icon: Icon, children }: { icon: typeof Info; children: ReactNode }) {
+  return (
+    <li className="text-muted-foreground flex gap-2.5 leading-relaxed">
+      <Icon size={14} className="text-primary mt-0.5 shrink-0" />
+      <span>{children}</span>
+    </li>
+  )
+}
+
+/** A checked row: what it is, where it goes and its figures — and under it, what to correct. */
+function CheckRow({ r, changed, onPacking }: { r: RowPlan; changed: boolean; onPacking: () => void }) {
+  const bad = r.problems.length > 0
+  return (
+    <>
+      <tr className={cn('border-border align-top', !bad && 'border-b', bad && 'bg-red-500/5')} data-row={r.row}>
+        <td className="px-3 py-2">
+          <span className={cn('inline-flex items-center gap-1 tabular-nums', bad ? 'text-red-400' : 'text-muted-foreground')}>
+            {bad ? <AlertCircle size={12} /> : <CheckCircle2 size={12} className="text-emerald-500" />}
+            {r.row}
+          </span>
+        </td>
+        <td className="px-3 py-2">
+          <div className="text-foreground font-medium">
+            {r.item?.name ?? '—'}
+            {r.newItem && <span className="badge-warning ml-1.5 align-middle text-[10px]">New item</span>}
+            {r.matched && <span className="badge-info ml-1.5 align-middle text-[10px]">Matched</span>}
+          </div>
+          {r.newItem && (
+            <div className="text-muted-foreground">
+              Made on import: {r.newItem.category} · {r.newItem.unit} · {r.newItem.tax} · code given by the ERP
+            </div>
+          )}
+          {r.matched && <div className="text-muted-foreground">The sheet says “{r.matched.name}”: brought in on this item instead.</div>}
+          <div className="text-muted-foreground">
+            {[r.item?.code && <span key="c" className="font-mono text-teal-400">{r.item.code}</span>, r.order && `Order ${r.order}`, r.lot && `Lot ${r.lot}`, r.bundle && `Bundle ${r.bundle}`]
+              .filter(Boolean)
+              .map((x, i) => (
+                <span key={i}>
+                  {i > 0 && ' · '}
+                  {x}
+                </span>
+              ))}
+          </div>
+        </td>
+        <td className="px-3 py-2">
+          <div className="text-foreground">{r.process}</div>
+          <div className="text-muted-foreground">
+            {r.location || '—'}
+            {r.newFloor && !bad && <span className="text-primary"> · made on import</span>}
+          </div>
+        </td>
+        <td className="text-foreground px-3 py-2 font-semibold">{r.size ?? ''}</td>
+        <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{r.qty !== null ? `${num(r.qty)} ${r.unit ?? ''}` : '—'}</td>
+        <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
+          {r.rate !== null ? money(r.rate) : '—'}
+          {r.valuationPending && !bad && <div className="text-[10px] font-semibold text-amber-600">Valuation pending</div>}
+        </td>
+        <td className="text-foreground whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">{r.value !== null ? money(r.value) : '—'}</td>
+        <td className="px-3 py-2">{r.status}</td>
+        <td className="text-muted-foreground px-3 py-2">
+          {r.packing ?? '—'}
+          {r.pack && r.qty ? (
+            <button type="button" className="text-primary ml-1.5 text-[11px] font-medium hover:underline" onClick={onPacking} aria-label={`Change the packing of row ${r.row}`}>
+              {changed ? 'Changed · change' : 'Change'}
+            </button>
+          ) : null}
+        </td>
+      </tr>
+      {bad && (
+        <tr className="border-border border-b bg-red-500/5">
+          <td />
+          <td colSpan={8} className="px-3 pb-2.5 pt-0">
+            <ul className="space-y-0.5 border-l-2 border-red-500/60 pl-2.5 text-red-400">
+              {r.problems.map((p) => (
+                <li key={p}>{p}</li>
+              ))}
+            </ul>
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+/**
+ * Each item the sheet names that is not in Items & Products: made with its
+ * own code once approved, or matched to an item already there — a spelling
+ * slip of one, say. Items of a similar name are offered first.
+ */
+function ResolvePanel({
+  decisions,
+  resolve,
+  undecided,
+  busy,
+  onDecide,
+  onApproveAll,
+  onHsn,
+}: {
+  decisions: Decision[]
+  resolve: Record<string, string>
+  undecided: number
+  busy: boolean
+  onDecide: (key: string, value: string) => void
+  onApproveAll: () => void
+  /** An HSN code typed for a new item; empty goes back to the sheet's or its category's. */
+  onHsn: (key: string, code: string) => void
+}) {
+  return (
+    <Panel
+      icon={PackagePlus}
+      title={
+        undecided ? (
+          <span className="text-amber-600">
+            {undecided} new {undecided === 1 ? 'item' : 'items'} to decide
+          </span>
+        ) : (
+          <span className="text-emerald-500">Every new item decided</span>
+        )
+      }
+      description="Not in Items & Products yet. Match each to an item already there (a spelling slip), or approve making it with its own code."
+      label="Resolve new items"
+      actions={
+        undecided > 0 ? (
+          <button type="button" className="btn-secondary h-8 text-xs" disabled={busy} onClick={onApproveAll}>
+            Approve the rest as new
+          </button>
+        ) : undefined
+      }
+      bodyClassName="p-0"
+    >
+      <ul className="divide-border divide-y">
+        {decisions.map((d) => {
+          const chosen = resolve[d.key] ?? ''
+          return (
+            <li key={d.key} className="grid gap-3 px-5 py-3.5 md:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
+              <div className="min-w-0">
+                <div className="text-foreground flex flex-wrap items-center gap-2 text-sm font-semibold">
+                  {d.name}
+                  {!chosen && <span className="badge-warning text-[10px]">To decide</span>}
+                  {chosen === 'NEW' && <span className="badge-success text-[10px]">Made new</span>}
+                  {chosen && chosen !== 'NEW' && <span className="badge-info text-[10px]">Matched</span>}
+                </div>
+                <div className="text-muted-foreground mt-0.5 text-xs">{[d.category, d.unit, d.tax].filter(Boolean).join(' · ')}</div>
+                {d.similar.length > 0 && !chosen && (
+                  <div className="mt-1 text-xs text-amber-600">
+                    Looks like {d.similar.length === 1 ? 'an item' : `${d.similar.length} items`} already there — check it is not a spelling slip.
+                  </div>
+                )}
+              </div>
+              <div className="space-y-1.5" role="radiogroup" aria-label={`Decide ${d.name}`}>
+                {d.similar.map((m) => (
+                  <label key={m.id} className={cn('border-border flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm', chosen === m.id && 'border-primary bg-primary/5')}>
+                    <input type="radio" name={`decide-${d.key}`} checked={chosen === m.id} disabled={busy} onChange={() => onDecide(d.key, m.id)} aria-label={`Use ${m.code} for ${d.name}`} />
+                    <span className="min-w-0 flex-1 truncate">
+                      Use <span className="font-mono text-xs font-semibold text-teal-400">{m.code}</span> {m.name}
+                    </span>
+                  </label>
+                ))}
+                <label className={cn('border-border flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm', chosen === 'NEW' && 'border-primary bg-primary/5')}>
+                  <input type="radio" name={`decide-${d.key}`} checked={chosen === 'NEW'} disabled={busy} onChange={() => onDecide(d.key, 'NEW')} aria-label={`Make ${d.name} new`} />
+                  <span>Make it new, with its own code</span>
+                </label>
+                {d.decision !== 'MATCHED' && (
+                  <div className="flex flex-wrap items-center gap-2 pl-1 text-xs">
+                    <span className="text-muted-foreground">HSN code</span>
+                    <input
+                      key={`${d.key}:${d.hsn ?? ''}`}
+                      className="form-input h-8 w-28 font-mono text-xs"
+                      defaultValue={d.hsn ?? ''}
+                      placeholder="e.g. 5208"
+                      inputMode="numeric"
+                      disabled={busy}
+                      aria-label={`HSN code for ${d.name}`}
+                      onBlur={(e) => {
+                        const code = e.target.value.replace(/\s+/g, '')
+                        if (code !== (d.hsn ?? '')) onHsn(d.key, code)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                      }}
+                    />
+                    {d.hsn ? (
+                      <span className="text-muted-foreground">its GST comes from this code</span>
+                    ) : (
+                      <span className="warn-text">None yet: it is made without one. Type it here, or add it later in Items &amp; Products.</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </Panel>
   )
 }

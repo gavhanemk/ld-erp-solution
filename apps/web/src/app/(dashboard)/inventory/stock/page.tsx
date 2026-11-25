@@ -87,6 +87,7 @@ const TYPE_LABEL: Record<string, string> = {
   CONSUMABLE: 'Consumable',
   PACKING_MATERIAL: 'Packing',
   TRIM: 'Trim',
+  FIXED_ASSET: 'Fixed Asset',
 }
 
 type FilterKey = 'store' | 'category' | 'sub' | 'department' | 'type' | 'owner' | 'status'

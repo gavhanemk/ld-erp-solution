@@ -1,4 +1,4 @@
-import { Factory, Package, Shirt, type LucideIcon } from 'lucide-react'
+import { Factory, Package, Shirt, Wrench, type LucideIcon } from 'lucide-react'
 
 /*
  * The three kinds opening stock is entered as, each with its own screen and
@@ -7,7 +7,7 @@ import { Factory, Package, Shirt, type LucideIcon } from 'lucide-react'
  * category only to its own items.
  */
 
-export type Kind = 'FG' | 'SFG' | 'RM'
+export type Kind = 'FG' | 'SFG' | 'RM' | 'FA'
 
 export const KINDS: Array<{
   key: Kind
@@ -41,6 +41,14 @@ export const KINDS: Array<{
     icon: Package,
     text: 'Fabric, thread, buttons, labels, trims and packing in a store.',
     steps: ['Material category', 'Item', 'Lot or roll', 'Quantity'],
+  },
+  {
+    key: 'FA',
+    label: 'Fixed Assets',
+    short: 'FA',
+    icon: Wrench,
+    text: 'Machines, computers, furniture — in a store or at a department. Each one gets its own asset tag.',
+    steps: ['Asset category', 'Item', 'Serial numbers', 'Location'],
   },
 ]
 export const kindOf = (k: string | null | undefined) => KINDS.find((x) => x.key === k)
@@ -86,6 +94,10 @@ export interface FormOptions {
   styles: StyleOption[]
   categories: Array<{ id: string; name: string; items: number }>
   items: MaterialOption[]
+  /** Fixed assets by their subcategory (Machines, Computers…). */
+  assetCategories?: Array<{ id: string; name: string; items: number }>
+  /** Every department: where a fixed asset may be installed. */
+  departments?: Array<{ id: string; name: string }>
 }
 
 /** One row of a style's grid: a colour of the style with its item (or none yet), or another item linked to the style. */

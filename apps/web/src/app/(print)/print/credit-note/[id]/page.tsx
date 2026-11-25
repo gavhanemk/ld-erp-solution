@@ -6,6 +6,8 @@ import { api, ApiError } from '@/lib/api'
 import { StoreSheet, Fact, Eyebrow, qty, money, longDate, CODE, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
 
 interface Payload {
+  /** The own brand the order is made under, carried from start to end. */
+  brand?: { name: string; type: string } | null
   company: Record<string, string | null>
   template: { title: string; declaration: string | null; footerNote: string | null; showAmountInWords: boolean }
   taxMode: 'IGST' | 'CGST_SGST' | 'NONE'
@@ -142,6 +144,7 @@ export default function PrintCreditNote() {
             <>
               <Fact label="Invoice" value={n.invoice ? `${n.invoice.invoiceNumber}, ${longDate(n.invoice.invoiceDate)}` : null} mono />
               <Fact label="Kind" value={isReturn ? 'Sales return' : 'Price adjustment'} />
+              <Fact label="Brand" value={data.brand?.name ?? null} />
               <Fact label="Reason" value={n.reason} />
               <Fact label="Place of supply" value={n.placeOfSupplyCode ? `${data.placeOfSupplyState ?? ''} (${n.placeOfSupplyCode})` : null} />
               <Fact label="Goods into" value={n.warehouse?.name} />

@@ -13,6 +13,7 @@ import { assertStockUnused, recordMovement } from '../services/stock.service'
 import { lockRow } from '../lib/lockRow'
 import { planAllocations, syncInvoiceFromReceipts } from '../services/salesReceipt.service'
 import { fgRates } from './finishedGoods.routes'
+import { orderBrand } from '../lib/orderBrand'
 
 /**
  * Credit notes: an invoice reduced after the fact, always against that invoice.
@@ -549,7 +550,14 @@ router.get('/:id/print', async (req: AuthRequest, res) => {
   const taxMode = Number(note.igst) > 0 ? 'IGST' : Number(note.cgst) > 0 ? 'CGST_SGST' : 'NONE'
   res.json({
     success: true,
-    data: { ...header, note, taxMode, placeOfSupplyState: stateName(note.placeOfSupplyCode), totalInWords: amountInWords(Number(note.totalAmount)) },
+    data: {
+      ...header,
+      brand: await orderBrand(prisma, { invoiceId: note.invoiceId }),
+      note,
+      taxMode,
+      placeOfSupplyState: stateName(note.placeOfSupplyCode),
+      totalInWords: amountInWords(Number(note.totalAmount)),
+    },
   })
 })
 

@@ -32,6 +32,8 @@ export async function processStock(filters: { orderNo?: string; itemId?: string;
 
   const and: Prisma.StockLedgerWhereInput[] = [
     { OR: [{ item: { type: { in: ['FINISHED_GOOD', 'SEMI_FINISHED'] } } }, { warehouseId: { in: floorIds } }] },
+    // A machine installed at a process is not work in progress.
+    { item: { type: { not: 'FIXED_ASSET' } } },
   ]
   if (filters.itemId) and.push({ itemId: filters.itemId })
   if (filters.orderNo) and.push({ orderNo: { equals: filters.orderNo.trim(), mode: 'insensitive' } })

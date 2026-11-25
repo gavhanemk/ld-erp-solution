@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, ChevronDown, ExternalLink, Loader2, PackagePlus, RefreshCw, SlidersHorizontal, X } from 'lucide-react'
 import { useEscape } from '@/lib/useEscape'
@@ -56,11 +56,8 @@ export function StyleGrid({
   const [run, setRun] = useState('')
   const [busy, setBusy] = useState(false)
   const gridRef = useRef<HTMLTableElement>(null)
-  // The item filters open by themselves when an item is picked (found by its code, say).
-  const [filtersOpen, setFiltersOpen] = useState(Boolean(only))
-  useEffect(() => {
-    if (only) setFiltersOpen(true)
-  }, [only])
+  // The card's own item boxes stay folded: the bar above picks the item; the line says which is shown.
+  const [filtersOpen, setFiltersOpen] = useState(false)
 
   // A row a colour (with its item) or another item of the style; cells keyed by the row.
   const rows = styleRows(style)

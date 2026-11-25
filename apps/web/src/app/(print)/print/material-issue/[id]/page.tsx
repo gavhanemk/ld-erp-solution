@@ -23,6 +23,8 @@ interface Person {
 }
 
 interface Payload {
+  /** The own brand the order is made under, carried from start to end. */
+  brand?: { name: string; type: string } | null
   company: Record<string, string | null>
   template: { title: string; footerNote: string | null }
   mr: {
@@ -182,6 +184,7 @@ export default function PrintMaterialIssue() {
                 <Fact label="Raised by" value={mr.raisedBy?.name ?? null} />
                 <Fact label="Needed by" value={longDate(mr.requiredDate)} />
                 <Fact label="Against" value={mr.mo?.moNumber ?? null} mono />
+                <Fact label="Brand" value={data.brand?.name ?? null} />
               </div>
             </>
           ),

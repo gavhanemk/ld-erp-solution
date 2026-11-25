@@ -46,7 +46,7 @@ export function StickersReady({ source, onClose, onDone }: { source: InwardRef; 
   }, [load])
 
   if (!ready) return null
-  return <ReadyWindow ready={ready} onClose={onClose} onDone={onDone} reload={() => load().then(setReady)} />
+  return <ReadyWindow ready={ready} part={source.type !== 'OPENING'} onClose={onClose} onDone={onDone} reload={() => load().then(setReady)} />
 }
 
 /** "1 sticker of 500 mtr", "5 stickers of 100 mtr", or "3 stickers, 250 mtr in all" when they differ. */
@@ -59,11 +59,14 @@ function stickerLine(g: Ready['groups'][number]) {
 
 function ReadyWindow({
   ready,
+  part,
   onClose,
   onDone,
   reload,
 }: {
   ready: Ready
+  /** Changed stickers may leave part loose; opening stock is all or nothing. */
+  part: boolean
   onClose: () => void
   onDone?: (message: string) => void
   reload: () => Promise<void>
@@ -134,6 +137,7 @@ function ReadyWindow({
       {changing && (
         <ChangeStickers
           line={changing}
+          part={part}
           onClose={() => setChanging(null)}
           onDone={() => {
             setChanging(null)

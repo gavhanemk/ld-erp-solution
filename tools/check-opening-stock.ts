@@ -14,7 +14,7 @@ const API = (process.env.E2E_API || 'http://localhost:5101/api').replace(/\/+$/,
 const HEADS = [
   'Opening Date', 'Process', 'Department / Location', 'Order No.', 'Style / Article No.', 'Item Code', 'Item Description',
   'Item Category', 'Fabric / Material', 'Colour', 'Size', 'Lot / Batch / Roll No.', 'Bundle / Barcode No.', 'UOM',
-  'Opening Qty', 'Unit Rate', 'Opening Value', 'Stock Status', 'Remarks',
+  'Opening Qty', 'Unit Rate', 'Opening Value', 'Stock Status', 'Remarks', 'HSN Code', 'GST %',
 ]
 
 let pass = 0, fail = 0

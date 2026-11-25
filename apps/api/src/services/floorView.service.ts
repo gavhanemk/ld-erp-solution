@@ -22,6 +22,7 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
     select: {
       id: true,
       moNumber: true,
+      brand: { select: { name: true, type: true } },
       status: true,
       progress: true,
       heldAt: true,
@@ -314,6 +315,7 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
     mo: {
       id: mo.id,
       moNumber: mo.moNumber,
+      brand: mo.brand,
       status: mo.status,
       progress: mo.progress,
       held: mo.heldAt ? { at: mo.heldAt, reason: mo.holdReason, by: mo.heldBy?.name ?? null } : null,

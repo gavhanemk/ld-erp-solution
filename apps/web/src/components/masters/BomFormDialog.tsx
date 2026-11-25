@@ -151,8 +151,9 @@ interface ItemOption {
 // A BOM says what goes into one piece, so it offers everything except a
 // finished good itself — a finished good is what a BOM produces, not a
 // component of another one. Kept as the Items master's own type list, less
-// FINISHED_GOOD, so a new item type lands here on its own.
-const COMPONENT_TYPES = Object.keys(ITEM_TYPE_LABEL).filter((t) => t !== 'FINISHED_GOOD').join(',')
+// FINISHED_GOOD, so a new item type lands here on its own — and less a fixed
+// asset: a machine makes the garment, it is not part of it.
+const COMPONENT_TYPES = Object.keys(ITEM_TYPE_LABEL).filter((t) => t !== 'FINISHED_GOOD' && t !== 'FIXED_ASSET').join(',')
 
 /** An item's main category and sub-category: a category with a parent is a sub-category. */
 const placeOf = (it: ItemOption | undefined) => {

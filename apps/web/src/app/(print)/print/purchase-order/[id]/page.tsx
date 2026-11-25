@@ -8,6 +8,7 @@ import { useParams, useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar, money } from '@/components/print/PrintSheet'
 import type { TaxByRate } from '@ld-erp/shared'
+import { SecondAddress } from '@/components/print/SecondAddress'
 
 /**
  * The printed purchase order.
@@ -1804,19 +1805,9 @@ export default function PrintPurchaseOrder() {
                     {companyAddress}
                   </div>
                 )}
-                {/* Settings → Company's "Address 2 / HO": the head office, when it is
-                  not the works above (25 Nov 2026). */}
                 {company.address2 && (
-                  <div
-                    style={{
-                      fontSize: '10.5px',
-                      color: GREY,
-                      lineHeight: 1.6,
-                      marginTop: '2px',
-                      maxWidth: '86%',
-                    }}
-                  >
-                    <strong style={{ color: NAVY, fontWeight: 700 }}>HO:</strong> {company.address2}
+                  <div style={{ fontSize: '10.5px', color: GREY, lineHeight: 1.6, maxWidth: '86%' }}>
+                    <SecondAddress text={company.address2} />
                   </div>
                 )}
               </div>

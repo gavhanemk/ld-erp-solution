@@ -45,6 +45,7 @@ export interface RegisterCompany {
   city: string | null
   state: string | null
   pincode: string | null
+  address2: string | null
   gstin: string | null
   phone: string | null
   email: string | null
@@ -57,6 +58,7 @@ export const COMPANY_SELECT = {
   city: true,
   state: true,
   pincode: true,
+  address2: true,
   gstin: true,
   phone: true,
   email: true,
@@ -77,7 +79,10 @@ export function letterhead(c: RegisterCompany | null): { name: string; lines: st
   const reach = [c.gstin && `GSTIN: ${c.gstin}`, c.phone && `Phone: ${c.phone}`, c.email]
     .filter(Boolean)
     .join('   ')
-  return { name: c.name || c.legalName || '', lines: [place, reach].filter(Boolean) }
+  // The second address (Settings → Company → Address 2 / HO): "HO: …", or as typed when it says what it is.
+  const second = (c.address2 ?? '').trim()
+  const ho = !second ? '' : /^(h\.?\s*o\.?|head\s*office|regd\.?|registered|corporate|unit|works|branch|factory|office)\b/i.test(second) ? second : `HO: ${second}`
+  return { name: c.name || c.legalName || '', lines: [place, ho, reach].filter(Boolean) }
 }
 
 export interface RegisterTotals {

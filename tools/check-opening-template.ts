@@ -13,7 +13,7 @@ import { prisma } from '../packages/database/src/index'
 const API = (process.env.E2E_API || 'http://localhost:5101/api').replace(/\/+$/, '')
 const ALL_HEADS = [
   'Opening Date', 'Process', 'Department / Location', 'Order No.', 'Style / Article No.', 'Item Code', 'Item Description', 'Item Category', 'Fabric / Material',
-  'Colour', 'Size', 'Lot / Batch / Roll No.', 'Bundle / Barcode No.', 'UOM', 'Opening Qty', 'Unit Rate', 'Opening Value', 'Stock Status', 'Remarks',
+  'Colour', 'Size', 'Lot / Batch / Roll No.', 'Bundle / Barcode No.', 'UOM', 'Opening Qty', 'Unit Rate', 'Opening Value', 'Stock Status', 'Remarks', 'HSN Code', 'GST %',
 ]
 const REQUIRED = { ALL: ['Opening Date', 'Item Description', 'Opening Qty'], FG: ['Style / Article No.', 'Colour', 'Size', 'Opening Quantity'], RM: ['Item Name', 'Opening Quantity'] }
 const SHEET = { ALL: 'Opening Stock', FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' } as const
@@ -77,7 +77,7 @@ async function main() {
     check(`${kind} template: the example in grey italics`, ws.getRow(2).font?.italic === true)
   }
   const allWs = (await template('ALL')).getWorksheet(SHEET.ALL)!
-  check('19-column template: the same 19 columns, in order', JSON.stringify(((allWs.getRow(1).values as unknown[]) ?? []).slice(1).map((v) => plain(String(v)))) === JSON.stringify(ALL_HEADS))
+  check('19-column template: the same 19 columns, then HSN Code and GST %', JSON.stringify(((allWs.getRow(1).values as unknown[]) ?? []).slice(1).map((v) => plain(String(v)))) === JSON.stringify(ALL_HEADS))
   const notes = Object.fromEntries(ALL_HEADS.map((h, i) => [h, String((allWs.getCell(1, i + 1).note as unknown as { texts?: Array<{ text: string }> })?.texts?.map((t) => t.text).join('') ?? allWs.getCell(1, i + 1).note ?? '')]))
   for (const h of ['Process', 'Department / Location', 'Order No.', 'Style / Article No.', 'Item Code', 'UOM', 'Unit Rate', 'Stock Status']) {
     check(`19-column template: ${h} says it is optional`, /^Optional/.test(notes[h]), notes[h])
@@ -98,6 +98,11 @@ async function main() {
   const style = await prisma.style.findFirstOrThrow({ where: { code: 'ZZTEST-SH-01' }, select: { id: true, colors: true, sizeGroupId: true } })
   const made = await prisma.item.findFirstOrThrow({ where: { styleId: style.id, type: 'FINISHED_GOOD' }, select: { color: true } })
   const size = await prisma.size.findFirstOrThrow({ where: { sizeGroupId: style.sizeGroupId! }, orderBy: { sequence: 'asc' }, select: { code: true } })
+  // New items take their HSN code from their category: the two used here have one from the HSN list.
+  const garmentHsn = (await prisma.hsnCode.findFirst({ where: { isActive: true, code: { startsWith: '62' } }, select: { code: true } }))?.code ?? '5208'
+  const shirtCategory = (await prisma.item.findFirstOrThrow({ where: { styleId: style.id, type: 'FINISHED_GOOD' }, orderBy: { createdAt: 'asc' }, select: { categoryId: true } })).categoryId
+  await prisma.itemCategory.update({ where: { id: fabric.id }, data: { hsnCode: '5208' } })
+  await prisma.itemCategory.update({ where: { id: shirtCategory }, data: { hsnCode: garmentHsn } })
   // Two colours of this run's own, with no item yet.
   const [newColour, kindColour] = [`Y${stamp}`, `X${stamp}`]
   await prisma.style.update({ where: { id: style.id }, data: { colors: [...style.colors, newColour, kindColour] } })
@@ -135,16 +140,24 @@ async function main() {
   check('summary: two new items to make, each once', toMake.length === 2 && toMake.some((i) => i.name === poplin), toMake)
 
   // 4. The good rows brought in: the items made with their own codes, the stock in.
-  const good = await call('POST', '/inventory/opening-stock/import', { ...(await sheet('ALL', [
+  const goodSheet = await sheet('ALL', [
     { ...base, 'Item Description': poplin, 'Item Category': 'Fabric', 'Fabric / Material': 'Cotton Poplin', Colour: 'White', 'Opening Qty': 50 },
     { ...base, 'Item Description': poplin, 'Lot / Batch / Roll No.': 'L2', 'Opening Qty': 30 },
     { ...base, Process: 'Finished Goods', 'Style / Article No.': 'ZZTEST-SH-01', Colour: newColour, Size: size.code, 'Opening Qty': 4, 'Unit Rate': 300 },
-  ], `zz-optional-go-${stamp}`)), confirm: true, requestKey: `zz-optional-${stamp}` })
+  ], `zz-optional-go-${stamp}`)
+  const goodCheck = await call('POST', '/inventory/opening-stock/import', goodSheet)
+  const decisions = (goodCheck.body?.data?.summary?.decisions ?? []) as Array<{ key: string; decision: string; tax: string }>
+  check('the new items wait for a decision, each with its HSN and GST', decisions.length === 2 && decisions.every((d) => d.decision === 'PENDING' && /HSN \d+ · GST/.test(d.tax)) && goodCheck.body?.data?.summary?.undecided === 2, decisions)
+  const undecided = await call('POST', '/inventory/opening-stock/import', { ...goodSheet, confirm: true, requestKey: `zz-optional-u-${stamp}` })
+  check('not imported until each new item is approved or matched', undecided.status === 400 && undecided.body?.code === 'NEW_ITEMS_UNDECIDED', undecided.body)
+  const resolve = Object.fromEntries(decisions.map((d) => [d.key, 'NEW']))
+  const good = await call('POST', '/inventory/opening-stock/import', { ...goodSheet, confirm: true, requestKey: `zz-optional-${stamp}`, resolve })
   check('import: brought in', good.status === 201, good.body)
   const itemsMade = (good.body?.data?.itemsMade ?? []) as Array<{ code: string; name: string }>
   check('import: two items made, with the ERP’s own codes', itemsMade.length === 2 && itemsMade.every((i) => /^[A-Z]{3}-\d{3}$/.test(i.code)), itemsMade)
   check('import: the message names the new items', /2 new items made/.test(good.body?.message ?? ''), good.body?.message)
-  const newPoplin = await prisma.item.findFirst({ where: { name: poplin }, select: { id: true, code: true, categoryId: true, description: true, color: true, type: true } })
+  const newPoplin = await prisma.item.findFirst({ where: { name: poplin }, select: { id: true, code: true, categoryId: true, description: true, color: true, type: true, hsnCode: true, taxRate: { select: { rate: true } } } })
+  check('the new item: its category’s HSN code, and the GST that code carries', newPoplin?.hsnCode === '5208' && Number(newPoplin?.taxRate?.rate) === 5, newPoplin && { hsn: newPoplin.hsnCode, gst: newPoplin.taxRate?.rate })
   check('the new item: under Fabric, a raw material, its fabric and colour kept', newPoplin?.categoryId === fabric.id && newPoplin?.type === 'RAW_MATERIAL' && newPoplin?.description === 'Cotton Poplin' && newPoplin?.color === 'White', newPoplin)
   check('the new item: its code starts FAB-', /^FAB-\d{3}$/.test(newPoplin?.code ?? ''), newPoplin?.code)
   const poplinLines = await prisma.openingStockLine.findMany({ where: { itemId: newPoplin?.id ?? '' }, select: { qty: true, warehouse: { select: { name: true } } } })

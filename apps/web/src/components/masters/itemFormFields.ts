@@ -17,6 +17,7 @@ export const ITEM_TYPE_LABEL: Record<string, { label: string; cls: string }> = {
   CONSUMABLE: { label: 'Consumable', cls: 'badge-neutral' },
   PACKING_MATERIAL: { label: 'Packing', cls: 'badge-neutral' },
   TRIM: { label: 'Trim', cls: 'badge-purple' },
+  FIXED_ASSET: { label: 'Fixed Asset', cls: 'badge-neutral' },
 }
 
 /** A main category is one with no parent; a sub-category sits under one. */

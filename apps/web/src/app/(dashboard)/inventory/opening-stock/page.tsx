@@ -21,6 +21,7 @@ import {
   Search,
   Shirt,
   Upload,
+  Wrench,
   X,
 } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
@@ -30,6 +31,7 @@ import { useQtyRules } from '@/lib/qtyRules'
 import { newPack, PackagingDialog, type PackValue } from '@/components/packages/PackagingEditor'
 import { ChangeStickers, type StickerLine } from '@/components/packages/ChangeStickers'
 import { openPrintTab, printLabels, qtyText } from '@/components/packages/packageTypes'
+import { EntryControls, RateCell } from '@/components/inventory/opening/EntryControls'
 
 /*
  * Inventory → Stock → Opening Stock: what the mill had on the day it started
@@ -68,7 +70,9 @@ interface Line {
   /** How many packages it came in, when the sizes were to follow. */
   packCount: number | null
   packType: string | null
-  openingStock: { id: string; number: string; fileName: string | null }
+  openingStock: { id: string; number: string; fileName: string | null; reversedAt?: string | null }
+  /** Came in without a rate: valued at nought until its rate is set. */
+  valuationPending?: boolean
   item: {
     code: string
     name: string
@@ -97,15 +101,19 @@ interface Entry {
   fileName: string | null
   notes: string | null
   /** FG, SFG or RM as entered; none for the 19-column sheet, which holds all three. */
-  kind: 'FG' | 'SFG' | 'RM' | null
+  kind: 'FG' | 'SFG' | 'RM' | 'FA' | null
   createdAt: string
   createdBy: { name: string } | null
   lines: number
   value: number
   openingDate: string | null
+  /** Taken back by an approved reversal. */
+  reversedAt?: string | null
+  /** A correction or reversal waiting for approval. */
+  changes?: Array<{ number: string; kind: string }>
 }
 
-type Kind = 'FG' | 'SFG' | 'RM'
+type Kind = 'FG' | 'SFG' | 'RM' | 'FA'
 type FilterKey = 'item' | 'code' | 'category' | 'style' | 'colour' | 'size' | 'process' | 'place' | 'order' | 'lot'
 type Options = Record<FilterKey, FilterOption[]>
 interface Dates {
@@ -119,6 +127,7 @@ const TILES: Array<{ key: Kind | ''; label: string; icon: typeof Package; note: 
   { key: 'FG', label: 'Finished Goods', icon: Shirt, note: 'Ready, by size' },
   { key: 'SFG', label: 'Semi Finished Goods', icon: Factory, note: 'At the processes' },
   { key: 'RM', label: 'Raw Materials', icon: Package, note: 'In the stores' },
+  { key: 'FA', label: 'Fixed Assets', icon: Wrench, note: 'Tagged one by one' },
 ]
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: 'item', label: 'Item Name' },
@@ -173,7 +182,7 @@ const COLUMNS: Array<{ head: string; right?: boolean; pin?: 'style' | 'code' | '
   { head: 'Department / Location', cell: (l) => l.warehouse.name },
   { head: 'Opening Qty', right: true, cell: (l) => <span className="text-foreground font-semibold">{num(Number(l.qty))}</span> },
   { head: 'UOM', cell: (l) => l.item.uom?.symbol ?? l.uomText ?? muted },
-  { head: 'Unit Rate', right: true, cell: (l) => money(Number(l.unitRate)) },
+  { head: 'Unit Rate', right: true, cell: (l) => <LineRate line={l} /> },
   { head: 'Opening Value', right: true, cell: (l) => <span className="text-foreground font-semibold">{money(Number(l.value))}</span> },
   {
     head: 'Stock Status',
@@ -207,10 +216,24 @@ const PIN = {
   name: 'sticky left-64 w-60 min-w-60 max-w-60 shadow-[1px_0_0_hsl(var(--border))]',
 }
 
-const KIND_NAME: Record<Kind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }
+const KIND_NAME: Record<Kind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials', FA: 'Fixed Assets' }
 
 /** What a line's Stickers cell can do on the page: load the lines again, say what happened. */
 const LineActions = createContext<{ reload: () => void; say: (message: string) => void }>({ reload: () => undefined, say: () => undefined })
+
+/** A line's rate; one that came in without a rate says its valuation is pending, with Set rate for an approver. */
+function LineRate({ line }: { line: Line }) {
+  const { reload, say } = useContext(LineActions)
+  return (
+    <RateCell
+      line={line}
+      onDone={(message) => {
+        say(message)
+        reload()
+      }}
+    />
+  )
+}
 
 /**
  * A line's stickers: how many it has, and what of it still waits for its
@@ -315,6 +338,7 @@ function StickersCell({ line }: { line: Line }) {
           total={s.waiting}
           unit={unit}
           places={qtyRules.places({ uom: { symbol: unit } })}
+          part={false}
           allowLater={false}
           noteLabel="Roll no. / reference (optional)"
           busy={busy}
@@ -328,6 +352,7 @@ function StickersCell({ line }: { line: Line }) {
       {changing && (
         <ChangeStickers
           line={changing}
+          part={false}
           onClose={() => setChanging(null)}
           onDone={(message) => {
             setChanging(null)
@@ -526,7 +551,7 @@ function OpeningStock() {
       ) : (
         <>
           {/* The kinds as slim cards: picking one shows only it; All shows everything. */}
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" role="tablist" aria-label="Kinds of stock">
+          <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-5" role="tablist" aria-label="Kinds of stock">
             {TILES.map((t) => {
               const f = tileFigures(t.key)
               const on = kind === t.key
@@ -646,6 +671,9 @@ function OpeningStock() {
                 </div>
               )}
 
+              {/* One entry shown: its state, and correcting it or taking it back. */}
+              {entry && <EntryControls key={entry.id} entryId={entry.id} onChanged={refresh} say={setNotice} />}
+
               <div className="glass-card overflow-hidden p-0">
                 {data && data.lines.length === 0 ? (
                   <div className="text-muted-foreground flex flex-col items-center gap-2 p-10 text-center text-sm">
@@ -730,7 +758,11 @@ function OpeningStock() {
                 <tbody>
                   {(entries ?? []).map((e) => (
                     <tr key={e.id} className="border-border hover:bg-secondary/40 cursor-pointer border-t" onClick={() => openEntry(e)} title="Show its lines">
-                      <td className="px-4 py-2 font-mono text-xs font-semibold text-teal-400">{e.number}</td>
+                      <td className="px-4 py-2">
+                        <span className="font-mono text-xs font-semibold text-teal-400">{e.number}</span>
+                        {e.reversedAt && <span className="badge-danger ml-2 text-[10px]">Reversed</span>}
+                        {!e.reversedAt && (e.changes?.length ?? 0) > 0 && <span className="badge-warning ml-2 text-[10px]">{e.changes![0].kind === 'REVERSAL' ? 'Reversal' : 'Correction'} waiting</span>}
+                      </td>
                       <td className="px-2 py-2">{day(e.openingDate)}</td>
                       <td className="text-foreground px-2 py-2 text-xs">{e.kind ? KIND_NAME[e.kind] : e.fileName ? 'All kinds (19 columns)' : 'Mixed'}</td>
                       <td className="px-2 py-2">

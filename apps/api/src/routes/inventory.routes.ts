@@ -28,6 +28,7 @@ import { assertNotCancelling, soOfMo } from '../services/orderCancel.service'
 import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
 import * as openingStock from '../services/openingStock.service'
+import * as openingControl from '../services/openingControl.service'
 import * as processStock from '../services/processStock.service'
 import { floorFor, processLadder } from '../services/processFloor.service'
 import { trackedRoutings } from '../services/styleTrack.service'
@@ -72,6 +73,7 @@ import { CGRN_STATUS_LABEL, HELD, heldByLine, postGrnStock, releaseHeld, reverse
 import { fillJobCardBlanks } from '../services/jobCard.service'
 import { SAMPLE_STORE_IDS, assertGeneralStores } from '../lib/sampleStore'
 import { assertLineQtyFitsUnits, assertQtyFitsUnits, assertRequisitionFitsUnits } from '../services/unitQuantity.service'
+import { orderBrand } from '../lib/orderBrand'
 
 /** A customer's receipt's quantities, each against its item: what their challan said, what came, what was refused. */
 const customerGrnQtys = (data: { lines: Array<{ itemId: string; challanQty?: number | null; receivedQty: number; rejectedQty?: number | null }> }) =>
@@ -1197,7 +1199,7 @@ const buyQtyOf = (l: { purchaseQty: Prisma.Decimal | null; fulfilment: string; r
 
 const mrInclude = {
   department: { select: { id: true, name: true, code: true } },
-  mo: { select: { id: true, moNumber: true } },
+  mo: { select: { id: true, moNumber: true, brand: { select: { name: true, type: true } } } },
   // The sales order the material is for, and its customer.
   so: { select: { id: true, soNumber: true, customer: { select: { id: true, name: true } } } },
   raisedBy: { select: { id: true, name: true } },
@@ -2888,7 +2890,7 @@ router.get('/requisitions/:id/print', requirePermission(MODULE, 'view'), async (
   })
 
   const header = await getPrintHeader('MR')
-  res.json({ success: true, data: { ...header, mr, handovers } })
+  res.json({ success: true, data: { ...header, brand: await orderBrand(prisma, { moId: mr.moId, soId: mr.soId }), mr, handovers } })
 })
 
 /** The stock transfer note that goes with the goods. */
@@ -5339,7 +5341,7 @@ router.patch(
  * import (all or nothing), and the uploads with their lines.
  */
 /** A kind: Finished Goods, Semi Finished Goods or Raw Materials; none is the 19-column sheet. */
-const osKind = zod.enum(['FG', 'SFG', 'RM'])
+const osKind = zod.enum(['FG', 'SFG', 'RM', 'FA'])
 const kindOf = (v: unknown) => (osKind.safeParse(v).success ? (v as openingStock.OsKind) : undefined)
 
 router.get('/opening-stock/import-template', requirePermission(MODULE, 'create'), async (req, res) => {
@@ -5379,6 +5381,10 @@ const openingImportBody = customerMaterialImport.importBody.extend({
   requestKey: zod.string().min(8).max(100).optional(),
   /** Packing changed on the review, by sheet row: it replaces what the sheet's package columns say. */
   packs: zod.record(zod.string().regex(/^\d+$/), packInputSchema).optional(),
+  /** What was decided for each new item on the review: 'NEW' to make it, or an item already there to use. */
+  resolve: zod.record(zod.string().max(300), zod.string().max(60)).optional(),
+  /** An HSN code typed on the review for a new item, by its key. */
+  hsn: zod.record(zod.string().max(300), zod.string().trim().max(12)).optional(),
 })
 async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
   await sheetIsFor(body)
@@ -5390,7 +5396,7 @@ async function readOpeningSheet(body: zod.infer<typeof openingImportBody>) {
   const packs = body.packs ?? {}
   return openingStock.planImport(
     rows.map((r) => (packs[String(r.row)] ? { ...r, pack: packs[String(r.row)] } : r)),
-    { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true },
+    { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true, resolve: body.resolve, hsn: body.hsn },
   )
 }
 
@@ -5440,7 +5446,7 @@ router.post('/opening-stock/import/report', requirePermission(MODULE, 'create'),
     if (!body.openingDate) throw new AppError('Pick the opening date for the sheet.', 400, 'NEEDS_DATE')
     openingStock.asNineteen(rows, body.kind, body.openingDate)
   }
-  const resolved = await openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true })
+  const resolved = await openingStock.planImport(rows, { kind: body.kind, labels: openingStock.labelsOf(body.kind), makeItems: true, resolve: body.resolve, hsn: body.hsn })
   const buffer = await openingStock.errorReport(raw, resolved, body.kind)
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', `attachment; filename="${body.fileName.replace(/\.xlsx?$/i, '').replace(/[^\w.-]+/g, '-')}-problems.xlsx"`)
@@ -5502,6 +5508,11 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
   const ruleOf = await packageRules(prisma)
   const routes = await trackedRoutings(prisma, styles.map((st) => ({ id: st.id, category: st.category })))
   const sizesOf = new Map(sizeGroups.map((g) => [g.id, g.sizes]))
+  // Fixed assets by their subcategory (Machines, Computers…), and the departments one may be installed at.
+  const [assetCategories, departments] = await Promise.all([
+    prisma.itemCategory.findMany({ where: { isActive: true, itemGroup: 'FIXED_ASSETS', parentId: { not: null } }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    prisma.department.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+  ])
   res.json({
     success: true,
     data: {
@@ -5527,6 +5538,8 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
         }
       }),
       categories: categories.map((c) => ({ id: c.id, name: c.name, items: items.filter((i) => i.categoryId === c.id).length })),
+      assetCategories: assetCategories.map((c) => ({ id: c.id, name: c.name, items: items.filter((i) => i.categoryId === c.id).length })),
+      departments,
       items: items.map((i) => ({
         id: i.id,
         code: i.code,
@@ -5696,7 +5709,8 @@ function openingLinesWhere(query: Record<string, unknown>): Prisma.OpeningStockL
   // Raw materials wherever they lie; semi-finished parts, and garments still at a
   // process; finished garments in a store.
   const group = text(query.group)
-  if (group === 'RM') and.push({ item: { type: { notIn: FINISHED_KINDS } } })
+  if (group === 'RM') and.push({ item: { type: { notIn: [...FINISHED_KINDS, 'FIXED_ASSET'] } } })
+  if (group === 'FA') and.push({ item: { type: 'FIXED_ASSET' } })
   if (group === 'SFG') and.push({ OR: [{ item: { type: 'SEMI_FINISHED' } }, { departmentId: { not: null }, item: { type: 'FINISHED_GOOD' } }] })
   if (group === 'FG') and.push({ departmentId: null, item: { type: 'FINISHED_GOOD' } })
   const entry = text(query.entry)
@@ -5841,7 +5855,8 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
       },
     }),
     prisma.$queryRaw<Array<{ kind: string; lines: number; value: number }>>`
-      SELECT CASE WHEN i.type NOT IN ('FINISHED_GOOD', 'SEMI_FINISHED') THEN 'RM'
+      SELECT CASE WHEN i.type = 'FIXED_ASSET' THEN 'FA'
+                  WHEN i.type NOT IN ('FINISHED_GOOD', 'SEMI_FINISHED') THEN 'RM'
                   WHEN i.type = 'SEMI_FINISHED' OR l."departmentId" IS NOT NULL THEN 'SFG'
                   ELSE 'FG' END AS kind,
              COUNT(*)::int AS lines, COALESCE(SUM(l.value), 0)::float8 AS value
@@ -5868,7 +5883,7 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
   const full = await prisma.openingStockLine.findMany({
     where: { id: { in: pageKeys.map((k) => k.id) } },
     include: {
-      openingStock: { select: { id: true, number: true, fileName: true } },
+      openingStock: { select: { id: true, number: true, fileName: true, reversedAt: true } },
       item: {
         select: {
           code: true,
@@ -5906,7 +5921,12 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
 router.get('/opening-stock', requirePermission(MODULE, 'view'), async (_req, res) => {
   const docs = await prisma.openingStock.findMany({
     orderBy: { createdAt: 'desc' },
-    select: { id: true, number: true, fileName: true, notes: true, kind: true, createdAt: true, createdBy: { select: { name: true } } },
+    select: {
+      id: true, number: true, fileName: true, notes: true, kind: true, createdAt: true, createdBy: { select: { name: true } },
+      // Taken back, and any correction or reversal still waiting for approval.
+      reversedAt: true,
+      changes: { where: { status: 'PENDING' }, select: { number: true, kind: true } },
+    },
   })
   const totals = await prisma.openingStockLine.groupBy({
     by: ['openingStockId'],
@@ -5926,11 +5946,84 @@ router.get('/opening-stock', requirePermission(MODULE, 'view'), async (_req, res
   })
 })
 
+/*
+ * Opening stock put right, never deleted: a line that came in without a rate
+ * valued (Inventory → approve); a correction or a whole entry's reversal
+ * asked for with a reason, and posted once approved by someone else with
+ * Inventory → approve (an Admin may approve their own).
+ */
+const openingRateBody = zod.object({ rate: zod.number().positive('Give the rate: more than nought').max(10_000_000) })
+router.post('/opening-stock/lines/:id/rate', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { rate } = openingRateBody.parse(req.body)
+  const done = await openingControl.setOpeningRate(req.params.id, rate, req.user?.id ?? null)
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'OpeningStockLine', entityId: req.params.id, before: { valuationPending: true }, after: { rate: done.rate, value: done.value, repriced: done.repriced } })
+  res.json({
+    success: true,
+    message: `${done.number} row ${done.row} (${done.item}) valued at ₹${done.rate}: ₹${done.value.toLocaleString('en-IN', { minimumFractionDigits: 2 })} from the opening date.${done.repriced ? ` ${done.repriced} later ${done.repriced === 1 ? 'movement' : 'movements'} priced again.` : ''}`,
+    data: done,
+  })
+})
+
+const openingChangeBody = zod.object({
+  kind: zod.enum(['CORRECTION', 'REVERSAL']),
+  reason: zod.string().trim().min(3, 'Say why').max(500),
+  lines: zod
+    .array(zod.object({ lineId: zod.string().min(1), qty: zod.number().min(0).nullish(), rate: zod.number().min(0).nullish() }))
+    .max(3000)
+    .optional(),
+})
+router.post('/opening-stock/:id/changes', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const body = openingChangeBody.parse(req.body)
+  const made = await openingControl.requestChange({ openingStockId: req.params.id, ...body }, req.user?.id ?? null)
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'OpeningStockChange', entityId: made.id, after: { number: made.number, kind: body.kind, reason: body.reason, lines: body.lines?.length ?? 0 } })
+  res.status(201).json({
+    success: true,
+    message: `${made.number}: ${body.kind === 'REVERSAL' ? 'reversal' : 'correction'} asked for. It is posted once someone with Inventory → approve approves it.`,
+    data: made,
+  })
+})
+
+router.get('/opening-stock/changes', requirePermission(MODULE, 'view'), async (req, res) => {
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  res.json({ success: true, data: await openingControl.listChanges({ openingStockId: text(req.query.entry), status: text(req.query.status) }) })
+})
+
+const openingDecisionBody = zod.object({ note: zod.string().trim().max(500).optional().nullable() })
+router.post('/opening-stock/changes/:id/approve', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { note } = openingDecisionBody.parse(req.body ?? {})
+  const done = await openingControl.approveChange(req.params.id, { id: req.user!.id, isAdmin: isAdmin(req.user) }, note)
+  await writeAuditLog(req, { module: MODULE, action: 'APPROVE', entityType: 'OpeningStockChange', entityId: done.id, after: { number: done.number, kind: done.kind, entry: done.entry, repriced: done.repriced } })
+  res.json({
+    success: true,
+    message: `${done.number} approved: ${done.entry} ${done.kind === 'REVERSAL' ? 'taken back — its stock out again, its stickers voided' : 'corrected'}.${done.repriced ? ` ${done.repriced} later ${done.repriced === 1 ? 'movement' : 'movements'} priced again.` : ''}`,
+    data: done,
+  })
+})
+router.post('/opening-stock/changes/:id/reject', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const note = zod.object({ note: zod.string().trim().min(3, 'Say why it is turned down').max(500) }).parse(req.body ?? {}).note
+  const done = await openingControl.rejectChange(req.params.id, req.user!.id, note)
+  await writeAuditLog(req, { module: MODULE, action: 'REJECT', entityType: 'OpeningStockChange', entityId: done.id, after: { number: done.number, note } })
+  res.json({ success: true, message: `${done.number} turned down: nothing was posted.`, data: done })
+})
+router.post('/opening-stock/changes/:id/withdraw', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const done = await openingControl.withdrawChange(req.params.id, { id: req.user!.id, isAdmin: isAdmin(req.user) })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'OpeningStockChange', entityId: done.id, after: { number: done.number, status: done.status } })
+  res.json({ success: true, message: `${done.number} withdrawn: nothing was posted.`, data: done })
+})
+
 router.get('/opening-stock/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const doc = await prisma.openingStock.findUnique({
     where: { id: req.params.id },
     include: {
       createdBy: { select: { name: true } },
+      reversedBy: { select: { name: true } },
+      changes: {
+        orderBy: { requestedAt: 'desc' },
+        select: {
+          id: true, number: true, kind: true, status: true, reason: true, lines: true, requestedAt: true, decidedAt: true, decisionNote: true,
+          requestedById: true, requestedBy: { select: { name: true } }, decidedBy: { select: { name: true } },
+        },
+      },
       lines: {
         orderBy: { rowNo: 'asc' },
         include: {

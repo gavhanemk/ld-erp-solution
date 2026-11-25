@@ -84,7 +84,8 @@ export const ACCESS_CATALOG: AccessModule[] = [
       s('masters.units', 'Units of Measure', MASTER, ['/masters/units'], ['/api/masters/uoms']),
       s('masters.expense-heads', 'Expense Heads', MASTER, ['/masters/expense-heads']),
       s('masters.styles', 'Styles & SKU', MASTER, ['/masters/styles'], ['/api/masters/styles', '/api/masters/style-orders', '/api/masters/style-tracking']),
-      s('masters.brands', 'Brands', MASTER, ['/masters/brands'], ['/api/masters/brands']),
+      // One set of brand records: the mill's own (In House Brands) and customers' (Brands).
+      s('masters.brands', 'Brands', MASTER, ['/masters/brands', '/masters/in-house-brands'], ['/api/masters/brands'], "Customers' brands, and In House Brands"),
       s('masters.bom', 'Bill of Materials', DOC, ['/masters/bom'], ['/api/masters/bom']),
       s('masters.size-runs', 'Size Runs', MASTER, ['/masters/size-runs'], ['/api/masters/size-groups', '/api/masters/sizes']),
       s('masters.customers', 'Customers', MASTER, ['/masters/customers'], ['/api/masters/customers']),
