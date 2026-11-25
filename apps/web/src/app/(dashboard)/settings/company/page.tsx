@@ -15,6 +15,7 @@ import {
 import { Field, FieldGrid, LoadingRow, Notice, SaveBar, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { TdsSections } from '@/components/settings/TdsSections'
+import { SectionHeader } from '@/components/settings/sections'
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -59,10 +60,12 @@ function CompanySettings() {
 
   return (
     <div className="space-y-5">
+      <SectionHeader
+        below={
       <div
         role="tablist"
         aria-label="Company settings"
-        className="border-border bg-card no-scrollbar flex w-fit max-w-full gap-1 overflow-x-auto rounded-xl border p-1 shadow-sm"
+        className="border-border bg-card no-scrollbar flex max-w-full gap-1 overflow-x-auto rounded-xl border p-1 shadow-sm"
       >
         {SECTIONS.map((s) => {
           const Icon = s.icon
@@ -77,7 +80,7 @@ function CompanySettings() {
               aria-controls={`company-panel-${s.key}`}
               onClick={() => open(s.key)}
               className={cn(
-                'flex shrink-0 items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors',
+                'flex shrink-0 items-center gap-2 rounded-lg px-3.5 py-1.5 text-sm font-medium transition-colors',
                 on
                   ? 'bg-primary text-primary-foreground shadow-sm'
                   : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
@@ -89,6 +92,8 @@ function CompanySettings() {
           )
         })}
       </div>
+        }
+      />
 
       {/* All four stay mounted and only the open one shows, so a half-typed
         company profile survives a look at the GST rates. */}

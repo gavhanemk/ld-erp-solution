@@ -2,74 +2,9 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import {
-  Building2,
-  Users,
-  SlidersHorizontal,
-  Activity,
-  Sparkles,
-  FileText,
-  Trash2,
-} from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { canOpen, useAccess } from '@/lib/access'
-
-/**
- * In the order someone actually sets an ERP up: describe the business, let
- * people in, decide what your paperwork says, adjust how it behaves, connect
- * the assistant, and finally check on it.
- */
-const tabs = [
-  {
-    href: '/settings/company',
-    label: 'Company',
-    icon: Building2,
-    short: 'Details, numbering, tax',
-    description: 'Your details, financial year, document numbers, GST rates and TDS sections',
-  },
-  {
-    href: '/settings/people',
-    label: 'People',
-    icon: Users,
-    short: 'Sign-ins and roles',
-    description: 'Who can sign in, and what each of them may do',
-  },
-  {
-    href: '/settings/documents',
-    label: 'Documents',
-    icon: FileText,
-    short: 'Letterhead and print options',
-    description: 'What appears on your printed invoices, orders and challans',
-  },
-  {
-    href: '/settings/preferences',
-    label: 'Preferences',
-    icon: SlidersHorizontal,
-    short: 'How the ERP behaves',
-    description: 'How the ERP behaves day to day',
-  },
-  {
-    href: '/settings/assistant',
-    label: 'Assistant',
-    icon: Sparkles,
-    short: 'AI key and permissions',
-    description: 'Connect the AI assistant and decide what it may do',
-  },
-  {
-    href: '/settings/recycle-bin',
-    label: 'Recycle Bin',
-    icon: Trash2,
-    short: 'Deleted documents',
-    description: 'Documents that were deleted, and how to put them back',
-  },
-  {
-    href: '/settings/system',
-    label: 'System',
-    icon: Activity,
-    short: 'Status, password, activity',
-    description: 'Connections, your password, and a record of every change',
-  },
-]
+import { SETTINGS_SECTIONS as tabs, SectionHeader } from '@/components/settings/sections'
 
 /**
  * Settings as a two-pane screen: the sections down the left, the open one on
@@ -85,7 +20,6 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
   // Only the sections this role may open (Settings → People decides).
   const visible = tabs.filter((t) => canOpen(t.href))
   const active = tabs.find((t) => pathname.startsWith(t.href))
-  const ActiveIcon = active?.icon
 
   return (
     <div className="space-y-5">
@@ -134,17 +68,8 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
         </nav>
 
         <div className="min-w-0 space-y-5">
-          {active && ActiveIcon && (
-            <div className="flex items-center gap-3">
-              <span className="bg-primary/10 border-primary/20 text-primary flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
-                <ActiveIcon size={19} />
-              </span>
-              <div className="min-w-0">
-                <h2 className="text-foreground text-lg font-semibold leading-tight">{active.label}</h2>
-                <p className="text-muted-foreground text-sm">{active.description}</p>
-              </div>
-            </div>
-          )}
+          {/* A section that has figures or tabs to show draws its own header. */}
+          {active && !('ownHeader' in active && active.ownHeader) && <SectionHeader />}
           {children}
         </div>
       </div>

@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { Plus, Pencil, KeyRound, Ban, RotateCcw, Search, ShieldCheck, Trash2, Users2, Crown } from 'lucide-react'
 import { ApiError, currentUser } from '@/lib/api'
 import { settingsApi, type PermissionModule, type SettingsRole, type SettingsUser } from '@/lib/settingsApi'
-import { LoadingRow, Notice, SettingsCard } from '@/components/settings/ui'
+import { LoadingRow, Notice } from '@/components/settings/ui'
+import { HeaderStat, SectionHeader } from '@/components/settings/sections'
 import { ResetPasswordDialog, UserDialog } from '@/components/settings/UserDialog'
 import { RoleEditor } from '@/components/settings/RoleEditor'
 import { DeleteUserDialog } from '@/components/settings/DeleteUserDialog'
@@ -169,8 +170,73 @@ export default function PeopleSettingsPage() {
       )
     : shown
 
+  const activeCount = users.filter((u) => u.status === 'ACTIVE').length
+  const superCount = users.filter((u) => u.role.name === 'Super Admin').length
+
   return (
     <div className="space-y-5">
+      <SectionHeader
+        right={
+          !loading && (
+            <>
+              <HeaderStat value={activeCount} label="can sign in" tone="emerald" />
+              <HeaderStat value={users.length - activeCount} label="inactive" tone="muted" />
+              <HeaderStat value={superCount} label="Super Admins" tone="amber" />
+              <HeaderStat value={roles.length} label="roles" />
+            </>
+          )
+        }
+        below={
+          <>
+            <div role="tablist" aria-label="People or roles" className="border-border bg-card inline-flex rounded-xl border p-1 shadow-sm">
+              {(
+                [
+                  ['people', Users2, 'People', users.length],
+                  ['roles', ShieldCheck, 'Roles & access', roles.length],
+                ] as const
+              ).map(([key, Icon, label, n]) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === key}
+                  onClick={() => setTab(key)}
+                  className={`flex items-center gap-2 rounded-lg px-4 py-1.5 text-sm font-medium transition-colors ${
+                    tab === key ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                  }`}
+                >
+                  <Icon size={15} />
+                  {label}
+                  <span className={`rounded-full px-1.5 py-px text-[11px] tabular-nums ${tab === key ? 'bg-white/20' : 'bg-secondary text-foreground'}`}>
+                    {n}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="text-muted-foreground hidden min-w-0 flex-1 truncate text-xs xl:block">
+              {tab === 'people'
+                ? 'Everyone who can sign in. Make someone inactive when they leave; their name stays on what they did.'
+                : 'A role decides which screens someone opens and what they can do there. Change a role, and everyone on it changes.'}
+            </p>
+            {tab === 'people' ? (
+              <button
+                className="btn-primary ml-auto text-xs"
+                onClick={() => setUserDialog({ open: true, user: null })}
+                disabled={roles.length === 0}
+                data-hotkey="new"
+                aria-keyshortcuts="Alt+N"
+              >
+                <Plus size={14} /> Add person
+              </button>
+            ) : (
+              <button className="btn-primary ml-auto text-xs" onClick={() => setRoleDialog({ open: true, role: null })} data-hotkey="new">
+                <Plus size={14} /> New role
+              </button>
+            )}
+          </>
+        }
+      />
+
       {loadError && (
         <Notice
           kind="error"
@@ -205,57 +271,8 @@ export default function PeopleSettingsPage() {
         </div>
       )}
 
-      <div role="tablist" aria-label="People or roles" className="border-border bg-card inline-flex rounded-xl border p-1 shadow-sm">
-        {(
-          [
-            ['people', Users2, 'People', users.length],
-            ['roles', ShieldCheck, 'Roles & access', roles.length],
-          ] as const
-        ).map(([key, Icon, label, n]) => (
-          <button
-            key={key}
-            type="button"
-            role="tab"
-            aria-selected={tab === key}
-            onClick={() => setTab(key)}
-            className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
-              tab === key ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-            }`}
-          >
-            <Icon size={15} />
-            {label}
-            <span
-              className={`rounded-full px-1.5 py-px text-[11px] tabular-nums ${
-                tab === key ? 'bg-white/20' : 'bg-secondary text-foreground'
-              }`}
-            >
-              {n}
-            </span>
-          </button>
-        ))}
-      </div>
-
       {tab === 'people' && (
-      <SettingsCard
-        icon={Users2}
-        title="People"
-        description={
-          loading
-            ? 'Everyone who can sign in to the ERP.'
-            : `Everyone who can sign in to the ERP · ${users.filter((u) => u.status === 'ACTIVE').length} active of ${users.length}`
-        }
-        actions={
-          <button
-            className="btn-primary text-xs"
-            onClick={() => setUserDialog({ open: true, user: null })}
-            disabled={roles.length === 0}
-            data-hotkey="new"
-            aria-keyshortcuts="Alt+N"
-          >
-            <Plus size={14} /> Add person
-          </button>
-        }
-      >
+      <section className="border-border bg-card overflow-hidden rounded-xl border p-5 shadow-sm">
         {loading ? (
           <LoadingRow />
         ) : (
@@ -429,21 +446,11 @@ export default function PeopleSettingsPage() {
             </p>
           </>
         )}
-      </SettingsCard>
+      </section>
       )}
 
       {tab === 'roles' && (
-        <SettingsCard
-          icon={ShieldCheck}
-          title="Roles & access"
-          description="A role decides which screens someone can open and what they can do there. Change a role, and everyone on it changes with it."
-          flush
-          actions={
-            <button className="btn-primary text-xs" onClick={() => setRoleDialog({ open: true, role: null })} data-hotkey="new">
-              <Plus size={14} /> New role
-            </button>
-          }
-        >
+        <section className="border-border bg-card overflow-hidden rounded-xl border shadow-sm">
           {loading ? (
             <div className="p-5">
               <LoadingRow />
@@ -553,7 +560,7 @@ export default function PeopleSettingsPage() {
               </table>
             </div>
           )}
-        </SettingsCard>
+        </section>
       )}
 
       <UserDialog
