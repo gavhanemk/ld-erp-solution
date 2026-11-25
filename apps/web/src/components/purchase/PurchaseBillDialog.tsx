@@ -2097,7 +2097,7 @@ export function PurchaseBillDialog({
         // wide screen it is held to a readable width and centred rather than
         // stretched edge to edge. A goods bill keeps the full width for its
         // deliveries table.
-        className={`glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden ${
+        className={`glass-card po-form purchase-sheet flex h-full max-h-full w-full flex-col overflow-hidden ${
           expenseMode ? 'max-w-6xl' : ''
         }`}
         role="dialog"

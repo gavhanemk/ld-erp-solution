@@ -76,7 +76,9 @@ export function PurchaseChargesTable({
   return (
     <div className="space-y-2">
       {rows.length > 0 && (
-        <div className="overflow-x-auto">
+        // Held to a readable width: on a wide screen a full-width table put the
+        // charge's name a hand's breadth from its own amount.
+        <div className="max-w-4xl overflow-x-auto">
           <table className="w-full min-w-[35rem] text-sm">
             <thead>
               <tr className="text-muted-foreground border-border border-b text-left text-[11px] font-semibold uppercase tracking-wider">
