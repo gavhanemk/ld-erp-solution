@@ -10,6 +10,7 @@ import { SuggestInput } from '@/components/ui/SuggestInput'
 import { StepInput } from '@/components/ui/StepInput'
 import { QtyProblem } from '@/components/ui/QtyProblem'
 import { qtyPlaces, qtyProblem, roundDownToPlaces, roundUpToPlaces } from '@ld-erp/shared'
+import { isAdminRole } from '@/lib/access'
 
 /**
  * A department asking the store for material.
@@ -305,7 +306,7 @@ export function RequisitionDialog({
         })),
       })
       onSaved(
-        currentUser()?.role === 'Admin'
+        isAdminRole(currentUser()?.role)
           ? `${res.data.mrNumber} raised. As admin you can approve it straight away.`
           : `${res.data.mrNumber} raised. It needs someone else to approve it.`,
       )
@@ -429,7 +430,7 @@ export function RequisitionDialog({
         </button>
       }
       footerNote={
-        currentUser()?.role === 'Admin'
+        isAdminRole(currentUser()?.role)
           ? 'As admin you can approve it yourself. The approver decides what the store issues and what gets bought.'
           : 'Someone else approves it, and decides what the store issues and what gets bought.'
       }

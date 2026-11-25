@@ -32,6 +32,8 @@ import {
 import { getPreferences, invalidatePreferences } from '../lib/preferences'
 import { AI_MODELS, PROVIDER_LABEL, getAiConfig, maskKey, saveAiConfig } from '../lib/aiConfig'
 import { testAssistant } from '../services/ai.service'
+import { forgetAccess, expandGrants } from '../lib/access'
+import { ACCESS_CATALOG, ACTIONS, ACTION_LABELS as CATALOG_ACTION_LABELS, CATALOG_PERMISSIONS, SUPER_ROLE } from '../lib/accessCatalog'
 
 const router = Router()
 
@@ -40,8 +42,6 @@ const SETTINGS = 'settings'
 /** Users, roles and the activity trail — a narrower group than SETTINGS. */
 const ADMIN = 'admin'
 
-/** The role that can never be locked out; mirrors SUPER_ROLE in the auth middleware. */
-const SUPER_ROLE = 'Admin'
 
 const BCRYPT_ROUNDS = 10
 
@@ -128,6 +128,7 @@ router.post('/users', requirePermission(ADMIN, 'create'), async (req: AuthReques
 
   const role = await prisma.role.findUnique({ where: { id: data.roleId } })
   if (!role) throw new AppError('That role no longer exists', 400, 'INVALID_ROLE')
+  assertMayGiveRole(req, role.name)
 
   const existing = await prisma.user.findUnique({ where: { email: data.email } })
   if (existing) throw new AppError('Someone already signs in with that email address', 409, 'DUPLICATE_EMAIL')
@@ -170,6 +171,9 @@ router.patch('/users/:id', requirePermission(ADMIN, 'edit'), async (req: AuthReq
   if (data.roleId && data.roleId !== before.roleId) {
     const role = await prisma.role.findUnique({ where: { id: data.roleId } })
     if (!role) throw new AppError('That role no longer exists', 400, 'INVALID_ROLE')
+    assertMayGiveRole(req, role.name)
+    // Taking Super Admin away is as much a Super Admin's call as giving it.
+    assertMayGiveRole(req, before.role.name)
   }
 
   // Losing every administrator means nobody can ever create one again.
@@ -189,6 +193,7 @@ router.patch('/users/:id', requirePermission(ADMIN, 'edit'), async (req: AuthReq
     data,
     select: userView,
   })
+  forgetAccess(after.id)
 
   await writeAuditLog(req, {
     module: ADMIN,
@@ -244,6 +249,7 @@ router.delete('/users/:id', requirePermission(ADMIN, 'delete'), async (req: Auth
     data: { status: 'INACTIVE' },
     select: userView,
   })
+  forgetAccess(after.id)
 
   await writeAuditLog(req, {
     module: ADMIN,
@@ -352,6 +358,7 @@ router.delete('/users/:id/permanent', requirePermission(ADMIN, 'delete'), async 
     await tx.notification.deleteMany({ where: { userId: before.id } })
     await tx.user.delete({ where: { id: before.id } })
   })
+  forgetAccess(before.id)
 
   await writeAuditLog(req, {
     module: ADMIN,
@@ -464,32 +471,27 @@ const ACTION_LABEL_OVERRIDES: Record<string, string> = {
   'ai:export': 'May export answers',
 }
 
+/**
+ * The matrix the role editor draws: every module, every screen in it, and the
+ * actions that mean something on each screen — from the access catalogue,
+ * which is also what the server checks against.
+ */
 router.get('/permissions', requirePermission(ADMIN, 'view'), async (_req, res) => {
-  const permissions = await prisma.permission.findMany({ orderBy: [{ module: 'asc' }, { action: 'asc' }] })
-
-  const modules = new Map<string, { module: string; label: string; actions: { action: string; label: string; key: string }[] }>()
-  for (const p of permissions) {
-    const entry = modules.get(p.module) ?? {
-      module: p.module,
-      label: MODULE_LABELS[p.module] ?? p.module,
-      actions: [],
-    }
-    const key = `${p.module}:${p.action}`
-    entry.actions.push({
-      action: p.action,
-      label: ACTION_LABEL_OVERRIDES[key] ?? ACTION_LABELS[p.action] ?? p.action,
-      key,
-    })
-    modules.set(p.module, entry)
-  }
-
-  // Keep the on-screen order the same as the sidebar rather than alphabetical.
-  const order = Object.keys(MODULE_LABELS)
-  const data = [...modules.values()].sort(
-    (a, b) => (order.indexOf(a.module) + 1 || 99) - (order.indexOf(b.module) + 1 || 99),
-  )
-
-  res.json({ success: true, data, actions: Object.entries(ACTION_LABELS).map(([action, label]) => ({ action, label })) })
+  const data = ACCESS_CATALOG.map((m) => ({
+    module: m.key,
+    label: m.label,
+    screens: m.screens.map((sc) => ({
+      key: sc.key,
+      label: sc.label,
+      hint: sc.hint ?? null,
+      actions: sc.actions.map((action) => ({
+        action,
+        label: ACTION_LABEL_OVERRIDES[`${sc.key}:${action}`] ?? CATALOG_ACTION_LABELS[action],
+        key: `${sc.key}:${action}`,
+      })),
+    })),
+  }))
+  res.json({ success: true, data, actions: ACTIONS.map((action) => ({ action, label: CATALOG_ACTION_LABELS[action] })) })
 })
 
 router.get('/roles', requirePermission(ADMIN, 'view'), async (_req, res) => {
@@ -509,10 +511,13 @@ router.get('/roles', requirePermission(ADMIN, 'view'), async (_req, res) => {
       description: r.description,
       isSystem: r.isSystem,
       userCount: r._count.users,
-      // The Admin role bypasses the matrix in the auth middleware, so listing
+      // Super Admin bypasses the matrix in the auth middleware, so listing
       // its rows and pretending they can be revoked would be misleading.
       unrestricted: r.name === SUPER_ROLE,
-      permissions: r.permissions.map((rp) => `${rp.permission.module}:${rp.permission.action}`),
+      // Spelt out screen by screen: a role set up before screens existed
+      // holds "purchase:create", which the editor shows as every Purchase
+      // screen ticked, and saves back screen by screen.
+      permissions: expandGrants(r.permissions.map((rp) => `${rp.permission.module}:${rp.permission.action}`)),
     })),
   })
 })
@@ -556,9 +561,9 @@ router.patch('/roles/:id', requirePermission(ADMIN, 'edit'), async (req: AuthReq
   if (before.isSystem && data.name && data.name !== before.name) {
     throw new AppError('Built-in roles cannot be renamed', 400, 'SYSTEM_ROLE')
   }
-  if (before.name === SUPER_ROLE && data.permissions) {
+  if (before.name === SUPER_ROLE && (data.permissions || (data.name && data.name !== before.name))) {
     throw new AppError(
-      'The Admin role always has full access. Create a separate role if you need a narrower one.',
+      'Super Admin always has full access and cannot be changed. Use the Admin role, or a new one, for anyone who needs less.',
       400,
       'SYSTEM_ROLE',
     )
@@ -610,11 +615,13 @@ router.patch('/roles/:id', requirePermission(ADMIN, 'edit'), async (req: AuthReq
     },
   })
 
+  // Access is read from the database and kept for half a minute, so everyone
+  // on this role works to the new matrix on their next request.
+  forgetAccess()
+
   res.json({
     success: true,
-    // Changed grants only reach a signed-in user when their access token is
-    // renewed, which is fifteen minutes at the outside.
-    message: 'Saved. People already signed in pick up the change within 15 minutes.',
+    message: 'Saved. Everyone on this role works to the new access straight away.',
     data: {
       id: after.id,
       name: after.name,
@@ -641,6 +648,7 @@ router.delete('/roles/:id', requirePermission(ADMIN, 'delete'), async (req: Auth
   }
 
   await prisma.role.delete({ where: { id: role.id } })
+  forgetAccess()
 
   await writeAuditLog(req, {
     module: ADMIN,
@@ -653,9 +661,32 @@ router.delete('/roles/:id', requirePermission(ADMIN, 'delete'), async (req: Auth
   res.json({ success: true, message: `Role "${role.name}" deleted.` })
 })
 
+/**
+ * Only a Super Admin gives anyone the Super Admin role, or takes it away:
+ * otherwise anybody allowed to edit people could make themselves one.
+ */
+function assertMayGiveRole(req: AuthRequest, roleName: string) {
+  if (roleName === SUPER_ROLE && !req.user?.superAdmin) {
+    throw new AppError('Only a Super Admin can give or take away the Super Admin role.', 403, 'SUPER_ADMIN_ONLY')
+  }
+}
+
+/**
+ * Every permission the access catalogue knows exists as a row, so a role can
+ * be given it. Screens are added to the catalogue over time; their rows are
+ * made here the first time a role is saved after that, once per server start.
+ */
+let catalogueSynced = false
+async function syncCatalogue() {
+  if (catalogueSynced) return
+  await prisma.permission.createMany({ data: CATALOG_PERMISSIONS, skipDuplicates: true })
+  catalogueSynced = true
+}
+
 /** Turns "sales:create" keys into permission ids, rejecting anything unknown. */
 async function resolvePermissionIds(keys: string[]): Promise<string[]> {
   if (keys.length === 0) return []
+  await syncCatalogue()
 
   const wanted = new Set(keys)
   const permissions = await prisma.permission.findMany()

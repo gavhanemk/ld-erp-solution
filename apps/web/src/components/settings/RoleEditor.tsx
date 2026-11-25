@@ -1,19 +1,27 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { X, Loader2, ShieldCheck } from 'lucide-react'
+import { ChevronDown, ChevronRight, Crown, Loader2, Search, ShieldCheck } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { settingsApi, type PermissionModule, type SettingsRole } from '@/lib/settingsApi'
-import { Field, Notice } from './ui'
-import { useEscape } from '@/lib/useEscape'
+import { FormFrame } from '@/components/ui/FormFrame'
+import { Field } from './ui'
+import { cn } from '@/lib/utils'
 
 /**
- * The permission matrix.
+ * The access matrix for one role: every module, every screen in it, and a
+ * switch for each thing that can be done there.
  *
- * Absolute ERP hides this behind a page that loads its roles by AJAX and shows
- * a wall of unlabelled checkboxes. Here it is one grid: modules down the side,
- * the six things you can do across the top, with a row and a column that tick
- * everything at once.
+ * Modules down the side, each opening to its screens; the actions across the
+ * top. A module's own row switches a column for all its screens at once, and
+ * the tick at the start of a row switches the whole row. A screen only shows
+ * the switches that mean something on it — a report has nothing to approve.
+ *
+ * Two rules keep a role coherent: switching anything on for a screen switches
+ * on View too (you cannot add to a screen you cannot open), and switching
+ * View off switches off the rest.
+ *
+ * Super Admin is shown, not edited: it holds everything, always.
  */
 export function RoleEditor({
   open,
@@ -34,109 +42,89 @@ export function RoleEditor({
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [granted, setGranted] = useState<Set<string>>(new Set())
+  const [search, setSearch] = useState('')
+  const [shut, setShut] = useState<Set<string>>(new Set())
+  const [saving, setSaving] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [formError, setFormError] = useState<string | null>(null)
-  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (!open) return
     setName(role?.name ?? '')
     setDescription(role?.description ?? '')
     setGranted(new Set(role?.permissions ?? []))
+    setSearch('')
+    setShut(new Set())
     setErrors({})
     setFormError(null)
   }, [open, role])
 
-  // Escape closes this window only — not the ones behind it.
-  useEscape(onClose, open)
-  useEffect(() => {
-    if (!open) return
-    const previous = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.body.style.overflow = previous
-    }
-  }, [open])
-
   const readOnly = Boolean(role?.unrestricted)
+  const isOn = (key: string) => readOnly || granted.has(key)
 
-  const total = useMemo(
-    () => modules.reduce((sum, m) => sum + m.actions.length, 0),
+  const allKeys = useMemo(
+    () => modules.flatMap((m) => m.screens.flatMap((s) => s.actions.map((a) => a.key))),
     [modules],
+  )
+  const onCount = readOnly ? allKeys.length : allKeys.filter((k) => granted.has(k)).length
+
+  const term = search.trim().toLowerCase()
+  const shown = useMemo(
+    () =>
+      modules
+        .map((m) => {
+          if (!term || m.label.toLowerCase().includes(term)) return m
+          const screens = m.screens.filter(
+            (s) => s.label.toLowerCase().includes(term) || (s.hint ?? '').toLowerCase().includes(term),
+          )
+          return screens.length ? { ...m, screens } : null
+        })
+        .filter((m): m is PermissionModule => m !== null),
+    [modules, term],
   )
 
   if (!open) return null
 
-  const toggle = (key: string) => {
+  /** Switches keys on or off, keeping each screen's View in step with the rest. */
+  const set = (keys: string[], on: boolean) => {
     if (readOnly) return
-    setGranted((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) {
-        next.delete(key)
-      } else {
-        next.add(key)
-        // Being able to add something you cannot see is not a coherent grant,
-        // so view comes along with any other action on the same module.
-        const [module] = key.split(':')
-        next.add(`${module}:view`)
-      }
-      return next
-    })
-  }
-
-  const toggleModule = (m: PermissionModule) => {
-    if (readOnly) return
-    const keys = m.actions.map((a) => a.key)
-    const allOn = keys.every((k) => granted.has(k))
-    setGranted((prev) => {
-      const next = new Set(prev)
-      for (const k of keys) (allOn ? next.delete(k) : next.add(k))
-      return next
-    })
-  }
-
-  const toggleAction = (action: string) => {
-    if (readOnly) return
-    const keys = modules
-      .filter((m) => m.actions.some((a) => a.action === action))
-      .map((m) => `${m.module}:${action}`)
-    const allOn = keys.every((k) => granted.has(k))
-
     setGranted((prev) => {
       const next = new Set(prev)
       for (const k of keys) {
-        if (allOn) {
-          next.delete(k)
-        } else {
+        const [screen, action] = k.split(':')
+        if (on) {
           next.add(k)
-          if (action !== 'view') next.add(`${k.split(':')[0]}:view`)
+          if (action !== 'view') next.add(`${screen}:view`)
+        } else {
+          next.delete(k)
+          // No View, nothing else: every switch on the screen goes off.
+          if (action === 'view') for (const g of [...next]) if (g.startsWith(`${screen}:`)) next.delete(g)
         }
       }
       return next
     })
   }
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const state = (keys: string[]): 'on' | 'off' | 'some' => {
+    if (!keys.length) return 'off'
+    const n = keys.filter(isOn).length
+    return n === 0 ? 'off' : n === keys.length ? 'on' : 'some'
+  }
+
+  const submit = async () => {
     setSaving(true)
     setErrors({})
     setFormError(null)
-
-    const payload: Record<string, unknown> = {
-      name: name.trim(),
-      description: description.trim() || null,
-    }
-    // The Admin role always has everything, and the API rejects an attempt to
-    // narrow it, so its grants are simply not sent.
+    const payload: Record<string, unknown> = { name: name.trim(), description: description.trim() || null }
+    // Super Admin always has everything; the server refuses an attempt to narrow it.
     if (!readOnly) payload.permissions = [...granted]
-
     try {
       if (role) {
         const res = await settingsApi.roles.update(role.id, payload)
         onSaved(res.message ?? `${payload.name} updated.`)
       } else {
         await settingsApi.roles.create(payload)
-        onSaved(`Role "${payload.name}" created.`)
+        onSaved(`Role "${payload.name}" created. Give it to people from the People list.`)
       }
       onClose()
     } catch (err) {
@@ -144,157 +132,341 @@ export function RoleEditor({
         if (err.fieldErrors) setErrors(err.fieldErrors)
         setFormError(err.fieldErrors ? 'Please correct the highlighted fields.' : err.message)
       } else {
-        setFormError('Could not save. Is the API running?')
+        setFormError('Could not save the role.')
       }
     } finally {
       setSaving(false)
     }
   }
 
+  const primary = readOnly ? (
+    <button type="button" className="btn-secondary" onClick={onClose}>
+      Close
+    </button>
+  ) : (
+    <button type="button" className="btn-primary" onClick={() => void submit()} disabled={saving || !name.trim()}>
+      {saving && <Loader2 size={15} className="animate-spin" />}
+      {role ? 'Save role' : 'Create role'}
+    </button>
+  )
+
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
-      <div className="glass-card w-full max-w-4xl my-auto" role="dialog" aria-modal="true">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <div>
-            <h2 className="text-lg font-semibold text-foreground">
-              {role ? `Edit "${role.name}"` : 'New role'}
-            </h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {readOnly
-                ? 'Administrators always have full access'
-                : `${granted.size} of ${total} permissions granted`}
-            </p>
-          </div>
-          <button onClick={onClose} className="btn-ghost p-2" aria-label="Close">
-            <X size={18} />
+    <FormFrame
+      icon={readOnly ? Crown : ShieldCheck}
+      title={role ? `Access: ${role.name}` : 'New role'}
+      subtitle={
+        readOnly
+          ? 'Every screen and every action, always. Nothing here can be switched off.'
+          : 'What people on this role can open and do, screen by screen'
+      }
+      primary={primary}
+      footer={
+        !readOnly && (
+          <button type="button" className="btn-ghost" onClick={onClose} disabled={saving}>
+            Cancel
           </button>
+        )
+      }
+      footerNote={
+        readOnly
+          ? 'Only a Super Admin can give someone the Super Admin role.'
+          : `${onCount} of ${allKeys.length} switched on · applies to everyone on this role as soon as it is saved`
+      }
+      error={formError}
+      onClose={onClose}
+      busy={saving}
+      width="max-w-6xl"
+    >
+      {!readOnly && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <Field label="Role name" htmlFor="role-name" required error={errors.name}>
+            <input
+              id="role-name"
+              className="form-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={Boolean(role?.isSystem)}
+              placeholder="Store Keeper"
+            />
+          </Field>
+          <Field label="What it is for" htmlFor="role-desc" error={errors.description} span={2}>
+            <input
+              id="role-desc"
+              className="form-input"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Receives goods and issues material; cannot approve"
+            />
+          </Field>
         </div>
+      )}
 
-        <form onSubmit={submit} className="px-6 py-5 space-y-5">
-          {formError && <Notice kind="error">{formError}</Notice>}
-
-          {readOnly && (
-            <Notice kind="info">
-              <span className="flex items-center gap-2">
-                <ShieldCheck size={14} />
-                The Admin role bypasses these permissions entirely, so ticking or unticking anything
-                here would have no effect. Create a separate role if you need a narrower one.
-              </span>
-            </Notice>
-          )}
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Field label="Role name" htmlFor="role-name" required error={errors.name}>
-              <input
-                id="role-name"
-                className="form-input"
-                placeholder="Cutting Supervisor"
-                value={name}
-                disabled={Boolean(role?.isSystem)}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </Field>
-
-            <Field
-              label="Description"
-              htmlFor="role-desc"
-              error={errors.description}
-              help="A line on what this role is for"
-            >
-              <input
-                id="role-desc"
-                className="form-input"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </Field>
-          </div>
-
-          <div className="overflow-x-auto -mx-6 px-6">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="text-left py-2 pr-4 font-medium text-xs uppercase tracking-wide text-muted-foreground">
-                    Module
-                  </th>
-                  {actions.map((a) => (
-                    <th key={a.action} className="px-2 py-2 text-center">
-                      <button
-                        type="button"
-                        onClick={() => toggleAction(a.action)}
-                        disabled={readOnly}
-                        className="text-xs font-medium text-muted-foreground hover:text-primary transition-colors disabled:hover:text-muted-foreground"
-                        title={`Tick ${a.label} everywhere`}
-                      >
-                        {a.label}
-                      </button>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {modules.map((m) => {
-                  const keys = m.actions.map((a) => a.key)
-                  const allOn = keys.every((k) => granted.has(k))
-                  const someOn = keys.some((k) => granted.has(k))
-
-                  return (
-                    <tr key={m.module} className="border-b border-border/50">
-                      <td className="py-2 pr-4">
-                        <button
-                          type="button"
-                          onClick={() => toggleModule(m)}
-                          disabled={readOnly}
-                          className="text-left hover:text-primary transition-colors disabled:hover:text-foreground"
-                          title="Tick everything on this module"
-                        >
-                          <span className={allOn ? 'text-primary' : someOn ? 'text-foreground' : ''}>
-                            {m.label}
-                          </span>
-                        </button>
-                      </td>
-
-                      {actions.map((a) => {
-                        const cell = m.actions.find((x) => x.action === a.action)
-                        if (!cell) return <td key={a.action} className="text-center text-muted-foreground">—</td>
-
-                        const on = readOnly || granted.has(cell.key)
-                        return (
-                          <td key={a.action} className="px-2 py-2 text-center">
-                            <input
-                              type="checkbox"
-                              className="accent-teal-500 w-4 h-4"
-                              checked={on}
-                              disabled={readOnly}
-                              onChange={() => toggle(cell.key)}
-                              aria-label={`${a.label} ${m.label}`}
-                            />
-                          </td>
-                        )
-                      })}
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="flex items-center justify-between gap-3 pt-3 border-t border-border">
-            <p className="text-xs text-muted-foreground">
-              People already signed in pick up a change within 15 minutes.
-            </p>
-            <div className="flex items-center gap-3">
-              <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
-                Cancel
-              </button>
-              <button type="submit" className="btn-primary" disabled={saving || !name.trim()}>
-                {saving && <Loader2 size={15} className="animate-spin" />}
-                {role ? 'Save changes' : 'Create role'}
-              </button>
-            </div>
-          </div>
-        </form>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="border-border bg-card focus-within:border-primary focus-within:ring-primary/20 flex h-9 min-w-0 flex-1 items-center gap-2 rounded-lg border px-3 focus-within:ring-2 sm:max-w-sm">
+          <Search size={14} className="text-muted-foreground" />
+          <input
+            className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"
+            placeholder="Search modules or screens…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search modules or screens"
+          />
+        </div>
+        {!readOnly && (
+          <>
+            <button type="button" className="btn-secondary h-9 text-xs" onClick={() => set(allKeys, true)}>
+              Allow everything
+            </button>
+            <button type="button" className="btn-ghost h-9 text-xs" onClick={() => setGranted(new Set())}>
+              Clear everything
+            </button>
+          </>
+        )}
+        <button
+          type="button"
+          className="btn-ghost ml-auto h-9 text-xs"
+          onClick={() => setShut((s) => (s.size ? new Set() : new Set(modules.map((m) => m.module))))}
+        >
+          {shut.size ? 'Open all modules' : 'Fold all modules'}
+        </button>
       </div>
-    </div>
+
+      <div className="border-border overflow-hidden rounded-xl border">
+        <div className="max-h-[58vh] overflow-auto">
+          <table className="w-full min-w-[820px] border-collapse text-sm">
+            <thead className="bg-secondary sticky top-0 z-10">
+              <tr className="border-border border-b">
+                <th className="text-muted-foreground px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider">
+                  Module / screen
+                </th>
+                {actions.map((a) => (
+                  <th
+                    key={a.action}
+                    className="text-muted-foreground w-20 px-2 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wider"
+                  >
+                    {a.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {shown.length === 0 && (
+                <tr>
+                  <td colSpan={actions.length + 1} className="text-muted-foreground px-4 py-8 text-center text-sm">
+                    Nothing matches that search.
+                  </td>
+                </tr>
+              )}
+              {shown.map((m) => (
+                <ModuleRows
+                  key={m.module}
+                  module={m}
+                  actions={actions}
+                  folded={shut.has(m.module) && !term}
+                  readOnly={readOnly}
+                  isOn={isOn}
+                  state={state}
+                  set={set}
+                  onFold={() =>
+                    setShut((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(m.module)) next.delete(m.module)
+                      else next.add(m.module)
+                      return next
+                    })
+                  }
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <p className="text-muted-foreground flex items-start gap-2 text-xs">
+        <ShieldCheck size={14} className="mt-px shrink-0" />
+        View decides which screens appear in the menu. Add, Edit, Delete, Approve, Post and Export are checked on the
+        server for each screen, so a switch left off cannot be worked round.
+      </p>
+    </FormFrame>
+  )
+}
+
+/** A module's own row, then its screens'. A module of one screen is a single row. */
+function ModuleRows({
+  module: m,
+  actions,
+  folded,
+  readOnly,
+  isOn,
+  state,
+  set,
+  onFold,
+}: {
+  module: PermissionModule
+  actions: { action: string; label: string }[]
+  folded: boolean
+  readOnly: boolean
+  isOn: (key: string) => boolean
+  state: (keys: string[]) => 'on' | 'off' | 'some'
+  set: (keys: string[], on: boolean) => void
+  onFold: () => void
+}) {
+  const single = m.screens.length === 1 && m.screens[0].key === m.module
+  const moduleKeys = m.screens.flatMap((s) => s.actions.map((a) => a.key))
+  const columnKeys = (action: string) =>
+    m.screens.flatMap((s) => s.actions.filter((a) => a.action === action).map((a) => a.key))
+  const onCount = moduleKeys.filter(isOn).length
+
+  return (
+    <>
+      <tr className="border-border bg-secondary/40 border-b">
+        <td className="px-4 py-2.5">
+          <div className="flex items-center gap-2.5">
+            <Tick
+              state={state(moduleKeys)}
+              disabled={readOnly}
+              label={`Everything in ${m.label}`}
+              onChange={(on) => set(moduleKeys, on)}
+            />
+            {single ? (
+              <span className="text-foreground font-semibold">{m.screens[0].label}</span>
+            ) : (
+              <button type="button" onClick={onFold} className="hover:text-primary flex min-w-0 items-center gap-1.5 text-left">
+                {folded ? (
+                  <ChevronRight size={14} className="text-muted-foreground" />
+                ) : (
+                  <ChevronDown size={14} className="text-muted-foreground" />
+                )}
+                <span className="text-foreground font-semibold">{m.label}</span>
+              </button>
+            )}
+            <span className="text-muted-foreground text-[11px] tabular-nums">
+              {onCount}/{moduleKeys.length}
+            </span>
+          </div>
+          {single && m.screens[0].hint && (
+            <p className="text-muted-foreground ml-7 mt-0.5 text-[11px] leading-tight">{m.screens[0].hint}</p>
+          )}
+        </td>
+        {actions.map((a) => {
+          const keys = columnKeys(a.action)
+          return (
+            <td key={a.action} className="px-2 py-2.5 text-center">
+              {keys.length > 0 && (
+                <Switch
+                  state={state(keys)}
+                  disabled={readOnly}
+                  label={single ? `${a.label} on ${m.screens[0].label}` : `${a.label} on every ${m.label} screen`}
+                  onChange={(on) => set(keys, on)}
+                />
+              )}
+            </td>
+          )
+        })}
+      </tr>
+      {!single &&
+        !folded &&
+        m.screens.map((s) => {
+          const rowKeys = s.actions.map((a) => a.key)
+          return (
+            <tr key={s.key} className="border-border/60 hover:bg-secondary/30 border-b">
+              <td className="py-2 pl-11 pr-4">
+                <div className="flex items-center gap-2.5">
+                  <Tick
+                    state={state(rowKeys)}
+                    disabled={readOnly}
+                    label={`Everything on ${s.label}`}
+                    onChange={(on) => set(rowKeys, on)}
+                  />
+                  <div className="min-w-0">
+                    <p className="text-foreground">{s.label}</p>
+                    {s.hint && <p className="text-muted-foreground text-[11px] leading-tight">{s.hint}</p>}
+                  </div>
+                </div>
+              </td>
+              {actions.map((a) => {
+                const item = s.actions.find((x) => x.action === a.action)
+                return (
+                  <td key={a.action} className="px-2 py-2 text-center">
+                    {item && (
+                      <Switch
+                        state={isOn(item.key) ? 'on' : 'off'}
+                        disabled={readOnly}
+                        label={`${item.label} on ${s.label}`}
+                        onChange={(on) => set([item.key], on)}
+                      />
+                    )}
+                  </td>
+                )
+              })}
+            </tr>
+          )
+        })}
+    </>
+  )
+}
+
+/** The switch in a cell: on, off, or partly on for a module's column. */
+function Switch({
+  state,
+  disabled,
+  label,
+  onChange,
+}: {
+  state: 'on' | 'off' | 'some'
+  disabled?: boolean
+  label: string
+  onChange: (on: boolean) => void
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={state === 'on' ? 'true' : state === 'some' ? 'mixed' : 'false'}
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={() => onChange(state !== 'on')}
+      className={cn(
+        'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-default',
+        state === 'on' ? 'bg-emerald-500' : state === 'some' ? 'bg-emerald-500/45' : 'bg-slate-300',
+      )}
+    >
+      <span
+        className={cn(
+          'absolute left-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform',
+          state === 'on' && 'translate-x-4',
+          state === 'some' && 'translate-x-2',
+        )}
+      />
+    </button>
+  )
+}
+
+/** The tick at the start of a row: the whole row on, off, or partly. */
+function Tick({
+  state,
+  disabled,
+  label,
+  onChange,
+}: {
+  state: 'on' | 'off' | 'some'
+  disabled?: boolean
+  label: string
+  onChange: (on: boolean) => void
+}) {
+  return (
+    <input
+      type="checkbox"
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      checked={state === 'on'}
+      ref={(el) => {
+        if (el) el.indeterminate = state === 'some'
+      }}
+      onChange={() => onChange(state !== 'on')}
+      className="h-4 w-4 shrink-0 cursor-pointer rounded accent-emerald-500 disabled:cursor-default"
+    />
   )
 }

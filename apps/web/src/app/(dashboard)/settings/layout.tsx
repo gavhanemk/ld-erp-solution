@@ -12,6 +12,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { canOpen, useAccess } from '@/lib/access'
 
 /**
  * In the order someone actually sets an ERP up: describe the business, let
@@ -80,6 +81,9 @@ const tabs = [
  */
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
+  useAccess() // re-draw when the access arrives
+  // Only the sections this role may open (Settings → People decides).
+  const visible = tabs.filter((t) => canOpen(t.href))
   const active = tabs.find((t) => pathname.startsWith(t.href))
   const ActiveIcon = active?.icon
 
@@ -97,7 +101,7 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
           aria-label="Settings sections"
           className="border-border bg-card no-scrollbar flex gap-1 overflow-x-auto rounded-xl border p-1.5 shadow-sm lg:sticky lg:top-4 lg:flex-col lg:overflow-visible"
         >
-          {tabs.map((tab) => {
+          {visible.map((tab) => {
             const Icon = tab.icon
             const isActive = pathname.startsWith(tab.href)
             return (

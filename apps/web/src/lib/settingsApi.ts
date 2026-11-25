@@ -42,15 +42,24 @@ export interface SettingsRole {
   description: string | null
   isSystem: boolean
   userCount: number
-  /** The Admin role bypasses the matrix entirely, so its grants are not editable. */
+  /** Super Admin bypasses the matrix entirely, so its grants are not editable. */
   unrestricted: boolean
+  /** Screen by screen: "purchase.orders:create". */
   permissions: string[]
+}
+
+/** One screen of a module, with the actions that mean something on it. */
+export interface PermissionScreen {
+  key: string
+  label: string
+  hint: string | null
+  actions: { action: string; label: string; key: string }[]
 }
 
 export interface PermissionModule {
   module: string
   label: string
-  actions: { action: string; label: string; key: string }[]
+  screens: PermissionScreen[]
 }
 
 export interface NumberSeries {

@@ -13,6 +13,7 @@ import {
 import { cn } from '@/lib/utils'
 import { api, currentUser, tokens } from '@/lib/api'
 import { useAppSettings } from '@/lib/appSettings'
+import { canDo, canOpen, useAccess } from '@/lib/access'
 import { INVENTORY_SECTIONS } from './inventorySections'
 
 /**
@@ -235,16 +236,46 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
 
   // A mill that records output without a per-day QC entry should not be looking
   // at a menu item it never uses. Settings → Preferences controls this.
+  const access = useAccess()
   const items = useMemo(() => {
     const enabledItems = navItems.filter(i => i.href !== '/sampling' || process.env.NEXT_PUBLIC_SAMPLING_ENABLED === 'true')
-    if (qcInDailyProduction) return enabledItems
+    const shown = qcInDailyProduction
+      ? enabledItems
+      : enabledItems.map((item) =>
+          item.label === 'Production' && item.children
+            ? { ...item, children: item.children.filter((c) => c.href !== '/production/qc') }
+            : item,
+        )
 
-    return enabledItems.map((item) =>
-      item.label === 'Production' && item.children
-        ? { ...item, children: item.children.filter((c) => c.href !== '/production/qc') }
-        : item,
-    )
-  }, [qcInDailyProduction])
+    // Only what this role may open (Settings → People). A group goes when
+    // every screen in it has; a heading goes with the screens under it.
+    if (!access.loaded || access.superAdmin) return shown
+    const may = (href?: string) =>
+      !href ||
+      // Settings has no page of its own: it is there if any of its sections is.
+      (href === '/settings' ? canOpen('/settings/company') || canOpen('/settings/people') : canOpen(href))
+    return shown.flatMap((item) => {
+      if (!item.children) return may(item.href) ? [item] : []
+      const kids = item.children.filter((c) => may(c.href))
+      if (!kids.length) return []
+      // A heading lives on the first entry of its group; it moves to whichever
+      // entry of the group is now first, and goes if none is left.
+      const groupOf = (i: number) => {
+        for (let j = i; j >= 0; j--) if (item.children![j].heading) return item.children![j].heading
+        return undefined
+      }
+      let lastGroup: string | undefined
+      const withHeadings = kids.map((c) => {
+        const group = groupOf(item.children!.indexOf(c))
+        const first = group !== lastGroup
+        lastGroup = group
+        const rest = { ...c, heading: undefined }
+        return first && group ? { ...rest, heading: group } : rest
+      })
+      return [{ ...item, children: withHeadings }]
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qcInDailyProduction, access])
 
   // localStorage is browser-only, so the signed-in user arrives after mount.
   useEffect(() => {
@@ -493,8 +524,8 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
         </div>
       </nav>
 
-      {/* AI Quick Access */}
-      {!collapsed && (
+      {/* AI Quick Access, for a role that may use the assistant. */}
+      {!collapsed && canDo('ai') && (
         <div className="px-3 py-2">
           <Link
             href="/ai"

@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { api, currentUser } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { keyLabel } from '@/lib/keys'
+import { canDo, useAccess } from '@/lib/access'
 
 interface TopBarProps {
   sidebarCollapsed: boolean
@@ -31,6 +32,7 @@ function initialsOf(name: string): string {
 }
 
 export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
+  useAccess() // re-draw when the access arrives
   const [isDark, setIsDark] = useState(true)
   const [notifOpen, setNotifOpen] = useState(false)
   const [notifications, setNotifications] = useState<Notification[]>([])
@@ -165,13 +167,14 @@ export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
         <Keyboard size={17} />
       </button>
 
-      <Link
+      {/* Only for a role that may use the assistant (Settings → People). */}
+      {canDo('ai') && <Link
         href="/ai"
         className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-500/10 border border-teal-500/20 hover:bg-teal-500/20 transition-all text-xs font-medium text-teal-400"
       >
         <Zap size={13} />
         Ask AI
-      </Link>
+      </Link>}
 
       <div className="relative">
         <button

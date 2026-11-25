@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { X, Loader2 } from 'lucide-react'
-import { ApiError } from '@/lib/api'
+import { ApiError, currentUser } from '@/lib/api'
 import { settingsApi, type SettingsRole, type SettingsUser } from '@/lib/settingsApi'
 import { Field, Notice } from './ui'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -196,11 +196,15 @@ export function UserDialog({
                 onChange={(e) => set('roleId', e.target.value)}
               >
                 <option value="">Select...</option>
-                {roles.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name}
-                  </option>
-                ))}
+                {/* Super Admin is offered only by a Super Admin; the server refuses anyone else. */}
+                {roles
+                  .filter((r) => !r.unrestricted || currentUser()?.superAdmin || r.id === values.roleId)
+                  .map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name}
+                      {r.unrestricted ? ' — every screen, always' : ''}
+                    </option>
+                  ))}
               </SmartSelect>
             </Field>
 

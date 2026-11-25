@@ -8,6 +8,7 @@ import { newRequestId } from '@/lib/utils'
 import type { OutwardRef } from '@/components/packages/packageTypes'
 import type { ProcessRequisition } from './ProcessDialog'
 import { noBuyBox, planRows, r3, spread, startingQty, type FulfilData } from './processPlan'
+import { isAdminRole } from '@/lib/access'
 
 /**
  * Several requisitions at once — an MO raises one per department, and taking
@@ -76,7 +77,7 @@ export function BulkRequisitionDialog({
 }) {
   const w = WORDS[action]
   const me = currentUser()
-  const admin = me?.role === 'Admin'
+  const admin = isAdminRole(me?.role)
   // The list behind refreshes after the run; this window keeps the ones it opened with.
   const [count] = useState(mrs.length)
   const [plans, setPlans] = useState<Plan[] | null>(null)

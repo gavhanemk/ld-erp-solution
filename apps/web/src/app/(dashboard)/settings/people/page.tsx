@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, Pencil, KeyRound, Ban, RotateCcw, Search, ShieldCheck, Trash2, Users2 } from 'lucide-react'
+import { Plus, Pencil, KeyRound, Ban, RotateCcw, Search, ShieldCheck, Trash2, Users2, Crown } from 'lucide-react'
 import { ApiError, currentUser } from '@/lib/api'
 import { settingsApi, type PermissionModule, type SettingsRole, type SettingsUser } from '@/lib/settingsApi'
 import { LoadingRow, Notice, SettingsCard } from '@/components/settings/ui'
@@ -417,11 +417,16 @@ This cannot be undone.`,
             {roles.map((role) => (
               <div
                 key={role.id}
-                className="border-border/70 hover:border-primary/40 flex flex-col gap-3 rounded-lg border p-4 transition-colors"
+                className={`flex flex-col gap-3 rounded-lg border p-4 transition-colors ${
+                  role.unrestricted ? 'border-amber-500/40 bg-amber-500/5' : 'border-border/70 hover:border-primary/40'
+                }`}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="text-sm font-semibold text-foreground truncate">{role.name}</p>
+                    <p className="flex items-center gap-1.5 text-sm font-semibold text-foreground truncate">
+                      {role.unrestricted && <Crown size={14} className="shrink-0 text-amber-500" />}
+                      {role.name}
+                    </p>
                     <p className="text-xs text-muted-foreground line-clamp-2">
                       {role.description ?? 'No description'}
                     </p>
@@ -435,7 +440,9 @@ This cannot be undone.`,
                     {role.userCount} {role.userCount === 1 ? 'person' : 'people'}
                   </span>
                   <span>
-                    {role.unrestricted ? 'Full access' : `${role.permissions.length} permissions`}
+                    {role.unrestricted
+                      ? 'Every screen, always'
+                      : `${new Set(role.permissions.filter((k) => k.endsWith(':view')).map((k) => k.split(':')[0])).size} screens · ${role.permissions.length} switches on`}
                   </span>
                 </div>
 
@@ -445,7 +452,7 @@ This cannot be undone.`,
                     onClick={() => setRoleDialog({ open: true, role })}
                   >
                     <Pencil size={13} />
-                    {role.unrestricted ? 'View' : 'Change access'}
+                    {role.unrestricted ? 'See access' : 'Change access'}
                   </button>
 
                   {!role.isSystem && (

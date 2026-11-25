@@ -17,6 +17,7 @@ import { ScanIssue } from '@/components/packages/ScanIssue'
 import { PickList } from '@/components/packages/PickList'
 import { LinkMoBox } from './LinkMoBox'
 import { noBuyBox, planRows, r3, shortOf, spread, startingQty, coveredByPo, type FulfilData, type FulfilOrder, type ProcessLine } from './processPlan'
+import { isAdminRole } from '@/lib/access'
 
 /**
  * Working on an approved requisition: three forms in one window, one tab each.
@@ -130,7 +131,7 @@ export function ProcessDialog({
 
   const me = currentUser()
   // Raised, approved and issued by three people; the Admin may do all three.
-  const canIssue = me?.role === 'Admin' || (me?.id !== mr.raisedBy?.id && me?.id !== mr.approvedBy?.id)
+  const canIssue = isAdminRole(me?.role) || (me?.id !== mr.raisedBy?.id && me?.id !== mr.approvedBy?.id)
   /** The MO it was just linked to here, for one raised against a sales order alone. */
   const [linkedMo, setLinkedMo] = useState<{ id: string; moNumber: string } | null>(null)
   /** Raised against a sales order with no MO: nothing is issued until it is linked to one. */
