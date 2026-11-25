@@ -4,6 +4,8 @@ import jwt from 'jsonwebtoken'
 import { prisma } from '@ld-erp/database'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
+import { authMiddleware, type AuthRequest } from '../middleware/auth'
+import { SCREENS, SUPER_ROLE } from '../lib/accessCatalog'
 
 const router = Router()
 
@@ -30,7 +32,9 @@ router.post('/login', async (req, res) => {
     throw new AppError('Invalid email or password', 401)
   }
 
-  // Build permissions list
+  // The grants travel with the user for the screen's first paint; the token
+  // itself carries only who this is. What they may do is read on every
+  // request (lib/access.ts), so it no longer has to fit in a header.
   const permissions = user.role.permissions.map(
     (rp) => `${rp.permission.module}:${rp.permission.action}`
   )
@@ -41,7 +45,6 @@ router.post('/login', async (req, res) => {
     name: user.name,
     roleId: user.roleId,
     role: user.role.name,
-    permissions,
   }
 
   const accessToken = jwt.sign(payload, process.env.JWT_SECRET!, {
@@ -69,6 +72,7 @@ router.post('/login', async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role.name,
+      superAdmin: user.role.name === SUPER_ROLE,
       permissions,
       avatarUrl: user.avatarUrl,
     },
@@ -90,12 +94,6 @@ router.post('/refresh', async (req, res) => {
 
     if (!user || user.status !== 'ACTIVE') throw new AppError('User not found or inactive', 401)
 
-    // The permission matrix must be rebuilt here. Omitting it would hand back a
-    // token with no grants, locking the user out 15 minutes after they log in.
-    const permissions = user.role.permissions.map(
-      (rp) => `${rp.permission.module}:${rp.permission.action}`
-    )
-
     const newAccessToken = jwt.sign(
       {
         id: user.id,
@@ -103,7 +101,6 @@ router.post('/refresh', async (req, res) => {
         name: user.name,
         roleId: user.roleId,
         role: user.role.name,
-        permissions,
       },
       process.env.JWT_SECRET!,
       { expiresIn: process.env.JWT_EXPIRES_IN || '15m' } as jwt.SignOptions
@@ -122,21 +119,21 @@ router.post('/logout', (req, res) => {
 })
 
 // GET /api/auth/me
-router.get('/me', async (req, res) => {
-  const authHeader = req.headers.authorization
-  if (!authHeader?.startsWith('Bearer ')) throw new AppError('Unauthorized', 401)
-
-  const token = authHeader.split(' ')[1]
-  const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string }
-
+// Who is signed in and what they may open, read fresh: the screen uses it to
+// draw the menu and to turn away a page this role may not see. The screens
+// come with their pages, so the menu needs no list of its own to keep in step.
+router.get('/me', authMiddleware, async (req: AuthRequest, res) => {
+  const u = req.user!
   const user = await prisma.user.findUnique({
-    where: { id: decoded.id },
-    include: { role: true },
-    omit: { passwordHash: true },
-  } as Parameters<typeof prisma.user.findUnique>[0])
-
+    where: { id: u.id },
+    select: { id: true, name: true, email: true, avatarUrl: true },
+  })
   if (!user) throw new AppError('User not found', 404)
-  res.json({ success: true, user })
+  res.json({
+    success: true,
+    user: { ...user, role: u.role, superAdmin: Boolean(u.superAdmin), permissions: u.permissions ?? [] },
+    screens: [...SCREENS.values()].filter((sc) => sc.hrefs.length).map((sc) => ({ key: sc.key, hrefs: sc.hrefs })),
+  })
 })
 
 export default router

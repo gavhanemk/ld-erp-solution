@@ -21,6 +21,7 @@ import {
 } from '../../schemas/master.schemas'
 import { checkTicket, mintTicket } from './confirm'
 import type { ErpTool } from './tools'
+import { grantsAllowKey, isSuperRole } from '../../lib/access'
 
 /**
  * What the assistant is allowed to change.
@@ -1162,8 +1163,7 @@ export const isWriteTool = (name: string): boolean => WRITES.some((w) => w.tool.
  * might want to draw, and one they draw for themselves in Settings → Roles.
  */
 export function writeToolsFor(role: string, permissions: string[]): ErpTool[] {
-  const granted = new Set(permissions)
-  const can = (p: string) => role === 'Admin' || granted.has(p)
+  const can = (p: string) => isSuperRole(role) || grantsAllowKey(permissions, p)
 
   return WRITES.filter((w) => can(w.gate) && (!w.tool.needs || can(w.tool.needs))).map(
     (w) => w.tool,

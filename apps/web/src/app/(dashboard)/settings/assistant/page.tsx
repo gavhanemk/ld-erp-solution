@@ -1,10 +1,10 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Loader2, ShieldCheck, ExternalLink, Zap, CheckCircle2, XCircle } from 'lucide-react'
+import { Loader2, ShieldCheck, ExternalLink, Zap, CheckCircle2, XCircle, KeyRound, Sparkles } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { settingsApi, type AiProvider, type AiSettings } from '@/lib/settingsApi'
-import { Field, LoadingRow, Notice, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
+import { Field, LoadingRow, Notice, SaveBar, SettingsCard, ToggleRow } from '@/components/settings/ui'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
@@ -106,7 +106,7 @@ export default function AssistantSettingsPage() {
 
   if (loading) {
     return (
-      <SettingsCard title="Assistant">
+      <SettingsCard title="Assistant" icon={Sparkles}>
         <LoadingRow />
       </SettingsCard>
     )
@@ -127,10 +127,11 @@ export default function AssistantSettingsPage() {
   }
 
   return (
-    <form onSubmit={save} className="space-y-6">
+    <form onSubmit={save} className="space-y-5">
       {message && <Notice kind={message.kind}>{message.text}</Notice>}
 
       <SettingsCard
+        icon={KeyRound}
         title="Connection"
         description="The assistant needs a key from your own account with whichever company you choose. The usage and the bill are yours, and nothing goes anywhere else."
       >
@@ -208,11 +209,10 @@ export default function AssistantSettingsPage() {
             )}
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-x-5 gap-y-4 lg:grid-cols-2">
             <Field
               label={settings?.configured ? 'Replace the key' : 'API key'}
               htmlFor="ai-key"
-              span={2}
               help={
                 provider === 'openai'
                   ? 'From platform.openai.com → API keys. Leave blank to keep the saved one.'
@@ -292,37 +292,27 @@ export default function AssistantSettingsPage() {
         </div>
       </SettingsCard>
 
-      <SettingsCard title="What the assistant may do">
-        <div className="divide-y divide-border/60">
-          <div className="flex items-start justify-between gap-6 py-4 first:pt-0">
-            <div>
-              <p className="text-sm font-medium text-foreground">Assistant switched on</p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Turn off to stop it answering without removing the key.
-              </p>
-            </div>
-            <Toggle checked={enabled} onChange={setEnabled} label="Assistant switched on" />
-          </div>
-
-          <div className="flex items-start justify-between gap-6 py-4">
-            <div>
-              <p className="text-sm font-medium text-foreground">Daily summary</p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                A short round-up of production, orders and money each evening.
-              </p>
-              <p className="text-[11px] text-muted-foreground/70 mt-1">
-                Written to your notifications. WhatsApp delivery once that is connected.
-              </p>
-            </div>
-            <Toggle checked={dailySummary} onChange={setDailySummary} label="Daily summary" />
-          </div>
+      <SettingsCard icon={ShieldCheck} title="What the assistant may do" description="Switch it off, or have it write a round-up each evening.">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <ToggleRow
+            label="Assistant switched on"
+            description="Turn off to stop it answering without removing the key."
+            checked={enabled}
+            onChange={setEnabled}
+          />
+          <ToggleRow
+            label="Daily summary"
+            description="A short round-up of production, orders and money each evening, written to your notifications. WhatsApp delivery once that is connected."
+            checked={dailySummary}
+            onChange={setDailySummary}
+          />
         </div>
 
-        <div className="mt-5 flex items-start gap-3 p-3 rounded-lg border border-teal-500/30 bg-teal-500/5">
-          <ShieldCheck size={16} className="text-teal-400 mt-0.5 shrink-0" />
-          <div className="text-sm text-teal-300">
+        <div className="border-primary/30 bg-primary/5 mt-4 flex items-start gap-3 rounded-lg border p-3">
+          <ShieldCheck size={16} className="text-primary mt-0.5 shrink-0" />
+          <div className="text-sm text-primary">
             <p className="font-medium">The assistant sees only what the person asking can see.</p>
-            <p className="text-xs text-teal-300/80 mt-1">
+            <p className="text-xs text-primary/80 mt-1">
               It runs under their role, not its own. A cutting supervisor asking what customers owe
               is told their role has no access to accounts — the same answer they would get by
               clicking. This is enforced on the server, not offered as a setting, so it cannot be
@@ -332,16 +322,15 @@ export default function AssistantSettingsPage() {
         </div>
       </SettingsCard>
 
-      <div className="flex items-center justify-between gap-4">
-        <p className="text-xs text-muted-foreground max-w-xl">
+      <p className="text-xs text-muted-foreground max-w-2xl">
           {provider === 'openai'
             ? 'OpenAI charges per question — a few paise each, so a busy day costs less than a cup of chai. You are billed by OpenAI directly.'
             : 'Gemini has a free tier that is generous enough for a mill this size, with daily limits. You are billed by Google directly.'}{' '}
           Only the figures needed to answer the question are sent, and nothing is used to train
           anybody&rsquo;s model.
-        </p>
-        <SaveButton saving={saving} />
-      </div>
+      </p>
+
+      <SaveBar saving={saving} />
     </form>
   )
 }

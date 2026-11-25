@@ -59,6 +59,7 @@ export const tokens = {
     localStorage.removeItem(ACCESS_KEY)
     localStorage.removeItem(REFRESH_KEY)
     localStorage.removeItem('user')
+    localStorage.removeItem('access')
   },
 }
 
@@ -217,11 +218,16 @@ export function masterResource<T>(resource: string) {
  * remove a button somebody needs and give them nothing to go on.
  */
 export const can = (module: string, action: string): boolean => {
-  const user = currentUser() as { role?: string; permissions?: string[] } | null
+  const user = currentUser() as { role?: string; superAdmin?: boolean; permissions?: string[] } | null
   if (!user) return true
-  if (user.role === 'Admin') return true
+  if (user.superAdmin || user.role === 'Super Admin') return true
   if (!Array.isArray(user.permissions)) return true
-  return user.permissions.includes(`${module}:${action}`) || user.permissions.includes(`${module}:*`)
+  // The server's rule (lib/access.ts): a screen by its own grant or its
+  // module's; a module by its own grant or the same action on any screen in it.
+  const grants = user.permissions
+  const mod = module.split('.')[0]
+  if (grants.includes(`${module}:${action}`) || grants.includes(`${mod}:${action}`) || grants.includes(`${mod}:*`)) return true
+  return module === mod && grants.some((g) => g.startsWith(`${mod}.`) && g.endsWith(`:${action}`))
 }
 
 export const currentUser = () => {

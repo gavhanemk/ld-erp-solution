@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { AlertCircle, Loader2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { SettingsCard } from '@/components/settings/ui'
 
 /**
  * What has been deleted, and the way back.
@@ -106,18 +107,7 @@ export default function RecycleBinPage() {
     })
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-muted-foreground max-w-2xl text-sm">
-          Purchase orders that were deleted. They are out of every list, report and search, but
-          nothing about them has been thrown away — restoring one puts it back exactly as it was,
-          with its lines and its number.
-        </p>
-        <button onClick={() => void load()} className="btn-secondary" disabled={loading}>
-          <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
-          Refresh
-        </button>
-      </div>
+    <div className="space-y-5">
 
       {error && (
         <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
@@ -128,11 +118,27 @@ export default function RecycleBinPage() {
 
       {message && (
         <div className="border-primary/30 bg-primary/5 rounded-lg border p-3">
-          <p className="text-sm text-teal-400">{message}</p>
+          <p className="text-sm text-primary">{message}</p>
         </div>
       )}
 
-      <div className="border-border bg-card overflow-hidden rounded-xl border">
+      <SettingsCard
+        icon={Trash2}
+        title="Deleted purchase orders"
+        description="Out of every list, report and search, but nothing has been thrown away — restoring one puts it back exactly as it was, with its lines and its number."
+        flush
+        actions={
+          <button onClick={() => void load()} className="btn-secondary h-8 text-xs" disabled={loading}>
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        }
+        footer={
+          <p className="text-muted-foreground mr-auto text-xs">
+            Only purchase orders arrive here so far. Deleting anything else in the ERP does not yet put it in this bin.
+          </p>
+        }
+      >
         {loading ? (
           <div className="text-muted-foreground flex items-center justify-center gap-2 p-10 text-sm">
             <Loader2 size={16} className="animate-spin" />
@@ -140,7 +146,9 @@ export default function RecycleBinPage() {
           </div>
         ) : rows.length === 0 ? (
           <div className="p-10 text-center">
-            <Trash2 size={22} className="text-muted-foreground mx-auto mb-2" />
+            <span className="bg-secondary mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full">
+              <Trash2 size={20} className="text-muted-foreground" />
+            </span>
             <p className="text-foreground text-sm font-medium">The recycle bin is empty</p>
             <p className="text-muted-foreground mt-1 text-xs">
               Deleted purchase orders arrive here and stay until somebody destroys them.
@@ -190,7 +198,7 @@ export default function RecycleBinPage() {
                         <button
                           onClick={() => void restore(row)}
                           disabled={busy === row.id}
-                          className="btn-ghost p-1.5 hover:text-teal-400"
+                          className="btn-ghost p-1.5 hover:text-primary"
                           title="Put this order back"
                           aria-label={`Restore ${row.poNumber}`}
                         >
@@ -217,12 +225,7 @@ export default function RecycleBinPage() {
             </table>
           </div>
         )}
-      </div>
-
-      <p className="text-muted-foreground text-xs">
-        Only purchase orders arrive here so far. Deleting anything else in the ERP does not yet put
-        it in this bin.
-      </p>
+      </SettingsCard>
     </div>
   )
 }

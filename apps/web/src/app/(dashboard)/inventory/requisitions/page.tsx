@@ -26,6 +26,7 @@ import type { InwardRef } from '@/components/packages/InwardStickers'
 import { StickersReady } from '@/components/packages/StickersReady'
 import { OutwardStickers } from '@/components/packages/OutwardStickers'
 import type { OutwardRef } from '@/components/packages/packageTypes'
+import { isAdminRole } from '@/lib/access'
 
 /**
  * Material requisitions: asked for, allowed, handed over.
@@ -306,7 +307,7 @@ function RequisitionsScreen() {
 
   const me = currentUser()
   // The Admin may approve a requisition they raised themselves; the server says the same.
-  const admin = me?.role === 'Admin'
+  const admin = isAdminRole(me?.role)
 
   const [rows, setRows] = useState<Requisition[]>([])
   const [loading, setLoading] = useState(true)
