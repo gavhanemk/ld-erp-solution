@@ -181,7 +181,7 @@ export const itemFormFields: FormField[] = [
     section: 'Identity',
     placeholder: '1164',
     showIf: (v, rows) => isFabric(v, rows),
-    help: 'As the mill writes it: D.No 1164',
+    help: "As written on the supplier's challan — printed just as typed",
   },
   {
     name: 'fabricColour',

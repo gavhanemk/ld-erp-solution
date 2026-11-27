@@ -277,7 +277,8 @@ export default function PrintPurchaseOrder() {
     const pack = inPack(line)
     const filing = categoryPath(line.item.category)
     const sub = [filing, line.description].filter(Boolean).join(' · ')
-    const shade = [line.item.designNo && `D.No ${line.item.designNo}`, line.item.color].filter(Boolean).join(' / ')
+    // Exactly as set on the item; the column's heading says what they are.
+    const shade = [line.item.designNo, line.item.color].filter(Boolean).join(' / ')
     return {
       key: line.id,
       cells: {

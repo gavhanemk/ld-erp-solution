@@ -24,13 +24,9 @@ const FABRIC = /fabric/i
 export const isFabricCategory = (c: { name: string; parent?: { name: string } | null } | null | undefined) =>
   !!c && (FABRIC.test(c.name) || FABRIC.test(c.parent?.name ?? ''))
 
-/** "D.NO. 1164", "DN.NO.1164", "Design No 1164" and "1164" are one design: 1164. */
+/** A design number exactly as typed — "120" stays "120" — with only stray spaces taken out. */
 export function cleanDesignNo(v: unknown): string | null {
-  const t = String(v ?? '')
-    .trim()
-    .replace(/^(design\s*no|d\.?\s*n\.?\s*o|dn\.?\s*no|d\.?\s*no|design|d)\s*[.:#\-]*\s*/i, '')
-    .replace(/\s+/g, ' ')
-    .trim()
+  const t = String(v ?? '').trim().replace(/\s+/g, ' ')
   return t || null
 }
 

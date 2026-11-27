@@ -1862,7 +1862,8 @@ export function PurchaseOrderDialog({
           readOnly
           tabIndex={-1}
           placeholder="No design no."
-          value={it.designNo ? `D.No ${it.designNo}` : ''}
+          value={it.designNo ?? ''}
+          title="Design No., from Masters → Items"
           aria-label={`Row ${i + 1} design number`}
         />
         <input
@@ -1871,6 +1872,7 @@ export function PurchaseOrderDialog({
           tabIndex={-1}
           placeholder="No colour"
           value={it.color ?? ''}
+          title="Colour, from Masters → Items"
           aria-label={`Row ${i + 1} colour`}
         />
       </div>

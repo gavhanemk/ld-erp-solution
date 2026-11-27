@@ -129,7 +129,7 @@ function columnsFor(
           <div>
             <div>{i.name}</div>
             <div className="text-muted-foreground text-xs font-normal">
-              {[i.designNo ? `D.No ${i.designNo}` : null, i.color].filter(Boolean).join(' · ')}
+              {[i.designNo ? `Design No: ${i.designNo}` : null, i.color ? `Colour: ${i.color}` : null].filter(Boolean).join(' · ')}
             </div>
           </div>
         ) : (

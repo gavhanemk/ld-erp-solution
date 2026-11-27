@@ -1,7 +1,7 @@
 /**
  * Fabric by design and colour (the user's decisions, 27 Nov 2026):
  *   - an item filed under Fabric is set up in the Items master with its own
- *     Design No. and Colour ("D.NO. 1164" is kept as 1164);
+ *     Design No. and Colour, kept exactly as typed ("120" stays "120");
  *   - two fabric items may share a name when their design or colour differs,
  *     never when both match; anything else cannot carry a Design No.;
  *   - a purchase order shows the picked item's design and colour (they come
@@ -55,8 +55,8 @@ async function main() {
 
   try {
     // ── Set up in the Items master ─────────────────────────────────────
-    const a = await fabric({ designNo: 'D.NO. 1164', color: 'Navy' })
-    check('1. a fabric item keeps its Design No. (as 1164) and Colour', a.status === 201 && a.body?.data?.designNo === '1164' && a.body?.data?.color === 'Navy', a.body)
+    const a = await fabric({ designNo: ' 1164 ', color: 'Navy' })
+    check('1. a fabric item keeps its Design No. exactly as typed (1164, nothing added) and its Colour', a.status === 201 && a.body?.data?.designNo === '1164' && a.body?.data?.color === 'Navy', a.body)
 
     const b = await fabric({ designNo: '1165', color: 'Navy' })
     check('2. the same fabric name in another design is a second item', b.status === 201 && b.body?.data?.id !== a.body?.data?.id, b.body)
@@ -64,7 +64,7 @@ async function main() {
     const c = await fabric({ designNo: '1164', color: 'Black' })
     check('3. … and in another colour', c.status === 201, c.body)
 
-    const d = await fabric({ designNo: 'dn.no 1164', color: 'navy' })
+    const d = await fabric({ designNo: '1164', color: 'NAVY' })
     check('4. the same name, design and colour twice is refused', d.status >= 400 && /already exists/i.test(JSON.stringify(d.body)), d.body)
 
     const e = await add({ name: `ZZTEST Tape ${tag}`, type: 'PACKING_MATERIAL', categoryId: packingCat.id, uomId: mtr.id, designNo: '99' })

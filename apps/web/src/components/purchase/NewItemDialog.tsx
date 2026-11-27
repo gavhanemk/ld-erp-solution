@@ -358,7 +358,7 @@ export function NewItemDialog<T = NewItem>({
                     maxLength={40}
                     className="form-input"
                   />
-                  <p className="form-help">As the mill writes it: D.No 1164</p>
+                  <p className="form-help">As written on the supplier&apos;s challan — printed just as typed.</p>
                 </div>
                 <div>
                   <label className="form-label" htmlFor="ni-colour">
