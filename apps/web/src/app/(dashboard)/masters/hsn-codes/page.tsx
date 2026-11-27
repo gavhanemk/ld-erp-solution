@@ -208,6 +208,9 @@ export default function HsnCodesPage() {
         filterDefs={filterDefs}
         refreshKey={refreshKey}
         defaultSort="code"
+        // Only a code nothing uses can go: the window says what uses it, if anything.
+        allowDelete={can('masters', 'delete')}
+        deleteRefusedHint="Those records keep the code. Make it inactive instead, so it is no longer offered."
         actions={
           can('masters', 'create') ? (
             <button
