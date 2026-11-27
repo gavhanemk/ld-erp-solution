@@ -202,8 +202,9 @@ export interface PoLine {
   }
 }
 
-/** Fabric is asked its design number and colour; nothing else is. */
+/** Fabric shows its design number and colour; thread its colour; nothing else either. */
 const FABRIC = /fabric/i
+const THREAD = /thread/i
 
 export interface PurchaseOrder {
   id: string
@@ -1853,19 +1854,24 @@ export function PurchaseOrderDialog({
     if (!it) return null
     const filed = categories.find((c) => c.id === it.categoryId)
     const parent = filed?.parentId ? categories.find((c) => c.id === filed.parentId) : null
-    if (!FABRIC.test(filed?.name ?? '') && !FABRIC.test(parent?.name ?? '')) return null
+    const under = (re: RegExp) => re.test(filed?.name ?? '') || re.test(parent?.name ?? '')
+    const fabric = under(FABRIC)
+    // Thread has a colour and no design number.
+    if (!fabric && !under(THREAD)) return null
     const box = `${cell} bg-muted/40 cursor-default`
     return (
       <div className="mt-1 grid grid-cols-2 gap-1" title="From the item in Masters → Items">
-        <input
-          className={box}
-          readOnly
-          tabIndex={-1}
-          placeholder="No design no."
-          value={it.designNo ?? ''}
-          title="Design No., from Masters → Items"
-          aria-label={`Row ${i + 1} design number`}
-        />
+        {fabric && (
+          <input
+            className={box}
+            readOnly
+            tabIndex={-1}
+            placeholder="No design no."
+            value={it.designNo ?? ''}
+            title="Design No., from Masters → Items"
+            aria-label={`Row ${i + 1} design number`}
+          />
+        )}
         <input
           className={box}
           readOnly

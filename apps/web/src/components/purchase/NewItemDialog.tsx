@@ -164,10 +164,11 @@ export function NewItemDialog<T = NewItem>({
     () => categories.filter((c) => c.parentId === categoryId),
     [categories, categoryId]
   )
-  // Filed under Fabric: one design and colour per item, asked here as in the master.
-  const isFabric = [categoryId, subcategoryId].some((id) =>
-    /fabric/i.test(categories.find((c) => c.id === id)?.name ?? '')
-  )
+  // Filed under Fabric: one design and colour per item; under Thread, one
+  // colour per item — asked here as in the master.
+  const filedUnder = (re: RegExp) => [categoryId, subcategoryId].some((id) => re.test(categories.find((c) => c.id === id)?.name ?? ''))
+  const isFabric = filedUnder(/fabric/i)
+  const isThread = !isFabric && filedUnder(/thread/i)
 
   const problems = useMemo(() => {
     const out: string[] = []
@@ -199,7 +200,7 @@ export function NewItemDialog<T = NewItem>({
         ...(hsnCode.trim() ? { hsnCode: hsnCode.trim() } : {}),
         ...(description.trim() ? { description: description.trim() } : {}),
         ...(isFabric && designNo.trim() ? { designNo: designNo.trim() } : {}),
-        ...(isFabric && colour.trim() ? { color: colour.trim() } : {}),
+        ...((isFabric || isThread) && colour.trim() ? { color: colour.trim() } : {}),
         // Each left out entirely when blank rather than sent as zero. Zero is a
         // real reorder level — "tell me the moment it runs out" — and is not
         // the same answer as "nobody has decided one".
@@ -225,6 +226,7 @@ export function NewItemDialog<T = NewItem>({
     hsnCode,
     description,
     isFabric,
+    isThread,
     designNo,
     colour,
     rate,
@@ -344,9 +346,9 @@ export function NewItemDialog<T = NewItem>({
               />
             </div>
 
-            {isFabric && (
+            {(isFabric || isThread) && (
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <div>
+                {isFabric && <div>
                   <label className="form-label" htmlFor="ni-design">
                     Design No.
                   </label>
@@ -359,7 +361,7 @@ export function NewItemDialog<T = NewItem>({
                     className="form-input"
                   />
                   <p className="form-help">As written on the supplier&apos;s challan — printed just as typed.</p>
-                </div>
+                </div>}
                 <div>
                   <label className="form-label" htmlFor="ni-colour">
                     Colour

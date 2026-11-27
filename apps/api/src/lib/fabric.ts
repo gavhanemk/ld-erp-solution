@@ -24,6 +24,16 @@ const FABRIC = /fabric/i
 export const isFabricCategory = (c: { name: string; parent?: { name: string } | null } | null | undefined) =>
   !!c && (FABRIC.test(c.name) || FABRIC.test(c.parent?.name ?? ''))
 
+const THREAD = /thread/i
+
+/**
+ * Whether a category (or the one above it) is a Thread category (27 Nov
+ * 2026). Thread is set up one colour per item, like fabric, but has no
+ * design number.
+ */
+export const isThreadCategory = (c: { name: string; parent?: { name: string } | null } | null | undefined) =>
+  !!c && (THREAD.test(c.name) || THREAD.test(c.parent?.name ?? ''))
+
 /** A design number exactly as typed — "120" stays "120" — with only stray spaces taken out. */
 export function cleanDesignNo(v: unknown): string | null {
   const t = String(v ?? '').trim().replace(/\s+/g, ' ')

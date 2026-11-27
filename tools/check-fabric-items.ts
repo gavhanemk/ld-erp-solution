@@ -7,7 +7,8 @@
  *   - a purchase order shows the picked item's design and colour (they come
  *     from the item), and its brand is a reference only — a customer's brand
  *     is refused;
- *   - goods received go into that item's stock like any other.
+ *   - goods received go into that item's stock like any other;
+ *   - thread is set up one colour per item too, with no design number.
  *
  * Demo database (lderp_demo) only; what it makes is removed at the end. From
  * the repo root:
@@ -35,6 +36,7 @@ async function main() {
 
   const cats = (await call('GET', '/masters/item-categories?limit=200')).body.data as any[]
   const fabricCat = cats.find((c) => /^fabric$/i.test(c.name) && c.parentId)
+  const threadCat = cats.find((c) => /^thread$/i.test(c.name) && c.parentId && c.isActive !== false)
   const packingCat = cats.find((c) => /packing/i.test(c.name) && c.parentId)
   const mtr = ((await call('GET', '/masters/uoms?limit=100')).body.data as any[]).find((u) => /^(m|mtr|meter|metre)$/i.test(u.symbol))
   const supplier = ((await call('GET', '/masters/suppliers?limit=20')).body.data as any[]).find((s) => !/vhagar/i.test(s.name) && s.gstin)
@@ -96,6 +98,18 @@ async function main() {
     const inStock = await prisma.stockLedger.aggregate({ where: { itemId: a.body.data.id, referenceId: grn.body?.data?.id }, _sum: { inQty: true } })
     check("11. goods received go into that fabric item's own stock", grn.status < 300 && Number(inStock._sum.inQty) === 40, { grn: grn.status, msg: grn.body?.message, inStock: inStock._sum.inQty })
     if (grn.body?.data?.id) await call('DELETE', `/purchase/grn/${grn.body.data.id}`, { reason: 'test' })
+
+    // ── Thread: one colour per item, no design number ──────────────────
+    const threadName = `ZZTEST Thread ${tag}`
+    const t1 = await add({ name: threadName, type: 'RAW_MATERIAL', categoryId: threadCat.id, uomId: mtr.id, color: 'White' })
+    check('12. a thread item keeps its Colour', t1.status === 201 && t1.body?.data?.color === 'White' && !t1.body?.data?.designNo, t1.body)
+    const t2 = await add({ name: threadName, type: 'RAW_MATERIAL', categoryId: threadCat.id, uomId: mtr.id, color: 'Black' })
+    check('13. the same thread in another colour is a second item', t2.status === 201, t2.body)
+    const t3 = await add({ name: `${threadName} X`, type: 'RAW_MATERIAL', categoryId: threadCat.id, uomId: mtr.id, color: 'Red', designNo: '7' })
+    check('14. a thread item cannot carry a Design No.', t3.status === 400 && t3.body?.code === 'DESIGN_NOT_FABRIC', t3.body)
+    const tpo = await call('POST', '/purchase/orders', { supplierId: supplier.id, lines: [{ itemId: t1.body.data.id, qty: 10, unitRate: 50, gstRate: 12 }] })
+    if (tpo.body?.data?.id) pos.push(tpo.body.data.id)
+    check("15. a purchase order shows the thread's colour from the item", tpo.status === 201 && tpo.body?.data?.lines?.[0]?.item?.color === 'White', tpo.body?.data?.lines?.[0]?.item)
   } finally {
     for (const id of pos) {
       await call('DELETE', `/purchase/orders/${id}`)

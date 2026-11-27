@@ -4,7 +4,7 @@ import { createItemSchema } from '../schemas/master.schemas'
 import { assertItemFitsCategory } from '../services/itemGroups.service'
 import { assertUniqueFields } from './crud'
 import { assertItemStyleColorValid, rethrowItemStyleColorClash } from './itemStyleColor'
-import { cleanColour, cleanDesignNo, isFabricCategory } from './fabric'
+import { cleanColour, cleanDesignNo, isFabricCategory, isThreadCategory } from './fabric'
 import { isGeneratedCode, withGeneratedCode } from './masterCode'
 
 /**
@@ -77,25 +77,29 @@ export async function itemBeforeSave(
   await assertItemFitsCategory(data, before)
 
   /*
-   * A fabric is set up one design and colour per item (lib/fabric): filed
-   * under Fabric, it keeps the Design No. and Colour typed for it. Anything
-   * else carries no design number, and only a finished good a colour.
+   * Fabric and thread are set up one colour per item (lib/fabric): filed
+   * under Fabric, an item keeps the Design No. and Colour typed for it; under
+   * Thread, its Colour. Anything else carries no design number, and only a
+   * finished good a colour (from its style).
    */
   const categoryId = (data.categoryId ?? before?.categoryId) as string | undefined
   const category = categoryId
     ? await prisma.itemCategory.findUnique({ where: { id: categoryId }, select: { name: true, parent: { select: { name: true } } } })
     : null
-  if (String(data.type ?? before?.type ?? '') !== 'FINISHED_GOOD' && isFabricCategory(category)) {
-    const designNo = data.designNo !== undefined ? cleanDesignNo(data.designNo) : ((before?.designNo as string | null | undefined) ?? null)
+  const notFinished = String(data.type ?? before?.type ?? '') !== 'FINISHED_GOOD'
+  const fabric = notFinished && isFabricCategory(category)
+  const thread = notFinished && !fabric && isThreadCategory(category)
+  if (cleanDesignNo(data.designNo) && !fabric) {
+    throw new AppError('Design No. is for fabric. File the item under a Fabric category, or clear the Design No.', 400, 'DESIGN_NOT_FABRIC')
+  }
+  if (fabric || thread) {
+    const designNo = fabric && data.designNo !== undefined ? cleanDesignNo(data.designNo) : fabric ? ((before?.designNo as string | null | undefined) ?? null) : null
     const color = data.color !== undefined ? cleanColour(data.color) : ((before?.color as string | null | undefined) ?? null)
     return { data: { ...data, styleId: null, designNo, color }, onSaveError: () => undefined }
   }
-  if (cleanDesignNo(data.designNo)) {
-    throw new AppError('Design No. is for fabric. File the item under a Fabric category, or clear the Design No.', 400, 'DESIGN_NOT_FABRIC')
-  }
   if (data.designNo !== undefined || before?.designNo) data = { ...data, designNo: null }
-  if (String(data.type ?? before?.type ?? '') !== 'FINISHED_GOOD' && cleanColour(data.color)) {
-    throw new AppError('Colour is for fabric and finished goods. File the item under a Fabric category, or clear the Colour.', 400, 'COLOUR_NOT_FABRIC')
+  if (notFinished && cleanColour(data.color)) {
+    throw new AppError('Colour is for fabric, thread and finished goods. File the item under a Fabric or Thread category, or clear the Colour.', 400, 'COLOUR_NOT_FABRIC')
   }
 
   const checked = await assertItemStyleColorValid(
