@@ -882,9 +882,12 @@ router.get('/direct/styles/:id', requirePermission(MODULE, 'view'), async (req, 
 /**
  * GET /direct/item-template?styleId=&colour= — what the item form starts at
  * for a style's colour with no finished item yet: like the style's other
- * colours (category, unit, HSN, rate), or the finished-goods category that is
- * plainly the style's. Only a suggestion: the item is added on the Items &
- * Products form itself, under its own permission, every field there to check.
+ * colours (category, unit, HSN), or the finished-goods category that is
+ * plainly the style's; its rate the cost per piece of the style's approved
+ * BOM for that colour (else its colourless one), so it matches the costing —
+ * none when it has no approved BOM with a cost. `rateFrom` says which BOM.
+ * Only a suggestion: the item is added on the Items & Products form itself,
+ * under its own permission, every field there to check.
  */
 router.get('/direct/item-template', requirePermission(MODULE, 'view'), async (req, res) => {
   const styleId = text(req.query.styleId)
@@ -904,11 +907,18 @@ router.get('/direct/item-template', requirePermission(MODULE, 'view'), async (re
       subCategoryId: cat?.parentId ? cat.id : undefined,
       uomId: t.uomId,
       hsnCode: t.hsnCode ?? undefined,
-      standardRate: t.standardRate != null ? Number(t.standardRate) : undefined,
     })
     copiedFrom = found.copiedFrom
   }
-  res.json({ success: true, data: { values, copiedFrom } })
+  // The rate: the approved BOM's cost per piece, this colour's or the style's colourless one.
+  const picked = await findBom(prisma, style.id, color || null)
+  const bom = picked ? await prisma.bOM.findUnique({ where: { id: picked.id }, select: { id: true, version: true, color: true, costPerPiece: true, approvedAt: true } }) : null
+  const rateFrom =
+    bom?.costPerPiece != null
+      ? { bomId: bom.id, style: style.code, version: bom.version, color: bom.color, costPerPiece: Number(bom.costPerPiece), approvedAt: bom.approvedAt }
+      : null
+  if (rateFrom) values.standardRate = rateFrom.costPerPiece
+  res.json({ success: true, data: { values, copiedFrom, rateFrom, bom: picked ? { version: picked.version, color: picked.color } : null } })
 })
 
 /**

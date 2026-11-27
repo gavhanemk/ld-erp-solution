@@ -7,6 +7,26 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { itemFormFields } from '@/components/masters/itemFormFields'
+import { formatDate } from '@/lib/utils'
+
+/** Where the item form's rate came from: the approved BOM's cost per piece. */
+interface RateFrom {
+  style: string
+  version: string
+  color: string | null
+  costPerPiece: number
+  approvedAt: string | null
+}
+
+/** The note under Standard Rate: which BOM it is, or why there is none. */
+function rateNote(code: string, rateFrom: RateFrom | null, bom: { version: string; color: string | null } | null) {
+  const which = (v: string, c: string | null) => `${code} BOM v${v} (${c || 'all colours'})`
+  if (rateFrom) {
+    return `From ${which(rateFrom.version, rateFrom.color)}${rateFrom.approvedAt ? `, approved ${formatDate(rateFrom.approvedAt)}` : ''}: its cost per piece, ₹${rateFrom.costPerPiece.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  }
+  if (bom) return `${which(bom.version, bom.color)} has no cost per piece yet: cost it on the BOM, or type the rate`
+  return `${code} has no approved BOM yet: type the rate, or leave it for later`
+}
 
 /** A style a direct order can make: switched on, out of sampling. */
 export interface DirectStyle {
@@ -80,7 +100,7 @@ export function DirectMoLines({
   disabled?: boolean
 }) {
   // A colour's finished item being added on the Items & Products form, and what it starts at.
-  const [adding, setAdding] = useState<{ styleId: string; values: Record<string, unknown> } | null>(null)
+  const [adding, setAdding] = useState<{ styleId: string; values: Record<string, unknown>; note: string } | null>(null)
   const [opening, setOpening] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const mayAddItem = can('masters.items', 'create')
@@ -104,8 +124,11 @@ export function DirectMoLines({
     setError(null)
     try {
       const qs = new URLSearchParams({ styleId: l.styleId, colour: l.color })
-      const r = await api.get<{ data: { values: Record<string, unknown> } }>(`/production/direct/item-template?${qs}`)
-      setAdding({ styleId: l.styleId, values: r.data.values })
+      const r = await api.get<{ data: { values: Record<string, unknown>; rateFrom: RateFrom | null; bom: { version: string; color: string | null } | null } }>(
+        `/production/direct/item-template?${qs}`
+      )
+      const code = styles.find((x) => x.id === l.styleId)?.code ?? 'The style'
+      setAdding({ styleId: l.styleId, values: r.data.values, note: rateNote(code, r.data.rateFrom, r.data.bom) })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not open the item form.')
     } finally {
@@ -298,7 +321,8 @@ export function DirectMoLines({
           columns={4}
           title="Item"
           resource="items"
-          fields={itemFormFields}
+          // Standard Rate says which BOM its figure is from.
+          fields={itemFormFields.map((f) => (f.name === 'standardRate' ? { ...f, help: adding.note } : f))}
           initialValues={adding.values}
           onClose={() => setAdding(null)}
           onSaved={() => void added()}

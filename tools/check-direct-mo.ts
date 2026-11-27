@@ -60,7 +60,18 @@ async function main() {
     check('no finished item for the colour: refused, saying to add it', noItem.status === 400 && noItem.body?.code === 'NO_ITEM' && /Add item/.test(noItem.body?.message ?? ''), noItem.body)
     const gone = await call('POST', '/production/direct/colour-item', { styleId: st.id, colour })
     check('no item is made by production on its own any more', gone.status === 404, gone.status)
-    const tpl = (await call('GET', `/production/direct/item-template?styleId=${st.id}&colour=${encodeURIComponent(colour)}`)).body?.data?.values
+    const tplRes = (await call('GET', `/production/direct/item-template?styleId=${st.id}&colour=${encodeURIComponent(colour)}`)).body?.data
+    const tpl = tplRes?.values
+    // Its rate: the approved BOM's cost per piece (the colour's, else the style's colourless one), and which BOM.
+    const boms = await prisma.bOM.findMany({ where: { styleId: st.id, status: 'APPROVED', isActive: true }, select: { version: true, color: true, costPerPiece: true, approvedAt: true, createdAt: true }, orderBy: [{ approvedAt: 'desc' }, { createdAt: 'desc' }] })
+    const want = boms.find((b) => (b.color ?? '').trim().toLowerCase() === colour.toLowerCase()) ?? boms.find((b) => !b.color?.trim()) ?? null
+    check(
+      "the rate is the approved BOM's cost per piece, and says which BOM",
+      want?.costPerPiece != null
+        ? tpl?.standardRate === Number(want.costPerPiece) && tplRes?.rateFrom?.version === want.version && tplRes?.rateFrom?.costPerPiece === Number(want.costPerPiece)
+        : tpl?.standardRate === undefined && tplRes?.rateFrom === null,
+      { want, got: tpl?.standardRate, rateFrom: tplRes?.rateFrom },
+    )
     check('the item form starts as a finished good of the style in that colour, like its other colours', tpl?.type === 'FINISHED_GOOD' && tpl?.styleId === st.id && tpl?.color === colour && !!tpl?.uomId && !!(tpl?.subCategoryId || tpl?.mainCategoryId), tpl)
     // Saved as the form saves it: through Items & Products.
     const made = await call('POST', '/masters/items', {
