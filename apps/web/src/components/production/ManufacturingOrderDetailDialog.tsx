@@ -130,11 +130,6 @@ interface PlanRow {
   defaultStoreId: string | null
   /** The process the material is most likely for, to start the plan filled in. */
   defaultProcessId: string | null
-  /**
-   * A fabric's own design / colour lines this order may draw — its brand's
-   * and the common ones — with what each has in stock (27 Nov 2026).
-   */
-  fabricLines?: Array<{ id: string; code: string; name: string; designNo: string | null; color: string | null; brand: string | null; qty: number }>
 }
 
 interface MaterialPlan {
@@ -147,7 +142,7 @@ interface MaterialPlan {
   processes: Array<{ id: string; name: string; kind: string; department: { id: string; name: string } }>
 }
 
-type Ask = Record<string, { on: boolean; qty: string; processId: string; warehouseId: string; stockItemId?: string }>
+type Ask = Record<string, { on: boolean; qty: string; processId: string; warehouseId: string }>
 
 /**
  * An order's sizes as GET /production/orders/:id/sizes gives them: each line's
@@ -293,14 +288,7 @@ export function ManufacturingOrderDetailDialog({
         Object.fromEntries(
           res.data.rows.map((r) => [
             r.key,
-            {
-              on: r.toRequest > 0,
-              qty: r.toRequest > 0 ? String(r.toRequest) : '',
-              processId: r.defaultProcessId ?? '',
-              warehouseId: r.defaultStoreId ?? '',
-              // The design / colour with the most in stock, until somebody picks another.
-              stockItemId: [...(r.fabricLines ?? [])].sort((x, y) => y.qty - x.qty)[0]?.id ?? '',
-            },
+            { on: r.toRequest > 0, qty: r.toRequest > 0 ? String(r.toRequest) : '', processId: r.defaultProcessId ?? '', warehouseId: r.defaultStoreId ?? '' },
           ])
         )
       )
@@ -467,7 +455,6 @@ export function ManufacturingOrderDetailDialog({
         requiredDate: requiredDate || null,
         lines: chosen.map(({ r, a }) => ({
           itemId: r.item.id,
-          stockItemId: a.stockItemId || null,
           processId: a.processId,
           warehouseId: a.warehouseId,
           qty: Number(a.qty),
@@ -951,23 +938,6 @@ export function ManufacturingOrderDetailDialog({
                                             r.ownership === 'CUSTOMER_OWNED' && <span className="badge-purple">Customer&apos;s</span>
                                           )}
                                         </div>
-                                        {/* Fabric bought by design and colour: which one this order draws.
-                                          Only this order's brand's and common fabric are offered. */}
-                                        {live && mayRaise && r.toRequest > 0 && (r.fabricLines?.length ?? 0) > 0 && (
-                                          <SmartSelect
-                                            className="form-input mt-1 h-8 w-64 py-0 text-xs"
-                                            value={a?.stockItemId ?? ''}
-                                            onChange={(e) => setRow(r.key, { stockItemId: e.target.value })}
-                                            aria-label={`Design and colour of ${r.item.code}`}
-                                          >
-                                            <option value="">The fabric, no design / colour</option>
-                                            {r.fabricLines!.map((f) => (
-                                              <option key={f.id} value={f.id} data-sub={`${qty(f.qty)} in stock${f.brand ? ` · ${f.brand}` : ' · common'}`}>
-                                                {[f.designNo ? `D.No ${f.designNo}` : null, f.color].filter(Boolean).join(' · ') || f.name}
-                                              </option>
-                                            ))}
-                                          </SmartSelect>
-                                        )}
                                       </td>
                                       <td className="text-xs">
                                         {live && mayRaise ? (

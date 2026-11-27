@@ -1,30 +1,27 @@
 import type { Panel, ReportDefinition } from '../types'
 import { round2, topWithRest } from './shared'
-import { asOnEnd, asOnFilter, asOnLabel, brandFilter, pctOf, rupees, warehouseFilter } from './inventory-shared'
+import { asOnEnd, asOnFilter, asOnLabel, pctOf, rupees, warehouseFilter } from './inventory-shared'
 
 /**
- * Fabric in the stores, by design, colour and brand (27 Nov 2026).
+ * Fabric in the stores, by design and colour (27 Nov 2026).
  *
- * Fabric is bought by design number and colour for one of the mill's own
- * brands, and each combination is a stock line of its own under the fabric
- * (lib/fabricLines). This lists them fabric by fabric — what came in, what
- * went out, what is left and what it is worth, as at any day — so the stock
- * and cost of a brand's fabric can be read on its own.
+ * Fabric items are set up one design and colour each in the Items master
+ * (lib/fabric). This lists them — what came in, what went out, what is left
+ * and what it is worth, as at any day. Brand is not on stock yet: it comes
+ * with the multi-brand allocation, which earmarks stock to a brand.
  */
 export const fabricStock: ReportDefinition = {
   id: 'fabric-stock',
   module: 'inventory',
-  title: 'Fabric Stock — Design, Colour & Brand',
+  title: 'Fabric Stock — Design & Colour',
   description:
-    'Fabric on hand fabric by fabric, by design number, colour and brand: received, issued, balance and value on any date.',
-  filters: [asOnFilter, warehouseFilter, brandFilter],
+    'Fabric on hand fabric by fabric, by design number and colour: received, issued, balance and value on any date.',
+  filters: [asOnFilter, warehouseFilter],
   columns: [
-    { key: 'fabricCode', label: 'Fabric Code', type: 'text', width: 14 },
+    { key: 'itemCode', label: 'Item Code', type: 'text', width: 14 },
     { key: 'fabric', label: 'Fabric', type: 'text', width: 30 },
     { key: 'designNo', label: 'Design No.', type: 'text', width: 12 },
     { key: 'colour', label: 'Colour', type: 'text', width: 14 },
-    { key: 'brand', label: 'Brand', type: 'text', width: 18 },
-    { key: 'itemCode', label: 'Stock Line', type: 'text', width: 16 },
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'received', label: 'Received', type: 'qty', total: 'sum' },
@@ -35,15 +32,15 @@ export const fabricStock: ReportDefinition = {
   ],
   summary: {
     title: 'Biggest fabric holdings by value',
-    columns: ['fabric', 'designNo', 'colour', 'brand', 'qty', 'uom', 'value'],
+    columns: ['fabric', 'designNo', 'colour', 'qty', 'uom', 'value'],
     by: 'value',
     limit: 12,
   },
   pivot: {
-    rows: ['brand', 'fabric', 'designNo', 'colour'],
+    rows: ['fabric', 'designNo', 'colour'],
     values: ['qty', 'value'],
     slicers: ['store'],
-    note: 'Open a brand to see its fabrics, a fabric to see its designs and colours.',
+    note: 'Open a fabric to see its designs, a design to see its colours.',
   },
 
   async run({ tx, params, rowCap }) {
@@ -51,11 +48,9 @@ export const fabricStock: ReportDefinition = {
     const found = await tx.$queryRaw<
       Array<{
         itemCode: string
-        fabricCode: string
         fabric: string
         designNo: string | null
         colour: string | null
-        brand: string | null
         store: string
         uom: string
         received: number
@@ -65,11 +60,9 @@ export const fabricStock: ReportDefinition = {
       }>
     >`
       SELECT i.code AS "itemCode",
-             COALESCE(p.code, i.code) AS "fabricCode",
-             COALESCE(p.name, i.name) AS fabric,
+             i.name AS fabric,
              i."designNo",
-             CASE WHEN i."parentItemId" IS NOT NULL THEN i.color END AS colour,
-             b.name AS brand,
+             i.color AS colour,
              w.name AS store,
              u.symbol AS uom,
              SUM(s."inQty")::float8 AS received,
@@ -78,29 +71,24 @@ export const fabricStock: ReportDefinition = {
              SUM((s."inQty" - s."outQty") * COALESCE(s."unitRate", 0))::float8 AS value
       FROM ld_erp.stock_ledger s
       JOIN ld_erp.items i ON i.id = s."itemId"
-      LEFT JOIN ld_erp.items p ON p.id = i."parentItemId"
-      JOIN ld_erp.item_categories c ON c.id = COALESCE(p."categoryId", i."categoryId")
+      JOIN ld_erp.item_categories c ON c.id = i."categoryId"
       LEFT JOIN ld_erp.item_categories pc ON pc.id = c."parentId"
       JOIN ld_erp.uom u ON u.id = i."uomId"
       JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
-      LEFT JOIN ld_erp.brands b ON b.id = i."brandId"
       WHERE s."transactionDate" <= ${end}
         AND s.ownership::text = 'OWNED'
         AND (c.name ILIKE '%fabric%' OR pc.name ILIKE '%fabric%')
         AND (${params.warehouseId ?? null}::text IS NULL OR s."warehouseId" = ${params.warehouseId ?? null})
-        AND (${params.brandId ?? null}::text IS NULL OR i."brandId" = ${params.brandId ?? null})
-      GROUP BY i.code, p.code, p.name, i.name, i."designNo", i."parentItemId", i.color, b.name, w.name, u.symbol
+      GROUP BY i.code, i.name, i."designNo", i.color, w.name, u.symbol
       HAVING ABS(SUM(s."inQty" - s."outQty")) > 0.0005 OR SUM(s."inQty") > 0
-      ORDER BY COALESCE(p.name, i.name), i."designNo" NULLS FIRST, i.color NULLS FIRST, b.name NULLS FIRST, w.name
+      ORDER BY i.name, i."designNo" NULLS FIRST, i.color NULLS FIRST, w.name
     `
 
     const rows = found.slice(0, rowCap).map((r) => ({
-      fabricCode: r.fabricCode,
+      itemCode: r.itemCode,
       fabric: r.fabric,
       designNo: r.designNo ?? '',
       colour: r.colour ?? '',
-      brand: r.brand ?? 'Common',
-      itemCode: r.itemCode,
       store: r.store,
       uom: r.uom,
       received: Math.round(r.received * 1000) / 1000,
@@ -116,41 +104,41 @@ export const fabricStock: ReportDefinition = {
       for (const r of rows) m.set(key(r), (m.get(key(r)) ?? 0) + r.value)
       return [...m].map(([label, v]) => ({ label, value: round2(v) })).sort((a, b) => b.value - a.value)
     }
-    const byBrand = sumBy((r) => r.brand)
     const byFabric = sumBy((r) => r.fabric)
+    const byStore = sumBy((r) => r.store)
     const lines = new Set(rows.map((r) => r.itemCode)).size
 
     const insights: string[] = []
-    if (byBrand.length > 1) insights.push(`${byBrand[0].label} holds the most fabric: ${rupees(byBrand[0].value)}, ${pctOf(byBrand[0].value, value)} of the value.`)
-    if (byFabric.length) insights.push(`${byFabric[0].label} is the biggest fabric holding at ${rupees(byFabric[0].value)}.`)
-    const common = rows.filter((r) => r.brand === 'Common' && r.qty > 0).length
-    if (common) insights.push(`${common} lines are common fabric, bought without a brand and open to every brand's orders.`)
+    if (byFabric.length) insights.push(`${byFabric[0].label} is the biggest fabric holding at ${rupees(byFabric[0].value)}, ${pctOf(byFabric[0].value, value)} of the value.`)
+    const plain = rows.filter((r) => !r.designNo && !r.colour && r.qty > 0).length
+    if (plain) insights.push(`${plain} fabric items have no design or colour set in the Items master.`)
 
     return {
       rows,
       totalRows: found.length > rowCap ? found.length : undefined,
       analysis: {
         headline: rows.length
-          ? `${lines} fabric lines as on ${asOnLabel(params)}, worth ${rupees(value)}.`
+          ? `${lines} fabric items as on ${asOnLabel(params)}, worth ${rupees(value)}.`
           : `No fabric in stock as on ${asOnLabel(params)} for these filters.`,
         kpis: [
           { label: 'Fabric value', value: rows.length ? value : null, format: 'money', basis: 'at average rate' },
-          { label: 'Fabric lines', value: rows.length ? lines : null, format: 'integer', basis: 'fabric × design × colour × brand' },
+          { label: 'Fabric items', value: rows.length ? lines : null, format: 'integer', basis: 'one design and colour each' },
           { label: 'Fabrics', value: rows.length ? byFabric.length : null, format: 'integer', basis: 'distinct fabrics' },
-          { label: 'Brands', value: rows.length ? byBrand.length : null, format: 'integer', basis: 'including common fabric' },
+          { label: 'Stores', value: rows.length ? byStore.length : null, format: 'integer', basis: 'holding fabric' },
         ],
         exceptions: [],
         panels: (
           [
-            { title: 'Fabric value by brand', question: 'composition', format: 'money', points: topWithRest(byBrand, 5) },
             { title: 'Biggest fabrics by value', question: 'pareto', format: 'money', points: byFabric.slice(0, 12) },
+            { title: 'Fabric value by store', question: 'composition', format: 'money', points: topWithRest(byStore, 5) },
           ] as Panel[]
         ).filter((p) => p.points.some((x) => x.value > 0)),
         insights,
         caveats: [
-          'Fabric is any item filed under a Fabric category. A fabric bought without a design, colour or brand is listed as itself, under Common.',
-          'Our own fabric only; a customer\'s fabric is in the Customer Material report.',
+          'Fabric is any item filed under a Fabric category, each with the Design No. and Colour set for it in the Items master.',
+          "Our own fabric only; a customer's fabric is in the Customer Material report.",
           'Value is at the average rate each line was received at.',
+          'Brand is not on stock yet. It comes with the multi-brand allocation, which earmarks these lines to a brand.',
         ],
       },
     }

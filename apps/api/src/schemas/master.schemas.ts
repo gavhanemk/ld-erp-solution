@@ -326,6 +326,8 @@ export const createItemSchema = z
     // lookup, so that lives in assertItemStyleColorValid instead.
     styleId: z.string().min(1, 'Choose a style').optional().nullable(),
     color: z.string().min(1, 'Choose a colour').max(50).optional().nullable(),
+    // A fabric's design number (lib/fabric). Only for an item filed under Fabric.
+    designNo: z.string().trim().max(40).optional().nullable(),
     // On an expense head: the TDS section a bill for it usually falls under.
     tdsSectionId: z.string().min(1).optional().nullable(),
     isActive,
@@ -349,10 +351,12 @@ export const createItemSchema = z
         path: ['styleId'],
       })
     }
-    if (v.type !== 'FINISHED_GOOD' && (v.styleId || v.color)) {
+    // A colour on anything else is a fabric's (lib/fabric), checked against
+    // its category when it is saved, where the category can be looked up.
+    if (v.type !== 'FINISHED_GOOD' && v.styleId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'Style and colour only apply to finished goods — clear them, or change the item type',
+        message: 'A style only applies to finished goods — clear it, or change the item type',
         path: ['styleId'],
       })
     }

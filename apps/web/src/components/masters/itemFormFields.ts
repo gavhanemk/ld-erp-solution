@@ -23,6 +23,15 @@ export const ITEM_TYPE_LABEL: Record<string, { label: string; cls: string }> = {
 /** A main category is one with no parent; a sub-category sits under one. */
 const isMain = (row: Record<string, unknown>) => !row.parentId
 
+/** Whether the category picked on the form (or the one above it) is a Fabric category. */
+function isFabric(v: Record<string, unknown>, rows: Record<string, Record<string, unknown>[]>) {
+  if (v.type === 'FINISHED_GOOD') return false
+  // Rows are kept under the field that loaded them; both category boxes load the categories.
+  const cats = [...(rows.subCategoryId ?? []), ...(rows.mainCategoryId ?? [])]
+  const named = (id: unknown) => String(cats.find((c) => c.id === id)?.name ?? '')
+  return /fabric/i.test(named(v.subCategoryId)) || /fabric/i.test(named(v.mainCategoryId))
+}
+
 /*
  * Four to a row, in two panels, so the whole item fits on one screen:
  *
@@ -158,6 +167,31 @@ export const itemFormFields: FormField[] = [
     optionsFromField: { field: 'styleId', resource: 'styles', arrayKey: 'colors' },
     showIf: (v) => v.type === 'FINISHED_GOOD' && Boolean(v.styleId),
     help: "One of the style's own colours — add more on the Style if it isn't listed",
+  },
+  /*
+   * A fabric's Design No. and Colour (27 Nov 2026), asked only when the item
+   * is filed under Fabric. Fabric is set up one design and colour per item,
+   * and a purchase order shows both, pre-filled, when it picks the item. The
+   * colour is saved in the item's own Colour, which a finished good's box
+   * above fills from its style instead.
+   */
+  {
+    name: 'designNo',
+    label: 'Design No.',
+    section: 'Identity',
+    placeholder: '1164',
+    showIf: (v, rows) => isFabric(v, rows),
+    help: 'As the mill writes it: D.No 1164',
+  },
+  {
+    name: 'fabricColour',
+    label: 'Colour',
+    section: 'Identity',
+    sendAs: 'color',
+    placeholder: 'Navy',
+    showIf: (v, rows) => isFabric(v, rows),
+    initial: (r) => (r.type === 'FINISHED_GOOD' ? '' : ((r.color as string | null) ?? '')),
+    help: 'One colour per item — set up another item for another colour',
   },
   { name: 'description', label: 'Description', type: 'textarea', section: 'Identity' },
   {

@@ -74,7 +74,6 @@ import { fillJobCardBlanks } from '../services/jobCard.service'
 import { SAMPLE_STORE_IDS, assertGeneralStores } from '../lib/sampleStore'
 import { assertLineQtyFitsUnits, assertQtyFitsUnits, assertRequisitionFitsUnits } from '../services/unitQuantity.service'
 import { orderBrand } from '../lib/orderBrand'
-import { assertFabricForMoBrand } from '../lib/fabricLines'
 
 /** A customer's receipt's quantities, each against its item: what their challan said, what came, what was refused. */
 const customerGrnQtys = (data: { lines: Array<{ itemId: string; challanQty?: number | null; receivedQty: number; rejectedQty?: number | null }> }) =>
@@ -1620,8 +1619,6 @@ export async function createRequisition(
   // The order it is for — named, or its MO's — and every customer-owned line
   // that customer's, for a job-work order of theirs.
   const order = await assertOwnersFitOrder(tx, { soId: data.soId, moId: data.moId, doc: 'requisition' }, data.lines)
-  // An MO draws its own brand's fabric or common fabric, never another brand's.
-  await assertFabricForMoBrand(tx, data.moId, data.lines.map((l) => l.itemId))
 
   // Sales order -> MO -> requisition -> issue. Material for a sales order is
   // asked for through its manufacturing order, so what the floor draws is
@@ -1774,7 +1771,6 @@ router.patch('/requisitions/:id/link-mo', requirePermission(MODULE, 'edit'), asy
     await lockRequisition(tx, before.id)
     // A customer's material still has to belong to that customer's job-work order.
     await assertOwnersFitOrder(tx, { soId: before.soId, moId: mo.id, doc: 'requisition' }, before.lines)
-    await assertFabricForMoBrand(tx, mo.id, before.lines.map((l) => l.itemId))
     const n = await tx.materialRequisition.updateMany({ where: { id: before.id, moId: null }, data: { moId: mo.id } })
     if (n.count !== 1) throw new AppError(`${before.mrNumber} was linked to an MO a moment ago. Reopen it.`, 409, 'ALREADY_LINKED')
     return tx.materialRequisition.findUniqueOrThrow({ where: { id: before.id }, include: mrInclude })

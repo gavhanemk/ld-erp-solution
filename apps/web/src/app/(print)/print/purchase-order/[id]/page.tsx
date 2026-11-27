@@ -59,11 +59,9 @@ interface Line {
   item: {
     code: string
     name: string
-    /** A fabric's own stock line carries its design and colour. */
+    /** A fabric's design and colour, from the Items master. */
     designNo?: string | null
     color?: string | null
-    /** The fabric a design / colour line sits under. */
-    parentItem?: { name: string } | null
     uom?: { symbol: string } | null
     category?: { name: string; parent?: { name: string } | null } | null
   }
@@ -286,8 +284,7 @@ export default function PrintPurchaseOrder() {
         sn: <span style={NUM}>{i + 1}</span>,
         item: (
           <>
-            {/* A fabric's own line prints as the fabric; its design and colour have a column. */}
-            <div style={{ fontWeight: 700 }}>{line.item.parentItem?.name ?? line.item.name}</div>
+            <div style={{ fontWeight: 700 }}>{line.item.name}</div>
             {sub && <SubLine>{sub}</SubLine>}
           </>
         ),

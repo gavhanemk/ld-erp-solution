@@ -4,6 +4,7 @@ import { createItemSchema } from '../schemas/master.schemas'
 import { assertItemFitsCategory } from '../services/itemGroups.service'
 import { assertUniqueFields } from './crud'
 import { assertItemStyleColorValid, rethrowItemStyleColorClash } from './itemStyleColor'
+import { cleanColour, cleanDesignNo, isFabricCategory } from './fabric'
 import { isGeneratedCode, withGeneratedCode } from './masterCode'
 
 /**
@@ -74,6 +75,29 @@ export async function itemBeforeSave(
   data = await departmentFromCategory(data, before)
   // A finished good is never filed under Fabric, nor a button under Finished Goods.
   await assertItemFitsCategory(data, before)
+
+  /*
+   * A fabric is set up one design and colour per item (lib/fabric): filed
+   * under Fabric, it keeps the Design No. and Colour typed for it. Anything
+   * else carries no design number, and only a finished good a colour.
+   */
+  const categoryId = (data.categoryId ?? before?.categoryId) as string | undefined
+  const category = categoryId
+    ? await prisma.itemCategory.findUnique({ where: { id: categoryId }, select: { name: true, parent: { select: { name: true } } } })
+    : null
+  if (String(data.type ?? before?.type ?? '') !== 'FINISHED_GOOD' && isFabricCategory(category)) {
+    const designNo = data.designNo !== undefined ? cleanDesignNo(data.designNo) : ((before?.designNo as string | null | undefined) ?? null)
+    const color = data.color !== undefined ? cleanColour(data.color) : ((before?.color as string | null | undefined) ?? null)
+    return { data: { ...data, styleId: null, designNo, color }, onSaveError: () => undefined }
+  }
+  if (cleanDesignNo(data.designNo)) {
+    throw new AppError('Design No. is for fabric. File the item under a Fabric category, or clear the Design No.', 400, 'DESIGN_NOT_FABRIC')
+  }
+  if (data.designNo !== undefined || before?.designNo) data = { ...data, designNo: null }
+  if (String(data.type ?? before?.type ?? '') !== 'FINISHED_GOOD' && cleanColour(data.color)) {
+    throw new AppError('Colour is for fabric and finished goods. File the item under a Fabric category, or clear the Colour.', 400, 'COLOUR_NOT_FABRIC')
+  }
+
   const checked = await assertItemStyleColorValid(
     String(data.type ?? before?.type ?? ''),
     (data.styleId !== undefined ? data.styleId : before?.styleId) as string | null | undefined,
@@ -96,6 +120,22 @@ export async function itemBeforeSave(
 export const ITEM_UNIQUE_FIELDS = ['name']
 
 /**
+ * Where an item's name has to be unique. A finished good: among all items, as
+ * before. Anything else: among items of the same design number and colour, so
+ * "Cotton Twill" can be set up once for each design and colour it comes in.
+ * Other items have neither, so for them nothing changes.
+ */
+export function itemUniqueScope(data: Record<string, unknown>, before?: Record<string, unknown>) {
+  if (String(data.type ?? before?.type ?? '') === 'FINISHED_GOOD') return undefined
+  const designNo = cleanDesignNo(data.designNo !== undefined ? data.designNo : before?.designNo)
+  const color = cleanColour(data.color !== undefined ? data.color : before?.color)
+  return {
+    designNo: designNo ? { equals: designNo, mode: 'insensitive' } : null,
+    color: color ? { equals: color, mode: 'insensitive' } : null,
+  }
+}
+
+/**
  * Adds an item exactly as Masters → Items does (the factory's POST): the
  * item schema, a name no other item has, the department from the category,
  * the finished-good rules, and a code made from the category (FAB-007).
@@ -110,7 +150,7 @@ export async function createItemRecord(raw: unknown, opts: { types?: readonly st
       400,
       'ITEM_TYPE_NOT_ALLOWED',
     )
-  await assertUniqueFields('item', ITEM_UNIQUE_FIELDS, parsed)
+  await assertUniqueFields('item', ITEM_UNIQUE_FIELDS, parsed, undefined, undefined, itemUniqueScope(parsed))
   const { data, onSaveError } = await itemBeforeSave(parsed)
   try {
     if (isGeneratedCode('item') && !data.code)

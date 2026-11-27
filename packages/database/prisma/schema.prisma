@@ -978,7 +978,6 @@ model Brand {
   quotations          SalesQuotation[] @relation("QuoteBrand")
   styles              Style[]
   costCentre          CostCentre?
-  items               Item[]           @relation("ItemBrand")
   purchaseOrders      PurchaseOrder[]  @relation("PurchaseOrderBrand")
 
   @@map("brands")
@@ -1261,15 +1260,10 @@ model Item {
   styleId      String?
   style        Style?       @relation(fields: [styleId], references: [id])
   color        String?
-  /// A fabric's own stock line (27 Nov 2026): the fabric it sits under, and the
-  /// design number, colour and in-house brand that keep its stock apart. Made by
-  /// the server from a purchase order row, never typed in the Items master.
-  parentItemId String?
-  parentItem   Item?        @relation("ItemVariants", fields: [parentItemId], references: [id], onDelete: Restrict)
-  variants     Item[]       @relation("ItemVariants")
+  /// A fabric's design number (27 Nov 2026), with its colour in `color`: set in
+  /// the Items master for an item filed under Fabric, one design and colour per
+  /// item, and shown on every purchase order that picks it.
   designNo     String?
-  brandId      String?
-  brand        Brand?       @relation("ItemBrand", fields: [brandId], references: [id], onDelete: Restrict)
   imageUrl     String?
   /// Its stickers, remembered from the last time somebody ticked "remember":
   /// what one package is, and how much one sticker holds. Empty means the
@@ -1319,8 +1313,6 @@ model Item {
   @@index([code])
   @@index([type])
   @@index([departmentId])
-  @@index([parentItemId])
-  @@index([brandId])
   reservations StockReservation[] @relation("ItemReservations")
   @@map("items")
   customerGrnLines    CustomerGRNLine[]    @relation("CustomerGRNLines")
@@ -2761,8 +2753,9 @@ model PurchaseOrder {
   @@index([enquiryId])
   @@index([enquiryQuoteId])
   /// Every list of orders filters on this, so it earns an index of its own.
-  /// The in-house brand the purchase is for (27 Nov 2026). Optional: blank is a
-  /// common purchase. A fabric line's stock is kept under this brand.
+  /// The in-house brand the purchase is for (27 Nov 2026): a purchase and
+  /// accounting reference. Optional: blank is a common purchase. No stock
+  /// effect yet; the multi-brand allocation will earmark what arrives to it.
   brandId String?
   brand   Brand?  @relation("PurchaseOrderBrand", fields: [brandId], references: [id], onDelete: SetNull)
 

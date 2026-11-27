@@ -25,7 +25,7 @@ import { findHsn, loadHsnIndex, withHsnRates } from '../lib/hsn'
 import { hsnUses } from '../lib/hsnUses'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
-import { itemBeforeSave, itemInclude, ITEM_UNIQUE_FIELDS } from '../lib/itemMaster'
+import { itemBeforeSave, itemInclude, itemUniqueScope, ITEM_UNIQUE_FIELDS } from '../lib/itemMaster'
 import { styleInDevelopment } from '../lib/styleStage'
 import {
   assertVersionFree,
@@ -816,8 +816,10 @@ router.use(
     entityType: 'Item',
     createSchema: createItemSchema,
     updateSchema: updateItemSchema,
-    // No two with the same name (ignoring capitals and spaces).
+    // No two with the same name (ignoring capitals and spaces) — a fabric's
+    // name once for each design and colour it comes in (lib/fabric).
     uniqueFields: ITEM_UNIQUE_FIELDS,
+    uniqueScope: itemUniqueScope,
     // Typing "linen" finds linen items by their category as well as their
     // name; "cutting" finds what the cutting floor uses.
     searchFields: [
@@ -845,11 +847,6 @@ router.use(
       subCategoryId: { where: (v) => ({ categoryId: { in: v } }), facets: ['categoryId'] },
       departmentId: { where: noneOr('departmentId'), facets: ['departmentId'] },
       uomId: { where: (v) => ({ uomId: { in: v } }), facets: ['uomId'] },
-      // A fabric's own stock lines (lib/fabricLines): `0` leaves them out —
-      // the purchase order picks the fabric and types the design and colour —
-      // `1` lists only them, and `parentItemId` one fabric's.
-      fabricLines: { where: (v) => (v.includes('1') ? { parentItemId: { not: null } } : { parentItemId: null }) },
-      parentItemId: { where: (v) => ({ parentItemId: { in: v } }) },
       // The tab of Items & Products: by the category the item is filed under.
       group: {
         where: (v) => ({ category: { itemGroup: { in: v.filter((g) => ITEM_GROUPS.has(g)) as ItemGroup[] } } }),

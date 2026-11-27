@@ -12,7 +12,7 @@ import { writeAuditLog } from '../lib/audit'
 import { postWithin } from '../services/accounts/posting.service'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { reclaimDocumentNumber, releaseDocumentNumber, releasedNumber, shownNumber } from '../lib/numberSeries'
-import { assertInHouseBrand, fabricLineItems } from '../lib/fabricLines'
+import { assertInHouseBrand } from '../lib/fabric'
 import { priceNote, notedQtyByGrnLine, syncBillAdjustments } from '../services/purchaseNote.service'
 import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
@@ -110,13 +110,6 @@ const lineSchema = z.object({
    */
   sampleMaterialId: z.string().optional().nullable(),
   sampleOverReason: z.string().trim().max(300).optional().nullable(),
-  /*
-   * A fabric's design number and colour (27 Nov 2026). With the order's brand
-   * they decide which of the fabric's own stock lines the line is bought into —
-   * see lib/fabricLines. Ignored for anything that is not fabric.
-   */
-  designNo: z.string().trim().max(40).optional().nullable(),
-  color: z.string().trim().max(40).optional().nullable(),
 })
 
 /**
@@ -282,12 +275,10 @@ const poInclude = {
           code: true,
           name: true,
           hsnCode: true,
-          // A fabric's own stock line: its design and colour (printed in the
-          // order's Design / Colour column), its brand, and the fabric it sits under.
+          // A fabric's design and colour, from the Items master, printed in
+          // the order's Design / Colour column.
           color: true,
           designNo: true,
-          brandId: true,
-          parentItem: { select: { id: true, code: true, name: true, category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } } } },
           uom: { select: { symbol: true } },
           // The category, and its parent where it has one. An item sits in
           // whichever level it was filed under, so the parent is what the list
@@ -1398,9 +1389,8 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
       toCustomer: Boolean(data.deliveryCustomerId),
     })
 
-    // Fabric goes into its own stock line for its design, colour and brand.
+    // The in-house brand the purchase is for: a reference on the order only.
     const brand = await assertInHouseBrand(tx, data.brandId)
-    const lineItemIds = await fabricLineItems(tx, data.lines, brand?.id ?? null)
 
     const charges = await resolveCharges(tx, data.charges ?? [], { canOverride: userCan(req.user, 'masters', 'edit') })
 
@@ -1455,7 +1445,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         charges: { create: priced.chargeRows },
         lines: {
           create: data.lines.map((l, i) => ({
-            itemId: lineItemIds[i],
+            itemId: l.itemId,
             description: l.description ?? null,
             styleNo: l.styleNo?.trim() || null,
             styleId: l.styleId || null,
@@ -1624,7 +1614,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
   }
 
   const after = await prisma.$transaction(async (tx) => {
-    const brandId = data.brandId !== undefined ? (await assertInHouseBrand(tx, data.brandId))?.id ?? null : before.brandId
+    if (data.brandId) await assertInHouseBrand(tx, data.brandId)
     if (data.lines) {
       // The delivery address is resolved again rather than carried over from
       // when the order was first raised, as a customer may have been picked or
@@ -1696,8 +1686,6 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
         ),
       })
 
-      const lineItemIds = await fabricLineItems(tx, data.lines, brandId)
-
       const priced = priceOrder(
         data.lines,
         orderDiscountOf(
@@ -1720,7 +1708,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       await tx.purchaseOrderLine.createMany({
         data: data.lines.map((l, i) => ({
           poId: before.id,
-          itemId: lineItemIds[i],
+          itemId: l.itemId,
           description: l.description ?? null,
           styleNo: l.styleNo?.trim() || null,
           styleId: l.styleId || null,
@@ -1765,14 +1753,6 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
         },
         include: poInclude,
       })
-    }
-
-    // The brand changed without the lines: the fabric lines move to the new brand's stock lines.
-    if (brandId !== before.brandId) {
-      const moved = await fabricLineItems(tx, before.lines.map((l) => ({ itemId: l.itemId })), brandId)
-      for (const [i, l] of before.lines.entries()) {
-        if (moved[i] !== l.itemId) await tx.purchaseOrderLine.update({ where: { id: l.id }, data: { itemId: moved[i] } })
-      }
     }
 
     return tx.purchaseOrder.update({

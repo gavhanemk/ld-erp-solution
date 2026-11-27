@@ -211,7 +211,6 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
       id: true,
       moNumber: true,
       status: true,
-      brandId: true,
       so: { select: { id: true, soNumber: true, customerId: true, isJobWork: true, customer: { select: { name: true } } } },
       steps: { select: { departmentId: true, sequence: true, sizeChanges: { where: { undoneAt: null }, select: { id: true }, take: 1 } } },
       lines: {
@@ -342,24 +341,7 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     }
   }
 
-  const planItemIds = [...new Set([...rows.values()].map((r) => r.item.id))]
-  /*
-   * A fabric's own stock lines (design, colour, brand — lib/fabricLines). Its
-   * stock is the fabric's stock, and what is asked of them is asked of the
-   * fabric. Only this order's brand's lines and the common ones are offered:
-   * one brand's fabric goes to another only by a stock transfer first.
-   */
-  const variants = planItemIds.length
-    ? await db.item.findMany({
-        where: { parentItemId: { in: planItemIds } },
-        select: { id: true, code: true, name: true, parentItemId: true, designNo: true, color: true, brandId: true, isActive: true, brand: { select: { name: true } } },
-        orderBy: { code: 'asc' },
-      })
-    : []
-  const parentOf = new Map(variants.map((v) => [v.id, v.parentItemId as string]))
-  const usable = variants.filter((v) => v.isActive && (!v.brandId || v.brandId === mo.brandId))
-  const baseOf = (itemId: string) => parentOf.get(itemId) ?? itemId
-  const itemIds = [...planItemIds, ...usable.map((v) => v.id)]
+  const itemIds = [...new Set([...rows.values()].map((r) => r.item.id))]
   const [stock, warehouses, asked] = await Promise.all([
     itemIds.length
       ? db.stockLedger.groupBy({
@@ -397,33 +379,16 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
   }
 
   const data = [...rows.values()].map((r) => {
-    const held = stock.filter(
-      (s) => baseOf(s.itemId) === r.item.id && s.ownership === r.ownership && (s.ownerCustomerId ?? null) === r.ownerCustomerId,
-    )
-    // One line per store, the fabric's lines added together.
-    const byStore = new Map<string, number>()
-    for (const s of held) byStore.set(s.warehouseId, (byStore.get(s.warehouseId) ?? 0) + Number(s._sum.inQty ?? 0) - Number(s._sum.outQty ?? 0))
-    const stores = [...byStore]
-      .map(([id, qty]) => ({ id, name: storeName.get(id) ?? 'Store', qty: round3(qty) }))
+    const stores = stock
+      .filter((s) => s.itemId === r.item.id && s.ownership === r.ownership && (s.ownerCustomerId ?? null) === r.ownerCustomerId)
+      .map((s) => ({ id: s.warehouseId, name: storeName.get(s.warehouseId) ?? 'Store', qty: round3(Number(s._sum.inQty ?? 0) - Number(s._sum.outQty ?? 0)) }))
       .filter((s) => s.qty > 0 && storeName.has(s.id))
       .sort((a, b) => b.qty - a.qty)
-    // The design / colour lines this order may draw, with what each has in stock.
-    const fabricLines = usable
-      .filter((v) => v.parentItemId === r.item.id)
-      .map((v) => ({
-        id: v.id,
-        code: v.code,
-        name: v.name,
-        designNo: v.designNo,
-        color: v.color,
-        brand: v.brand?.name ?? null,
-        qty: round3(held.filter((s) => s.itemId === v.id).reduce((n, s) => n + Number(s._sum.inQty ?? 0) - Number(s._sum.outQty ?? 0), 0)),
-      }))
     const inStock = round3(stores.reduce((s, x) => s + x.qty, 0))
     const single = rowsOf.get(`${r.item.id}|${r.ownership}|${r.ownerCustomerId ?? ''}`) === 1
     const mine = asked.filter(
       (a) =>
-        baseOf(a.itemId) === r.item.id &&
+        a.itemId === r.item.id &&
         a.ownership === r.ownership &&
         (a.ownerCustomerId ?? null) === r.ownerCustomerId &&
         (single || a.mr.departmentId === (r.department?.id ?? null)),
@@ -454,7 +419,6 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
       short: round3(Math.max(0, toRequest - inStock)),
       stores,
       defaultStoreId: stores[0]?.id ?? warehouses[0]?.id ?? null,
-      fabricLines,
     }
   })
 

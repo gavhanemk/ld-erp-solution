@@ -123,6 +123,9 @@ export function NewItemDialog<T = NewItem>({
   const [uomId, setUomId] = useState('')
   const [hsnCode, setHsnCode] = useState('')
   const [description, setDescription] = useState('')
+  // A fabric's Design No. and Colour (27 Nov 2026), as Masters → Items asks them.
+  const [designNo, setDesignNo] = useState('')
+  const [colour, setColour] = useState('')
   const [rate, setRate] = useState('')
   const [reorderLevel, setReorderLevel] = useState('')
   const [minStock, setMinStock] = useState('')
@@ -161,6 +164,10 @@ export function NewItemDialog<T = NewItem>({
     () => categories.filter((c) => c.parentId === categoryId),
     [categories, categoryId]
   )
+  // Filed under Fabric: one design and colour per item, asked here as in the master.
+  const isFabric = [categoryId, subcategoryId].some((id) =>
+    /fabric/i.test(categories.find((c) => c.id === id)?.name ?? '')
+  )
 
   const problems = useMemo(() => {
     const out: string[] = []
@@ -191,6 +198,8 @@ export function NewItemDialog<T = NewItem>({
         uomId,
         ...(hsnCode.trim() ? { hsnCode: hsnCode.trim() } : {}),
         ...(description.trim() ? { description: description.trim() } : {}),
+        ...(isFabric && designNo.trim() ? { designNo: designNo.trim() } : {}),
+        ...(isFabric && colour.trim() ? { color: colour.trim() } : {}),
         // Each left out entirely when blank rather than sent as zero. Zero is a
         // real reorder level — "tell me the moment it runs out" — and is not
         // the same answer as "nobody has decided one".
@@ -215,6 +224,9 @@ export function NewItemDialog<T = NewItem>({
     uomId,
     hsnCode,
     description,
+    isFabric,
+    designNo,
+    colour,
     rate,
     reorderLevel,
     minStock,
@@ -331,6 +343,39 @@ export function NewItemDialog<T = NewItem>({
                 autoFocus
               />
             </div>
+
+            {isFabric && (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="form-label" htmlFor="ni-design">
+                    Design No.
+                  </label>
+                  <input
+                    id="ni-design"
+                    value={designNo}
+                    onChange={(e) => setDesignNo(e.target.value)}
+                    placeholder="1164"
+                    maxLength={40}
+                    className="form-input"
+                  />
+                  <p className="form-help">As the mill writes it: D.No 1164</p>
+                </div>
+                <div>
+                  <label className="form-label" htmlFor="ni-colour">
+                    Colour
+                  </label>
+                  <input
+                    id="ni-colour"
+                    value={colour}
+                    onChange={(e) => setColour(e.target.value)}
+                    placeholder="Navy"
+                    maxLength={50}
+                    className="form-input"
+                  />
+                  <p className="form-help">One colour per item — another colour is another item.</p>
+                </div>
+              </div>
+            )}
 
             <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               {codeTyped && (

@@ -27,7 +27,7 @@ export const materialConsumption: ReportDefinition = {
     warehouseFilter,
     categoryFilter,
     itemFilter,
-    // The brand the material was used for: the manufacturing order's, else the material's own.
+    // The brand the material was used for: its manufacturing order's.
     brandFilter,
   ],
   columns: [
@@ -40,9 +40,8 @@ export const materialConsumption: ReportDefinition = {
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
-    // Fabric by design and colour (lib/fabricLines), and the brand it was used
-    // for — so material cost can be read brand by brand and fabric by fabric.
-    { key: 'fabric', label: 'Fabric', type: 'text', width: 24 },
+    // A fabric's design and colour (lib/fabric), and the brand it was used for
+    // (its MO's) — so material cost can be read brand by brand and fabric by fabric.
     { key: 'designNo', label: 'Design No.', type: 'text', width: 12 },
     { key: 'colour', label: 'Colour', type: 'text', width: 12 },
     { key: 'brand', label: 'Brand', type: 'text', width: 16 },
@@ -118,8 +117,6 @@ export const materialConsumption: ReportDefinition = {
             categoryId: true,
             designNo: true,
             color: true,
-            parentItem: { select: { name: true } },
-            brand: { select: { id: true, name: true } },
             uom: { select: { symbol: true } },
           },
         },
@@ -144,7 +141,7 @@ export const materialConsumption: ReportDefinition = {
     const all = issues.map((i) => {
       const mr = i.referenceId ? mrById.get(i.referenceId) : undefined
       const line = mr?.lines.find((l) => l.itemId === i.itemId)
-      const brand = mr?.mo?.brand ?? i.item.brand ?? null
+      const brand = mr?.mo?.brand ?? null
       const qty = Math.round((Number(i.outQty) - Number(i.inQty)) * 1000) / 1000
       const rate = Number(i.unitRate ?? 0)
       return {
@@ -157,9 +154,8 @@ export const materialConsumption: ReportDefinition = {
         category: cats.names(i.item.categoryId).category,
         itemCode: i.item.code,
         item: i.item.name,
-        fabric: i.item.parentItem?.name ?? '',
         designNo: i.item.designNo ?? '',
-        colour: i.item.parentItem ? (i.item.color ?? '') : '',
+        colour: i.item.color ?? '',
         brand: brand?.name ?? '',
         brandId: brand?.id ?? null,
         moNumber: mr?.mo?.moNumber ?? '',

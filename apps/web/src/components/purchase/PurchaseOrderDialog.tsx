@@ -155,13 +155,6 @@ export interface PoLine {
   /** Set by the server on a saved line that buys for a sample. */
   sampleMaterial?: SampleMaterialRef | null
   /**
-   * A fabric's design number and colour (27 Nov 2026). With the order's brand
-   * they pick the fabric's own stock line, which the server makes the first
-   * time — see lib/fabricLines on the API. Only asked on a fabric row.
-   */
-  designNo?: string | null
-  color?: string | null
-  /**
    * Whether `discount` is a percentage or a number of rupees.
    *
    * Browser only. A stored line keeps a percentage, so a rupee figure is
@@ -203,26 +196,10 @@ export interface PoLine {
     hsnCode: string | null
     uom?: { symbol: string } | null
     category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
-    /** A fabric's own stock line: its design, colour and brand, and the fabric it sits under. */
+    /** A fabric's design and colour, as set on the item in the Items master. */
     designNo?: string | null
     color?: string | null
-    brandId?: string | null
-    parentItem?: {
-      id: string
-      code: string
-      name: string
-      category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
-    } | null
   }
-}
-
-/** One of a fabric's own stock lines, offered back as a design / colour already bought. */
-interface FabricLineOption {
-  id: string
-  parentItemId: string | null
-  designNo: string | null
-  color: string | null
-  brandId: string | null
 }
 
 /** Fabric is asked its design number and colour; nothing else is. */
@@ -380,6 +357,9 @@ interface Option {
   buyUnits?: Array<{ factor: string | number; isDefault: boolean; uom: { id: string; symbol: string; decimalPlaces?: number } }>
   categoryId?: string | null
   category?: { id: string; name: string } | null
+  /** A fabric's design number and colour, set in the Items master. */
+  designNo?: string | null
+  color?: string | null
   parentId?: string | null
   address?: string | null
   city?: string | null
@@ -674,8 +654,6 @@ export function PurchaseOrderDialog({
   // The in-house brand this purchase is for (Masters → In House Brands); blank for a common one.
   const [brandId, setBrandId] = useState('')
   const [brands, setBrands] = useState<Array<{ id: string; name: string }>>([])
-  // Designs and colours each fabric has been bought in, offered as the row is typed.
-  const [fabricLines, setFabricLines] = useState<FabricLineOption[]>([])
   /// The indent lines taken onto this order, and the reference they last wrote:
   /// the box follows them until somebody types in it themselves.
   const [indentRows, setIndentRows] = useState<IndentRow[]>([])
@@ -908,15 +886,10 @@ export function PurchaseOrderDialog({
     setLines(
       record?.lines?.length
         ? record.lines.map((l) => {
-            // A fabric's own stock line reopens as the fabric, with its design
-            // and colour in their boxes; saving finds the same line again.
-            const base = l.item?.parentItem ?? null
-            const cat = categories.find((c) => c.id === (base?.category ?? l.item?.category)?.id)
+            const cat = categories.find((c) => c.id === l.item?.category?.id)
             return {
-              itemId: base?.id ?? l.itemId,
-              codeText: base?.code ?? l.item?.code ?? '',
-              designNo: base ? (l.item?.designNo ?? '') : '',
-              color: base ? (l.item?.color ?? '') : '',
+              itemId: l.itemId,
+              codeText: l.item?.code ?? '',
               // Reopened at the level the item is actually filed under, so the
               // two dropdowns agree with the item beside them.
               categoryId: cat?.parentId ?? cat?.id ?? '',
@@ -1176,8 +1149,7 @@ export function PurchaseOrderDialog({
 
     void Promise.all([
       masterResource<Option>('suppliers').list({ limit: 500, active: true }),
-      // The fabrics themselves; their design / colour lines are picked by typing.
-      masterResource<Option>('items').list({ limit: 500, active: true, fabricLines: '0' }),
+      masterResource<Option>('items').list({ limit: 500, active: true }),
       masterResource<Option>('warehouses').list({ limit: 100, active: true }),
       masterResource<Option>('customers').list({ limit: 500, active: true }),
       masterResource<Option>('item-categories')
@@ -1230,13 +1202,9 @@ export function PurchaseOrderDialog({
       masterResource<{ id: string; name: string }>('brands')
         .list({ limit: 100, active: true, type: 'LD_COTTON_MILLS,VHAGAR' })
         .catch(() => null),
-      masterResource<FabricLineOption>('items')
-        .list({ limit: 1000, active: true, fabricLines: '1' })
-        .catch(() => null),
-    ]).then(([s, i, w, cust, c, st, ct, hc, co, ns, dflt, br, fl]) => {
+    ]).then(([s, i, w, cust, c, st, ct, hc, co, ns, dflt, br]) => {
       if (cancelled) return
       setBrands(br?.data ?? [])
-      setFabricLines(fl?.data ?? [])
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
       setWarehouses((w as Paginated<Option>).data)
@@ -1875,11 +1843,10 @@ export function PurchaseOrderDialog({
   /**
    * Design No. and Colour, under a fabric row only (27 Nov 2026).
    *
-   * Fabric is stocked by design, colour and the order's brand — each its own
-   * stock line under the fabric, made by the server the first time — so these
-   * are boxes of their own rather than words in the description. What the
-   * fabric has been bought in before is offered as the box is typed in.
-   * Any other item shows nothing here.
+   * A fabric item is one design and colour, set in the Items master, so they
+   * come filled in from the item the row picks and are not typed here —
+   * another design or colour is another item (+ Add a new item… asks for
+   * both). Any other item shows nothing here.
    */
   const fabricBoxes = (line: PoLine, i: number, cell: string) => {
     const it = itemById.get(line.itemId)
@@ -1887,39 +1854,25 @@ export function PurchaseOrderDialog({
     const filed = categories.find((c) => c.id === it.categoryId)
     const parent = filed?.parentId ? categories.find((c) => c.id === filed.parentId) : null
     if (!FABRIC.test(filed?.name ?? '') && !FABRIC.test(parent?.name ?? '')) return null
-    const known = fabricLines.filter((f) => f.parentItemId === line.itemId)
-    const designs = [...new Set(known.map((f) => f.designNo).filter((d): d is string => Boolean(d)))]
-    const colours = [...new Set(known.map((f) => f.color).filter((c): c is string => Boolean(c)))]
+    const box = `${cell} bg-muted/40 cursor-default`
     return (
-      <div className="mt-1 grid grid-cols-2 gap-1">
+      <div className="mt-1 grid grid-cols-2 gap-1" title="From the item in Masters → Items">
         <input
-          className={cell}
-          placeholder="Design No."
-          list={`po-designs-${i}`}
-          value={line.designNo ?? ''}
-          onChange={(e) => setLine(i, { designNo: e.target.value })}
+          className={box}
+          readOnly
+          tabIndex={-1}
+          placeholder="No design no."
+          value={it.designNo ? `D.No ${it.designNo}` : ''}
           aria-label={`Row ${i + 1} design number`}
-          maxLength={40}
         />
         <input
-          className={cell}
-          placeholder="Colour"
-          list={`po-colours-${i}`}
-          value={line.color ?? ''}
-          onChange={(e) => setLine(i, { color: e.target.value })}
+          className={box}
+          readOnly
+          tabIndex={-1}
+          placeholder="No colour"
+          value={it.color ?? ''}
           aria-label={`Row ${i + 1} colour`}
-          maxLength={40}
         />
-        <datalist id={`po-designs-${i}`}>
-          {designs.map((d) => (
-            <option key={d} value={d} />
-          ))}
-        </datalist>
-        <datalist id={`po-colours-${i}`}>
-          {colours.map((c) => (
-            <option key={c} value={c} />
-          ))}
-        </datalist>
       </div>
     )
   }
@@ -2030,12 +1983,8 @@ export function PurchaseOrderDialog({
     }
 
     // The same item twice makes the order hard to check against the bill that
-    // follows, and is nearly always a slip. Not for fabric: one fabric in two
-    // designs or colours is two rows, told apart by their Design No. and Colour.
-    const pickedCat = categories.find((c) => c.id === itemById.get(itemId)?.categoryId)
-    const pickedParent = pickedCat?.parentId ? categories.find((c) => c.id === pickedCat.parentId) : null
-    const pickedFabric = FABRIC.test(pickedCat?.name ?? '') || FABRIC.test(pickedParent?.name ?? '')
-    if (!pickedFabric && lines.some((l, i) => i !== index && l.itemId === itemId)) {
+    // follows, and is nearly always a slip.
+    if (lines.some((l, i) => i !== index && l.itemId === itemId)) {
       const clash = itemById.get(itemId)
       setError(
         `${clash?.name ?? 'That item'} is already on another row. Change the quantity there instead of adding it twice.`
@@ -2068,8 +2017,6 @@ export function PurchaseOrderDialog({
     setLine(index, {
       itemId,
       codeText: item?.code ?? '',
-      // A different item: the last one's design and colour do not carry over.
-      ...(line.itemId !== itemId ? { designNo: '', color: '' } : {}),
       // Starts in the pack it is usually bought in (a box of 20); its own unit when it has none.
       uomId: item?.buyUnits?.find((u) => u.isDefault)?.uom.id ?? null,
       ...styleFill,
@@ -2594,9 +2541,6 @@ export function PurchaseOrderDialog({
       // ₹333.33 is stored as the percentage that gives back exactly ₹100.
       discount: lineDiscountOf(l),
       gstRate: num(l.gstRate),
-      // Fabric only; the server ignores them on anything else.
-      designNo: (l.designNo ?? '').trim() || null,
-      color: (l.color ?? '').trim() || null,
     })),
   })
 
@@ -3165,8 +3109,8 @@ export function PurchaseOrderDialog({
                     Brand
                   </label>
                   {/* Optional. A purchase for one of the mill's own brands is
-                    tagged to it, and its fabric is stocked under that brand;
-                    blank is a common purchase shared by all. */}
+                    tagged to it, for purchase and accounts reference; blank is
+                    a common purchase. It does not split stock. */}
                   <SmartSelect
                     id="po-brand"
                     className="form-input"
