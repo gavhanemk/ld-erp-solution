@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { StoreSheet, Fact, Eyebrow, qty, money, longDate, CODE, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { moCustomer } from '@/components/production/moCustomer'
 
 interface Line {
   id: string
@@ -263,7 +264,7 @@ export default function PrintTransfer() {
             <>
               <Fact label="Ref no." value={t.jobCard ? [t.jobCard.orderNo, t.jobCard.projectId, t.jobCard.designNo].filter(Boolean).join('/') || null : null} mono />
               <Fact label="Job card" value={t.jobCard ? `${t.jobCard.jobCardNumber} · ${mo.moNumber}` : mo.moNumber} mono />
-              <Fact label="Customer" value={mo.so ? `${mo.so.customer.name}${mo.so.customerPORef ? ` · PO ${mo.so.customerPORef}` : ''}` : null} />
+              <Fact label="Customer" value={mo.so ? `${mo.so.customer.name}${mo.so.customerPORef ? ` · PO ${mo.so.customerPORef}` : ''}` : moCustomer(mo)} />
               <Fact label="Fabric · lot" value={t.jobCard ? [t.jobCard.fabricQuality, t.jobCard.lotNo].filter(Boolean).join(' · ') || null : null} />
             </>
           ),

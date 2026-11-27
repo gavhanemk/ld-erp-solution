@@ -479,6 +479,9 @@ async function piecesOf(where: { moId?: { in: string[] }; item?: { styleId: stri
 const moSelect = {
   id: true,
   moNumber: true,
+  purpose: true,
+  brand: { select: { name: true, type: true } },
+  customer: { select: { id: true, name: true } },
   status: true,
   createdAt: true,
   actualStartDate: true,
@@ -872,6 +875,10 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
     mos: mos.map((m) => ({
       id: m.id,
       moNumber: m.moNumber,
+      // A direct order (no sales order): what it is for, and its own brand.
+      purpose: m.purpose,
+      brand: m.brand,
+      customer: m.customer,
       status: m.status,
       planned: m.totalPlannedQty,
       cut: m.totalCutQty,

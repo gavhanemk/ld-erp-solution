@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { StoreSheet, Fact, Eyebrow, qty, longDate, CODE, GREY, INK, MUTED, NAVY, RULE, TINT, type SheetColumn } from '@/components/print/StoreSheet'
+import { moCustomer } from '@/components/production/moCustomer'
 
 interface Payload {
   /** The own brand the order is made under, carried from start to end. */
@@ -110,7 +111,7 @@ export default function PrintCutting() {
               <Fact label="Mfg. order" value={c.mo.moNumber} mono />
               <Fact label="Brand" value={data.brand?.name ?? null} />
               <Fact label="Order no." value={c.mo.so ? `${c.mo.so.soNumber}${c.mo.so.customerPORef ? ` · PO ${c.mo.so.customerPORef}` : ''}` : null} />
-              <Fact label="Customer" value={c.mo.so?.customer.name ?? null} />
+              <Fact label="Customer" value={moCustomer(c.mo)} />
               <Fact label="Description" value={c.moLine?.style.name ?? null} />
             </>
           ),

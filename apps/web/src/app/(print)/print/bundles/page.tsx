@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { code128Bars } from '@/lib/code128'
+import { moCustomer } from '@/components/production/moCustomer'
 
 interface Payload {
   company: string
@@ -87,7 +88,7 @@ function Sticker({ b, data, layout }: { b: Payload['bundles'][number]; data: Pay
       <div style={{ fontSize: big ? '7pt' : '5.8pt', color: '#333', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {data.mo.moNumber} · {b.cuttingOrder.cutOrderNumber.split('-').pop()} {day(b.cuttingOrder.cutDate)}
         {b.cuttingOrder.lotNo ? ` · lot ${b.cuttingOrder.lotNo}` : ''}
-        {data.mo.so ? ` · ${data.mo.so.customer.name}` : ''}
+        {moCustomer(data.mo) ? ` · ${moCustomer(data.mo)}` : ''}
       </div>
     </div>
   )

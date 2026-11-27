@@ -37,7 +37,19 @@ export interface OrderItem {
 export interface OrderStory {
   kind: 'SO' | 'MO'
   so: { id: string; soNumber: string; brand?: { name: string; type: string } | null; status: string; orderDate: string; deliveryDate: string | null; poRef: string | null; customer: { id: string; name: string; billingCity: string | null } } | null
-  mos: Array<{ id: string; moNumber: string; status: string; planned: number; cut: number; packed: number; styles: Array<{ styleId: string; style: string; name: string; color: string; qty: number }> }>
+  mos: Array<{
+    id: string
+    moNumber: string
+    /** ORDER from a sales order; STOCK or SAMPLE for a direct one. */
+    purpose?: string
+    brand?: { name: string; type: string } | null
+    customer?: { id: string; name: string } | null
+    status: string
+    planned: number
+    cut: number
+    packed: number
+    styles: Array<{ styleId: string; style: string; name: string; color: string; qty: number }>
+  }>
   figures: { ordered: number; cut: number; intoFg: number; tagged: number; inStore: number; despatched: number; scrapped: number; delivered: number | null }
   stages: Array<{
     moId: string
@@ -267,6 +279,12 @@ export function OrderTrace({ o, open }: { o: OrderStory; open: (t: Target) => vo
               <Go to={{ kind: 'c', id: o.so.customer.id }} open={open}>
                 {o.so.customer.name}
               </Go>
+            ) : o.mos[0]?.customer ? (
+              <Go to={{ kind: 'c', id: o.mos[0].customer.id }} open={open}>
+                {o.mos[0].customer.name}
+              </Go>
+            ) : o.mos[0]?.purpose === 'SAMPLE' ? (
+              'Samples'
             ) : (
               'For stock'
             )}
@@ -278,7 +296,8 @@ export function OrderTrace({ o, open }: { o: OrderStory; open: (t: Target) => vo
               </Go>
             </Fact>
           )}
-          <Fact label="Brand">{o.so?.brand ? <BrandTag brand={o.so.brand} /> : '—'}</Fact>
+          {/* A direct order (no sales order) is under its own brand. */}
+          <Fact label="Brand">{o.so?.brand ?? o.mos[0]?.brand ? <BrandTag brand={o.so?.brand ?? o.mos[0]?.brand} /> : '—'}</Fact>
           <Fact label="Their PO">{o.so?.poRef ?? '—'}</Fact>
           <Fact label="Ordered on">{fmtDay(o.so?.orderDate)}</Fact>
           <Fact label="Wanted by">{fmtDay(o.so?.deliveryDate)}</Fact>

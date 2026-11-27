@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { StoreSheet, Fact, Eyebrow, qty, longDate, GREY, INK, MUTED, RULE, TINT, type SheetColumn } from '@/components/print/StoreSheet'
 import { refNo, type JobCardDetail } from '@/components/production/floor/types'
+import { moCustomer } from '@/components/production/moCustomer'
 
 interface Payload {
   /** The own brand the order is made under, carried from start to end. */
@@ -63,7 +64,7 @@ export default function PrintJobCard() {
               <Fact label="Project ID" value={c.projectId} />
               <Fact label="Mfg. order" value={d.mo.moNumber} mono />
               <Fact label="Brand" value={data.brand?.name ?? null} />
-              <Fact label="Customer" value={d.mo.so?.customer.name ?? null} />
+              <Fact label="Customer" value={moCustomer(d.mo)} />
             </>
           ),
         },

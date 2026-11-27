@@ -10,6 +10,7 @@ import { oldCutNote } from '../MoFlowStrip'
 import { SheetView } from './SheetView'
 import { useJobCard } from './useFlow'
 import { pcs, refNo, revisedQty, stageOf } from './types'
+import { moCustomer } from '@/components/production/moCustomer'
 
 /**
  * One job card: a colour (or design) of a manufacturing order, as the floor
@@ -82,7 +83,7 @@ export function JobCardView({ jobCardId, onClose, onChanged }: { jobCardId: stri
         title={d ? `Job card ${d.card.jobCardNumber}` : 'Job card'}
         subtitle={
           d
-            ? `${d.line?.style.code} ${d.line?.color} · ${pcs(d.line?.totalQty ?? 0)} pcs · ${d.mo.moNumber}${d.mo.so ? ` · ${d.mo.so.soNumber} · ${d.mo.so.customer.name}` : ''}${d.mo.brand ? ` · ${d.mo.brand.name}` : ''}`
+            ? `${d.line?.style.code} ${d.line?.color} · ${pcs(d.line?.totalQty ?? 0)} pcs · ${d.mo.moNumber}${d.mo.so ? ` · ${d.mo.so.soNumber} · ${d.mo.so.customer.name}` : moCustomer(d.mo) ? ` · ${moCustomer(d.mo)}` : ''}${d.mo.brand ? ` · ${d.mo.brand.name}` : ''}`
             : undefined
         }
         width="max-w-6xl"

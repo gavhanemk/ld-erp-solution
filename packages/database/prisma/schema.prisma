@@ -507,6 +507,16 @@ enum PurchaseOrderStatus {
   CANCELLED
 }
 
+/// What a manufacturing order is made for: a sales order, or — a direct
+/// order, with none — stock to sell later, samples, or a customer whose
+/// order is not raised (yet).
+enum MOPurpose {
+  ORDER
+  STOCK
+  SAMPLE
+  CUSTOMER
+}
+
 enum MOStatus {
   DRAFT
   RELEASED
@@ -1584,6 +1594,8 @@ model Customer {
   updatedAt         DateTime     @updatedAt
 
   salesOrders  SalesOrder[]
+  /// Manufacturing orders made for them directly, with no sales order.
+  directMos    ManufacturingOrder[] @relation("MOCustomer")
   /// Purchase orders the supplier was told to deliver straight to this customer.
   poDeliveries PurchaseOrder[]  @relation("PODeliveryCustomer")
   invoices     SalesInvoice[]
@@ -4108,6 +4120,13 @@ model ManufacturingOrder {
   so               SalesOrder? @relation(fields: [soId], references: [id])
   brandId          String
   brand            Brand       @relation(fields: [brandId], references: [id])
+  /// ORDER when raised from a sales order; STOCK, SAMPLE or CUSTOMER for a
+  /// direct one. A direct order linked to a sales order later keeps what it
+  /// was raised for.
+  purpose          MOPurpose   @default(ORDER)
+  /// A direct order made for a customer with no sales order: who it is for.
+  customerId       String?
+  customer         Customer?   @relation("MOCustomer", fields: [customerId], references: [id])
   plannedStartDate DateTime?
   plannedEndDate   DateTime?
   actualStartDate  DateTime?

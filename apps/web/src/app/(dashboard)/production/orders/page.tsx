@@ -33,6 +33,8 @@ interface MoRow {
   soId: string | null
   customer: string | null
   soNumber: string | null
+  /** ORDER from a sales order; STOCK, SAMPLE or CUSTOMER for a direct one. */
+  purpose?: 'ORDER' | 'STOCK' | 'SAMPLE' | 'CUSTOMER'
   deliveryDate: string | null
   styles: string[]
   withoutBom: number
@@ -112,7 +114,7 @@ function Materials({ mo }: { mo: MoRow }) {
  * Manufacturing orders: what the factory is making, and for which order.
  *
  * Each is raised from a confirmed sales order (New MO, or Plan production on
- * the order), released to the floor, and its materials worked out from the
+ * the order) — or direct, with no order, for stock or samples — released to the floor, and its materials worked out from the
  * BOM and asked of the store. Packed is what has been booked into finished
  * goods against it. Links in: ?make=<sales order id> opens a new one for
  * that order; ?open=<id> opens one; ?stage=<stage> lists those at it.
@@ -330,7 +332,7 @@ export default function ManufacturingOrdersPage() {
         ) : rows.length === 0 ? (
           <div className="px-4 py-10 text-center">
             <p className="text-muted-foreground text-sm">
-              {search || stage ? 'No manufacturing orders match these filters.' : 'None open. Press New MO, or Plan production on a confirmed sales order.'}
+              {search || stage ? 'No manufacturing orders match these filters.' : 'None open. Press New MO — for a sales order, or direct for stock or samples — or Plan production on a confirmed sales order.'}
             </p>
           </div>
         ) : (
@@ -353,9 +355,9 @@ export default function ManufacturingOrdersPage() {
                           <FloorState mo={mo} />
                           <BrandTag brand={mo.brand} />
                         </div>
-                        <p className="text-foreground mt-1 font-medium leading-snug">{mo.customer ?? '—'}</p>
+                        <p className="text-foreground mt-1 font-medium leading-snug">{mo.customer ?? (mo.purpose === 'SAMPLE' ? 'Samples' : 'For stock')}</p>
                         <p className="text-muted-foreground text-[11px]">
-                          {mo.soNumber ?? 'No order'} · {mo.styles.slice(0, 2).join(', ')}
+                          {mo.soNumber ?? (mo.purpose === 'SAMPLE' ? 'Samples' : mo.purpose === 'CUSTOMER' ? 'No sales order' : 'For stock')} · {mo.styles.slice(0, 2).join(', ')}
                           {mo.styles.length > 2 ? ` +${mo.styles.length - 2}` : ''}
                         </p>
                       </div>
@@ -406,7 +408,7 @@ export default function ManufacturingOrdersPage() {
                           )}
                         </td>
                         <td>
-                          <div className="text-foreground max-w-[15rem] truncate font-medium">{mo.customer ?? '—'}</div>
+                          <div className="text-foreground max-w-[15rem] truncate font-medium">{mo.customer ?? (mo.purpose === 'SAMPLE' ? 'Samples' : 'For stock')}</div>
                           {mo.soNumber && (
                             <a href={`/sales/orders?q=${encodeURIComponent(mo.soNumber)}`} className="text-primary font-mono text-[11px] hover:underline">
                               {mo.soNumber}

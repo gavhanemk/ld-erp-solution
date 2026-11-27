@@ -35,6 +35,7 @@ import { RouteStrip, stripNote } from './RouteStrip'
 import type { TransferRow } from './TransferDetailDialog'
 import { useJobCard } from './useFlow'
 import { fabricLine, isCheck, pcs, type FabricRecord, type FlowTransfer, type JobCardDetail, type StepFigures } from './types'
+import { moCustomer } from '@/components/production/moCustomer'
 
 /**
  * The board: every open job card with its route drawn as a line of stages —
@@ -221,7 +222,7 @@ function BoardRow({ c, h }: { c: BoardCard; h: Handlers }) {
           </p>
           <p className="text-muted-foreground mt-0.5 text-xs">
             {c.mo.moNumber}
-            {c.mo.so ? ` · ${c.mo.so.soNumber} · ${c.mo.so.customer.name}` : ''}
+            {c.mo.so ? ` · ${c.mo.so.soNumber} · ${c.mo.so.customer.name}` : moCustomer(c.mo) ? ` · ${moCustomer(c.mo)}` : ''}
             {c.mo.brand ? ` · ${c.mo.brand.name}` : ''}
             {c.mo.due ? ` · due ${formatDate(c.mo.due)}` : ''} · cut {pcs(c.cut)} · packed {pcs(c.packed)} of {pcs(c.line.totalQty)}
           </p>
@@ -303,8 +304,8 @@ function RowsTable({ rows, handlers }: { rows: BoardCard[]; handlers: (c: BoardC
                 <td className="text-xs">
                   <span className="text-foreground block">{c.mo.moNumber}</span>
                   <span className="text-muted-foreground block text-[11px]">
-                    {c.mo.so ? c.mo.so.customer.name : ''}
-                    {c.mo.due ? `${c.mo.so ? ' · ' : ''}due ${formatDate(c.mo.due)}` : ''}
+                    {moCustomer(c.mo) ?? ''}
+                    {c.mo.due ? `${moCustomer(c.mo) ? ' · ' : ''}due ${formatDate(c.mo.due)}` : ''}
                   </span>
                   {late && <span className="badge-danger mt-0.5 inline-block">Late</span>}
                 </td>
@@ -442,7 +443,7 @@ function WaitingForStages({ search, refreshKey, onOpen }: { search: string; refr
             <span className="text-primary font-mono">{r.jobCardNumber}</span>
             <span>
               {r.mo.moNumber}
-              {r.mo.so ? <span className="text-muted-foreground"> · {r.mo.so.customer.name}</span> : null}
+              {moCustomer(r.mo) ? <span className="text-muted-foreground"> · {moCustomer(r.mo)}</span> : null}
             </span>
             <span>
               <span className="font-medium">{r.moLine.style.code}</span> · {r.moLine.color} · {pcs(r.moLine.totalQty)} pcs

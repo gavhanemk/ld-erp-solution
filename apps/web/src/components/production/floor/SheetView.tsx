@@ -8,6 +8,7 @@ import { StageSheet } from './StageSheet'
 import { useJobCard } from './useFlow'
 import { RouteStrip } from './RouteStrip'
 import { isCheck, pcs } from './types'
+import { moCustomer } from '@/components/production/moCustomer'
 
 /**
  * One job card's sheet for one stage, with its whole route along the top —
@@ -48,7 +49,7 @@ export function SheetView({
     <FormFrame
       icon={icon}
       title={step ? `${step.name} sheet` : 'Process sheet'}
-      subtitle={d ? `${d.card.jobCardNumber} · ${d.line?.style.code} ${d.line?.color} · ${pcs(d.line?.totalQty ?? 0)} pcs · ${d.mo.moNumber}${d.mo.so ? ` · ${d.mo.so.customer.name}` : ''}` : undefined}
+      subtitle={d ? `${d.card.jobCardNumber} · ${d.line?.style.code} ${d.line?.color} · ${pcs(d.line?.totalQty ?? 0)} pcs · ${d.mo.moNumber}${moCustomer(d.mo) ? ` · ${moCustomer(d.mo)}` : ''}` : undefined}
       width="max-w-7xl"
       primary={
         <button
