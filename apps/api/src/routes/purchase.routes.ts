@@ -212,6 +212,9 @@ const createSchema = z.object({
    */
   supplierAddressId: z.string().optional().nullable(),
   reference: z.string().max(100).optional().nullable(),
+  // Who at the supplier the order is for, printed as "Kind Attention". Left
+  // out, a new order takes the supplier's contact person.
+  kindAttention: z.string().trim().max(100).optional().nullable(),
   // Internal. `notes` is printed on the supplier's copy; this is not.
   remark: z.string().max(1000).optional().nullable(),
   discountAmount: z.number().min(0).optional(),
@@ -1456,6 +1459,11 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         enquiryNo: quote?.piNumber ?? data.enquiryNo ?? null,
         enquiryDate: quote?.piDate ?? data.enquiryDate ?? null,
         reference: data.reference ?? null,
+        kindAttention:
+          data.kindAttention !== undefined
+            ? data.kindAttention || null
+            : ((await tx.supplier.findUnique({ where: { id: data.supplierId }, select: { contactPerson: true } }))
+                ?.contactPerson ?? null),
         remark: data.remark ?? null,
         placeOfSupplyCode: tax.placeOfSupply,
         subtotal: priced.subtotal,
@@ -1627,6 +1635,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     ...(data.enquiryNo !== undefined ? { enquiryNo: data.enquiryNo ?? null } : {}),
     ...(data.enquiryDate !== undefined ? { enquiryDate: data.enquiryDate ?? null } : {}),
     ...(data.reference !== undefined ? { reference: data.reference ?? null } : {}),
+    ...(data.kindAttention !== undefined ? { kindAttention: data.kindAttention || null } : {}),
     ...(data.remark !== undefined ? { remark: data.remark ?? null } : {}),
     ...(data.notes !== undefined ? { notes: data.notes ?? null } : {}),
     ...(data.terms !== undefined ? { terms: data.terms ?? null } : {}),

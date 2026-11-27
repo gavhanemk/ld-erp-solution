@@ -1673,6 +1673,9 @@ model Supplier {
   gstin          String?
   pan            String?
   phone          String?
+  /// Who the mill deals with at the supplier (27 Nov 2026). A purchase order's
+  /// "Kind Attention" is filled from it, and can be changed on the order.
+  contactPerson  String?
   email          String?
   address        String?
   city           String?
@@ -2723,6 +2726,10 @@ model PurchaseOrder {
   /// is holding. Correcting a typo in the master, or retiring an address,
   /// must not quietly change what an order already sent says.
   supplierAddress     String?
+  /// Who at the supplier the order is for, printed as "Kind Attention"
+  /// (27 Nov 2026). Filled from the supplier's contact person; can be changed
+  /// on the order without touching the supplier.
+  kindAttention       String?
   notes               String?
   terms               String?
   createdById         String

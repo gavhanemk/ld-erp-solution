@@ -89,6 +89,8 @@ interface PrintPayload {
     enquiryDate: string | null
     reference: string | null
     supplierAddress: string | null
+    /** Who at the supplier it is for: "Kind Attention" in the To block. */
+    kindAttention?: string | null
     notes: string | null
     terms: string | null
     subtotal: string
@@ -263,13 +265,16 @@ export default function PrintPurchaseOrder() {
 
   const docTitle = order.isService ? 'Service Purchase Order' : template.title
 
-  // Where the goods go: a customer called out, or our own godown.
+  // Where the goods go: a customer called out, or our own premises. Ours print
+  // under the company's name (27 Nov 2026: a store's short name, "LD COTTON",
+  // read as another firm). A store whose name says more than that — "Fabric
+  // Godown" — follows it.
   const toCustomer = Boolean(sheetOrder.deliveryCustomer)
-  const deliverName = sheetOrder.deliveryCustomer
-    ? sheetOrder.deliveryCustomer.name
-    : sheetOrder.deliveryWarehouse
-      ? sheetOrder.deliveryWarehouse.name
-      : company.name
+  const plain = (s: string | null | undefined) => (s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  const storeName = sheetOrder.deliveryWarehouse?.name?.trim() ?? ''
+  const deliverStore =
+    !toCustomer && storeName && !plain(company.name).includes(plain(storeName)) ? storeName : null
+  const deliverName = sheetOrder.deliveryCustomer ? sheetOrder.deliveryCustomer.name : company.name
   const deliverAddress =
     sheetOrder.deliveryAddress || sheetOrder.deliveryWarehouse?.address || (toCustomer ? null : companyAddress)
 
@@ -351,7 +356,7 @@ export default function PrintPurchaseOrder() {
         <PartyLine label="Address-" value={supplierAddress || null} />
         <PartyLine label="GST No" value={supplier.gstin} mono />
         <PartyLine label="Contact No" value={supplier.phone} mono />
-        <PartyLine label="Kind Attention" value={null} />
+        <PartyLine label="Kind Attention" value={order.kindAttention || null} />
         <PartyLine label="Payment Terms" value={paymentTerms} />
       </PartyBlock>
 
@@ -361,6 +366,12 @@ export default function PrintPurchaseOrder() {
             {deliverName}
             {sheetOrder.deliveryCustomer?.code && (
               <span style={{ fontWeight: 600, marginLeft: '6px', ...CODE }}>{sheetOrder.deliveryCustomer.code}</span>
+            )}
+            {deliverStore && (
+              <>
+                {' '}
+                <span style={{ fontWeight: 600, textTransform: 'none' }}>· {deliverStore}</span>
+              </>
             )}
           </div>
           {deliverAddress && <div style={{ marginTop: '1px' }}>{deliverAddress}</div>}

@@ -25,6 +25,7 @@ export type SupplierKey =
   | 'stateCode'
   | 'pan'
   | 'phone'
+  | 'contactPerson'
   | 'email'
   | 'address'
   | 'city'
@@ -51,6 +52,7 @@ export const SUPPLIER_COLUMNS: SheetColumn<SupplierKey>[] = [
   { key: 'stateCode', head: 'GST State Code', width: 10, note: 'Two digits. Empty: taken from the GSTIN, or from State.' },
   { key: 'pan', head: 'PAN', width: 12, note: 'Empty: taken from the GSTIN.' },
   { key: 'phone', head: 'Phone', width: 16 },
+  { key: 'contactPerson', head: 'Contact Person', width: 18, note: 'Who you deal with there. Printed as "Kind Attention" on purchase orders.' },
   { key: 'email', head: 'Email', width: 26 },
   { key: 'address', head: 'Address', width: 34 },
   { key: 'city', head: 'City', width: 14 },
@@ -104,6 +106,7 @@ export function supplierRow(s: Record<string, unknown>): Record<SupplierKey, str
     stateCode: text(s.stateCode),
     pan: text(s.pan),
     phone: text(s.phone),
+    contactPerson: text(s.contactPerson),
     email: text(s.email),
     address: text(s.address),
     city: text(s.city),
@@ -289,6 +292,7 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
       stateCode,
       pan: text(raw.pan)?.toUpperCase() ?? null,
       phone: text(raw.phone),
+      contactPerson: text(raw.contactPerson),
       email: text(raw.email),
       address: text(raw.address),
       city: text(raw.city),

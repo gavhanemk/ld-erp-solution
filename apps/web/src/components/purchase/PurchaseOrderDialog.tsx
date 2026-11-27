@@ -253,6 +253,8 @@ export interface PurchaseOrder {
   enquiryNo: string | null
   enquiryDate: string | null
   reference: string | null
+  /** Who at the supplier it is for; printed as "Kind Attention". */
+  kindAttention?: string | null
   /** What this order was billed to, as it read the day it was raised. */
   supplierAddress?: string | null
   remark: string | null
@@ -398,6 +400,8 @@ interface Option {
   pincode?: string | null
   phone?: string | null
   email?: string | null
+  /** A supplier's contact person: fills the order's "Kind attention". */
+  contactPerson?: string | null
   paymentTerms?: string | null
   creditDays?: number | null
   // A customer keeps two addresses. Goods are taxed where they land, so the
@@ -682,6 +686,10 @@ export function PurchaseOrderDialog({
   /// not be shown the same number as though it were theirs.
   const [nextPoNumber, setNextPoNumber] = useState('')
   const [reference, setReference] = useState('')
+  const [kindAttention, setKindAttention] = useState('')
+  // The contact person last filled in, so choosing another supplier replaces
+  // it — but never what somebody typed.
+  const filledAttention = useRef('')
   // The in-house brand this purchase is for (Masters → In House Brands); blank for a common one.
   const [brandId, setBrandId] = useState('')
   const [brands, setBrands] = useState<Array<{ id: string; name: string }>>([])
@@ -895,6 +903,8 @@ export function PurchaseOrderDialog({
     // lines added after, until somebody types over it.
     const sampleRefText = sampleSource ? sampleReference(sampleSource.needs) : ''
     setReference(record?.reference ?? sampleRefText)
+    setKindAttention(record?.kindAttention ?? '')
+    filledAttention.current = ''
     setBrandId(record?.brandId ?? '')
     setIndentRows([])
     setSampleTaken(
@@ -1356,6 +1366,16 @@ export function PurchaseOrderDialog({
     )
   }
   const supplier = suppliers.find((s) => s.id === supplierId)
+
+  // "Kind attention" follows the supplier's contact person — on a new order
+  // and when the supplier is changed — until somebody types over it.
+  useEffect(() => {
+    const contact = supplier?.contactPerson?.trim() ?? ''
+    // Read now: the update below runs at the next render, after the ref has moved on.
+    const previous = filledAttention.current
+    setKindAttention((cur) => (cur.trim() === '' || cur === previous ? contact : cur))
+    filledAttention.current = contact
+  }, [supplier?.id, supplier?.contactPerson])
 
   /**
    * Everything about finding an item now lives on the row it belongs to.
@@ -2530,6 +2550,7 @@ export function PurchaseOrderDialog({
     // row and keeps it on the order, so the words cannot come from here.
     supplierAddressId: supplierAddressId || null,
     reference: reference.trim() || null,
+    kindAttention: kindAttention.trim() || null,
     remark: remark.trim() || null,
     // Only an order-level order has one. Sending whatever is in the box on an
     // item-level order would take the discount twice.
@@ -3166,6 +3187,29 @@ export function PurchaseOrderDialog({
                       </option>
                     ))}
                   </SmartSelect>
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-attention">
+                    Kind attention
+                  </label>
+                  {/* Who at the supplier the order is for, printed in the "To"
+                    block. Filled from the supplier's contact person; what is
+                    typed here stays on this order and leaves the supplier alone. */}
+                  <div className="relative">
+                    <User
+                      size={14}
+                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
+                    />
+                    <input
+                      id="po-attention"
+                      className="form-input pl-9"
+                      placeholder="The supplier's contact person"
+                      maxLength={100}
+                      value={kindAttention}
+                      onChange={(e) => setKindAttention(e.target.value)}
+                    />
+                  </div>
                 </div>
 
                 <div>

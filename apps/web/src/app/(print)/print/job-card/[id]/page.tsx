@@ -75,7 +75,7 @@ export default function PrintJobCard() {
               <Fact label="Description" value={c.description} />
               <Fact label="Style" value={d.line ? `${d.line.style.code} · ${d.line.style.name}` : null} />
               <Fact label="Colour" value={d.line?.color ?? null} />
-              <Fact label="Design no." value={c.designNo} mono />
+              <Fact label="Print / design" value={c.designNo} mono />
             </>
           ),
         },
