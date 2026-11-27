@@ -47,7 +47,11 @@ export function DeleteDialog({
   /** Called with the API's sentence saying what was done. */
   onDeleted: (message: string) => void
 }) {
-  const noun = entityName.toLowerCase()
+  // "Department" → "department", but "HSN / SAC Code" → "HSN / SAC code": short forms stay in capitals.
+  const noun = entityName
+    .split(' ')
+    .map((w) => (/^[A-Z]{2,}$/.test(w) ? w : w.toLowerCase()))
+    .join(' ')
   const [check, setCheck] = useState<Check | null>(null)
   const [targets, setTargets] = useState<{ id: string; name: string }[] | null>(null)
   const [moveTo, setMoveTo] = useState('')
@@ -115,7 +119,8 @@ export function DeleteDialog({
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm sm:left-[var(--sidebar-current-width)]">
       <div
-        className="glass-card po-form w-full max-w-lg overflow-hidden"
+        // Solid: a glass card inside the cover's own blur is see-through.
+        className="po-form bg-card border-border w-full max-w-lg overflow-hidden rounded-xl border shadow-2xl"
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="delete-title"

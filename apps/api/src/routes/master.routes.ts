@@ -22,6 +22,7 @@ import * as workstationImport from '../services/workstationImport.service'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { findHsn, loadHsnIndex, withHsnRates } from '../lib/hsn'
+import { hsnUses } from '../lib/hsnUses'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { itemBeforeSave, itemInclude, ITEM_UNIQUE_FIELDS } from '../lib/itemMaster'
@@ -1537,6 +1538,46 @@ router.post('/hsn-codes/from-items', requirePermission(MODULE, 'create'), async 
     })
   }
   res.json({ success: true, data: { created, skipped } })
+})
+
+/*
+ * Deleting an HSN / SAC code for good, only when nothing uses it.
+ *
+ * Most uses are the code written on an item or a document line, not a link,
+ * so the CRUD's own check (links only) cannot see them; hsnUses reads every
+ * column that holds a code. A code in use is refused, with where it is used:
+ * those records keep their code, and making it inactive is the way to stop
+ * it being offered. Ahead of the CRUD router, whose DELETE /:id still does the
+ * deactivating.
+ */
+router.get('/hsn-codes/:id/delete-check', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
+  const hsn = await prisma.hsnCode.findUnique({ where: { id: req.params.id }, select: { id: true, code: true } })
+  if (!hsn) throw new AppError('HSN / SAC code not found', 404, 'NOT_FOUND')
+  res.json({ success: true, data: { move: [], blank: [], refuse: await hsnUses(hsn) } })
+})
+
+router.delete('/hsn-codes/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res, next) => {
+  if (req.query.permanent !== 'true') return next()
+  const before = await prisma.hsnCode.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('HSN / SAC code not found', 404, 'NOT_FOUND')
+  const uses = await hsnUses(before)
+  if (uses.length) {
+    throw new AppError(
+      `${before.code} is used by ${uses.join(', ')}, so it cannot be deleted. Make it inactive instead.`,
+      409,
+      'IN_USE',
+    )
+  }
+  await prisma.hsnCode.delete({ where: { id: before.id } })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'DELETE',
+    entityType: 'HsnCode',
+    entityId: before.id,
+    before,
+    after: { deleted: true },
+  })
+  res.json({ success: true, message: `${before.code} deleted.` })
 })
 
 /*
