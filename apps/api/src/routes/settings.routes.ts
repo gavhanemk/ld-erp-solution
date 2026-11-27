@@ -6,6 +6,7 @@ import type { Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { termsOn } from '../services/tds.service'
 import { formatDocumentNumber } from '../lib/docNumber'
+import { numbersInUse, seriesIsChecked } from '../lib/numberSeries'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -775,6 +776,9 @@ router.get('/number-series', requirePermission(SETTINGS, 'view'), async (_req, r
     data: series.map((s) => ({
       ...s,
       label: DOC_TYPE_LABELS[s.docType] ?? s.docType,
+      // The current running series (27 Nov 2026): the last number this series
+      // has issued, and the one it gives next.
+      lastUsedNumber: s.lastNumber > 0 ? formatDocumentNumber(s) : null,
       nextNumber: sampleNumber(s),
     })),
   })
@@ -812,6 +816,56 @@ router.post('/number-series', requirePermission(SETTINGS, 'create'), async (req:
   })
 
   res.status(201).json({ success: true, data: { ...created, nextNumber: sampleNumber(created) } })
+})
+
+/**
+ * Sets the number a series gives next (27 Nov 2026) — to skip ahead, or to
+ * start it again from a lower number. Never so that a number already on a
+ * document would be issued again: every number from the new one up to the
+ * last issued is checked against the documents of that series first. A
+ * series whose documents cannot be checked may only be moved forward.
+ */
+router.patch('/number-series/:id/next', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
+  const { nextNumber } = z
+    .object({ nextNumber: z.number().int('A whole number').min(1, 'Start from 1 or more').max(99_999_999) })
+    .parse(req.body)
+  const before = await prisma.numberSeries.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('Number series not found', 404, 'NOT_FOUND')
+  const label = DOC_TYPE_LABELS[before.docType] ?? before.docType
+  if (nextNumber - 1 < before.lastNumber) {
+    if (!seriesIsChecked(before.docType)) {
+      throw new AppError(`${label} numbers can only be moved forward.`, 409, 'SERIES_FORWARD_ONLY')
+    }
+    if (before.lastNumber - nextNumber + 1 > 10_000) {
+      throw new AppError('That is too far back to check. Move it back in smaller steps.', 409, 'SERIES_TOO_FAR')
+    }
+    const wanted = Array.from({ length: before.lastNumber - nextNumber + 1 }, (_, i) =>
+      formatDocumentNumber({ ...before, lastNumber: nextNumber + i }),
+    )
+    const used = await numbersInUse(prisma, before.docType, wanted)
+    if (used.length) {
+      const highest = used.sort().at(-1)!
+      throw new AppError(
+        `${highest} is already on a ${label.toLowerCase()}, so the next number cannot be ${wanted[0]}. The lowest it can start from is the one after ${highest}.`,
+        409,
+        'NUMBER_IN_USE',
+      )
+    }
+  }
+  const after = await prisma.numberSeries.update({ where: { id: before.id }, data: { lastNumber: nextNumber - 1 } })
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'UPDATE',
+    entityType: 'NumberSeries',
+    entityId: after.id,
+    before,
+    after,
+  })
+  res.json({
+    success: true,
+    data: { ...after, lastUsedNumber: after.lastNumber > 0 ? formatDocumentNumber(after) : null, nextNumber: sampleNumber(after) },
+    message: `The next ${label.toLowerCase()} will be ${sampleNumber(after)}.`,
+  })
 })
 
 router.patch('/number-series/:id', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
@@ -855,7 +909,7 @@ router.patch('/number-series/:id', requirePermission(SETTINGS, 'edit'), async (r
 
   res.json({
     success: true,
-    data: { ...after, nextNumber: sampleNumber(after) },
+    data: { ...after, lastUsedNumber: after.lastNumber > 0 ? formatDocumentNumber(after) : null, nextNumber: sampleNumber(after) },
     message:
       before.lastNumber > 0 && data.prefix && data.prefix !== before.prefix
         ? `${before.lastNumber} document(s) already use the old prefix. They keep their existing numbers.`

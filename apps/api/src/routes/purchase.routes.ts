@@ -11,6 +11,7 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { postWithin } from '../services/accounts/posting.service'
 import { nextDocumentNumber } from '../lib/docNumber'
+import { reclaimDocumentNumber, releaseDocumentNumber, releasedNumber, shownNumber } from '../lib/numberSeries'
 import { priceNote, notedQtyByGrnLine, syncBillAdjustments } from '../services/purchaseNote.service'
 import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
@@ -2117,7 +2118,8 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
   // refused outright, but the check below is the one that actually protects
   // anything: an order nothing has arrived against and nothing has been
   // billed against holds no history worth keeping. This is a soft delete —
-  // the order goes to the recycle bin and its number is still never reused —
+  // the order goes to the recycle bin — and when it is the newest order its
+  // number is given back for the next one (27 Nov 2026; see lib/numberSeries)
   // so an order sent by mistake can be taken off the list, and recovered if
   // that turns out to be wrong. Cancelling stays the right answer for an
   // order that was real and fell through, and the wording on the button says
@@ -2139,9 +2141,19 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
     )
   }
 
-  const after = await prisma.purchaseOrder.update({
-    where: { id: order.id },
-    data: { deletedAt: new Date(), deletedById: req.user?.id ?? null },
+  const { after, released } = await prisma.$transaction(async (tx) => {
+    // The newest order gives its number back; the binned row is re-labelled
+    // so the next order can carry it.
+    const released = await releaseDocumentNumber(tx, 'PO', order.poNumber)
+    const after = await tx.purchaseOrder.update({
+      where: { id: order.id },
+      data: {
+        deletedAt: new Date(),
+        deletedById: req.user?.id ?? null,
+        ...(released ? { poNumber: releasedNumber(order.poNumber) } : {}),
+      },
+    })
+    return { after, released }
   })
 
   // A binned order stops standing on its enquiry, the same as a cancelled one.
@@ -2156,7 +2168,10 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
     after,
   })
 
-  res.json({ success: true, message: `${order.poNumber} moved to the recycle bin.` })
+  res.json({
+    success: true,
+    message: `${order.poNumber} moved to the recycle bin.${released ? ` The next order will take ${order.poNumber}.` : ''}`,
+  })
 })
 
 /**
@@ -2190,7 +2205,7 @@ router.get('/recycle-bin', requirePermission(MODULE, 'view'), async (_req, res) 
     success: true,
     data: rows.map((r) => ({
       id: r.id,
-      poNumber: r.poNumber,
+      poNumber: shownNumber(r.poNumber),
       poDate: r.poDate,
       status: r.status,
       totalAmount: r.totalAmount,
@@ -2236,7 +2251,7 @@ router.post(
           // Putting it back takes no edits, so the advice is a new order, not a reason.
           if (err instanceof AppError && ['SAMPLE_OVER_ORDER', 'SAMPLE_NOT_OPEN'].includes(err.code ?? '')) {
             throw new AppError(
-              `${order.poNumber} cannot be put back: ${
+              `${shownNumber(order.poNumber)} cannot be put back: ${
                 err.code === 'SAMPLE_OVER_ORDER'
                   ? 'the sample it bought for has been ordered on other orders since'
                   : err.message.replace(/\.$/, '').replace(/^./, (c) => c.toLowerCase())
@@ -2248,9 +2263,16 @@ router.post(
           throw err
         }
       }
+      // Its own number when that is still free; a fresh one when another order
+      // has taken it since it was binned.
+      const own = shownNumber(order.poNumber)
+      const poNumber =
+        order.poNumber === own || (await reclaimDocumentNumber(tx, 'PO', own))
+          ? own
+          : await nextDocumentNumber(tx, 'PO', new Date())
       return tx.purchaseOrder.update({
         where: { id: order.id },
-        data: { deletedAt: null, deletedById: null },
+        data: { deletedAt: null, deletedById: null, poNumber },
       })
     })
 
@@ -2266,7 +2288,14 @@ router.post(
       after,
     })
 
-    res.json({ success: true, message: `${order.poNumber} restored.` })
+    const own = shownNumber(order.poNumber)
+    res.json({
+      success: true,
+      message:
+        after.poNumber === own
+          ? `${own} restored.`
+          : `Restored as ${after.poNumber} — ${own} was taken by a new order while this one was in the recycle bin.`,
+    })
   }
 )
 
@@ -2300,7 +2329,7 @@ router.delete(
     }
     if (order._count.grns > 0 || order._count.invoices > 0) {
       throw new AppError(
-        `${order.poNumber} has stock or bills against it now, so it cannot be destroyed. Restore it instead.`,
+        `${shownNumber(order.poNumber)} has stock or bills against it now, so it cannot be destroyed. Restore it instead.`,
         409,
         'PO_HAS_DOCUMENTS'
       )
@@ -4115,6 +4144,8 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
 
     try {
       await tx.gRN.delete({ where: { id: grn.id } })
+      // The newest receipt gives its number back (27 Nov 2026; lib/numberSeries).
+      await releaseDocumentNumber(tx, 'GRN', grn.grnNumber)
     } catch (err) {
       if (err instanceof Error && err.name === 'PrismaClientKnownRequestError') {
         const code = (err as unknown as { code?: string }).code

@@ -74,6 +74,8 @@ export interface NumberSeries {
   lastNumber: number
   padding: number
   isActive: boolean
+  /** The last number this series has given out, e.g. "PO-0003"; null before the first. */
+  lastUsedNumber: string | null
   nextNumber: string
 }
 
@@ -232,6 +234,9 @@ export const settingsApi = {
     create: (data: Record<string, unknown>) => api.post<Single<NumberSeries>>('/settings/number-series', data),
     update: (id: string, data: Record<string, unknown>) =>
       api.patch<Single<NumberSeries> & { message?: string }>(`/settings/number-series/${id}`, data),
+    /** Where the series carries on from; the server refuses a number already on a document. */
+    setNext: (id: string, nextNumber: number) =>
+      api.patch<Single<NumberSeries> & { message?: string }>(`/settings/number-series/${id}/next`, { nextNumber }),
   },
 
   taxRates: {

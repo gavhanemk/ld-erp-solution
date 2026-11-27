@@ -653,6 +653,10 @@ export function PurchaseOrderDialog({
   const [discountAmount, setDiscountAmount] = useState('')
   const [notes, setNotes] = useState('')
   const [terms, setTerms] = useState('')
+  // Today's standard terms from Settings → Documents. A saved order keeps the
+  // terms it was made with; this is what the box offers to bring it up to date.
+  const [standardTerms, setStandardTerms] = useState<string | null>(null)
+  const termsDiffer = !!standardTerms?.trim() && terms.trim() !== standardTerms.trim()
 
   /*
    * What has been typed against each kind of charge, keyed by charge type id.
@@ -1211,6 +1215,7 @@ export function PurchaseOrderDialog({
        * typing in the meantime should not lose it.
        */
       if (!record) setTerms((cur) => cur || (dflt?.data.terms ?? ''))
+      setStandardTerms(dflt?.data.terms ?? null)
     })
 
     return () => {
@@ -4384,10 +4389,29 @@ export function PurchaseOrderDialog({
                     openByDefault={false}
                     summary={
                       terms.trim()
-                        ? `Printed on the order — ${terms.trim().length} characters`
-                        : 'None — nothing will be printed'
+                        ? `Printed on the order — ${terms.trim().length} characters${termsDiffer ? ' · not the current terms in Settings' : ''}`
+                        : standardTerms?.trim()
+                          ? 'The current terms from Settings will be printed'
+                          : 'None — nothing will be printed'
                     }
                   >
+                    {/* An order keeps the terms it was saved with — Settings
+                      changing later never rewrites it silently. One press brings
+                      it up to today's wording when that is wanted. */}
+                    {termsDiffer && terms.trim() && (
+                      <div className="border-border bg-muted/40 mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+                        <span className="text-muted-foreground">
+                          {record ? 'This order was saved with different terms from the ones now in Settings.' : 'These are not the standard terms from Settings.'}
+                        </span>
+                        <button
+                          type="button"
+                          className="text-primary font-medium hover:underline"
+                          onClick={() => setTerms(standardTerms ?? '')}
+                        >
+                          Use the current terms from Settings
+                        </button>
+                      </div>
+                    )}
                     <textarea
                       rows={3}
                       maxLength={TERMS_MAX}

@@ -11,6 +11,7 @@ import { writeAuditLog } from '../lib/audit'
 import { postWithin } from '../services/accounts/posting.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
+import { releaseDocumentNumber } from '../lib/numberSeries'
 import {
   MAX_FILES_PER_DOCUMENT,
   MAX_FILE_BYTES,
@@ -1212,6 +1213,8 @@ router.delete('/:id', requirePermission(MODULE, 'delete'), async (req: AuthReque
       )
     }
     await tx.purchaseNote.delete({ where: { id: before.id } })
+    // The newest draft gives its number back (27 Nov 2026; lib/numberSeries).
+    await releaseDocumentNumber(tx, DOC_RULES[before.docType].series, before.noteNumber)
     return before
   })
 
