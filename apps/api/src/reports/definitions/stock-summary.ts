@@ -33,6 +33,9 @@ export const stockSummary: ReportDefinition = {
     { key: 'subCategory', label: 'Sub-category', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    // A fabric's design and colour, or a finished good's colour, from the item.
+    { key: 'designNo', label: 'Design No.', type: 'text', width: 12 },
+    { key: 'colour', label: 'Colour', type: 'text', width: 12 },
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'owner', label: 'Owner', type: 'text', width: 20 },
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
@@ -67,6 +70,8 @@ export const stockSummary: ReportDefinition = {
         itemId: string
         itemCode: string
         itemName: string
+        designNo: string | null
+        colour: string | null
         categoryId: string
         uom: string
         warehouseId: string
@@ -79,6 +84,7 @@ export const stockSummary: ReportDefinition = {
       }>
     >`
       SELECT i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", i."categoryId",
+             i."designNo", i.color AS colour,
              u.symbol AS uom, w.id AS "warehouseId", w.name AS store,
              s.ownership::text AS ownership, cust.name AS owner,
              SUM(s."inQty" - s."outQty")::float8 AS qty,
@@ -93,7 +99,7 @@ export const stockSummary: ReportDefinition = {
         AND s.ownership::text IN (${Prisma.join(owners)})
         AND (${params.warehouseId ?? null}::text IS NULL OR s."warehouseId" = ${params.warehouseId ?? null})
         AND (${catIds}::text[] IS NULL OR i."categoryId" = ANY(${catIds}::text[]))
-      GROUP BY i.id, i.code, i.name, i."categoryId", u.symbol, w.id, w.name, s.ownership, cust.name
+      GROUP BY i.id, i.code, i.name, i."categoryId", i."designNo", i.color, u.symbol, w.id, w.name, s.ownership, cust.name
       HAVING ABS(SUM(s."inQty" - s."outQty")) > 0.0005
       ORDER BY i.name, w.name
     `
@@ -115,6 +121,8 @@ export const stockSummary: ReportDefinition = {
         subCategory,
         itemCode: r.itemCode,
         item: r.itemName,
+        designNo: r.designNo ?? '',
+        colour: r.colour ?? '',
         store: r.store,
         owner: own ? 'Ours' : (r.owner ?? 'Customer'),
         uom: r.uom,

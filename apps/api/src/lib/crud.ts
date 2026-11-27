@@ -41,6 +41,8 @@ export interface CrudOptions {
    * in one dropdown. The clash is reported under that field on the form.
    */
   uniqueFields?: string[]
+  /** More conditions a clash on a unique field must also meet, worked out from the record. */
+  uniqueScope?: (data: Record<string, unknown>, before?: Record<string, unknown>) => Record<string, unknown> | undefined
   /**
    * A facet worked out by a rule of its own rather than a plain group-by:
    * given the where clause (every other filter applied), how many records
@@ -148,6 +150,8 @@ export async function assertUniqueFields(
   data: Record<string, unknown>,
   exceptId?: string,
   before?: Record<string, unknown>,
+  /** More conditions a clash must also meet — a fabric's name is unique per design and colour. */
+  scope?: Record<string, unknown>,
 ) {
   // Reached by name, as the factory reaches every delegate; see crudRouter.
   const delegate = (prisma as unknown as Record<string, any>)[model]
@@ -162,6 +166,7 @@ export async function assertUniqueFields(
     const clash = await delegate.findFirst({
       where: {
         [field]: { equals: value.trim(), mode: 'insensitive' },
+        ...(scope ?? {}),
         ...(exceptId ? { NOT: { id: exceptId } } : {}),
       },
     })
@@ -224,6 +229,7 @@ export function crudRouter(options: CrudOptions): Router {
     facets = [],
     customFacets = {},
     uniqueFields = [],
+    uniqueScope,
     permanentDelete,
     exportSheet,
     afterRead,
@@ -241,7 +247,7 @@ export function crudRouter(options: CrudOptions): Router {
     data: Record<string, unknown>,
     exceptId?: string,
     before?: Record<string, unknown>,
-  ) => assertUniqueFields(model, uniqueFields, data, exceptId, before)
+  ) => assertUniqueFields(model, uniqueFields, data, exceptId, before, uniqueScope?.(data, before))
 
   /**
    * The where clause for a list request: active flag, search, and every

@@ -204,7 +204,7 @@ export default function PrintTransfer() {
                   {lines.map((l) => `${l.bundle.code.split('-').pop()}${l.bundle.size ? `/${l.bundle.size.code}` : ''}:${l.dispatchedQty}`).join('  ')}
                 </div>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 11px', background: NAVY, color: '#fff' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 11px', borderTop: '1.5pt solid #000', color: '#fff' }}>
                 <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>Value of goods</span>
                 <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(total)}</span>
               </div>

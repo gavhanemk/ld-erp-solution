@@ -34,6 +34,17 @@ export const categoryFilter: ReportFilter = {
 }
 
 /** Our stock unless asked otherwise: a customer's cloth is not the mill's money. */
+/**
+ * The in-house brand (27 Nov 2026): fabric is stocked under the brand it was
+ * bought for, and a manufacturing order draws only its own brand's.
+ */
+export const brandFilter: ReportFilter = {
+  key: 'brandId',
+  label: 'Brand',
+  type: 'select',
+  optionsFrom: 'brands',
+}
+
 export const ownershipFilter: ReportFilter = {
   key: 'ownership',
   label: 'Whose stock',

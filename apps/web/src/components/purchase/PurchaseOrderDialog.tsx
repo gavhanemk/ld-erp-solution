@@ -196,8 +196,15 @@ export interface PoLine {
     hsnCode: string | null
     uom?: { symbol: string } | null
     category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
+    /** A fabric's design and colour, as set on the item in the Items master. */
+    designNo?: string | null
+    color?: string | null
   }
 }
+
+/** Fabric shows its design number and colour; thread its colour; nothing else either. */
+const FABRIC = /fabric/i
+const THREAD = /thread/i
 
 export interface PurchaseOrder {
   id: string
@@ -210,6 +217,9 @@ export interface PurchaseOrder {
   deliveryDate: string | null
   deliveryWarehouseId: string | null
   deliveryCustomerId: string | null
+  /** The in-house brand the purchase is for; null for a common purchase. */
+  brandId?: string | null
+  brand?: { id: string; name: string } | null
   enquiryNo: string | null
   enquiryDate: string | null
   reference: string | null
@@ -348,6 +358,9 @@ interface Option {
   buyUnits?: Array<{ factor: string | number; isDefault: boolean; uom: { id: string; symbol: string; decimalPlaces?: number } }>
   categoryId?: string | null
   category?: { id: string; name: string } | null
+  /** A fabric's design number and colour, set in the Items master. */
+  designNo?: string | null
+  color?: string | null
   parentId?: string | null
   address?: string | null
   city?: string | null
@@ -639,6 +652,9 @@ export function PurchaseOrderDialog({
   /// not be shown the same number as though it were theirs.
   const [nextPoNumber, setNextPoNumber] = useState('')
   const [reference, setReference] = useState('')
+  // The in-house brand this purchase is for (Masters → In House Brands); blank for a common one.
+  const [brandId, setBrandId] = useState('')
+  const [brands, setBrands] = useState<Array<{ id: string; name: string }>>([])
   /// The indent lines taken onto this order, and the reference they last wrote:
   /// the box follows them until somebody types in it themselves.
   const [indentRows, setIndentRows] = useState<IndentRow[]>([])
@@ -653,6 +669,10 @@ export function PurchaseOrderDialog({
   const [discountAmount, setDiscountAmount] = useState('')
   const [notes, setNotes] = useState('')
   const [terms, setTerms] = useState('')
+  // Today's standard terms from Settings → Documents. A saved order keeps the
+  // terms it was made with; this is what the box offers to bring it up to date.
+  const [standardTerms, setStandardTerms] = useState<string | null>(null)
+  const termsDiffer = !!standardTerms?.trim() && terms.trim() !== standardTerms.trim()
 
   /*
    * What has been typed against each kind of charge, keyed by charge type id.
@@ -845,6 +865,7 @@ export function PurchaseOrderDialog({
     // lines added after, until somebody types over it.
     const sampleRefText = sampleSource ? sampleReference(sampleSource.needs) : ''
     setReference(record?.reference ?? sampleRefText)
+    setBrandId(record?.brandId ?? '')
     setIndentRows([])
     setSampleTaken(
       (sampleSource?.needs ?? []).map((n) => ({ sampleMaterialId: n.sampleMaterialId, requestNumber: n.requestNumber }))
@@ -1178,8 +1199,13 @@ export function PurchaseOrderDialog({
           '/purchase/order-defaults'
         )
         .catch(() => null),
-    ]).then(([s, i, w, cust, c, st, ct, hc, co, ns, dflt]) => {
+      // The mill's own brands, for the Brand box.
+      masterResource<{ id: string; name: string }>('brands')
+        .list({ limit: 100, active: true, type: 'LD_COTTON_MILLS,VHAGAR' })
+        .catch(() => null),
+    ]).then(([s, i, w, cust, c, st, ct, hc, co, ns, dflt, br]) => {
       if (cancelled) return
+      setBrands(br?.data ?? [])
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
       setWarehouses((w as Paginated<Option>).data)
@@ -1211,6 +1237,7 @@ export function PurchaseOrderDialog({
        * typing in the meantime should not lose it.
        */
       if (!record) setTerms((cur) => cur || (dflt?.data.terms ?? ''))
+      setStandardTerms(dflt?.data.terms ?? null)
     })
 
     return () => {
@@ -1813,6 +1840,50 @@ export function PurchaseOrderDialog({
 
   const setLine = (index: number, patch: Partial<PoLine>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
+
+  /**
+   * Design No. and Colour, under a fabric row only (27 Nov 2026).
+   *
+   * A fabric item is one design and colour, set in the Items master, so they
+   * come filled in from the item the row picks and are not typed here —
+   * another design or colour is another item (+ Add a new item… asks for
+   * both). Any other item shows nothing here.
+   */
+  const fabricBoxes = (line: PoLine, i: number, cell: string) => {
+    const it = itemById.get(line.itemId)
+    if (!it) return null
+    const filed = categories.find((c) => c.id === it.categoryId)
+    const parent = filed?.parentId ? categories.find((c) => c.id === filed.parentId) : null
+    const under = (re: RegExp) => re.test(filed?.name ?? '') || re.test(parent?.name ?? '')
+    const fabric = under(FABRIC)
+    // Thread has a colour and no design number.
+    if (!fabric && !under(THREAD)) return null
+    const box = `${cell} bg-muted/40 cursor-default`
+    return (
+      <div className="mt-1 grid grid-cols-2 gap-1" title="From the item in Masters → Items">
+        {fabric && (
+          <input
+            className={box}
+            readOnly
+            tabIndex={-1}
+            placeholder="No design no."
+            value={it.designNo ?? ''}
+            title="Design No., from Masters → Items"
+            aria-label={`Row ${i + 1} design number`}
+          />
+        )}
+        <input
+          className={box}
+          readOnly
+          tabIndex={-1}
+          placeholder="No colour"
+          value={it.color ?? ''}
+          title="Colour, from Masters → Items"
+          aria-label={`Row ${i + 1} colour`}
+        />
+      </div>
+    )
+  }
 
   /**
    * "Why more than the sample needs", under a row bought for a sample.
@@ -2452,6 +2523,7 @@ export function PurchaseOrderDialog({
     otherCharges: num(legacyOther),
     notes: notes.trim() || null,
     terms: terms.trim() || null,
+    brandId: brandId || null,
     /*
      * Only rows that have an item, and only the fields the API knows about.
      * The category narrowing and the code box are how a row found its item;
@@ -3041,6 +3113,28 @@ export function PurchaseOrderDialog({
                 </div>
 
                 <div>
+                  <label className="form-label" htmlFor="po-brand">
+                    Brand
+                  </label>
+                  {/* Optional. A purchase for one of the mill's own brands is
+                    tagged to it, for purchase and accounts reference; blank is
+                    a common purchase. It does not split stock. */}
+                  <SmartSelect
+                    id="po-brand"
+                    className="form-input"
+                    value={brandId}
+                    onChange={(e) => setBrandId(e.target.value)}
+                  >
+                    <option value="">Common — no brand</option>
+                    {brands.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </SmartSelect>
+                </div>
+
+                <div>
                   <label className="form-label" htmlFor="po-remark">
                     Remark
                   </label>
@@ -3457,6 +3551,7 @@ export function PurchaseOrderDialog({
                                 )}
                               </p>
                             )}
+                            {fabricBoxes(line, i, cell)}
                             {sampleWhyBox(line, i, cell)}
                           </td>
 
@@ -3789,6 +3884,7 @@ export function PurchaseOrderDialog({
                             )}
                           </p>
                         )}
+                        {fabricBoxes(line, i, cell)}
                         {sampleWhyBox(line, i, cell)}
                       </div>
 
@@ -4384,10 +4480,29 @@ export function PurchaseOrderDialog({
                     openByDefault={false}
                     summary={
                       terms.trim()
-                        ? `Printed on the order — ${terms.trim().length} characters`
-                        : 'None — nothing will be printed'
+                        ? `Printed on the order — ${terms.trim().length} characters${termsDiffer ? ' · not the current terms in Settings' : ''}`
+                        : standardTerms?.trim()
+                          ? 'The current terms from Settings will be printed'
+                          : 'None — nothing will be printed'
                     }
                   >
+                    {/* An order keeps the terms it was saved with — Settings
+                      changing later never rewrites it silently. One press brings
+                      it up to today's wording when that is wanted. */}
+                    {termsDiffer && terms.trim() && (
+                      <div className="border-border bg-muted/40 mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+                        <span className="text-muted-foreground">
+                          {record ? 'This order was saved with different terms from the ones now in Settings.' : 'These are not the standard terms from Settings.'}
+                        </span>
+                        <button
+                          type="button"
+                          className="text-primary font-medium hover:underline"
+                          onClick={() => setTerms(standardTerms ?? '')}
+                        >
+                          Use the current terms from Settings
+                        </button>
+                      </div>
+                    )}
                     <textarea
                       rows={3}
                       maxLength={TERMS_MAX}

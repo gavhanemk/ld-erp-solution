@@ -25,7 +25,7 @@ import { findHsn, loadHsnIndex, withHsnRates } from '../lib/hsn'
 import { hsnUses } from '../lib/hsnUses'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
-import { itemBeforeSave, itemInclude, ITEM_UNIQUE_FIELDS } from '../lib/itemMaster'
+import { itemBeforeSave, itemInclude, itemUniqueScope, ITEM_UNIQUE_FIELDS } from '../lib/itemMaster'
 import { styleInDevelopment } from '../lib/styleStage'
 import {
   assertVersionFree,
@@ -816,8 +816,10 @@ router.use(
     entityType: 'Item',
     createSchema: createItemSchema,
     updateSchema: updateItemSchema,
-    // No two with the same name (ignoring capitals and spaces).
+    // No two with the same name (ignoring capitals and spaces) — a fabric's
+    // name once for each design and colour it comes in (lib/fabric).
     uniqueFields: ITEM_UNIQUE_FIELDS,
+    uniqueScope: itemUniqueScope,
     // Typing "linen" finds linen items by their category as well as their
     // name; "cutting" finds what the cutting floor uses.
     searchFields: [

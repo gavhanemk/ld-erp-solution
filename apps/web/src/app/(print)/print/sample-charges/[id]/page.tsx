@@ -160,7 +160,7 @@ export default function PrintSampleCharges() {
                   <span style={NUM}>₹{money(Number(v))}</span>
                 </div>
               ))}
-              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 11px', background: NAVY, color: '#fff' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 11px', borderTop: '1.5pt solid #000', color: '#fff' }}>
                 <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>Total</span>
                 <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(sheet.total)}</span>
               </div>

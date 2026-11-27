@@ -978,6 +978,7 @@ model Brand {
   quotations          SalesQuotation[] @relation("QuoteBrand")
   styles              Style[]
   costCentre          CostCentre?
+  purchaseOrders      PurchaseOrder[]  @relation("PurchaseOrderBrand")
 
   @@map("brands")
 }
@@ -1259,6 +1260,10 @@ model Item {
   styleId      String?
   style        Style?       @relation(fields: [styleId], references: [id])
   color        String?
+  /// A fabric's design number (27 Nov 2026), with its colour in `color`: set in
+  /// the Items master for an item filed under Fabric, one design and colour per
+  /// item, and shown on every purchase order that picks it.
+  designNo     String?
   imageUrl     String?
   /// Its stickers, remembered from the last time somebody ticked "remember":
   /// what one package is, and how much one sticker holds. Empty means the
@@ -2748,7 +2753,14 @@ model PurchaseOrder {
   @@index([enquiryId])
   @@index([enquiryQuoteId])
   /// Every list of orders filters on this, so it earns an index of its own.
+  /// The in-house brand the purchase is for (27 Nov 2026): a purchase and
+  /// accounting reference. Optional: blank is a common purchase. No stock
+  /// effect yet; the multi-brand allocation will earmark what arrives to it.
+  brandId String?
+  brand   Brand?  @relation("PurchaseOrderBrand", fields: [brandId], references: [id], onDelete: SetNull)
+
   @@index([deletedAt])
+  @@index([brandId])
   @@map("purchase_orders")
 }
 

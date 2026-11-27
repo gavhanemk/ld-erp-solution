@@ -8,6 +8,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
+import { reclaimDocumentNumber, releaseDocumentNumber, releasedNumber, shownNumber } from '../lib/numberSeries'
 import { getPrintHeader } from '../lib/printData'
 import {
   MAX_FILES_PER_DOCUMENT,
@@ -233,6 +234,7 @@ function shape(e: EnquiryRow, orderedByLine?: Map<string, number>) {
 
   return {
     ...e,
+    enquiryNumber: shownNumber(e.enquiryNumber),
     quotes,
     supplierCount: quotes.length,
     answeredCount: quotes.filter((q) => q.answered).length,
@@ -1287,9 +1289,15 @@ router.delete('/:id', requirePermission(MODULE, 'delete'), async (req: AuthReque
 
   await prisma.$transaction(async (tx) => {
     await refuseIfOrdered(tx, before, 'deleted')
+    // The newest enquiry gives its number back (27 Nov 2026; lib/numberSeries).
+    const released = await releaseDocumentNumber(tx, 'ENQ', before.enquiryNumber)
     await tx.purchaseEnquiry.update({
       where: { id: before.id },
-      data: { deletedAt: new Date(), deletedById: req.user!.id },
+      data: {
+        deletedAt: new Date(),
+        deletedById: req.user!.id,
+        ...(released ? { enquiryNumber: releasedNumber(before.enquiryNumber) } : {}),
+      },
     })
   })
 
@@ -1311,13 +1319,19 @@ router.post('/:id/restore', requirePermission(MODULE, 'delete'), async (req: Aut
   })
   if (!before) throw new AppError('That enquiry no longer exists', 404, 'NOT_FOUND')
   if (!before.deletedAt) {
-    throw new AppError(before.enquiryNumber + ' is not in the recycle bin.', 409, 'NOT_DELETED')
+    throw new AppError(shownNumber(before.enquiryNumber) + ' is not in the recycle bin.', 409, 'NOT_DELETED')
   }
 
   const updated = await prisma.$transaction(async (tx) => {
+    // Its own number when still free, a fresh one when another enquiry has it now.
+    const own = shownNumber(before.enquiryNumber)
+    const enquiryNumber =
+      before.enquiryNumber === own || (await reclaimDocumentNumber(tx, 'ENQ', own))
+        ? own
+        : await nextDocumentNumber(tx, 'ENQ', new Date())
     await tx.purchaseEnquiry.update({
       where: { id: before.id },
-      data: { deletedAt: null, deletedById: null },
+      data: { deletedAt: null, deletedById: null, enquiryNumber },
     })
     await syncEnquiryStatus(tx, before.id)
     return tx.purchaseEnquiry.findUniqueOrThrow({
@@ -1335,7 +1349,15 @@ router.post('/:id/restore', requirePermission(MODULE, 'delete'), async (req: Aut
     after: updated,
   })
 
-  res.json({ success: true, data: shape(updated), message: before.enquiryNumber + ' restored.' })
+  const own = shownNumber(before.enquiryNumber)
+  res.json({
+    success: true,
+    data: shape(updated),
+    message:
+      updated.enquiryNumber === own
+        ? own + ' restored.'
+        : `Restored as ${updated.enquiryNumber} — ${own} was taken by a new enquiry meanwhile.`,
+  })
 })
 
 // -- Files -------------------------------------------------------------------
