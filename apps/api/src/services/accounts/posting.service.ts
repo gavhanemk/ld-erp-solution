@@ -3,7 +3,7 @@ import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf } from '../../lib/docNumber'
 import { logger } from '../../utils/logger'
 import { keyedLedgerId, partyLedgerId } from './chart.service'
-import { bankDatesOf, bankKey, booksSettings, dayText, dayValue, istDay, r2, type BooksSettings } from './books.service'
+import { bankDatesOf, bankKey, booksSettings, checkBalancedNow, dayText, dayValue, istDay, r2, type BooksSettings } from './books.service'
 
 /**
  * Sales and Purchase documents into the books.
@@ -635,6 +635,8 @@ async function writeLines(tx: Tx, voucherId: string, plan: Plan, banked = new Ma
       },
     })
   }
+  // The database's own balance check, run now so a refusal is not lost at commit.
+  await checkBalancedNow(tx)
 }
 
 /**

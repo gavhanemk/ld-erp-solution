@@ -5,6 +5,7 @@ import { prisma } from '@ld-erp/database'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
+import { createOnce, requestIdOf } from '../lib/onceFor'
 import { ensureChart } from '../services/accounts/chart.service'
 import {
   booksSettings,
@@ -778,10 +779,28 @@ router.get('/vouchers/:id/print', requirePermission(MODULE, 'view'), async (req,
 router.post('/vouchers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const input = voucherSchema.parse(req.body)
   await ensureChart()
-  const made = await prisma.$transaction((tx) => writeVoucher(tx, input, req.user!.id), { timeout: 30_000 })
-  const v = await loadVoucher(made.id)
-  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'Voucher', entityId: made.id, after: shapeVoucher(v, await moneyGroupIds(prisma)) })
-  res.status(201).json({ success: true, data: { id: made.id, voucherNo: made.voucherNo }, message: `${KIND_LABEL[input.kind]} ${made.voucherNo} saved` })
+  // A double click or a retry saves it once: the voucher form sends one request id until it saves.
+  const { doc: made, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'VOUCHER',
+    userId: req.user!.id,
+    make: async (tx) => {
+      const v = await writeVoucher(tx, input, req.user!.id)
+      return { id: v.id, voucherNo: v.voucherNo }
+    },
+    load: (id) => prisma.voucher.findUniqueOrThrow({ where: { id }, select: { id: true, voucherNo: true } }),
+    timeout: 30_000,
+  })
+  if (!repeat) {
+    const v = await loadVoucher(made.id)
+    await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'Voucher', entityId: made.id, after: shapeVoucher(v, await moneyGroupIds(prisma)) })
+  }
+  res.status(repeat ? 200 : 201).json({
+    success: true,
+    data: { id: made.id, voucherNo: made.voucherNo },
+    message: `${KIND_LABEL[input.kind]} ${made.voucherNo} saved${repeat ? '. (That was the same request again: nothing more was saved.)' : ''}`,
+    repeat,
+  })
 })
 
 /** Alters a voucher typed here. One written by a document changes only with its document. */

@@ -3,6 +3,7 @@ import { AppError } from '../middleware/errorHandler'
 import { SAMPLE_STORE_IDS, sampleStoreMayMove, sampleStoreRefused } from '../lib/sampleStore'
 // package.service imports this file too; each only calls the other from inside a function.
 import { takeFromPackage } from './package.service'
+import { currentUserId } from '../lib/requestContext'
 
 /**
  * The only place in the system that is allowed to write a stock movement.
@@ -121,7 +122,13 @@ export interface Balance {
  * an item stuck.
  */
 async function lockBalance(tx: Prisma.TransactionClient, key: StockKey): Promise<void> {
-  const token = [
+  const token = lockToken(key)
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)`
+}
+
+/** The name a balance's lock goes by: everything that makes it one balance. */
+function lockToken(key: StockKey): string {
+  return [
     key.itemId,
     key.warehouseId,
     key.ownership ?? 'OWNED',
@@ -129,8 +136,21 @@ async function lockBalance(tx: Prisma.TransactionClient, key: StockKey): Promise
     key.sizeId ?? '',
     key.grade ?? 'A',
   ].join('|')
+}
 
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)`
+/**
+ * Locks several balances at once, always in the same order.
+ *
+ * A document that touches two balances — a transfer takes from one store and
+ * puts into another — locking them in the order it meets them can deadlock
+ * against one going the other way: A→B holds A and waits for B while B→A
+ * holds B and waits for A. Taken in one fixed order, the second simply waits
+ * for the first. Each lock is held to the end of the transaction, and taking
+ * one again later (as `recordMovement` does) is harmless.
+ */
+export async function lockBalances(tx: Prisma.TransactionClient, keys: StockKey[]): Promise<void> {
+  const tokens = [...new Set(keys.map(lockToken))].sort()
+  for (const token of tokens) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)`
 }
 
 /**
@@ -142,14 +162,7 @@ async function lockBalanceAndStore(
   tx: Prisma.TransactionClient,
   key: StockKey,
 ): Promise<{ purpose: string | null; name: string | null }> {
-  const token = [
-    key.itemId,
-    key.warehouseId,
-    key.ownership ?? 'OWNED',
-    key.ownerCustomerId ?? '',
-    key.sizeId ?? '',
-    key.grade ?? 'A',
-  ].join('|')
+  const token = lockToken(key)
   const rows = await tx.$queryRaw<Array<{ purpose: string | null; name: string | null }>>`
     SELECT w.purpose::text AS purpose, w.name
     FROM (SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)) AS held
@@ -451,6 +464,8 @@ export async function recordMovement(
       unitRate,
       transactionDate,
       notes: m.notes ?? null,
+      // Who asked for it: the signed-in user of the request this runs in.
+      createdById: currentUserId(),
     },
   })
 
@@ -660,6 +675,14 @@ export async function transferStock(
       'SAME_WAREHOUSE',
     )
   }
+
+  // Both balances locked up front, in one fixed order: two transfers going
+  // opposite ways between the same stores would otherwise deadlock.
+  const whose = { ownership: args.ownership, ownerCustomerId: args.ownerCustomerId, sizeId: args.sizeId, grade: args.grade }
+  await lockBalances(tx, [
+    { itemId: args.itemId, warehouseId: args.fromWarehouseId, ...whose },
+    { itemId: args.itemId, warehouseId: args.toWarehouseId, ...whose },
+  ])
 
   const out = await recordMovement(tx, {
     itemId: args.itemId,

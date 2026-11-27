@@ -77,6 +77,25 @@ export async function booksSettings(tx: Tx): Promise<BooksSettings> {
  * voucher rewritten without changing its bank line stays reconciled. A
  * changed amount has to be reconciled again.
  */
+/**
+ * Has the database check, now, that every voucher this transaction has
+ * written balances.
+ *
+ * The check itself is a trigger on acc_voucher_lines that waits for the
+ * commit, because a voucher's lines go in one at a time and are only square
+ * once the last is in. Left to the commit, though, a refusal is lost: Prisma
+ * (5.22) logs "transaction failed to commit" and answers as if the save went
+ * through, while nothing was kept. So every writer of voucher lines calls this
+ * once its voucher is complete: the waiting check runs here, inside the
+ * transaction, and a voucher that does not balance fails the save with its
+ * own message. The check then goes back to waiting, so the next voucher in the
+ * same transaction can be written line by line again.
+ */
+export async function checkBalancedNow(tx: Tx): Promise<void> {
+  await tx.$executeRawUnsafe('SET CONSTRAINTS "acc_voucher_lines_balance" IMMEDIATE')
+  await tx.$executeRawUnsafe('SET CONSTRAINTS "acc_voucher_lines_balance" DEFERRED')
+}
+
 export async function bankDatesOf(tx: Tx, voucherId: string): Promise<Map<string, Date>> {
   const lines = await tx.voucherLine.findMany({ where: { voucherId, bankDate: { not: null } }, select: { ledgerId: true, debit: true, credit: true, bankDate: true } })
   return new Map(lines.map((l) => [bankKey(l.ledgerId, Number(l.debit) - Number(l.credit)), l.bankDate!]))

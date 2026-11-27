@@ -1,11 +1,11 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, Loader2, PackagePlus, Plus, Shirt, Trash2, Warehouse as WarehouseIcon, X } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
-import { formatRupees } from '@/lib/utils'
+import { formatRupees, newRequestId } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SizeQtyGrid, sumSizes, type SizeOption } from '@/components/sales/SizeQtyGrid'
@@ -134,6 +134,12 @@ export function FinishedGoodsDialog({
   useEscape(() => {
     if (!saving) onClose()
   }, open)
+  // One id from opening the form to its save: a double click or a retry
+  // reaches the server as the same request and receives the pieces once.
+  const requestId = useRef(newRequestId())
+  useEffect(() => {
+    if (open) requestId.current = newRequestId()
+  }, [open])
   useEffect(() => {
     if (!open) return
     const previous = document.body.style.overflow
@@ -340,7 +346,7 @@ export function FinishedGoodsDialog({
       ),
     }
     try {
-      const res = await api.post<{ message?: string }>('/finished-goods', body)
+      const res = await api.post<{ message?: string }>('/finished-goods', { ...body, requestId: requestId.current })
       onSaved(res.message ?? 'Finished goods put into stock.')
       onClose()
     } catch (err) {

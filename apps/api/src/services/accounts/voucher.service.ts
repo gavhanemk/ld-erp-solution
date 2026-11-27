@@ -3,7 +3,7 @@ import type { BillRefKind, Prisma, VoucherKind } from '@prisma/client'
 import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf, nextDocumentNumber } from '../../lib/docNumber'
 import { VOUCHER_SERIES } from './chart.service'
-import { bankDatesOf, bankKey, booksSettings, dayText, dayValue, istDay, openBills, r2, todayIst, type BooksSettings } from './books.service'
+import { bankDatesOf, bankKey, booksSettings, checkBalancedNow, dayText, dayValue, istDay, openBills, r2, todayIst, type BooksSettings } from './books.service'
 
 /**
  * Vouchers typed in Accounts: Payment, Receipt, Contra and Journal.
@@ -314,6 +314,8 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
       },
     })
   }
+  // The database's own balance check, run now so a refusal is not lost at commit.
+  await checkBalancedNow(tx)
   return { id, voucherNo }
 }
 

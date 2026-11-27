@@ -768,6 +768,7 @@ model User {
   uploadedReceiptFiles   PaymentReceiptAttachment[] @relation("ReceiptAttachmentUploadedBy")
   uploadedEnquiryFiles PurchaseEnquiryAttachment[] @relation("EnquiryAttachmentUploadedBy")
   movedStock           StockTransfer[]             @relation("TransferMovedBy")
+  stockMovements       StockLedger[]               @relation("StockLedgerCreatedBy")
   cancelledStock       StockTransfer[]             @relation("TransferCancelledBy")
   countedStock         StockAdjustment[]           @relation("AdjustmentMadeBy")
   receivedGoods        GRN[]                       @relation("GRNCreatedBy")
@@ -3256,6 +3257,10 @@ model StockLedger {
   transactionDate DateTime        @default(now())
   notes           String?
   createdAt       DateTime        @default(now())
+  /// Who wrote the movement: the signed-in user whose request it was. Empty
+  /// for a script, a seed or anything written before this was kept.
+  createdById     String?
+  createdBy       User?           @relation("StockLedgerCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
   /// "A" for first quality, "B" for B-grade finished goods, kept apart from
   /// good ones. Everything that is not a graded garment is "A".

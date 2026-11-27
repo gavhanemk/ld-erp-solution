@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
 import { accessFor, grantsAllow, isAdminRole } from '../lib/access'
 import { SCREENS, SUPER_ROLE, moduleOf, screenForPath } from '../lib/accessCatalog'
+import { runAs } from '../lib/requestContext'
 
 export interface AuthRequest extends Request {
   user?: {
@@ -64,7 +65,8 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
       permissions: access.grants,
       superAdmin: access.superAdmin,
     }
-    next()
+    // The rest of the request runs as this user, so the stock writer can say who moved stock.
+    runAs(req.user.id ?? null, () => next())
   } catch (err) {
     next(err)
   }

@@ -10,6 +10,7 @@ import { getPrintHeader } from '../lib/printData'
 import {
   assertStockUnused,
   balanceOf,
+  lockBalances,
   lockedBalanceOf,
   onHand,
   recordMovement,
@@ -68,7 +69,7 @@ import {
 } from '../schemas/inventory.schemas'
 import { autoStickers, stickersNote, withdrawStickers } from '../services/stickers.service'
 import { assertOwnersFitOrder } from '../services/ownership.service'
-import { onceFor } from '../lib/onceFor'
+import { createOnce, onceFor, requestIdOf } from '../lib/onceFor'
 import { CGRN_STATUS_LABEL, HELD, heldByLine, postGrnStock, releaseHeld, reverseGrnStock, takeHeldPackages } from '../services/customerGrn.service'
 import { fillJobCardBlanks } from '../services/jobCard.service'
 import { SAMPLE_STORE_IDS, assertGeneralStores } from '../lib/sampleStore'
@@ -488,6 +489,8 @@ async function ledgerRows(ids: string[]) {
       },
       warehouse: { select: { id: true, name: true } },
       ownerCustomer: { select: { id: true, name: true } },
+      // Who made the movement; empty on rows from before this was kept.
+      createdBy: { select: { id: true, name: true } },
     },
   })
   const byId = new Map(rows.map((r) => [r.id, r]))
@@ -824,12 +827,21 @@ export async function createStockIn(tx: Prisma.TransactionClient, data: z.infer<
 router.post('/stock-in', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = stockInSchema.parse(req.body)
   await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Stock in' })))
-  const adj = await prisma.$transaction((tx) => createStockIn(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
-  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockAdjustment', entityId: adj.id, after: adj })
-  res.status(201).json({
+  const userId = req.user?.id ?? null
+  // A double click or a retry saves it once: the form sends one request id until it saves.
+  const { doc: adj, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'STOCK_IN',
+    userId,
+    make: (tx) => createStockIn(tx, data, userId),
+    load: (id) => prisma.stockAdjustment.findUniqueOrThrow({ where: { id }, include: adjustmentInclude }),
+  })
+  if (!repeat) await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockAdjustment', entityId: adj.id, after: adj })
+  res.status(repeat ? 200 : 201).json({
     success: true,
-    message: `${adj.adjustmentNumber} saved: ${adj.lines.length} ${adj.lines.length === 1 ? 'item' : 'items'} waiting for a store manager's approval in Stock Documents → Adjustments. Stock goes up once it is approved.`,
+    message: `${adj.adjustmentNumber} saved: ${adj.lines.length} ${adj.lines.length === 1 ? 'item' : 'items'} waiting for a store manager's approval in Stock Documents → Adjustments. Stock goes up once it is approved.${repeat ? ' (That was the same request again: nothing more was saved.)' : ''}`,
     data: adj,
+    repeat,
   })
 })
 
@@ -851,24 +863,37 @@ router.post('/adjustments', requirePermission(MODULE, 'create'), async (req: Aut
   // The count itself must be whole for a whole-number item (0 or 1 carton, never 0.6);
   // the difference it books may still be a fraction, which is how an old 0.6 is put right.
   await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.countedQty, what: 'Counted' })))
-  const adjustment = await prisma.$transaction((tx) => createAdjustment(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
-
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'CREATE',
-    entityType: 'StockAdjustment',
-    entityId: adjustment.id,
-    after: adjustment,
+  const userId = req.user?.id ?? null
+  // A double click or a retry saves it once: the form sends one request id until it saves.
+  const { doc: adjustment, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'STOCK_ADJUSTMENT',
+    userId,
+    make: (tx) => createAdjustment(tx, data, userId),
+    load: (id) => prisma.stockAdjustment.findUniqueOrThrow({ where: { id }, include: adjustmentInclude }),
   })
+
+  if (!repeat) {
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'CREATE',
+      entityType: 'StockAdjustment',
+      entityId: adjustment.id,
+      after: adjustment,
+    })
+  }
 
   const corrected = adjustment.lines.filter((l) => Number(l.difference) !== 0).length
 
-  res.status(201).json({
+  res.status(repeat ? 200 : 201).json({
     success: true,
-    message: corrected
-      ? `${adjustment.adjustmentNumber} saved with ${corrected} ${corrected === 1 ? 'difference' : 'differences'}. It goes to a store manager; stock changes once it is approved.`
-      : `${adjustment.adjustmentNumber} saved. Everything counted matched the book, so there is nothing to approve.`,
+    message:
+      (corrected
+        ? `${adjustment.adjustmentNumber} saved with ${corrected} ${corrected === 1 ? 'difference' : 'differences'}. It goes to a store manager; stock changes once it is approved.`
+        : `${adjustment.adjustmentNumber} saved. Everything counted matched the book, so there is nothing to approve.`) +
+      (repeat ? ' (That was the same request again: nothing more was saved.)' : ''),
     data: adjustment,
+    repeat,
   })
 })
 
@@ -1042,20 +1067,31 @@ export async function createTransfer(
 router.post('/transfers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = transferSchema.parse(req.body)
   await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Transfer' })))
-  const transfer = await prisma.$transaction((tx) => createTransfer(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
-
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'CREATE',
-    entityType: 'StockTransfer',
-    entityId: transfer.id,
-    after: transfer,
+  const userId = req.user?.id ?? null
+  // A double click or a retry moves it once: the form sends one request id until it saves.
+  const { doc: transfer, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'STOCK_TRANSFER',
+    userId,
+    make: (tx) => createTransfer(tx, data, userId),
+    load: (id) => prisma.stockTransfer.findUniqueOrThrow({ where: { id }, include: transferInclude }),
   })
 
-  res.status(201).json({
+  if (!repeat) {
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'CREATE',
+      entityType: 'StockTransfer',
+      entityId: transfer.id,
+      after: transfer,
+    })
+  }
+
+  res.status(repeat ? 200 : 201).json({
     success: true,
-    message: `${transfer.transferNumber} saved. ${transfer.lines.length} ${transfer.lines.length === 1 ? 'item' : 'items'} moved from ${transfer.fromWarehouse.name} to ${transfer.toWarehouse.name}.`,
+    message: `${transfer.transferNumber} saved. ${transfer.lines.length} ${transfer.lines.length === 1 ? 'item' : 'items'} moved from ${transfer.fromWarehouse.name} to ${transfer.toWarehouse.name}.${repeat ? ' (That was the same request again: nothing more was saved.)' : ''}`,
     data: transfer,
+    repeat,
   })
 })
 
@@ -2608,6 +2644,17 @@ router.post(
         body.lines.flatMap((a) => {
           const line = mr.lines.find((l) => l.id === a.lineId)
           return line ? [{ itemId: line.itemId, qty: a.qty, what: 'Reserve' }] : []
+        }),
+      )
+
+      // Every balance this reads is locked first, in one fixed order, the same
+      // lock an issue or a transfer takes: two requisitions reserving at the
+      // same moment cannot both count the same free stock.
+      await lockBalances(
+        tx,
+        body.lines.flatMap((a) => {
+          const line = mr.lines.find((l) => l.id === a.lineId)
+          return line && a.qty > 0 ? [{ itemId: line.itemId, warehouseId: a.warehouseId }] : []
         }),
       )
 
@@ -4403,20 +4450,31 @@ export async function createJobWorkChallan(tx: Prisma.TransactionClient, data: z
 router.post('/job-work', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createJobWorkChallanSchema.parse(req.body)
   await assertQtyFitsUnits(prisma, data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty, what: 'Sent' })))
-  const challan = await prisma.$transaction((tx) => createJobWorkChallan(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
-
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'CREATE',
-    entityType: 'JobWorkChallan',
-    entityId: challan.id,
-    after: challan,
+  const userId = req.user?.id ?? null
+  // A double click or a retry sends it once: the form sends one request id until it saves.
+  const { doc: challan, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'JOB_WORK_CHALLAN',
+    userId,
+    make: (tx) => createJobWorkChallan(tx, data, userId),
+    load: (id) => prisma.jobWorkChallan.findUniqueOrThrow({ where: { id }, include: jobWorkInclude }),
   })
 
-  res.status(201).json({
+  if (!repeat) {
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'CREATE',
+      entityType: 'JobWorkChallan',
+      entityId: challan.id,
+      after: challan,
+    })
+  }
+
+  res.status(repeat ? 200 : 201).json({
     success: true,
-    message: `${challan.challanNumber} saved. ${challan.lines.length} ${challan.lines.length === 1 ? 'item is' : 'items are'} now at ${challan.jobWorker.name}, still ${challan.lines.some((l) => l.ownership === 'CUSTOMER_OWNED') ? "the customer's" : 'ours'}.`,
+    message: `${challan.challanNumber} saved. ${challan.lines.length} ${challan.lines.length === 1 ? 'item is' : 'items are'} now at ${challan.jobWorker.name}, still ${challan.lines.some((l) => l.ownership === 'CUSTOMER_OWNED') ? "the customer's" : 'ours'}.${repeat ? ' (That was the same request again: nothing more was saved.)' : ''}`,
     data: challan,
+    repeat,
   })
 })
 

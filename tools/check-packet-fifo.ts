@@ -44,7 +44,8 @@ async function main() {
   const [where] = await prisma.$queryRaw<Array<{ db: string; port: number }>>`select current_database() as db, inet_server_port() as port`
   if (where.db !== 'lderp_demo' || Number(where.port) !== 5433) throw new Error(`Not the demo database (${where.db}:${where.port}) — stopping.`)
 
-  const admin = await prisma.user.findFirstOrThrow({ where: { role: { name: 'Admin' } }, include: { role: true } })
+  // Admin became Super Admin in #79; either is the administrator here.
+  const admin = await prisma.user.findFirstOrThrow({ where: { role: { name: { in: ['Super Admin', 'Admin'] } } }, include: { role: true } })
   const other = await prisma.user.findFirstOrThrow({ where: { id: { not: admin.id } } })
   const asAdmin = { id: admin.id, email: admin.email, name: admin.name, roleId: admin.roleId, role: admin.role.name }
   // A storekeeper: can issue and move, cannot approve.

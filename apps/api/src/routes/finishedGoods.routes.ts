@@ -6,6 +6,7 @@ import { AuthRequest, requirePermission } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { assertNotCancelling } from '../services/orderCancel.service'
 import { writeAuditLog } from '../lib/audit'
+import { createOnce, requestIdOf } from '../lib/onceFor'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { assertStylesInProduction } from '../lib/styleStage'
 import { assertStockUnused, recordMovement } from '../services/stock.service'
@@ -427,14 +428,23 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
  */
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSchema.parse(req.body)
-  const receipt = await prisma.$transaction((tx) => createFgReceipt(tx, data, req.user!.id), { timeout: 30_000 })
+  // A double click or a retry receives it once: the form sends one request id until it saves.
+  const { doc: receipt, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'FG_RECEIPT',
+    userId: req.user!.id,
+    make: (tx) => createFgReceipt(tx, data, req.user!.id),
+    load: (id) => prisma.finishedGoodsReceipt.findUniqueOrThrow({ where: { id }, include: receiptInclude }),
+    timeout: 30_000,
+  })
 
-  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'FinishedGoodsReceipt', entityId: receipt.id, after: receipt })
+  if (!repeat) await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'FinishedGoodsReceipt', entityId: receipt.id, after: receipt })
   const pieces = receipt.lines.reduce((s, l) => s + Number(l.qty), 0)
-  res.status(201).json({
+  res.status(repeat ? 200 : 201).json({
     success: true,
-    message: `${receipt.fgrNumber}: ${pieces.toLocaleString('en-IN')} pcs into ${receipt.warehouse.name}`,
+    message: `${receipt.fgrNumber}: ${pieces.toLocaleString('en-IN')} pcs into ${receipt.warehouse.name}${repeat ? '. (That was the same request again: nothing more was saved.)' : ''}`,
     data: receipt,
+    repeat,
   })
 })
 

@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { newRequestId } from '@/lib/utils'
 import { Loader2, Plus, Trash2, Copy, Send, Undo2, Factory, Truck, Boxes, FileText } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
@@ -131,6 +132,9 @@ export function SendJobWorkDialog({
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // One id for this form until it saves: a double click or a retry reaches
+  // the server as the same request and sends the goods out once.
+  const requestId = useRef(newRequestId())
 
   useEffect(() => {
     let cancelled = false
@@ -259,7 +263,9 @@ export function SendJobWorkDialog({
         notes: notes || null,
         soId: soId || null,
         lines: filled.map((l) => ({ itemId: l.itemId, qty: num(l.qty), ...parseWhose(l.whose) })),
+        requestId: requestId.current,
       })
+      requestId.current = newRequestId()
       onSaved(res.message ?? `${res.data.challanNumber} saved.`, { type: 'JOB_WORK', id: res.data.id })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')

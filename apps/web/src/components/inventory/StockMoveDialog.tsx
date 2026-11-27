@@ -1,8 +1,9 @@
 'use client'
 
 import { useQtyRules } from '@/lib/qtyRules'
+import { newRequestId } from '@/lib/utils'
 import { QtyProblem } from '@/components/ui/QtyProblem'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Loader2,
   Plus,
@@ -165,6 +166,9 @@ export function StockMoveDialog({
   const [error, setError] = useState<string | null>(null)
   // What the chosen store holds, by item, owner and size.
   const [held, setHeld] = useState<Held[]>([])
+  // One id for this form until it saves: a double click or a retry reaches
+  // the server as the same request and saves the document once.
+  const requestId = useRef(newRequestId())
 
   useEffect(() => {
     if (mode === 'opening' || mode === 'stockin' || !warehouseId) {
@@ -302,6 +306,7 @@ export function StockMoveDialog({
         })
       } else if (mode === 'stockin') {
         res = await api.post('/inventory/stock-in', {
+          requestId: requestId.current,
           warehouseId,
           source,
           notes: notes || null,
@@ -309,6 +314,7 @@ export function StockMoveDialog({
         })
       } else if (mode === 'count') {
         res = await api.post('/inventory/adjustments', {
+          requestId: requestId.current,
           warehouseId,
           reason: reason.trim(),
           lines: filled.map((l) => ({
@@ -321,6 +327,7 @@ export function StockMoveDialog({
         })
       } else {
         res = await api.post('/inventory/transfers', {
+          requestId: requestId.current,
           fromWarehouseId: warehouseId,
           toWarehouseId,
           notes: notes || null,
@@ -328,6 +335,7 @@ export function StockMoveDialog({
         })
       }
 
+      requestId.current = newRequestId()
       onSaved(res.message ?? 'Saved.', res.data)
     } catch (err) {
       setError(apiErrorMessage(err))

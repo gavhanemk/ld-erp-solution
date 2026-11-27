@@ -1,6 +1,7 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { newRequestId } from '@/lib/utils'
 import { createPortal } from 'react-dom'
 import { AlertCircle, BookOpenCheck, CalendarDays, FileText, Hash, Info, ListOrdered, Loader2, PenLine, Plus, Save, Trash2, Wand2, X } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
@@ -146,6 +147,12 @@ export function VoucherDialog({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
+  // One id from opening the form to its save: a double click or a retry
+  // reaches the server as the same request and saves one voucher.
+  const requestId = useRef(newRequestId())
+  useEffect(() => {
+    if (open) requestId.current = newRequestId()
+  }, [open])
 
   useEscape(() => {
     if (!saving) onClose()
@@ -401,7 +408,7 @@ export function VoucherDialog({
     try {
       const res = voucherId
         ? await api.patch<{ data: { id: string; voucherNo: string }; message: string }>(`/accounts/vouchers/${voucherId}`, body)
-        : await api.post<{ data: { id: string; voucherNo: string }; message: string }>('/accounts/vouchers', body)
+        : await api.post<{ data: { id: string; voucherNo: string }; message: string }>('/accounts/vouchers', { ...body, requestId: requestId.current })
       onSaved(res.message, res.data.id)
       onClose()
     } catch (err) {
