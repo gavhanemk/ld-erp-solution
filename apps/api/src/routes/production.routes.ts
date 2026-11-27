@@ -57,8 +57,8 @@ const moLineSchema = z.object({
   qty: pieces.optional(),
 })
 
-/** What a direct order is made for. */
-const directPurpose = z.enum(['STOCK', 'SAMPLE'])
+/** What a direct order is made for: stock, samples, or a customer whose order is not raised (yet). */
+const directPurpose = z.enum(['STOCK', 'SAMPLE', 'CUSTOMER'])
 
 const moFields = {
   plannedStartDate: z.coerce.date().optional().nullable(),
@@ -86,6 +86,8 @@ const moBodySchema = z
     /** A direct order's brand (one of our own) and what it is for: kept as they are when left out. */
     brandId: z.string().min(1).optional(),
     purpose: directPurpose.optional(),
+    /** A direct order for a customer: who it is for. */
+    customerId: z.string().min(1).optional().nullable(),
   })
   .superRefine(checkMo)
 
@@ -97,6 +99,8 @@ export const createMoSchema = z
     /** A direct order: the brand it is made under (one of our own), and what it is for. */
     brandId: z.string().min(1).optional(),
     purpose: directPurpose.optional(),
+    /** A direct order for a customer: who it is for. */
+    customerId: z.string().min(1).optional().nullable(),
     /** Release to the floor on saving, rather than keep it as a draft. */
     release: z.boolean().optional(),
   })
@@ -107,6 +111,7 @@ export const createMoSchema = z
       return
     }
     if (!d.brandId) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['brandId'], message: 'Pick the brand it is made under' })
+    if (d.purpose === 'CUSTOMER' && !d.customerId) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['customerId'], message: 'Pick the customer it is made for' })
     if (d.lines.some((l) => !l.styleId)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lines'], message: 'Pick the style of each line' })
   })
 
@@ -230,8 +235,17 @@ async function ownBrand(tx: Prisma.TransactionClient, brandId: string) {
   return brand
 }
 
-/** What a manufacturing order is made for, in a few words: its sales order, or stock, or samples. */
-const madeFor = (mo: { purpose: string; so?: { soNumber: string } | null }) => (mo.so ? mo.so.soNumber : mo.purpose === 'SAMPLE' ? 'samples' : 'stock')
+/** A customer a direct order is made for: there, and switched on. */
+async function directCustomer(tx: Prisma.TransactionClient, customerId: string) {
+  const c = await tx.customer.findUnique({ where: { id: customerId }, select: { id: true, name: true, isActive: true } })
+  if (!c) throw new AppError('That customer does not exist', 400, 'BAD_CUSTOMER')
+  if (!c.isActive) throw new AppError(`${c.name} is switched off in Masters → Customers`, 400, 'INACTIVE')
+  return c
+}
+
+/** What a manufacturing order is made for, in a few words: its sales order, or stock, samples, or the customer. */
+const madeFor = (mo: { purpose: string; so?: { soNumber: string } | null; customer?: { name: string } | null }) =>
+  mo.so ? mo.so.soNumber : mo.purpose === 'SAMPLE' ? 'samples' : mo.purpose === 'CUSTOMER' ? (mo.customer?.name ?? 'a customer') : 'stock'
 
 /** Released: the floor has it, and the sales order is in production. */
 async function release(tx: Prisma.TransactionClient, moId: string) {
@@ -247,6 +261,8 @@ async function release(tx: Prisma.TransactionClient, moId: string) {
 
 const moInclude = {
   brand: { select: { id: true, name: true, type: true } },
+  // A direct order made for a customer: who.
+  customer: { select: { id: true, name: true } },
   so: {
     select: {
       id: true,
@@ -344,6 +360,7 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
         { moNumber: { contains: q, mode: 'insensitive' } },
         { so: { soNumber: { contains: q, mode: 'insensitive' } } },
         { so: { customer: { name: { contains: q, mode: 'insensitive' } } } },
+        { customer: { name: { contains: q, mode: 'insensitive' } } },
         { lines: { some: { style: { code: { contains: q, mode: 'insensitive' } } } } },
       ],
     })
@@ -364,6 +381,8 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       include: {
         brand: { select: { id: true, name: true, type: true } },
         so: { select: { id: true, soNumber: true, status: true, shortClosedAt: true, deliveryDate: true, customer: { select: { name: true } } } },
+        // A direct order made for a customer: who.
+        customer: { select: { name: true } },
         lines: { select: { color: true, bomId: true, style: { select: { code: true } } } },
         routing: { select: { code: true } },
         _count: { select: { materialRequisitions: true, steps: true } },
@@ -416,7 +435,7 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       editBlock: blockOf(mo),
       brand: mo.brand,
       soId: mo.so?.id ?? null,
-      customer: mo.so?.customer.name ?? null,
+      customer: mo.so?.customer.name ?? mo.customer?.name ?? null,
       soNumber: mo.so?.soNumber ?? null,
       purpose: mo.purpose,
       deliveryDate: mo.so?.deliveryDate ?? null,
@@ -509,6 +528,8 @@ export async function createMo(tx: Prisma.TransactionClient, data: z.infer<typeo
   // From a sales order, its lines; direct, the styles picked, under a brand of our own.
   const { so, total, create } = data.soId ? await shapeLines(tx, data.soId, data) : { so: null, ...(await shapeDirectLines(tx, data)) }
   const brandId = so ? so.brandId : (await ownBrand(tx, data.brandId!)).id
+  const purpose = so ? 'ORDER' : (data.purpose ?? 'STOCK')
+  const customerId = purpose === 'CUSTOMER' ? (await directCustomer(tx, data.customerId!)).id : null
   // Every check first: a refused order takes no number.
   const moNumber = await nextDocumentNumber(tx, 'MO', new Date())
   const mo = await tx.manufacturingOrder.create({
@@ -516,7 +537,8 @@ export async function createMo(tx: Prisma.TransactionClient, data: z.infer<typeo
       moNumber,
       soId: so?.id ?? null,
       brandId,
-      purpose: so ? 'ORDER' : (data.purpose ?? 'STOCK'),
+      purpose,
+      customerId,
       plannedStartDate: data.plannedStartDate ?? null,
       plannedEndDate: data.plannedEndDate ?? so?.deliveryDate ?? null,
       totalPlannedQty: total,
@@ -606,7 +628,18 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       if (block) throw new AppError(block, 409, 'MO_STARTED')
       // A direct order's lines are its styles; its brand and purpose may change with them.
       const { total, create } = before.soId ? await shapeLines(tx, before.soId, data, before.id) : await shapeDirectLines(tx, data)
-      const direct = !before.soId ? { ...(data.brandId ? { brandId: (await ownBrand(tx, data.brandId)).id } : {}), ...(data.purpose ? { purpose: data.purpose } : {}) } : {}
+      const purpose = data.purpose ?? before.purpose
+      const direct = !before.soId
+        ? {
+            ...(data.brandId ? { brandId: (await ownBrand(tx, data.brandId)).id } : {}),
+            ...(data.purpose ? { purpose: data.purpose } : {}),
+            // For a customer: the one picked (or kept); for stock or samples, none.
+            customerId:
+              purpose === 'CUSTOMER'
+                ? (await directCustomer(tx, data.customerId ?? before.customerId ?? (() => { throw new AppError('Pick the customer it is made for', 400, 'NO_CUSTOMER') })())).id
+                : null,
+          }
+        : {}
       await tx.mOLine.deleteMany({ where: { moId: before.id } })
       await tx.manufacturingOrder.update({
         where: { id: before.id },
@@ -875,7 +908,16 @@ router.post('/orders/:id/link', requirePermission(MODULE, 'edit'), async (req: A
     async (tx) => {
       const mo = await tx.manufacturingOrder.findUnique({
         where: { id: req.params.id },
-        select: { id: true, moNumber: true, status: true, soId: true, brandId: true, lines: { select: { id: true, styleId: true, color: true, totalQty: true, style: { select: { code: true } } } } },
+        select: {
+          id: true,
+          moNumber: true,
+          status: true,
+          soId: true,
+          brandId: true,
+          customerId: true,
+          customer: { select: { name: true } },
+          lines: { select: { id: true, styleId: true, color: true, totalQty: true, style: { select: { code: true } } } },
+        },
       })
       if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
       if (mo.soId) throw new AppError(`${mo.moNumber} is already for a sales order.`, 409, 'HAS_ORDER')
@@ -886,6 +928,9 @@ router.post('/orders/:id/link', requirePermission(MODULE, 'edit'), async (req: A
         throw new AppError(so.status === 'DRAFT' ? `${so.soNumber} is still a draft. Confirm it first.` : `${so.soNumber} is ${so.status.toLowerCase().replace(/_/g, ' ')}, so nothing more is made for it.`, 409, 'ORDER_NOT_OPEN')
       }
       if (so.isJobWork) throw new AppError(`${so.soNumber} is job work, made from the customer's fabric: a run from our own cannot become it.`, 400, 'JOB_WORK')
+      if (mo.customerId && so.customerId !== mo.customerId) {
+        throw new AppError(`${mo.moNumber} is made for ${mo.customer?.name}; ${so.soNumber} is ${so.customer.name}'s.`, 400, 'OTHER_CUSTOMER')
+      }
       const same = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase()
       const matched = mo.lines.map((l) => {
         const line = lines.find((x) => x.style?.id === l.styleId && same(x.color, l.color))
@@ -918,7 +963,7 @@ router.post('/orders/:id/link', requirePermission(MODULE, 'edit'), async (req: A
  * for: open, not job work, with every style and colour it makes on a line.
  */
 router.get('/orders/:id/linkable', requirePermission(MODULE, 'view'), async (req, res) => {
-  const mo = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { soId: true, lines: { select: { styleId: true, color: true } } } })
+  const mo = await prisma.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { soId: true, customerId: true, lines: { select: { styleId: true, color: true } } } })
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   if (mo.soId) {
     res.json({ success: true, data: [] })
@@ -926,7 +971,14 @@ router.get('/orders/:id/linkable', requirePermission(MODULE, 'view'), async (req
   }
   const styleIds = [...new Set(mo.lines.map((l) => l.styleId))]
   const orders = await prisma.salesOrder.findMany({
-    where: { status: { in: [...PLANNABLE_ORDER_STATUSES] }, isJobWork: false, cancelRequestedAt: null, lines: { some: { item: { styleId: { in: styleIds } } } } },
+    where: {
+      status: { in: [...PLANNABLE_ORDER_STATUSES] },
+      isJobWork: false,
+      cancelRequestedAt: null,
+      // Made for a customer: only their orders.
+      ...(mo.customerId ? { customerId: mo.customerId } : {}),
+      lines: { some: { item: { styleId: { in: styleIds } } } },
+    },
     select: {
       id: true,
       soNumber: true,
@@ -955,7 +1007,10 @@ router.get('/orders/:id/linkable', requirePermission(MODULE, 'view'), async (req
  */
 router.post('/orders/:id/unlink', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const out = await prisma.$transaction(async (tx) => {
-    const mo = await tx.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { id: true, moNumber: true, status: true, purpose: true, soId: true, so: { select: { soNumber: true } } } })
+    const mo = await tx.manufacturingOrder.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, moNumber: true, status: true, purpose: true, soId: true, so: { select: { soNumber: true } }, customer: { select: { name: true } } },
+    })
     if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
     if (!mo.soId || !mo.so) throw new AppError(`${mo.moNumber} is not for a sales order.`, 409, 'NO_ORDER')
     if (mo.purpose === 'ORDER') throw new AppError(`${mo.moNumber} was raised for ${mo.so.soNumber}, so it stays with it.`, 409, 'RAISED_FOR_ORDER')
@@ -968,7 +1023,7 @@ router.post('/orders/:id/unlink', requirePermission(MODULE, 'edit'), async (req:
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: out.mo.id, after: { unlinkedFrom: out.mo.so?.soNumber } })
   res.json({
     success: true,
-    message: `${out.mo.moNumber} is no longer for ${out.mo.so?.soNumber}: it makes ${out.mo.purpose === 'SAMPLE' ? 'samples' : 'stock'} again${out.freed ? `, and ${out.freed} tagged ${out.freed === 1 ? 'piece goes' : 'pieces go'} back to stock` : ''}.`,
+    message: `${out.mo.moNumber} is no longer for ${out.mo.so?.soNumber}: it is made for ${madeFor({ purpose: out.mo.purpose, customer: out.mo.customer })} again${out.freed ? `, and ${out.freed} tagged ${out.freed === 1 ? 'piece goes' : 'pieces go'} back to stock` : ''}.`,
   })
 })
 

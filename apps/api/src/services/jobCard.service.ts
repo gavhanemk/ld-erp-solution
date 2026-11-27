@@ -287,6 +287,8 @@ const cardSelect = {
       plannedEndDate: true,
       brand: { select: { name: true, type: true } },
       so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } },
+      // A direct order made for a customer: who.
+      customer: { select: { name: true } },
       steps: { orderBy: { sequence: 'asc' }, select: stepSelect },
     },
   },
@@ -403,7 +405,7 @@ async function stageRows(db: Db, q: { q?: string }) {
           designNo: c.designNo,
           lotNo: c.lotNo,
           line: c.moLine,
-          mo: { id: c.mo.id, moNumber: c.mo.moNumber, brand: c.mo.brand, held: !!c.mo.heldAt, due: c.mo.plannedEndDate, so: c.mo.so },
+          mo: { id: c.mo.id, moNumber: c.mo.moNumber, brand: c.mo.brand, customer: c.mo.customer, held: !!c.mo.heldAt, due: c.mo.plannedEndDate, so: c.mo.so },
         },
         step: {
           id: s.id,
@@ -526,7 +528,7 @@ export async function boardCards(db: Db, q: BoardFilters) {
       jobCardNumber: c.jobCardNumber,
       designNo: c.designNo,
       line: c.moLine,
-      mo: { id: c.mo.id, moNumber: c.mo.moNumber, brand: c.mo.brand, held: !!c.mo.heldAt, due: c.mo.plannedEndDate, so: c.mo.so },
+      mo: { id: c.mo.id, moNumber: c.mo.moNumber, brand: c.mo.brand, customer: c.mo.customer, held: !!c.mo.heldAt, due: c.mo.plannedEndDate, so: c.mo.so },
       state: c.state,
       withCutters: c.withCutters,
       fabric: c.fabric,

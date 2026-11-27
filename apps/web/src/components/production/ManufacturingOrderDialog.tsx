@@ -11,6 +11,8 @@ import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { loadInHouseBrands, suggestedBrand, type OwnBrand } from '@/components/sales/brand'
+import { fetchEveryPage } from '@/lib/export'
+import { DIRECT_PURPOSES, type DirectPurpose } from '@/components/production/moCustomer'
 import { DirectMoLines, directProblem, directTotal, newDirectLine, type DirectLine, type DirectStyle, type StyleInfo } from '@/components/production/DirectMoLines'
 
 interface Plannable {
@@ -55,8 +57,10 @@ interface SavedMo {
   status: string
   soId: string | null
   brandId: string
-  /** ORDER from a sales order; STOCK or SAMPLE for a direct one. */
-  purpose: 'ORDER' | 'STOCK' | 'SAMPLE'
+  /** ORDER from a sales order; STOCK, SAMPLE or CUSTOMER for a direct one. */
+  purpose: 'ORDER' | DirectPurpose
+  /** A direct order made for a customer: who. */
+  customerId: string | null
   routingId: string | null
   plannedStartDate: string | null
   plannedEndDate: string | null
@@ -64,7 +68,7 @@ interface SavedMo {
   lines: Array<{ soLineId: string | null; styleId: string; color: string; totalQty: number; sizes: Array<{ sizeId: string; qty: number }> }>
 }
 
-/** For a sales order, or direct: for stock or samples, with no order. */
+/** For a sales order, or direct: with no order — for stock, a customer, or samples. */
 type Mode = 'order' | 'direct'
 
 /** A routing the order could take, with why not when it does not fit. */
@@ -137,7 +141,9 @@ export function ManufacturingOrderDialog({
   const [brands, setBrands] = useState<OwnBrand[]>([])
   const [brandId, setBrandId] = useState('')
   const [brandPicked, setBrandPicked] = useState(false)
-  const [purpose, setPurpose] = useState<'STOCK' | 'SAMPLE'>('STOCK')
+  const [purpose, setPurpose] = useState<DirectPurpose>('STOCK')
+  const [customers, setCustomers] = useState<Array<{ id: string; name: string; code: string | null; billingCity: string | null }>>([])
+  const [customerId, setCustomerId] = useState('')
   const [directStyles, setDirectStyles] = useState<DirectStyle[]>([])
   const [directLines, setDirectLines] = useState<DirectLine[]>([newDirectLine()])
   const [infos, setInfos] = useState<Record<string, StyleInfo>>({})
@@ -179,20 +185,25 @@ export function ManufacturingOrderDialog({
     setBrandId('')
     setBrandPicked(false)
     setPurpose('STOCK')
+    setCustomerId('')
     setDirectLines([newDirectLine()])
     setLoading(true)
     void (async () => {
       try {
-        const [list, mo, styles, own] = await Promise.all([
+        const [list, mo, styles, own, custs] = await Promise.all([
           api.get<{ data: Plannable[] }>('/production/plannable'),
           moId ? api.get<{ data: SavedMo }>(`/production/orders/${moId}`) : Promise.resolve(null),
           api.get<{ data: DirectStyle[] }>('/production/direct/styles').catch(() => ({ data: [] as DirectStyle[] })),
           loadInHouseBrands().catch(() => [] as OwnBrand[]),
+          fetchEveryPage<{ id: string; name: string; code: string | null; billingCity: string | null }>((p) => `/masters/customers?active=true&limit=200&page=${p}`).catch(() => ({
+            rows: [] as Array<{ id: string; name: string; code: string | null; billingCity: string | null }>,
+          })),
         ])
         if (!alive) return
         setOrders(list.data)
         setDirectStyles(styles.data)
         setBrands(own)
+        setCustomers([...custs.rows].sort((a, b) => a.name.localeCompare(b.name)))
         if (mo) {
           setSaved(mo.data)
           setSoId(mo.data.soId ?? '')
@@ -201,7 +212,8 @@ export function ManufacturingOrderDialog({
             setMode('direct')
             setBrandId(mo.data.brandId)
             setBrandPicked(true)
-            setPurpose(mo.data.purpose === 'SAMPLE' ? 'SAMPLE' : 'STOCK')
+            setPurpose(mo.data.purpose === 'ORDER' ? 'STOCK' : mo.data.purpose)
+            setCustomerId(mo.data.customerId ?? '')
             setDirectLines(
               mo.data.lines.map((l) => ({
                 ...newDirectLine(l.styleId, l.color),
@@ -314,6 +326,8 @@ export function ManufacturingOrderDialog({
   const blocker = direct
     ? !brandId
       ? 'Pick the brand it is made under.'
+      : purpose === 'CUSTOMER' && !customerId
+        ? 'Pick the customer it is made for.'
       : directIssue
         ? directIssue
         : total <= 0
@@ -350,6 +364,7 @@ export function ManufacturingOrderDialog({
           ...head,
           brandId,
           purpose,
+          customerId: purpose === 'CUSTOMER' ? customerId : null,
           lines: directLines
             .map((l, i) => ({ l, info: infos[l.styleId], n: directTotals[i] }))
             .filter((x) => x.n > 0)
@@ -423,7 +438,7 @@ export function ManufacturingOrderDialog({
                   : o
                     ? `Making ${o.soNumber} for ${o.customer.name}`
                     : direct
-                      ? `Direct — made for ${purpose === 'SAMPLE' ? 'samples' : 'stock'}, with no sales order`
+                      ? `Direct — made for ${purpose === 'SAMPLE' ? 'samples' : purpose === 'CUSTOMER' ? (customers.find((c) => c.id === customerId)?.name ?? 'a customer') : 'stock'}, with no sales order`
                       : 'What the factory is to make for a sales order'}
               </p>
             </div>
@@ -463,7 +478,7 @@ export function ManufacturingOrderDialog({
                     {(
                       [
                         ['order', 'A sales order'],
-                        ['direct', 'Direct — stock or samples'],
+                        ['direct', 'Direct (no sales order)'],
                       ] as const
                     ).map(([key, label]) => (
                       <button
@@ -504,15 +519,26 @@ export function ManufacturingOrderDialog({
                         </SmartSelect>
                       </Field>
                       <Field label="Purpose" htmlFor="mo-purpose">
-                        <SmartSelect id="mo-purpose" className="form-input" value={purpose} onChange={(e) => setPurpose(e.target.value === 'SAMPLE' ? 'SAMPLE' : 'STOCK')}>
-                          <option value="STOCK" data-sub="Into the finished goods store, to sell later">
-                            For stock
-                          </option>
-                          <option value="SAMPLE" data-sub="A trial or salesman's samples">
-                            Samples
-                          </option>
+                        <SmartSelect id="mo-purpose" className="form-input" value={purpose} onChange={(e) => setPurpose((DIRECT_PURPOSES.find((x) => x.value === e.target.value)?.value ?? 'STOCK') as DirectPurpose)}>
+                          {DIRECT_PURPOSES.map((x) => (
+                            <option key={x.value} value={x.value} data-sub={x.sub}>
+                              {x.label}
+                            </option>
+                          ))}
                         </SmartSelect>
                       </Field>
+                      {purpose === 'CUSTOMER' && (
+                        <Field label="Customer" htmlFor="mo-customer" className="sm:col-span-2">
+                          <SmartSelect id="mo-customer" className="form-input" value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+                            <option value="">Choose the customer</option>
+                            {customers.map((c) => (
+                              <option key={c.id} value={c.id} data-sub={c.billingCity ?? undefined}>
+                                {c.code ? `${c.code} — ${c.name}` : c.name}
+                              </option>
+                            ))}
+                          </SmartSelect>
+                        </Field>
+                      )}
                     </>
                   ) : (
                   <Field label="Sales order" icon={ClipboardList} htmlFor="mo-so" className="sm:col-span-2">

@@ -35,6 +35,8 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
       totalCutQty: true,
       totalPackedQty: true,
       so: { select: { soNumber: true, isJobWork: true, customer: { select: { name: true } } } },
+      // A direct order made for a customer: who.
+      customer: { select: { name: true } },
       lines: {
         select: {
           id: true,
@@ -324,6 +326,7 @@ export async function flowSummary(db: Db, moId: string, only?: { moLineId: strin
       totalCutQty: mo.totalCutQty,
       totalPackedQty: mo.totalPackedQty,
       so: mo.so,
+      customer: mo.customer,
     },
     lines: mo.lines
       .filter((l) => !moLineId || l.id === moLineId)

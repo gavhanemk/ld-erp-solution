@@ -127,6 +127,30 @@ async function main() {
       check('an order raised from a sales order cannot be unlinked', refuse.status === 409 && refuse.body?.code === 'RAISED_FOR_ORDER', refuse.body)
     }
 
+    // 6b. Made for a customer with no sales order: who, and only their orders can take it.
+    const noCust = await call('POST', '/production/orders', { brandId: ldBrand.id, purpose: 'CUSTOMER', lines: [line] })
+    check('for a customer, none picked: refused', noCust.status === 400, noCust.body)
+    const custName = (await prisma.customer.findUniqueOrThrow({ where: { id: customer.id }, select: { name: true } })).name
+    const forCust = await call('POST', '/production/orders', { brandId: ldBrand.id, purpose: 'CUSTOMER', customerId: customer.id, lines: [line] })
+    const forCustId = forCust.body?.data?.id
+    check(`for a customer: saved, said as for ${custName}`, forCust.status === 201 && forCust.body?.data?.customerId === customer.id && new RegExp(`pcs for ${custName}`).test(forCust.body?.message ?? ''), forCust.body?.message ?? forCust.body)
+    const listed = ((await call('GET', `/production/orders?direct=1&limit=100`)).body?.data ?? []).find((m: any) => m.id === forCustId)
+    check('the list shows the customer, with no sales order', listed?.customer === custName && listed?.soNumber === null && listed?.purpose === 'CUSTOMER', listed)
+    const otherCust = await prisma.salesOrder.findFirst({
+      where: { status: { in: ['CONFIRMED', 'IN_PRODUCTION'] }, isJobWork: false, customerId: { not: customer.id }, lines: { some: { itemId: item.id } } },
+      select: { id: true },
+    })
+    const forCustLinkable = (await call('GET', `/production/orders/${forCustId}/linkable`)).body?.data ?? []
+    check("its linkable orders: only that customer's", forCustLinkable.length > 0 && forCustLinkable.every((x: any) => x.customer === custName), forCustLinkable.map((x: any) => x.customer))
+    if (otherCust) {
+      const wrongCust = await call('POST', `/production/orders/${forCustId}/link`, { soId: otherCust.id })
+      check("another customer's order: refused", wrongCust.status === 400 && wrongCust.body?.code === 'OTHER_CUSTOMER', wrongCust.body)
+    }
+    const toStock = await call('PATCH', `/production/orders/${forCustId}`, { purpose: 'STOCK', lines: [line] })
+    const nowStock = await prisma.manufacturingOrder.findUnique({ where: { id: forCustId }, select: { purpose: true, customerId: true } })
+    check('changed to stock: the customer comes off', okay(toStock) && nowStock?.purpose === 'STOCK' && nowStock.customerId === null, nowStock)
+    await call('POST', `/production/orders/${forCustId}/close`, { reason: 'Test of a direct order for a customer' })
+
     // 7. Packed pieces have to be what it makes.
     const store = await prisma.warehouse.findFirstOrThrow({ where: { name: 'Store', isActive: true, departmentId: null }, select: { id: true } })
     const otherItem = await prisma.item.findFirst({ where: { type: 'FINISHED_GOOD', isActive: true, styleId: { not: st.id } }, select: { id: true } })

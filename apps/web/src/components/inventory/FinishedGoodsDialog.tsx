@@ -425,7 +425,7 @@ export function FinishedGoodsDialog({
                           <option
                             key={m.id}
                             value={m.id}
-                            data-sub={`${m.purpose === 'SAMPLE' ? 'Samples · ' : m.purpose === 'STOCK' ? 'For stock · ' : ''}${m.totalPackedQty} of ${m.totalPlannedQty} pcs packed`}
+                            data-sub={`${m.purpose === 'SAMPLE' ? 'Samples · ' : m.purpose === 'STOCK' ? 'For stock · ' : m.purpose === 'CUSTOMER' ? 'For a customer, no order · ' : ''}${m.totalPackedQty} of ${m.totalPlannedQty} pcs packed`}
                           >
                             {m.moNumber}
                           </option>

@@ -7,6 +7,7 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { transferStatus } from './transferStatus'
 import { pcs, sheetHref, type FlowTransfer } from './types'
+import { moCustomer } from '@/components/production/moCustomer'
 
 /**
  * One process transfer, in full: what was sent, from which department to
@@ -54,7 +55,7 @@ export function TransferDetailDialog({
   const toCount = !t.vendor && (t.status === 'DISPATCHED' || t.status === 'PARTLY_RECEIVED')
   const facts: Array<[string, React.ReactNode]> = [
     ['Job card', t.jobCard ? `${t.jobCard.jobCardNumber} · ${t.jobCard.moLine.style.code} ${t.jobCard.moLine.color}` : t.mo.moNumber],
-    ['Order', `${t.mo.moNumber}${t.mo.so ? ` · ${t.mo.so.customer.name}` : ''}`],
+    ['Order', `${t.mo.moNumber}${moCustomer(t.mo) ? ` · ${moCustomer(t.mo)}` : ''}`],
     ['Brand', t.mo.brand?.name ?? '—'],
     ['From', `${t.fromStep.name}${t.fromStep.department ? ` (${t.fromStep.department.name})` : ''}`],
     ['To', t.vendor ? `${t.toStep.name} at ${t.vendor.name} (outside unit)` : `${t.toStep.name}${t.toStep.department ? ` (${t.toStep.department.name})` : ''}`],

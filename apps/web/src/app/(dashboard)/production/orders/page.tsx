@@ -33,8 +33,8 @@ interface MoRow {
   soId: string | null
   customer: string | null
   soNumber: string | null
-  /** ORDER from a sales order; STOCK or SAMPLE for a direct one. */
-  purpose?: 'ORDER' | 'STOCK' | 'SAMPLE'
+  /** ORDER from a sales order; STOCK, SAMPLE or CUSTOMER for a direct one. */
+  purpose?: 'ORDER' | 'STOCK' | 'SAMPLE' | 'CUSTOMER'
   deliveryDate: string | null
   styles: string[]
   withoutBom: number
@@ -357,7 +357,7 @@ export default function ManufacturingOrdersPage() {
                         </div>
                         <p className="text-foreground mt-1 font-medium leading-snug">{mo.customer ?? (mo.purpose === 'SAMPLE' ? 'Samples' : 'For stock')}</p>
                         <p className="text-muted-foreground text-[11px]">
-                          {mo.soNumber ?? (mo.purpose === 'SAMPLE' ? 'Samples' : 'For stock')} · {mo.styles.slice(0, 2).join(', ')}
+                          {mo.soNumber ?? (mo.purpose === 'SAMPLE' ? 'Samples' : mo.purpose === 'CUSTOMER' ? 'No sales order' : 'For stock')} · {mo.styles.slice(0, 2).join(', ')}
                           {mo.styles.length > 2 ? ` +${mo.styles.length - 2}` : ''}
                         </p>
                       </div>

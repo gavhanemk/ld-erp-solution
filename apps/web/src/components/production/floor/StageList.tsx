@@ -8,6 +8,7 @@ import { useAppSettings } from '@/lib/appSettings'
 import { Pagination } from '@/components/tables/Pagination'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { pcs, type Stage, type StepFigures } from './types'
+import { moCustomer } from '@/components/production/moCustomer'
 
 /**
  * One stage's work: a table row for each job card at that stage — its order,
@@ -223,7 +224,7 @@ export function StageList({ operationId, stage, onOpen, refreshKey }: { operatio
                     <td>
                       <span className="whitespace-nowrap font-mono text-xs">{r.card.mo.moNumber}</span>
                       <span className="text-muted-foreground block text-[11px]">
-                        {r.card.mo.so ? `${r.card.mo.so.customer.name} · ` : ''}
+                        {moCustomer(r.card.mo) ? `${moCustomer(r.card.mo)} · ` : ''}
                         {pcs(r.card.line.totalQty)} pcs
                       </span>
                     </td>
@@ -266,7 +267,7 @@ export function StageList({ operationId, stage, onOpen, refreshKey }: { operatio
                 </p>
                 <p className="text-muted-foreground text-xs">
                   {r.card.mo.moNumber}
-                  {r.card.mo.so ? ` · ${r.card.mo.so.customer.name}` : ''} · {pcs(r.card.line.totalQty)} pcs
+                  {moCustomer(r.card.mo) ? ` · ${moCustomer(r.card.mo)}` : ''} · {pcs(r.card.line.totalQty)} pcs
                   {r.card.mo.due ? ` · due ${formatDate(r.card.mo.due)}` : ''}
                 </p>
                 <dl className="grid grid-cols-4 gap-2">

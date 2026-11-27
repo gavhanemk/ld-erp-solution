@@ -43,6 +43,7 @@ export interface OrderStory {
     /** ORDER from a sales order; STOCK or SAMPLE for a direct one. */
     purpose?: string
     brand?: { name: string; type: string } | null
+    customer?: { id: string; name: string } | null
     status: string
     planned: number
     cut: number
@@ -277,6 +278,10 @@ export function OrderTrace({ o, open }: { o: OrderStory; open: (t: Target) => vo
             {o.so ? (
               <Go to={{ kind: 'c', id: o.so.customer.id }} open={open}>
                 {o.so.customer.name}
+              </Go>
+            ) : o.mos[0]?.customer ? (
+              <Go to={{ kind: 'c', id: o.mos[0].customer.id }} open={open}>
+                {o.mos[0].customer.name}
               </Go>
             ) : o.mos[0]?.purpose === 'SAMPLE' ? (
               'Samples'

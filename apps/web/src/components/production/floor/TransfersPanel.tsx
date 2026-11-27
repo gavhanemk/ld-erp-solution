@@ -15,6 +15,7 @@ import { BoardView } from '@/components/production/floor/BoardView'
 import { BrandTag } from '@/components/sales/brand'
 import { TransferDetailDialog, mayTakeBack, type TransferRow } from '@/components/production/floor/TransferDetailDialog'
 import { pcs, sheetHref, type FlowTransfer, type JobCardDetail } from '@/components/production/floor/types'
+import { moCustomer } from '@/components/production/moCustomer'
 
 /**
  * Production Floor's "Job cards" and "Transfer cards" tabs (until 12 Nov 2026
@@ -490,7 +491,7 @@ export function TransfersPanel({
                           <BrandTag brand={t.mo.brand} className="ml-1.5" />
                           <span className="text-muted-foreground block text-[11px]">
                             {t.jobCard ? `${t.jobCard.moLine.style.code} · ${t.jobCard.moLine.color}` : ''}
-                            {t.mo.so ? ` · ${t.mo.so.customer.name}` : ''}
+                            {moCustomer(t.mo) ? ` · ${moCustomer(t.mo)}` : ''}
                           </span>
                         </td>
                         <td className="text-xs">

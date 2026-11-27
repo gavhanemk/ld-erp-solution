@@ -222,7 +222,7 @@ router.get('/orders/:id/flow', requirePermission(MODULE, 'view'), async (req, re
 // ─── Transfer cards ───────────────────────────────────────────
 
 const transferInclude = {
-  mo: { select: { id: true, moNumber: true, brand: { select: { name: true, type: true } }, so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } } } },
+  mo: { select: { id: true, moNumber: true, brand: { select: { name: true, type: true } }, customer: { select: { name: true } }, so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } } } },
   fromStep: { select: { id: true, name: true, departmentId: true, department: { select: { name: true } } } },
   toStep: { select: { id: true, name: true, kind: true, isQcStep: true, departmentId: true, department: { select: { name: true } } } },
   vendor: { select: { id: true, name: true, gstin: true, address: true, city: true, state: true, stateCode: true } },
@@ -906,7 +906,7 @@ router.get('/orders/:id/stickers', requirePermission(MODULE, 'view'), async (req
     .filter(Boolean)
   const mo = await prisma.manufacturingOrder.findUnique({
     where: { id: req.params.id },
-    select: { moNumber: true, so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } } },
+    select: { moNumber: true, customer: { select: { name: true } }, so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } } },
   })
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   const bundles = await prisma.productionBundle.findMany({
@@ -1015,6 +1015,7 @@ router.get('/cutting/:id/print', requirePermission(MODULE, 'view'), async (req, 
           moNumber: true,
           totalPlannedQty: true,
           so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } },
+          customer: { select: { name: true } },
         },
       },
       bundles: {

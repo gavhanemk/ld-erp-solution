@@ -19,6 +19,7 @@ import { MoFlowStrip, currentMoTab, type MoFlowFacts, type MoTab } from './MoFlo
 import { MoProductionPanel } from './floor/MoProductionPanel'
 import { bundleShort, PROGRESS, type Flow, type SizeChangeEntry } from './floor/types'
 import { FLOOR_NOTE, LIVE_MO, moStage } from './status'
+import { directFor } from '@/components/production/moCustomer'
 
 interface MoDetail {
   id: string
@@ -37,8 +38,10 @@ interface MoDetail {
   createdBy: { name: string } | null
   closedBy: { name: string } | null
   brand: { name: string }
-  /** ORDER from a sales order; STOCK or SAMPLE for a direct one. */
-  purpose?: 'ORDER' | 'STOCK' | 'SAMPLE'
+  /** ORDER from a sales order; STOCK, SAMPLE or CUSTOMER for a direct one. */
+  purpose?: 'ORDER' | 'STOCK' | 'SAMPLE' | 'CUSTOMER'
+  /** A direct order made for a customer: who. */
+  customer?: { id: string; name: string } | null
   so: {
     id: string
     soNumber: string
@@ -349,7 +352,7 @@ export function ManufacturingOrderDetailDialog({
   const [linking, setLinking] = useState(false)
   const unlinkIt = async () => {
     if (!mo?.so) return
-    if (!window.confirm(`Give ${mo.moNumber} back to ${mo.purpose === 'SAMPLE' ? 'samples' : 'stock'}? It is no longer made for ${mo.so.soNumber}.`)) return
+    if (!window.confirm(`Give ${mo.moNumber} back to ${directFor(mo)}? It is no longer made for ${mo.so.soNumber}.`)) return
     setBusy('unlink')
     setError(null)
     try {
@@ -563,8 +566,8 @@ export function ManufacturingOrderDetailDialog({
               {mo && (
                 <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
                   {mo.so
-                    ? `${mo.so.soNumber} · ${mo.so.customer.name}${mo.purpose && mo.purpose !== 'ORDER' ? ` · raised for ${mo.purpose === 'SAMPLE' ? 'samples' : 'stock'}` : ''}`
-                    : `Direct — for ${mo.purpose === 'SAMPLE' ? 'samples' : 'stock'}, no sales order`}{' '}
+                    ? `${mo.so.soNumber} · ${mo.so.customer.name}${mo.purpose && mo.purpose !== 'ORDER' ? ` · raised direct, for ${directFor(mo)}` : ''}`
+                    : `Direct — for ${directFor(mo)}, no sales order`}{' '}
                   · {mo.brand.name}
                 </p>
               )}
@@ -606,8 +609,8 @@ export function ManufacturingOrderDetailDialog({
               </button>
             )}
             {mo?.so && mo.purpose && mo.purpose !== 'ORDER' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
-              <button className="btn-secondary" onClick={() => void unlinkIt()} disabled={busy !== null} title={`Raised for ${mo.purpose === 'SAMPLE' ? 'samples' : 'stock'}: no longer make it for ${mo.so.soNumber}`}>
-                {busy === 'unlink' ? <Loader2 size={15} className="animate-spin" /> : <Undo2 size={15} />} Give back to {mo.purpose === 'SAMPLE' ? 'samples' : 'stock'}
+              <button className="btn-secondary" onClick={() => void unlinkIt()} disabled={busy !== null} title={`Raised for ${directFor(mo)}: no longer make it for ${mo.so.soNumber}`}>
+                {busy === 'unlink' ? <Loader2 size={15} className="animate-spin" /> : <Undo2 size={15} />} Unlink from {mo.so.soNumber}
               </button>
             )}
             {mo?.status === 'DRAFT' && can('production', 'edit') && (
