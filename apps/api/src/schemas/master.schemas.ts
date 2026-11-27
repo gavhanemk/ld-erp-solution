@@ -243,6 +243,8 @@ const supplierFields = z.object({
   gstin,
   pan,
   phone,
+  /** Who the mill deals with there; fills a purchase order's "Kind attention". */
+  contactPerson: z.string().trim().max(100).optional().nullable(),
   email,
   address: optionalText,
   city: z.string().max(100).optional().nullable(),

@@ -126,7 +126,9 @@ export function JobCardView({ jobCardId, onClose, onChanged }: { jobCardId: stri
                 {field('projectId', 'Project ID', { placeholder: 'DC-46' })}
                 {field('description', 'Description', { span: 2, placeholder: 'Formal shirts' })}
                 {field('fabricQuality', 'Fabric quality', { span: 2, placeholder: 'Poplin print PS-426A' })}
-                {field('designNo', 'Design no.')}
+                {/* The buyer's print or design name, from the order line's "Print name" —
+                  not the fabric's Design No. (27 Nov 2026). */}
+                {field('designNo', 'Print / design')}
                 {field('lotNo', 'Lot no.')}
                 {field('meters', 'Metres', { number: true })}
                 {field('average', 'Average (m per piece)', { number: true })}

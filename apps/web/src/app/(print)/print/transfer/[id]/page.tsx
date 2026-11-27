@@ -176,7 +176,7 @@ export default function PrintTransfer() {
                 <Fact label="Job order" value={t.jobWorkOrder?.orderNumber ?? null} mono />
                 <Fact label="Mfg. order" value={t.jobCard ? `${mo.moNumber} · ${t.jobCard.jobCardNumber}` : mo.moNumber} mono />
                 <Fact label="Brand" value={data.brand?.name ?? null} />
-                <Fact label="Design no." value={t.jobCard?.designNo ?? null} mono />
+                <Fact label="Print / design" value={t.jobCard?.designNo ?? null} mono />
                 <Fact label="Bundles" value={`${lines.length} · ${qty(sent)} pieces`} />
               </>
             ),

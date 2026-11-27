@@ -89,6 +89,8 @@ interface PrintPayload {
     enquiryDate: string | null
     reference: string | null
     supplierAddress: string | null
+    /** Who at the supplier it is for: "Kind Attention" in the To block. */
+    kindAttention?: string | null
     notes: string | null
     terms: string | null
     subtotal: string
@@ -351,7 +353,7 @@ export default function PrintPurchaseOrder() {
         <PartyLine label="Address-" value={supplierAddress || null} />
         <PartyLine label="GST No" value={supplier.gstin} mono />
         <PartyLine label="Contact No" value={supplier.phone} mono />
-        <PartyLine label="Kind Attention" value={null} />
+        <PartyLine label="Kind Attention" value={order.kindAttention || null} />
         <PartyLine label="Payment Terms" value={paymentTerms} />
       </PartyBlock>
 

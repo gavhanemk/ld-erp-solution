@@ -573,7 +573,7 @@ export function MoDetailsDialog({
                   {number(f.average, set('average'), 'Average (m per piece)')}
                   {text(f.ratio, set('ratio'), 'Ratio', { placeholder: 'M1 L2 XL2 2XL1' })}
                   {text(f.fabricQuality, set('fabricQuality'), 'Fabric quality', { span: true })}
-                  {text(f.designNo, set('designNo'), 'Design no.')}
+                  {text(f.designNo, set('designNo'), 'Print / design')}
                   {text(f.orderNo, set('orderNo'), 'Order no.')}
                   {text(f.projectId, set('projectId'), 'Project ID')}
                   {text(f.description, set('description'), 'Description', { span: true })}
