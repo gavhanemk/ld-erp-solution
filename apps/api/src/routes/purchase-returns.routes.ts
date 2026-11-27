@@ -607,9 +607,13 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       const b = billLine.get(l.billLineId)!
       const qty = round3(l.qty)
       const grnLineId = grnLineOfBillLine.get(l.billLineId)
-      const fromHeld = grnLineId
+      const credited = grnLineId
         ? await creditReturn(tx, { grnLineId, warehouseId: l.warehouseId, qty, returnId: created.id, returnNumber, by: req.user?.name ?? '' })
         : 0
+      // Rejects held in a reject godown before they were kept as R are still
+      // good-graded there: what the store does not hold as R goes as it is.
+      const heldR = credited > 0 ? (await balanceOf(tx, { itemId: b.itemId, warehouseId: l.warehouseId, grade: REJECTED_GRADE })).qty : 0
+      const fromHeld = round3(Math.min(credited, heldR))
       const parts = [
         { qty: fromHeld, grade: REJECTED_GRADE },
         { qty: round3(qty - fromHeld), grade: 'A' },

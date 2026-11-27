@@ -22,6 +22,8 @@ import { itc04Sent } from './definitions/itc04-sent'
 import { itc04Received } from './definitions/itc04-received'
 import { customerMaterialStock } from './definitions/customer-material-stock'
 import { stockCountVariance } from './definitions/stock-count-variance'
+import { stockReconciliation } from './definitions/stock-reconciliation'
+import { wipReconciliation } from './definitions/wip-reconciliation'
 import { packetBalances } from './definitions/packet-balances'
 import { fifoExceptions } from './definitions/fifo-exceptions'
 
@@ -61,6 +63,8 @@ export const REPORTS: ReportDefinition[] = [
   itc04Received,
   customerMaterialStock,
   stockCountVariance,
+  stockReconciliation,
+  wipReconciliation,
   packetBalances,
   fifoExceptions,
   ...SALES_REPORTS,

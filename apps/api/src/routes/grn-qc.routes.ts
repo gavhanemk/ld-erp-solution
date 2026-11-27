@@ -42,6 +42,52 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000
  * out of one grade, in to the other at the value they went out at — a hold,
  * not a loss.
  */
+/**
+ * Rejected goods out of a reject godown and back into good stock in the
+ * store they were received into, at the value they were carried at. They
+ * come out as rejects (grade R); any moved there before rejects were held as
+ * R come out as they are.
+ */
+async function rejectsBack(
+  tx: Prisma.TransactionClient,
+  a: { itemId: string; from: string; to: string; qty: number; referenceType: string; referenceId: string; when: Date; notes: string },
+) {
+  const asR = Math.min(a.qty, (await balanceOf(tx, { itemId: a.itemId, warehouseId: a.from, grade: REJECTED_GRADE })).qty)
+  const parts = [
+    { grade: REJECTED_GRADE, qty: round3(asR) },
+    { grade: 'A', qty: round3(a.qty - asR) },
+  ].filter((p) => p.qty > 0)
+  for (const p of parts) {
+    const out = await recordMovement(tx, {
+      itemId: a.itemId,
+      warehouseId: a.from,
+      transactionType: 'TRANSFER',
+      direction: 'OUT',
+      qty: p.qty,
+      grade: p.grade,
+      referenceType: a.referenceType,
+      referenceId: a.referenceId,
+      transactionDate: a.when,
+      notes: a.notes,
+      ignoreReservations: true,
+      earlierDate: 'move-up',
+    })
+    await recordMovement(tx, {
+      itemId: a.itemId,
+      warehouseId: a.to,
+      transactionType: 'TRANSFER',
+      direction: 'IN',
+      qty: p.qty,
+      unitRate: out.unitRate,
+      referenceType: a.referenceType,
+      referenceId: a.referenceId,
+      transactionDate: a.when,
+      notes: a.notes,
+      earlierDate: 'move-up',
+    })
+  }
+}
+
 async function regrade(
   tx: Prisma.TransactionClient,
   a: { itemId: string; warehouseId: string; qty: number; from: string; to: string; referenceType: string; referenceId: string; when: Date; notes: string },
@@ -353,6 +399,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
 
     // Out of the godown it was received into, into the reject godown, at the
     // value it was carried at — a move, not a loss. Nothing moves without one.
+    // They arrive held as rejected (grade R): never offered to issue, and taken
+    // out as rejects when they go back to the supplier or are used after all.
     for (const l of rejectWarehouseId ? rejecting : []) {
       const out = await recordMovement(tx, {
         itemId: l.itemId,
@@ -374,6 +422,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         direction: 'IN',
         qty: l.rejectedQty,
         unitRate: out.unitRate,
+        grade: REJECTED_GRADE,
         referenceType: 'GRN_QC',
         referenceId: created.id,
         transactionDate: when,
@@ -485,6 +534,10 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
     // godown's other rejects, from other receipts, must not stand in for them
     // and become good stock.
     if (d.rejectWarehouseId && d.lines.some((l) => l.rejectedQty > 0)) {
+      const used = d.lines.find((l) => (l.usedQty ?? 0) > 0)
+      if (used) {
+        throw new AppError('Some of what this check rejected has already been used after all, so the check stands.', 409, 'QC_REJECTS_SETTLED')
+      }
       const sentBack = await tx.purchaseReturnLine.findMany({
         where: {
           warehouseId: d.rejectWarehouseId,
@@ -509,30 +562,15 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
     }
     for (const l of d.lines) {
       if (!(l.rejectedQty > 0) || !d.rejectWarehouseId) continue
-      const back = await recordMovement(tx, {
+      await rejectsBack(tx, {
         itemId: l.itemId,
-        warehouseId: d.rejectWarehouseId,
-        transactionType: 'TRANSFER',
-        direction: 'OUT',
+        from: d.rejectWarehouseId,
+        to: l.warehouseId,
         qty: l.rejectedQty,
         referenceType: 'GRN_QC_CANCELLED',
         referenceId: row.id,
-        transactionDate: now,
+        when: now,
         notes: `QC of ${row.grn.grnNumber} cancelled: ${reason}`,
-        earlierDate: 'move-up',
-      })
-      await recordMovement(tx, {
-        itemId: l.itemId,
-        warehouseId: l.warehouseId,
-        transactionType: 'TRANSFER',
-        direction: 'IN',
-        qty: l.rejectedQty,
-        unitRate: back.unitRate,
-        referenceType: 'GRN_QC_CANCELLED',
-        referenceId: row.id,
-        transactionDate: now,
-        notes: `QC of ${row.grn.grnNumber} cancelled: ${reason}`,
-        earlierDate: 'move-up',
       })
     }
 
@@ -629,7 +667,8 @@ router.get('/rejected', requirePermission(MODULE, 'view'), async (req, res) => {
   const shaped = rows
     .map(({ check, d, l }) => {
       const item = itemOf.get(l.itemId)
-      const held = d.hold === 'SAME_STORE' ? heldOf(l) : null
+      // Held in the same store or in a reject godown: what is still held there.
+      const held = d.hold === 'SAME_STORE' || d.rejectWarehouseId ? heldOf(l) : null
       return {
         qcId: check.id,
         grnLineId: l.grnLineId,
@@ -654,7 +693,7 @@ router.get('/rejected', requirePermission(MODULE, 'view'), async (req, res) => {
     })
     .filter((r) => !heldOnly || (r.held ?? r.rejected) > 0.0005)
     .filter((r) => !q || [r.grn.grnNumber, r.grn.challanNo, r.grn.poNumber, r.supplier.name, r.item.code, r.item.name, r.store.name, r.reason].some((v) => (v ?? '').toLowerCase().includes(q)))
-  const all = rows.filter(({ d, l }) => d.hold === 'SAME_STORE' && heldOf(l) > 0.0005)
+  const all = rows.filter(({ d, l }) => (d.hold === 'SAME_STORE' || !!d.rejectWarehouseId) && heldOf(l) > 0.0005)
   res.json({
     success: true,
     data: shaped,
@@ -681,8 +720,8 @@ router.post('/:id/use', requirePermission(MODULE, 'edit'), async (req: AuthReque
     if (!row) throw new AppError('That check does not exist', 404, 'NOT_FOUND')
     const d = readQc(row.checklistData)
     if (!d || d.cancelled) throw new AppError('That check is cancelled', 409, 'QC_CANCELLED')
-    if (d.hold !== 'SAME_STORE') {
-      throw new AppError('These rejected goods were moved to a reject godown. Move them back with a stock transfer.', 409, 'NOT_HELD')
+    if (d.hold !== 'SAME_STORE' && !d.rejectWarehouseId) {
+      throw new AppError('Nothing was held from this check.', 409, 'NOT_HELD')
     }
     const l = d.lines.find((x) => x.grnLineId === data.grnLineId)
     if (!l || !(l.rejectedQty > 0)) throw new AppError('That line was not rejected on this check', 400, 'NOT_REJECTED')
@@ -690,17 +729,13 @@ router.post('/:id/use', requirePermission(MODULE, 'edit'), async (req: AuthReque
     if (data.qty > held + 0.0005) throw new AppError(`Only ${held} is still held as rejected on this line.`, 400, 'MORE_THAN_HELD')
     const qty = round3(data.qty)
     const now = new Date()
-    await regrade(tx, {
-      itemId: l.itemId,
-      warehouseId: l.warehouseId,
-      qty,
-      from: REJECTED_GRADE,
-      to: 'A',
-      referenceType: 'GRN_QC_USED',
-      referenceId: row.id,
-      when: now,
-      notes: `Rejected on QC of ${row.grn.grnNumber}, used after all: ${data.reason}`,
-    })
+    const notes = `Rejected on QC of ${row.grn.grnNumber}, used after all: ${data.reason}`
+    if (d.hold === 'SAME_STORE') {
+      await regrade(tx, { itemId: l.itemId, warehouseId: l.warehouseId, qty, from: REJECTED_GRADE, to: 'A', referenceType: 'GRN_QC_USED', referenceId: row.id, when: now, notes })
+    } else {
+      // From the reject godown, back into good stock where it was received.
+      await rejectsBack(tx, { itemId: l.itemId, from: d.rejectWarehouseId!, to: l.warehouseId, qty, referenceType: 'GRN_QC_USED', referenceId: row.id, when: now, notes })
+    }
     l.usedQty = round3((l.usedQty ?? 0) + qty)
     l.events = [...(l.events ?? []), { at: now.toISOString(), by: req.user?.name ?? '', kind: 'USED', qty, note: data.reason }]
     await tx.inwardQC.update({ where: { id: row.id }, data: { checklistData: d as unknown as Prisma.InputJsonValue } })

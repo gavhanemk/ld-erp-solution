@@ -2,7 +2,7 @@ import type { Prisma, StockOwnership } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { lockedBalanceOf, recordMovement } from './stock.service'
+import { lockedBalanceOf, recordMovement, stockLockedUpTo } from './stock.service'
 import { withdrawStickers } from './stickers.service'
 
 /*
@@ -41,6 +41,16 @@ async function repriceFrom(tx: Prisma.TransactionClient, first: Key): Promise<nu
   const queue = [first]
   const seen = new Set<string>()
   let changed = 0
+  // A closed period's stock is what its books closed on: never priced again.
+  const lock = await stockLockedUpTo(tx)
+  const closed = (d: Date) => lock !== null && new Date(d.getTime() + 330 * 60_000).toISOString().slice(0, 10) <= lock
+  const refuseClosed = () => {
+    throw new AppError(
+      `Pricing this opening stock would change stock already moved in the closed period, up to ${lock}. Reopen the period in Accounts first.`,
+      409,
+      'PERIOD_LOCKED',
+    )
+  }
   while (queue.length && seen.size < 50) {
     const key = queue.shift()!
     if (seen.has(keyText(key))) continue
@@ -49,7 +59,7 @@ async function repriceFrom(tx: Prisma.TransactionClient, first: Key): Promise<nu
     const rows = await tx.stockLedger.findMany({
       where: { itemId: key.itemId, warehouseId: key.warehouseId, ownership: key.ownership, ownerCustomerId: key.ownerCustomerId, sizeId: key.sizeId, grade: key.grade },
       orderBy: [{ transactionDate: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-      select: { id: true, inQty: true, outQty: true, unitRate: true, transactionType: true, referenceType: true, referenceId: true },
+      select: { id: true, inQty: true, outQty: true, unitRate: true, transactionType: true, referenceType: true, referenceId: true, transactionDate: true },
     })
     let qty = 0
     let value = 0
@@ -63,16 +73,18 @@ async function repriceFrom(tx: Prisma.TransactionClient, first: Key): Promise<nu
       if (!(outQ > 0)) continue
       const rate = qty > 0.0005 ? round2(value / qty) : Number(r.unitRate ?? 0)
       if (Math.abs(rate - Number(r.unitRate ?? 0)) > 0.004) {
+        if (closed(r.transactionDate)) refuseClosed()
         await tx.stockLedger.update({ where: { id: r.id }, data: { unitRate: rate } })
         changed++
         if (r.transactionType === 'TRANSFER') {
           // The same transfer's arrival in the other store: the same price, and that store priced again.
           const halves = await tx.stockLedger.findMany({
             where: { referenceType: r.referenceType, referenceId: r.referenceId, itemId: key.itemId, sizeId: key.sizeId, grade: key.grade, inQty: { gt: 0 }, NOT: { warehouseId: key.warehouseId } },
-            select: { id: true, unitRate: true, itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, sizeId: true, grade: true },
+            select: { id: true, unitRate: true, itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, sizeId: true, grade: true, transactionDate: true },
           })
           for (const h of halves) {
             if (Math.abs(Number(h.unitRate ?? 0) - rate) <= 0.004) continue
+            if (closed(h.transactionDate)) refuseClosed()
             await tx.stockLedger.update({ where: { id: h.id }, data: { unitRate: rate } })
             changed++
             queue.push(keyOf(h))

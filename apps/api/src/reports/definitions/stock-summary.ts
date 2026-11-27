@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
 import { round2, topWithRest } from './shared'
+import { storeOffers } from '../../services/availability.service'
 import {
   asOnEnd,
   asOnFilter,
@@ -21,12 +22,26 @@ import {
  * the end of a chosen day. The figure a stock statement, an insurance
  * declaration or a month-end close starts from.
  */
+/** A store's kind, as Masters → Warehouses says it. */
+const KIND_LABEL: Record<string, string> = {
+  GENERAL: 'General store',
+  RAW_MATERIAL: 'Raw material',
+  WIP: 'Work in progress',
+  FINISHED_GOODS: 'Finished goods',
+  QC_HOLD: 'Held for QC',
+  REJECTED: 'Rejected',
+  SCRAP: 'Scrap',
+  JOB_WORK: 'At a job worker',
+  TRANSIT: 'In transit',
+  SAMPLE: 'Samples',
+}
+
 export const stockSummary: ReportDefinition = {
   id: 'stock-summary',
   module: 'inventory',
   title: 'Stock Summary',
   description:
-    'Stock on hand item by item and store by store, on any date — quantity, average rate, value, and what is reserved for orders.',
+    'Stock on hand item by item and store by store, on any date — good, B-grade and rejected apart, what is reserved, what is free, average rate and value.',
   filters: [asOnFilter, warehouseFilter, categoryFilter, ownershipFilter],
   columns: [
     { key: 'category', label: 'Category', type: 'text', width: 18 },
@@ -36,7 +51,11 @@ export const stockSummary: ReportDefinition = {
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'owner', label: 'Owner', type: 'text', width: 20 },
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
+    { key: 'storeKind', label: 'Store Kind', type: 'text', width: 14 },
     { key: 'qty', label: 'On Hand', type: 'qty', total: 'sum' },
+    { key: 'good', label: 'Good', type: 'qty', total: 'sum' },
+    { key: 'bGrade', label: 'B-grade', type: 'qty', total: 'sum' },
+    { key: 'held', label: 'Rejected / Held', type: 'qty', total: 'sum' },
     { key: 'reserved', label: 'Reserved', type: 'qty', total: 'sum' },
     { key: 'free', label: 'Free', type: 'qty', total: 'sum' },
     { key: 'rate', label: 'Avg Rate', type: 'money', total: 'none' },
@@ -74,6 +93,11 @@ export const stockSummary: ReportDefinition = {
         ownership: string
         owner: string | null
         qty: number
+        good: number
+        bGrade: number
+        held: number
+        storeKind: string
+        storePurpose: string
         value: number
         lastMoved: Date
       }>
@@ -82,6 +106,10 @@ export const stockSummary: ReportDefinition = {
              u.symbol AS uom, w.id AS "warehouseId", w.name AS store,
              s.ownership::text AS ownership, cust.name AS owner,
              SUM(s."inQty" - s."outQty")::float8 AS qty,
+             COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s.grade = 'A'), 0)::float8 AS good,
+             COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s.grade = 'B'), 0)::float8 AS "bGrade",
+             COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s.grade NOT IN ('A', 'B')), 0)::float8 AS held,
+             w.kind::text AS "storeKind", w.purpose::text AS "storePurpose",
              SUM((s."inQty" - s."outQty") * COALESCE(s."unitRate", 0))::float8 AS value,
              MAX(s."transactionDate") AS "lastMoved"
       FROM ld_erp.stock_ledger s
@@ -93,7 +121,7 @@ export const stockSummary: ReportDefinition = {
         AND s.ownership::text IN (${Prisma.join(owners)})
         AND (${params.warehouseId ?? null}::text IS NULL OR s."warehouseId" = ${params.warehouseId ?? null})
         AND (${catIds}::text[] IS NULL OR i."categoryId" = ANY(${catIds}::text[]))
-      GROUP BY i.id, i.code, i.name, i."categoryId", u.symbol, w.id, w.name, s.ownership, cust.name
+      GROUP BY i.id, i.code, i.name, i."categoryId", u.symbol, w.id, w.name, w.kind, w.purpose, s.ownership, cust.name
       HAVING ABS(SUM(s."inQty" - s."outQty")) > 0.0005
       ORDER BY i.name, w.name
     `
@@ -108,7 +136,10 @@ export const stockSummary: ReportDefinition = {
 
     const rows = found.slice(0, rowCap).map((r) => {
       const own = r.ownership === 'OWNED'
-      const reserved = own && !params.asOn ? Math.min(Math.max(r.qty, 0), held.get(`${r.itemId}|${r.warehouseId}`) ?? 0) : 0
+      // Free by the one rule: good stock in a store that issues, less what is held (today only).
+      const good = Math.round(r.good * 1000) / 1000
+      const offers = storeOffers({ purpose: r.storePurpose, kind: r.storeKind })
+      const reserved = own && !params.asOn ? Math.min(Math.max(good, 0), held.get(`${r.itemId}|${r.warehouseId}`) ?? 0) : 0
       const { category, subCategory } = cats.names(r.categoryId)
       return {
         category,
@@ -118,9 +149,13 @@ export const stockSummary: ReportDefinition = {
         store: r.store,
         owner: own ? 'Ours' : (r.owner ?? 'Customer'),
         uom: r.uom,
+        storeKind: KIND_LABEL[r.storeKind] ?? r.storeKind,
         qty: Math.round(r.qty * 1000) / 1000,
+        good,
+        bGrade: Math.round(r.bGrade * 1000) / 1000,
+        held: Math.round(r.held * 1000) / 1000,
         reserved,
-        free: Math.round((r.qty - reserved) * 1000) / 1000,
+        free: offers ? Math.round(Math.max(0, good - reserved) * 1000) / 1000 : 0,
         rate: r.qty > 0 ? round2(r.value / r.qty) : 0,
         value: round2(r.value),
         lastMoved: r.lastMoved,

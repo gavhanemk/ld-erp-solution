@@ -70,9 +70,10 @@ import {
 import { autoStickers, stickersNote, withdrawStickers } from '../services/stickers.service'
 import { assertOwnersFitOrder } from '../services/ownership.service'
 import { createOnce, onceFor, requestIdOf } from '../lib/onceFor'
+import { assertStoresOffer, offeredSql } from '../services/availability.service'
 import { CGRN_STATUS_LABEL, HELD, heldByLine, postGrnStock, releaseHeld, reverseGrnStock, takeHeldPackages } from '../services/customerGrn.service'
 import { fillJobCardBlanks } from '../services/jobCard.service'
-import { SAMPLE_STORE_IDS, assertGeneralStores } from '../lib/sampleStore'
+import { assertGeneralStores } from '../lib/sampleStore'
 import { assertLineQtyFitsUnits, assertQtyFitsUnits, assertRequisitionFitsUnits } from '../services/unitQuantity.service'
 import { orderBrand } from '../lib/orderBrand'
 
@@ -106,19 +107,22 @@ const str = (v: unknown): string | undefined =>
 router.get('/held', requirePermission(MODULE, 'view'), async (req, res) => {
   const warehouseId = str(req.query.warehouseId)
   if (!warehouseId) throw new AppError('Say which store', 400, 'NO_WAREHOUSE')
+  // Good stock only, unless asked for every grade (a count or a move can take
+  // B-grade or rejected stock, each as itself).
+  const allGrades = str(req.query.grades) === 'all'
   const rows = await prisma.$queryRaw<
-    Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; ownerName: string | null; sizeId: string | null; sizeCode: string | null; sequence: number | null; qty: number }>
+    Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; ownerName: string | null; sizeId: string | null; sizeCode: string | null; sequence: number | null; grade: string; qty: number }>
   >`
     SELECT s."itemId", s."ownership"::text AS "ownership", s."ownerCustomerId", c.name AS "ownerName",
-           s."sizeId", z.code AS "sizeCode", z.sequence AS "sequence",
+           s."sizeId", z.code AS "sizeCode", z.sequence AS "sequence", s.grade,
            SUM(s."inQty" - s."outQty")::float8 AS "qty"
     FROM ld_erp.stock_ledger s
     LEFT JOIN ld_erp.customers c ON c.id = s."ownerCustomerId"
     LEFT JOIN ld_erp.sizes z ON z.id = s."sizeId"
-    WHERE s."warehouseId" = ${warehouseId} AND s."grade" = 'A'
-    GROUP BY s."itemId", s."ownership", s."ownerCustomerId", c.name, s."sizeId", z.code, z.sequence
+    WHERE s."warehouseId" = ${warehouseId} AND (${allGrades} OR s."grade" = 'A')
+    GROUP BY s."itemId", s."ownership", s."ownerCustomerId", c.name, s."sizeId", z.code, z.sequence, s.grade
     HAVING SUM(s."inQty" - s."outQty") > 0
-    ORDER BY s."itemId", s."ownership", c.name, z.sequence`
+    ORDER BY s."itemId", s."ownership", c.name, z.sequence, s.grade`
   res.json({ success: true, data: rows.map((r) => ({ ...r, qty: Math.round(r.qty * 1000) / 1000 })) })
 })
 
@@ -609,13 +613,13 @@ async function whoseStock(
  */
 async function refuseRepeatedItems(
   tx: Prisma.TransactionClient,
-  keys: Array<string | { itemId: string; ownerCustomerId?: string | null; sizeId?: string | null }>,
+  keys: Array<string | { itemId: string; ownerCustomerId?: string | null; sizeId?: string | null; grade?: string | null }>,
 ) {
   const seen = new Map<string, number>()
   for (const [i, k] of keys.entries()) {
     // The same cloth twice is a repeat; ours and a customer's, or two sizes, are not.
     const itemId = typeof k === 'string' ? k : k.itemId
-    const key = typeof k === 'string' ? k : [k.itemId, k.ownerCustomerId ?? '', k.sizeId ?? ''].join('|')
+    const key = typeof k === 'string' ? k : [k.itemId, k.ownerCustomerId ?? '', k.sizeId ?? '', k.grade ?? 'A'].join('|')
     const first = seen.get(key)
     if (first !== undefined) {
       const item = await tx.item.findUnique({ where: { id: itemId }, select: { name: true } })
@@ -721,12 +725,14 @@ export async function createAdjustment(tx: Prisma.TransactionClient, data: z.inf
 
   const whose: Array<Awaited<ReturnType<typeof whoseStock>>> = []
   for (const line of data.lines) whose.push(await whoseStock(tx, line))
-  await refuseRepeatedItems(tx, data.lines.map((l, i) => ({ itemId: l.itemId, ...whose[i] })))
+  await refuseRepeatedItems(tx, data.lines.map((l, i) => ({ itemId: l.itemId, ...whose[i], grade: l.grade ?? 'A' })))
 
   const counted = []
 
   for (const [i, line] of data.lines.entries()) {
-    const key = { itemId: line.itemId, warehouseId: data.warehouseId, ...whose[i] }
+    // Each grade is its own balance: good, B-grade and rejected are counted apart.
+    const grade = line.grade ?? 'A'
+    const key = { itemId: line.itemId, warehouseId: data.warehouseId, ...whose[i], grade }
     const before = await lockedBalanceOf(tx, key)
     const difference = Number((line.countedQty - before.qty).toFixed(3))
     const customers = whose[i].ownership === 'CUSTOMER_OWNED'
@@ -746,6 +752,7 @@ export async function createAdjustment(tx: Prisma.TransactionClient, data: z.inf
     counted.push({
       itemId: line.itemId,
       ...whose[i],
+      grade,
       bookQty: before.qty,
       countedQty: line.countedQty,
       difference,
@@ -1012,13 +1019,14 @@ export async function createTransfer(
       transferDate: when,
       notes: data.notes ?? null,
       movedById: userId,
-      lines: { create: data.lines.map((l, i) => ({ itemId: l.itemId, qty: l.qty, ...whose[i] })) },
+      lines: { create: data.lines.map((l, i) => ({ itemId: l.itemId, qty: l.qty, ...whose[i], grade: l.grade ?? 'A' })) },
     },
     include: { lines: true },
   })
 
   for (const line of created.lines) {
-    const key = { ownership: line.ownership, ownerCustomerId: line.ownerCustomerId, sizeId: line.sizeId }
+    // A grade moves as itself: rejects go to a reject store still rejected.
+    const key = { ownership: line.ownership, ownerCustomerId: line.ownerCustomerId, sizeId: line.sizeId, grade: line.grade }
     // Read what it is carried at before it moves. transferStock prices the
     // arriving stock at the same figure, so this is the rate the document
     // should remember.
@@ -1183,6 +1191,7 @@ router.patch(
           ownership: line.ownership,
           ownerCustomerId: line.ownerCustomerId,
           sizeId: line.sizeId,
+          grade: line.grade,
           referenceType: 'STOCK_TRANSFER_CANCELLED',
           referenceId: before.id,
           transactionDate: new Date(),
@@ -1263,8 +1272,9 @@ const mrInclude = {
 
 /**
  * What a requisition line could take from the stores now, for every screen
- * that shows "in stock": our own stock in every store less what is reserved
- * for other lines, or — for a customer's material — that customer's stock.
+ * that shows "in stock": by the one rule (services/availability.service), the
+ * good stock in stores that issue, our own less what is held for other lines,
+ * or — for a customer's material — that customer's.
  */
 async function availableFor(
   lines: Array<{ id: string; itemId: string; ownership: string; ownerCustomerId: string | null }>,
@@ -1273,14 +1283,14 @@ async function availableFor(
   if (!itemIds.length) return new Map()
   const [stock, held] = await Promise.all([
     prisma.$queryRaw<Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; qty: number }>>`
-      SELECT "itemId", ownership::text AS "ownership", "ownerCustomerId", SUM("inQty" - "outQty")::float8 AS "qty"
-      FROM ld_erp.stock_ledger
-      WHERE "itemId" IN (${Prisma.join(itemIds)})
-        -- Goods a quality check rejected are held apart: never on offer to issue.
-        AND grade <> 'R'
-        -- And material bought for samples: it is issued to its sample, not on a requisition.
-        AND "warehouseId" NOT IN (${SAMPLE_STORE_IDS})
-      GROUP BY "itemId", ownership, "ownerCustomerId"`,
+      SELECT s."itemId", s.ownership::text AS "ownership", s."ownerCustomerId", SUM(s."inQty" - s."outQty")::float8 AS "qty"
+      FROM ld_erp.stock_ledger s
+      JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
+      WHERE s."itemId" IN (${Prisma.join(itemIds)})
+        -- Good stock in stores that issue: not rejected or B-grade, not in a
+        -- sample, QC hold, reject, scrap or in-transit store.
+        AND ${offeredSql()}
+      GROUP BY s."itemId", s.ownership, s."ownerCustomerId"`,
     prisma.$queryRaw<Array<{ itemId: string; mrLineId: string; qty: number }>>`
       SELECT "itemId", "mrLineId", qty::float8 AS "qty"
       FROM ld_erp.stock_reservations
@@ -1434,9 +1444,8 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       FROM ld_erp.stock_ledger s
       JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
       WHERE s."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
-        AND s.grade <> 'R'
-        -- A sample store's material is never offered to a requisition.
-        AND w.purpose::text <> 'SAMPLING'
+        -- Good stock in stores that issue (services/availability.service).
+        AND ${offeredSql()}
       GROUP BY s."itemId", s."warehouseId", w.name, s."ownership", s."ownerCustomerId"
       HAVING SUM(s."inQty" - s."outQty") > 0`,
     // Each order line raised against these lines. Cancelled orders have bought nothing.
@@ -2336,6 +2345,8 @@ export async function issueRequisition(
       select: { id: true, name: true },
     })).map((w) => [w.id, w.name]),
   )
+  // A reject, QC hold, scrap or in-transit store's stock is counted, never issued.
+  await assertStoresOffer(tx, [...storeNames.keys()], 'Move what can still be used to a store goods are issued from first.')
   const handedOver: string[] = []
   // Settings → Preferences: stickered stock is handed over by scanning its
   // packages. A typed issue (this, unless the caller scanned) may then take
@@ -2630,6 +2641,11 @@ router.post(
         body.lines.filter((l) => l.qty > 0).map((l) => l.warehouseId),
         'Hold stock for a requisition in a general store.',
       )
+      await assertStoresOffer(
+        tx,
+        body.lines.filter((l) => l.qty > 0).map((l) => l.warehouseId),
+        'Hold stock in a store goods are issued from.',
+      )
 
       const stores = new Map(
         (await tx.warehouse.findMany({
@@ -2850,7 +2866,7 @@ router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) 
            xb.name AS "releasedBy", r."releasedAt", r."releaseReason",
            -- Our stock of the item in that store now, reserved or not.
            COALESCE((SELECT SUM(sl."inQty" - sl."outQty") FROM ld_erp.stock_ledger sl
-                     WHERE sl."itemId" = r."itemId" AND sl."warehouseId" = r."warehouseId" AND sl.ownership::text = 'OWNED' AND sl.grade <> 'R'), 0)::float8 AS "onHand"
+                     WHERE sl."itemId" = r."itemId" AND sl."warehouseId" = r."warehouseId" AND sl.ownership::text = 'OWNED' AND sl.grade = 'A'), 0)::float8 AS "onHand"
     FROM ld_erp.stock_reservations r
     JOIN ld_erp.items i ON i.id = r."itemId"
     LEFT JOIN ld_erp.uom u ON u.id = i."uomId"

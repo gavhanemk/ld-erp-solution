@@ -167,6 +167,9 @@ export const stockInSchema = z
     if (new Set(ids).size !== ids.length) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lines'], message: 'An item is on the list twice. Enter it once, with the total.' })
   })
 
+/** Which grade a line is: A good, B seconds, R held or rejected. Left out, good. */
+export const stockGrade = z.enum(['A', 'B', 'R'], { errorMap: () => ({ message: 'Pick the grade: good, B-grade or rejected' }) }).optional()
+
 export const adjustmentSchema = z.object({
   warehouseId: id('a warehouse'),
   adjustmentDate: z.coerce.date().optional(),
@@ -179,6 +182,7 @@ export const adjustmentSchema = z.object({
       z
         .object({
           itemId: id('an item'),
+          grade: stockGrade,
           countedQty: z
             .number({ invalid_type_error: 'Counted quantity has to be a number' })
             .min(0, 'A counted quantity cannot be negative')
@@ -203,7 +207,7 @@ export const transferSchema = z.object({
   transferDate: z.coerce.date().optional(),
   notes: z.string().max(1000).optional().nullable(),
   lines: z
-    .array(z.object({ itemId: id('an item'), qty, ...stockOwnerFields }).refine(ownerNamed, ownerNamedMessage))
+    .array(z.object({ itemId: id('an item'), qty, ...stockOwnerFields, grade: stockGrade }).refine(ownerNamed, ownerNamedMessage))
     .min(1, 'Add at least one item'),
 })
 

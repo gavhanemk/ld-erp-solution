@@ -67,6 +67,7 @@ export async function approveAdjustmentIn(tx: Prisma.TransactionClient, id: stri
       ownership: line.ownership,
       ownerCustomerId: line.ownerCustomerId,
       sizeId: line.sizeId,
+      grade: line.grade,
       transactionType: 'ADJUSTMENT',
       direction: difference > 0 ? 'IN' : 'OUT',
       qty: Math.abs(difference),

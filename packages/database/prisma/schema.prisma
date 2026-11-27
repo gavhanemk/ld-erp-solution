@@ -3668,6 +3668,8 @@ model StockTransferLine {
   orderNo         String?
   lotNo           String?
   bundleNo        String?
+  /// Which grade moved: A good, B seconds, R held or rejected.
+  grade           String         @default("A")
   @@map("stock_transfer_lines")
 }
 
@@ -3738,6 +3740,8 @@ model StockAdjustmentLine {
   /// A finished garment's size; empty for anything without one.
   sizeId          String?
   size            Size?          @relation("AdjustmentLineSize", fields: [sizeId], references: [id])
+  /// Which grade was counted: A good, B seconds, R held or rejected.
+  grade           String         @default("A")
   @@map("stock_adjustment_lines")
 }
 

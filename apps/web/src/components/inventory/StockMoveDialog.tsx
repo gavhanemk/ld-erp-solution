@@ -76,11 +76,11 @@ interface Line {
   itemId: string
   qty: string
   rate: string
-  /** Whose stock and which size: "OWNED||" for our own, unsized. */
+  /** Whose stock, which size and which grade: "OWNED||" for our own, unsized, good. */
   whose: string
 }
 
-/** One balance a store holds: an item, whose it is, its size. */
+/** One balance a store holds: an item, whose it is, its size and its grade. */
 interface Held {
   itemId: string
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
@@ -88,17 +88,25 @@ interface Held {
   ownerName: string | null
   sizeId: string | null
   sizeCode: string | null
+  /** A good, B seconds, R held or rejected. */
+  grade?: string
   qty: number
 }
 
+/** How a grade reads beside its balance: nothing for good stock. */
+const GRADE_WORDS: Record<string, string> = { B: 'B-grade', R: 'rejected' }
+
 const OURS = 'OWNED||'
-const heldKey = (h: Pick<Held, 'ownership' | 'ownerCustomerId' | 'sizeId'>) => `${h.ownership}|${h.ownerCustomerId ?? ''}|${h.sizeId ?? ''}`
+// Good stock keeps the key it always had; another grade adds itself on the end.
+const heldKey = (h: Pick<Held, 'ownership' | 'ownerCustomerId' | 'sizeId' | 'grade'>) =>
+  `${h.ownership}|${h.ownerCustomerId ?? ''}|${h.sizeId ?? ''}${h.grade && h.grade !== 'A' ? `|${h.grade}` : ''}`
 const parseWhose = (k: string) => {
-  const [ownership, ownerCustomerId, sizeId] = k.split('|')
+  const [ownership, ownerCustomerId, sizeId, grade] = k.split('|')
   return {
     ownership: (ownership || 'OWNED') as 'OWNED' | 'CUSTOMER_OWNED',
     ownerCustomerId: ownerCustomerId || null,
     sizeId: sizeId || null,
+    grade: (grade || 'A') as 'A' | 'B' | 'R',
   }
 }
 
@@ -177,7 +185,7 @@ export function StockMoveDialog({
     }
     let cancelled = false
     api
-      .get<{ data: Held[] }>(`/inventory/held?warehouseId=${warehouseId}`)
+      .get<{ data: Held[] }>(`/inventory/held?warehouseId=${warehouseId}&grades=all`)
       .then((res) => {
         if (cancelled) return
         setHeld(res.data)
@@ -544,7 +552,8 @@ export function StockMoveDialog({
                           {choices.map((h) => (
                             <option key={heldKey(h)} value={heldKey(h)}>
                               {h.ownership === 'CUSTOMER_OWNED' ? `${h.ownerName ?? 'Customer'}'s` : 'Ours'}
-                              {h.sizeCode ? ` · size ${h.sizeCode}` : ''} · {h.qty.toLocaleString('en-IN')} {item?.uom?.symbol ?? ''}
+                              {h.sizeCode ? ` · size ${h.sizeCode}` : ''}
+                              {h.grade && GRADE_WORDS[h.grade] ? ` · ${GRADE_WORDS[h.grade]}` : ''} · {h.qty.toLocaleString('en-IN')} {item?.uom?.symbol ?? ''}
                             </option>
                           ))}
                         </SmartSelect>

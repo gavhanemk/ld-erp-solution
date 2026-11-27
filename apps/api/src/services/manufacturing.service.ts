@@ -1,4 +1,5 @@
 import type { MOStatus, Prisma, PrismaClient } from '@prisma/client'
+import { offeredStock, offeringStore } from './availability.service'
 import { qtyPlaces, roundUpToPlaces } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 import { netSizeChanges } from './sizeChanges.service'
@@ -342,17 +343,18 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
   }
 
   const itemIds = [...new Set([...rows.values()].map((r) => r.item.id))]
-  const [stock, warehouses, asked] = await Promise.all([
+  const [stock, warehouses, asked, heldElsewhere] = await Promise.all([
     itemIds.length
       ? db.stockLedger.groupBy({
           by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],
-          // Goods a quality check rejected are held apart, not in stock to ask for;
-          // so is material bought for samples, kept in a sample store.
-          where: { itemId: { in: itemIds }, grade: { not: 'R' }, warehouse: { purpose: { not: 'SAMPLING' } } },
+          // By the one rule (services/availability.service): good stock in
+          // stores that issue — not rejected or B-grade, not in a sample, QC
+          // hold, reject, scrap or in-transit store.
+          where: { itemId: { in: itemIds }, ...offeredStock },
           _sum: { inQty: true, outQty: true },
         })
       : Promise.resolve([]),
-    db.warehouse.findMany({ where: { isActive: true, purpose: { not: 'SAMPLING' } }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    db.warehouse.findMany({ where: { isActive: true, ...offeringStore }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
     db.materialRequisitionLine.findMany({
       where: { mr: { moId: mo.id, status: { not: 'REJECTED' } } },
       select: {
@@ -365,8 +367,17 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
         mr: { select: { departmentId: true, closedAt: true } },
       },
     }),
+    // Held on the racks for anything but this order's own requisitions: not free for it.
+    itemIds.length
+      ? db.stockReservation.findMany({
+          where: { status: 'ACTIVE', itemId: { in: itemIds }, mr: { OR: [{ moId: null }, { moId: { not: mo.id } }] } },
+          select: { itemId: true, warehouseId: true, qty: true },
+        })
+      : Promise.resolve([]),
   ])
   const storeName = new Map(warehouses.map((w) => [w.id, w.name]))
+  const heldFor = (itemId: string, warehouseId: string) =>
+    heldElsewhere.filter((h) => h.itemId === itemId && h.warehouseId === warehouseId).reduce((t, h) => t + Number(h.qty), 0)
 
   // Rows of the same material and owner: a requisition counts against its own
   // department's row, but where the material has one row only it counts
@@ -381,7 +392,12 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
   const data = [...rows.values()].map((r) => {
     const stores = stock
       .filter((s) => s.itemId === r.item.id && s.ownership === r.ownership && (s.ownerCustomerId ?? null) === r.ownerCustomerId)
-      .map((s) => ({ id: s.warehouseId, name: storeName.get(s.warehouseId) ?? 'Store', qty: round3(Number(s._sum.inQty ?? 0) - Number(s._sum.outQty ?? 0)) }))
+      // Free, by the one rule: less what is held for other work (our own stock only is ever held).
+      .map((s) => ({
+        id: s.warehouseId,
+        name: storeName.get(s.warehouseId) ?? 'Store',
+        qty: round3(Number(s._sum.inQty ?? 0) - Number(s._sum.outQty ?? 0) - (s.ownership === 'OWNED' ? heldFor(s.itemId, s.warehouseId) : 0)),
+      }))
       .filter((s) => s.qty > 0 && storeName.has(s.id))
       .sort((a, b) => b.qty - a.qty)
     const inStock = round3(stores.reduce((s, x) => s + x.qty, 0))

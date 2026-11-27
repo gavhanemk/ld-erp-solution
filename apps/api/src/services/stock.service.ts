@@ -4,6 +4,7 @@ import { SAMPLE_STORE_IDS, sampleStoreMayMove, sampleStoreRefused } from '../lib
 // package.service imports this file too; each only calls the other from inside a function.
 import { takeFromPackage } from './package.service'
 import { currentUserId } from '../lib/requestContext'
+import { OFFERING_STORE_IDS, storeOffers } from './availability.service'
 
 /**
  * The only place in the system that is allowed to write a stock movement.
@@ -223,6 +224,16 @@ export async function lockedBalanceOf(
 /** The calendar day in India, as YYYY-MM-DD: what "dated the 28th" means at the mill. */
 const indianDay = (d: Date) => new Date(d.getTime() + 330 * 60_000).toISOString().slice(0, 10)
 
+/**
+ * The day the books are locked up to (Accounts → Chart of Accounts → Books),
+ * as YYYY-MM-DD in India, or null when nothing is locked. Stock in a closed
+ * period is closed too: its value is the closing stock those books carry.
+ */
+export async function stockLockedUpTo(tx: Prisma.TransactionClient): Promise<string | null> {
+  const rows = await tx.$queryRaw<Array<{ d: Date | null }>>`SELECT "booksLockedUpTo" AS d FROM ld_erp.company LIMIT 1`
+  return rows[0]?.d ? indianDay(rows[0].d) : null
+}
+
 const readableDay = (d: Date) =>
   d.toLocaleDateString('en-IN', {
     day: 'numeric',
@@ -276,12 +287,12 @@ async function settleDate(
       AND "grade" = ${key.grade ?? 'A'}
   `
   const last = rows[0]?.last ?? null
-  if (!last) return asked
+  if (!last) return outsideLock(tx, asked, key.earlierDate)
 
   // A correction, a cancellation, an approval or a despatch happens now: it
   // goes in just after the last movement rather than being refused for the
   // date its document carries.
-  if (key.earlierDate === 'move-up' && asked <= last) return new Date(last.getTime() + 1)
+  if (key.earlierDate === 'move-up' && asked <= last) return outsideLock(tx, new Date(last.getTime() + 1), key.earlierDate)
 
   if (indianDay(asked) < indianDay(last)) {
     const [item, warehouse] = await Promise.all([
@@ -295,7 +306,25 @@ async function settleDate(
     )
   }
 
-  return asked <= last ? new Date(last.getTime() + 1) : asked
+  return outsideLock(tx, asked <= last ? new Date(last.getTime() + 1) : asked, key.earlierDate)
+}
+
+/**
+ * A movement's date, kept out of a closed period: stock up to the lock date
+ * is as the books closed it. A correction, cancellation or approval happens
+ * now, so it is written now; anything else dated in the closed period is
+ * refused, saying so.
+ */
+async function outsideLock(tx: Prisma.TransactionClient, when: Date, earlierDate?: 'refuse' | 'move-up'): Promise<Date> {
+  const lock = await stockLockedUpTo(tx)
+  if (!lock || indianDay(when) > lock) return when
+  const now = new Date()
+  if (earlierDate === 'move-up' && indianDay(now) > lock) return now
+  throw new AppError(
+    `Stock up to ${readableDay(new Date(`${lock}T00:00:00+05:30`))} is closed: the books are locked to that day (Accounts → Chart of Accounts → Books). Date this after it, or reopen the period first.`,
+    400,
+    'PERIOD_LOCKED',
+  )
 }
 
 /**
@@ -712,21 +741,11 @@ export async function transferStock(
     transactionType: 'TRANSFER',
     direction: 'IN',
     qty: args.qty,
-    // An empty source values at 0, which would quietly write the stock off on
-    // arrival. Falling back to the destination's own average keeps it whole.
-    unitRate:
-      out.unitRate > 0
-        ? out.unitRate
-        : (
-            await balanceOf(tx, {
-              itemId: args.itemId,
-              warehouseId: args.toWarehouseId,
-              ownership: args.ownership,
-              ownerCustomerId: args.ownerCustomerId,
-              sizeId: args.sizeId,
-              grade: args.grade,
-            })
-          ).avgRate,
+    // At what it left at, always: a move across the yard neither makes nor
+    // loses value. Stock carried at nothing (a customer's, or an opening line
+    // whose rate is still pending) arrives at nothing; setting the opening
+    // rate later prices both halves of the move (openingControl.repriceFrom).
+    unitRate: out.unitRate,
     referenceType: args.referenceType,
     referenceId: args.referenceId,
     ownership: args.ownership,
@@ -793,8 +812,10 @@ export async function reorderStatus(
     FROM ld_erp.items i
     JOIN ld_erp.uom             u ON u.id = i."uomId"
     JOIN ld_erp.item_categories c ON c.id = i."categoryId"
-    -- Material bought for samples is not stock the mill reorders against.
-    LEFT JOIN ld_erp.stock_ledger s ON s."itemId" = i.id AND s."warehouseId" NOT IN (${SAMPLE_STORE_IDS})
+    -- By the one rule (services/availability.service): good stock in stores
+    -- that issue. Samples, rejects, QC holds, scrap and goods in transit are
+    -- not stock the mill reorders against.
+    LEFT JOIN ld_erp.stock_ledger s ON s."itemId" = i.id AND s.grade = 'A' AND s."warehouseId" IN (${OFFERING_STORE_IDS})
     WHERE i."isActive" = true
       AND i."reorderLevel" > 0
       AND (${filters.itemId ?? null}::text IS NULL OR i.id = ${filters.itemId ?? null})
@@ -853,6 +874,16 @@ export async function onHand(
     ownerCustomerId: string | null
     ownerName: string | null
     qty: number
+    /** Of qty: good stock (grade A), B-grade, and held or rejected (grade R). */
+    good: number
+    bGrade: number
+    held: number
+    /** What kind of store it is (Masters → Warehouses). */
+    storeKind: string
+    /** Held for requisitions, of the good stock. */
+    reserved: number
+    /** Free by the one rule: good stock in a store that issues, less what is held. */
+    free: number
     value: number
     avgRate: number
     /** The item needs reordering: our own stock, every store together, is at or below its reorder level. */
@@ -876,6 +907,11 @@ export async function onHand(
       ownerCustomerId: string | null
       ownerName: string | null
       qty: number
+      good: number
+      bGrade: number
+      held: number
+      storeKind: string
+      storePurpose: string
       value: number
       lastMovedAt: Date | null
     }>
@@ -889,10 +925,16 @@ export async function onHand(
       i."reorderLevel"::float8               AS "reorderLevel",
       w.id                                   AS "warehouseId",
       w.name                                 AS "warehouseName",
+      w.kind::text                           AS "storeKind",
+      w.purpose::text                        AS "storePurpose",
       s."ownership"                          AS "ownership",
       s."ownerCustomerId"                    AS "ownerCustomerId",
       cust.name                              AS "ownerName",
       SUM(s."inQty" - s."outQty")::float8    AS "qty",
+      -- Every grade apart: good, B-grade, and held or rejected.
+      COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s.grade = 'A'), 0)::float8 AS "good",
+      COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s.grade = 'B'), 0)::float8 AS "bGrade",
+      COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s.grade NOT IN ('A', 'B')), 0)::float8 AS "held",
       SUM((s."inQty" - s."outQty") * COALESCE(s."unitRate", 0))::float8 AS "value",
       MAX(s."transactionDate")               AS "lastMovedAt"
     FROM ld_erp.stock_ledger s
@@ -915,21 +957,36 @@ export async function onHand(
            OR (SELECT bool_and(i.name || ' ' || i.code ILIKE '%' || w || '%')
                FROM unnest(${filters.searchWords ?? null}::text[]) AS w))
     GROUP BY i.id, i.code, i.name, u.symbol, c.name, i."reorderLevel",
-             w.id, w.name, s."ownership", s."ownerCustomerId", cust.name
+             w.id, w.name, w.kind, w.purpose, s."ownership", s."ownerCustomerId", cust.name
     HAVING SUM(s."inQty" - s."outQty") <> 0
     ORDER BY i.name ASC, w.name ASC
   `
 
   const status = new Map((await reorderStatus(tx, { itemId: filters.itemId })).map((r) => [r.itemId, r]))
+  // Held for requisitions, by item and store: only our own good stock is ever held.
+  const holds = new Map(
+    (
+      await tx.stockReservation.groupBy({ by: ['itemId', 'warehouseId'], where: { status: 'ACTIVE' }, _sum: { qty: true } })
+    ).map((h) => [`${h.itemId}|${h.warehouseId}`, Number(h._sum.qty ?? 0)]),
+  )
 
   const out = rows
     .map((r) => {
+      const { storePurpose, ...row } = r
       const qty = round3(r.qty)
       const value = round2(r.value)
       const item = status.get(r.itemId)
+      const good = round3(r.good)
+      const offers = storeOffers({ purpose: storePurpose, kind: r.storeKind })
+      const reserved = r.ownership === 'OWNED' ? round3(Math.min(Math.max(good, 0), holds.get(`${r.itemId}|${r.warehouseId}`) ?? 0)) : 0
       return {
-        ...r,
+        ...row,
         qty,
+        good,
+        bGrade: round3(r.bGrade),
+        held: round3(r.held),
+        reserved,
+        free: offers ? round3(Math.max(0, good - reserved)) : 0,
         value,
         avgRate: qty > 0 ? round2(value / qty) : 0,
         // A customer's fabric is not ours to reorder.
@@ -960,10 +1017,16 @@ export async function onHand(
         reorderLevel: item.reorderLevel,
         warehouseId: '',
         warehouseName: 'None in any store',
+        storeKind: 'GENERAL',
         ownership: 'OWNED',
         ownerCustomerId: null,
         ownerName: null,
         qty: 0,
+        good: 0,
+        bGrade: 0,
+        held: 0,
+        reserved: 0,
+        free: 0,
         value: 0,
         avgRate: 0,
         isLow: true,
