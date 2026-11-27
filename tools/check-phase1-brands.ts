@@ -110,6 +110,17 @@ async function main() {
       check(`the default goes back to ${original.name}`, okay(back) && (await prisma.brand.findUnique({ where: { id: original.id } }))?.isDefault === true, back.body?.message)
     }
 
+    // A fresh install has no default: the LD Cotton Mills brand takes it when added.
+    await prisma.brand.updateMany({ where: { isDefault: true }, data: { isDefault: false } })
+    const fresh = await call('POST', '/masters/brands', { name: `ZZTEST LD Cotton ${stamp}`, type: 'LD_COTTON_MILLS', isActive: true })
+    if (okay(fresh)) madeBrands.push(fresh.body.data.id)
+    const freshRow = okay(fresh) ? await prisma.brand.findUnique({ where: { id: fresh.body.data.id }, select: { isDefault: true } }) : null
+    check('no default yet: an LD Cotton Mills brand takes it when added', freshRow?.isDefault === true, [fresh.body?.message, freshRow])
+    if (original) {
+      await prisma.brand.updateMany({ where: { isDefault: true }, data: { isDefault: false } })
+      await prisma.brand.update({ where: { id: original.id }, data: { isDefault: true } })
+    }
+
     // ── Styles of each brand (fixtures copied from the ZZTEST shirt) ──
     const base = await prisma.style.findFirstOrThrow({ where: { code: 'ZZTEST-SH-01' } })
     const baseItem = await prisma.item.findFirstOrThrow({ where: { styleId: base.id, type: 'FINISHED_GOOD' } })

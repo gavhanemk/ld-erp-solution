@@ -1954,6 +1954,15 @@ async function brandAfterSave(saved: Record<string, any>, input: Record<string, 
     ])
   }
   if (saved.type === 'CUSTOM') return
+  // A fresh install has no default yet: LD Cotton Mills takes it when it is
+  // added, or the first own brand does — whichever comes first. It can be
+  // moved to another brand afterwards.
+  if (saved.isActive && !(await prisma.brand.count({ where: { isDefault: true } }))) {
+    const others = await prisma.brand.count({ where: { type: { not: 'CUSTOM' }, isActive: true, id: { not: saved.id } } })
+    if (/ld\s*cotton/i.test(String(saved.name)) || others === 0) {
+      await prisma.brand.update({ where: { id: saved.id }, data: { isDefault: true } })
+    }
+  }
   const wanted = typeof input.profitCentreName === 'string' ? input.profitCentreName.trim() : ''
   const centre = await prisma.costCentre.findUnique({ where: { brandId: saved.id } })
   if (!centre) {
