@@ -72,7 +72,7 @@ function refuseUnlessLocal() {
 async function main() {
   refuseUnlessLocal()
   const cust = await prisma.customer.findFirst({ where: { isActive: true, isBlacklisted: false, OR: [{ shippingStateCode: { not: null } }, { billingStateCode: { not: null } }] }, select: { id: true } })
-  const brand = await prisma.brand.findFirst({ where: { isActive: true } })
+  const brand = await prisma.brand.findFirst({ where: { isActive: true, isDefault: true } })
   const fabric = await prisma.item.findUnique({ where: { code: 'FAB-COT-001' } })
   const fgTemplate = await prisma.item.findUnique({ where: { code: 'FG-SHRT-001' } })
   const store = await prisma.warehouse.findFirst({ where: { isActive: true }, select: { id: true } })

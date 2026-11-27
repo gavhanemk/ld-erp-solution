@@ -180,9 +180,10 @@ export function seasonYear(season: unknown, now = new Date()): string {
 export async function nextStyleCode(data: Record<string, unknown>, attempt = 0): Promise<string> {
   const brand =
     typeof data.brandId === 'string' && data.brandId
-      ? await prisma.brand.findUnique({ where: { id: data.brandId }, select: { name: true, type: true } })
+      ? await prisma.brand.findUnique({ where: { id: data.brandId }, select: { name: true, type: true, code: true } })
       : null
-  const prefix = brand ? brandCode(brand.name, brand.type) : (STYLE_BRAND[String(data.brandType)] ?? 'LD')
+  // The brand's own code (Masters → In House Brands), else one made from its name.
+  const prefix = brand ? (brand.code || brandCode(brand.name, brand.type)) : (STYLE_BRAND[String(data.brandType)] ?? 'LD')
   const stem = `${prefix}-${garmentCode(data.category)}-${seasonYear(data.season)}`
   const rows = await prisma.style.findMany({ where: { code: { startsWith: stem } }, select: { code: true } })
   const highest = rows.reduce((max, r) => {
@@ -232,6 +233,25 @@ export function highestCodeNumber(codes: string[]): number {
     const n = Number.parseInt(code.slice(code.lastIndexOf('-') + 1), 10)
     return Number.isFinite(n) && n > max ? n : max
   }, 0)
+}
+
+/**
+ * A new brand's code: made from its name as its style codes always were
+ * (LD Cotton Mills → LD, Stich Code → ST), with a number on the end when
+ * another brand has it already (ST2).
+ */
+export async function nextBrandCode(name: unknown, type?: unknown): Promise<string> {
+  const stem = brandCode(name, type)
+  const taken = new Set(
+    (await prisma.brand.findMany({ where: { code: { startsWith: stem } }, select: { code: true } })).map((b) => b.code),
+  )
+  let n = 1
+  let code = stem
+  while (taken.has(code)) {
+    n += 1
+    code = `${stem}${n}`
+  }
+  return code
 }
 
 /** Whether this register has its codes made up for it. */

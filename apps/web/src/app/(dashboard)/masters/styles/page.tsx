@@ -121,11 +121,12 @@ const baseColumns: Column<Style>[] = [
  * values in use; each counts what it would leave.
  */
 const filterDefs: FilterDef[] = [
+  // By the brand itself: Stich Code's styles apart from LD Cotton Mills'.
   {
-    key: 'brandType',
+    key: 'brandId',
     label: 'Brand',
-    facet: 'brandType',
-    options: Object.entries(BRAND_LABEL).map(([value, label]) => ({ value, label })),
+    facet: 'brandId',
+    optionsFrom: { resource: 'brands' },
   },
   {
     key: 'stage',

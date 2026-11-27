@@ -44,6 +44,9 @@ interface StyleOption {
   code: string
   name: string
   brandType: keyof typeof BRAND_LABEL
+  /** The brand it is made under, by the brand itself: the picker groups by it. */
+  brandId?: string | null
+  brand?: { id: string; name: string; type: string } | null
   category: string | null
   colors: string[]
   items: Array<{ id: string; color: string | null }>
@@ -348,26 +351,37 @@ export function QuotationDialog({
   const chargeTypeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
 
   const styleByCode = useMemo(() => new Map(styles.map((st) => [st.code.toLowerCase(), st])), [styles])
-  /** Whose style each garment is (LD Cotton Mills or VHAGAR), for the brand it is suggested under. */
-  const lineBrandTypes = useMemo(
+  /** The brand each garment's style is made under, for the brand it is suggested under. */
+  const lineBrandIds = useMemo(
     () =>
       lines
         .filter((l) => l.itemId || l.styleCode.trim())
         .map((l) => {
           const typed = l.styleCode.trim().toLowerCase()
           const style = typed ? styleByCode.get(typed) : styles.find((x) => x.items.some((i) => i.id === l.itemId))
-          return style?.brandType ?? null
+          return style?.brandId ?? null
         }),
     [lines, styleByCode, styles]
   )
-  // Until someone picks a brand, it follows the garments: VHAGAR styles, VHAGAR.
+  // Until someone picks a brand, it follows the garments: Stich Code styles, Stich Code.
   useEffect(() => {
     if (brandPicked || !brands.length) return
-    const next = suggestedBrand(brands, lineBrandTypes, isJobWork)
+    const next = suggestedBrand(brands, lineBrandIds, isJobWork)
     if (next && next !== brandId) setBrandId(next)
-  }, [brandPicked, brands, lineBrandTypes, isJobWork, brandId])
+  }, [brandPicked, brands, lineBrandIds, isJobWork, brandId])
   const brand = brands.find((b) => b.id === brandId)
-  const otherBrand = otherBrandLines(brand, lineBrandTypes)
+  const otherBrand = otherBrandLines(brand, lineBrandIds, brands)
+  /** The style picker's groups: one per brand, by name, a style with none last. */
+  const styleGroups = useMemo(() => {
+    const groups = new Map<string, { label: string; styles: StyleOption[] }>()
+    for (const x of styles) {
+      const key = x.brand?.id ?? ''
+      const g = groups.get(key) ?? { label: x.brand?.name ?? BRAND_LABEL[x.brandType] ?? 'No brand', styles: [] }
+      g.styles.push(x)
+      groups.set(key, g)
+    }
+    return [...groups.entries()].sort(([a, x], [b, y]) => (a === '' ? 1 : b === '' ? -1 : x.label.localeCompare(y.label))).map(([key, g]) => ({ key, ...g }))
+  }, [styles])
 
   const setLine = (key: string, patch: Partial<LineDraft>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)))
   /** A copy of a line, put just under it. */
@@ -616,7 +630,8 @@ export function QuotationDialog({
                     help={
                       otherBrand > 0 ? (
                         <span className="warn-text">
-                          {otherBrand} {otherBrand === 1 ? 'garment is' : 'garments are'} another brand&apos;s style
+                          {otherBrand} {otherBrand === 1 ? 'garment is' : 'garments are'} another brand&apos;s style. One quotation carries one brand: put{' '}
+                          {otherBrand === 1 ? 'it' : 'them'} on a quotation of their own.
                         </span>
                       ) : brandPicked ? undefined : (
                         'Follows the styles until you pick one'
@@ -634,7 +649,7 @@ export function QuotationDialog({
                     >
                       {!brandId && <option value="">Choose the brand</option>}
                       {brands.map((b) => (
-                        <option key={b.id} value={b.id} data-sub={b.type === 'VHAGAR' ? 'VHAGAR' : 'LD Cotton Mills'}>
+                        <option key={b.id} value={b.id} data-sub={b.isDefault ? 'B2B and job work' : (b.code ?? undefined)}>
                           {b.name}
                         </option>
                       ))}
@@ -711,18 +726,15 @@ export function QuotationDialog({
                               >
                                 <option value="">Choose a style</option>
                                 {p.l.styleCode && !st && <option value={p.l.styleCode}>{p.l.styleCode} (not in the style master)</option>}
-                                {(['LD_COTTON_MILLS', 'VHAGAR', 'CUSTOM'] as const).map((bt) => {
-                                  const group = styles.filter((x) => x.brandType === bt)
-                                  return group.length ? (
-                                    <optgroup key={bt} label={BRAND_LABEL[bt]}>
-                                      {group.map((x) => (
-                                        <option key={x.id} value={x.code} data-sub={bomNote(x)}>
-                                          {x.code} — {x.name}
-                                        </option>
-                                      ))}
-                                    </optgroup>
-                                  ) : null
-                                })}
+                                {styleGroups.map((g) => (
+                                  <optgroup key={g.key || 'none'} label={g.label}>
+                                    {g.styles.map((x) => (
+                                      <option key={x.id} value={x.code} data-sub={bomNote(x)}>
+                                        {x.code} — {x.name}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                ))}
                               </SmartSelect>
                               <input className={`${cell} mt-1`} maxLength={500} value={p.l.description} placeholder="Description (optional)" onChange={(e) => setLine(p.l.key, { description: e.target.value })} />
                             </td>

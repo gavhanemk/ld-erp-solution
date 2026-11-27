@@ -85,6 +85,18 @@ export interface CrudOptions {
     before?: Record<string, unknown>,
   ) => Promise<{ data: Record<string, unknown>; onSaveError?: (err: unknown) => void }>
   /**
+   * What has to follow a record once it is saved — a brand's profit centre
+   * takes the brand's code and name. Runs after a create or an edit has
+   * succeeded, with the record as saved, what the form sent (fields
+   * `beforeSave` kept off the record included) and, on an edit, the record
+   * before it.
+   */
+  afterSave?: (
+    saved: Record<string, any>,
+    input: Record<string, unknown>,
+    before?: Record<string, unknown>,
+  ) => Promise<void>
+  /**
    * Turns on GET /export: every record the list would show, with the same
    * search, filters and sort but no pages, handed to this to make the file.
    */
@@ -220,6 +232,7 @@ export function crudRouter(options: CrudOptions): Router {
     activeFlag = softDelete,
     injectOnCreate,
     beforeSave,
+    afterSave,
     filters = {},
     facets = [],
     customFacets = {},
@@ -401,6 +414,7 @@ export function crudRouter(options: CrudOptions): Router {
       onSaveError?.(err)
       throw err
     }
+    if (afterSave) await afterSave(created, parsed)
 
     await writeAuditLog(req, {
       module,
@@ -431,6 +445,7 @@ export function crudRouter(options: CrudOptions): Router {
       onSaveError?.(err)
       throw err
     }
+    if (afterSave) await afterSave(updated, parsed, before)
 
     await writeAuditLog(req, {
       module,

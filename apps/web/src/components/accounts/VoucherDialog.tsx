@@ -645,7 +645,8 @@ export function VoucherDialog({
                                 {pl ? (
                                   <SmartSelect className="form-input" value={l.costCentreId} onChange={(e) => update(l.key, { costCentreId: e.target.value })} aria-label={`Brand on line ${i + 1}`}>
                                     <option value="">Not split</option>
-                                    {centres.map((c) => (
+                                    {/* Our own brands' profit centres; a customer's brand only where a line already has it. */}
+                                    {centres.filter((c) => c.brand?.type !== 'CUSTOM' || c.id === l.costCentreId).map((c) => (
                                       <option key={c.id} value={c.id}>
                                         {c.name}
                                       </option>

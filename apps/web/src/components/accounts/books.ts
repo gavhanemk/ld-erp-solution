@@ -43,7 +43,8 @@ export interface CostCentre {
   id: string
   name: string
   isActive: boolean
-  brand: { id: string; name: string } | null
+  /** The brand it is the profit centre of; `type` CUSTOM for a customer's brand. */
+  brand: { id: string; name: string; type?: string } | null
 }
 
 export interface BooksSummary {

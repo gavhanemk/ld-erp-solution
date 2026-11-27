@@ -155,7 +155,7 @@ async function main() {
     include: routingInclude,
   })
   if (!source._count.mos) {
-    const brand = await prisma.brand.findFirstOrThrow()
+    const brand = await prisma.brand.findFirstOrThrow({ where: { isDefault: true } })
     await prisma.$transaction(async (tx) => {
       const mo = await tx.manufacturingOrder.create({
         data: {

@@ -11,7 +11,26 @@ interface Warehouse {
   isActive: boolean
   /** GENERAL: bulk stock. SAMPLING: material bought for samples, kept apart from it. */
   purpose?: 'GENERAL' | 'SAMPLING'
+  /** What kind of place it is, so its stock can be told apart by status. */
+  kind?: string
+  /** Set on a process's own floor. */
+  departmentId?: string | null
 }
+
+/** What kind of place a store is: its stock is counted under this status. */
+const KIND_LABEL: Record<string, string> = {
+  GENERAL: 'General store',
+  RAW_MATERIAL: 'Raw material',
+  WIP: 'Work in progress (process floor)',
+  FINISHED_GOODS: 'Finished goods',
+  QC_HOLD: 'Held for QC',
+  REJECTED: 'Rejected',
+  SCRAP: 'Scrap',
+  JOB_WORK: 'At a job worker',
+  TRANSIT: 'In transit',
+  SAMPLE: 'Samples',
+}
+
 
 /** A sample store is offered only where sampling is switched on. */
 const samplingOn = process.env.NEXT_PUBLIC_SAMPLING_ENABLED === 'true'
@@ -42,6 +61,11 @@ const columns: Column<Warehouse>[] = [
         } as Column<Warehouse>,
       ]
     : []),
+  {
+    key: 'kind',
+    header: 'Kind',
+    render: (w) => <span className="text-xs">{KIND_LABEL[w.kind ?? 'GENERAL'] ?? w.kind}</span>,
+  },
   { key: 'isActive', header: 'Status', render: (w) => <ActiveBadge isActive={w.isActive} /> },
 ]
 
@@ -50,6 +74,18 @@ const formFields: FormField[] = [
   { name: 'code', label: 'Warehouse Code', generated: true },
   { name: 'name', label: 'Warehouse Name', required: true, placeholder: 'Fabric Store' },
   { name: 'address', label: 'Address', type: 'textarea', span: 2 },
+  {
+    name: 'kind',
+    label: 'Kind of store',
+    type: 'select',
+    // A sample store is set by what it holds; a process floor is always work in progress.
+    options: Object.entries(KIND_LABEL)
+      .filter(([value]) => value !== 'SAMPLE' && value !== 'WIP')
+      .map(([value, label]) => ({ value, label })),
+    valueForNew: 'GENERAL',
+    showIf: (v) => !v.departmentId && v.purpose !== 'SAMPLING',
+    help: 'What its stock counts as in the stock reports: rejected and scrap stock is never offered as available. The store stays one place for every brand.',
+  },
   ...(samplingOn
     ? [
         {

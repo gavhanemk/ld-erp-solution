@@ -30,7 +30,7 @@ async function main() {
   const home = company?.stateCode || company?.gstin?.slice(0, 2) || '27'
   const away = home === '29' ? '27' : '29'
   const customer = await prisma.customer.findFirst({ where: { isActive: true }, select: { id: true } })
-  const brand = await prisma.brand.findFirst({ where: { isActive: true }, select: { id: true } })
+  const brand = await prisma.brand.findFirst({ where: { isActive: true, isDefault: true }, select: { id: true } })
   const raw = await prisma.item.findMany({
     where: { type: 'FINISHED_GOOD', isActive: true },
     select: {
@@ -209,10 +209,11 @@ async function main() {
     .catch((e: { code?: string }) => e.code)
   check('no shipment date before the order date', early === 'BAD_DATE', String(early))
 
-  // The brand, which the form no longer asks for: from the garments' styles.
-  const brands = await prisma.brand.findMany({ where: { isActive: true }, select: { id: true, name: true, type: true } })
-  const own = brands.find((b) => b.type === 'LD_COTTON_MILLS')
-  const vhagar = brands.find((b) => b.type === 'VHAGAR')
+  // The brand, which the form no longer asks for: the brand the garments'
+  // styles are made under, by the brand itself; else the default brand.
+  // (One brand per order and the rest: tools/check-phase1-brands.ts, with
+  // made-up brands, never VHAGAR's.)
+  const fallback = await prisma.brand.findFirstOrThrow({ where: { isDefault: true }, select: { id: true, name: true } })
   const brandFor = (o: { isJobWork?: boolean; brandId?: string; lines: Array<{ itemId: string; styleCode?: string }> }) =>
     prisma
       .$transaction((tx) =>
@@ -228,20 +229,13 @@ async function main() {
         ),
       )
       .then((r) => r.header.brandId)
-  // Styles typed on the lines, so the check does not hang on which items have styles.
-  const [vStyles, lStyles] = await Promise.all([
-    prisma.style.findMany({ where: { brandType: 'VHAGAR' }, select: { code: true }, take: 1 }),
-    prisma.style.findMany({ where: { brandType: 'LD_COTTON_MILLS' }, select: { code: true }, take: 1 }),
-  ])
-  const l = lStyles[0]?.code
-  if (l) check(`no brand sent, our style (${l}): ${own?.name}`, (await brandFor({ lines: [{ itemId: A.id, styleCode: l }] })) === own?.id)
-  if (vhagar && vStyles.length && l) {
-    const v = vStyles[0].code
-    check(`every garment a VHAGAR style (${v}): ${vhagar.name}`, (await brandFor({ lines: [{ itemId: A.id, styleCode: v }, { itemId: B.id, styleCode: v }] })) === vhagar.id)
-    check("a VHAGAR style beside one of ours: the mill's own", (await brandFor({ lines: [{ itemId: A.id, styleCode: v }, { itemId: B.id, styleCode: l }] })) === own?.id)
-    check('job work in a VHAGAR style: the mill\'s own', (await brandFor({ isJobWork: true, lines: [{ itemId: A.id, styleCode: v }] })) === own?.id)
-  } else console.log('SKIP no VHAGAR brand or style to try')
-  if (vhagar) check('a brand sent is kept', (await brandFor({ brandId: vhagar.id, lines: [{ itemId: A.id }] })) === vhagar.id)
+  // A style typed on the line, so the check does not hang on which items have styles.
+  const ours = await prisma.style.findFirst({ where: { brandId: fallback.id }, select: { code: true } })
+  if (ours) {
+    check(`no brand sent, a ${fallback.name} style (${ours.code}): ${fallback.name}`, (await brandFor({ lines: [{ itemId: A.id, styleCode: ours.code }] })) === fallback.id)
+    check(`job work: ${fallback.name}`, (await brandFor({ isJobWork: true, lines: [{ itemId: A.id, styleCode: ours.code }] })) === fallback.id)
+    check('a brand sent is kept', (await brandFor({ brandId: fallback.id, lines: [{ itemId: A.id, styleCode: ours.code }] })) === fallback.id)
+  } else console.log(`SKIP no ${fallback.name} style to try`)
 
   console.log(`\n${pass} passed, ${fail} failed`)
 }

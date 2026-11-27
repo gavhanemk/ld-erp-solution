@@ -583,6 +583,19 @@ export const createWarehouseSchema = z.object({
       })
       .optional()
   ),
+  /*
+   * What kind of place it is, so its stock can be told apart: raw material,
+   * finished goods, held for QC, rejected, scrap… A process floor is always
+   * work in progress, and a sample store sample.
+   */
+  kind: z.preprocess(
+    (v) => (v === '' || v === null ? undefined : v),
+    z
+      .enum(['GENERAL', 'RAW_MATERIAL', 'WIP', 'FINISHED_GOODS', 'QC_HOLD', 'REJECTED', 'SCRAP', 'JOB_WORK', 'TRANSIT', 'SAMPLE'], {
+        errorMap: () => ({ message: 'Pick what kind of store it is' }),
+      })
+      .optional()
+  ),
 })
 export const updateWarehouseSchema = createWarehouseSchema.partial()
 
@@ -617,6 +630,8 @@ export const createDepartmentSchema = z.object({
   code: code.optional(),
   name,
   isActive,
+  /** The department it rolls up into as a cost centre: Line QC into Quality Control. Blank at the top. */
+  parentId: z.preprocess((v) => (v === '' ? null : v), z.string().optional().nullable()),
 })
 export const updateDepartmentSchema = createDepartmentSchema.partial()
 
@@ -788,10 +803,24 @@ export const updateItemCategorySchema = createItemCategorySchema.partial()
 export const createBrandSchema = z.object({
   companyId: z.string().min(1, 'Company is required'),
   name,
+  /** Short and unique (LD, ST, VH); made from the name when left out. New style codes start with it. */
+  code: z
+    .string()
+    .trim()
+    .transform((v) => v.toUpperCase())
+    .refine((v) => v === '' || /^[A-Z0-9]{1,8}$/.test(v), 'A brand code is up to 8 letters or digits')
+    .optional()
+    .nullable(),
   type: BrandTypeEnum,
   description: optionalText,
   logoUrl: z.string().url().optional().nullable(),
   isActive,
+  /** The own brand B2B and job work are booked under. Only one. */
+  isDefault: z.boolean().optional(),
+  /** Where its finished goods come in by default. */
+  defaultWarehouseId: z.string().optional().nullable(),
+  /** The name its profit centre goes by in Accounts ("LD Cotton Mills — B2B & Job Work"). Not a brand column. */
+  profitCentreName: z.string().trim().max(60).optional().nullable(),
 })
 export const updateBrandSchema = createBrandSchema.partial()
 

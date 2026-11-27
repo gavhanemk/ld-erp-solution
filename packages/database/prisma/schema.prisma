@@ -967,10 +967,19 @@ model Brand {
   companyId   String
   company     Company   @relation(fields: [companyId], references: [id])
   name        String
+  /// Short and unique: LD, ST, VH. New style codes of the brand start with it.
+  code        String?   @unique
   type        BrandType
   description String?
   logoUrl     String?
   isActive    Boolean   @default(true)
+  /// The own brand B2B and job work are booked under, and the one an order
+  /// falls back to when its styles do not say: LD Cotton Mills. Only one
+  /// (a partial unique index in the migration keeps it so).
+  isDefault   Boolean   @default(false)
+  /// Where its finished goods come in by default.
+  defaultWarehouseId String?
+  defaultWarehouse   Warehouse? @relation("BrandDefaultStore", fields: [defaultWarehouseId], references: [id], onDelete: SetNull)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -1334,6 +1343,23 @@ enum StyleStage {
 enum WarehousePurpose {
   GENERAL
   SAMPLING
+}
+
+/// What kind of place a store is, so stock can be told apart by status: raw
+/// material, work in progress (a process floor), finished goods, held for QC,
+/// rejected, scrap, at a job worker, on the way, or for samples. GENERAL until
+/// someone says otherwise. Physical place only: no store is copied per brand.
+enum WarehouseKind {
+  GENERAL
+  RAW_MATERIAL
+  WIP
+  FINISHED_GOODS
+  QC_HOLD
+  REJECTED
+  SCRAP
+  JOB_WORK
+  TRANSIT
+  SAMPLE
 }
 
 model Style {
@@ -1732,6 +1758,8 @@ model Warehouse {
   /// apart from it: only sample purchases are received there, only Sampling
   /// issues from it, and general documents cannot draw on it (lib/sampleStore).
   purpose   WarehousePurpose @default(GENERAL)
+  /// What kind of place it is (see WarehouseKind). A process floor is WIP.
+  kind      WarehouseKind    @default(GENERAL)
   /// Set on a process's own floor (Cutting Floor, Stitching Floor…): the work
   /// in progress at that process is kept here, size by size. Empty for a store
   /// or an outside unit. One floor per process.
@@ -1756,6 +1784,8 @@ model Warehouse {
 
   reservations StockReservation[] @relation("WarehouseReservations")
   cuttingPanels CuttingOrder[] @relation("CuttingPanelStore")
+  /// Brands whose finished goods come into this store by default.
+  defaultForBrands Brand[] @relation("BrandDefaultStore")
   @@map("warehouses")
   customerMaterialReceipts CustomerGRN[]    @relation("CustomerMaterialReceipts")
   customerMaterialReturns CustomerMaterialReturn[] @relation("CustomerMaterialReturns")
@@ -1778,6 +1808,11 @@ model Department {
   name      String
   code      String  @unique
   isActive  Boolean @default(true)
+  /// The department it rolls up into, as a cost centre: Line QC into Quality
+  /// Control, Quality Control into Production. Empty at the top.
+  parentId  String?
+  parent    Department?  @relation("DepartmentParent", fields: [parentId], references: [id], onDelete: SetNull)
+  children  Department[] @relation("DepartmentParent")
 
   operations        Operation[]
   employees         Employee[]
@@ -5014,11 +5049,15 @@ model Ledger {
   @@map("ledgers")
 }
 
-/// Where income and spending is booked to, so profit can be read by brand.
-/// One per brand, made for it; shared costs are split across them.
+/// Where income and spending is booked to, so profit can be read by brand:
+/// the brand's profit centre. One per own brand, made for it; shared costs are
+/// split across them. (Department cost centres are the Departments master.)
 model CostCentre {
   id        String   @id @default(cuid())
   name      String   @unique
+  /// The brand's code, kept in step with it.
+  code        String?  @unique
+  description String?
   brandId   String?  @unique
   brand     Brand?   @relation(fields: [brandId], references: [id], onDelete: Restrict)
   isActive  Boolean  @default(true)

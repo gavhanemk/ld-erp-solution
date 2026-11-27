@@ -67,22 +67,27 @@ async function loadMasters() {
     }),
     prisma.sizeGroup.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
     // Oldest first: the first brand of a kind stands for the kind.
-    prisma.brand.findMany({ where: { isActive: true }, select: { id: true, name: true, type: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
+    prisma.brand.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true, type: true, isDefault: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
   ])
   return { styles, sizeGroups, brands }
 }
 
 /**
- * The brand a sheet names: one from the Brands master by its name ("DCot"),
- * or a kind (LD Cotton Mills, VHAGAR, Custom), which takes the first brand of
- * that kind.
+ * The brand a sheet names: one from the brand masters by its name ("Stich
+ * Code", "DCot") or its code ("ST"), or a kind (LD Cotton Mills, VHAGAR,
+ * Custom) — LD Cotton Mills meaning the default brand, the others the first
+ * brand of that kind.
  */
-function brandFor(typed: string | undefined, brands: Array<{ id: string; name: string; type: 'LD_COTTON_MILLS' | 'VHAGAR' | 'CUSTOM' }>) {
-  const named = brands.find((b) => low(b.name) === low(typed))
+function brandFor(
+  typed: string | undefined,
+  brands: Array<{ id: string; name: string; code: string | null; type: 'LD_COTTON_MILLS' | 'VHAGAR' | 'CUSTOM'; isDefault: boolean }>,
+) {
+  const named = brands.find((b) => low(b.name) === low(typed)) ?? brands.find((b) => b.code && low(b.code) === low(typed))
   if (named) return { brandId: named.id, brandType: named.type }
   const kind = BRANDS[low(typed)]
   if (!kind) return null
-  return { brandId: brands.find((b) => b.type === kind)?.id ?? null, brandType: kind }
+  const chosen = (kind === 'LD_COTTON_MILLS' ? brands.find((b) => b.isDefault) : undefined) ?? brands.find((b) => b.type === kind)
+  return { brandId: chosen?.id ?? null, brandType: chosen?.type ?? kind }
 }
 
 /** The template, optionally listing every style already in the system. */

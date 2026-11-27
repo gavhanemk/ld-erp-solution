@@ -235,6 +235,8 @@ router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
       code: true,
       name: true,
       brandType: true,
+      brandId: true,
+      brand: { select: { id: true, name: true, type: true } },
       category: true,
       colors: true,
       items: { where: { isActive: true, type: 'FINISHED_GOOD' }, select: { id: true, color: true } },
@@ -249,6 +251,9 @@ router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
       code: st.code,
       name: st.name,
       brandType: st.brandType,
+      // Whose brand the style is, by the brand itself: the picker groups by it.
+      brandId: st.brandId,
+      brand: st.brand,
       category: st.category,
       colors: [...new Set([...st.colors, ...st.items.map((i) => i.color).filter((c): c is string => !!c)])],
       items: st.items,

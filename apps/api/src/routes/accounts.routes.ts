@@ -570,7 +570,8 @@ router.get('/ledgers/:id/bills', requirePermission(MODULE, 'view'), async (req, 
 
 router.get('/cost-centres', requirePermission(MODULE, 'view'), async (_req, res) => {
   await ensureChart()
-  const rows = await prisma.costCentre.findMany({ orderBy: { name: 'asc' }, include: { brand: { select: { id: true, name: true } } } })
+  // With the brand's kind: the voucher's Brand box offers our own brands' profit centres only.
+  const rows = await prisma.costCentre.findMany({ orderBy: { name: 'asc' }, include: { brand: { select: { id: true, name: true, type: true } } } })
   res.json({ success: true, data: rows })
 })
 

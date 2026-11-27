@@ -171,7 +171,7 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
       new Date(`${from}T00:00:00+05:30`),
       new Date(`${to}T23:59:59.999+05:30`),
     ),
-    tx.costCentre.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+    tx.costCentre.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true, brand: { select: { type: true } } } }),
   ])
   const byCentre = new Map<string, Map<string, number>>()
   for (const r of centreRows) {
@@ -212,7 +212,11 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
   const netProfit = r2(grossProfit + B('INDIRECT_INCOMES').total - B('INDIRECT_EXPENSES').total)
 
   // By brand: stock is valued for the mill as a whole, so its change sits with what no brand carries.
-  const columns = [...centres.map((c) => ({ id: c.id, name: c.name })), { id: '', name: 'Not split' }]
+  // A column for each of our own brands' profit centres; a customer's brand
+  // only when something was booked to it in the period, so nothing is hidden.
+  const booked = new Set(centreRows.filter((r) => r.amount !== 0).map((r) => r.costCentreId))
+  const shown = centres.filter((c) => c.brand?.type !== 'CUSTOM' || booked.has(c.id))
+  const columns = [...shown.map((c) => ({ id: c.id, name: c.name })), { id: '', name: 'Not split' }]
   const brand = columns.map((c) => {
     const stock = c.id === '' ? r2(closing.value - opening.value) : 0
     const gross = r2(at('SALES_ACCOUNTS', c.id) + at('DIRECT_INCOMES', c.id) + stock - at('PURCHASE_ACCOUNTS', c.id) - at('DIRECT_EXPENSES', c.id))
