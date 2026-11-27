@@ -289,7 +289,8 @@ export const createItemSchema = z
     code: code.optional(),
     name,
     description: optionalText,
-    type: ItemTypeEnum,
+    // Left out, it comes from the category (Masters → Items asks only for that).
+    type: ItemTypeEnum.optional(),
     categoryId: z.string().min(1, 'Choose a category from the list'),
     uomId: z.string().min(1, 'Choose a unit — pieces, metres, kilograms and so on'),
     // The department that normally uses it. Optional; null clears it.
@@ -346,10 +347,11 @@ export const createItemSchema = z
         path: ['styleId'],
       })
     }
-    if (v.type !== 'FINISHED_GOOD' && (v.styleId || v.color)) {
+    // With no type sent it comes from the category, and the save checks style and colour against that.
+    if (v.type && v.type !== 'FINISHED_GOOD' && (v.styleId || v.color)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'Style and colour only apply to finished goods — clear them, or change the item type',
+        message: 'Style and colour only apply to finished goods — clear them, or file it under Finished Goods',
         path: ['styleId'],
       })
     }

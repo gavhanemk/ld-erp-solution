@@ -24,7 +24,7 @@ export async function assertItemStyleColorValid(
   if (type !== 'FINISHED_GOOD') {
     if (styleId || color) {
       throw new AppError(
-        'Style and colour only apply to finished goods. Clear them, or change the item type to Finished Good.',
+        'Style and colour only apply to finished goods. Clear them, or file the item under Finished Goods.',
         400,
         'STYLE_COLOR_NOT_ALLOWED',
       )

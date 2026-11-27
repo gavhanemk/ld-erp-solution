@@ -41,6 +41,19 @@ const isMain = (row: Record<string, unknown>) => !row.parentId
  */
 export const itemFormFields: FormField[] = [
   { name: 'code', label: 'Item Code', generated: true, section: 'Identity' },
+  /*
+   * The tab of Items & Products the item is in, as its category says: not a
+   * box (the Category is), only what decides which boxes show — a style and
+   * colour for a finished good, sticker settings for the rest. Never sent: the
+   * server gives the item its type from the category.
+   */
+  {
+    name: 'group',
+    label: 'Group',
+    type: 'readout',
+    showIf: () => false,
+    initial: (r) => groupOfType(String(r.type ?? '')),
+  },
   {
     name: 'name',
     label: 'Item Name',
@@ -50,29 +63,15 @@ export const itemFormFields: FormField[] = [
     span: 2,
     // Warns against the other items filed under the same category (a
     // sub-category wins over its main category, the same rule the save
-    // itself follows) and of the same type, so a raw material is never
-    // compared against a finished good of a similar name.
+    // itself follows), so a raw material is never compared against a
+    // finished good of a similar name.
     duplicateCheck: {
       resource: 'items',
       paramsFrom: (v) => {
         const categoryId = (v.subCategoryId || v.mainCategoryId) as string | undefined
-        const type = v.type as string | undefined
-        return categoryId && type ? { categoryId, type } : null
+        return categoryId ? { categoryId } : null
       },
     },
-  },
-  {
-    name: 'type',
-    label: 'Item Type',
-    type: 'select',
-    required: true,
-    section: 'Identity',
-    options: Object.entries(ITEM_TYPE_LABEL).map(([value, v]) => ({ value, label: v.label })),
-    // The category list follows the type's tab of Items & Products, so a
-    // category from another tab is cleared; a raw material becoming a trim
-    // keeps its category.
-    resets: ['mainCategoryId', 'subCategoryId'],
-    resetsWhen: (before, after) => groupOfType(String(before.type ?? '')) !== groupOfType(String(after.type ?? '')),
   },
   {
     name: 'uomId',
@@ -91,12 +90,13 @@ export const itemFormFields: FormField[] = [
     required: true,
     section: 'Identity',
     sendAs: 'categoryId',
-    resets: ['subCategoryId'],
-    // Main categories of the type's tab: a finished good is never offered Fabric.
+    // The category decides what the item is: its tab (group) is filled from it.
+    resets: ['subCategoryId', 'group'],
+    fills: { field: 'group', from: (row) => row.itemGroup },
+    // Every main category of Items & Products; the expense heads have a master of their own.
     optionsFrom: {
       resource: 'item-categories',
-      filter: (row, values) =>
-        isMain(row) && (!values.type || !row.itemGroup || row.itemGroup === groupOfType(String(values.type))),
+      filter: (row) => isMain(row) && row.itemGroup !== 'EXPENSES',
     },
     initial: (r) => {
       const c = r.category as { parentId?: string | null } | null
@@ -146,7 +146,7 @@ export const itemFormFields: FormField[] = [
     section: 'Identity',
     // A style still in sampling gets its items when its sample is handed over.
     optionsFrom: { resource: 'styles', filter: (row) => row.stage !== 'DEVELOPMENT' },
-    showIf: (v) => v.type === 'FINISHED_GOOD',
+    showIf: (v) => v.group === 'FINISHED_GOODS',
     help: 'Which garment this is — the item becomes that style in one colour',
   },
   {
@@ -156,7 +156,7 @@ export const itemFormFields: FormField[] = [
     required: true,
     section: 'Identity',
     optionsFromField: { field: 'styleId', resource: 'styles', arrayKey: 'colors' },
-    showIf: (v) => v.type === 'FINISHED_GOOD' && Boolean(v.styleId),
+    showIf: (v) => v.group === 'FINISHED_GOODS' && Boolean(v.styleId),
     help: "One of the style's own colours — add more on the Style if it isn't listed",
   },
   { name: 'description', label: 'Description', type: 'textarea', section: 'Identity' },
@@ -195,7 +195,7 @@ export const itemFormFields: FormField[] = [
     ],
     noneLabel: 'As the category says',
     section: 'Costing & Stock',
-    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    showIf: (v) => v.group !== 'FINISHED_GOODS',
     help: 'What one stickered package of it is',
   },
   {
@@ -204,7 +204,7 @@ export const itemFormFields: FormField[] = [
     type: 'number',
     section: 'Costing & Stock',
     placeholder: '100',
-    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    showIf: (v) => v.group !== 'FINISHED_GOODS',
     help: 'Empty: a sticker per roll or box, else one for the lot',
   },
   // What is inside one unit, so a sticker on a box says how many pieces.
@@ -214,7 +214,7 @@ export const itemFormFields: FormField[] = [
     type: 'number',
     section: 'Costing & Stock',
     placeholder: '144',
-    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    showIf: (v) => v.group !== 'FINISHED_GOODS',
     help: 'A box of 144 buttons: 144. Printed on its stickers',
   },
   {
@@ -223,7 +223,7 @@ export const itemFormFields: FormField[] = [
     type: 'text',
     section: 'Costing & Stock',
     placeholder: 'pcs',
-    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    showIf: (v) => v.group !== 'FINISHED_GOODS',
     help: 'pcs, m, gross… Empty means pcs',
   },
   // Two stickers on every carton (one each side): copies of each of its stickers.
@@ -242,7 +242,7 @@ export const itemFormFields: FormField[] = [
     ],
     nullWhenEmpty: true,
     initial: (r) => (r.labelCopies == null ? '' : String(r.labelCopies)),
-    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    showIf: (v) => v.group !== 'FINISHED_GOODS',
     help: 'How many copies of each of its stickers print',
   },
   // Whether 2.5 of it can be asked for, issued or bought; normally its unit decides.
@@ -255,7 +255,7 @@ export const itemFormFields: FormField[] = [
     options: QTY_PLACES_OPTIONS,
     nullWhenEmpty: true,
     initial: (r) => (r.decimalPlaces == null ? '' : String(r.decimalPlaces)),
-    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    showIf: (v) => v.group !== 'FINISHED_GOODS',
     help: 'Leave as its unit unless this one item is counted differently',
   },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new documents' },

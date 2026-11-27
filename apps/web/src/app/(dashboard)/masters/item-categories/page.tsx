@@ -383,7 +383,7 @@ function ItemCategories() {
   const addItem = (group: Group, mainId: string, sub?: Category) =>
     setItemForm({
       record: null,
-      init: { type: ITEM_GROUP_TYPES[group]?.[0], mainCategoryId: mainId, subCategoryId: sub?.id },
+      init: { group, mainCategoryId: mainId, subCategoryId: sub?.id },
     })
 
   const totals = useMemo(() => {

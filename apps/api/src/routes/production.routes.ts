@@ -897,7 +897,7 @@ router.get('/direct/item-template', requirePermission(MODULE, 'view'), async (re
   if (!style) throw new AppError('That style does not exist', 404, 'NOT_FOUND')
   const color = style.colors.find((c) => c.trim().toLowerCase() === colour.toLowerCase()) ?? colour
   const found = await garmentTemplate(style)
-  const values: Record<string, unknown> = { type: 'FINISHED_GOOD', name: `${style.name}${color ? ` — ${color}` : ''}`, styleId: style.id, color }
+  const values: Record<string, unknown> = { group: 'FINISHED_GOODS', name: `${style.name}${color ? ` — ${color}` : ''}`, styleId: style.id, color }
   let copiedFrom: string | null = null
   if (!('needCategory' in found)) {
     const t = found.template

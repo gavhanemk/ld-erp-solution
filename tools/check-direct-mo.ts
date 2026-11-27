@@ -72,11 +72,11 @@ async function main() {
         : tpl?.standardRate === undefined && tplRes?.rateFrom === null,
       { want, got: tpl?.standardRate, rateFrom: tplRes?.rateFrom },
     )
-    check('the item form starts as a finished good of the style in that colour, like its other colours', tpl?.type === 'FINISHED_GOOD' && tpl?.styleId === st.id && tpl?.color === colour && !!tpl?.uomId && !!(tpl?.subCategoryId || tpl?.mainCategoryId), tpl)
+    check('the item form starts as a finished good of the style in that colour, like its other colours', tpl?.group === 'FINISHED_GOODS' && tpl?.styleId === st.id && tpl?.color === colour && !!tpl?.uomId && !!(tpl?.subCategoryId || tpl?.mainCategoryId), tpl)
     // Saved as the form saves it: through Items & Products.
     const made = await call('POST', '/masters/items', {
       name: tpl.name,
-      type: tpl.type,
+      // No type, as the form sends it: the category gives it.
       categoryId: tpl.subCategoryId ?? tpl.mainCategoryId,
       uomId: tpl.uomId,
       styleId: tpl.styleId,
@@ -84,7 +84,7 @@ async function main() {
       ...(tpl.hsnCode ? { hsnCode: tpl.hsnCode } : {}),
       ...(tpl.standardRate != null ? { standardRate: tpl.standardRate } : {}),
     })
-    check('added on Items & Products', made.status === 201 || made.status === 200, made.body)
+    check('added on Items & Products, a finished good by its category', (made.status === 201 || made.status === 200) && made.body?.data?.type === 'FINISHED_GOOD', made.body)
     const item = made.body.data
     if (item?.id) await prisma.item.update({ where: { id: item.id }, data: { hsnCode: '6205' } })
     info = (await call('GET', `/production/direct/styles/${st.id}`)).body?.data

@@ -89,6 +89,23 @@ async function main() {
   const rated = await call('PATCH', `/masters/items/${panel.body.data.id}`, { standardRate: 12.5 })
   check('its rate can still be changed', okay(rated), rated.body)
 
+  // No Item Type on the form: the category gives it.
+  const fabric = rawSubs.find((c) => c.name === 'Fabric')!
+  const noType = await call('POST', '/masters/items', { name: `ZZTEST Untyped Twill ${stamp}`, categoryId: fabric.id, uomId: pcs.id })
+  check('no type sent, under Fabric: a raw material', okay(noType) && noType.body.data.type === 'RAW_MATERIAL', noType.body)
+  const trims = rawSubs.find((c) => /trim|button/i.test(c.name))
+  if (trims) {
+    const trim = await call('POST', '/masters/items', { name: `ZZTEST Untyped Trim ${stamp}`, categoryId: trims.id, uomId: pcs.id })
+    check(`no type sent, under ${trims.name}: what its items are`, okay(trim) && ['TRIM', 'RAW_MATERIAL', 'PACKING_MATERIAL', 'CONSUMABLE'].includes(trim.body.data.type), trim.body)
+    if (okay(trim)) await call('DELETE', `/masters/items/${trim.body.data.id}`)
+  }
+  const panelSub = semi.subs.find((s) => s.name === 'Cut Panels')!
+  const moved = await call('PATCH', `/masters/items/${noType.body.data.id}`, { categoryId: panelSub.id })
+  check('moved to Cut Panels with no type sent: a semi-finished item now', okay(moved) && moved.body.data.type === 'SEMI_FINISHED', moved.body)
+  const kept = await call('PATCH', `/masters/items/${noType.body.data.id}`, { standardRate: 9 })
+  check('changed in place: keeps its type', okay(kept) && kept.body.data.type === 'SEMI_FINISHED', kept.body)
+  await call('DELETE', `/masters/items/${noType.body.data.id}`)
+
   // Categories: a sub-category follows its main one; a main one's tab is picked or from its name.
   const fgMain = fg[0]
   const sub = await call('POST', '/masters/item-categories', { name: `ZZTEST Kidswear ${stamp}`, parentId: fgMain.id, itemGroup: 'RAW_MATERIALS' })

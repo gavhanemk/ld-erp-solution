@@ -331,7 +331,8 @@ function formFor(tab: Tab, mainId: string, subId: string, mains: MainCategory[])
   const types = ITEM_GROUP_TYPES[tab] ?? []
   const main = mainId || (mains.length === 1 ? mains[0].id : '')
   return itemFormFields.map((f) => {
-    if (f.name === 'type') return { ...f, valueForNew: types[0] }
+    // The tab decides what the item is; the type follows from its category on the server.
+    if (f.name === 'group') return { ...f, valueForNew: types.length ? tab : undefined }
     if (f.name === 'mainCategoryId') return { ...f, valueForNew: main || undefined }
     if (f.name === 'subCategoryId') {
       return { ...f, valueForNew: subId && subId !== DIRECT ? subId : undefined }

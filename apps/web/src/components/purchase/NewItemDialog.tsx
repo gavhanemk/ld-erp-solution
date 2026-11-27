@@ -9,6 +9,7 @@ import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { uomFormFields } from '@/components/masters/uomFormFields'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { groupOfType } from '@ld-erp/shared'
 
 /**
  * Adding an item to the master without leaving the form that needed it.
@@ -29,8 +30,9 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
  * screen can repair that from the outside. A type decides which lists the item
  * appears on for everybody else.
  *
- * So: category, name, unit and type are asked for, and the code, the HSN and
- * the rate are offered. The code is left blank by default because the server
+ * So: category, name and unit are asked for — the category decides the type
+ * (Masters → Items gives it on the server) — and the code, the HSN and the
+ * rate are offered. The code is left blank by default because the server
  * allots one, and two people typing codes by hand is how a master ends up with
  * FAB-COT-3 and FAB-COT-003.
  */
@@ -39,6 +41,8 @@ interface Category {
   id: string
   name: string
   parentId: string | null
+  /** The tab of Items & Products it is in: what an item filed under it is. */
+  itemGroup?: string | null
 }
 
 interface Uom {
@@ -58,19 +62,6 @@ export interface NewItem {
   standardRate?: string | null
 }
 
-const TYPES: Array<{ value: string; label: string; hint: string }> = [
-  {
-    value: 'RAW_MATERIAL',
-    label: 'Raw material',
-    hint: 'Fabric, yarn — what the product is made of',
-  },
-  { value: 'TRIM', label: 'Trim', hint: 'Buttons, zips, elastic, lace' },
-  { value: 'PACKING_MATERIAL', label: 'Packing material', hint: 'Cartons, poly bags, tape' },
-  { value: 'CONSUMABLE', label: 'Consumable', hint: 'Used up, not part of the product' },
-  { value: 'SEMI_FINISHED', label: 'Semi finished', hint: 'Part-made, going back out' },
-  { value: 'FINISHED_GOOD', label: 'Finished good', hint: 'Ready to sell' },
-  { value: 'FIXED_ASSET', label: 'Fixed asset', hint: 'A machine, computer or furniture: kept, not used up' },
-]
 
 export function NewItemDialog<T = NewItem>({
   categories,
@@ -104,22 +95,14 @@ export function NewItemDialog<T = NewItem>({
   /** What was typed in the search that found nothing, as the name to start from. */
   initialName?: string
 }) {
-  // The types this form offers: all of them, or those it is told to.
-  const types = useMemo(
-    () => (allowedTypes ? TYPES.filter((t) => allowedTypes.includes(t.value)) : TYPES),
-    [allowedTypes]
-  )
+  // The tabs of Items & Products this form may file into: those of the types it is told to, else all.
+  const groups = useMemo(() => (allowedTypes ? new Set(allowedTypes.map((t) => groupOfType(t))) : null), [allowedTypes])
   const [categoryId, setCategoryId] = useState(initialCategory ?? '')
   const [subcategoryId, setSubcategoryId] = useState(initialSubcategory ?? '')
   const [name, setName] = useState(initialName)
   // Only Masters → Items takes a code typed by hand; anywhere else the server allots it.
   const codeTyped = endpoint === '/masters/items'
   const [code, setCode] = useState('')
-  const [type, setType] = useState(() =>
-    types.some((t) => t.value === 'RAW_MATERIAL')
-      ? 'RAW_MATERIAL'
-      : (types[0]?.value ?? 'RAW_MATERIAL')
-  )
   const [uomId, setUomId] = useState('')
   const [hsnCode, setHsnCode] = useState('')
   const [description, setDescription] = useState('')
@@ -156,7 +139,11 @@ export function NewItemDialog<T = NewItem>({
    */
   const stockBackwards = minStock !== '' && maxStock !== '' && Number(minStock) > Number(maxStock)
 
-  const tops = useMemo(() => categories.filter((c) => !c.parentId), [categories])
+  // Main categories (expense heads have a master of their own), within the tabs it may add to.
+  const tops = useMemo(
+    () => categories.filter((c) => !c.parentId && c.itemGroup !== 'EXPENSES' && (!groups || !c.itemGroup || groups.has(c.itemGroup as never))),
+    [categories, groups]
+  )
   const subs = useMemo(
     () => categories.filter((c) => c.parentId === categoryId),
     [categories, categoryId]
@@ -184,7 +171,6 @@ export function NewItemDialog<T = NewItem>({
         // Left out entirely when blank, so the server allots one rather than
         // being handed an empty string to validate.
         ...(codeTyped && code.trim() ? { code: code.trim().toUpperCase() } : {}),
-        type,
         // The subcategory is the real filing when there is one; the parent is
         // only how the buyer found it.
         categoryId: subcategoryId || categoryId,
@@ -209,7 +195,6 @@ export function NewItemDialog<T = NewItem>({
     problems,
     name,
     code,
-    type,
     categoryId,
     subcategoryId,
     uomId,
@@ -350,25 +335,6 @@ export function NewItemDialog<T = NewItem>({
                   <p className="form-help">Leave empty unless it already has one.</p>
                 </div>
               )}
-              <div>
-                <label className="form-label" htmlFor="ni-type">
-                  Item type
-                </label>
-                <SmartSelect
-                  id="ni-type"
-                  value={type}
-                  onChange={(e) => setType(e.target.value)}
-                  className="form-input"
-                >
-                  {types.map((t) => (
-                    <option key={t.value} value={t.value}>
-                      {t.label}
-                    </option>
-                  ))}
-                </SmartSelect>
-                {/* Decides which lists it turns up on for everybody else. */}
-                <p className="form-help">{types.find((t) => t.value === type)?.hint}</p>
-              </div>
               <div>
                 <label className="form-label" htmlFor="ni-uom">
                   Unit of measure

@@ -1,7 +1,8 @@
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { createItemSchema } from '../schemas/master.schemas'
-import { assertItemFitsCategory } from '../services/itemGroups.service'
+import { assertItemFitsCategory, groupOfCategory } from '../services/itemGroups.service'
+import { typeFitsGroup, type ItemGroup } from '@ld-erp/shared'
 import { assertUniqueFields } from './crud'
 import { assertItemStyleColorValid, rethrowItemStyleColorClash } from './itemStyleColor'
 import { isGeneratedCode, withGeneratedCode } from './masterCode'
@@ -67,11 +68,54 @@ export async function departmentFromCategory(
  * which a schema cannot do. On an edit the saved type, style and colour stand
  * in for whatever the edit leaves out.
  */
+/**
+ * The type a category gives a new item: its group's one — a finished good, a
+ * semi-finished piece, a fixed asset — and among raw materials what the
+ * sub-category's items already are, else what its name says (Trims, Packing
+ * Material, Consumables), else a raw material.
+ */
+async function typeForCategory(categoryId: string, group: ItemGroup): Promise<string> {
+  if (group === 'FINISHED_GOODS') return 'FINISHED_GOOD'
+  if (group === 'SEMI_FINISHED') return 'SEMI_FINISHED'
+  if (group === 'FIXED_ASSETS') return 'FIXED_ASSET'
+  if (group === 'EXPENSES') return 'CONSUMABLE'
+  const like = await prisma.item.findFirst({
+    where: { categoryId, isActive: true, type: { in: ['RAW_MATERIAL', 'TRIM', 'PACKING_MATERIAL', 'CONSUMABLE'] } },
+    orderBy: { createdAt: 'desc' },
+    select: { type: true },
+  })
+  if (like) return like.type
+  const cat = await prisma.itemCategory.findUnique({ where: { id: categoryId }, select: { name: true, parent: { select: { name: true } } } })
+  const said = `${cat?.name ?? ''} ${cat?.parent?.name ?? ''}`
+  if (/trim|button|zip|label|tag|lace|elastic|accessor|fastener/i.test(said)) return 'TRIM'
+  if (/pack|carton|poly ?bag|tape/i.test(said)) return 'PACKING_MATERIAL'
+  if (/consumable|spare|stationer/i.test(said)) return 'CONSUMABLE'
+  return 'RAW_MATERIAL'
+}
+
+/**
+ * The item's type from its category, when it was not sent: a new item takes
+ * the category's; an item moved to a category of another group takes the new
+ * one's; otherwise it keeps its own (a trim stays a trim). A type sent is kept,
+ * and checked against the category as before.
+ */
+async function typeFromCategory(data: Record<string, unknown>, before?: Record<string, unknown>) {
+  if (data.type) return data
+  const categoryId = (data.categoryId ?? before?.categoryId) as string | undefined
+  if (!categoryId) return data
+  const found = await groupOfCategory(categoryId)
+  if (!found) return data
+  const kept = before?.type as string | undefined
+  if (kept && typeFitsGroup(kept, found.group)) return data
+  return { ...data, type: await typeForCategory(categoryId, found.group) }
+}
+
 export async function itemBeforeSave(
   data: Record<string, unknown>,
   before?: Record<string, unknown>,
 ): Promise<{ data: Record<string, unknown>; onSaveError: (err: unknown) => void }> {
   data = await departmentFromCategory(data, before)
+  data = await typeFromCategory(data, before)
   // A finished good is never filed under Fabric, nor a button under Finished Goods.
   await assertItemFitsCategory(data, before)
   const checked = await assertItemStyleColorValid(
@@ -104,14 +148,15 @@ export const ITEM_UNIQUE_FIELDS = ['name']
  */
 export async function createItemRecord(raw: unknown, opts: { types?: readonly string[] } = {}) {
   const parsed = createItemSchema.parse(raw) as Record<string, unknown>
-  if (opts.types && !opts.types.includes(String(parsed.type)))
+  await assertUniqueFields('item', ITEM_UNIQUE_FIELDS, parsed)
+  const { data, onSaveError } = await itemBeforeSave(parsed)
+  // The type as it comes out — sent, or from the category — has to be one this place may add.
+  if (opts.types && !opts.types.includes(String(data.type)))
     throw new AppError(
       'Only a raw material, trim, packing material or consumable can be added here.',
       400,
       'ITEM_TYPE_NOT_ALLOWED',
     )
-  await assertUniqueFields('item', ITEM_UNIQUE_FIELDS, parsed)
-  const { data, onSaveError } = await itemBeforeSave(parsed)
   try {
     if (isGeneratedCode('item') && !data.code)
       return await withGeneratedCode('item', data, (withCode) =>
