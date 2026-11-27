@@ -1,12 +1,13 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Bell, Search, Sun, Moon, Zap, ChevronDown, BellOff, Menu, Keyboard } from 'lucide-react'
+import { Bell, Search, Sun, Moon, Zap, BellOff, Menu, Keyboard } from 'lucide-react'
 import Link from 'next/link'
 import { api, currentUser } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { keyLabel } from '@/lib/keys'
 import { canDo, useAccess } from '@/lib/access'
+import { ProfileMenu } from './ProfileMenu'
 
 interface TopBarProps {
   sidebarCollapsed: boolean
@@ -21,14 +22,6 @@ interface Notification {
   type: string
   isRead: boolean
   createdAt: string
-}
-
-/** "Mahesh Ghavane" -> "MG"; a single name gives its first two letters. */
-function initialsOf(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean)
-  if (parts.length === 0) return '?'
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }
 
 export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
@@ -191,7 +184,8 @@ export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
         </button>
 
         {notifOpen && (
-          <div className="absolute right-0 top-12 w-80 glass-card p-0 overflow-hidden animate-fade-in z-50">
+          // Solid, as the account menu: a glass card inside the bar's blur is see-through.
+          <div className="absolute right-0 top-12 z-50 w-80 overflow-hidden rounded-xl border border-border bg-card shadow-xl animate-fade-in">
             <div className="px-4 py-3 border-b border-border flex items-center justify-between">
               <p className="text-sm font-semibold">Notifications</p>
               {unread > 0 && <span className="badge-info text-[10px]">{unread} new</span>}
@@ -244,14 +238,7 @@ export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
         {isDark ? <Sun size={18} /> : <Moon size={18} />}
       </button>
 
-      <button className="flex shrink-0 items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-secondary transition-colors">
-        <div className="w-8 h-8 shrink-0 rounded-full bg-teal-500/20 border border-teal-500/30 flex items-center justify-center">
-          <span className="text-xs font-bold text-teal-400">
-            {user?.name ? initialsOf(user.name) : '—'}
-          </span>
-        </div>
-        <ChevronDown size={14} className="hidden text-muted-foreground sm:block" />
-      </button>
+      <ProfileMenu />
     </header>
   )
 }
