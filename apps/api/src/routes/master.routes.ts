@@ -845,6 +845,11 @@ router.use(
       subCategoryId: { where: (v) => ({ categoryId: { in: v } }), facets: ['categoryId'] },
       departmentId: { where: noneOr('departmentId'), facets: ['departmentId'] },
       uomId: { where: (v) => ({ uomId: { in: v } }), facets: ['uomId'] },
+      // A fabric's own stock lines (lib/fabricLines): `0` leaves them out —
+      // the purchase order picks the fabric and types the design and colour —
+      // `1` lists only them, and `parentItemId` one fabric's.
+      fabricLines: { where: (v) => (v.includes('1') ? { parentItemId: { not: null } } : { parentItemId: null }) },
+      parentItemId: { where: (v) => ({ parentItemId: { in: v } }) },
       // The tab of Items & Products: by the category the item is filed under.
       group: {
         where: (v) => ({ category: { itemGroup: { in: v.filter((g) => ITEM_GROUPS.has(g)) as ItemGroup[] } } }),

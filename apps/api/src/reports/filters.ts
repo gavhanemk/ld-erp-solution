@@ -32,6 +32,8 @@ const LOOKUPS: Record<
     (await tx.warehouse.findUnique({ where: { id }, select: { name: true } }))?.name ?? null,
   itemCategories: async (tx, id) =>
     (await tx.itemCategory.findUnique({ where: { id }, select: { name: true } }))?.name ?? null,
+  brands: async (tx, id) =>
+    (await tx.brand.findUnique({ where: { id }, select: { name: true } }))?.name ?? null,
 }
 
 const DAY = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })

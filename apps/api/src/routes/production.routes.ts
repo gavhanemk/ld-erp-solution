@@ -1310,6 +1310,8 @@ export const raiseSchema = z.object({
         ownership: z.enum(['OWNED', 'CUSTOMER_OWNED']).optional(),
         ownerCustomerId: z.string().optional().nullable(),
         styleNo: z.string().max(50).optional().nullable(),
+        /** Which of the fabric's own design / colour lines to draw (lib/fabricLines); the fabric itself when absent. */
+        stockItemId: z.string().optional().nullable(),
       }),
     )
     .min(1, 'Pick at least one material to ask for'),
@@ -1377,6 +1379,19 @@ export async function raiseRequisitions(tx: Prisma.TransactionClient, moId: stri
     }
   }
 
+  // A fabric line drawn by design / colour must be that fabric's, and this
+  // order's brand's or common (the brand itself is checked with the rest).
+  const picked = [...new Set(data.lines.map((l) => l.stockItemId).filter((x): x is string => !!x))]
+  if (picked.length) {
+    const found = await tx.item.findMany({ where: { id: { in: picked } }, select: { id: true, parentItemId: true } })
+    const parentOfPick = new Map(found.map((f) => [f.id, f.parentItemId]))
+    for (const l of data.lines) {
+      if (l.stockItemId && parentOfPick.get(l.stockItemId) !== l.itemId) {
+        throw new AppError("That design / colour is not one of this fabric's. Refresh the plan and pick it again.", 400, 'BAD_FABRIC_LINE')
+      }
+    }
+  }
+
   // The process each material is for decides who asks: fabric for cutting is
   // asked by Cutting, buttons for stitching by Stitching.
   const processIds = [...new Set(data.lines.map((l) => l.processId).filter((x): x is string => !!x))]
@@ -1405,7 +1420,7 @@ export async function raiseRequisitions(tx: Prisma.TransactionClient, moId: stri
       requiredDate: data.requiredDate ?? null,
       notes: data.notes?.trim() || `For ${mo.moNumber}${mo.so ? ` (${mo.so.soNumber})` : ''}`,
       lines: deptLines.map((l) => ({
-        itemId: l.itemId,
+        itemId: l.stockItemId || l.itemId,
         requestedQty: l.qty,
         warehouseId: l.warehouseId,
         purpose: l.processName ? `For ${mo.moNumber} — ${l.processName}` : `For ${mo.moNumber}`,

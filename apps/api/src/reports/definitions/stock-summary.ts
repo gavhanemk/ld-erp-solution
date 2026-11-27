@@ -5,6 +5,7 @@ import {
   asOnEnd,
   asOnFilter,
   asOnLabel,
+  brandFilter,
   categoryFilter,
   loadCategories,
   ownershipFilter,
@@ -27,12 +28,16 @@ export const stockSummary: ReportDefinition = {
   title: 'Stock Summary',
   description:
     'Stock on hand item by item and store by store, on any date — quantity, average rate, value, and what is reserved for orders.',
-  filters: [asOnFilter, warehouseFilter, categoryFilter, ownershipFilter],
+  filters: [asOnFilter, warehouseFilter, categoryFilter, brandFilter, ownershipFilter],
   columns: [
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'subCategory', label: 'Sub-category', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    // A fabric's own stock line: its design, colour and brand (lib/fabricLines).
+    { key: 'designNo', label: 'Design No.', type: 'text', width: 12 },
+    { key: 'colour', label: 'Colour', type: 'text', width: 12 },
+    { key: 'brand', label: 'Brand', type: 'text', width: 16 },
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'owner', label: 'Owner', type: 'text', width: 20 },
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
@@ -67,6 +72,9 @@ export const stockSummary: ReportDefinition = {
         itemId: string
         itemCode: string
         itemName: string
+        designNo: string | null
+        colour: string | null
+        brand: string | null
         categoryId: string
         uom: string
         warehouseId: string
@@ -79,6 +87,7 @@ export const stockSummary: ReportDefinition = {
       }>
     >`
       SELECT i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", i."categoryId",
+             i."designNo", CASE WHEN i."parentItemId" IS NOT NULL THEN i.color END AS colour, b.name AS brand,
              u.symbol AS uom, w.id AS "warehouseId", w.name AS store,
              s.ownership::text AS ownership, cust.name AS owner,
              SUM(s."inQty" - s."outQty")::float8 AS qty,
@@ -89,11 +98,13 @@ export const stockSummary: ReportDefinition = {
       JOIN ld_erp.uom u ON u.id = i."uomId"
       JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
       LEFT JOIN ld_erp.customers cust ON cust.id = s."ownerCustomerId"
+      LEFT JOIN ld_erp.brands b ON b.id = i."brandId"
       WHERE s."transactionDate" <= ${end}
         AND s.ownership::text IN (${Prisma.join(owners)})
         AND (${params.warehouseId ?? null}::text IS NULL OR s."warehouseId" = ${params.warehouseId ?? null})
         AND (${catIds}::text[] IS NULL OR i."categoryId" = ANY(${catIds}::text[]))
-      GROUP BY i.id, i.code, i.name, i."categoryId", u.symbol, w.id, w.name, s.ownership, cust.name
+        AND (${params.brandId ?? null}::text IS NULL OR i."brandId" = ${params.brandId ?? null})
+      GROUP BY i.id, i.code, i.name, i."categoryId", i."designNo", i."parentItemId", i.color, b.name, u.symbol, w.id, w.name, s.ownership, cust.name
       HAVING ABS(SUM(s."inQty" - s."outQty")) > 0.0005
       ORDER BY i.name, w.name
     `
@@ -115,6 +126,9 @@ export const stockSummary: ReportDefinition = {
         subCategory,
         itemCode: r.itemCode,
         item: r.itemName,
+        designNo: r.designNo ?? '',
+        colour: r.colour ?? '',
+        brand: r.brand ?? '',
         store: r.store,
         owner: own ? 'Ours' : (r.owner ?? 'Customer'),
         uom: r.uom,
