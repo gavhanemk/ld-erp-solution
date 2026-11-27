@@ -7,9 +7,12 @@
  * without importing three thousand lines of form to get at a type.
  */
 
+import type { ShadeFields } from '@/lib/items'
+
 export type EnquiryStatus = 'DRAFT' | 'SENT' | 'QUOTED' | 'ORDERED' | 'CLOSED'
 
-export interface EnquiryItem {
+/** With its Design No. and Colour, which tell same-name fabrics apart. */
+export interface EnquiryItem extends ShadeFields {
   id: string
   code: string
   name: string

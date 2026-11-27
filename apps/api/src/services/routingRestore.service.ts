@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { createRoutingSchema } from '../schemas/master.schemas'
 import { createRouting, routingInclude } from './routing.service'
 
@@ -50,7 +51,7 @@ interface Snapshot {
   createdBy?: { id: string; name: string } | null
   updatedBy?: { id: string; name: string } | null
   style?: { code: string; name: string } | null
-  fabric?: { name: string } | null
+  fabric?: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null } | null
   steps: SnapStep[]
 }
 
@@ -68,8 +69,14 @@ export async function deletedRoutings(db: Db) {
     db.auditLog.findMany({ where: { entityType: 'Routing', action: 'RESTORE' }, select: { entityId: true } }),
   ])
   const back = new Set(restores.map((r) => r.entityId))
-  return deletes
-    .filter((d) => d.before && !back.has(d.entityId))
+  const kept = deletes.filter((d) => d.before && !back.has(d.entityId))
+  // The fabric's design and colour, read from the item: a fabric item is one
+  // design and colour for good, and a copy taken before 27 Nov 2026 has only its name.
+  const fabricIds = [...new Set(kept.map((d) => (d.before as unknown as Snapshot).fabricItemId).filter((id): id is string => !!id))]
+  const shades = new Map(
+    (fabricIds.length ? await db.item.findMany({ where: { id: { in: fabricIds } }, select: { id: true, ...ITEM_SHADE } }) : []).map((i) => [i.id, i]),
+  )
+  return kept
     .map((d) => {
       const r = d.before as unknown as Snapshot
       const steps = [...(r.steps ?? [])].sort((a, b) => a.sequence - b.sequence)
@@ -83,6 +90,7 @@ export async function deletedRoutings(db: Db) {
         style: r.style ? { code: r.style.code, name: r.style.name } : null,
         category: r.category,
         fabric: r.fabric?.name ?? null,
+        fabricShade: r.fabricItemId ? itemShadeText(shades.get(r.fabricItemId) ?? r.fabric) : '',
         steps: steps.map((s) => s.operation?.name ?? 'Process'),
         deletedAt: d.createdAt,
         deletedBy: d.user?.name ?? null,

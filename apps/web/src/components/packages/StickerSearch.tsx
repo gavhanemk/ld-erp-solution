@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Filter, Loader2, Package, X } from 'lucide-react'
 import { api } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { Scanner } from './Scanner'
 import { STATUS, qtyText } from './packageTypes'
@@ -15,7 +16,7 @@ export interface FoundPackage {
   qty: number
   unit: string
   packType: string
-  item: { id: string; code: string; name: string }
+  item: { id: string; code: string; name: string } & ShadeFields
   store: string
   rack: string | null
   lotNo: string | null
@@ -197,7 +198,9 @@ function FoundText({ p }: { p: FoundPackage }) {
         <span className={`${st.cls} text-[10px]`}>{st.label}</span>
       </span>
       <span className="text-muted-foreground block truncate text-xs">
-        {[p.store + (p.rack ? ` · rack ${p.rack}` : ''), p.lotNo ? `lot ${p.lotNo}` : null, cameLine(p), p.went.length ? `went ${wentLine(p)}` : null].filter(Boolean).join(' · ')}
+        {[itemShade(p.item) || null, p.store + (p.rack ? ` · rack ${p.rack}` : ''), p.lotNo ? `lot ${p.lotNo}` : null, cameLine(p), p.went.length ? `went ${wentLine(p)}` : null]
+          .filter(Boolean)
+          .join(' · ')}
       </span>
     </span>
   )
@@ -206,7 +209,7 @@ function FoundText({ p }: { p: FoundPackage }) {
 // ── Find by details ─────────────────────────────────────────────────────────
 
 interface Options {
-  items: Array<{ id: string; code: string; name: string }>
+  items: Array<{ id: string; code: string; name: string } & ShadeFields>
   stores: Array<{ id: string; name: string }>
   suppliers: Array<{ id: string; name: string }>
   pos: Array<{ id: string; poNumber: string; supplierId: string }>
@@ -294,7 +297,7 @@ export function StickerFinder({ onOpen }: { onOpen: (code: string) => void }) {
           <SmartSelect className={cls} value={f.itemId} onChange={(e) => set({ itemId: e.target.value })} aria-label="Item">
             <option value="">Any item</option>
             {o?.items.map((i) => (
-              <option key={i.id} value={i.id} data-sub={i.code}>
+              <option key={i.id} value={i.id} data-sub={[i.code, itemShade(i)].filter(Boolean).join(' · ')}>
                 {i.name}
               </option>
             ))}
@@ -432,6 +435,7 @@ export function StickerFinder({ onOpen }: { onOpen: (code: string) => void }) {
                           <td className="text-primary whitespace-nowrap font-mono text-xs font-semibold">{p.code}</td>
                           <td>
                             <span className="text-foreground">{p.item.name}</span>
+                            {itemShade(p.item) && <span className="text-muted-foreground block text-xs">{itemShade(p.item)}</span>}
                             <span className="text-muted-foreground block font-mono text-[11px]">{p.item.code}</span>
                           </td>
                           <td className="whitespace-nowrap text-right tabular-nums">{p.status === 'IN_STOCK' ? `${qtyText(p.qty)} ${p.unit}` : '—'}</td>

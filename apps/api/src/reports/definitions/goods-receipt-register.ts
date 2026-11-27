@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition, Tone } from '../types'
+import { ITEM_SHADE } from '../../lib/fabric'
 import {
   byMonth,
   dateRangeFilters,
@@ -9,6 +10,9 @@ import {
   supplierFilter,
   searchFilter,
   itemFilter,
+  shadeColumns,
+  shadeOf,
+  sumByItem,
   topWithRest,
 } from './shared'
 
@@ -93,6 +97,7 @@ export const goodsReceiptRegister: ReportDefinition = {
     { key: 'challanNo', label: 'Challan No.', type: 'text', width: 14 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'ordered', label: 'Ordered', type: 'qty', total: 'sum' },
     { key: 'received', label: 'Received', type: 'qty', total: 'sum' },
@@ -205,7 +210,7 @@ export const goodsReceiptRegister: ReportDefinition = {
                 bill: { select: { billNumber: true, supplierInvoiceNo: true } },
               },
             },
-            item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+            item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
             warehouse: { select: { name: true } },
           },
         },
@@ -238,6 +243,7 @@ export const goodsReceiptRegister: ReportDefinition = {
           challanNo: g.challanNo ?? '',
           itemCode: l.item.code,
           item: l.item.name,
+          ...shadeOf(l.item),
           uom: l.item.uom?.symbol ?? '',
           ordered: Number(l.orderedQty),
           received,
@@ -277,8 +283,8 @@ export const goodsReceiptRegister: ReportDefinition = {
     const accepted = round2(live.reduce((s, r) => s + r.accepted, 0))
     const deliveries = new Set(live.map((r) => r.grnNumber)).size
 
-    const byItem = new Map<string, number>()
-    for (const r of live) byItem.set(r.item, (byItem.get(r.item) ?? 0) + r.accepted)
+    // By item code: one name in two designs is two items.
+    const byItem = sumByItem(live, (r) => r.accepted)
 
     const bySupplierRejects = new Map<string, number>()
     for (const r of live) {
@@ -337,7 +343,7 @@ export const goodsReceiptRegister: ReportDefinition = {
     }
     if (deliveries) {
       insights.push(
-        `${deliveries} ${deliveries === 1 ? 'delivery' : 'deliveries'} across ${new Set(live.map((r) => r.supplier)).size} suppliers, covering ${byItem.size} items.`
+        `${deliveries} ${deliveries === 1 ? 'delivery' : 'deliveries'} across ${new Set(live.map((r) => r.supplier)).size} suppliers, covering ${byItem.length} items.`
       )
     }
 
@@ -435,10 +441,7 @@ export const goodsReceiptRegister: ReportDefinition = {
               title: 'Most received items',
               question: 'ranking',
               format: 'qty',
-              points: topWithRest(
-                [...byItem].map(([label, value]) => ({ label, value: round2(value) })),
-                8
-              ),
+              points: topWithRest(byItem, 8),
               note: 'Quantity that reached stock. Units differ by item — see the Data sheet.',
             },
             {

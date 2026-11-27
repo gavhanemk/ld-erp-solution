@@ -1,6 +1,7 @@
 import type { ReportDefinition } from '../types'
 import { findHsn, gstRateFor, loadHsnIndex, splitGstRate } from '../../lib/hsn'
-import { round2 } from './shared'
+import { ITEM_SHADE } from '../../lib/fabric'
+import { itemLabel, round2 } from './shared'
 import { rupees } from './inventory-shared'
 import { party, periodFilter, periodOf, uqcOf } from './itc04-shared'
 
@@ -75,7 +76,7 @@ export const itc04Sent: ReportDefinition = {
         unitRate: true,
         hsnCode: true,
         ownership: true,
-        item: { select: { name: true, hsnCode: true, uom: { select: { symbol: true } }, taxRate: { select: { rate: true } } } },
+        item: { select: { name: true, ...ITEM_SHADE, hsnCode: true, uom: { select: { symbol: true } }, taxRate: { select: { rate: true } } } },
         challan: {
           select: { challanNumber: true, challanDate: true, process: true, jobWorker: { select: { name: true, gstin: true, state: true, stateCode: true } } },
         },
@@ -108,7 +109,10 @@ export const itc04Sent: ReportDefinition = {
           challanNumber: l.challan.challanNumber,
           challanDate: l.challan.challanDate,
           goodsType: 'Inputs',
-          description: l.item.name,
+          // The form's own column, so a fabric's design and colour ride in
+          // it rather than in columns of their own that would break the
+          // form's order: two designs of one fabric are two goods.
+          description: itemLabel(l.item.name, l.item),
           uqc: uqcOf(l.item.uom?.symbol),
           qty: r3(qty),
           taxableValue: rate == null ? null : round2(qty * rate),
@@ -205,6 +209,7 @@ export const itc04Sent: ReportDefinition = {
           `Period ${period.label}${period.chosen ? '' : ' — the half-year we are in, as no period was picked'}: challans dated in it.`,
           "Only our own inputs. A customer's material sent on is theirs to declare as principal, so it is left out.",
           'A registered job worker is named by GSTIN; an unregistered one by state code and name.',
+          "A fabric's or thread's Design No. and Colour follow its name in the description of goods.",
           'Tax rates come from the HSN master (else the item’s own rate), split into Central and State tax when the job worker is in our state, Integrated tax when not. Cess is nil.',
           'Production pieces have no value in the ERP: fill their value and rate before filing.',
           'This is the form’s content, not the GST offline tool’s file: copy it into ITC_04_Offline.xls and let the tool check it.',

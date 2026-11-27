@@ -7,6 +7,7 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { ContractorPicker } from './ContractorPicker'
 import { pcs, type JobCardDetail } from './types'
 
@@ -17,7 +18,8 @@ import { pcs, type JobCardDetail } from './types'
  * already have. What comes back cut is received against this issue.
  */
 
-interface Fabric {
+/** A fabric issued to the order, with its design and colour: several can share a name. */
+interface Fabric extends ShadeFields {
   itemId: string
   code: string
   name: string
@@ -183,14 +185,17 @@ export function CutterIssueDialog({ d, onClose, onSaved }: { d: JobCardDetail; o
           </label>
           <label className="block">
             <span className="form-label">Fabric</span>
-            <SmartSelect className="form-input" value={fabricItemId} onChange={(e) => setFabricItemId(e.target.value)}>
+            <SmartSelect className="form-input" value={fabricItemId} onChange={(e) => setFabricItemId(e.target.value)} aria-label="Fabric">
               <option value="">—</option>
               {fabrics.map((f) => (
-                <option key={f.itemId} value={f.itemId} data-sub={`${f.left} ${f.uom ?? ''} not yet used`}>
+                // The code and the design and colour under the name, searched too.
+                <option key={f.itemId} value={f.itemId} data-sub={[f.code, `${f.left} ${f.uom ?? ''} not yet used`, itemShade(f)].filter(Boolean).join(' · ')}>
                   {f.name}
                 </option>
               ))}
             </SmartSelect>
+            {/* The box shows the name only: which design and colour was picked, under it. */}
+            {fabric && itemShade(fabric) && <span className="text-muted-foreground mt-1 block text-xs">{itemShade(fabric)}</span>}
           </label>
           <label className="block">
             <span className="form-label">Fabric given{fabric?.uom ? ` (${fabric.uom})` : ''}</span>

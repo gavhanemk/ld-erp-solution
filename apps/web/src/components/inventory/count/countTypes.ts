@@ -1,7 +1,10 @@
 /*
  * Stock count by scanning stickers: what the screens are handed, and the
- * words and colours they use for it.
+ * words and colours they use for it. Every item comes with a fabric's design
+ * no. and colour (ShadeFields), so same-name items are counted apart.
  */
+
+import type { ShadeFields } from '@/lib/items'
 
 export type CountStatus = 'OPEN' | 'SUBMITTED' | 'CLOSED' | 'CANCELLED'
 export type ScanResult = 'FOUND' | 'ELSEWHERE' | 'NOT_IN_STOCK' | 'UNKNOWN' | 'GONE'
@@ -12,7 +15,7 @@ export interface CountScan {
   result: ScanResult
   qty: number | null
   unit: string
-  item: { code: string; name: string } | null
+  item: (ShadeFields & { code: string; name: string }) | null
   owner: string | null
   packType: string | null
   lotNo: string | null
@@ -24,7 +27,7 @@ export interface CountScan {
   note: string
 }
 
-export interface CountLine {
+export interface CountLine extends ShadeFields {
   key: string
   itemId: string
   code: string
@@ -46,7 +49,7 @@ export interface CountLine {
   difference: number
 }
 
-export interface ToFind {
+export interface ToFind extends ShadeFields {
   id: string
   code: string
   itemId: string
@@ -96,9 +99,9 @@ export interface DoneCount extends CountHead {
     rejectReason: string | null
     approvedAt: string | null
     approvedBy: { name: string } | null
-    lines: Array<{ item: string; code: string; unit: string; owner: string | null; book: number; counted: number; difference: number }>
+    lines: Array<ShadeFields & { item: string; code: string; unit: string; owner: string | null; book: number; counted: number; difference: number }>
   } | null
-  missing: Array<{ id: string; code: string; item: string; unit: string; qty: number; status: string; packType: string; lotNo: string | null; rack: string | null }>
+  missing: Array<ShadeFields & { id: string; code: string; item: string; unit: string; qty: number; status: string; packType: string; lotNo: string | null; rack: string | null }>
   scans: CountScan[]
 }
 

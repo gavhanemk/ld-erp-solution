@@ -8,9 +8,11 @@ import { SettingsCard } from '@/components/settings/ui'
 /**
  * What has been deleted, and the way back.
  *
- * Deleting a purchase order marks it rather than removing it, so everything it
- * had — lines, charges, files — is still sitting there. Restoring is putting
- * one field back, not rebuilding a document from a description of it.
+ * Moving a purchase order to the bin marks it rather than removing it, so
+ * everything it had — lines, charges, files, its number — is still there.
+ * Restoring is putting one field back, not rebuilding a document from a
+ * description of it. Deleting one permanently here frees its number (27 Nov
+ * 2026).
  *
  * Only purchase orders so far. The page says so plainly at the foot rather
  * than implying that everything deleted anywhere in the ERP arrives here,
@@ -26,6 +28,8 @@ interface BinnedOrder {
   supplier: { id: string; name: string; code?: string | null } | null
   deletedAt: string
   deletedBy: string | null
+  /** Sent to the supplier before it was binned: restore and cancel it; it cannot be destroyed. */
+  wasSent?: boolean
 }
 
 export default function RecycleBinPage() {
@@ -72,23 +76,22 @@ export default function RecycleBinPage() {
   /*
    * The only thing on this screen that cannot be undone, so the prompt says so
    * in those words rather than asking "are you sure?". Leaving an order in the
-   * bin costs nothing, which is the point worth making at the moment somebody
-   * is deciding.
+   * bin costs nothing but its number, which stays reserved while it is here.
    */
   const destroy = async (row: BinnedOrder) => {
     const warning =
-      `Destroy ${row.poNumber} permanently? ` +
-      'The order, its lines and anything attached to it are removed from the database, ' +
-      'and this cannot be undone. Leaving it in the bin costs nothing.'
+      `Delete ${row.poNumber} permanently? ` +
+      'The order, its lines and anything attached to it are removed for good, and this cannot be undone. ' +
+      `Its number is freed: if it is the latest order, the next purchase or service order takes ${row.poNumber}.`
     if (!confirm(warning)) return
     setBusy(row.id)
     setMessage(null)
     try {
       const res = await api.delete<{ message?: string }>(`/purchase/recycle-bin/${row.id}`)
       await load()
-      setMessage(res.message ?? `${row.poNumber} destroyed.`)
+      setMessage(res.message ?? `${row.poNumber} deleted permanently.`)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not destroy it.')
+      setError(err instanceof ApiError ? err.message : 'Could not delete it.')
     } finally {
       setBusy(null)
     }
@@ -125,7 +128,7 @@ export default function RecycleBinPage() {
       <SettingsCard
         icon={Trash2}
         title="Deleted purchase orders"
-        description="Out of every list, report and search, but nothing has been thrown away — restoring one puts it back exactly as it was, with its lines and its number."
+        description="Out of every list, report and search, but nothing has been thrown away — each keeps its number reserved, and restoring one puts it back exactly as it was. Deleting one permanently frees its number."
         flush
         actions={
           <button onClick={() => void load()} className="btn-secondary h-8 text-xs" disabled={loading}>
@@ -151,7 +154,7 @@ export default function RecycleBinPage() {
             </span>
             <p className="text-foreground text-sm font-medium">The recycle bin is empty</p>
             <p className="text-muted-foreground mt-1 text-xs">
-              Deleted purchase orders arrive here and stay until somebody destroys them.
+              Deleted purchase orders arrive here and stay until they are restored or deleted permanently.
             </p>
           </div>
         ) : (
@@ -208,15 +211,26 @@ export default function RecycleBinPage() {
                             <RotateCcw size={15} />
                           )}
                         </button>
+                        {/* An order the supplier had stays on record: restore and
+                          cancel it. Its number is never given out again. */}
+                        {row.wasSent ? (
+                          <span
+                            className="text-muted-foreground px-1.5 text-xs"
+                            title="It was sent to the supplier, so it stays on record. Restore it and cancel it."
+                          >
+                            Sent — restore and cancel
+                          </span>
+                        ) : (
                         <button
                           onClick={() => void destroy(row)}
                           disabled={busy === row.id}
                           className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
-                          title="Destroy permanently"
-                          aria-label={`Destroy ${row.poNumber} permanently`}
+                          title="Delete permanently"
+                          aria-label={`Delete ${row.poNumber} permanently`}
                         >
                           <Trash2 size={15} />
                         </button>
+                        )}
                       </div>
                     </td>
                   </tr>

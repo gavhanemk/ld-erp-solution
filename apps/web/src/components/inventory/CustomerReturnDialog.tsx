@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { X, Loader2, AlertCircle, Plus, Trash2, Undo2, FileText, Truck, Boxes } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import type { OutwardRef } from '@/components/packages/packageTypes'
@@ -17,7 +18,7 @@ import type { OutwardRef } from '@/components/packages/packageTypes'
  * the same again, so two people returning the same roll cannot both succeed.
  */
 
-export interface HeldStock {
+export interface HeldStock extends ShadeFields {
   itemId: string
   itemCode: string
   itemName: string
@@ -347,7 +348,7 @@ export function CustomerReturnDialog({
                             {theirs
                               .filter((t) => !taken.has(t.itemId))
                               .map((t) => (
-                                <option key={t.itemId} value={t.itemId}>
+                                <option key={t.itemId} value={t.itemId} data-sub={itemShade(t) || undefined}>
                                   {t.itemCode} · {t.itemName} · {fmt(t.qty)} {t.uom}
                                 </option>
                               ))}

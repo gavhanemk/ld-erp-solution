@@ -23,6 +23,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, apiErrorMessage, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { itemShade, itemShadeCols } from '@/lib/items'
 import { useAppSettings } from '@/lib/appSettings'
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
@@ -89,6 +90,23 @@ const INNER_COLS: Array<{ label: string; width: string }> = [
   /* Ours, and the only rate on this table. What a supplier quoted is his, and
      it lives on the comparison window with his PI number beside it. */
   { label: 'We expected', width: '14%' },
+]
+
+/*
+ * The same, with a fabric's Design No. and Colour beside its name — as the
+ * Items master has them — when a line on the enquiry carries either. Same-name
+ * fabrics differ only there; an enquiry for buttons and zips has no use for
+ * two empty columns.
+ */
+const INNER_COLS_SHADED: Array<{ label: string; width: string }> = [
+  { label: 'Item code', width: '12%' },
+  { label: 'Item', width: '24%' },
+  { label: 'Design No.', width: '10%' },
+  { label: 'Colour', width: '10%' },
+  { label: 'HSN', width: '8%' },
+  { label: 'Against indent', width: '12%' },
+  { label: 'Qty', width: '12%' },
+  { label: 'We expected', width: '12%' },
 ]
 
 const INNER_NUMERIC = ['Qty', 'We expected']
@@ -593,6 +611,9 @@ export default function PurchaseEnquiriesPage() {
                           <div key={l.id} className="flex items-start justify-between gap-3 p-2">
                             <div className="min-w-0">
                               <p className="truncate text-xs">{l.item.name}</p>
+                              {itemShade(l.item) && (
+                                <p className="text-muted-foreground text-[10px]">{itemShade(l.item)}</p>
+                              )}
                               <p className="text-muted-foreground font-mono text-[10px]">
                                 {l.item.code}
                               </p>
@@ -660,6 +681,8 @@ export default function PurchaseEnquiriesPage() {
                     const s = ENQUIRY_STATUS[e.status]
                     const expanded = open === e.id
                     const waiting = e.quotes.find((q) => q.sentAt && !q.answered)
+                    // Design No. and Colour columns, when a line has either.
+                    const shaded = e.lines.some((l) => itemShade(l.item))
                     return (
                       <Fragment key={e.id}>
                         <tr className={expanded ? 'bg-secondary/30' : undefined} data-row tabIndex={ri === 0 ? 0 : -1}>
@@ -829,7 +852,7 @@ export default function PurchaseEnquiriesPage() {
                                 <table className="subtable w-full table-fixed">
                                   <thead className="sticky top-0 z-10">
                                     <tr>
-                                      {INNER_COLS.map(({ label: h, width }) => (
+                                      {(shaded ? INNER_COLS_SHADED : INNER_COLS).map(({ label: h, width }) => (
                                         <th
                                           key={h}
                                           style={{ width }}
@@ -859,6 +882,16 @@ export default function PurchaseEnquiriesPage() {
                                             </p>
                                           )}
                                         </td>
+                                        {shaded && (
+                                          <>
+                                            <td className="px-3 py-1.5 text-xs">
+                                              {itemShadeCols(l.item).designNo}
+                                            </td>
+                                            <td className="px-3 py-1.5 text-xs">
+                                              {itemShadeCols(l.item).colour}
+                                            </td>
+                                          </>
+                                        )}
                                         <td className="text-muted-foreground px-3 py-1.5 text-xs">
                                           {l.hsnCode ?? '—'}
                                         </td>

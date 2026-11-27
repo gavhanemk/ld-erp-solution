@@ -3,6 +3,7 @@ import type { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { userCan, type AuthRequest } from '../middleware/auth'
 import { nextDocumentNumber } from '../lib/docNumber'
+import { ITEM_SHADE } from '../lib/fabric'
 import { CODE_ATTEMPTS, nextStyleCode } from '../lib/masterCode'
 import { MAX_FILE_BYTES, MAX_FILES_PER_DOCUMENT, removeObject, statObject } from '../lib/storage'
 import { lockedBalanceOf, recordMovement, transferStock } from './stock.service'
@@ -82,6 +83,8 @@ export const sampleItemSelect = {
   id: true,
   code: true,
   name: true,
+  // A fabric's design and colour, a thread's colour: same-name materials told apart.
+  ...ITEM_SHADE,
   type: true,
   departmentId: true,
   standardRate: true,
@@ -150,7 +153,7 @@ export const sampleInclude = {
   closeOuts: {
     orderBy: { createdAt: 'desc' as const },
     include: {
-      item: { select: { name: true, code: true, uom: { select: { symbol: true } } } },
+      item: { select: { name: true, code: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
       warehouse: { select: { name: true } },
       toWarehouse: { select: { name: true } },
       createdBy: { select: { name: true } },
@@ -2109,6 +2112,9 @@ export function sampleItemOption(i: {
   id: string
   code: string
   name: string
+  designNo?: string | null
+  color?: string | null
+  styleId?: string | null
   type: string
   departmentId: string | null
   standardRate: unknown
@@ -2118,6 +2124,9 @@ export function sampleItemOption(i: {
     id: i.id,
     code: i.code,
     name: i.name,
+    designNo: i.designNo ?? null,
+    color: i.color ?? null,
+    styleId: i.styleId ?? null,
     type: i.type as SampleMaterialType,
     uom: i.uom
       ? { id: i.uom.id, code: i.uom.symbol, name: i.uom.name, symbol: i.uom.symbol }
@@ -2127,7 +2136,7 @@ export function sampleItemOption(i: {
       i.standardRate === null || i.standardRate === undefined ? null : n(i.standardRate),
   }
 }
-/** Materials in use whose name or code has the words typed, for the BOM's picker. */
+/** Materials in use whose name, code, design no. or colour has the words typed, for the BOM's picker. */
 export async function searchSampleItems(tx: Tx, q: string, limit: number) {
   const rows = await tx.item.findMany({
     where: {
@@ -2138,6 +2147,9 @@ export async function searchSampleItems(tx: Tx, q: string, limit: number) {
             OR: [
               { name: { contains: q, mode: 'insensitive' as const } },
               { code: { contains: q, mode: 'insensitive' as const } },
+              // A fabric is one design and colour: "1164" or "Navy" finds it too.
+              { designNo: { contains: q, mode: 'insensitive' as const } },
+              { color: { contains: q, mode: 'insensitive' as const } },
             ],
           }
         : {}),

@@ -17,8 +17,9 @@ import {
   Trash2,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
-import { PurchaseOrderDialog, type PurchaseOrder } from '@/components/purchase/PurchaseOrderDialog'
+import { neverSentDraft, PurchaseOrderDialog, type PurchaseOrder } from '@/components/purchase/PurchaseOrderDialog'
 import { PurchaseBillDialog } from '@/components/purchase/PurchaseBillDialog'
+import { DeleteOrderDialog } from '@/components/purchase/DeleteOrderDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
@@ -86,6 +87,7 @@ export default function ServiceOrdersPage() {
   })
   /** The order a bill is being booked from. */
   const [billing, setBilling] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<PurchaseOrder | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
 
   useEffect(() => {
@@ -231,21 +233,15 @@ export default function ServiceOrdersPage() {
         },
       })
     }
-    if (po.status === 'DRAFT' || po.status === 'SENT' || po.status === 'CANCELLED') {
+    // Only a draft never sent can be deleted — to the recycle bin or for good,
+    // the same as a purchase order, whose number series it shares (27 Nov 2026).
+    if (neverSentDraft(po)) {
       items.push({
         key: 'delete',
         label: 'Delete order',
         icon: <Trash2 size={15} />,
         danger: true,
-        onClick: () => {
-          if (
-            !confirm(
-              `Delete ${po.poNumber} for good? This is not the same as cancelling — nothing will be left saying it was called off. The number will not be reused.`
-            )
-          )
-            return
-          void run(po, () => api.delete(`/purchase/orders/${po.id}`), 'Could not delete.')
-        },
+        onClick: () => setDeleting(po),
       })
     }
     return items
@@ -574,6 +570,22 @@ export default function ServiceOrdersPage() {
         onClose={() => setDialog({ open: false, record: null })}
         onSaved={() => void load()}
       />
+
+      {deleting && (
+        <DeleteOrderDialog
+          poNumber={deleting.poNumber}
+          onChoose={(choice) => {
+            const po = deleting
+            setDeleting(null)
+            void run(
+              po,
+              () => api.delete(`/purchase/orders/${po.id}${choice === 'permanent' ? '?permanent=1' : ''}`),
+              'Could not delete.'
+            )
+          }}
+          onCancel={() => setDeleting(null)}
+        />
+      )}
 
       <PurchaseBillDialog
         open={billing !== null}

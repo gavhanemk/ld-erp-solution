@@ -1,4 +1,5 @@
 import type { Prisma, PrismaClient } from '@prisma/client'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { trackedRoutings, type Applies } from './styleTrack.service'
 import { styleOrderStages } from './styleOrders.service'
 
@@ -38,7 +39,7 @@ const routingSelect = {
   updatedAt: true,
   updatedBy: { select: { name: true } },
   style: { select: { code: true } },
-  fabric: { select: { name: true } },
+  fabric: { select: { name: true, ...ITEM_SHADE } },
   steps: {
     orderBy: { sequence: 'asc' as const },
     select: { sequence: true, isQcStep: true, execution: true, skip: true, operation: { select: { name: true } } },
@@ -63,6 +64,8 @@ function shape(r: RoutingRow, styleId: string, takesNew: string | null) {
     isActive: r.isActive,
     isLocked: r.isLocked,
     fabric: r.fabric?.name ?? null,
+    /** "Design No: 1164 · Colour: Navy" — which of several same-name fabrics; '' when it has neither. */
+    fabricShade: itemShadeText(r.fabric),
     steps: r.steps.map((s) => ({ sequence: s.sequence, name: s.operation.name, isQcStep: s.isQcStep, execution: s.execution, skip: s.skip })),
     updatedAt: r.updatedAt,
     updatedBy: r.updatedBy?.name ?? null,

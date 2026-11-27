@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { byMonth, dateRangeFilters, itemFilter, periodLabel, round2, topWithRest } from './shared'
+import { itemShadeText } from '../../lib/fabric'
+import { byMonth, dateRangeFilters, itemFilter, periodLabel, round2, sumByItem, topWithRest } from './shared'
 import { brandFilter, categoryFilter, loadCategories, pctOf, rupees, warehouseFilter } from './inventory-shared'
 
 /**
@@ -117,6 +118,7 @@ export const materialConsumption: ReportDefinition = {
             categoryId: true,
             designNo: true,
             color: true,
+            styleId: true,
             uom: { select: { symbol: true } },
           },
         },
@@ -156,6 +158,9 @@ export const materialConsumption: ReportDefinition = {
         item: i.item.name,
         designNo: i.item.designNo ?? '',
         colour: i.item.color ?? '',
+        // The words a chart or summary line names the item with; a finished
+        // good's colour is in its name already.
+        itemShade: itemShadeText(i.item),
         brand: brand?.name ?? '',
         brandId: brand?.id ?? null,
         moNumber: mr?.mo?.moNumber ?? '',
@@ -178,7 +183,8 @@ export const materialConsumption: ReportDefinition = {
     }
     const byDept = by((r) => r.department)
     const byCustomer = by((r) => r.customer)
-    const byItem = by((r) => r.item)
+    // By item code, not name: one fabric in two designs is two items.
+    const byItem = sumByItem(rows, (r) => r.value).sort((a, b) => b.value - a.value)
     const requisitions = new Set(rows.map((r) => r.mrNumber)).size
     const monthly = byMonth(rows, (r) => r.date, (r) => r.value)
     const forOrders = round2(rows.filter((r) => r.soNumber).reduce((s, r) => s + r.value, 0))

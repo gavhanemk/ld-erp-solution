@@ -38,6 +38,7 @@ import { lockedBalanceOf } from '../services/stock.service'
 import { onceFor } from '../lib/onceFor'
 import { findOptions, findPackages, findSchema } from '../services/packageFind.service'
 import { fillJobCardBlanks } from '../services/jobCard.service'
+import { ITEM_SHADE } from '../lib/fabric'
 
 /*
  * Labelled packages of stock and what is done to them by scanning.
@@ -150,6 +151,7 @@ const pkgInclude = {
       contentQty: true,
       contentUnit: true,
       labelCopies: true,
+      ...ITEM_SHADE,
       uom: { select: { symbol: true } },
       category: { select: { name: true } },
     },
@@ -300,6 +302,9 @@ function listWhere(query: Record<string, unknown>): Prisma.StockPackageWhereInpu
             { rack: { equals: rackOf(q), mode: 'insensitive' as const } },
             { item: { name: { contains: q, mode: 'insensitive' as const } } },
             { item: { code: { contains: q, mode: 'insensitive' as const } } },
+            // A fabric by its design number or colour: "1164", "navy".
+            { item: { designNo: { contains: q, mode: 'insensitive' as const } } },
+            { item: { color: { contains: q, mode: 'insensitive' as const } } },
           ],
         }
       : {}),
@@ -453,7 +458,7 @@ router.get('/groups', requirePermission(MODULE, 'view'), async (req, res) => {
   const [items, stores, owners, summary] = await Promise.all([
     prisma.item.findMany({
       where: { id: { in: [...new Set(groups.map((g) => g.itemId))] } },
-      select: { id: true, code: true, name: true, uom: { select: { symbol: true } }, category: { select: { name: true } } },
+      select: { id: true, code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } }, category: { select: { name: true } } },
     }),
     prisma.warehouse.findMany({ where: { id: { in: [...new Set(groups.map((g) => g.warehouseId))] } }, select: { id: true, name: true } }),
     prisma.customer.findMany({
@@ -481,6 +486,9 @@ router.get('/groups', requirePermission(MODULE, 'view'), async (req, res) => {
           itemId: g.itemId,
           itemCode: item?.code ?? '',
           item: item?.name ?? '',
+          designNo: item?.designNo ?? null,
+          color: item?.color ?? null,
+          styleId: item?.styleId ?? null,
           category: item?.category?.name ?? '',
           unit: item?.uom?.symbol ?? '',
           warehouseId: g.warehouseId,
@@ -528,7 +536,7 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
       warehouseId: true,
       acceptedQty: true,
       batchNumber: true,
-      item: { select: { code: true, name: true, categoryId: true, uom: { select: { symbol: true } } } },
+      item: { select: { code: true, name: true, ...ITEM_SHADE, categoryId: true, uom: { select: { symbol: true } } } },
       warehouse: { select: { name: true } },
       grn: { select: { id: true, grnNumber: true, grnDate: true, po: { select: { supplier: { select: { name: true } } } } } },
     },
@@ -544,9 +552,25 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
   // Stock of packaged items on the racks with no sticker yet, what came in
   // last at the top: stock just added is what somebody is looking for.
   const loose = await prisma.$queryRaw<
-    Array<{ itemId: string; itemCode: string; item: string; categoryId: string; unit: string; warehouseId: string; store: string; ownership: string; ownerCustomerId: string | null; owner: string | null; qty: number; lastIn: Date | null }>
+    Array<{
+      itemId: string
+      itemCode: string
+      item: string
+      designNo: string | null
+      color: string | null
+      styleId: string | null
+      categoryId: string
+      unit: string
+      warehouseId: string
+      store: string
+      ownership: string
+      ownerCustomerId: string | null
+      owner: string | null
+      qty: number
+      lastIn: Date | null
+    }>
   >`
-    SELECT s."itemId", i.code AS "itemCode", i.name AS item, i."categoryId", u.symbol AS unit,
+    SELECT s."itemId", i.code AS "itemCode", i.name AS item, i."designNo", i.color, i."styleId", i."categoryId", u.symbol AS unit,
            s."warehouseId", w.name AS store, s.ownership::text AS ownership, s."ownerCustomerId", c.name AS owner,
            MAX(s."createdAt") FILTER (WHERE s."inQty" > 0) AS "lastIn",
            (SUM(s."inQty" - s."outQty") - COALESCE((
@@ -559,7 +583,7 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
     JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
     LEFT JOIN ld_erp.customers c ON c.id = s."ownerCustomerId"
     WHERE i."categoryId" = ANY(${cats}::text[]) AND s."sizeId" IS NULL
-    GROUP BY s."itemId", i.code, i.name, i."categoryId", u.symbol, s."warehouseId", w.name, s.ownership, s."ownerCustomerId", c.name
+    GROUP BY s."itemId", i.code, i.name, i."designNo", i.color, i."styleId", i."categoryId", u.symbol, s."warehouseId", w.name, s.ownership, s."ownerCustomerId", c.name
     HAVING SUM(s."inQty" - s."outQty") - COALESCE((
               SELECT SUM(p.qty) FROM ld_erp.stock_packages p
               WHERE p."itemId" = s."itemId" AND p."warehouseId" = s."warehouseId" AND p.ownership = s.ownership
@@ -598,6 +622,9 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
       itemId: l.itemId,
       itemCode: l.item.code,
       item: l.item.name,
+      designNo: l.item.designNo,
+      color: l.item.color,
+      styleId: l.item.styleId,
       unit: l.item.uom?.symbol ?? '',
       warehouseId: l.warehouseId,
       store: l.warehouse.name,
@@ -680,6 +707,10 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           content: r.item.contentQty && Number(r.item.contentQty) > 0 ? { qty: round3(Number(r.qty) * Number(r.item.contentQty)), unit: r.item.contentUnit || 'pcs' } : null,
           itemCode: r.item.code,
           item: r.item.name,
+          // A fabric's design and colour, a thread's colour: a line of their own on the roll's sticker.
+          designNo: r.item.designNo,
+          color: r.item.color,
+          styleId: r.item.styleId,
           category: r.item.category?.name ?? '',
           store: r.warehouse.name,
           lotNo: r.lotNo,
@@ -728,6 +759,9 @@ router.get('/outward-labels', requirePermission(MODULE, 'view'), async (req, res
         docNumber: doc.number,
         item: l.item,
         itemCode: l.itemCode,
+        designNo: l.designNo,
+        color: l.color,
+        styleId: l.styleId,
         qty: round3(l.qty),
         unit: l.unit,
         to: doc.to,
@@ -771,6 +805,9 @@ async function outwardSpots(doc: Awaited<ReturnType<typeof loadOutward>>) {
       itemId: l.itemId,
       item: l.item,
       itemCode: l.itemCode,
+      designNo: l.designNo,
+      color: l.color,
+      styleId: l.styleId,
       unit: l.unit,
       warehouseId: l.warehouseId,
       store: l.from,
@@ -801,7 +838,18 @@ router.post('/outward/plan', requirePermission(MODULE, 'view'), async (req, res)
       number: doc.number,
       to: doc.to,
       moves: OUTWARD[data.type].moves,
-      lines: doc.lines.map((l) => ({ key: l.key, item: l.item, itemCode: l.itemCode, qty: round3(l.qty), unit: l.unit, from: l.from, owner: l.owner })),
+      lines: doc.lines.map((l) => ({
+        key: l.key,
+        item: l.item,
+        itemCode: l.itemCode,
+        designNo: l.designNo,
+        color: l.color,
+        styleId: l.styleId,
+        qty: round3(l.qty),
+        unit: l.unit,
+        from: l.from,
+        owner: l.owner,
+      })),
       spots: await outwardSpots(doc),
     },
   })
@@ -928,7 +976,7 @@ router.get('/ready', requirePermission(MODULE, 'view'), async (req, res) => {
       sourceLineId: true,
       lotNo: true,
       createdAt: true,
-      item: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
+      item: { select: { id: true, code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
       warehouse: { select: { name: true } },
     },
     orderBy: [{ createdAt: 'desc' }, { code: 'asc' }],
@@ -938,12 +986,44 @@ router.get('/ready', requirePermission(MODULE, 'view'), async (req, res) => {
   // Change remakes one line's stickers.
   const groups = new Map<
     string,
-    { key: string; sourceRef: string | null; date: Date; itemCode: string; item: string; store: string; unit: string; qty: number; each: number | null; packType: string; lots: string[]; ids: string[] }
+    {
+      key: string
+      sourceRef: string | null
+      date: Date
+      itemCode: string
+      item: string
+      designNo: string | null
+      color: string | null
+      styleId: string | null
+      store: string
+      unit: string
+      qty: number
+      each: number | null
+      packType: string
+      lots: string[]
+      ids: string[]
+    }
   >()
   for (const r of rows) {
     const key = [r.sourceType, r.sourceId ?? '', r.item.id, r.warehouse.name, r.grnLineId ?? '', r.sourceLineId ?? ''].join('|')
     const q = Number(r.qty)
-    const g = groups.get(key) ?? { key, sourceRef: r.sourceRef, date: r.createdAt, itemCode: r.item.code, item: r.item.name, store: r.warehouse.name, unit: r.item.uom?.symbol ?? '', qty: 0, each: q, packType: r.packType, lots: [], ids: [] }
+    const g = groups.get(key) ?? {
+      key,
+      sourceRef: r.sourceRef,
+      date: r.createdAt,
+      itemCode: r.item.code,
+      item: r.item.name,
+      designNo: r.item.designNo,
+      color: r.item.color,
+      styleId: r.item.styleId,
+      store: r.warehouse.name,
+      unit: r.item.uom?.symbol ?? '',
+      qty: 0,
+      each: q,
+      packType: r.packType,
+      lots: [],
+      ids: [],
+    }
     if (g.each !== null && Math.abs(g.each - q) > 1e-9) g.each = null
     g.qty = round3(g.qty + q)
     if (r.lotNo && !g.lots.includes(r.lotNo)) g.lots.push(r.lotNo)
@@ -984,7 +1064,7 @@ router.post('/put-away', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   if (!rack) throw new AppError('Type the rack first', 400, 'NO_RACK')
   const code = normaliseCode(data.code)
   const out = await prisma.$transaction(async (tx) => {
-    const found = await tx.stockPackage.findFirst({ where: scannedWhere(data.code), select: { id: true } })
+    const found = await tx.stockPackage.findFirst({ where: scannedWhere(data.code), select: { id: true, item: { select: ITEM_SHADE } } })
     if (!found) throw new AppError(`No package with the code ${code}. Check the sticker, or type the number under the QR.`, 404, 'NOT_FOUND')
     const pkg = await lockPackage(tx, found.id)
     if (pkg.status !== 'IN_STOCK') {
@@ -996,13 +1076,13 @@ router.post('/put-away', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     }
     const was = pkg.rack
     const changed = await setRack(tx, pkg, rack, { userId: req.user?.id ?? null })
-    return { pkg, was, changed }
+    return { pkg, was, changed, shade: found.item }
   })
   const p = out.pkg
   res.json({
     success: true,
     message: out.changed ? `${p.code} put on rack ${rack}${out.was ? ` (was ${out.was})` : ''}.` : `${p.code} is already on rack ${rack}.`,
-    data: { id: p.id, code: p.code, item: p.item.name, qty: Number(p.qty), unit: p.item.uom?.symbol ?? '', store: p.warehouse.name, rack, was: out.was, changed: out.changed },
+    data: { id: p.id, code: p.code, item: p.item.name, ...out.shade, qty: Number(p.qty), unit: p.item.uom?.symbol ?? '', store: p.warehouse.name, rack, was: out.was, changed: out.changed },
   })
 })
 

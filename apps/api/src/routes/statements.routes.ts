@@ -4,6 +4,7 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { getPrintHeader } from '../lib/printData'
 import { MOVEMENT_DOC_JOIN, PARTY_KIND_LABEL, documentLabel, type PartyKind } from '../services/movementDocs.service'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 
 /**
  * Statements to hand to someone outside the mill: a customer asking what has
@@ -120,7 +121,7 @@ router.get('/customer/:customerId', requirePermission(MODULE, 'view'), async (re
       qty: true,
       returnLines: { where: { jobWorkReturn: { cancelledAt: null } }, select: { consumedQty: true, wastedQty: true } },
       challan: { select: { challanNumber: true, challanDate: true, process: true, expectedBackOn: true, jobWorker: { select: { name: true } } } },
-      item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+      item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
     },
     orderBy: { challan: { challanDate: 'asc' } },
   })
@@ -176,7 +177,7 @@ router.get('/customer/:customerId', requirePermission(MODULE, 'view'), async (re
   const itemIds = [...new Set([...opening.filter((o) => Math.abs(o.qty) > 0.0005).map((o) => o.itemId), ...lines.map((l) => l.itemId), ...here.map((h) => h.itemId)])]
   const items = await prisma.item.findMany({
     where: { id: { in: itemIds } },
-    select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
+    select: { id: true, code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } },
   })
   const openOf = new Map(opening.map((o) => [o.itemId, Number(o.qty)]))
 
@@ -193,6 +194,10 @@ router.get('/customer/:customerId', requirePermission(MODULE, 'view'), async (re
         itemId: it.id,
         code: it.code,
         name: it.name,
+        // A fabric's design and colour, a thread's colour: same-name fabrics apart on the statement.
+        designNo: it.designNo,
+        color: it.color,
+        styleId: it.styleId,
         uom: it.uom?.symbol ?? '',
         opening: open,
         received: sum('received'),
@@ -210,7 +215,7 @@ router.get('/customer/:customerId', requirePermission(MODULE, 'view'), async (re
       }
     })
     .filter((s) => s.rows.length || Math.abs(s.opening) > 0.0005 || Math.abs(s.closing) > 0.0005)
-    .sort((a, b) => a.name.localeCompare(b.name))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.code.localeCompare(b.code))
 
   res.json({
     success: true,
@@ -231,6 +236,9 @@ router.get('/customer/:customerId', requirePermission(MODULE, 'view'), async (re
             expectedBackOn: l.challan.expectedBackOn,
             code: l.item.code,
             item: l.item.name,
+            designNo: l.item.designNo,
+            color: l.item.color,
+            styleId: l.item.styleId,
             uom: l.item.uom?.symbol ?? '',
             sent: r3(Number(l.qty)),
             wasted: r3(l.returnLines.reduce((s, r) => s + Number(r.wastedQty), 0)),
@@ -284,7 +292,7 @@ router.get('/job-worker/:supplierId', requirePermission(MODULE, 'view'), async (
             ownership: true,
             ownerCustomer: { select: { name: true } },
             size: { select: { code: true } },
-            item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+            item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
             returnLines: {
               where: { jobWorkReturn: { cancelledAt: null } },
               select: {
@@ -292,7 +300,7 @@ router.get('/job-worker/:supplierId', requirePermission(MODULE, 'view'), async (
                 receivedQty: true,
                 wastedQty: true,
                 damagedQty: true,
-                item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+                item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
                 warehouse: { select: { name: true } },
                 jobWorkReturn: { select: { returnNumber: true, returnDate: true, theirChallanNo: true } },
               },
@@ -317,6 +325,9 @@ router.get('/job-worker/:supplierId', requirePermission(MODULE, 'view'), async (
           id: l.id,
           code: l.item.code,
           item: l.item.name,
+          designNo: l.item.designNo,
+          color: l.item.color,
+          styleId: l.item.styleId,
           uom: l.item.uom?.symbol ?? '',
           size: l.size?.code ?? null,
           customer: l.ownership === 'CUSTOMER_OWNED' ? (l.ownerCustomer?.name ?? 'a customer') : null,
@@ -335,6 +346,8 @@ router.get('/job-worker/:supplierId', requirePermission(MODULE, 'view'), async (
             received: r3(Number(r.receivedQty)),
             receivedCode: r.item.code,
             receivedItem: r.item.name,
+            // What it came back as, when that has a design and colour of its own.
+            receivedShade: itemShadeText(r.item),
             receivedUom: r.item.uom?.symbol ?? '',
             wasted: r3(Number(r.wastedQty)),
             damaged: r3(Number(r.damagedQty)),
@@ -359,12 +372,41 @@ router.get('/job-worker/:supplierId', requirePermission(MODULE, 'view'), async (
     })
     .filter((c) => !openOnly || c.state !== 'SETTLED')
 
-  // Item by item, across every challan.
-  const perItem = new Map<string, { code: string; item: string; uom: string; sent: number; accounted: number; wasted: number; damaged: number; pending: number; pendingValue: number }>()
+  // Item by item, across every challan: by code, so same-name fabrics stay apart.
+  const perItem = new Map<
+    string,
+    {
+      code: string
+      item: string
+      designNo: string | null
+      color: string | null
+      styleId: string | null
+      uom: string
+      sent: number
+      accounted: number
+      wasted: number
+      damaged: number
+      pending: number
+      pendingValue: number
+    }
+  >()
   for (const c of list) {
     for (const l of c.lines) {
       const k = `${l.code}|${l.uom}`
-      const t = perItem.get(k) ?? { code: l.code, item: l.item, uom: l.uom, sent: 0, accounted: 0, wasted: 0, damaged: 0, pending: 0, pendingValue: 0 }
+      const t = perItem.get(k) ?? {
+        code: l.code,
+        item: l.item,
+        designNo: l.designNo,
+        color: l.color,
+        styleId: l.styleId,
+        uom: l.uom,
+        sent: 0,
+        accounted: 0,
+        wasted: 0,
+        damaged: 0,
+        pending: 0,
+        pendingValue: 0,
+      }
       t.sent = r3(t.sent + l.sent)
       t.accounted = r3(t.accounted + l.accounted)
       t.wasted = r3(t.wasted + l.wasted)
@@ -383,7 +425,7 @@ router.get('/job-worker/:supplierId', requirePermission(MODULE, 'view'), async (
       period: { from, to },
       openOnly,
       challans: list,
-      items: [...perItem.values()].sort((a, b) => a.item.localeCompare(b.item)),
+      items: [...perItem.values()].sort((a, b) => a.item.localeCompare(b.item) || a.code.localeCompare(b.code)),
       totals: {
         challans: list.length,
         open: list.filter((c) => c.state !== 'SETTLED').length,

@@ -1,6 +1,7 @@
 import { prisma, type Prisma } from '@ld-erp/database'
 import { z } from 'zod'
 import { normaliseCode, round3 } from './package.service'
+import { ITEM_SHADE } from '../lib/fabric'
 
 /*
  * Finding a sticker without knowing its number.
@@ -141,6 +142,9 @@ export async function findPackages(f: FindQuery) {
         ...(code ? [{ code: { contains: code, mode: ci } }] : []),
         { item: { name: { contains: q, mode: ci } } },
         { item: { code: { contains: q, mode: ci } } },
+        // A fabric by its design number or colour: "1164", "navy".
+        { item: { designNo: { contains: q, mode: ci } } },
+        { item: { color: { contains: q, mode: ci } } },
         { lotNo: { contains: q, mode: ci } },
         { rack: { contains: q, mode: ci } },
         { sourceRef: { contains: q, mode: ci } },
@@ -176,7 +180,7 @@ const SELECT = {
   sourceId: true,
   sourceRef: true,
   createdAt: true,
-  item: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
+  item: { select: { id: true, code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
   warehouse: { select: { id: true, name: true } },
   ownerCustomer: { select: { name: true } },
 } satisfies Prisma.StockPackageSelect
@@ -220,7 +224,7 @@ async function describe(rows: Row[]) {
       qty: round3(Number(r.qty)),
       unit: r.item.uom?.symbol ?? '',
       packType: r.packType,
-      item: { id: r.item.id, code: r.item.code, name: r.item.name },
+      item: { id: r.item.id, code: r.item.code, name: r.item.name, designNo: r.item.designNo, color: r.item.color, styleId: r.item.styleId },
       store: r.warehouse.name,
       rack: r.rack,
       lotNo: r.lotNo,
@@ -249,7 +253,7 @@ export async function findOptions() {
   const itemIds = [...new Set(packages.map((p) => p.itemId))]
   const storeIds = [...new Set(packages.map((p) => p.warehouseId))]
   const [items, stores, grns, customerGrns, moves] = await Promise.all([
-    prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, code: true, name: true }, orderBy: { name: 'asc' } }),
+    prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, code: true, name: true, ...ITEM_SHADE }, orderBy: [{ name: 'asc' }, { code: 'asc' }] }),
     prisma.warehouse.findMany({ where: { id: { in: storeIds } }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
     prisma.gRN.findMany({
       where: { id: { in: sourceIds } },
@@ -282,7 +286,7 @@ export async function findOptions() {
   }
   const byText = (a: string, b: string) => a.localeCompare(b, 'en', { numeric: true })
   return {
-    items: items.map((i) => ({ id: i.id, code: i.code, name: i.name })),
+    items: items.map((i) => ({ id: i.id, code: i.code, name: i.name, designNo: i.designNo, color: i.color, styleId: i.styleId })),
     stores,
     suppliers: [...suppliers.values()].sort((a, b) => byText(a.name, b.name)),
     pos: [...pos.values()].sort((a, b) => byText(b.poNumber, a.poNumber)),

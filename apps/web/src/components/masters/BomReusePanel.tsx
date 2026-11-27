@@ -4,6 +4,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 import { Copy, Search, X, ChevronDown, Loader2 } from 'lucide-react'
 import { api, type Paginated } from '@/lib/api'
 import { formatRupees } from '@/lib/utils'
+import { itemShade } from '@/lib/items'
 import { compareBomLines, type BomComparableLine } from '@ld-erp/shared'
 import type { Bom } from './BomFormDialog'
 
@@ -22,7 +23,8 @@ interface Props {
   lines: BomComparableLine[]
   onCopy: (bom: Bom) => void
   source?: Bom | null
-  itemLabels: Record<string, { name: string; unit?: string; category?: string }>
+  /** The form's items: name, design and colour ("Design No: 1164 · Colour: Navy"), unit and category. */
+  itemLabels: Record<string, { name: string; shade?: string; unit?: string; category?: string }>
   processLabels: Record<string, string>
   disabled?: boolean
 }
@@ -384,9 +386,13 @@ export const BomReusePanel = forwardRef<BomReuseHandle, Props>(function BomReuse
                             <tr key={l.id ?? i} className="border-border/50 border-t">
                               <td className="p-2">
                                 {l.componentItem?.code} · {l.componentItem?.name}
+                                {itemShade(l.componentItem) && (
+                                  <span className="text-muted-foreground block">{itemShade(l.componentItem)}</span>
+                                )}
                                 <span className="text-muted-foreground block">
-                                  {itemLabels[l.componentItemId]?.category} ?{' '}
-                                  {l.department?.name ?? 'No process'}
+                                  {[itemLabels[l.componentItemId]?.category, l.department?.name ?? 'No process']
+                                    .filter(Boolean)
+                                    .join(' · ')}
                                 </span>
                               </td>
                               <td className="p-2 text-right">
@@ -405,6 +411,7 @@ export const BomReusePanel = forwardRef<BomReuseHandle, Props>(function BomReuse
                             const item = selected.lines?.find(
                               (x) => x.componentItemId === l.componentItemId
                             )?.componentItem
+                            const shade = item ? itemShade(item) : itemLabels[l.componentItemId]?.shade
                             return (
                               <tr
                                 key={i}
@@ -412,6 +419,7 @@ export const BomReusePanel = forwardRef<BomReuseHandle, Props>(function BomReuse
                               >
                                 <td className="p-2">
                                   {item?.name ?? itemLabels[l.componentItemId]?.name ?? 'Component'}
+                                  {shade && <span className="text-muted-foreground block">{shade}</span>}
                                   <span className="text-muted-foreground block">
                                     {row.kind} {row.changes.join(', ')}
                                     {row.changes.includes('Process') &&

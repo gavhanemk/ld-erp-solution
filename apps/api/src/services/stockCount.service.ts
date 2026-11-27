@@ -6,6 +6,14 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { normaliseCode, normaliseRack, packageRules, round3, scannedWhere, setRack } from './package.service'
 import { afterCountDecided } from './stockCountHooks.service'
 import { createAdjustment } from '../routes/inventory.routes'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
+
+/** An item's design no. and colour on a row: same-name fabrics told apart on the count (27 Nov 2026). */
+const shadeOf = (i: { designNo: string | null; color: string | null; styleId: string | null } | null | undefined) => ({
+  designNo: i?.designNo ?? null,
+  color: i?.color ?? null,
+  styleId: i?.styleId ?? null,
+})
 
 /*
  * A stock count made by scanning stickers.
@@ -109,7 +117,7 @@ const scanSelect = {
       rack: true,
       warehouseId: true,
       warehouse: { select: { name: true } },
-      item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+      item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
       ownerCustomer: { select: { name: true } },
     },
   },
@@ -128,7 +136,7 @@ function shapeScan(s: ScanRow, warehouseId: string) {
     s.result === 'FOUND'
       ? gone
         ? `Counted here, but it has since ${p!.status !== 'IN_STOCK' ? 'been issued or emptied' : `moved to ${p!.warehouse.name}`}, so it no longer counts.`
-        : `${qty ?? 0} ${unit} ${p?.item.name ?? ''}`.trim()
+        : `${qty ?? 0} ${unit} ${p?.item.name ?? ''}${p && itemShadeText(p.item) ? ` (${itemShadeText(p.item)})` : ''}`.trim()
       : s.result === 'ELSEWHERE'
         ? `Booked to ${p?.warehouse.name ?? 'another store'}. Move it here with Scan → Move, or take it back where it belongs. It is not counted here.`
         : s.result === 'NOT_IN_STOCK'
@@ -142,7 +150,7 @@ function shapeScan(s: ScanRow, warehouseId: string) {
     result: gone ? 'GONE' : s.result,
     qty,
     unit,
-    item: p ? { code: p.item.code, name: p.item.name } : null,
+    item: p ? { code: p.item.code, name: p.item.name, ...shadeOf(p.item) } : null,
     owner: p?.ownerCustomer?.name ?? null,
     packType: p?.packType ?? null,
     lotNo: p?.lotNo ?? null,
@@ -266,7 +274,7 @@ export async function reviewOf(db: Db, c: { id: string; warehouseId: string; loo
   const ids = [...new Set([...spots.values()].map((s) => s.itemId))]
   const owners = [...new Set([...spots.values()].map((s) => s.ownerCustomerId).filter((x): x is string => !!x))]
   const [items, customers] = await Promise.all([
-    db.item.findMany({ where: { id: { in: ids } }, select: { id: true, code: true, name: true, categoryId: true, uom: { select: { symbol: true } } } }),
+    db.item.findMany({ where: { id: { in: ids } }, select: { id: true, code: true, name: true, ...ITEM_SHADE, categoryId: true, uom: { select: { symbol: true } } } }),
     owners.length ? db.customer.findMany({ where: { id: { in: owners } }, select: { id: true, name: true } }) : Promise.resolve([]),
   ])
   const itemOf = new Map(items.map((i) => [i.id, i]))
@@ -287,6 +295,7 @@ export async function reviewOf(db: Db, c: { id: string; warehouseId: string; loo
         itemId: s.itemId,
         code: it?.code ?? '',
         name: it?.name ?? 'Unknown item',
+        ...shadeOf(it),
         unit: it?.uom?.symbol ?? '',
         tracked: it ? ruleOf(it.categoryId).tracked : false,
         ownership: s.ownership,
@@ -304,14 +313,21 @@ export async function reviewOf(db: Db, c: { id: string; warehouseId: string; loo
         difference: inCount ? round3(countedQty - s.book) : 0,
       }
     })
-    .sort((a, b) => a.name.localeCompare(b.name) || (a.owner ?? '').localeCompare(b.owner ?? ''))
+    .sort(
+      (a, b) =>
+        a.name.localeCompare(b.name) ||
+        // Same-name fabric, design by design.
+        (a.designNo ?? '').localeCompare(b.designNo ?? '', undefined, { numeric: true }) ||
+        (a.color ?? '').localeCompare(b.color ?? '') ||
+        (a.owner ?? '').localeCompare(b.owner ?? ''),
+    )
 
   const counted = new Set(lines.filter((l) => l.inCount).map((l) => l.key))
   const stillToFind = packages
     .filter((p) => !found.has(p.id) && counted.has(spotKey(p)))
     .map((p) => {
       const it = itemOf.get(p.itemId)
-      return { id: p.id, code: p.code, itemId: p.itemId, item: it?.name ?? '', unit: it?.uom?.symbol ?? '', qty: Number(p.qty), packType: p.packType, lotNo: p.lotNo, rack: p.rack }
+      return { id: p.id, code: p.code, itemId: p.itemId, item: it?.name ?? '', ...shadeOf(it), unit: it?.uom?.symbol ?? '', qty: Number(p.qty), packType: p.packType, lotNo: p.lotNo, rack: p.rack }
     })
     // Rack by rack, so the list reads in the order the store is walked.
     .sort((a, b) => byRack(a.rack, b.rack) || a.code.localeCompare(b.code))
@@ -348,7 +364,7 @@ export async function countView(id: string) {
           rejectReason: true,
           approvedAt: true,
           approvedBy: { select: { name: true } },
-          lines: { select: { itemId: true, bookQty: true, countedQty: true, difference: true, item: { select: { code: true, name: true, uom: { select: { symbol: true } } } }, ownerCustomer: { select: { name: true } } } },
+          lines: { select: { itemId: true, bookQty: true, countedQty: true, difference: true, item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } }, ownerCustomer: { select: { name: true } } } },
         },
       },
     },
@@ -377,7 +393,7 @@ export async function countView(id: string) {
     ids.length
       ? prisma.stockPackage.findMany({
           where: { id: { in: ids } },
-          select: { id: true, code: true, qty: true, status: true, packType: true, lotNo: true, rack: true, item: { select: { name: true, uom: { select: { symbol: true } } } } },
+          select: { id: true, code: true, qty: true, status: true, packType: true, lotNo: true, rack: true, item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } },
           orderBy: { code: 'asc' },
         })
       : Promise.resolve([]),
@@ -391,6 +407,7 @@ export async function countView(id: string) {
           lines: c.adjustment.lines.map((l) => ({
             item: l.item.name,
             code: l.item.code,
+            ...shadeOf(l.item),
             unit: l.item.uom?.symbol ?? '',
             owner: l.ownerCustomer?.name ?? null,
             book: Number(l.bookQty),
@@ -400,7 +417,7 @@ export async function countView(id: string) {
         }
       : null,
     // Withdrawn once the adjustment was approved; still standing while it waits, or if it was refused.
-    missing: missing.map((p) => ({ id: p.id, code: p.code, item: p.item.name, unit: p.item.uom?.symbol ?? '', qty: Number(p.qty), status: p.status, packType: p.packType, lotNo: p.lotNo, rack: p.rack })),
+    missing: missing.map((p) => ({ id: p.id, code: p.code, item: p.item.name, ...shadeOf(p.item), unit: p.item.uom?.symbol ?? '', qty: Number(p.qty), status: p.status, packType: p.packType, lotNo: p.lotNo, rack: p.rack })),
     scans: scans.map((s) => shapeScan(s, c.warehouseId)),
   }
 }

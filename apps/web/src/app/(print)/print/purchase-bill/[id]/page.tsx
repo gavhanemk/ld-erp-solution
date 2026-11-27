@@ -1,6 +1,7 @@
 'use client'
 
 import { inPack } from '@/lib/packs'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { chargeSnapshot } from '@ld-erp/shared'
 
 import { Fragment, useEffect, useState } from 'react'
@@ -62,14 +63,12 @@ interface BillLine {
   sgst: string
   igst: string
   amount: string
+  /** A fabric's design and colour (a thread's colour) come with it, from Masters → Items. */
   item: {
     code: string
     name: string
-    /** A fabric's own stock line carries its design and colour. */
-    designNo?: string | null
-    color?: string | null
     uom?: { symbol: string } | null
-  }
+  } & ShadeFields
   /** The pack it was billed in (a box of 20 pcs); qty is in the item's own unit. */
   uomFactor?: string | number
   uom?: { symbol: string } | null
@@ -313,8 +312,10 @@ export default function PurchaseBillPrintPage() {
   const rows: DocRow[] = [
     ...bill.lines.map((l, i) => {
       const pack = inPack(l)
-      const shade = [l.item.designNo && `D.${l.item.designNo.replace(/^d\.?\s*/i, '')}`, l.item.color].filter(Boolean).join(' / ')
-      const sub = [`${l.item.code}${l.description ? ` — ${l.description}` : ''}`, shade].filter(Boolean).join(' · ')
+      // "Design No: 1164 · Colour: Navy", exactly as typed in the Items master,
+      // on its own line under the name as on the goods receipt.
+      const shade = itemShade(l.item)
+      const sub = `${l.item.code}${l.description ? ` — ${l.description}` : ''}`
       const grn = l.grnLine?.grn.grnNumber
       return {
         key: l.id,
@@ -323,6 +324,7 @@ export default function PurchaseBillPrintPage() {
           item: (
             <>
               <div style={{ fontWeight: 700 }}>{l.item.name}</div>
+              {shade && <SubLine>{shade}</SubLine>}
               <SubLine>
                 {sub}
                 {grn && (

@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { samplingEnabled } from '../lib/pilot'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { lockRequests, requestPools } from './samplePool.service'
 import {
   SAMPLE_OVER_REASON_MIN,
@@ -23,6 +24,12 @@ import {
 
 type Tx = Prisma.TransactionClient
 const round3 = (v: number) => Math.round(v * 1000) / 1000
+
+/** An item named in a message: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const itemInWords = (i: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null }) => {
+  const shade = itemShadeText(i)
+  return shade ? `${i.name} (${shade})` : i.name
+}
 
 /** How an order line names the sample it buys for: "SMP-… · Body". */
 export const sampleLineSelect = {
@@ -183,7 +190,7 @@ export async function assertSampleLines(
       plannedQty: true,
       issuedQty: true,
       component: true,
-      item: { select: { name: true, uom: { select: { symbol: true } } } },
+      item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
       round: {
         select: {
           state: true,
@@ -204,7 +211,7 @@ export async function assertSampleLines(
         'BAD_SAMPLE_LINE'
       )
     const label = sampleLabel(m)
-    const name = m.item?.name ?? 'its material'
+    const name = m.item ? itemInWords(m.item) : 'its material'
     const unit = m.item?.uom?.symbol ?? ''
     if (m.itemId !== l.itemId)
       throw new AppError(
@@ -260,7 +267,7 @@ export async function assertSampleLines(
     const total = round3(group.reduce((t, g) => t + g.l.qty, 0))
     const over = total > open + 1e-9
     const { m } = group[0]
-    const name = m.item?.name ?? 'its material'
+    const name = m.item ? itemInWords(m.item) : 'its material'
     const unit = m.item?.uom?.symbol ?? ''
     for (const g of group) {
       const reason = g.l.sampleOverReason?.trim() ?? ''
@@ -286,7 +293,10 @@ export async function assertSampleLines(
  */
 export async function assertGrnSampleStores(
   tx: Tx,
-  prepared: Array<{ warehouseId: string; poLine: { sampleMaterialId?: string | null; item: { name: string } } }>
+  prepared: Array<{
+    warehouseId: string
+    poLine: { sampleMaterialId?: string | null; item: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null } }
+  }>
 ) {
   const ids = [...new Set(prepared.map((p) => p.warehouseId))]
   const stores = new Map(
@@ -299,13 +309,13 @@ export async function assertGrnSampleStores(
     if (!store) continue
     if (p.poLine.sampleMaterialId && store.purpose !== 'SAMPLING')
       throw new AppError(
-        `${p.poLine.item.name} is bought for a sample. Receive it into a sample store, not ${store.name}, so it is kept for that sample.`,
+        `${itemInWords(p.poLine.item)} is bought for a sample. Receive it into a sample store, not ${store.name}, so it is kept for that sample.`,
         409,
         'SAMPLE_GOODS_TO_SAMPLE_STORE'
       )
     if (!p.poLine.sampleMaterialId && store.purpose === 'SAMPLING')
       throw new AppError(
-        `${store.name} is a sample store: only material bought for a sample is received there. Receive ${p.poLine.item.name} into a general store.`,
+        `${store.name} is a sample store: only material bought for a sample is received there. Receive ${itemInWords(p.poLine.item)} into a general store.`,
         409,
         'SAMPLE_STORE'
       )
@@ -337,6 +347,9 @@ export async function sampleNeeds(
               { component: like },
               { item: { name: like } },
               { item: { code: like } },
+              // A fabric's design number or colour finds it too.
+              { item: { designNo: like } },
+              { item: { color: like } },
               { round: { request: { number: like } } },
               { round: { request: { title: like } } },
               { round: { request: { buyerStyleRef: like } } },
@@ -354,6 +367,8 @@ export async function sampleNeeds(
           name: true,
           hsnCode: true,
           categoryId: true,
+          // Which design and colour the sample needs bought.
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
           taxRate: { select: { id: true, rate: true } },
         },

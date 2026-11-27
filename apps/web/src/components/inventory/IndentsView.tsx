@@ -7,6 +7,7 @@ import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { Pagination } from '@/components/tables/Pagination'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { formatDate } from '@/lib/utils'
+import { itemShadeCols, type ShadeFields } from '@/lib/items'
 
 /**
  * Every item still pending, across all open requisitions — the old system's
@@ -15,7 +16,7 @@ import { formatDate } from '@/lib/utils'
  * the requisition to issue, reserve or buy.
  */
 
-interface Row {
+interface Row extends ShadeFields {
   lineId: string
   mrId: string
   mrNumber: string
@@ -111,7 +112,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
     (r: Row, skip?: FilterKey) =>
       (!words.length ||
         words.every((w) =>
-          `${r.mrNumber} ${r.itemCode} ${r.itemName} ${r.styleNo ?? ''} ${r.departmentName} ${r.customerName ?? ''} ${r.soNumber ?? ''} ${r.poNumbers ?? ''}`.toLowerCase().includes(w),
+          `${r.mrNumber} ${r.itemCode} ${r.itemName} ${itemShadeCols(r).designNo} ${itemShadeCols(r).colour} ${r.styleNo ?? ''} ${r.departmentName} ${r.customerName ?? ''} ${r.soNumber ?? ''} ${r.poNumbers ?? ''}`.toLowerCase().includes(w),
         )) &&
       (Object.entries(picked) as Array<[FilterKey, string[]]>).every(([k, v]) => k === skip || !v?.length || v.includes(valueOf[k](r))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -159,6 +160,8 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
           'Sales Order': r.soNumber ?? '',
           'Item Code': r.itemCode,
           'Item Name': r.itemName,
+          'Design No.': itemShadeCols(r).designNo,
+          Colour: itemShadeCols(r).colour,
           'Style No': r.styleNo ?? '',
           Unit: r.uom,
           Whose: r.ownership === 'CUSTOMER_OWNED' ? "Customer's material" : 'Ours',
@@ -175,7 +178,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
           Status: STATE[stateOf(r)].label,
         })),
       )
-      sheet['!cols'] = [16, 11, 11, 16, 24, 14, 14, 30, 6, 18, 12, 12, 10, 12, 11, 10, 11, 11, 12, 20, 22].map((wch) => ({ wch }))
+      sheet['!cols'] = [16, 11, 11, 16, 24, 14, 14, 30, 12, 12, 6, 18, 12, 12, 10, 12, 11, 10, 11, 11, 12, 20, 22].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Indents')
       XLSX.writeFile(book, `indents-${dayKey(new Date())}.xlsx`)
@@ -268,6 +271,8 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
                     <th className="whitespace-nowrap">Department</th>
                     <th className="whitespace-nowrap">For</th>
                     <th className="whitespace-nowrap">Item</th>
+                    <th className="whitespace-nowrap">Design No.</th>
+                    <th className="whitespace-nowrap">Colour</th>
                     <th className="whitespace-nowrap">Style no.</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Available</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Asked</th>
@@ -304,6 +309,8 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
                             {r.ownership === 'CUSTOMER_OWNED' && <span className="font-sans text-sky-600"> · customer&apos;s material</span>}
                           </div>
                         </td>
+                        <td className="whitespace-nowrap text-sm">{itemShadeCols(r).designNo || dash}</td>
+                        <td className="whitespace-nowrap text-sm">{itemShadeCols(r).colour || dash}</td>
                         <td className="whitespace-nowrap font-mono text-xs font-semibold">{r.styleNo ?? dash}</td>
                         <td className={num}>
                           <span className={r.available + 1e-9 >= needed(r) ? 'font-semibold text-emerald-600' : 'font-semibold text-red-500'}>{qtyFmt(r.available)}</span>{' '}

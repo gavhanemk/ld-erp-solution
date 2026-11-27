@@ -409,6 +409,12 @@ export default function BomPage() {
                               <Layers size={15} className="shrink-0 text-primary" />
                               <span className="font-mono text-sm font-semibold text-primary">{bom.style?.code}</span>
                               <span className="text-sm font-medium text-foreground">{bom.style?.name}</span>
+                              {/* The BOM's brand is its style's; the VHAGAR mark already says that one. */}
+                              {bom.style?.brand && !(bom.style.brandType === 'VHAGAR' && /^vhagar$/i.test(bom.style.brand.name.trim())) && (
+                                <span className="text-xs text-muted-foreground">
+                                  Brand: <span className="text-foreground">{bom.style.brand.name}</span>
+                                </span>
+                              )}
                               {bom.style?.brandType === 'VHAGAR' && <span className="vhagar-accent text-xs font-bold">VHAGAR</span>}
                               <span className="rounded-full border border-border bg-card px-2 py-0.5 text-[11px] text-muted-foreground tabular-nums">
                                 {mine.length} {mine.length === 1 ? 'BOM' : 'BOMs'}

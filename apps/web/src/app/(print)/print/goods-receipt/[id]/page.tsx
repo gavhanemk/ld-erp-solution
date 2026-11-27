@@ -1,6 +1,7 @@
 'use client'
 
 import { inPack, ratePer } from '@/lib/packs'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
@@ -72,15 +73,13 @@ interface GrnLine {
   gross: number
   discountAmount: number
   taxable: number
+  /** A fabric's design and colour (a thread's colour) come with it, from Masters → Items. */
   item: {
     code: string
     name: string
     hsnCode: string | null
     uom: { symbol: string } | null
-    /** A fabric's own stock line carries its design and colour, when the API sends them. */
-    designNo?: string | null
-    color?: string | null
-  }
+  } & ShadeFields
   /** The order's pack (a box of 20 pcs): quantities are in pieces, the rate per pack. */
   uomFactor?: string | number
   uom?: { symbol: string } | null
@@ -240,7 +239,8 @@ export default function PrintGoodsReceipt() {
     const rejected = Number(line.rejectedQty)
     const arrivedInPack = inPack({ ...line, qty: line.receivedQty })
     const per = ratePer(line)
-    const shade = [line.item.designNo && `D.${line.item.designNo.replace(/^d\.?\s*/i, '')}`, line.item.color].filter(Boolean).join(' / ')
+    // "Design No: 1164 · Colour: Navy", exactly as typed in the Items master.
+    const shade = itemShade(line.item)
     return {
       key: line.id,
       cells: {

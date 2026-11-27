@@ -3,12 +3,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ArrowRight, Loader2, Printer, Tags } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { StepInput } from '@/components/ui/StepInput'
 import { FifoOverride, isFifoStop } from './FifoOverride'
 import { openPrintTab, packCount, printOutward, qtyText, type OutwardRef } from './packageTypes'
 
-interface Spot {
+interface Spot extends ShadeFields {
   key: string
   item: string
   itemCode: string
@@ -23,11 +24,13 @@ interface Plan {
   to: string
   /** The stock only moved to another store, so whole rolls go with it. */
   moves: boolean
-  lines: Array<{ key: string; item: string; itemCode: string; qty: number; unit: string; from: string; owner: string | null }>
+  lines: Array<{ key: string; item: string; itemCode: string; qty: number; unit: string; from: string; owner: string | null } & ShadeFields>
   spots: Spot[]
 }
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
+/** An item in a sentence, with its design and colour: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const named = (s: { item: string } & ShadeFields) => (itemShade(s) ? `${s.item} (${itemShade(s)})` : s.item)
 
 /**
  * The labels after stock goes out, one card per item, in plain words.
@@ -80,7 +83,7 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
       const tooMuch = s.packages.find((p) => (Number(takes[p.id]) || 0) > p.qty + 1e-9)
       if (tooMuch) return `${tooMuch.code} has only ${qtyText(tooMuch.qty)} ${s.unit} in it.`
       const total = r3(s.packages.reduce((sum, p) => sum + (Number(takes[p.id]) || 0), 0))
-      if (total > s.over + 1e-6) return `${s.item}: only ${qtyText(s.over)} ${s.unit} went out.`
+      if (total > s.over + 1e-6) return `${named(s)}: only ${qtyText(s.over)} ${s.unit} went out.`
       return null
     })
     .find(Boolean)
@@ -108,7 +111,7 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
         takes: chosen.map(({ p, qty }) => ({ packageId: p.id, qty })),
         ...(fifoReason ? { fifoReason } : {}),
       })
-      onDone(`No labels printed. The stickers on ${plan.spots.map((s) => s.item).join(', ')} now match the stock.`)
+      onDone(`No labels printed. The stickers on ${plan.spots.map(named).join(', ')} now match the stock.`)
     } catch (err) {
       if (err instanceof ApiError && isFifoStop(err.code)) setFifo({ message: err.message, retry: (r) => void skip(r) })
       else setError(err instanceof ApiError ? err.message : 'Could not update the stickers.')
@@ -304,6 +307,7 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
                 </span>
               </span>
             </div>
+            {itemShade(l) && <p className="text-muted-foreground text-xs">{itemShade(l)}</p>}
             <p className="text-muted-foreground mt-1.5 flex items-center gap-1.5 text-sm">
               <Tags size={14} className="text-primary shrink-0" />
               <span>
@@ -316,6 +320,7 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
         {loose.map((s) => (
           <div key={s.key} className="border-border bg-card rounded-xl border p-3">
             <p className="text-foreground text-sm font-semibold">{s.item}</p>
+            {itemShade(s) && <p className="text-muted-foreground text-xs">{itemShade(s)}</p>}
             {spotBlock(s)}
           </div>
         ))}

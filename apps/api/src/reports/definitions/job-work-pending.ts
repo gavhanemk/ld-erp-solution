@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { dateRangeFilters, periodLabel, round2 } from './shared'
+import { ITEM_SHADE } from '../../lib/fabric'
+import { dateRangeFilters, periodLabel, round2, shadeColumns, shadeOf } from './shared'
 import { daysBetween, pctOf, rupees } from './inventory-shared'
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
@@ -56,6 +57,7 @@ export const jobWorkPending: ReportDefinition = {
     { key: 'owner', label: 'Whose', type: 'text', width: 20 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item Sent', type: 'text', width: 28 },
+    ...shadeColumns,
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'sent', label: 'Sent', type: 'qty', total: 'sum' },
     { key: 'settled', label: 'Accounted For', type: 'qty', total: 'sum' },
@@ -120,7 +122,7 @@ export const jobWorkPending: ReportDefinition = {
         unitRate: true,
         ownership: true,
         ownerCustomer: { select: { name: true } },
-        item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+        item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
         challan: {
           select: { challanNumber: true, challanDate: true, process: true, expectedBackOn: true, jobWorker: { select: { name: true } } },
         },
@@ -157,6 +159,7 @@ export const jobWorkPending: ReportDefinition = {
         owner: l.ownership === 'CUSTOMER_OWNED' ? (l.ownerCustomer?.name ?? 'A customer') : 'Ours',
         itemCode: l.item.code,
         item: l.item.name,
+        ...shadeOf(l.item),
         uom: l.item.uom?.symbol ?? '',
         sent: r3(sent),
         settled: r3(settled),
@@ -228,6 +231,9 @@ export const jobWorkPending: ReportDefinition = {
           owner: o.mo.so?.isJobWork ? o.mo.so.customer.name : 'Ours',
           itemCode: styles.map((s) => s.code).join(', '),
           item: `${styles.map((s) => s.name).join(', ') || 'Pieces'} — ${o.mo.moNumber}`,
+          // Garment pieces: the colour is the style's own.
+          designNo: '',
+          colour: '',
           uom: 'pcs',
           sent,
           settled,

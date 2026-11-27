@@ -44,7 +44,10 @@ export function SheetHeader({ d, step }: { d: JobCardDetail; step?: FlowStep }) 
         {facts.map(([label, value]) => (
           <div key={label} className="min-w-0">
             <dt className="text-muted-foreground text-[11px]">{label}</dt>
-            <dd className="text-foreground truncate font-medium">{value}</dd>
+            {/* Cut short to fit, in full on hover: a fabric quality now carries its design and colour. */}
+            <dd className="text-foreground truncate font-medium" title={typeof value === 'string' ? value : undefined}>
+              {value}
+            </dd>
           </div>
         ))}
       </dl>

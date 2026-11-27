@@ -17,7 +17,9 @@ import {
   RULE,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
+import { SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 interface Payload {
   company: Record<string, string | null>
@@ -68,7 +70,7 @@ interface Payload {
       releasedQty: string
       batchNumber: string | null
       markings: string | null
-      item: { code: string; name: string; uom: { symbol: string } | null }
+      item: { code: string; name: string; uom: { symbol: string } | null } & ShadeFields
     }>
     packages: Array<{ code: string; itemId: string; qty: string; initialQty: string; grade: string; status: string }>
   }
@@ -131,6 +133,7 @@ export default function PrintCustomerGrn() {
             <div style={{ fontWeight: 600 }}>
               <span style={CODE}>{l.item.code}</span> {l.item.name}
             </div>
+            {itemShade(l.item) && <SubLine>{itemShade(l.item)}</SubLine>}
             {(l.batchNumber || l.markings) && <div style={{ fontSize: '9px', color: GREY }}>{[l.batchNumber && `Lot ${l.batchNumber}`, l.markings].filter(Boolean).join(' · ')}</div>}
             {codes.length > 0 && (
               <div style={{ fontSize: '8.5px', color: GREY, marginTop: '2px', lineHeight: 1.45 }}>

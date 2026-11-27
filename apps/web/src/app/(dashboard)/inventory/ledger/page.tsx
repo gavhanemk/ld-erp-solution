@@ -17,6 +17,7 @@ import {
   CategoryTreemap, DepartmentRadar, DocumentBars, FlowChart, MovementDonut, StoreColumns,
 } from '@/components/inventory/LedgerCharts'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
 
 /**
  * Every stock movement there has ever been.
@@ -41,7 +42,7 @@ interface Row {
   transactionDate: string
   notes: string | null
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
-  item: { id: string; code: string; name: string; uom: { symbol: string } }
+  item: ShadeFields & { id: string; code: string; name: string; uom: { symbol: string } }
   warehouse: { id: string; name: string }
   ownerCustomer: { id: string; name: string } | null
   itemType: string
@@ -104,7 +105,7 @@ interface Analysis {
   byCategory: Group[]
   byDepartment: Group[]
   byDocument: Group[]
-  topItems: Array<Group & { code: string; uom: string; inQty: number; outQty: number }>
+  topItems: Array<Group & ShadeFields & { code: string; uom: string; inQty: number; outQty: number }>
 }
 
 interface LedgerResponse {
@@ -548,6 +549,8 @@ function LedgerScreen() {
             'Party Type': m.party?.kind ? PARTY_KIND[m.party.kind] : '',
             'Item Code': m.item.code,
             'Item Name': m.item.name,
+            'Design No.': itemShadeCols(m.item).designNo,
+            Colour: itemShadeCols(m.item).colour,
             Type: TYPE_LABEL[m.itemType] ?? m.itemType,
             Category: m.mainCategoryName,
             'Sub Category': m.subCategoryName ?? '',
@@ -564,7 +567,7 @@ function LedgerScreen() {
           }
         }),
       )
-      sheet['!cols'] = [11, 7, 14, 24, 16, 28, 12, 14, 32, 13, 18, 18, 14, 22, 20, 9, 9, 7, 10, 10, 12, 50].map((wch) => ({ wch }))
+      sheet['!cols'] = [11, 7, 14, 24, 16, 28, 12, 14, 32, 12, 12, 13, 18, 18, 14, 22, 20, 9, 9, 7, 10, 10, 12, 50].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Inward & Outward')
       XLSX.writeFile(book, `inward-outward-${iso(new Date())}.xlsx`)
@@ -771,6 +774,7 @@ function LedgerScreen() {
         <div className="flex items-center justify-between p-3 rounded-lg border border-border bg-secondary">
           <p className="text-sm text-foreground">
             Showing only <span className="font-medium">{rows[0].item.name}</span>{' '}
+            {itemShade(rows[0].item) && <span className="text-xs text-muted-foreground">{itemShade(rows[0].item)} </span>}
             <span className="font-mono text-xs text-muted-foreground">{rows[0].item.code}</span>
           </p>
           <Link href="/inventory/ledger" className="text-xs text-teal-400 hover:underline">
@@ -925,6 +929,8 @@ function LedgerScreen() {
                       <th className="whitespace-nowrap">#</th>
                       <th className="whitespace-nowrap">Code</th>
                       <th className="whitespace-nowrap">Item</th>
+                      <th className="whitespace-nowrap">Design No.</th>
+                      <th className="whitespace-nowrap">Colour</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Came in</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Went out</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Value in</th>
@@ -946,6 +952,8 @@ function LedgerScreen() {
                         <td className="text-xs text-muted-foreground tabular-nums">{n + 1}</td>
                         <td className="whitespace-nowrap font-mono text-xs text-teal-500">{t.code}</td>
                         <td className="min-w-[180px] text-sm font-medium text-foreground">{t.label}</td>
+                        <td className="whitespace-nowrap text-xs">{itemShadeCols(t).designNo || <span className="text-muted-foreground">—</span>}</td>
+                        <td className="whitespace-nowrap text-xs">{itemShadeCols(t).colour || <span className="text-muted-foreground">—</span>}</td>
                         <td className="whitespace-nowrap text-right tabular-nums text-emerald-500">
                           {t.inQty > 0 ? `+${qtyFmt(t.inQty)} ${t.uom}` : '—'}
                         </td>
@@ -988,6 +996,8 @@ function LedgerScreen() {
                   <th className="whitespace-nowrap">Party</th>
                   <th className="whitespace-nowrap">Code</th>
                   <th className="whitespace-nowrap">Item</th>
+                  <th className="whitespace-nowrap">Design No.</th>
+                  <th className="whitespace-nowrap">Colour</th>
                   <th className="whitespace-nowrap">Category</th>
                   <th className="whitespace-nowrap">Sub-cat.</th>
                   <th className="whitespace-nowrap">Dept.</th>
@@ -1012,7 +1022,7 @@ function LedgerScreen() {
                     const d = byDay.get(day)
                     out.push(
                       <tr key={`day-${day}`} className="bg-secondary/60">
-                        <td colSpan={16} className="py-1.5">
+                        <td colSpan={18} className="py-1.5">
                           <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs">
                             <span className="font-semibold text-foreground">{dayTitle(day)}</span>
                             {d && (
@@ -1075,6 +1085,8 @@ function LedgerScreen() {
                           {r.item.name}
                         </Link>
                       </td>
+                      <td className="whitespace-nowrap text-xs">{itemShadeCols(r.item).designNo || <span className="text-muted-foreground">—</span>}</td>
+                      <td className="whitespace-nowrap text-xs">{itemShadeCols(r.item).colour || <span className="text-muted-foreground">—</span>}</td>
                       <td className="text-xs">{r.mainCategoryName}</td>
                       <td className="text-xs">{r.subCategoryName ?? <span className="text-muted-foreground">—</span>}</td>
                       <td className="text-xs">{r.departmentName ?? <span className="text-muted-foreground">—</span>}</td>

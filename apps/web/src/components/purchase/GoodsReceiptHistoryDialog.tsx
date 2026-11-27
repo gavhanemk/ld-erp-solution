@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { AlertCircle, Calendar, Loader2, PackageCheck, Truck, X } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 interface HistoryLine {
   id: string
@@ -14,7 +15,7 @@ interface HistoryLine {
   rejectedQty: string | number
   acceptedQty: string | number
   batchNumber?: string | null
-  item: { id: string; code: string; name: string; uom?: { symbol: string } | null }
+  item: { id: string; code: string; name: string; uom?: { symbol: string } | null } & ShadeFields
   warehouse?: { id: string; name: string } | null
 }
 
@@ -126,6 +127,8 @@ export function GoodsReceiptHistoryDialog({
       string,
       {
         name: string
+        /** Its design and colour, so two lines of one fabric name read apart. */
+        shade: string
         code: string
         uom: string
         ordered: number
@@ -141,6 +144,7 @@ export function GoodsReceiptHistoryDialog({
         const key = line.poLineId ?? line.item.id
         const row = rows.get(key) ?? {
           name: line.item.name,
+          shade: itemShade(line.item),
           code: line.item.code,
           uom: line.item.uom?.symbol ?? '',
           ordered: Number(line.orderedQty),
@@ -241,6 +245,9 @@ export function GoodsReceiptHistoryDialog({
                           <tr key={row.code + row.name}>
                             <td>
                               <div className="text-foreground">{row.name}</div>
+                              {row.shade && (
+                                <div className="text-muted-foreground text-[10px]">{row.shade}</div>
+                              )}
                               <div className="text-muted-foreground font-mono text-[10px]">
                                 {row.code}
                               </div>
@@ -348,6 +355,9 @@ export function GoodsReceiptHistoryDialog({
                               <tr key={line.id}>
                                 <td>
                                   <div className="text-foreground">{line.item.name}</div>
+                                  {itemShade(line.item) && (
+                                    <div className="text-muted-foreground text-[10px]">{itemShade(line.item)}</div>
+                                  )}
                                   <div className="text-muted-foreground font-mono text-[10px]">
                                     {line.item.code}
                                     {line.batchNumber ? ` · batch ${line.batchNumber}` : ''}

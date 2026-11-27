@@ -5,6 +5,7 @@ import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
+import { ITEM_SHADE } from '../lib/fabric'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, recordMovement } from '../services/stock.service'
@@ -17,6 +18,7 @@ import {
   adjustableOn,
   DOC_RULES,
   effectFor,
+  lineItemName,
   priceNote,
   REASON_RULES,
   taxContextFor,
@@ -116,7 +118,9 @@ const returnInclude = {
         },
       },
       item: {
-        select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
+        // Design No. and Colour, so the list and the printed challan tell
+        // same-name fabrics apart.
+        select: { id: true, code: true, name: true, uom: { select: { symbol: true } }, ...ITEM_SHADE },
       },
       warehouse: { select: { id: true, code: true, name: true } },
     },
@@ -487,7 +491,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       const unit = a.uom ? ` ${a.uom}` : ''
       if (qty > a.remainingQty + 0.0005) {
         throw new AppError(
-          `Only ${a.remainingQty}${unit} of ${a.itemName} can still go back against ${bill.billNumber}` +
+          `Only ${a.remainingQty}${unit} of ${lineItemName(a)} can still go back against ${bill.billNumber}` +
             (a.adjustedQty > 0
               ? ` — ${a.billedQty}${unit} was billed and ${a.adjustedQty}${unit} is already on returns or notes.`
               : '.') +
@@ -500,7 +504,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       const value = round2((qty / a.packFactor) * a.billedRate)
       if (value > a.remainingValue + 0.005) {
         throw new AppError(
-          `${a.itemName} has ₹${a.remainingValue.toLocaleString('en-IN')} left to claim on ${bill.billNumber}, ` +
+          `${lineItemName(a)} has ₹${a.remainingValue.toLocaleString('en-IN')} left to claim on ${bill.billNumber}, ` +
             `and ${round3(qty)}${unit} at the bill's rate comes to ₹${value.toLocaleString('en-IN')}. ` +
             `An earlier note has already claimed part of this line's value.`,
           400,

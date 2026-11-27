@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { dateRangeFilters, periodLabel, round2 } from './shared'
+import { ITEM_SHADE } from '../../lib/fabric'
+import { dateRangeFilters, periodLabel, round2, shadeColumns, shadeOf } from './shared'
 import { daysBetween, pctOf, warehouseFilter } from './inventory-shared'
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
@@ -43,6 +44,7 @@ export const requisitionFulfilment: ReportDefinition = {
     { key: 'department', label: 'Department', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'styleNo', label: 'Style No.', type: 'text', width: 14 },
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
@@ -93,7 +95,7 @@ export const requisitionFulfilment: ReportDefinition = {
         requestedQty: true,
         issuedQty: true,
         styleNo: true,
-        item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+        item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
         warehouse: { select: { name: true } },
         mr: {
           select: {
@@ -141,6 +143,7 @@ export const requisitionFulfilment: ReportDefinition = {
         department: l.mr.department?.name ?? '',
         itemCode: l.item.code,
         item: l.item.name,
+        ...shadeOf(l.item),
         styleNo: l.styleNo ?? '',
         store: l.warehouse.name,
         uom: l.item.uom?.symbol ?? '',

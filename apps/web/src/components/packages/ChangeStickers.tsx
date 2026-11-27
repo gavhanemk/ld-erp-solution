@@ -3,11 +3,12 @@
 import { useQtyRules } from '@/lib/qtyRules'
 import { useState } from 'react'
 import { api, ApiError } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { openPrintTab, printLabels, qtyText } from './packageTypes'
 import { newPack, PackagingDialog, type PackPlan, type PackValue } from './PackagingEditor'
 
 /** One line's stickers, as Ready to print and the window after stock comes in list them. */
-export interface StickerLine {
+export interface StickerLine extends ShadeFields {
   ids: string[]
   item: string
   unit: string
@@ -72,7 +73,7 @@ export function ChangeStickers({
   return (
     <PackagingDialog
       title="Change stickers"
-      subtitle={`${line.item} · ${qtyText(line.qty)} ${line.unit}${line.sourceRef ? ` · ${line.sourceRef}` : ''} · now on ${line.ids.length} ${line.ids.length === 1 ? 'sticker' : 'stickers'}`}
+      subtitle={`${line.item}${itemShade(line) ? ` (${itemShade(line)})` : ''} · ${qtyText(line.qty)} ${line.unit}${line.sourceRef ? ` · ${line.sourceRef}` : ''} · now on ${line.ids.length} ${line.ids.length === 1 ? 'sticker' : 'stickers'}`}
       initial={initial}
       total={line.qty}
       unit={line.unit}

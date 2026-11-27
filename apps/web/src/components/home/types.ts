@@ -86,7 +86,8 @@ export interface HomeData {
     byType: Array<{ type: string; label: string; value: number; items: number }>
     toReorder: number
     comingUp: number
-    reorder: Array<{ itemId: string; name: string; uom: string; onHand: number; reorderLevel: number; cover: number; low: boolean }>
+    /** With a fabric's design no. and colour (optional), so same-name items read apart. */
+    reorder: Array<{ itemId: string; name: string; uom: string; onHand: number; reorderLevel: number; cover: number; low: boolean; designNo?: string | null; color?: string | null; styleId?: string | null }>
     mrPending: number
     mrToIssue: number
     jobWorkOpen: number

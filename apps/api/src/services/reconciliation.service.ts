@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 
 /**
  * Closing an order with everything accounted for.
@@ -56,7 +57,8 @@ export async function orderReconciliation(db: Db, soId: string) {
 
   // Its requisitions: raised for it, or for one of its manufacturing orders.
   const forOrder = { OR: [{ soId }, { mo: { soId } }] }
-  const itemSelect = { select: { code: true, name: true, uom: { select: { symbol: true } } } }
+  // With its design and colour: two of the customer's fabrics may share a name.
+  const itemSelect = { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } }
 
   const [grnLines, issueLines, cmrLines, cuttings, fgLines, damaged, openOrders, jwChallans, moLines, ownLines, mrs, ownBilled] = await Promise.all([
     db.customerGRNLine.findMany({
@@ -222,7 +224,7 @@ export async function orderReconciliation(db: Db, soId: string) {
     if (!bomLines.some((b) => b.componentItemId === itemId)) bomForOrder = null
 
     return {
-      item: { id: itemId, code: info.code, name: info.name, uom: info.uom?.symbol ?? null },
+      item: { id: itemId, code: info.code, name: info.name, designNo: info.designNo, color: info.color, styleId: info.styleId, uom: info.uom?.symbol ?? null },
       challan,
       shortOnChallan: round3(Math.max(0, challan - received)),
       received,
@@ -274,7 +276,7 @@ export async function orderReconciliation(db: Db, soId: string) {
       const qty = round3(ls.reduce((s, l) => s + Number(l.issuedQty) - Number(l.returnedQty), 0))
       const value = round2(ownValue.filter((r) => r.itemId === itemId).reduce((s, r) => s + (Number(r.outQty) - Number(r.inQty)) * Number(r.unitRate ?? 0), 0))
       const it = ls[0].item
-      return { item: { id: itemId, code: it.code, name: it.name, uom: it.uom?.symbol ?? null }, qty, value }
+      return { item: { id: itemId, code: it.code, name: it.name, designNo: it.designNo, color: it.color, styleId: it.styleId, uom: it.uom?.symbol ?? null }, qty, value }
     })
     .filter((m) => m.qty > 0.0005)
 
@@ -339,10 +341,13 @@ export function materialGaps(r: Awaited<ReturnType<typeof orderReconciliation>>)
     const q = (n: number) => `${n.toLocaleString('en-IN', { maximumFractionDigits: 3 })}${unit ? ` ${unit}` : ''}`
     const gaps: MaterialGap[] = []
     const base = { itemId: f.item.id, item: f.item.name, unit }
-    if (f.unaccounted > 0.0005) gaps.push({ ...base, kind: 'MISSING', qty: f.unaccounted, text: `${q(f.unaccounted)} of ${f.item.name} is missing: the customer has less with us than this order's receipts leave` })
-    if (f.issuedNotCut > 0.0005) gaps.push({ ...base, kind: 'ON_FLOOR', qty: f.issuedNotCut, text: `${q(f.issuedNotCut)} of ${f.item.name} was issued to production and neither cut nor brought back` })
+    // Named with its design and colour, so two fabrics of one name are told apart.
+    const shade = itemShadeText(f.item)
+    const name = shade ? `${f.item.name} (${shade})` : f.item.name
+    if (f.unaccounted > 0.0005) gaps.push({ ...base, kind: 'MISSING', qty: f.unaccounted, text: `${q(f.unaccounted)} of ${name} is missing: the customer has less with us than this order's receipts leave` })
+    if (f.issuedNotCut > 0.0005) gaps.push({ ...base, kind: 'ON_FLOOR', qty: f.issuedNotCut, text: `${q(f.issuedNotCut)} of ${name} was issued to production and neither cut nor brought back` })
     const withUs = round3(Math.max(0, f.leftForOrder - f.unaccounted))
-    if (withUs > 0.0005) gaps.push({ ...base, kind: 'WITH_US', qty: withUs, text: `${q(withUs)} of ${f.item.name} is still with us for this order, in a store or at a job worker${f.rejected - f.released - f.returnedRejected > 0.0005 ? ' (rejected material included)' : ''}: send it back to the customer` })
+    if (withUs > 0.0005) gaps.push({ ...base, kind: 'WITH_US', qty: withUs, text: `${q(withUs)} of ${name} is still with us for this order, in a store or at a job worker${f.rejected - f.released - f.returnedRejected > 0.0005 ? ' (rejected material included)' : ''}: send it back to the customer` })
     return gaps
   })
 }

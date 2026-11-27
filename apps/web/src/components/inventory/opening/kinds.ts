@@ -1,4 +1,5 @@
 import { Factory, Package, Shirt, Wrench, type LucideIcon } from 'lucide-react'
+import type { ShadeFields } from '@/lib/items'
 
 /*
  * The three kinds opening stock is entered as, each with its own screen and
@@ -73,7 +74,8 @@ export interface StyleOption {
   route: Array<{ id: string; name: string }> | null
   routeFrom: { applies: 'STYLE' | 'CATEGORY' | 'ANY'; code: string } | null
 }
-export interface MaterialOption {
+/** With a fabric's design no. and colour: same-name items told apart. */
+export interface MaterialOption extends ShadeFields {
   id: string
   code: string
   name: string

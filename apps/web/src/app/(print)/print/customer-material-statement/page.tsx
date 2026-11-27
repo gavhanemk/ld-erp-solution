@@ -5,7 +5,9 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { StoreSheet, Fact, Eyebrow, qty, longDate, CODE, GREY, INK, MUTED, NAVY, RULE, type SheetColumn } from '@/components/print/StoreSheet'
 import { StatementTable, type StatementRow } from '@/components/print/StatementTable'
+import { SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
 
 interface Move {
   date: string
@@ -22,7 +24,7 @@ interface Move {
   balance: number
 }
 
-interface ItemStatement {
+interface ItemStatement extends ShadeFields {
   itemId: string
   code: string
   name: string
@@ -58,7 +60,7 @@ interface Payload {
   period: { from: string | null; to: string }
   showMoves: boolean
   items: ItemStatement[]
-  withJobWorkers: Array<{
+  withJobWorkers: Array<ShadeFields & {
     challanNumber: string
     challanDate: string
     process: string
@@ -151,6 +153,8 @@ function Statement() {
         data.items.map((i) => ({
           'Item Code': i.code,
           Item: i.name,
+          'Design No.': itemShadeCols(i).designNo,
+          Colour: itemShadeCols(i).colour,
           Unit: i.uom,
           Opening: i.opening,
           Received: i.received,
@@ -172,6 +176,8 @@ function Statement() {
             Date: longDate(r.date),
             'Item Code': i.code,
             Item: i.name,
+            'Design No.': itemShadeCols(i).designNo,
+            Colour: itemShadeCols(i).colour,
             Size: r.size ?? '',
             Document: r.doc ?? '',
             What: r.what,
@@ -191,7 +197,18 @@ function Statement() {
     XLSX.utils.book_append_sheet(
       book,
       XLSX.utils.json_to_sheet(
-        data.items.flatMap((i) => i.where.map((w) => ({ 'Item Code': i.code, Item: i.name, Where: w.store, 'At job worker': w.atJobWorker ? 'Yes' : '', Quantity: w.qty, Unit: i.uom }))),
+        data.items.flatMap((i) =>
+          i.where.map((w) => ({
+            'Item Code': i.code,
+            Item: i.name,
+            'Design No.': itemShadeCols(i).designNo,
+            Colour: itemShadeCols(i).colour,
+            Where: w.store,
+            'At job worker': w.atJobWorker ? 'Yes' : '',
+            Quantity: w.qty,
+            Unit: i.uom,
+          })),
+        ),
       ),
       'Where it is',
     )
@@ -261,6 +278,7 @@ function Statement() {
       item: (
         <>
           <div style={{ fontWeight: 600 }}>{i.name}</div>
+          {itemShade(i) && <SubLine>{itemShade(i)}</SubLine>}
           <div style={{ ...CODE, fontSize: '8.5px', color: GREY }}>{i.code}</div>
         </>
       ),
@@ -277,7 +295,15 @@ function Statement() {
       i.where.map((w, n) => ({
         key: `${i.itemId}-${w.store}`,
         cells: {
-          item: n === 0 ? <span style={{ fontWeight: 600 }}>{i.name}</span> : '',
+          item:
+            n === 0 ? (
+              <>
+                <span style={{ fontWeight: 600 }}>{i.name}</span>
+                {itemShade(i) && <SubLine>{itemShade(i)}</SubLine>}
+              </>
+            ) : (
+              ''
+            ),
           store: (
             <>
               {w.store}
@@ -295,6 +321,7 @@ function Statement() {
       heading: (
         <>
           {i.name} <span style={{ ...CODE, fontWeight: 400, color: GREY }}>{i.code}</span>
+          {itemShade(i) && <span style={{ fontWeight: 400 }}> · {itemShade(i)}</span>}
           <span style={{ float: 'right', fontWeight: 600 }}>
             Opening {qty(i.opening)} {i.uom}
           </span>
@@ -419,7 +446,12 @@ function Statement() {
                       <div style={{ color: GREY, fontSize: '8.5px' }}>{l.process}</div>
                     </>
                   ),
-                  item: l.item,
+                  item: (
+                    <>
+                      {l.item}
+                      {itemShade(l) && <SubLine>{itemShade(l)}</SubLine>}
+                    </>
+                  ),
                   sent: `${qty(l.sent)} ${l.uom}`,
                   pending: <strong>{`${qty(l.pending)} ${l.uom}`}</strong>,
                   due: longDate(l.expectedBackOn) ?? '—',

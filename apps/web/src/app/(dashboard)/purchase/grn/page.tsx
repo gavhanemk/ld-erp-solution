@@ -48,6 +48,15 @@ import { shortCloseNoun, shortCloseVerb, wasNeverReceived } from '@/components/p
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import type { InwardRef } from '@/components/packages/InwardStickers'
 import { StickersReady, printDocStickers } from '@/components/packages/StickersReady'
+import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
+
+/** An item in a list of names: its name, then its design and colour when it has them. */
+const nameWithShade = (it: ({ name: string } & ShadeFields) | null | undefined) =>
+  it ? [it.name, itemShade(it)].filter(Boolean).join(' · ') : undefined
+
+/** An item named in a sentence: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const nameInWords = (it: ({ name: string } & ShadeFields) | null | undefined) =>
+  it ? (itemShade(it) ? `${it.name} (${itemShade(it)})` : it.name) : undefined
 
 /**
  * What has actually turned up against the purchase orders.
@@ -72,7 +81,7 @@ interface ReceiptLine {
     name: string
     hsnCode: string | null
     uom: { symbol: string } | null
-  }
+  } & ShadeFields
   warehouse: { id: string; name: string }
 }
 
@@ -163,13 +172,13 @@ interface WaitingLine {
   shortCloseReason: string | null
   styleNo?: string | null
   style?: { id: string; code: string; name: string } | null
-  item?: {
+  item?: ({
     id: string
     code: string
     name: string
     uom?: { symbol: string } | null
     category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
-  } | null
+  } & ShadeFields) | null
 }
 
 interface WaitingOrder {
@@ -510,7 +519,8 @@ export default function GoodsReceiptPage() {
    * list once and the dropdowns hold everything that went past.
    */
   const seenSuppliers = useRef(new Map<string, string>())
-  const seenItems = useRef(new Map<string, { code: string; name: string }>())
+  // By item, never by name: three "Cotton Twill" in different designs are three options.
+  const seenItems = useRef(new Map<string, { code: string; name: string } & ShadeFields>())
 
   /*
    * Everything that has ever been received, asked for once.
@@ -524,7 +534,7 @@ export default function GoodsReceiptPage() {
    */
   const [receivedEver, setReceivedEver] = useState<{
     suppliers: Array<{ id: string; name: string }>
-    items: Array<{ id: string; code: string; name: string }>
+    items: Array<{ id: string; code: string; name: string } & ShadeFields>
   }>({ suppliers: [], items: [] })
 
   useEffect(() => {
@@ -534,7 +544,7 @@ export default function GoodsReceiptPage() {
         const res = await api.get<{
           data: {
             suppliers: Array<{ id: string; name: string }>
-            items: Array<{ id: string; code: string; name: string }>
+            items: Array<{ id: string; code: string; name: string } & ShadeFields>
           }
         }>('/purchase/grn/filter-options')
         if (!cancelled) setReceivedEver(res.data)
@@ -633,6 +643,9 @@ export default function GoodsReceiptPage() {
     { header: 'Supplier Bill Date', value: ({ g }) => asDate(g.supplierInvoiceDate) },
     { header: 'Item Code', value: ({ l }) => l?.item.code ?? '' },
     { header: 'Item', value: ({ l }) => l?.item.name ?? '' },
+    // A fabric's design and colour, as typed in Masters → Items (blank for anything else).
+    { header: 'Design No.', value: ({ l }) => itemShadeCols(l?.item).designNo },
+    { header: 'Colour', value: ({ l }) => itemShadeCols(l?.item).colour },
     { header: 'UOM', value: ({ l }) => l?.item.uom?.symbol ?? '' },
     { header: 'Ordered', value: ({ l }) => asNumber(l?.orderedQty) },
     { header: 'Received', value: ({ l }) => asNumber(l?.receivedQty) },
@@ -796,18 +809,23 @@ export default function GoodsReceiptPage() {
   /** Every item on order or ever received, in name order, no repeats. */
   const waitingItems = useMemo(() => {
     const seen = seenItems.current
-    for (const it of receivedEver.items) seen.set(it.id, { code: it.code, name: it.name })
+    const keep = (it: { id: string; code: string; name: string } & ShadeFields) =>
+      seen.set(it.id, { code: it.code, name: it.name, designNo: it.designNo, color: it.color, styleId: it.styleId })
+    for (const it of receivedEver.items) keep(it)
     for (const po of waiting) {
       for (const l of po.lines ?? []) {
-        if (l.item) seen.set(l.item.id, { code: l.item.code, name: l.item.name })
+        if (l.item) keep(l.item)
       }
     }
     for (const grn of rows) {
       for (const l of grn.lines) {
-        if (l.item) seen.set(l.item.id, { code: l.item.code, name: l.item.name })
+        if (l.item) keep(l.item)
       }
     }
-    return [...seen].map(([id, v]) => ({ id, ...v })).sort((a, b) => a.name.localeCompare(b.name))
+    // Same-name items sit together, in design and colour order.
+    return [...seen]
+      .map(([id, v]) => ({ id, ...v }))
+      .sort((a, b) => a.name.localeCompare(b.name) || itemShade(a).localeCompare(itemShade(b)))
   }, [waiting, rows, receivedEver])
 
   /*
@@ -840,7 +858,8 @@ export default function GoodsReceiptPage() {
         po.poNumber,
         po.supplier?.name,
         po.reference,
-        ...(po.lines ?? []).flatMap((l) => [l.item?.name, l.item?.code]),
+        // A fabric's design number or colour finds its order too.
+        ...(po.lines ?? []).flatMap((l) => [l.item?.name, l.item?.code, l.item?.designNo, l.item?.color]),
       ]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q))
@@ -1440,7 +1459,7 @@ export default function GoodsReceiptPage() {
             >
               <option value="">All items</option>
               {waitingItems.map((it) => (
-                <option key={it.id} value={it.id}>
+                <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                   {it.name}
                 </option>
               ))}
@@ -1526,7 +1545,7 @@ export default function GoodsReceiptPage() {
                     const groups = qtyByUnit(lines)
                     const anyPending = groups.some((g) => g.pending > 0)
                     const expanded = openOrder === po.id
-                    const items = itemsPreview(lines.map((l) => l.item?.name))
+                    const items = itemsPreview(lines.map((l) => nameWithShade(l.item)))
                     const ordered = qtyPreview(groups, 'ordered')
                     const received = qtyPreview(groups, 'received')
                     const pending = qtyPreview(groups, 'pending')
@@ -1667,6 +1686,9 @@ export default function GoodsReceiptPage() {
                                 <p className="text-foreground text-sm font-medium leading-snug">
                                   {line.item?.name ?? '—'}
                                 </p>
+                                {itemShade(line.item) && (
+                                  <p className="text-muted-foreground mt-0.5 text-[11px]">{itemShade(line.item)}</p>
+                                )}
                                 <p className="text-muted-foreground mt-0.5 truncate text-[10px]">
                                   <span className="font-mono">{line.item?.code ?? '—'}</span>
                                   {(line.style?.code || line.styleNo) && (
@@ -1828,7 +1850,7 @@ export default function GoodsReceiptPage() {
                                         {lines.length} {lines.length === 1 ? 'item' : 'items'}
                                       </div>
                                       {(() => {
-                                        const p = itemsPreview(lines.map((l) => l.item?.name))
+                                        const p = itemsPreview(lines.map((l) => nameWithShade(l.item)))
                                         return (
                                           <div
                                             className="text-muted-foreground truncate text-[10px] leading-tight"
@@ -1980,6 +2002,11 @@ export default function GoodsReceiptPage() {
                                                     <div className="text-foreground truncate text-xs">
                                                       {line.item?.name ?? '—'}
                                                     </div>
+                                                    {itemShade(line.item) && (
+                                                      <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                        {itemShade(line.item)}
+                                                      </div>
+                                                    )}
                                                   </td>
                                                   <td className="px-3 py-1.5 text-xs">
                                                     {line.style?.code || line.styleNo ? (
@@ -2195,7 +2222,7 @@ export default function GoodsReceiptPage() {
                           </dd>
                           <dt className="text-muted-foreground">Items</dt>
                           {(() => {
-                            const p = itemsPreview(grn.lines.map((l) => l.item?.name))
+                            const p = itemsPreview(grn.lines.map((l) => nameWithShade(l.item)))
                             return (
                               <dd className="text-foreground min-w-0 truncate" title={p.full}>
                                 {p.shown}
@@ -2258,6 +2285,9 @@ export default function GoodsReceiptPage() {
                                 <p className="text-foreground text-sm font-medium leading-snug">
                                   {l.item.name}
                                 </p>
+                                {itemShade(l.item) && (
+                                  <p className="text-muted-foreground mt-0.5 text-[11px]">{itemShade(l.item)}</p>
+                                )}
                                 <p className="text-muted-foreground mt-0.5 truncate text-[10px]">
                                   <span className="font-mono">{l.item.code}</span>
                                   {l.warehouse?.name && <> · {l.warehouse.name}</>}
@@ -2469,6 +2499,11 @@ export default function GoodsReceiptPage() {
                                                     <div className="text-foreground">
                                                       {l.item.name}
                                                     </div>
+                                                    {itemShade(l.item) && (
+                                                      <div className="text-muted-foreground text-[10px]">
+                                                        {itemShade(l.item)}
+                                                      </div>
+                                                    )}
                                                     <div className="text-muted-foreground font-mono text-[10px]">
                                                       {l.item.code}
                                                       {l.batchNumber
@@ -2657,8 +2692,8 @@ export default function GoodsReceiptPage() {
         <ReasonDialog
           title={
             lineConfirm.type === 'close'
-              ? `${shortCloseVerb(lineConfirm.line.receivedQty)} ${lineConfirm.line.item?.name ?? 'this line'}?`
-              : `Reopen ${lineConfirm.line.item?.name ?? 'this line'}?`
+              ? `${shortCloseVerb(lineConfirm.line.receivedQty)} ${nameInWords(lineConfirm.line.item) ?? 'this line'}?`
+              : `Reopen ${nameInWords(lineConfirm.line.item) ?? 'this line'}?`
           }
           description={
             lineConfirm.type === 'close'

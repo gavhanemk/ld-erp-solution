@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { inPack } from '@/lib/packs'
-import type { EnquiryLine, EnquiryRecord } from '@/components/purchase/enquiryTypes'
+import { itemShade } from '@/lib/items'
+import type { EnquiryRecord } from '@/components/purchase/enquiryTypes'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import {
   Box,
@@ -168,9 +169,9 @@ export default function PurchaseRequisitionPrintPage() {
   const rows = e.lines.map((l, i) => {
     // Asked in the pack it is bought in: 2 box (= 40 pcs).
     const pack = inPack(l)
-    // A fabric's own stock line carries its design and colour, where the item has them.
-    const it = l.item as EnquiryLine['item'] & { designNo?: string | null; color?: string | null }
-    const shade = [it.designNo && `D.${it.designNo.replace(/^d\.?\s*/i, '')}`, it.color].filter(Boolean).join(' / ')
+    // A fabric's Design No. and Colour (a thread's Colour), exactly as set in
+    // the Items master — the supplier quotes for that design, not the name.
+    const shade = itemShade(l.item)
     return {
       key: l.id,
       cells: {

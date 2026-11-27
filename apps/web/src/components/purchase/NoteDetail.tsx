@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Download, FileText, Loader2, Paperclip } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { itemShade, itemShadeCols } from '@/lib/items'
 import {
   DOC_WORDS,
   EFFECT_WORDS,
@@ -59,6 +60,10 @@ export function NoteDetail({ note }: { note: PurchaseNote }) {
     },
   ].filter((s) => Boolean(s.when))
 
+  /* A fabric's Design No. and Colour beside its name, when a line carries
+     either — same-name fabrics differ only there. */
+  const shaded = note.lines.some((l) => itemShade(l.item))
+
   return (
     <div className="space-y-3 p-3">
       {/* ── What is coming off ──────────────────────────────────────────── */}
@@ -67,6 +72,12 @@ export function NoteDetail({ note }: { note: PurchaseNote }) {
           <thead>
             <tr className="border-border bg-secondary border-b text-left">
               <th className="text-muted-foreground px-2 py-1.5 font-medium">Item</th>
+              {shaded && (
+                <>
+                  <th className="text-muted-foreground px-2 py-1.5 font-medium">Design No.</th>
+                  <th className="text-muted-foreground px-2 py-1.5 font-medium">Colour</th>
+                </>
+              )}
               <th className="text-muted-foreground px-2 py-1.5 text-right font-medium">Billed</th>
               <th className="text-muted-foreground px-2 py-1.5 text-right font-medium">Adjusted</th>
               <th className="text-muted-foreground px-2 py-1.5 text-right font-medium">Rate</th>
@@ -86,6 +97,12 @@ export function NoteDetail({ note }: { note: PurchaseNote }) {
                   </p>
                   {l.remarks && <p className="text-muted-foreground italic">{l.remarks}</p>}
                 </td>
+                {shaded && (
+                  <>
+                    <td className="text-foreground px-2 py-1.5">{itemShadeCols(l.item).designNo}</td>
+                    <td className="text-foreground px-2 py-1.5">{itemShadeCols(l.item).colour}</td>
+                  </>
+                )}
                 <td className="text-muted-foreground px-2 py-1.5 text-right tabular-nums">
                   {l.originalQty != null ? (
                     <>

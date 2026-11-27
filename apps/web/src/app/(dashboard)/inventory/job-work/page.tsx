@@ -19,6 +19,7 @@ import {
   DaysOutBars, DueDonut, GstClock, ProcessPie, SentBackTrend, WasteColumns, WorkerBars,
 } from '@/components/inventory/JobWorkCharts'
 import { formatDate } from '@/lib/utils'
+import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import type { InwardRef } from '@/components/packages/InwardStickers'
 import { StickersReady } from '@/components/packages/StickersReady'
@@ -40,7 +41,7 @@ import type { OutwardRef } from '@/components/packages/packageTypes'
 
 type Status = 'SENT' | 'PARTLY_BACK' | 'CLOSED' | 'CANCELLED'
 
-interface LineRow {
+interface LineRow extends ShadeFields {
   id: string
   challanId: string
   challanNumber: string
@@ -78,7 +79,7 @@ interface LineRow {
   unitRate: number
   settledQty: number
   backSameQty: number
-  madeInto: Array<{ itemName: string; uom: string; qty: number }>
+  madeInto: Array<{ itemName: string; uom: string; qty: number } & ShadeFields>
   wastedQty: number
   /** Spoiled at the unit, and of that not yet charged on a debit note. */
   damagedQty?: number
@@ -308,7 +309,7 @@ function JobWorkScreen() {
   const matchesSearch = useCallback(
     (r: LineRow) => {
       if (!words.length) return true
-      const hay = `${r.challanNumber} ${r.jobWorkerName} ${r.process} ${r.itemCode} ${r.itemName} ${r.hsnCode ?? ''} ${r.vehicleNo ?? ''} ${r.lrNumber ?? ''} ${r.returnNumbers.join(' ')}`.toLowerCase()
+      const hay = `${r.challanNumber} ${r.jobWorkerName} ${r.process} ${r.itemCode} ${r.itemName} ${itemShade(r)} ${r.hsnCode ?? ''} ${r.vehicleNo ?? ''} ${r.lrNumber ?? ''} ${r.returnNumbers.join(' ')}`.toLowerCase()
       return words.every((w) => hay.includes(w))
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -473,6 +474,8 @@ function JobWorkScreen() {
             'Their Store': r.toWarehouseName,
             'Item Code': r.itemCode,
             'Item Name': r.itemName,
+            'Design No.': itemShadeCols(r).designNo,
+            Colour: itemShadeCols(r).colour,
             Category: r.mainCategoryName,
             'Sub Category': r.subCategoryName ?? '',
             Department: r.departmentName ?? '',
@@ -483,7 +486,7 @@ function JobWorkScreen() {
             'Value Sent': Math.round(r.sentQty * r.unitRate * 100) / 100,
             'Settled Qty': r.settledQty,
             'Came Back As Itself': r.backSameQty,
-            'Made Into': r.madeInto.map((m) => `${qtyFmt(m.qty)} ${m.uom} ${m.itemName}`).join('; '),
+            'Made Into': r.madeInto.map((m) => `${qtyFmt(m.qty)} ${m.uom} ${m.itemName}${itemShade(m) ? ` (${itemShade(m)})` : ''}`).join('; '),
             'Wasted Qty': r.wastedQty,
             'Still Out Qty': r.stillOutQty,
             'Value Still Out': Math.round(f.valueOut * 100) / 100,
@@ -501,15 +504,15 @@ function JobWorkScreen() {
           }
         }),
       )
-      sheet['!cols'] = [14, 11, 24, 12, 18, 18, 18, 14, 30, 16, 16, 14, 10, 6, 10, 9, 12, 10, 10, 26, 9, 10, 12, 11, 16, 8, 10, 10, 18, 12, 12, 16, 22, 26].map((wch) => ({ wch }))
+      sheet['!cols'] = [14, 11, 24, 12, 18, 18, 18, 14, 30, 12, 14, 16, 16, 14, 10, 6, 10, 9, 12, 10, 10, 26, 9, 10, 12, 11, 16, 8, 10, 10, 18, 12, 12, 16, 22, 26].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Job Work')
 
       // What each job worker still holds, item by item.
-      const held = new Map<string, { worker: string; code: string; item: string; uom: string; qty: number; value: number; oldest: number }>()
+      const held = new Map<string, { worker: string; code: string; item: string; designNo: string; colour: string; uom: string; qty: number; value: number; oldest: number }>()
       for (const r of outRows) {
         const k = `${r.jobWorkerId}|${r.itemId}`
-        const cur = held.get(k) ?? { worker: r.jobWorkerName, code: r.itemCode, item: r.itemName, uom: r.uom, qty: 0, value: 0, oldest: 0 }
+        const cur = held.get(k) ?? { worker: r.jobWorkerName, code: r.itemCode, item: r.itemName, ...itemShadeCols(r), uom: r.uom, qty: 0, value: 0, oldest: 0 }
         cur.qty += r.stillOutQty
         cur.value += fact(r).valueOut
         cur.oldest = Math.max(cur.oldest, fact(r).daysOut)
@@ -525,6 +528,8 @@ function JobWorkScreen() {
                 'Job Worker': h.worker,
                 'Item Code': h.code,
                 'Item Name': h.item,
+                'Design No.': h.designNo,
+                Colour: h.colour,
                 'Still Out': Math.round(h.qty * 1000) / 1000,
                 Unit: h.uom,
                 Value: Math.round(h.value * 100) / 100,
@@ -1065,6 +1070,7 @@ function JobWorkScreen() {
                             <Link href={`/inventory/stock/${r.itemId}`} className="text-sm font-medium text-foreground hover:text-teal-400">
                               {r.itemName}
                             </Link>
+                            {itemShade(r) && <div className="text-xs text-muted-foreground">{itemShade(r)}</div>}
                           </td>
                           <td className="text-xs">{r.mainCategoryName}</td>
                           <td className="text-xs">{r.subCategoryName ?? <span className="text-muted-foreground">—</span>}</td>
@@ -1080,6 +1086,7 @@ function JobWorkScreen() {
                                 {r.madeInto.map((m) => (
                                   <div key={m.itemName} className="text-[10px] text-sky-500">
                                     as {qtyFmt(m.qty)} {m.uom} {m.itemName}
+                                    {itemShade(m) ? ` (${itemShade(m)})` : ''}
                                   </div>
                                 ))}
                               </>
@@ -1394,7 +1401,7 @@ function JobWorkScreen() {
               id: l.id,
               qty: l.sentQty,
               outstanding: l.stillOutQty,
-              item: { id: l.itemId, name: l.itemName, uom: { symbol: l.uom } },
+              item: { id: l.itemId, name: l.itemName, uom: { symbol: l.uom }, designNo: l.designNo, color: l.color, styleId: l.styleId },
             })),
           }}
           onClose={() => setReceiving(null)}

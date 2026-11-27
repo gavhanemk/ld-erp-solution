@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X, Loader2, AlertCircle, ClipboardCheck, BadgeCheck, Save, CornerUpLeft, Boxes, FileText } from 'lucide-react'
 import { api, ApiError, can, currentUser } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { StepInput } from '@/components/ui/StepInput'
 import { Section } from '@/components/purchase/Section'
 import { formatDate } from '@/lib/utils'
@@ -43,9 +44,12 @@ interface Receipt {
     rejectReason: string | null
     batchNumber: string | null
     markings: string | null
-    item: { code: string; name: string; uom: { symbol: string } | null }
+    item: { code: string; name: string; uom: { symbol: string } | null } & ShadeFields
   }>
 }
+
+/** An item in a sentence, with its design and colour: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const named = (i: { name: string } & ShadeFields) => (itemShade(i) ? `${i.name} (${itemShade(i)})` : i.name)
 
 interface Check {
   rejected: string
@@ -104,8 +108,8 @@ export function CustomerGrnQcDialog({
     if (!grn) return null
     for (const [i, l] of grn.lines.entries()) {
       const r = num(checks[i]?.rejected ?? '')
-      if (r > Number(l.receivedQty) + 1e-9) return `${l.item.name}: only ${fmt(Number(l.receivedQty))} arrived, so no more than that can be rejected.`
-      if (r > 0 && !checks[i]?.reason.trim()) return `${l.item.name}: say why it was rejected — torn, stained, wrong shade.`
+      if (r > Number(l.receivedQty) + 1e-9) return `${named(l.item)}: only ${fmt(Number(l.receivedQty))} arrived, so no more than that can be rejected.`
+      if (r > 0 && !checks[i]?.reason.trim()) return `${named(l.item)}: say why it was rejected — torn, stained, wrong shade.`
     }
     return null
   })()
@@ -256,6 +260,7 @@ export function CustomerGrnQcDialog({
                           <tr key={l.id} className="align-top">
                             <td className="min-w-[200px]">
                               <div className="text-foreground text-sm font-medium">{l.item.name}</div>
+                              {itemShade(l.item) && <div className="text-muted-foreground text-xs">{itemShade(l.item)}</div>}
                               <div className="text-muted-foreground font-mono text-[11px]">
                                 {l.item.code}
                                 {l.batchNumber ? ` · lot ${l.batchNumber}` : ''}

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Loader2, Plus, Trash2, Copy, Send, Undo2, Factory, Truck, Boxes, FileText } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -39,7 +40,7 @@ interface Category {
   parent?: { id: string; name: string } | null
 }
 
-interface ItemOption extends Option {
+interface ItemOption extends Option, ShadeFields {
   code?: string
   uom?: { symbol: string } | null
   category?: Category | null
@@ -75,6 +76,8 @@ interface OrderOption {
 }
 
 const num = (v: string) => Number(v) || 0
+/** An item in a sentence, with its design and colour: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const named = (i: { name: string } & ShadeFields) => (itemShade(i) ? `${i.name} (${itemShade(i)})` : i.name)
 const fmt = (v: number) => v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
 
 /** The main category and sub-category of an item: a category with a parent is a sub-category. */
@@ -139,14 +142,15 @@ export function SendJobWorkDialog({
         const [s, i, w, o] = await Promise.all([
           // Active only: a switched-off unit, item or store is not offered for anything new.
           masterResource<Option>('suppliers').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
-          masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
+          // Every item, not the first 200: one fabric item a design and colour reaches that soon.
+          everyItem<ItemOption>({ active: true, sort: 'name', order: 'asc' }),
           masterResource<Option>('warehouses').list({ limit: 100, active: true }),
           // Open sales orders, for the optional "for order" link. Without Sales rights, none.
           api.get<{ data: OrderOption[] }>('/sales/orders/options?open=1').catch(() => ({ data: [] as OrderOption[] })),
         ])
         if (cancelled) return
         setWorkers(s.data)
-        setItems(i.data)
+        setItems(i)
         setWarehouses(w.data)
         setOrders(o.data)
       } catch {
@@ -239,7 +243,7 @@ export function SendJobWorkDialog({
     const over = filled.find((l) => num(l.qty) > onHand(l) + 1e-9)
     if (over) {
       const it = items.find((x) => x.id === over.itemId)
-      return setError(`${fromName} has only ${fmt(onHand(over))} ${it?.uom?.symbol ?? ''} of ${it?.name ?? 'that item'} for that owner.`)
+      return setError(`${fromName} has only ${fmt(onHand(over))} ${it?.uom?.symbol ?? ''} of ${it ? named(it) : 'that item'} for that owner.`)
     }
     // A customer's material goes out only for their own order.
     const order = orders.find((o) => o.id === soId)
@@ -480,7 +484,7 @@ export function SendJobWorkDialog({
                       >
                         <option value="">Choose an item… ({choices.length})</option>
                         {choices.map((it) => (
-                          <option key={it.id} value={it.id}>
+                          <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                             {it.code ? `${it.code} · ` : ''}
                             {it.name}
                           </option>
@@ -568,7 +572,7 @@ interface ChallanLine {
   id: string
   qty: string | number
   outstanding: number
-  item: { id: string; name: string; uom: { symbol: string } | null }
+  item: { id: string; name: string; uom: { symbol: string } | null } & ShadeFields
 }
 
 interface ReturnEntry {
@@ -618,13 +622,13 @@ export function ReceiveJobWorkDialog({
     void (async () => {
       try {
         const [i, w] = await Promise.all([
-          masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
+          everyItem<ItemOption>({ active: true, sort: 'name', order: 'asc' }),
           masterResource<Option>('warehouses').list({ limit: 100, active: true }),
         ])
         if (cancelled) return
         // The items sent are always offered, even if one has since been switched off.
-        const sent = challan.lines.map((l) => l.item).filter((s) => !i.data.some((x) => x.id === s.id))
-        setItems([...sent, ...i.data])
+        const sent = challan.lines.map((l) => l.item).filter((s) => !i.some((x) => x.id === s.id))
+        setItems([...sent, ...i])
         setWarehouses(w.data)
         setEntries(
           Object.fromEntries(
@@ -663,12 +667,12 @@ export function ReceiveJobWorkDialog({
     if (lines.length === 0) return setError('Enter what came back on at least one line.')
     if (lines.some(({ e }) => !e.warehouseId)) return setError('Every line needs a store to go into.')
     const over = lines.find(({ line, e }) => num(e.consumed) > line.outstanding + 1e-9)
-    if (over) return setError(`Only ${fmt(over.line.outstanding)} ${over.line.item.uom?.symbol ?? ''} of ${over.line.item.name} is still out.`)
+    if (over) return setError(`Only ${fmt(over.line.outstanding)} ${over.line.item.uom?.symbol ?? ''} of ${named(over.line.item)} is still out.`)
     const unbalanced = lines.find(({ line, e }) => balanceOf(e, line.item.id)?.ok === false)
     if (unbalanced) {
       const e = unbalanced.e
       return setError(
-        `${unbalanced.line.item.name}: ${fmt(num(e.received))} good + ${fmt(num(e.damaged))} damaged + ${fmt(num(e.wasted))} wasted has to come to the ${fmt(num(e.consumed))} being settled.`,
+        `${named(unbalanced.line.item)}: ${fmt(num(e.received))} good + ${fmt(num(e.damaged))} damaged + ${fmt(num(e.wasted))} wasted has to come to the ${fmt(num(e.consumed))} being settled.`,
       )
     }
 
@@ -785,6 +789,7 @@ export function ReceiveJobWorkDialog({
                     <td className="text-muted-foreground text-xs tabular-nums">{i + 1}</td>
                     <td className="min-w-[180px]">
                       <div className="text-sm font-medium text-foreground">{l.item.name}</div>
+                      {itemShade(l.item) && <div className="text-muted-foreground text-xs">{itemShade(l.item)}</div>}
                       <div className="text-muted-foreground text-[11px]">
                         {fmt(Number(l.qty))} {sentUom} sent
                       </div>
@@ -817,7 +822,7 @@ export function ReceiveJobWorkDialog({
                         aria-label={`What came back for ${l.item.name}`}
                       >
                         {items.map((it) => (
-                          <option key={it.id} value={it.id}>
+                          <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                             {it.name}
                           </option>
                         ))}

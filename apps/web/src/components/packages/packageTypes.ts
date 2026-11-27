@@ -1,3 +1,5 @@
+import type { ShadeFields } from '@/lib/items'
+
 /** What one labelled package physically is, in the words the store uses. */
 export const PACK_TYPES = [
   { value: 'BOX', label: 'Box', one: 'box', many: 'boxes' },
@@ -123,7 +125,8 @@ export interface PackageDetail {
   sourceType: string
   createdAt: string
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
-  item: { id: string; code: string; name: string; category: { name: string } | null; uom: { symbol: string } | null }
+  /** With a fabric's design and colour, a thread's colour. */
+  item: { id: string; code: string; name: string; category: { name: string } | null; uom: { symbol: string } | null } & ShadeFields
   warehouse: { id: string; name: string }
   ownerCustomer: { id: string; name: string } | null
   parent: { id: string; code: string } | null

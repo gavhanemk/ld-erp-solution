@@ -15,6 +15,7 @@ import {
   ParetoChart, PipelineSteps, Sparkline, StoreDonut, UnitFlow, UnitTiles, inr,
 } from '@/components/inventory/InventoryDashboardCharts'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * The inventory at a glance.
@@ -63,17 +64,17 @@ interface Dashboard {
   unitFlow: Array<{ uom: string; inQty: number; outQty: number; moves: number }>
   byCategory: Array<{ name: string; value: number; children: Array<{ name: string; value: number }> }>
   ageing: Array<{ key: string; label: string; value: number; lines: number }>
-  dead: Array<{ itemId: string; code: string; name: string; store: string; qty: number; uom: string; value: number; days: number | null }>
+  dead: Array<ShadeFields & { itemId: string; code: string; name: string; store: string; qty: number; uom: string; value: number; days: number | null }>
   abc: {
-    top: Array<{ itemId: string; code: string; name: string; value: number; cumPct: number; cls: string }>
+    top: Array<ShadeFields & { itemId: string; code: string; name: string; value: number; cumPct: number; cls: string }>
     summary: Array<{ cls: string; items: number; value: number }>
     total: number
   }
-  reorder: Array<{ itemId: string; code: string; name: string; uom: string; category: string; onHand: number; reorderLevel: number; cover: number }>
+  reorder: Array<ShadeFields & { itemId: string; code: string; name: string; uom: string; category: string; onHand: number; reorderLevel: number; cover: number }>
   series: Array<{ day: string; inValue: number; outValue: number; moves: number }>
   heat: Array<{ day: string; moves: number }>
   mix: Array<{ type: string; moves: number; value: number }>
-  movers: Array<{ itemId: string; code: string; name: string; uom: string; moves: number; inValue: number; outValue: number }>
+  movers: Array<ShadeFields & { itemId: string; code: string; name: string; uom: string; moves: number; inValue: number; outValue: number }>
   requisitions: { pending: number; approved: number; partly: number; issued: number; rejected: number }
   jobWork: Array<{
     id: string
@@ -438,7 +439,10 @@ export default function InventoryDashboardPage() {
                   {data.reorder.slice(0, 7).map((r) => (
                     <Link key={r.itemId} href={`/inventory/stock/${r.itemId}`} className="block">
                       <div className="flex items-baseline justify-between gap-2 text-xs">
-                        <span className="min-w-0 truncate text-foreground hover:text-primary">{r.name}</span>
+                        <span className="min-w-0 truncate text-foreground hover:text-primary">
+                          {r.name}
+                          {itemShade(r) && <span className="text-muted-foreground"> · {itemShade(r)}</span>}
+                        </span>
                         <span className="shrink-0 tabular-nums text-muted-foreground">
                           {qtyFmt(r.onHand)} / {qtyFmt(r.reorderLevel)} {r.uom}
                         </span>
@@ -532,6 +536,7 @@ export default function InventoryDashboardPage() {
                     <Link key={`${d.itemId}-${d.store}`} href={`/inventory/stock/${d.itemId}`} className="flex items-center justify-between gap-2 py-2 text-xs hover:text-primary">
                       <span className="min-w-0">
                         <span className="block truncate text-foreground">{d.name}</span>
+                        {itemShade(d) && <span className="block truncate text-[10px] text-muted-foreground">{itemShade(d)}</span>}
                         <span className="text-[10px] text-muted-foreground">
                           {d.store} · {qtyFmt(d.qty)} {d.uom} · {d.days ?? '—'} days
                         </span>

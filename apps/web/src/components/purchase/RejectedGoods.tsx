@@ -7,6 +7,7 @@ import { AlertCircle, CheckCircle2, Loader2, PackageX, Search, Truck, Undo2, X }
 import { api, ApiError, can } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
 import { StepInput } from '@/components/ui/StepInput'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { ReturnChallanDialog } from './ReturnChallanDialog'
 
 interface QcEvent {
@@ -25,7 +26,7 @@ interface RejectedRow {
   checkedBy: string | null
   grn: { id: string; grnNumber: string; grnDate: string; challanNo: string | null; poNumber: string }
   supplier: { id: string; name: string }
-  item: { id: string; code: string; name: string; unit: string }
+  item: { id: string; code: string; name: string; unit: string } & ShadeFields
   store: { id: string; name: string }
   heldIn: 'SAME_STORE' | 'GODOWN' | 'NOTED'
   godown: string | null
@@ -230,6 +231,7 @@ export function RejectedGoods() {
                       </td>
                       <td>
                         <span className="text-foreground text-sm">{r.item.name}</span>
+                        {itemShade(r.item) && <span className="text-muted-foreground block text-[11px]">{itemShade(r.item)}</span>}
                         <span className="text-muted-foreground block font-mono text-[11px]">{r.item.code}</span>
                         {r.events.length > 0 && (
                           <span className="text-muted-foreground line-clamp-2 block max-w-xs text-[11px]" title={story(r)}>
@@ -265,6 +267,7 @@ export function RejectedGoods() {
                       {r.held != null && r.held > 0 ? <span className="warn-text">{qty(r.held)} held</span> : `${qty(r.rejected)} rejected`} {r.item.unit}
                     </span>
                   </div>
+                  {itemShade(r.item) && <p className="text-muted-foreground text-[11px]">{itemShade(r.item)}</p>}
                   <p className="text-muted-foreground text-xs">
                     {[r.grn.grnNumber, r.grn.challanNo ? `challan ${r.grn.challanNo}` : null, r.supplier.name, r.store.name, r.reason].filter(Boolean).join(' · ')}
                   </p>
@@ -345,7 +348,8 @@ function UseAfterAll({ row, onClose, onDone }: { row: RejectedRow; onClose: () =
               Use after all
             </h2>
             <p className="text-muted-foreground mt-0.5 text-sm">
-              {row.item.name} from {row.grn.grnNumber} goes back into good stock in {row.store.name}, and can be issued again.
+              {row.item.name}
+              {itemShade(row.item) ? ` (${itemShade(row.item)})` : ''} from {row.grn.grnNumber} goes back into good stock in {row.store.name}, and can be issued again.
             </p>
           </div>
           <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onClose} aria-label="Close" disabled={busy}>

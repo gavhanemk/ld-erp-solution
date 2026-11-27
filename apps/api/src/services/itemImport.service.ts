@@ -7,6 +7,7 @@ import type { PackType } from '@prisma/client'
 import { addDropdowns, addHowToSheet, addTemplateSheet, readSheetRows, type SheetColumn } from '../lib/sheet'
 import { createItemSchema } from '../schemas/master.schemas'
 import { itemPrefix } from '../lib/masterCode'
+import { cleanColour, cleanDesignNo, isFabricCategory, isThreadCategory, ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { balanceOf, lockedBalanceOf, recordMovement } from './stock.service'
 
 /**
@@ -24,6 +25,11 @@ import { balanceOf, lockedBalanceOf, recordMovement } from './stock.service'
  * its code or its name and is not changed, but for how it comes packed when
  * the row fills that in; its stock is added. The same item on several rows is
  * one item with stock in several stores.
+ *
+ * Fabric is set up one design and colour per item, and thread one colour per
+ * item (lib/fabric), so several items may share a name: "Cotton Twill" in
+ * 1164 Navy and in 1165 Black. Their rows carry a Design No. and a Colour, and
+ * an item is then the name together with those two, never the name alone.
  */
 
 export const MAX_ROWS = 2000
@@ -48,6 +54,9 @@ const COLUMNS = [
   { key: 'store', head: 'Store', width: 22, list: 'stores', note: 'For stock on hand today. Leave the three stock columns empty for an item with none.' },
   { key: 'qty', head: 'Stock Qty', width: 12 },
   { key: 'rate', head: 'Stock Rate', width: 12, note: 'What one unit of the stock cost. Empty takes the Standard Rate.' },
+  // Added on 27 Nov 2026, at the end so a sheet filled in before still reads.
+  { key: 'designNo', head: 'Design No.', width: 14, note: 'Fabric only: its design number, exactly as it is known (120, 1164). Another design is another item, even with the same name.' },
+  { key: 'color', head: 'Colour', width: 16, note: 'Fabric and thread: the colour of this item. Another colour is another item, even with the same name. Empty for anything else.' },
 ] as const
 
 type Key = (typeof COLUMNS)[number]['key']
@@ -122,6 +131,7 @@ async function loadMasters() {
         packType: true,
         packQty: true,
         decimalPlaces: true,
+        ...ITEM_SHADE,
         category: { select: { name: true, parent: { select: { name: true } } } },
         department: { select: { name: true } },
         uom: { select: { name: true, decimalPlaces: true } },
@@ -146,9 +156,11 @@ export async function buildTemplate(withItems: boolean): Promise<Buffer> {
   wb.creator = 'LD ERP'
 
   const sheet = addTemplateSheet(wb, 'Items', COLUMNS as unknown as SheetColumn[])
+  // Text, so a design number typed as 0120 stays 0120 rather than becoming 120.
+  sheet.getColumn('designNo').numFmt = '@'
 
   if (withItems) {
-    for (const it of m.items.filter((i) => i.isActive).sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const it of m.items.filter((i) => i.isActive).sort((a, b) => a.name.localeCompare(b.name) || a.code.localeCompare(b.code))) {
       const parent = it.category.parent?.name
       sheet.addRow({
         code: it.code,
@@ -160,6 +172,9 @@ export async function buildTemplate(withItems: boolean): Promise<Buffer> {
         unit: it.uom.name,
         packType: it.packType ? PACK_LABEL[it.packType] : '',
         packQty: it.packQty != null && Number(it.packQty) > 0 ? Number(it.packQty) : '',
+        // A finished good's colour is its style's, already in its name.
+        designNo: it.styleId ? '' : (it.designNo ?? ''),
+        color: it.styleId ? '' : (it.color ?? ''),
       })
     }
   }
@@ -189,10 +204,12 @@ export async function buildTemplate(withItems: boolean): Promise<Buffer> {
     'Pick Type, Category, Sub Category, Department, Unit and Store from the dropdowns, so they match what is in the system.',
     "Department can be left empty: the item then takes its sub-category's department.",
     'A new item gets its code when it is saved. Put a code in Item Code only to point at an item already in the system.',
-    'An item already in the system (same code, or same name) is not changed. Only its stock is added, and its Sticker Package and Qty per Sticker when the row fills them in.',
+    'An item already in the system (same code; or same name, Design No. and Colour) is not changed. Only its stock is added, and its Sticker Package and Qty per Sticker when the row fills them in.',
+    'Fabric: one row, and one item, for each design and colour, with its Design No. and Colour exactly as they are known. Thread: its Colour only. Leave both empty for anything else.',
+    'Several items with one name (Cotton Twill in 1164 Navy and in 1165 Black): fill Design No. and Colour, or the Item Code, to say which one a row is for.',
     'Sticker Package and Qty per Sticker say how an item comes packed: a packet of 50 buttons is Packet and 50. When it comes in, it then gets one sticker a packet.',
     'Stock on hand today: fill Store, Stock Qty and Stock Rate. Empty Stock Rate takes the Standard Rate. Leave all three empty for no stock.',
-    'The same item in two stores: two rows with the same name, one per store.',
+    'The same item in two stores: two rows with the same name, Design No. and Colour, one per store.',
     'Opening stock can only be entered once for an item in a store. After that, correct it with a stock count.',
     'Nothing is saved until you have seen what each row will do and pressed Import. If any row has a problem, nothing is imported.',
   ])
@@ -222,6 +239,11 @@ export function readSheet(file: Buffer, fileName: string): Promise<Array<{ row: 
 export interface RowPlan {
   row: number
   name: string
+  /** A fabric's design and colour, a thread's colour: what tells same-name items apart. */
+  designNo: string | null
+  color: string | null
+  /** Set on a finished good, whose colour is its style's. */
+  styleId: string | null
   /** What happens to the item: made new, found already there, or nothing (a problem). */
   item: 'new' | 'existing' | 'none'
   code: string | null
@@ -261,19 +283,45 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
   const unit = new Map(m.units.flatMap((u) => [[low(u.name), u], [low(u.symbol), u]] as const))
   const store = new Map(m.stores.flatMap((s) => [[low(s.name), s], [low(s.code), s]] as const))
   const byCode = new Map(m.items.map((i) => [low(i.code), i]))
-  const byName = new Map(m.items.map((i) => [low(i.name), i]))
+  const catById = new Map(m.categories.map((c) => [c.id, c]))
+  // An item is its name together with its design no. and colour: several
+  // fabric items share a name (lib/fabric). A finished good's colour is its
+  // style's, so it goes by its name alone.
+  const keyOf = (name: string, designNo: string | null | undefined, color: string | null | undefined) =>
+    `${low(name)}|${low(designNo)}|${low(color)}`
+  const itemKeyOf = (i: (typeof m.items)[number]) => (i.styleId ? keyOf(i.name, null, null) : keyOf(i.name, i.designNo, i.color))
+  const byKey = new Map(m.items.map((i) => [itemKeyOf(i), i]))
+  const byName = new Map<string, typeof m.items>()
+  for (const i of m.items) byName.set(low(i.name), [...(byName.get(low(i.name)) ?? []), i])
 
-  // The first row naming an item defines it; later rows with the same name only
-  // add stock in another store.
+  // The first row naming an item defines it; later rows naming the same item
+  // (name, design no. and colour) only add stock in another store.
   const seen = new Map<string, Resolved>()
+  const seenByName = new Map<string, Resolved[]>()
   const stockKeys = new Set<string>()
   const out: Resolved[] = []
 
   for (const { row, raw } of rows) {
     const problems: string[] = []
     const name = (raw.name ?? '').trim()
-    const plan: RowPlan = { row, name, item: 'none', code: null, stock: null, pack: null, skipped: false, problems }
-    const res: Resolved = { plan, itemKey: low(name) }
+    // A fabric's design number and colour, a thread's colour, exactly as typed.
+    const designNo = cleanDesignNo(raw.designNo)
+    const color = cleanColour(raw.color)
+    const shaded = Boolean(designNo || color)
+    const plan: RowPlan = {
+      row,
+      name,
+      designNo,
+      color,
+      styleId: null,
+      item: 'none',
+      code: null,
+      stock: null,
+      pack: null,
+      skipped: false,
+      problems,
+    }
+    const res: Resolved = { plan, itemKey: keyOf(name, designNo, color) }
 
     // How it comes packed, when the row says.
     const packType = raw.packType ? packOf(raw.packType) : undefined
@@ -287,11 +335,47 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
     const packBad = Boolean(raw.packType && !packType) || (packQty !== undefined && (Number.isNaN(packQty) || !(packQty > 0)))
     const packText = (t?: PackType, q?: number) => [t ? PACK_LABEL[t] : 'Sticker', q ? `of ${q}` : null].filter(Boolean).join(' ')
 
-    // Which item this row is about.
+    // Which item this row is about: by its code; else by its name, design no.
+    // and colour — in the system, or made by a row above; else, on a row with
+    // neither (a sheet from before them), by its name when only one item has it.
     let existing = raw.code ? byCode.get(low(raw.code)) : undefined
     if (raw.code && !existing) problems.push(`No item with code ${raw.code} in the system. Leave Item Code empty for a new item.`)
-    if (!existing && name) existing = byName.get(low(name))
+    let first: Resolved | undefined
+    let unsure = false
+    if (!existing && name) {
+      existing = byKey.get(keyOf(name, designNo, color))
+      if (!existing) first = seen.get(keyOf(name, designNo, color))
+      if (!existing && !first && !shaded) {
+        const inSystem = byName.get(low(name)) ?? []
+        const onSheet = seenByName.get(low(name)) ?? []
+        if (inSystem.length + onSheet.length === 1) {
+          existing = inSystem[0]
+          first = onSheet[0]
+        } else if (inSystem.length + onSheet.length > 1) {
+          unsure = true
+          const which = [
+            ...inSystem.map((i) => `${i.code}: ${itemShadeText(i) || 'no design no. or colour'}`),
+            ...onSheet.map((r) => `row ${r.plan.row}: ${itemShadeText(r.plan) || 'no design no. or colour'}`),
+          ]
+          problems.push(
+            `${which.length} items are called ${name} (${which.slice(0, 4).join('; ')}${which.length > 4 ? '; …' : ''}). Fill in Design No. and Colour, or the Item Code, to say which one.`,
+          )
+        }
+      }
+    }
     if (!name && !existing) problems.push('Item Name is empty.')
+
+    // An item already in the system keeps its design and colour: a row giving
+    // others is not quietly passed over.
+    const shadeBad = Boolean(
+      existing &&
+        ((designNo && low(designNo) !== low(existing.designNo)) || (color && low(color) !== low(existing.color))),
+    )
+    if (existing && shadeBad) {
+      problems.push(
+        `${existing.code} is ${itemShadeText({ designNo: existing.designNo, color: existing.color }) || 'set up with no design no. or colour'} in Masters → Items, and this row says ${itemShadeText({ designNo, color })}. An item already in the system is not changed here: change it in Masters → Items, or clear the Item Code to add a new item.`,
+      )
+    }
 
     if (existing) {
       res.itemKey = `id:${existing.id}`
@@ -299,6 +383,9 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
       plan.item = 'existing'
       plan.code = existing.code
       plan.name = existing.name
+      plan.designNo = existing.designNo
+      plan.color = existing.color
+      plan.styleId = existing.styleId
       if (!existing.isActive) problems.push(`${existing.code} is deactivated. Reactivate it first to add stock.`)
       // Only what differs from the item is set.
       const change = {
@@ -309,12 +396,13 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
         res.packUpdate = change
         plan.pack = packText(pack.packType ?? existing.packType ?? undefined, pack.packQty ?? (existing.packQty != null ? Number(existing.packQty) : undefined))
       }
-    } else if (name && seen.has(low(name))) {
-      const first = seen.get(low(name))!
+    } else if (first) {
       res.itemKey = first.itemKey
       plan.item = first.plan.item
       plan.code = first.plan.code
-    } else if (name) {
+      plan.designNo = first.plan.designNo
+      plan.color = first.plan.color
+    } else if (name && !unsure) {
       // A new item: every field that has to match a master is looked up.
       plan.item = 'new'
       const type = TYPES[low(raw.type)] ?? (Object.values(TYPES).includes((raw.type ?? '').toUpperCase()) ? (raw.type ?? '').toUpperCase() : undefined)
@@ -352,6 +440,23 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
       if (!raw.unit) problems.push('Unit is empty.')
       else if (!u) problems.push(`No unit "${raw.unit}".`)
 
+      // Design No. and Colour as the item form takes them (itemBeforeSave in
+      // lib/itemMaster, in its words): a design number only under a Fabric
+      // category, a colour under Fabric or Thread. Checked here against the
+      // categories already loaded, so a long sheet is not a query a row.
+      const filed = categoryId ? catById.get(categoryId) : undefined
+      const above = filed?.parentId ? catById.get(filed.parentId) : undefined
+      const cat = filed ? { name: filed.name, parent: above ? { name: above.name } : null } : null
+      const notFinished = type !== 'FINISHED_GOOD'
+      const fabric = notFinished && isFabricCategory(cat)
+      const thread = notFinished && !fabric && isThreadCategory(cat)
+      if (filed && designNo && !fabric) {
+        problems.push('Design No. is for fabric. File the item under a Fabric category, or clear the Design No.')
+      }
+      if (filed && notFinished && color && !fabric && !thread) {
+        problems.push('Colour is for fabric, thread and finished goods. File the item under a Fabric or Thread category, or clear the Colour.')
+      }
+
       const numbers = {
         standardRate: num(raw.standardRate),
         reorderLevel: num(raw.reorderLevel),
@@ -371,6 +476,8 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
           uomId: u.id,
           hsnCode: raw.hsn ? raw.hsn.replace(/\s+/g, '') : undefined,
           description: raw.description || undefined,
+          ...(fabric && designNo ? { designNo } : {}),
+          ...((fabric || thread) && color ? { color } : {}),
           ...pack,
           ...Object.fromEntries(Object.entries(numbers).filter(([, v]) => v !== undefined)),
         }
@@ -379,14 +486,15 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
         if (!checked.success) problems.push(...checked.error.issues.map((i) => i.message))
         else res.create = { ...(checked.data as Record<string, unknown>), categoryId }
       }
-      seen.set(low(name), res)
+      seen.set(res.itemKey, res)
+      seenByName.set(low(name), [...(seenByName.get(low(name)) ?? []), res])
     }
 
     // Stock on hand today, if the row gives any.
     if (raw.store || raw.qty || raw.rate) {
       const s = store.get(low(raw.store))
       const qty = num(raw.qty)
-      const standard = existing ? Number(existing.standardRate ?? 0) : (seen.get(low(name))?.create?.standardRate as number | undefined)
+      const standard = existing ? Number(existing.standardRate ?? 0) : ((first ?? res).create?.standardRate as number | undefined)
       const rate = num(raw.rate) ?? (standard && standard > 0 ? standard : undefined)
       if (!raw.store) problems.push('Stock Qty is given but Store is empty.')
       else if (!s) problems.push(`No store "${raw.store}".`)
@@ -401,7 +509,10 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
       }
       if (s && qty && qty > 0 && rate && rate > 0) {
         const key = `${res.itemKey}|${s.id}`
-        if (stockKeys.has(key)) problems.push(`${plan.name || name} is in ${s.name} twice on this sheet. Enter it once, with the total.`)
+        if (stockKeys.has(key)) {
+          const shade = itemShadeText(plan)
+          problems.push(`${plan.name || name}${shade ? ` (${shade})` : ''} is in ${s.name} twice on this sheet. Enter it once, with the total.`)
+        }
         stockKeys.add(key)
         if (res.existingId) {
           const bal = await balanceOf(prisma, { itemId: res.existingId, warehouseId: s.id })
@@ -414,9 +525,10 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
       }
     }
 
-    if (plan.item === 'existing' && !plan.stock && !raw.store && !raw.qty && !raw.rate && !res.packUpdate && !packBad) {
+    if (plan.item === 'existing' && !plan.stock && !raw.store && !raw.qty && !raw.rate && !res.packUpdate && !packBad && !shadeBad) {
       // Nothing asked of an item that is already there: not a problem, just
       // nothing to do, and any complaint about it being deactivated is moot.
+      // A design no. or colour changed against it is said, not skipped past.
       plan.skipped = true
       problems.length = 0
     }
@@ -449,7 +561,7 @@ export async function runImport(plans: Resolved[]) {
 
       // Next number for each code prefix, read once and counted on from.
       const next = new Map<string, number>()
-      const created: Array<{ code: string; name: string }> = []
+      const created: Array<{ code: string; name: string; designNo: string | null; color: string | null; styleId: string | null }> = []
       for (const p of plans) {
         if (!p.create || idByKey.has(p.itemKey)) continue
         const prefix = await itemPrefix(p.create.categoryId)
@@ -466,10 +578,10 @@ export async function runImport(plans: Resolved[]) {
         const code = `${prefix}-${String(n).padStart(3, '0')}`
         const item = await tx.item.create({
           data: { ...(p.create as Record<string, unknown>), code } as never,
-          select: { id: true, code: true, name: true },
+          select: { id: true, code: true, name: true, ...ITEM_SHADE },
         })
         idByKey.set(p.itemKey, item.id)
-        created.push({ code: item.code, name: item.name })
+        created.push({ code: item.code, name: item.name, designNo: item.designNo, color: item.color, styleId: item.styleId })
       }
 
       // How items already in the system come packed, where the sheet says.

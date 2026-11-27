@@ -2,6 +2,7 @@ import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { requirePermission } from '../middleware/auth'
+import { ITEM_SHADE } from '../lib/fabric'
 
 /*
  * The Purchase dashboard.
@@ -128,6 +129,8 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
             select: {
               id: true,
               name: true,
+              // Same-name fabrics are kept apart by id and told apart by these.
+              ...ITEM_SHADE,
               uom: { select: { symbol: true } },
               category: {
                 select: {
@@ -167,6 +170,9 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     const lines: Array<{
       itemId: string
       name: string
+      designNo: string | null
+      color: string | null
+      styleId: string | null
       uom: string
       category: { id: string; name: string }
       sub: { id: string; name: string } | null
@@ -205,6 +211,9 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
       lines.push({
         itemId: l.item.id,
         name: l.item.name,
+        designNo: l.item.designNo,
+        color: l.item.color,
+        styleId: l.item.styleId,
         uom: l.item.uom?.symbol ?? '',
         category: { id: top.id, name: top.name },
         sub: c.parent ? { id: c.id, name: c.name } : null,
@@ -559,16 +568,18 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
   }
 
   /* ---- The items that took the money, with their quantity ---- */
-  const byItem = new Map<string, { id: string; name: string; uom: string; value: number; qty: number; orders: Set<string> }>()
+  type Shade = { designNo: string | null; color: string | null; styleId: string | null }
+  const shadeOf = (l: Shade): Shade => ({ designNo: l.designNo, color: l.color, styleId: l.styleId })
+  const byItem = new Map<string, { id: string; name: string; shade: Shade; uom: string; value: number; qty: number; orders: Set<string> }>()
   for (const l of allLines) {
-    const i = byItem.get(l.itemId) ?? { id: l.itemId, name: l.name, uom: l.uom, value: 0, qty: 0, orders: new Set<string>() }
+    const i = byItem.get(l.itemId) ?? { id: l.itemId, name: l.name, shade: shadeOf(l), uom: l.uom, value: 0, qty: 0, orders: new Set<string>() }
     i.value += l.value
     i.qty += l.qty
     i.orders.add(l.order.id)
     byItem.set(l.itemId, i)
   }
   const topItems = [...byItem.values()]
-    .map((i) => ({ id: i.id, name: i.name, uom: i.uom, value: r2(i.value), qty: r2(i.qty), orders: i.orders.size }))
+    .map((i) => ({ id: i.id, name: i.name, ...i.shade, uom: i.uom, value: r2(i.value), qty: r2(i.qty), orders: i.orders.size }))
     .sort((a, b) => b.value - a.value)
     .slice(0, 10)
 
@@ -579,11 +590,11 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
    */
   const rateLines = new Map<
     string,
-    { id: string; name: string; uom: string; lines: Array<{ rate: number; qty: number; poNumber: string; date: Date }> }
+    { id: string; name: string; shade: Shade; uom: string; lines: Array<{ rate: number; qty: number; poNumber: string; date: Date }> }
   >()
   for (const l of [...allLines].sort((a, b) => a.order.poDate.getTime() - b.order.poDate.getTime())) {
     if (l.rate <= 0 || l.qty <= 0) continue
-    const e = rateLines.get(l.itemId) ?? { id: l.itemId, name: l.name, uom: l.uom, lines: [] }
+    const e = rateLines.get(l.itemId) ?? { id: l.itemId, name: l.name, shade: shadeOf(l), uom: l.uom, lines: [] }
     e.lines.push({ rate: l.rate, qty: l.qty, poNumber: l.order.poNumber, date: l.order.poDate })
     rateLines.set(l.itemId, e)
   }
@@ -597,6 +608,7 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
       return {
         id: e.id,
         name: e.name,
+        ...e.shade,
         uom: e.uom,
         buys: e.lines.length,
         avgRate: r2(avg),

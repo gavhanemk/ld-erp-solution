@@ -1,11 +1,15 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition, Tone } from '../types'
+import { ITEM_SHADE } from '../../lib/fabric'
 import {
   dateRangeFilters,
   dayRange,
   itemFilter,
   round2,
+  rowItemLabel,
   searchFilter,
+  shadeColumns,
+  shadeOf,
   supplierFilter,
   topWithRest,
 } from './shared'
@@ -93,6 +97,7 @@ export const purchaseOrderStatus: ReportDefinition = {
     { key: 'deliveryDate', label: 'Wanted By', type: 'date', width: 13 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'orderedQty', label: 'Ordered', type: 'qty', total: 'sum' },
     { key: 'receivedQty', label: 'Received', type: 'qty', total: 'sum' },
@@ -183,7 +188,7 @@ export const purchaseOrderStatus: ReportDefinition = {
         uomFactor: true,
         discount: true,
         shortClosed: true,
-        item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+        item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
         po: {
           select: {
             poNumber: true,
@@ -235,6 +240,7 @@ export const purchaseOrderStatus: ReportDefinition = {
         deliveryDate: wantedBy,
         itemCode: l.item.code,
         item: l.item.name,
+        ...shadeOf(l.item),
         uom: l.item.uom?.symbol ?? '',
         orderedQty,
         receivedQty,
@@ -286,7 +292,7 @@ export const purchaseOrderStatus: ReportDefinition = {
       const worst = [...late].sort((a, b) => b.daysLate - a.daysLate)[0]
       if (worst) {
         insights.push(
-          `The latest is ${worst.poNumber} from ${worst.supplier}: ${worst.pendingQty.toLocaleString('en-IN')} ${worst.uom} of ${worst.item}, ${worst.daysLate} days past the wanted date.`
+          `The latest is ${worst.poNumber} from ${worst.supplier}: ${worst.pendingQty.toLocaleString('en-IN')} ${worst.uom} of ${rowItemLabel(worst)}, ${worst.daysLate} days past the wanted date.`
         )
       }
     } else if (live.length) {

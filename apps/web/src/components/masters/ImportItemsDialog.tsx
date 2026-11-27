@@ -1,8 +1,10 @@
 'use client'
 
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { SheetImportDialog, type SheetImportConfig } from './SheetImportDialog'
 
-interface RowPlan {
+/** A row of the sheet, with the item's design and colour (ShadeFields): several fabric items share a name. */
+interface RowPlan extends ShadeFields {
   row: number
   name: string
   item: 'new' | 'existing' | 'none'
@@ -37,7 +39,7 @@ const config: SheetImportConfig<RowPlan, Summary> = {
   templates: {
     blank: {
       title: 'Blank template',
-      text: 'For new items. Dropdowns for type, category, sub-category, department, unit and store.',
+      text: 'For new items. Dropdowns for type, category, sub-category, department, unit and store. Fabric: one row for each design and colour, with its Design No. and Colour; thread: its Colour.',
     },
     current: {
       title: 'With your current items',
@@ -50,6 +52,7 @@ const config: SheetImportConfig<RowPlan, Summary> = {
       cell: (r) => (
         <>
           <div className="text-foreground font-medium">{r.name || '—'}</div>
+          {itemShade(r) && <div className="text-muted-foreground text-xs">{itemShade(r)}</div>}
           {r.code && <div className="font-mono text-[11px] text-teal-500">{r.code}</div>}
         </>
       ),
@@ -91,7 +94,12 @@ const config: SheetImportConfig<RowPlan, Summary> = {
       s.stockLines ? count(s.stockLines, 'stock line', 'stock lines') : '',
       s.packsSet ? `packing on ${count(s.packsSet, 'item', 'items')}` : '',
     ].filter(Boolean),
-  created: (data) => (data as { created: Array<{ code: string; name: string }> }).created,
+  // "Cotton Twill · Design No: 1164 · Colour: Navy": several new fabric items can share a name.
+  created: (data) =>
+    (data as { created: Array<ShadeFields & { code: string; name: string }> }).created.map((c) => ({
+      code: c.code,
+      name: [c.name, itemShade(c)].filter(Boolean).join(' · '),
+    })),
 }
 
 export function ImportItemsDialog({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {

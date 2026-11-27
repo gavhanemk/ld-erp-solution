@@ -37,6 +37,16 @@ export interface Filter {
 
 type Values = Record<string, string>
 
+/** One choice from a master list. */
+export interface FilterOption {
+  id: string
+  name: string
+  /** Under the name in the list, and searched: an item's code, design and colour. */
+  sub?: string
+  /** An item's design and colour, which its chip names it with. */
+  shade?: string
+}
+
 /* The presets and the financial-year rule live in `@/lib/period` — the notes
    screens offer the same ones, and two copies would have been two definitions
    of the financial year. */
@@ -70,7 +80,7 @@ export function FilterBar({
   values: Values
   /** What the result on screen was actually built from. */
   applied: Values
-  options: Record<string, Array<{ id: string; name: string }>>
+  options: Record<string, FilterOption[]>
   onChange: (next: Values) => void
   onRun: () => void
   loading: boolean
@@ -102,9 +112,10 @@ export function FilterBar({
       let shown = v
       if (f.type === 'boolean') shown = 'Yes'
       else if (f.type === 'select') {
+        const picked = options[f.optionsFrom ?? '']?.find((o) => o.id === v)
         shown =
           f.options?.find((o) => o.value === v)?.label ??
-          options[f.optionsFrom ?? '']?.find((o) => o.id === v)?.name ??
+          (picked ? (picked.shade ? `${picked.name} · ${picked.shade}` : picked.name) : undefined) ??
           v
       }
       out.push({ key: f.key, text: `${f.label}: ${shown}`, clears: [f.key] })
@@ -178,8 +189,10 @@ export function FilterBar({
               {o.label}
             </option>
           ))}
+          {/* An item's code, design and colour on the line under its name, and
+            searched with it: three "Cotton Twill" items are told apart here. */}
           {(options[f.optionsFrom ?? ''] ?? []).map((o) => (
-            <option key={o.id} value={o.id}>
+            <option key={o.id} value={o.id} data-sub={o.sub || undefined}>
               {o.name}
             </option>
           ))}

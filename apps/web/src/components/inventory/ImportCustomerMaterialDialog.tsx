@@ -11,6 +11,8 @@ interface RowPlan {
   challanNo: string | null
   item: string
   itemCode: string
+  /** "Design No: 1164 · Colour: Navy": which of several same-name fabrics the row is. */
+  shade?: string
   challanQty: number | null
   arrivedQty: number | null
   uom: string
@@ -66,6 +68,7 @@ const config: SheetImportConfig<RowPlan, Summary> = {
       cell: (r) => (
         <>
           <div className="text-foreground text-sm">{r.item || '—'}</div>
+          {r.shade && <div className="text-muted-foreground text-xs">{r.shade}</div>}
           {r.itemCode && <div className="font-mono text-[11px] text-teal-500">{r.itemCode}</div>}
         </>
       ),

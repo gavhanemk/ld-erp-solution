@@ -13,7 +13,7 @@ import { CutterReceiveDialog } from './CutterReceiveDialog'
 import { LayFabricDialog } from './LayFabricDialog'
 import { SendOnDialog } from './SendOnDialog'
 import { MoDetailsDialog } from '../MoDetailsDialog'
-import { fabricLine, fabricQty, pcs, type FlowStep, type JobCardCutting, type JobCardDetail } from './types'
+import { fabricName, fabricQty, fabricRecordLines, pcs, type FlowStep, type JobCardCutting, type JobCardDetail } from './types'
 
 /**
  * The cutting sheet of one job card: what the order wants by size, what has
@@ -179,14 +179,18 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
           <p className="text-muted-foreground text-sm">Nothing issued for cutting yet. Issue sizes to a cutting contractor to start.</p>
         ) : (
           <div className="space-y-2">
-            {/* The job card's fabric, all lays together: given, used, wasted, and what is left over with whom. */}
-            {d.fabric.map((r) => (
+            {/*
+             * The job card's fabric, all lays together: given, used, wasted, and what is left over with whom —
+             * fabric by fabric (each design and colour its own line), with the unit's total after two or more.
+             */}
+            {fabricRecordLines(d.fabric).map((r) => (
               <p
-                key={r.unit}
-                className={`rounded-lg border px-2.5 py-1.5 text-xs ${r.leftOver || r.overUsed || r.notRecorded ? 'warn-text border-amber-500/40 bg-amber-500/5' : 'border-border text-muted-foreground'}`}
+                key={r.key}
+                className={`rounded-lg border px-2.5 py-1.5 text-xs ${r.warn ? 'warn-text border-amber-500/40 bg-amber-500/5' : 'border-border text-muted-foreground'}`}
               >
-                <span className="text-foreground font-semibold">Fabric: </span>
-                {fabricLine(r)}
+                <span className="text-foreground font-semibold">{r.total ? 'All fabric: ' : 'Fabric: '}</span>
+                {r.fabric && <span className="text-foreground font-medium">{r.fabric} — </span>}
+                {r.text}
               </p>
             ))}
             {d.cuttings.map((c) => {
@@ -216,7 +220,7 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
                         {c.lotNo ? ` · lot ${c.lotNo}` : ''}
                         {c.ratio ? ` · ratio ${c.ratio}` : ''}
                         {Number(c.noOfLayers) > 0 ? ` · ${Number(c.noOfLayers)} layers` : ''}
-                        {c.fabricItem ? ` · ${c.fabricItem.name}` : ''}
+                        {c.fabricItem ? ` · ${fabricName(c.fabricItem)}` : ''}
                         {c.fabricIssued != null ? ` · ${fabricQty(Number(c.fabricIssued), unit)} given` : ''}
                         {c.status === 'COMPLETED' && c.fabricUsed != null ? ` · ${Number(c.fabricUsed)} used, ${Number(c.wastage ?? 0)} waste` : ''}
                         {leftOver ? (

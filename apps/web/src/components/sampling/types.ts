@@ -118,6 +118,10 @@ export interface SampleMaterial {
     id?: string
     name: string
     code: string
+    /** A fabric's design and colour, a thread's colour (styleId: a finished good). */
+    designNo?: string | null
+    color?: string | null
+    styleId?: string | null
     type: string
     isActive?: boolean
     departmentId?: string | null
@@ -413,7 +417,7 @@ export interface SampleCloseOut {
   value?: string
   reason: string
   createdAt: string
-  item: { name: string; code: string; uom: { symbol: string } | null }
+  item: { name: string; code: string; designNo?: string | null; color?: string | null; styleId?: string | null; uom: { symbol: string } | null }
   warehouse: { name: string }
   toWarehouse: { name: string } | null
   createdBy: { name: string }

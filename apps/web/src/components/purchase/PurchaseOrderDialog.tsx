@@ -60,6 +60,7 @@ import {
 } from '@/components/purchase/sampleLines'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 import { priceDocument, chargeConfigOf, chargeSnapshot, savedChargeConfig, SAMPLE_OVER_REASON_MIN, type ChargeMasterConfig, type ChargeTaxSnapshot, type ChargeGstMode, type SampleNeed } from '@ld-erp/shared'
 import { type HsnOption } from '@/components/purchase/TaxBreakdown'
 
@@ -199,12 +200,36 @@ export interface PoLine {
     /** A fabric's design and colour, as set on the item in the Items master. */
     designNo?: string | null
     color?: string | null
+    /** Set on a finished good, whose colour is already in its name. */
+    styleId?: string | null
   }
 }
+
+/**
+ * Whether an order may be deleted (to the recycle bin or for good): a draft
+ * never sent to the supplier (the user's rule, 27 Nov 2026). Anything else is
+ * cancelled. `wasSent` comes from the list, which also knows drafts sent
+ * before `sentAt` was kept.
+ */
+export const neverSentDraft = (po: Pick<PurchaseOrder, 'status' | 'sentAt' | 'approvedAt' | 'wasSent'>) =>
+  po.status === 'DRAFT' && !po.sentAt && !po.approvedAt && !po.wasSent
 
 /** Fabric shows its design number and colour; thread its colour; nothing else either. */
 const FABRIC = /fabric/i
 const THREAD = /thread/i
+
+/**
+ * A picker option's sub-line with the item's design and colour after it, so
+ * three "Cotton Twill" in the list read as three and typing 1164 finds one.
+ */
+const withShade = (sub: string | null | undefined, it: ShadeFields) =>
+  [sub, itemShade(it)].filter(Boolean).join(' · ') || undefined
+
+/** An item named in a list or a heading: its name, then its design and colour when it has them. */
+const nameWithShade = (it: { name: string } & ShadeFields) => [it.name, itemShade(it)].filter(Boolean).join(' · ')
+
+/** An item named in a sentence: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const nameInWords = (it: { name: string } & ShadeFields) => (itemShade(it) ? `${it.name} (${itemShade(it)})` : it.name)
 
 export interface PurchaseOrder {
   id: string
@@ -217,6 +242,11 @@ export interface PurchaseOrder {
   deliveryDate: string | null
   deliveryWarehouseId: string | null
   deliveryCustomerId: string | null
+  /** When it was first sent to the supplier; never cleared (27 Nov 2026). */
+  sentAt?: string | null
+  approvedAt?: string | null
+  /** From the order list: it has been with the supplier at some point. */
+  wasSent?: boolean
   /** The in-house brand the purchase is for; null for a common purchase. */
   brandId?: string | null
   brand?: { id: string; name: string } | null
@@ -1150,7 +1180,8 @@ export function PurchaseOrderDialog({
 
     void Promise.all([
       masterResource<Option>('suppliers').list({ limit: 500, active: true }),
-      masterResource<Option>('items').list({ limit: 500, active: true }),
+      // Every item, not the first page: one item per design and colour fills 200 fast.
+      everyItem<Option>({ active: true }),
       masterResource<Option>('warehouses').list({ limit: 100, active: true }),
       masterResource<Option>('customers').list({ limit: 500, active: true }),
       masterResource<Option>('item-categories')
@@ -1207,7 +1238,7 @@ export function PurchaseOrderDialog({
       if (cancelled) return
       setBrands(br?.data ?? [])
       setSuppliers((s as Paginated<Option>).data)
-      setItems((i as Paginated<Option>).data)
+      setItems(i)
       setWarehouses((w as Paginated<Option>).data)
       setCustomers((cust as Paginated<Option>).data)
       setCategories(c ? (c as Paginated<Option>).data : [])
@@ -1818,7 +1849,10 @@ export function PurchaseOrderDialog({
   const unfinished = activeLines
     .map((l) => ({
       line: l,
-      name: itemById.get(l.itemId)?.name ?? 'A line',
+      name: (() => {
+        const it = itemById.get(l.itemId)
+        return it ? nameWithShade(it) : 'A line'
+      })(),
       noQty: num(l.qty) <= 0,
       // 2.5 cartons: a whole number for an item counted whole.
       badQty: !!lineQtyProblem(l),
@@ -1995,7 +2029,7 @@ export function PurchaseOrderDialog({
     if (lines.some((l, i) => i !== index && l.itemId === itemId)) {
       const clash = itemById.get(itemId)
       setError(
-        `${clash?.name ?? 'That item'} is already on another row. Change the quantity there instead of adding it twice.`
+        `${clash ? nameInWords(clash) : 'That item'} is already on another row. Change the quantity there instead of adding it twice.`
       )
       return
     }
@@ -3496,7 +3530,7 @@ export function PurchaseOrderDialog({
                               >
                                 <option value="">Item code</option>
                                 {choices.map((it) => (
-                                  <option key={it.id} value={it.id} data-sub={it.name}>
+                                  <option key={it.id} value={it.id} data-sub={withShade(it.name, it)}>
                                     {it.code ?? it.name}
                                   </option>
                                 ))}
@@ -3517,7 +3551,7 @@ export function PurchaseOrderDialog({
                                     the item, code and all. */}
                                 {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
                                 {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
-                                  <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
+                                  <option key={it.id} value={it.id} data-sub={withShade(it.code, it)}>
                                     {it.name}
                                   </option>
                                 ))}
@@ -3840,7 +3874,7 @@ export function PurchaseOrderDialog({
                           >
                             <option value="">Code</option>
                             {choices.map((it) => (
-                              <option key={it.id} value={it.id} data-sub={it.name}>
+                              <option key={it.id} value={it.id} data-sub={withShade(it.name, it)}>
                                 {it.code ?? it.name}
                               </option>
                             ))}
@@ -3858,7 +3892,7 @@ export function PurchaseOrderDialog({
                                 item is offered only on an empty row. */}
                             {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
                             {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
-                              <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
+                              <option key={it.id} value={it.id} data-sub={withShade(it.code, it)}>
                                 {it.name}
                               </option>
                             ))}
@@ -4555,7 +4589,10 @@ export function PurchaseOrderDialog({
                   <PurchaseSummary
                     result={totals.result}
                     split={taxMode}
-                    itemNames={activeLines.map((l) => itemById.get(l.itemId)?.name ?? 'Item')}
+                    itemNames={activeLines.map((l) => {
+                      const it = itemById.get(l.itemId)
+                      return it ? nameWithShade(it) : 'Item'
+                    })}
                     chargeNames={totals.chargeRows.map((c) => c.name)}
                   />
                 </Section>
@@ -4935,7 +4972,10 @@ export function PurchaseOrderDialog({
                         Previous purchases
                       </h3>
                       <p className="text-muted-foreground mt-0.5 text-[13px]">
-                        {itemById.get(historyFor)?.name ?? 'This item'}
+                        {(() => {
+                          const it = itemById.get(historyFor)
+                          return it ? nameWithShade(it) : 'This item'
+                        })()}
                       </p>
                     </div>
                   </div>
@@ -5111,6 +5151,7 @@ export function PurchaseOrderDialog({
              * id flat while the master returns the category nested, and the
              * item box reads the flat one for the "Category › Sub" line.
              */
+            const shade = created as NewItem & ShadeFields
             const option: Option = {
               id: created.id,
               code: created.code,
@@ -5121,6 +5162,11 @@ export function PurchaseOrderDialog({
                 ? { id: created.category.id, name: created.category.name }
                 : null,
               categoryId: created.category?.id ?? null,
+              // The master sends the new item whole: its design and colour
+              // fill the row's boxes at once, as a listed item's would.
+              designNo: shade.designNo ?? null,
+              color: shade.color ?? null,
+              styleId: shade.styleId ?? null,
             }
             setItems((prev) => [...prev, option])
 

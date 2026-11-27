@@ -7,6 +7,7 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { fabricQty, newClientKey, pcs, type JobCardCutting, type JobCardDetail } from './types'
 
 /**
@@ -17,8 +18,10 @@ import { fabricQty, newClientKey, pcs, type JobCardCutting, type JobCardDetail }
  * open to print. Cutting more than the order needs a production manager.
  */
 
-interface Fabric {
+/** A fabric issued to the order, with its design and colour: several can share a name. */
+interface Fabric extends ShadeFields {
   itemId: string
+  code: string
   name: string
   uom: string | null
   fabric: boolean
@@ -181,11 +184,14 @@ export function CutterReceiveDialog({
             <SmartSelect className="form-input" value={fabricItemId} onChange={(e) => setFabricItemId(e.target.value)} aria-label="Fabric">
               <option value="">Pick the fabric…</option>
               {fabrics.map((f) => (
-                <option key={f.itemId} value={f.itemId} data-sub={`${f.left} ${f.uom ?? ''} not yet used`}>
+                // The code and the design and colour under the name, searched too.
+                <option key={f.itemId} value={f.itemId} data-sub={[f.code, `${f.left} ${f.uom ?? ''} not yet used`, itemShade(f)].filter(Boolean).join(' · ')}>
                   {f.name}
                 </option>
               ))}
             </SmartSelect>
+            {/* The box shows the name only: which design and colour was picked, under it. */}
+            {fabric && itemShade(fabric) && <span className="text-muted-foreground mt-1 block text-xs">{itemShade(fabric)}</span>}
             {problemAt('receive-fabric')}
           </label>
           <label className="block">

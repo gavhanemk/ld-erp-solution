@@ -11,6 +11,7 @@ import { floorFor } from './processFloor.service'
 import { highestCodeNumber, itemPrefix, withGeneratedCode } from '../lib/masterCode'
 import { findHsn, loadHsnIndex } from '../lib/hsn'
 import { trackedRoutings } from './styleTrack.service'
+import { cleanColour, cleanDesignNo, isFabricCategory, isThreadCategory, itemShadeText } from '../lib/fabric'
 
 /*
  * Opening stock from the mill's own 19-column sheet, process by process.
@@ -35,6 +36,8 @@ export type OsKey =
   | 'colour' | 'size' | 'lot' | 'bundle' | 'uom' | 'qty' | 'rate' | 'value' | 'status' | 'remarks'
   /** Only for an item made on import: its HSN code, and its GST % checked against it. */
   | 'hsn' | 'gst'
+  /** Optional, fabric only (27 Nov 2026): with its name and colour, which fabric item the row is. */
+  | 'designNo'
   /** Only on the Semi Finished Goods template: checked against the process. */
   | 'department'
   /** Raw Materials template, optional: how the row's stock is packed. */
@@ -48,6 +51,16 @@ export type OsKey =
  */
 export type OsKind = 'FG' | 'SFG' | 'RM' | 'FA'
 export const KIND_LABEL: Record<OsKind, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials', FA: 'Fixed Assets' }
+
+/*
+ * Fabric is set up one item per design and colour, thread one per colour
+ * (27 Nov 2026): on a sheet the two say which of the items of a name a row
+ * is, and a fabric made on import carries them.
+ */
+const DESIGN_NOTE =
+  'Optional. Fabric only: its design number, exactly as on the roll. With the item name and Colour it finds the fabric item — or makes it, one item per design and colour.'
+const COLOUR_NOTE =
+  'Optional. Fabric and thread: its colour. With the item name (and Design No.) it finds the item — or makes it, one item per colour.'
 
 /**
  * The sheet, exactly: these names, in this order (A to S). A trailing * marks
@@ -76,6 +89,8 @@ export const OS_COLUMNS: SheetColumn<OsKey>[] = [
   { key: 'remarks', head: 'Remarks', width: 28, note: 'Optional.' },
   { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's; with none there either, the item is made without one, to add later." },
   { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
+  // Added at the end (27 Nov 2026), so a sheet made from an older template still reads.
+  { key: 'designNo', head: 'Design No.', width: 12, note: DESIGN_NOTE },
 ]
 
 /** Each kind's template: only its own columns, in this order. */
@@ -124,6 +139,9 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'remarks', head: 'Remarks', width: 24, note: 'Optional.' },
     { key: 'hsn', head: 'HSN Code', width: 12, note: "Optional. Only for an item made on import: its HSN code, from Masters → HSN / SAC Codes. Empty: its category's; with none there either, the item is made without one, to add later." },
     { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
+    // Added at the end (27 Nov 2026): fabric is one item per design and colour, thread one per colour.
+    { key: 'designNo', head: 'Design No.', width: 12, note: DESIGN_NOTE },
+    { key: 'colour', head: 'Colour', width: 12, note: COLOUR_NOTE },
   ],
   FA: [
     { key: 'category', head: 'Asset Category', width: 18, list: 'assetCategories', note: "Needed for a new item: its subcategory under Fixed Assets (Machines, Computers…). For an item already there it is checked against the item's category." },
@@ -328,6 +346,13 @@ const STATUS_GRADE: Record<OsStatus, string> = { OK: 'A', HOLD: 'R', REJECTED: '
 const low = (s?: string | null) => (s ?? '').trim().toLowerCase()
 /** Letters and digits only: "Kaj-Button" and "kaj button" are the same. */
 const squash = (s?: string | null) => low(s).replace(/[^a-z0-9]/g, '')
+/** A design no. or colour as the Items master compares them: capitals and stray spaces aside, exactly. */
+const sameShade = (a?: string | null, b?: string | null) => low(a).replace(/\s+/g, ' ') === low(b).replace(/\s+/g, ' ')
+/** An item's name with a fabric's design and colour beside it, so the check's lists tell same-name items apart. */
+const shaded = (i: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null }) => {
+  const s = itemShadeText(i)
+  return s ? `${i.name} (${s})` : i.name
+}
 /** …and a plural's s dropped: "Raw Materials" and "Raw Material" are the same. */
 const stem = (s?: string | null) => squash(s).replace(/s$/, '')
 
@@ -476,6 +501,8 @@ interface NewItem {
   standardRate: unknown
   styleId: string | null
   color: string | null
+  /** A fabric's design number, exactly as the sheet gives it; null for anything else. */
+  designNo: string | null
   description: string | null
 }
 const NEW = 'new:'
@@ -485,7 +512,7 @@ async function loadMasters() {
     prisma.item.findMany({
       where: { isActive: true },
       select: {
-        id: true, code: true, name: true, type: true, color: true, styleId: true, decimalPlaces: true,
+        id: true, code: true, name: true, type: true, color: true, designNo: true, styleId: true, decimalPlaces: true,
         categoryId: true, packType: true, packQty: true,
         category: { select: { name: true, itemGroup: true, isActive: true, parent: { select: { name: true, itemGroup: true } } } },
         uom: { select: { name: true, symbol: true, decimalPlaces: true } },
@@ -536,6 +563,7 @@ const HOW_TO: Record<OsKind, string[]> = {
     "Material Category is checked against the item's category (Fabric, Thread, Buttons…).",
     'Item Code may be left empty: the ERP gives every item its own code, and the item is found by its exact Item Name.',
     'An item not in Items & Products yet is made on import, with its own code: give its Material Category, and its UOM if not the category’s usual one. The check lists every new item, with the items of a similar name, to match or approve first.',
+    'Fabric is one item per design and colour, thread one per colour: Design No. and Colour (the last two columns, both optional) say which item of a name the row is, and a new fabric or thread is made with them.',
     "A new item's HSN code: the HSN Code column, else its category's (Masters → Item Categories); with neither, it is made without one, to add in Items & Products later. A code given must be in Masters → HSN / SAC Codes: its GST comes from there, and a GST % given is checked against it.",
     "UOM may be left empty: the item's own unit. Given, it is checked, never converted, so give the quantity in it.",
     'Location may be left empty: the store called Store. Otherwise a store in Masters → Warehouses.',
@@ -626,6 +654,7 @@ export async function buildTemplate(kind?: OsKind): Promise<Buffer> {
     "Department / Location may be left empty: the store called Store (finished garments: the finished goods store), or for work in progress that process's own floor (made if it has none yet). Name a store or outside unit from Masters → Warehouses to put it there.",
     'Item Code may be left empty: the ERP gives every item its own code. The item is found by its exact description (a finished garment by Style / Article No. and Colour).',
     'An item not in Items & Products yet is made on import, with its own code: give its Item Category (Fabric, Thread…), and its UOM if not the category’s usual one. The check lists every new item, with the items of a similar name, to match or approve before anything is brought in.',
+    'Fabric is one item per design and colour, thread one per colour: Design No. (the last column, optional) and Colour say which item of a name the row is, and a new fabric or thread is made with them.',
     "A new item's HSN code: the HSN Code column, else its category's (Masters → Item Categories); a new colour of a style takes the style's other colours'. With none, it is made without one, to add in Items & Products later. A code given must be in Masters → HSN / SAC Codes: its GST comes from there, and a GST % given is checked against it.",
     "UOM may be left empty: the item's own unit. Given, it is checked and never converted, so give the quantity in the item's own unit.",
     "Size: needed for garments that come in sizes, from the style's size run (S, M, L…). Raw materials have no size.",
@@ -848,7 +877,7 @@ export async function planImport(
   /** The new item as the rest of the check sees an item: its category, unit and style. */
   const keep = (spec: NewItem, cat: Category, unit: Unit, style: (typeof m.styles)[number] | null, row: number, copiedFrom: string | null, tax: string) => {
     const item = {
-      id: `${NEW}${spec.key}`, code: spec.name, name: spec.name, type: spec.type, color: spec.color, styleId: spec.styleId, decimalPlaces: null,
+      id: `${NEW}${spec.key}`, code: spec.name, name: spec.name, type: spec.type, color: spec.color, designNo: spec.designNo, styleId: spec.styleId, decimalPlaces: null,
       categoryId: spec.categoryId, packType: null, packQty: null,
       category: { name: cat.name, itemGroup: cat.itemGroup, isActive: true, parent: cat.parent },
       uom: { name: unit.name, symbol: unit.symbol, decimalPlaces: unit.decimalPlaces },
@@ -856,7 +885,8 @@ export async function planImport(
     } as unknown as MasterItem
     const said = {
       key: spec.key,
-      name: spec.name,
+      // A new fabric named with its design and colour, so two of one name read apart on the review.
+      name: shaded(spec),
       category: [cat.parent?.name, cat.name].filter(Boolean).join(' › '),
       unit: unit.symbol,
       type: cat.group ? ITEM_GROUP_LABEL[cat.group] : '',
@@ -877,7 +907,7 @@ export async function planImport(
       .filter((i) => looksLikeSameName(name, i.name))
       .sort((a, b) => (a.categoryId === categoryId ? 0 : 1) - (b.categoryId === categoryId ? 0 : 1))
       .slice(0, 5)
-      .map((i) => ({ id: i.id, code: i.code, name: i.name }))
+      .map((i) => ({ id: i.id, code: i.code, name: shaded(i) }))
 
   /** A finished garment not made yet in this colour: made like the style's other colours. */
   const newGarment = async (style: (typeof m.styles)[number], colourText: string, raw: Raw, row: number, problems: string[]) => {
@@ -916,14 +946,27 @@ export async function planImport(
     if (!tax) return null
     const spec: NewItem = {
       key, name, type: 'FINISHED_GOOD', categoryId: cat.id, uomId: unit.id,
-      hsnCode: tax.hsnCode, taxRateId: tax.taxRateId, standardRate: t.template.standardRate, styleId: style.id, color: colour, description: null,
+      hsnCode: tax.hsnCode, taxRateId: tax.taxRateId, standardRate: t.template.standardRate, styleId: style.id, color: colour, designNo: null, description: null,
     }
     return keep(spec, cat, unit, style, row, t.copiedFrom, tax.said)
   }
 
+  /**
+   * A new item's key: its name — and, for fabric, its design no. and colour,
+   * for thread its colour: one item each (27 Nov 2026). From the row's own
+   * category, so the review's decisions find it again.
+   */
+  const newKeyOf = (name: string, raw: Raw) => {
+    const cat = (raw.category ?? '').trim() ? subcategoryNamed(raw.category!).subs[0] : undefined
+    const fabric = isFabricCategory(cat)
+    const designNo = fabric ? cleanDesignNo(raw.designNo) : null
+    const colour = fabric || isThreadCategory(cat) ? cleanColour(raw.colour) : null
+    return [`name:${low(name)}`, designNo && `d:${low(designNo)}`, colour && `c:${low(colour)}`].filter(Boolean).join('|')
+  }
+
   /** Any other item not in Items & Products yet: made from its name, category and unit. */
   const newNamed = async (name: string, raw: Raw, row: number, problems: string[]) => {
-    const key = `name:${low(name)}`
+    const key = newKeyOf(name, raw)
     const catText = (raw.category ?? '').trim()
     const seen = madeNew.get(key)
     if (seen) {
@@ -956,6 +999,14 @@ export async function planImport(
       problems.push(`A new finished item is made from its ${L('style')} and ${L('colour')}, like the style's other colours: give both.`)
       return null
     }
+    // As Masters → Items has it: fabric keeps its design no. and colour, thread its colour, nothing else either.
+    const fabric = isFabricCategory(cat)
+    const thread = !fabric && isThreadCategory(cat)
+    const designNo = cleanDesignNo(raw.designNo)
+    if (designNo && !fabric) {
+      problems.push(`${L('designNo')} is for fabric, and "${name}" goes under ${cat.name}. Clear it, or give a Fabric category.`)
+      return null
+    }
     if (cat.group !== 'RAW_MATERIALS' && cat.group !== 'SEMI_FINISHED' && cat.group !== 'FIXED_ASSETS') {
       problems.push(`${cat.name} is ${cat.group === 'EXPENSES' ? 'an expense head' : 'not under Raw Materials, Semi-Finished Goods, Finished Goods or Fixed Assets'}, not stock.`)
       return null
@@ -974,7 +1025,11 @@ export async function planImport(
     if (!tax) return null
     const spec: NewItem = {
       key, name: name.slice(0, 200), type, categoryId: cat.id, uomId: unit.id, hsnCode: tax.hsnCode, taxRateId: tax.taxRateId,
-      standardRate: null, styleId: null, color: (raw.colour ?? '').trim() || null, description: (raw.fabric ?? '').trim() || null,
+      standardRate: null, styleId: null,
+      // Any other item's colour stays on its opening line only.
+      color: fabric || thread ? cleanColour(raw.colour) : null,
+      designNo: fabric ? designNo : null,
+      description: (raw.fabric ?? '').trim() || null,
     }
     return keep(spec, cat, unit, null, row, like?.code ?? null, tax.said)
   }
@@ -1096,6 +1151,9 @@ export async function planImport(
     if (styleText && !style) problems.push(`No style "${styleText}" in Masters → Styles.`)
     const colourText = (raw.colour ?? '').trim()
     const nameText = (raw.description ?? '').trim()
+    // A fabric's design no. (27 Nov 2026), exactly as typed: with the name and
+    // colour it is the item, as Masters → Items keeps one per design and colour.
+    const designText = cleanDesignNo(raw.designNo)
     if ((raw.code ?? '').trim()) {
       item = itemByCode.get(low(raw.code)) ?? null
       if (!item) {
@@ -1104,13 +1162,27 @@ export async function planImport(
             ? `No item with code ${raw.code} in Items & Products. The ERP gives items their own codes: leave ${L('code')} empty and the item is found by its ${style ? `${L('style')} and ${L('colour')}` : L('description')}, or made new.`
             : `No item with code ${raw.code} in Items & Products.`,
         )
+      } else if (designText && item.designNo && !sameShade(item.designNo, designText)) {
+        problems.push(`${item.code} is design ${item.designNo}, not ${designText}.`)
       }
     } else {
       const garment = style && colourText ? (fgByStyleColour.get(`${style.id}|${squash(colourText)}`) ?? null) : null
       const named = nameText ? (itemsByName.get(low(nameText)) ?? []) : []
+      /*
+       * Several items may share a name, one per design and colour (fabric) or
+       * colour (thread). A Design No. says which; a Colour alone picks between
+       * several of a name, or — against a fabric or thread of another colour —
+       * makes the row a new item. Without either, the name finds it as before.
+       */
+      const fits = (i: MasterItem) => !i.styleId && (!designText || sameShade(i.designNo, designText)) && (!colourText || sameShade(i.color, colourText))
+      const otherColour = (i: MasterItem) =>
+        !i.styleId && !!i.color && !sameShade(i.color, colourText) && (isFabricCategory(i.category) || isThreadCategory(i.category))
+      const pool =
+        designText || (colourText && named.length > 1) ? named.filter(fits) : colourText && named.length === 1 && otherColour(named[0]) ? [] : named
       if (garment) item = garment
-      else if (named.length === 1) item = named[0]
-      else if (named.length > 1) problems.push(`"${nameText}" is the name of ${named.length} items: give the Item Code.`)
+      else if (pool.length === 1) item = pool[0]
+      else if (pool.length > 1) problems.push(`"${nameText}" is the name of ${pool.length} items${designText || colourText ? ' in that design and colour' : ''}: give the Item Code.`)
+      else if (named.length > 1 && !designText) problems.push(`"${nameText}" is the name of ${named.length} items: give the Item Code.`)
       else if (!nameText && !(style && colourText)) {
         if (!(styleText && !style)) {
           problems.push(
@@ -1123,7 +1195,11 @@ export async function planImport(
         }
       } else if (!opts.makeItems) {
         problems.push(
-          style && colourText ? `No finished item for ${style.code} in ${colourText}. Add it in Items & Products, or give its Item Code.` : `No item named "${nameText}": give the Item Code.`,
+          style && colourText
+            ? `No finished item for ${style.code} in ${colourText}. Add it in Items & Products, or give its Item Code.`
+            : named.length
+              ? `No item named "${nameText}" in that design and colour: give the Item Code.`
+              : `No item named "${nameText}": give the Item Code.`,
         )
       } else {
         // Made new: a garment from its style and colour — unless the row names
@@ -1132,13 +1208,13 @@ export async function planImport(
         const asGarment =
           Boolean(style && colourText) &&
           (!nameText || opts.kind === 'FG' || opts.kind === 'SFG' || kind === 'FG' || catGroup === 'FINISHED_GOODS' || (kind === 'PROCESS' && catGroup !== 'RAW_MATERIALS'))
-        const key = `name:${low(nameText)}`
+        const key = newKeyOf(nameText, raw)
         const chosen = !asGarment ? opts.resolve?.[key] : undefined
         if (chosen && chosen !== 'NEW') {
           // Matched on the review to an item already there: that item, as if its code were given.
           item = m.items.find((i) => i.id === chosen) ?? null
           if (!item) problems.push(`The item chosen for "${nameText}" is no longer in Items & Products: choose again.`)
-          else plan.matched = { key, name: nameText, similar: similarTo(nameText, item.categoryId) }
+          else plan.matched = { key, name: shaded({ name: nameText, designNo: designText, color: colourText || null }), similar: similarTo(nameText, item.categoryId) }
         } else {
           const made = asGarment ? await newGarment(style!, colourText, raw, row, problems) : await newNamed(nameText, raw, row, problems)
           if (made) {
@@ -1153,7 +1229,11 @@ export async function planImport(
 
     let sizeId: string | null = null
     if (item) {
-      plan.item = { code: newItem ? '' : item.code, name: item.name }
+      // Named with a fabric's design and colour, so the check shows which of a name it found.
+      plan.item = { code: newItem ? '' : item.code, name: shaded(item) }
+      if (designText && !isFabricCategory(item.category)) {
+        problems.push(`${L('designNo')} is for fabric, and ${newItem ? `"${item.name}"` : item.code} is ${item.category?.name ?? 'not fabric'}. Clear it.`)
+      }
       const group = groupOfType(item.type)
       plan.group = group
       plan.stage = kind === 'PROCESS' && group !== 'RAW_MATERIALS' ? 'SEMI_FINISHED' : group

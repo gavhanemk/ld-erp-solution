@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, apiErrorMessage, ApiError, can, masterResource } from '@/lib/api'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
 import { Section } from '@/components/purchase/Section'
@@ -72,8 +73,8 @@ interface Option {
   name: string
 }
 
-/** An item, with what a manually typed line needs to default itself from. */
-interface ItemOption {
+/** An item, with what a manually typed line needs to default itself from, and its Design No. and Colour. */
+interface ItemOption extends ShadeFields {
   id: string
   code?: string
   name: string
@@ -119,7 +120,8 @@ interface GrnOption {
   lines: Array<{ rejectedQty: string | number }>
 }
 
-interface AdjustableLine {
+/** With the item's Design No. and Colour: two lines of one bill can share a fabric's name. */
+interface AdjustableLine extends ShadeFields {
   billLineId: string
   itemId: string
   itemCode: string
@@ -171,7 +173,7 @@ interface BillContext {
 }
 
 /** What a receipt still has left to note — the counterpart to `AdjustableLine`, for a note with no bill behind it. */
-interface AdjustableGrnLine {
+interface AdjustableGrnLine extends ShadeFields {
   grnLineId: string
   itemId: string
   itemCode: string
@@ -442,12 +444,14 @@ export function PurchaseNoteDialog({
         const [r, s, i, w] = await Promise.all([
           api.get<{ data: { reasons: ReasonOption[] } }>('/purchase/notes/reasons'),
           masterResource<Option>('suppliers').list({ limit: 500 }),
-          masterResource<ItemOption>('items').list({ limit: 500, active: true }),
+          // Every page: the list answers 200 a request, and one asked for 500
+          // quietly got the first 200.
+          everyItem<ItemOption>({ active: true }),
           masterResource<Option & { isActive?: boolean }>('warehouses').list({ limit: 200 }),
         ])
         setReasons(r.data.reasons)
         setSuppliers([...s.data].sort((a, b) => a.name.localeCompare(b.name)))
-        setItems(i.data)
+        setItems(i)
         setWarehouses(w.data)
       } catch {
         setError('Could not load the lists this form needs. Is the API running?')
@@ -752,6 +756,21 @@ export function PurchaseNoteDialog({
 
   /** Every item, by id, for the no-bill line editor to default a rate and a GST from. */
   const itemById = useMemo(() => new Map(items.map((it) => [it.id, it])), [items])
+
+  /**
+   * A line's Design No. and Colour, said under its item: two lines of one
+   * bill can share a fabric's name. A typed line's picker shows the name
+   * alone, so it is said under that too; a saved note's own item stands in
+   * when the item is no longer active.
+   */
+  const lineShade = (l: FormLine) =>
+    l.meta
+      ? itemShade(l.meta)
+      : l.grnMeta
+        ? itemShade(l.grnMeta)
+        : l.itemId
+          ? itemShade(itemById.get(l.itemId) ?? record?.lines.find((rl) => rl.item.id === l.itemId)?.item)
+          : ''
 
   /** A blank row on a no-bill note, typed rather than pulled from anywhere. */
   const addManualLine = () =>
@@ -1557,6 +1576,9 @@ export function PurchaseNoteDialog({
                                         <p className="text-foreground text-[13px] font-medium">
                                           {g.itemCode} — {g.itemName}
                                         </p>
+                                        {lineShade(l) && (
+                                          <p className="text-muted-foreground text-[11px]">{lineShade(l)}</p>
+                                        )}
                                         <p className="text-muted-foreground text-[11px]">
                                           {grnContext?.grn.grnNumber} ·{' '}
                                           <span
@@ -1572,19 +1594,24 @@ export function PurchaseNoteDialog({
                                         </p>
                                       </>
                                     ) : (
-                                      <SmartSelect
-                                        className="form-input h-8 py-0 text-[13px]"
-                                        value={l.itemId}
-                                        onChange={(e) => pickManualItem(i, e.target.value)}
-                                        aria-label={`Line ${i + 1} item`}
-                                      >
-                                        <option value="">Select…</option>
-                                        {items.map((it) => (
-                                          <option key={it.id} value={it.id}>
-                                            {it.code ? `${it.code} — ${it.name}` : it.name}
-                                          </option>
-                                        ))}
-                                      </SmartSelect>
+                                      <>
+                                        <SmartSelect
+                                          className="form-input h-8 py-0 text-[13px]"
+                                          value={l.itemId}
+                                          onChange={(e) => pickManualItem(i, e.target.value)}
+                                          aria-label={`Line ${i + 1} item`}
+                                        >
+                                          <option value="">Select…</option>
+                                          {items.map((it) => (
+                                            <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
+                                              {it.code ? `${it.code} — ${it.name}` : it.name}
+                                            </option>
+                                          ))}
+                                        </SmartSelect>
+                                        {lineShade(l) && (
+                                          <p className="text-muted-foreground mt-0.5 text-[11px]">{lineShade(l)}</p>
+                                        )}
+                                      </>
                                     )}
                                     {problem && (
                                       <p className="mt-1 text-[11px] text-red-400">{problem}</p>
@@ -1686,6 +1713,9 @@ export function PurchaseNoteDialog({
                                     <p className="text-foreground text-[13px] font-medium">
                                       {g.itemCode} — {g.itemName}
                                     </p>
+                                    {lineShade(l) && (
+                                      <p className="text-muted-foreground text-[11px]">{lineShade(l)}</p>
+                                    )}
                                     <p className="text-muted-foreground text-[11px]">
                                       {grnContext?.grn.grnNumber} ·{' '}
                                       <span
@@ -1707,7 +1737,7 @@ export function PurchaseNoteDialog({
                                   >
                                     <option value="">Select…</option>
                                     {items.map((it) => (
-                                      <option key={it.id} value={it.id}>
+                                      <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                                         {it.code ? `${it.code} — ${it.name}` : it.name}
                                       </option>
                                     ))}
@@ -1722,6 +1752,10 @@ export function PurchaseNoteDialog({
                                   <Trash2 size={13} />
                                 </button>
                               </div>
+                              {/* Under the picker, which shows the name alone. */}
+                              {!g && lineShade(l) && (
+                                <p className="text-muted-foreground mt-0.5 text-[11px]">{lineShade(l)}</p>
+                              )}
                               <div className="mt-2 grid grid-cols-2 gap-2">
                                 <div>
                                   <label className="form-label text-[11px]">Quantity</label>
@@ -1841,6 +1875,9 @@ export function PurchaseNoteDialog({
                                   <p className="text-foreground text-[13px] font-medium">
                                     {m.itemName}
                                   </p>
+                                  {itemShade(m) && (
+                                    <p className="text-muted-foreground text-[11px]">{itemShade(m)}</p>
+                                  )}
                                   <p className="text-muted-foreground text-[11px]">
                                     {m.itemCode}
                                     {m.hsnCode ? ` · HSN ${m.hsnCode}` : ''}
@@ -1955,6 +1992,9 @@ export function PurchaseNoteDialog({
                                 <span className="text-foreground block text-[13px] font-medium">
                                   {m.itemName}
                                 </span>
+                                {itemShade(m) && (
+                                  <span className="text-muted-foreground block text-[11px]">{itemShade(m)}</span>
+                                )}
                                 <span className="text-muted-foreground block text-[11px]">
                                   {m.grnId ? (
                                     <>
@@ -2449,6 +2489,9 @@ export function PurchaseNoteDialog({
                       <tr key={i} className="border-border/60 border-b last:border-0">
                         <td className="text-foreground px-2.5 py-1.5">
                           {l.meta?.itemName ?? l.grnMeta?.itemName ?? itemById.get(l.itemId)?.name}
+                          {lineShade(l) && (
+                            <span className="text-muted-foreground block text-[10px]">{lineShade(l)}</span>
+                          )}
                         </td>
                         <td className="px-2.5 py-1.5 text-right tabular-nums">
                           {qtyFmt(num(l.qty))}
