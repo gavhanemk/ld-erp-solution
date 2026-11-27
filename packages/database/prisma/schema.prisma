@@ -994,9 +994,10 @@ model NumberSeries {
   lastNumber    Int     @default(0)
   padding       Int     @default(4)
   isActive      Boolean @default(true)
-  /// A purchase order takes the lowest free number of its series (28 Nov
-  /// 2026); numbers at or below this are never filled again — the series was
-  /// moved ahead or renamed in Settings, and what it skipped stays skipped.
+  /// A purchase order deleted for good, when it was the newest, steps the
+  /// count back to the last number an order still holds (27 Nov 2026) — but
+  /// never to this or below: the series was moved ahead or renamed in
+  /// Settings, and what it skipped stays skipped.
   reuseFloor    Int     @default(0)
 
   @@unique([companyId, docType, financialYear])
@@ -2729,9 +2730,10 @@ model PurchaseOrder {
   approvedById        String?
   approvedBy          User?                 @relation("POApprovedBy", fields: [approvedById], references: [id])
   approvedAt          DateTime?
-  /// When it was first sent to the supplier (27 Nov 2026). Never cleared: an
-  /// order put back to Draft afterwards has still been sent, so it can only be
-  /// cancelled and its number is never given out again.
+  /// When it was first sent to the supplier, kept from 27 Nov 2026 (earlier
+  /// orders: their status and the activity log). Never cleared: an order put
+  /// back to Draft afterwards has still been sent, so it can only be cancelled
+  /// and its number stays on record.
   sentAt              DateTime?
   createdAt           DateTime              @default(now())
   updatedAt           DateTime              @updatedAt

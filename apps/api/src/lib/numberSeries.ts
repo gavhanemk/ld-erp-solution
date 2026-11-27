@@ -15,12 +15,17 @@ import { checkedNumber, formatDocumentNumber, seriesFor } from './docNumber'
  * - The next number can be set in Settings, but never so that a number already
  *   on a document would be issued again.
  *
- * Purchase orders go further (the user's rules, 27 Nov 2026). Purchase orders
- * and service purchase orders share the one PO series, and each new order
- * takes the LOWEST free number of it — so a draft deleted from the middle
- * (PO-0002 between 0001 and 0003) gives its number to the next order. Only a
- * draft never sent gives its number back: an order the supplier has had can
- * only be cancelled, and its number stays on record. See nextPurchaseOrderNumber.
+ * Purchase orders have rules of their own (the user's, 27 Nov 2026):
+ * - Purchase orders and service purchase orders share the one PO series, and
+ *   numbers run on from the last one: PO-0005 the last, the next is PO-0006.
+ *   Gaps further down are not filled.
+ * - Deleting offers two ways. Moved to the recycle bin, an order keeps its
+ *   number until it is restored or deleted for good — nothing else gets it.
+ *   Deleted for good, it frees its number; when it was the newest the count
+ *   steps back, so the next order takes that number again.
+ * - Only a draft never sent can be deleted. An order the supplier has had is
+ *   cancelled instead: it stays on record and its number is never reused.
+ * - Orders already made are never renumbered or re-labelled.
  */
 
 export const RELEASED_MARK = '~released-'
@@ -136,84 +141,115 @@ export async function reclaimDocumentNumber(
 }
 
 /**
- * Whether a purchase order may be deleted and give its number back: a draft
- * that was never sent to the supplier (nor approved). Anything else is
- * cancelled instead, and its number is never given out again.
+ * Whether a purchase order is a draft that never went to the supplier (nor
+ * was approved) — the only kind that may be deleted. Anything else is
+ * cancelled instead, and its number stays on record. For orders from before
+ * `sentAt` was kept, ask `sentInHistory` too.
  */
 export const neverSent = (po: { status: string; sentAt?: Date | null; approvedAt?: Date | null }) =>
   po.status === 'DRAFT' && !po.sentAt && !po.approvedAt
 
 /**
- * The lowest number of a series that no document carries, above its
- * `reuseFloor` and up to the last one issued; null when there is none. A
- * number a binned draft gave back is free (its row is re-labelled), and so is
- * one that was never used at all.
+ * Of these orders, the ones the activity log shows as sent once. `sentAt` is
+ * kept from 27 Nov 2026; a draft put back to Draft before then has no date of
+ * its own, and orders already made are not written to.
  */
-export async function lowestFreeNumber(
-  tx: Prisma.TransactionClient,
-  docType: string,
-  series: { prefix: string; separator: string; financialYear: string; lastNumber: number; padding: number; reuseFloor: number },
-): Promise<string | null> {
-  const from = Math.max(1, series.reuseFloor + 1)
-  for (let start = from; start <= series.lastNumber; start += 1000) {
-    const batch = Array.from({ length: Math.min(1000, series.lastNumber - start + 1) }, (_, i) =>
-      formatDocumentNumber({ ...series, lastNumber: start + i }),
-    )
-    const used = new Set(await numbersInUse(tx, docType, batch))
-    const free = batch.find((n) => !used.has(n))
-    if (free) return free
-  }
-  return null
+export async function sentInHistory(tx: Prisma.TransactionClient, ids: string[]): Promise<Set<string>> {
+  if (!ids.length) return new Set()
+  const rows = await tx.auditLog.findMany({
+    where: { entityType: 'PurchaseOrder', entityId: { in: ids }, after: { path: ['status'], equals: 'SENT' } },
+    select: { entityId: true },
+    distinct: ['entityId'],
+  })
+  return new Set(rows.map((r) => r.entityId))
+}
+
+type PoSeries = { prefix: string; separator: string; financialYear: string; lastNumber: number; padding: number }
+
+/**
+ * Which of these PO numbers an order holds — one on the books, or one in the
+ * recycle bin, which keeps its number until it is restored or deleted for
+ * good. A bin row that gave its number back under the earlier rule (stored
+ * with `RELEASED_MARK`) still holds the number it shows.
+ */
+async function poNumbersHeld(tx: Prisma.TransactionClient, numbers: string[]): Promise<Set<string>> {
+  const held = new Set(await numbersInUse(tx, 'PO', numbers))
+  const wanted = new Set(numbers)
+  const released = await tx.purchaseOrder.findMany({
+    where: { poNumber: { contains: RELEASED_MARK } },
+    select: { poNumber: true },
+  })
+  for (const r of released) if (wanted.has(shownNumber(r.poNumber))) held.add(shownNumber(r.poNumber))
+  return held
 }
 
 /**
- * The first number after the last one issued that no document carries. An
- * order can hold one past the count — an order the supplier had keeps its
- * number in the recycle bin even where the count was stepped back for it —
- * and that number is stepped over, never issued twice.
+ * The number after the last one issued, stepping over any an order already
+ * holds past it (a bin row from the earlier rule can).
  */
-async function nextUnusedNumber(
-  tx: Prisma.TransactionClient,
-  docType: string,
-  series: { prefix: string; separator: string; financialYear: string; lastNumber: number; padding: number },
-): Promise<{ number: string; lastNumber: number }> {
+async function nextUnusedNumber(tx: Prisma.TransactionClient, series: PoSeries): Promise<{ number: string; lastNumber: number }> {
   for (let start = series.lastNumber + 1; ; start += 50) {
     const batch = Array.from({ length: 50 }, (_, i) => ({
       lastNumber: start + i,
       number: formatDocumentNumber({ ...series, lastNumber: start + i }),
     }))
-    const used = new Set(await numbersInUse(tx, docType, batch.map((b) => b.number)))
-    const next = batch.find((b) => !used.has(b.number))
+    const held = await poNumbersHeld(tx, batch.map((b) => b.number))
+    const next = batch.find((b) => !held.has(b.number))
     if (next) return next
   }
 }
 
 /**
- * The number a new purchase order (or service purchase order) takes: the
- * lowest free one in its financial year's PO series, else the next.
+ * The number a new purchase order (or service purchase order) takes: the one
+ * after the last in its financial year's PO series.
  *
- * The series row is locked first, so two orders saved at the same moment
- * take their numbers one after the other and can never pick the same free
- * one; `poNumber` is unique besides.
+ * The series row is locked first, so two orders saved at the same moment take
+ * their numbers one after the other; `poNumber` is unique besides.
  */
 export async function nextPurchaseOrderNumber(tx: Prisma.TransactionClient, documentDate: Date = new Date()): Promise<string> {
   const series = await seriesFor(tx, 'PO', documentDate)
   await tx.$queryRaw`SELECT id FROM ld_erp.number_series WHERE id = ${series.id} FOR UPDATE`
   const locked = await tx.numberSeries.findUniqueOrThrow({ where: { id: series.id } })
-  const free = await lowestFreeNumber(tx, 'PO', locked)
-  if (free) return checkedNumber(free)
-  const next = await nextUnusedNumber(tx, 'PO', locked)
+  const next = await nextUnusedNumber(tx, locked)
   await tx.numberSeries.update({ where: { id: locked.id }, data: { lastNumber: next.lastNumber } })
   return checkedNumber(next.number)
+}
+
+/**
+ * After a purchase order is deleted for good. When it carried the last number
+ * issued, the count steps back to the last number an order still holds (on
+ * the books or in the bin), so the next order runs on from there: PO-0004,
+ * the newest, deleted for good — the next order is PO-0004. Never below
+ * `reuseFloor`, so numbers skipped in Settings stay skipped. A number from the
+ * middle stays a gap.
+ */
+export async function stepBackPurchaseOrderNumber(tx: Prisma.TransactionClient, number: string): Promise<void> {
+  for (const s of await tx.numberSeries.findMany({ where: { docType: 'PO' } })) {
+    if (s.lastNumber < 1 || formatDocumentNumber(s) !== number) continue
+    await tx.$queryRaw`SELECT id FROM ld_erp.number_series WHERE id = ${s.id} FOR UPDATE`
+    const locked = await tx.numberSeries.findUniqueOrThrow({ where: { id: s.id } })
+    // An order saved a moment ago has moved the count on: this one is a gap now.
+    if (formatDocumentNumber(locked) !== number) return
+    let last = locked.reuseFloor
+    for (let top = locked.lastNumber - 1; top > locked.reuseFloor; top -= 1000) {
+      const ks = Array.from({ length: Math.min(1000, top - locked.reuseFloor) }, (_, i) => top - i)
+      const held = await poNumbersHeld(tx, ks.map((k) => formatDocumentNumber({ ...locked, lastNumber: k })))
+      const k = ks.find((k) => held.has(formatDocumentNumber({ ...locked, lastNumber: k })))
+      if (k !== undefined) {
+        last = k
+        break
+      }
+    }
+    await tx.numberSeries.update({ where: { id: locked.id }, data: { lastNumber: last } })
+    return
+  }
 }
 
 /** What a series will give next, without taking it — for Settings and the order form's preview. */
 export async function peekNextNumber(
   tx: Prisma.TransactionClient,
-  series: { docType: string; prefix: string; separator: string; financialYear: string; lastNumber: number; padding: number; reuseFloor: number },
+  series: { docType: string; prefix: string; separator: string; financialYear: string; lastNumber: number; padding: number },
 ): Promise<string> {
-  if (series.docType === 'PO') {
-    return (await lowestFreeNumber(tx, 'PO', series)) ?? (await nextUnusedNumber(tx, 'PO', series)).number
-  }
+  if (series.docType === 'PO') return (await nextUnusedNumber(tx, series)).number
   return formatDocumentNumber({ ...series, lastNumber: series.lastNumber + 1 })
 }

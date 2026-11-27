@@ -206,11 +206,13 @@ export interface PoLine {
 }
 
 /**
- * Whether an order may be deleted and give its number back: a draft never sent
- * to the supplier (the user's rule, 27 Nov 2026). Anything else is cancelled.
+ * Whether an order may be deleted (to the recycle bin or for good): a draft
+ * never sent to the supplier (the user's rule, 27 Nov 2026). Anything else is
+ * cancelled. `wasSent` comes from the list, which also knows drafts sent
+ * before `sentAt` was kept.
  */
-export const neverSentDraft = (po: Pick<PurchaseOrder, 'status' | 'sentAt' | 'approvedAt'>) =>
-  po.status === 'DRAFT' && !po.sentAt && !po.approvedAt
+export const neverSentDraft = (po: Pick<PurchaseOrder, 'status' | 'sentAt' | 'approvedAt' | 'wasSent'>) =>
+  po.status === 'DRAFT' && !po.sentAt && !po.approvedAt && !po.wasSent
 
 /** Fabric shows its design number and colour; thread its colour; nothing else either. */
 const FABRIC = /fabric/i
@@ -243,6 +245,8 @@ export interface PurchaseOrder {
   /** When it was first sent to the supplier; never cleared (27 Nov 2026). */
   sentAt?: string | null
   approvedAt?: string | null
+  /** From the order list: it has been with the supplier at some point. */
+  wasSent?: boolean
   /** The in-house brand the purchase is for; null for a common purchase. */
   brandId?: string | null
   brand?: { id: string; name: string } | null

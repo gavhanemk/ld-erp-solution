@@ -10,8 +10,17 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { postWithin } from '../services/accounts/posting.service'
-import { nextDocumentNumber } from '../lib/docNumber'
-import { neverSent, nextPurchaseOrderNumber, reclaimDocumentNumber, releaseDocumentNumber, releasedNumber, shownNumber } from '../lib/numberSeries'
+import { nextDocumentNumber, seriesFor } from '../lib/docNumber'
+import {
+  neverSent,
+  nextPurchaseOrderNumber,
+  peekNextNumber,
+  reclaimDocumentNumber,
+  releaseDocumentNumber,
+  sentInHistory,
+  shownNumber,
+  stepBackPurchaseOrderNumber,
+} from '../lib/numberSeries'
 import { ITEM_SHADE, assertInHouseBrand, itemShadeText } from '../lib/fabric'
 import { priceNote, notedQtyByGrnLine, syncBillAdjustments } from '../services/purchaseNote.service'
 import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
@@ -1037,14 +1046,19 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
   let data: unknown = rows
   if (!picker) {
     const withLines = rows as unknown as Array<{
+      id: string
       lines: Array<Record<string, unknown> & { id: string }>
     }>
     const rejected = await rejectedByPoLine(
       prisma,
       withLines.flatMap((po) => po.lines.map((l) => l.id))
     )
-    data = withLines.map((po) => ({
+    // Whether it has ever been with the supplier, so the list offers Delete
+    // only for a draft never sent — counting drafts sent before `sentAt` was kept.
+    const history = await sentInHistory(prisma, rows.filter((r) => neverSent(r)).map((r) => r.id))
+    data = withLines.map((po, i) => ({
       ...po,
+      wasSent: !neverSent(rows[i]) || history.has(po.id),
       lines: po.lines.map((l) => ({ ...l, rejectedQty: rejected.get(l.id) ?? 0 })),
     }))
   }
@@ -2137,55 +2151,130 @@ router.patch(
   }
 )
 
-router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
-  const order = await prisma.purchaseOrder.findUnique({
-    where: { id: req.params.id },
-    include: { _count: { select: { grns: true, invoices: true } } },
-  })
-  if (!order || order.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
-
-  // Only a draft that never went to the supplier can be deleted (the user's
-  // rule, 27 Nov 2026). It goes to the recycle bin and gives its number back:
-  // the next purchase or service order takes the lowest free number, so
-  // PO-0002 deleted between 0001 and 0003 is the next order's. An order the
-  // supplier has had — sent, even if put back to Draft since — is cancelled
-  // instead: its history stays, and its number is never given out again.
-  if (!neverSent(order)) {
+/**
+ * What stops a purchase order being deleted, either way (the user's rules,
+ * 27 Nov 2026): it has been with the supplier — sent, even if put back to
+ * Draft since — so it is cancelled instead, stays on record and keeps its
+ * number for good; or a document points at it, which deleting would cut loose.
+ */
+async function refuseIfUndeletable(
+  order: {
+    id: string
+    poNumber: string
+    status: string
+    sentAt: Date | null
+    approvedAt: Date | null
+    _count: { grns: number; invoices: number; purchaseNotes: number }
+  },
+  from: 'list' | 'bin',
+) {
+  const number = shownNumber(order.poNumber)
+  if (!neverSent(order) || (await sentInHistory(prisma, [order.id])).has(order.id)) {
     throw new AppError(
-      `${order.poNumber} has been sent to the supplier, so it cannot be deleted. Cancel it instead — it stays on record, and its number is never used again.`,
+      from === 'list'
+        ? `${number} was sent to the supplier, so it cannot be deleted. Cancel it instead — it stays on record and its number is never used again.`
+        : `${number} was sent to the supplier, so it stays on record and cannot be deleted permanently. Restore it and cancel it instead.`,
       409,
       'PO_SENT',
     )
   }
 
-  if (order._count.grns > 0 || order._count.invoices > 0) {
-    const against = [
-      order._count.grns > 0 &&
-        `${order._count.grns} goods receipt${order._count.grns > 1 ? 's' : ''}`,
-      order._count.invoices > 0 &&
-        `${order._count.invoices} bill${order._count.invoices > 1 ? 's' : ''}`,
-    ]
-      .filter(Boolean)
-      .join(' and ')
+  // The order's own lines can be pointed at too, by a receipt or bill line.
+  const [receiptLines, billLines] = await Promise.all([
+    prisma.gRNLine.count({ where: { poLine: { poId: order.id } } }),
+    prisma.purchaseInvoiceLine.count({ where: { poLine: { poId: order.id } } }),
+  ])
+  const { grns, invoices, purchaseNotes } = order._count
+  const against = [
+    grns > 0 && `${grns} goods receipt${grns > 1 ? 's' : ''}`,
+    invoices > 0 && `${invoices} bill${invoices > 1 ? 's' : ''}`,
+    purchaseNotes > 0 && `${purchaseNotes} debit or credit note${purchaseNotes > 1 ? 's' : ''}`,
+  ].filter(Boolean)
+  if (!against.length && receiptLines + billLines > 0) against.push('goods receipts or bills')
+  if (against.length) {
     throw new AppError(
-      `${order.poNumber} has ${against} against it, so it cannot be deleted. Cancel it instead.`,
+      from === 'list'
+        ? `${number} has ${against.join(' and ')} against it, so it cannot be deleted. Cancel it instead.`
+        : `${number} has ${against.join(' and ')} against it now, so it cannot be deleted permanently. Restore it instead.`,
       409,
-      'PO_HAS_DOCUMENTS'
+      'PO_HAS_DOCUMENTS',
     )
   }
+}
 
-  const after = await prisma.$transaction(async (tx) => {
-    // The binned row is re-labelled so the next order can carry its number; the
-    // newest also steps the counter back, so Settings shows the true last one.
-    await releaseDocumentNumber(tx, 'PO', order.poNumber)
-    return tx.purchaseOrder.update({
-      where: { id: order.id },
-      data: {
-        deletedAt: new Date(),
-        deletedById: req.user?.id ?? null,
-        poNumber: releasedNumber(order.poNumber),
-      },
-    })
+/**
+ * Removes a purchase order for good — "Delete permanently", from an order list
+ * or from the recycle bin. Its lines, charges and attachment rows go with it
+ * (they cascade); the files after, best effort, because a file with no row is
+ * merely wasted space while a row pointing at a missing file is a broken
+ * download. When it carried the last number, the count steps back and the
+ * next order takes that number (lib/numberSeries).
+ */
+async function deleteOrderForGood(
+  req: AuthRequest,
+  order: { id: string; poNumber: string; enquiryId: string | null; attachments: Array<{ storagePath: string }> },
+) {
+  await prisma.$transaction(async (tx) => {
+    await tx.purchaseOrder.delete({ where: { id: order.id } })
+    // A bin row re-labelled under the earlier rule gave its number back then.
+    if (order.poNumber === shownNumber(order.poNumber)) await stepBackPurchaseOrderNumber(tx, order.poNumber)
+  })
+  // Its enquiry has no order standing on it any more.
+  if (order.enquiryId) await syncEnquiryStatus(prisma, order.enquiryId)
+  for (const file of order.attachments) {
+    await removeObject(file.storagePath).catch(() => {})
+  }
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'DELETE',
+    entityType: 'PurchaseOrder',
+    entityId: order.id,
+    before: order,
+  })
+}
+
+/** What to say once an order is gone for good: who gets its number. */
+async function deletedForGoodMessage(number: string, poDate: Date) {
+  let next: string | null = null
+  try {
+    next = await peekNextNumber(prisma, await seriesFor(prisma, 'PO', poDate))
+  } catch {
+    // Only the message needs it; the order is gone either way.
+  }
+  if (next === number) return `${number} deleted permanently. The next purchase or service order takes ${number}.`
+  return `${number} deleted permanently.${next ? ` New orders carry on from the last number — the next is ${next}.` : ''}`
+}
+
+/*
+ * Deleting, two ways (the user's rules, 27 Nov 2026) — the screen asks which.
+ *
+ * To the recycle bin, the default: the order is marked, not removed, and keeps
+ * its number — no new order takes it while it is in the bin — so restoring it
+ * puts it back exactly as it was. With `?permanent=1` it is removed for good at
+ * once, without a second trip through the bin, and its number is freed.
+ */
+router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
+  const permanent = req.query.permanent === '1' || req.query.permanent === 'true'
+  const order = await prisma.purchaseOrder.findUnique({
+    where: { id: req.params.id },
+    include: {
+      ...poInclude,
+      attachments: true,
+      _count: { select: { grns: true, invoices: true, purchaseNotes: true } },
+    },
+  })
+  if (!order || order.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+  await refuseIfUndeletable(order, 'list')
+
+  if (permanent) {
+    await deleteOrderForGood(req, order)
+    res.json({ success: true, message: await deletedForGoodMessage(order.poNumber, order.poDate) })
+    return
+  }
+
+  const after = await prisma.purchaseOrder.update({
+    where: { id: order.id },
+    data: { deletedAt: new Date(), deletedById: req.user?.id ?? null },
   })
 
   // A binned order stops standing on its enquiry, the same as a cancelled one.
@@ -2202,7 +2291,7 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
 
   res.json({
     success: true,
-    message: `${order.poNumber} moved to the recycle bin. Its number is free again: the next purchase or service order takes it.`,
+    message: `${order.poNumber} moved to the recycle bin. Its number stays reserved until it is restored or deleted permanently.`,
   })
 })
 
@@ -2232,6 +2321,7 @@ router.get('/recycle-bin', requirePermission(MODULE, 'view'), async (_req, res) 
     select: { id: true, name: true },
   })
   const nameById = new Map(users.map((u) => [u.id, u.name]))
+  const history = await sentInHistory(prisma, rows.filter((r) => neverSent(r)).map((r) => r.id))
 
   res.json({
     success: true,
@@ -2246,8 +2336,8 @@ router.get('/recycle-bin', requirePermission(MODULE, 'view'), async (_req, res) 
       deletedAt: r.deletedAt,
       deletedBy: r.deletedById ? (nameById.get(r.deletedById) ?? 'Someone since removed') : null,
       // Sent to the supplier before it was binned: it stays on record (restore
-      // and cancel it), so it can never be destroyed and its number never reused.
-      wasSent: !neverSent(r),
+      // and cancel it), so it is never deleted for good and its number never reused.
+      wasSent: !neverSent(r) || history.has(r.id),
     })),
   })
 })
@@ -2298,8 +2388,9 @@ router.post(
           throw err
         }
       }
-      // Its own number when that is still free; a fresh one when another order
-      // has taken it since it was binned.
+      // A binned order kept its number, so it has it still. One re-labelled
+      // under the earlier rule takes its own back while that is free, or a
+      // fresh one when another order has had it since.
       const own = shownNumber(order.poNumber)
       const poNumber =
         order.poNumber === own || (await reclaimDocumentNumber(tx, 'PO', own))
@@ -2335,17 +2426,13 @@ router.post(
 )
 
 /**
- * Empties one order out of the bin for good.
- *
- * This is the only route in the module that actually removes a purchase order.
- * The lines, charges and attachment rows cascade; the attachment files are
- * swept up after, best effort, because a file with no row is invisible and
- * merely wastes space while a row pointing at a missing file is a broken
- * download.
+ * Deletes one order in the bin for good, which frees its number.
  *
  * The guards are checked again rather than trusted from when it was binned: an
  * order can sit in the bin while a goods receipt is written against it by
- * someone who never opened the bin, and there is no undoing this one.
+ * someone who never opened the bin, and there is no undoing this one. One
+ * binned after it was sent (before the rule) stays on record: restore and
+ * cancel it.
  */
 router.delete(
   '/recycle-bin/:id',
@@ -2356,44 +2443,15 @@ router.delete(
       include: {
         ...poInclude,
         attachments: true,
-        _count: { select: { grns: true, invoices: true } },
+        _count: { select: { grns: true, invoices: true, purchaseNotes: true } },
       },
     })
     if (!order || !order.deletedAt) {
       throw new AppError('That order is not in the recycle bin', 404, 'NOT_IN_BIN')
     }
-    if (order._count.grns > 0 || order._count.invoices > 0) {
-      throw new AppError(
-        `${shownNumber(order.poNumber)} has stock or bills against it now, so it cannot be destroyed. Restore it instead.`,
-        409,
-        'PO_HAS_DOCUMENTS'
-      )
-    }
-    // An order the supplier had stays on record, so its number is never used
-    // again (27 Nov 2026). One binned before that rule: restore and cancel it.
-    if (!neverSent(order)) {
-      throw new AppError(
-        `${shownNumber(order.poNumber)} was sent to the supplier, so it stays on record and cannot be destroyed. Restore it and cancel it instead.`,
-        409,
-        'PO_SENT',
-      )
-    }
-
-    await writeAuditLog(req, {
-      module: MODULE,
-      action: 'DELETE',
-      entityType: 'PurchaseOrder',
-      entityId: order.id,
-      before: order,
-    })
-
-    await prisma.purchaseOrder.delete({ where: { id: order.id } })
-
-    for (const file of order.attachments ?? []) {
-      await removeObject(file.storagePath).catch(() => {})
-    }
-
-    res.json({ success: true, message: `${order.poNumber} destroyed.` })
+    await refuseIfUndeletable(order, 'bin')
+    await deleteOrderForGood(req, order)
+    res.json({ success: true, message: await deletedForGoodMessage(shownNumber(order.poNumber), order.poDate) })
   }
 )
 

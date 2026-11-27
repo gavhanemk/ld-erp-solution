@@ -1,19 +1,19 @@
 /**
- * Purchase order numbers (the user's rules, 27 Nov 2026), and the running series:
- *   - purchase orders and service purchase orders share ONE PO series;
- *   - a new order takes the lowest free number of it — a deleted unsent
- *     draft's (PO-0002 deleted between 0001 and 0003 is the next order's), or
- *     a number never used at all (the "0001 missing" case);
- *   - an order sent to the supplier — even if put back to Draft — cannot be
- *     deleted, only cancelled, and its number is never used again; one binned
- *     before that rule cannot be destroyed;
- *   - two orders saved at the same moment never get the same number;
- *   - a number past the count that an order already carries is stepped over;
- *   - restored from the recycle bin, an order gets its own number back when
- *     free, else a fresh one;
- *   - Settings shows the last used and the true next number; Set moves the
- *     next number ahead (what it skipped stays skipped) but never onto a
- *     number in use; only users who may edit settings can;
+ * Purchase order numbers and deleting (the user's rules, 27 Nov 2026), and the
+ * running series:
+ *   - purchase orders and service purchase orders share ONE PO series, and
+ *     numbers run on from the last one (PO-0005 the last, the next is 0006);
+ *     gaps further down are not filled;
+ *   - Delete offers two ways: to the recycle bin, where the order keeps its
+ *     number reserved, or permanently, which frees it — the newest deleted for
+ *     good gives its number to the next order;
+ *   - only a draft never sent can be deleted; one the supplier has had (even
+ *     put back to Draft, even before `sentAt` was kept) is cancelled instead;
+ *   - orders saved at the same moment never share a number;
+ *   - a bin row re-labelled under the earlier rule still holds its number;
+ *   - Settings shows the last used and the true next number; Set moves it,
+ *     never onto a number an order holds, and deleting for good never steps
+ *     the count back past it; only users who may edit settings can;
  *   - other documents keep the older rule: the newest gives its number back.
  *
  * Demo database (lderp_demo) only; everything it makes is removed at the end
@@ -37,7 +37,7 @@ const caller = (token: string) => async (method: string, path: string, body?: un
   const r = await fetch(`${API}${path}`, { method, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: body === undefined ? undefined : JSON.stringify(body) })
   return { status: r.status, body: (await r.json().catch(() => null)) as any }
 }
-const tail = (n?: string) => Number(String(n ?? '').split('-').pop())
+const tail = (n?: string) => Number(String(n ?? '').split('~')[0].split('-').pop())
 
 async function main() {
   const [{ current_database: db }] = await prisma.$queryRaw<{ current_database: string }[]>`select current_database()`
@@ -57,90 +57,119 @@ async function main() {
   }
   const series = async () => ((await call('GET', '/settings/number-series')).body.data as any[]).find((s) => s.docType === 'PO' && s.isActive)
   const original = await prisma.numberSeries.findUniqueOrThrow({ where: { id: (await series()).id } })
+  const L = original.lastNumber
+  const row = (id: string) => prisma.purchaseOrder.findUnique({ where: { id } })
+  const forGood = (id: string) => call('DELETE', `/purchase/orders/${id}?permanent=1`)
 
   try {
-    // ── One series for purchase and service orders ─────────────────────
-    // From a clean point: older free numbers on this test copy would
-    // (rightly) be filled first. Put back at the end.
-    await prisma.numberSeries.update({ where: { id: original.id }, data: { reuseFloor: original.lastNumber } })
+    // From a clean point: what this test copy already holds lower down is not
+    // this check's business. Put back at the end.
+    await prisma.numberSeries.update({ where: { id: original.id }, data: { reuseFloor: L } })
     const s1 = await newPo(true), s2 = await newPo(true), p3 = await newPo(false), p4 = await newPo(false), s5 = await newPo(true)
-    const seq = [s1, s2, p3, p4, s5].map((x) => tail(x.poNumber))
-    check(`1. service, service, purchase, purchase, service orders number one after another (${[s1, s2, p3, p4, s5].map((x) => x.poNumber).join(', ')})`,
-      seq.every((n, i) => i === 0 || n === seq[i - 1] + 1), seq)
+    const at = (k: number) => s1.poNumber.replace(/\d+$/, (d) => String(k).padStart(d.length, '0'))
 
-    // ── Scenario A: an unsent draft deleted from the middle ────────────
-    const delA = await call('DELETE', `/purchase/orders/${s2.id}`)
-    const preview = (await series())?.nextNumber
+    // ── One series, running on ─────────────────────────────────────────
+    check(`1. service, service, purchase, purchase, service orders run on from the last number (${[s1, s2, p3, p4, s5].map((x) => x.poNumber).join(', ')})`,
+      [s1, s2, p3, p4, s5].every((x, i) => x.poNumber === at(L + 1 + i)))
+
+    // ── To the recycle bin: the number stays reserved ──────────────────
+    const bin5 = await call('DELETE', `/purchase/orders/${s5.id}`)
+    const shown6 = (await series())?.nextNumber
     const n6 = await newPo(false)
-    check(`2. an unsent draft deleted from the middle (${s2.poNumber}) is the next order's number`, delA.status < 300 && n6.poNumber === s2.poNumber, { del: delA.body?.message, got: n6.poNumber })
-    check('3. Settings and the order form preview that same number before it is taken', preview === s2.poNumber, { preview })
+    check(`2. the newest (${s5.poNumber}) moved to the recycle bin keeps its number: the next order is ${n6.poNumber}, as Settings showed`,
+      bin5.status < 300 && n6.poNumber === at(L + 6) && shown6 === at(L + 6), { bin: bin5.body?.message, shown6, got: n6.poNumber })
+    const binned5 = await row(s5.id)
+    check('3. in the bin it carries its number unchanged', binned5?.poNumber === s5.poNumber && !!binned5?.deletedAt, binned5?.poNumber)
+    const r5 = await call('POST', `/purchase/recycle-bin/${s5.id}/restore`)
+    const s5After = await row(s5.id)
+    check(`4. restored, it is ${s5.poNumber} again`, r5.status < 300 && s5After?.poNumber === s5.poNumber && !s5After?.deletedAt, r5.body)
 
-    // ── Scenario B: a sent order is never deleted, never reused ────────
-    await call('PATCH', `/purchase/orders/${p3.id}/send`, {})
-    const delB = await call('DELETE', `/purchase/orders/${p3.id}`)
-    check(`4. a sent order (${p3.poNumber}) cannot be deleted — it is cancelled instead`, delB.status === 409 && delB.body?.code === 'PO_SENT', delB.body)
-    const cancelled = await call('PATCH', `/purchase/orders/${p3.id}/cancel`, {})
-    const n7 = await newPo(false)
-    check(`5. cancelled, its number stays used: the next order is ${n7.poNumber}, not ${p3.poNumber}`, cancelled.status < 300 && n7.poNumber !== p3.poNumber && tail(n7.poNumber) > tail(s5.poNumber), { got: n7.poNumber })
+    // ── Deleted for good: the number is freed ──────────────────────────
+    const del6 = await forGood(n6.id)
+    const shownAfter6 = (await series())?.nextNumber
+    const n7 = await newPo(true)
+    check(`5. the newest (${n6.poNumber}) deleted for good gives its number to the next order — here a service order: ${n7.poNumber}`,
+      del6.status < 300 && n7.poNumber === n6.poNumber && shownAfter6 === n6.poNumber, { del: del6.body?.message, shownAfter6, got: n7.poNumber })
+    const left = await prisma.purchaseOrderLine.count({ where: { poId: n6.id } })
+    check('6. gone for good: not in the bin, and no lines left behind', !(await row(n6.id)) && left === 0, { left })
 
-    await call('PATCH', `/purchase/orders/${p4.id}/send`, {})
-    await call('PATCH', `/purchase/orders/${p4.id}/reopen`, {})
-    const delC = await call('DELETE', `/purchase/orders/${p4.id}`)
-    check(`6. sent and put back to Draft (${p4.poNumber}), it still cannot be deleted`, delC.status === 409 && delC.body?.code === 'PO_SENT', delC.body)
+    const del3 = await forGood(p3.id)
+    const n8 = await newPo(false)
+    check(`7. deleted for good from the middle (${p3.poNumber}), its number is not filled: new orders carry on (${n8.poNumber})`,
+      del3.status < 300 && n8.poNumber === at(L + 7) && /carry on/.test(del3.body?.message ?? ''), { msg: del3.body?.message, got: n8.poNumber })
 
-    // ── A number never used (the "0001 missing" case) ──────────────────
-    await prisma.numberSeries.update({ where: { id: original.id }, data: { lastNumber: { increment: 1 } } })
-    const skipped = tail(n7.poNumber) + 1
-    const n8 = await newPo(true)
+    await call('DELETE', `/purchase/orders/${n8.id}`)
+    const des8 = await call('DELETE', `/purchase/recycle-bin/${n8.id}`)
     const n9 = await newPo(false)
-    check(`7. a number never used below the counter is filled by the next order (${n8.poNumber}), then the count goes on (${n9.poNumber})`,
-      tail(n8.poNumber) === skipped && tail(n9.poNumber) === skipped + 1, { skipped, n8: n8.poNumber, n9: n9.poNumber })
+    check(`8. the newest deleted for good from the recycle bin (${n8.poNumber}) gives its number to the next order (${n9.poNumber})`,
+      des8.status < 300 && n9.poNumber === n8.poNumber, { msg: des8.body?.message, got: n9.poNumber })
 
-    // ── At the same moment ─────────────────────────────────────────────
+    await forGood(n7.id) // the middle one first: a gap
+    await forGood(n9.id) // then the newest, above the gap
+    const n10 = await newPo(true)
+    check(`9. the newest deleted for good above a gap: the count goes back to the last order still there (${s5.poNumber}), so the next is ${n10.poNumber}`,
+      n10.poNumber === at(L + 6), n10.poNumber)
+
+    // ── An order the supplier has had ──────────────────────────────────
+    await call('PATCH', `/purchase/orders/${p4.id}/send`, {})
+    const d1 = await call('DELETE', `/purchase/orders/${p4.id}`)
+    const d2 = await forGood(p4.id)
+    check(`10. a sent order (${p4.poNumber}) cannot be deleted either way — it is cancelled instead`,
+      d1.status === 409 && d1.body?.code === 'PO_SENT' && d2.status === 409 && d2.body?.code === 'PO_SENT', { d1: d1.body, d2: d2.body })
+    const c4 = await call('PATCH', `/purchase/orders/${p4.id}/cancel`, {})
+    const p4After = await row(p4.id)
+    check(`11. cancelled, it keeps its number and stays on the list (${p4.poNumber})`, c4.status < 300 && p4After?.poNumber === p4.poNumber && !p4After?.deletedAt)
+
+    await call('PATCH', `/purchase/orders/${s2.id}/send`, {})
+    await call('PATCH', `/purchase/orders/${s2.id}/reopen`, {})
+    const d3 = await forGood(s2.id)
+    check(`12. sent and put back to Draft (${s2.poNumber}), it still cannot be deleted`, d3.status === 409 && d3.body?.code === 'PO_SENT', d3.body)
+
+    await prisma.purchaseOrder.update({ where: { id: s2.id }, data: { sentAt: null } }) // as if sent before the date was kept
+    const d4 = await call('DELETE', `/purchase/orders/${s2.id}`)
+    const listed = ((await call('GET', `/purchase/orders?service=true&q=${encodeURIComponent(s2.poNumber)}`)).body?.data as any[])?.find((x) => x.id === s2.id)
+    check('13. one sent before the date was kept is known from the activity log: not deletable, and the list says so',
+      d4.status === 409 && d4.body?.code === 'PO_SENT' && listed?.wasSent === true, { d4: d4.body, wasSent: listed?.wasSent })
+    const draft = ((await call('GET', `/purchase/orders?service=true&q=${encodeURIComponent(s1.poNumber)}`)).body?.data as any[])?.find((x) => x.id === s1.id)
+    check('14. a draft never sent is listed as one that can be deleted', draft?.wasSent === false, draft?.wasSent)
+
+    // ── Gaps lower down stay gaps ──────────────────────────────────────
+    await prisma.numberSeries.update({ where: { id: original.id }, data: { lastNumber: { increment: 1 } } })
+    const n11 = await newPo(false)
+    check(`15. a number never used below the last one (the "0001 missing" case) stays unused: new orders carry on (${n11.poNumber})`,
+      n11.poNumber === at(L + 8), n11.poNumber)
+
     const burst = await Promise.all(Array.from({ length: 6 }, (_, i) => newPo(i % 2 === 0)))
-    const numbers = burst.map((b) => b?.poNumber)
-    check('8. six orders saved at the same moment all get different numbers', numbers.every(Boolean) && new Set(numbers).size === 6, numbers)
+    const nums = burst.map((b) => tail(b?.poNumber)).sort((a, b) => a - b)
+    check('16. six orders saved at the same moment get six different numbers, one after another',
+      nums.length === 6 && nums.every((n, i) => n === L + 9 + i), nums)
 
-    // ── Restoring ──────────────────────────────────────────────────────
-    const r1 = await call('POST', `/purchase/recycle-bin/${s2.id}/restore`)
-    const s2After = (await call('GET', `/purchase/orders/${s2.id}`)).body?.data
-    check(`9. the draft whose number was reused is restored under a fresh number (${s2After?.poNumber})`, r1.status < 300 && s2After?.poNumber !== s2.poNumber, { status: r1.status, got: s2After?.poNumber })
-    const lone = await newPo(false)
-    await call('DELETE', `/purchase/orders/${lone.id}`)
-    const r2 = await call('POST', `/purchase/recycle-bin/${lone.id}/restore`)
-    const loneAfter = (await call('GET', `/purchase/orders/${lone.id}`)).body?.data
-    check(`10. restored while its number is still free, a draft gets it back (${lone.poNumber})`, r2.status < 300 && loneAfter?.poNumber === lone.poNumber, { got: loneAfter?.poNumber })
-
-    // ── Destroying from the bin ────────────────────────────────────────
-    const old = await newPo(false)
-    await call('DELETE', `/purchase/orders/${old.id}`)
-    // An order binned before the rule, after it had been sent.
-    await prisma.purchaseOrder.update({ where: { id: old.id }, data: { sentAt: new Date() } })
-    const bin = (await call('GET', '/purchase/recycle-bin')).body?.data as any[]
-    const destroy = await call('DELETE', `/purchase/recycle-bin/${old.id}`)
-    check('11. one binned after being sent cannot be destroyed (restore and cancel it), and the bin says so', destroy.status === 409 && destroy.body?.code === 'PO_SENT' && bin?.find((b) => b.id === old.id)?.wasSent === true, destroy.body)
+    // ── A bin row from the earlier rule ────────────────────────────────
+    const x = await newPo(false)
+    await prisma.purchaseOrder.update({ where: { id: x.id }, data: { deletedAt: new Date(), poNumber: `${x.poNumber}~released-zz` } })
+    await prisma.numberSeries.update({ where: { id: original.id }, data: { lastNumber: { decrement: 1 } } })
+    const shownX = (await series())?.nextNumber
+    const n12 = await newPo(true)
+    check(`17. a bin row re-labelled under the earlier rule still holds its number (${x.poNumber}): the next order steps over it (${n12.poNumber})`,
+      n12.poNumber === at(L + 16) && shownX === at(L + 16), { shownX, got: n12.poNumber })
+    const rx = await call('POST', `/purchase/recycle-bin/${x.id}/restore`)
+    check(`18. restored, it is ${x.poNumber} again`, rx.status < 300 && (await row(x.id))?.poNumber === x.poNumber, rx.body)
 
     // ── Running series in Settings ─────────────────────────────────────
     const now = await series()
-    check(`12. Settings calls it the purchase & service order series and shows its last number (${now?.lastUsedNumber})`, /service/i.test(now?.label ?? '') && !!now?.lastUsedNumber, now)
-    const low = await call('PATCH', `/settings/number-series/${now.id}/next`, { nextNumber: 1 })
-    check('13. the next number cannot be set to one already in use', low.status === 409 && low.body?.code === 'NUMBER_IN_USE', low.body)
-    const ahead = now.lastNumber + 5
+    check(`19. Settings calls it the purchase & service order series and shows its last number (${now?.lastUsedNumber})`, /service/i.test(now?.label ?? '') && !!now?.lastUsedNumber, now)
+    await call('DELETE', `/purchase/orders/${n12.id}`) // the newest, to the bin
+    const low = await call('PATCH', `/settings/number-series/${now.id}/next`, { nextNumber: tail(n12.poNumber) })
+    check(`20. the next number cannot be set onto one an order in the bin holds (${n12.poNumber})`, low.status === 409 && low.body?.code === 'NUMBER_IN_USE', low.body)
+    const ahead = tail(n12.poNumber) + 5
     const up = await call('PATCH', `/settings/number-series/${now.id}/next`, { nextNumber: ahead })
     const e = await newPo(false)
-    check(`14. set ahead, the next order takes that number (${e.poNumber}) — what it skipped stays skipped`, up.status < 300 && tail(e.poNumber) === ahead, { status: up.status, next: up.body?.data?.nextNumber, got: e.poNumber })
+    check(`21. set ahead, the next order takes that number (${e.poNumber}) — what it skipped stays skipped`, up.status < 300 && tail(e.poNumber) === ahead, { status: up.status, got: e.poNumber })
+    const de = await forGood(e.id)
+    const shownE = (await series())?.nextNumber
+    check(`22. that order deleted for good gives its number back, but the count never goes back past the point set (${shownE})`, de.status < 300 && shownE === e.poNumber, { de: de.body, shownE })
     const denied = await buyer('PATCH', `/settings/number-series/${now.id}/next`, { nextNumber: ahead + 9 })
-    check('15. a user who may not edit settings cannot change it', denied.status === 403, denied.status)
-
-    // ── A number past the count already on an order ────────────────────
-    // (an order the supplier had, binned under the earlier rule, keeps its
-    // number even where the count was stepped back for it)
-    const held = await newPo(false)
-    await prisma.numberSeries.update({ where: { id: original.id }, data: { lastNumber: { decrement: 1 } } })
-    const shown = (await series())?.nextNumber
-    const past = await newPo(true)
-    check(`16. a number past the count already on an order (${held.poNumber}) is stepped over: the next is ${past?.poNumber}, as Settings showed`,
-      !!past && tail(past.poNumber) === tail(held.poNumber) + 1 && shown === past.poNumber, { held: held.poNumber, shown, got: past?.poNumber })
+    check('23. a user who may not edit settings cannot change it', denied.status === 403, denied.status)
 
     // ── Other documents keep the newest-only rule ──────────────────────
     const g = await newPo(false)
@@ -150,13 +179,13 @@ async function main() {
     const g1 = await grn()
     const del = await call('DELETE', `/purchase/grn/${g1?.id}`, { reason: 'test' })
     const g2 = await grn()
-    check(`17. the newest goods receipt deleted (${g1?.grnNumber}), the next one takes its number`, del.status < 300 && g2?.grnNumber === g1?.grnNumber, { del: del.status, g1: g1?.grnNumber, g2: g2?.grnNumber })
+    check(`24. the newest goods receipt deleted (${g1?.grnNumber}), the next one takes its number`, del.status < 300 && g2?.grnNumber === g1?.grnNumber, { del: del.status, g1: g1?.grnNumber, g2: g2?.grnNumber })
     if (g2?.id) await call('DELETE', `/purchase/grn/${g2.id}`, { reason: 'test' })
   } finally {
     // Test orders go for good, sent or not, and the series is put back.
     await prisma.purchaseOrderLine.deleteMany({ where: { poId: { in: made } } })
     await prisma.purchaseOrderCharge.deleteMany({ where: { poId: { in: made } } }).catch(() => undefined)
-    for (const id of made) await prisma.purchaseOrder.delete({ where: { id } }).catch(() => undefined)
+    await prisma.purchaseOrder.deleteMany({ where: { id: { in: made } } })
     await prisma.numberSeries.update({ where: { id: original.id }, data: { lastNumber: original.lastNumber, reuseFloor: original.reuseFloor } })
   }
   console.log(`\n${pass} passed, ${fail} failed`)

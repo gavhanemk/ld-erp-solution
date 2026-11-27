@@ -33,6 +33,7 @@ import type { EnquiryQuote, EnquiryRecord } from '@/components/purchase/enquiryT
 import { takeHandedEnquiry } from '@/components/purchase/enquiryHandoff'
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
 import { GoodsReceiptHistoryDialog } from '@/components/purchase/GoodsReceiptHistoryDialog'
+import { DeleteOrderDialog, type DeleteChoice } from '@/components/purchase/DeleteOrderDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { describeReport, downloadReport } from '@/lib/reportDownload'
@@ -161,6 +162,7 @@ export default function PurchaseOrdersPage() {
   /** Which order's files are open in the read-only viewer, or null when closed. */
   const [filesFor, setFilesFor] = useState<PurchaseOrder | null>(null)
   const [historyFor, setHistoryFor] = useState<PurchaseOrder | null>(null)
+  const [deleting, setDeleting] = useState<PurchaseOrder | null>(null)
 
   /*
    * Arriving from an enquiry's Order button.
@@ -495,25 +497,20 @@ export default function PurchaseOrdersPage() {
    * Deleting is not cancelling, and the wording says so.
    *
    * Cancelling keeps the order and records that it was called off, which is
-   * what the file should show for a real order that fell through. Deleting is
-   * for the ones that should never have been raised — a duplicate, a slip, the
-   * rows left over from setting the system up — and it takes the lines,
-   * charges and attachments with it.
-   *
-   * The number is spelled out in the prompt because it is the only thing that
-   * cannot be undone: the series counts up and will not hand that number out
-   * again.
+   * what the file should show for a real order that fell through — and the
+   * only way for one the supplier has had. Deleting is for a draft that should
+   * never have been raised: a duplicate, a slip. The window asks which way
+   * (27 Nov 2026): to the recycle bin, where it keeps its number, or for good,
+   * which frees the number.
    */
-  const remove = async (po: PurchaseOrder) => {
-    // Only a draft never sent can be deleted (27 Nov 2026); its number goes back.
-    const warning =
-      `Delete ${po.poNumber}? This draft was never sent, so it goes to the recycle bin ` +
-      `and ${po.poNumber} is free again: the next purchase or service order takes it.`
-    if (!confirm(warning)) return
+  const remove = async (po: PurchaseOrder, choice: DeleteChoice) => {
+    setDeleting(null)
     setBusy(true)
     setMessage(null)
     try {
-      const res = await api.delete<{ message?: string }>(`/purchase/orders/${po.id}`)
+      const res = await api.delete<{ message?: string }>(
+        `/purchase/orders/${po.id}${choice === 'permanent' ? '?permanent=1' : ''}`
+      )
       await load()
       if (res.message) setMessage(res.message)
     } catch (err) {
@@ -597,15 +594,15 @@ export default function PurchaseOrdersPage() {
       })
     }
 
-    // Only a draft never sent to the supplier can be deleted, and it gives its
-    // number back (27 Nov 2026). An order the supplier has had is cancelled
-    // instead, so it stays on record and its number is never used again.
+    // Only a draft never sent to the supplier can be deleted — to the recycle
+    // bin or for good (27 Nov 2026). An order the supplier has had is
+    // cancelled instead, so it stays on record and keeps its number.
     if (neverSentDraft(po)) {
       items.push({
         key: 'delete',
         label: 'Delete order',
         icon: <Trash2 size={15} />,
-        onClick: () => void remove(po),
+        onClick: () => setDeleting(po),
         danger: true,
       })
     }
@@ -1470,6 +1467,14 @@ export default function PurchaseOrdersPage() {
           poNumber={historyFor.poNumber}
           supplierName={historyFor.supplier?.name}
           onClose={() => setHistoryFor(null)}
+        />
+      )}
+
+      {deleting && (
+        <DeleteOrderDialog
+          poNumber={deleting.poNumber}
+          onChoose={(choice) => void remove(deleting, choice)}
+          onCancel={() => setDeleting(null)}
         />
       )}
 

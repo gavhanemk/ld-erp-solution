@@ -772,8 +772,8 @@ router.get('/number-series', requirePermission(SETTINGS, 'view'), async (_req, r
     orderBy: [{ financialYear: 'desc' }, { docType: 'asc' }],
   })
 
-  // What each series gives next — for purchase orders the lowest free number
-  // (a deleted draft's), which is what the order form previews too.
+  // What each series gives next — for purchase orders the one after the last
+  // number an order holds, which is what the order form previews too.
   const next = await Promise.all(series.map((s) => peekNextNumber(prisma, s)))
   res.json({
     success: true,
@@ -856,9 +856,9 @@ router.patch('/number-series/:id/next', requirePermission(SETTINGS, 'edit'), asy
       )
     }
   }
-  // Moved ahead, what it skipped stays skipped: purchase orders, which fill
-  // free numbers, never go back for them (lib/numberSeries). Moved back, it
-  // may fill from there again.
+  // Moved ahead, what it skipped stays skipped: a purchase order deleted for
+  // good never steps the count back past it (lib/numberSeries). Moved back,
+  // it may run on from there again.
   const after = await prisma.numberSeries.update({
     where: { id: before.id },
     data: {
@@ -909,8 +909,8 @@ router.patch('/number-series/:id', requirePermission(SETTINGS, 'edit'), async (r
   }
 
   // Changing the prefix once documents exist produces two different formats in
-  // the same year, which is legal but confusing, so it is called out. The new
-  // format never fills the old one's numbers: none of them is "free".
+  // the same year, which is legal but confusing, so it is called out. Deleting
+  // a new-format order for good never steps the count back into the old ones.
   const reformatted =
     before.lastNumber > 0 &&
     (merged.prefix !== before.prefix || merged.separator !== before.separator || merged.padding !== before.padding)
