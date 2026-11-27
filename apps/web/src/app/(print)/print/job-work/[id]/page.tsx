@@ -217,7 +217,7 @@ export default function PrintJobWorkChallan() {
                 justifyContent: 'space-between',
                 alignItems: 'center',
                 padding: '7px 11px',
-                background: NAVY,
+                borderTop: '1.5pt solid #000',
                 color: '#fff',
               }}
             >

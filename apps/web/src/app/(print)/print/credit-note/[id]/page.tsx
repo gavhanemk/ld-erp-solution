@@ -180,7 +180,7 @@ export default function PrintCreditNote() {
                 </div>
               ))}
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 11px', background: NAVY, color: '#fff', marginTop: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 11px', borderTop: '1.5pt solid #000', color: '#fff', marginTop: 'auto' }}>
               <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>Credit total</span>
               <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(n.totalAmount)}</span>
             </div>
