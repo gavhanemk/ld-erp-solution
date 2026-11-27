@@ -3,7 +3,7 @@
 import { useQtyRules } from '@/lib/qtyRules'
 import { newRequestId } from '@/lib/utils'
 import { QtyProblem } from '@/components/ui/QtyProblem'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Loader2,
   Plus,
@@ -15,6 +15,7 @@ import {
   ArrowRightLeft,
   Warehouse,
   Truck,
+  Tags,
 } from 'lucide-react'
 import { api, apiErrorMessage, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
@@ -84,7 +85,20 @@ interface Line {
   rate: string
   /** Whose stock, which size and which grade: "OWNED||" for our own, unsized, good. */
   whose: string
+  /** Garment tags moving with the pieces, scanned or picked: one per piece. */
+  tags: string[]
 }
+
+/** One balance's garment tags in the store: what is held, how much of it is tagged, the tags free to move. */
+interface TagInfo {
+  held: number
+  tagged: number
+  untagged: number
+  codes: string[]
+}
+
+/** A scanner types a code and Enter; typed by hand they may be spaced or comma separated. */
+const splitCodes = (text: string) => [...new Set(text.split(/[\s,;]+/).map((c) => c.trim().toUpperCase()).filter(Boolean))]
 
 /** One balance a store holds: an item, whose it is, its size and its grade. */
 interface Held {
@@ -116,7 +130,7 @@ const parseWhose = (k: string) => {
   }
 }
 
-const emptyLine = (): Line => ({ itemId: '', qty: '', rate: '', whose: OURS })
+const emptyLine = (): Line => ({ itemId: '', qty: '', rate: '', whose: OURS, tags: [] })
 
 const COPY: Record<
   MoveMode,
@@ -185,6 +199,11 @@ export function StockMoveDialog({
   // One id for this form until it saves: a double click or a retry reaches
   // the server as the same request and saves the document once.
   const requestId = useRef(newRequestId())
+  // Each balance's garment tags in the store a move leaves, by store, item and whose.
+  const [tagInfo, setTagInfo] = useState<Record<string, TagInfo>>({})
+  const [scanText, setScanText] = useState<Record<number, string>>({})
+  const [picking, setPicking] = useState<number | null>(null)
+  const tagKey = (l: Line) => `${warehouseId}|${l.itemId}|${l.whose}`
 
   useEffect(() => {
     if (mode === 'opening' || mode === 'stockin' || !warehouseId) {
@@ -246,6 +265,41 @@ export function StockMoveDialog({
   }, [])
 
   const itemsById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
+
+  // A move of tagged garments names its tags: what the store holds tagged, for each line's stock.
+  useEffect(() => {
+    if (mode !== 'transfer' || !warehouseId) return
+    const wanted = lines.filter((l) => l.itemId && !(tagKey(l) in tagInfo))
+    if (!wanted.length) return
+    let cancelled = false
+    void Promise.all(
+      wanted.map(async (l) => {
+        const w = parseWhose(l.whose)
+        const qs = new URLSearchParams({ warehouseId, itemId: l.itemId, grade: w.grade, ownership: w.ownership })
+        if (w.sizeId) qs.set('sizeId', w.sizeId)
+        if (w.ownerCustomerId) qs.set('ownerCustomerId', w.ownerCustomerId)
+        try {
+          const r = await api.get<{ data: TagInfo }>(`/inventory/tags?${qs}`)
+          return [tagKey(l), r.data] as const
+        } catch {
+          return [tagKey(l), { held: 0, tagged: 0, untagged: 0, codes: [] }] as const
+        }
+      }),
+    ).then((got) => {
+      if (!cancelled) setTagInfo((t) => ({ ...t, ...Object.fromEntries(got) }))
+    })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, warehouseId, lines])
+
+  /** How many of a line's pieces must be named by tag: beyond what the store holds untagged. */
+  const tagsNeeded = (l: Line) => {
+    const info = tagInfo[tagKey(l)]
+    if (!info || !info.tagged) return 0
+    return Math.max(0, Math.round(Number(l.qty) || 0) - info.untagged)
+  }
   const stores = useMemo(() => warehouses.filter((w) => w.kind !== 'TRANSIT'), [warehouses])
   const transitStores = useMemo(() => warehouses.filter((w) => w.kind === 'TRANSIT'), [warehouses])
   const onTheRoad = mode === 'transfer' && goes === 'IN_TRANSIT'
@@ -282,6 +336,13 @@ export function StockMoveDialog({
       return setError('Say why the figure is being changed — one line is enough.')
     }
     if (filled.length === 0) return setError('Add at least one item with a quantity.')
+    if (mode === 'transfer') {
+      const short = filled.findIndex((l) => l.tags.length < tagsNeeded(l))
+      if (short >= 0) {
+        const l = filled[short]
+        return setError(`${itemsById.get(l.itemId)?.name ?? 'A line'}: name ${tagsNeeded(l) - l.tags.length} more of its pieces by their tags — scan them or pick them from the store.`)
+      }
+    }
     // 2.5 cartons (or 0.6 counted): said under its box, and again here.
     const half = filled.find((l) => qtyRules.placesProblem(l.qty, itemsById.get(l.itemId)))
     if (half) return setError(`${itemsById.get(half.itemId)?.name ?? 'An item'}: ${qtyRules.placesProblem(half.qty, itemsById.get(half.itemId))}`)
@@ -360,7 +421,7 @@ export function StockMoveDialog({
           mode: goes,
           transitWarehouseId: onTheRoad ? transitId : null,
           notes: notes || null,
-          lines: filled.map((l) => ({ itemId: l.itemId, qty: Number(l.qty), ...parseWhose(l.whose) })),
+          lines: filled.map((l) => ({ itemId: l.itemId, qty: Number(l.qty), ...parseWhose(l.whose), ...(l.tags.length ? { garmentCodes: l.tags } : {}) })),
         })
       }
 
@@ -579,8 +640,11 @@ export function StockMoveDialog({
                 const choices = held.filter((h) => h.itemId === line.itemId)
                 const ours = choices.find((h) => heldKey(h) === OURS)
                 const customers = parseWhose(line.whose).ownership === 'CUSTOMER_OWNED'
+                const info = mode === 'transfer' && line.itemId ? tagInfo[tagKey(line)] : undefined
+                const need = tagsNeeded(line)
                 return (
-                  <tr key={i} data-grid-row>
+                  <Fragment key={i}>
+                  <tr data-grid-row>
                     <td className="text-muted-foreground px-3 py-2 text-xs">{i + 1}</td>
                     <td className="px-3 py-2">
                       <SmartSelect
@@ -591,6 +655,7 @@ export function StockMoveDialog({
                           const offered = held.filter((h) => h.itemId === e.target.value)
                           setLine(i, {
                             itemId: e.target.value,
+                            tags: [],
                             // Held only as one customer's, or one size: start on that.
                             whose: offered.length === 1 ? heldKey(offered[0]) : OURS,
                             // The item's standard rate is a starting point for
@@ -619,7 +684,7 @@ export function StockMoveDialog({
                         <SmartSelect
                           className="form-input h-9"
                           value={line.whose}
-                          onChange={(e) => setLine(i, { whose: e.target.value })}
+                          onChange={(e) => setLine(i, { whose: e.target.value, tags: [] })}
                           disabled={!line.itemId}
                           aria-label={`Whose stock on line ${i + 1}`}
                         >
@@ -694,6 +759,69 @@ export function StockMoveDialog({
                       </div>
                     </td>
                   </tr>
+                  {info && info.tagged > 0 && (
+                    <tr data-grid-row="tags">
+                      <td />
+                      <td colSpan={mode === 'transfer' ? 4 : 5} className="pb-2 pt-0">
+                        <div className={`rounded-lg border p-2 ${line.tags.length < need ? 'border-amber-500/60' : 'border-border'} bg-secondary/40`}>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-foreground flex items-center gap-1.5 text-xs font-medium">
+                              <Tags size={13} /> Garment tags
+                              <span className="text-muted-foreground font-normal">
+                                · {info.tagged} of the {info.held} here are tagged
+                                {need > 0 ? ` — name at least ${need} of the pieces moving` : ' — untagged pieces can move without one'}
+                              </span>
+                            </span>
+                            <span className={`text-xs tabular-nums ${line.tags.length < need ? 'text-amber-500' : 'text-muted-foreground'}`}>
+                              {line.tags.length} named
+                            </span>
+                          </div>
+                          <div className="mt-1.5 flex flex-wrap items-start gap-2">
+                            <textarea
+                              className="form-input min-h-[38px] flex-1 font-mono text-xs"
+                              placeholder="Scan the tags here, one after another"
+                              value={scanText[i] ?? ''}
+                              onChange={(e) => setScanText((t) => ({ ...t, [i]: e.target.value }))}
+                              onBlur={() => {
+                                const codes = splitCodes(scanText[i] ?? '')
+                                if (!codes.length) return
+                                setLine(i, { tags: [...new Set([...line.tags, ...codes])] })
+                                setScanText((t) => ({ ...t, [i]: '' }))
+                              }}
+                              aria-label={`Scan tags on line ${i + 1}`}
+                            />
+                            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setPicking(picking === i ? null : i)}>
+                              {picking === i ? 'Done picking' : 'Pick from the store'}
+                            </button>
+                            {line.tags.length > 0 && (
+                              <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setLine(i, { tags: [] })}>
+                                Clear
+                              </button>
+                            )}
+                          </div>
+                          {line.tags.length > 0 && (
+                            <p className="text-muted-foreground mt-1 break-all font-mono text-[10px]">{line.tags.join(' · ')}</p>
+                          )}
+                          {picking === i && (
+                            <div className="border-border mt-1.5 grid max-h-40 grid-cols-2 gap-x-3 overflow-y-auto rounded border p-1.5 sm:grid-cols-4">
+                              {info.codes.length === 0 && <span className="text-muted-foreground text-xs">No tag here can move now.</span>}
+                              {info.codes.map((c) => (
+                                <label key={c} className="flex items-center gap-1.5 font-mono text-[11px]">
+                                  <input
+                                    type="checkbox"
+                                    checked={line.tags.includes(c)}
+                                    onChange={(e) => setLine(i, { tags: e.target.checked ? [...line.tags, c] : line.tags.filter((x) => x !== c) })}
+                                  />
+                                  {c}
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 )
               })}
             </tbody>

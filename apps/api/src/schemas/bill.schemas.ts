@@ -159,6 +159,12 @@ const billBase = z.object({
    */
   rateVarianceReason: z.string().max(300).optional().nullable(),
   lines: z.array(billLineSchema).min(1, 'A bill needs at least one line'),
+  /**
+   * A bill brought in from the old books as it was: its expense lines may
+   * lack the department every new bill needs. Only someone who approves in
+   * Accounts may, and says why; the bill is marked as a legacy import.
+   */
+  legacyImport: z.object({ reason: z.string().trim().min(5, 'Say why this bill comes in without departments') }).optional().nullable(),
   charges: z.array(billChargeSchema).optional(),
 })
 

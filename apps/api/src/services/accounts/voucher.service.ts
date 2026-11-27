@@ -66,6 +66,12 @@ export const voucherSchema = z
     chequeNo: z.string().trim().max(40).optional().nullable(),
     chequeDate: ymd('cheque date').optional().nullable(),
     lines: z.array(lineSchema).min(2, 'A voucher needs a debit and a credit').max(200),
+    /**
+     * A voucher brought in from the old books as it was: its expense lines
+     * may lack the department every new expense needs. Only someone who
+     * approves in Accounts may, and says why; the voucher is marked.
+     */
+    legacyImport: z.object({ reason: z.string().trim().min(5, 'Say why this voucher comes in without departments') }).optional().nullable(),
   })
   .superRefine((v, ctx) => {
     const dr = r2(v.lines.filter((l) => l.side === 'DR').reduce((s, l) => s + l.amount, 0))
@@ -135,6 +141,8 @@ interface Existing {
   voucherNo: string
   financialYear: string
   date: Date
+  /** Brought in from the old books: its expense lines keep their exemption. */
+  legacyImport?: boolean
 }
 
 /**
@@ -161,7 +169,7 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
   const [ledgers, money] = await Promise.all([
     tx.ledger.findMany({
       where: { id: { in: ids } },
-      select: { id: true, name: true, isActive: true, billWise: true, groupId: true, group: { select: { nature: true } } },
+      select: { id: true, name: true, isActive: true, billWise: true, groupId: true, systemKey: true, departmentId: true, group: { select: { nature: true } } },
     }),
     moneyGroupIds(tx),
   ])
@@ -214,6 +222,33 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
       if (!pl) throw new AppError(`Line ${i + 1}: a department goes on income and expense lines only, not on ${byId.get(l.ledgerId)!.name}.`, 400, 'DEPARTMENT_PL_ONLY')
     }
   })
+
+  // ── Every expense says which department bears it ──
+  // An expense line takes its ledger's usual department when none is picked.
+  // Stock purchases (central until they move to a brand) and round off are
+  // left as they are; a legacy import may lack it, marked as such.
+  const legacy = !!input.legacyImport || !!existing?.legacyImport
+  const groupTree = await tx.ledgerGroup.findMany({ select: { id: true, parentId: true, systemKey: true } })
+  const groupById = new Map(groupTree.map((g) => [g.id, g]))
+  const topKey = (groupId: string) => {
+    let g = groupById.get(groupId)
+    for (let i = 0; g?.parentId && i < 20; i++) g = groupById.get(g.parentId)
+    return g?.systemKey ?? null
+  }
+  const noDept: string[] = []
+  input.lines.forEach((l, i) => {
+    const led = byId.get(l.ledgerId)!
+    if (led.group.nature !== 'EXPENSE' || topKey(led.groupId) === 'PURCHASE_ACCOUNTS' || led.systemKey === 'ROUND_OFF') return
+    if (!l.departmentId && led.departmentId) l.departmentId = led.departmentId
+    if (!l.departmentId) noDept.push(`line ${i + 1} (${led.name})`)
+  })
+  if (noDept.length && !legacy) {
+    throw new AppError(
+      `Pick the department that bears ${noDept.join(', ')}: it is the expense's cost centre. Or give the ledger a usual department in Chart of Accounts.`,
+      400,
+      'DEPARTMENT_REQUIRED',
+    )
+  }
 
   // ── Bills ──
   type Ref = { kind: BillRefKind; billNo: string | null; billDate: Date; dueDate: Date | null; amount: number }
@@ -297,7 +332,7 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
     await tx.voucher.update({ where: { id: existing.id }, data: { ...header, updatedById: userId } })
     id = existing.id
   } else {
-    const made = await tx.voucher.create({ data: { ...header, kind: input.kind, voucherNo, createdById: userId }, select: { id: true } })
+    const made = await tx.voucher.create({ data: { ...header, kind: input.kind, voucherNo, createdById: userId, legacyImport: !!input.legacyImport }, select: { id: true } })
     id = made.id
   }
   for (const [i, l] of input.lines.entries()) {

@@ -1,7 +1,7 @@
 'use client'
 
-import { useMemo, useRef, useState } from 'react'
-import { Loader2, PackageCheck, Undo2, Ban, Package, CalendarDays } from 'lucide-react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Loader2, PackageCheck, Undo2, Ban, Package, CalendarDays, Tags } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
 import { newRequestId } from '@/lib/utils'
 import { useQtyRules } from '@/lib/qtyRules'
@@ -72,6 +72,9 @@ const COPY: Record<TransitStep, { title: (t: TransitTransfer) => string; blurb: 
 
 const fmt = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 3 })
 
+/** A scanner types a code and Enter; typed by hand they may be spaced or comma separated. */
+const splitCodes = (text: string) => [...new Set(text.split(/[\s,;]+/).map((c) => c.trim().toUpperCase()).filter(Boolean))]
+
 export function TransitStepDialog({
   transfer,
   step,
@@ -94,12 +97,35 @@ export function TransitStepDialog({
   const qtyRules = useQtyRules()
   // One id until it saves: a double click or a retry receives once.
   const requestId = useRef(newRequestId())
+  // Tagged garments on the road, by line; the tags named for this step, typed or scanned.
+  const [onRoad, setOnRoad] = useState<Record<string, string[]>>({})
+  const [goodTags, setGoodTags] = useState<Record<string, string>>({})
+  const [badTags, setBadTags] = useState<Record<string, string>>({})
+  useEffect(() => {
+    let gone = false
+    api
+      .get<{ data: { lines: Array<{ lineId: string; onRoad: string[] }> } }>(`/inventory/transfers/${transfer.id}/tags`)
+      .then((r) => {
+        if (!gone) setOnRoad(Object.fromEntries(r.data.lines.filter((l) => l.onRoad.length).map((l) => [l.lineId, l.onRoad])))
+      })
+      .catch(() => {})
+    return () => {
+      gone = true
+    }
+  }, [transfer.id])
 
   const save = async () => {
     setError(null)
     if (step === 'write-off' && notes.trim().length < 5) return setError('Say what happened to it — one line is enough.')
     const lines = open
-      .map((l) => ({ lineId: l.id, qty: Number(qty[l.id] || 0), damagedQty: step === 'receive' ? Number(damaged[l.id] || 0) : undefined, l }))
+      .map((l) => ({
+        lineId: l.id,
+        qty: Number(qty[l.id] || 0),
+        damagedQty: step === 'receive' ? Number(damaged[l.id] || 0) : undefined,
+        garmentCodes: splitCodes(goodTags[l.id] ?? ''),
+        damagedGarmentCodes: step === 'receive' ? splitCodes(badTags[l.id] ?? '') : [],
+        l,
+      }))
       .filter((x) => x.qty > 0 || (x.damagedQty ?? 0) > 0)
     if (!lines.length) return setError('Enter how much on at least one line.')
     for (const x of lines) {
@@ -114,10 +140,10 @@ export function TransitStepDialog({
     try {
       const body =
         step === 'receive'
-          ? { requestId: requestId.current, receivedAt: date || undefined, notes: notes.trim() || null, lines: lines.map((x) => ({ lineId: x.lineId, qty: x.qty, damagedQty: x.damagedQty ?? 0 })) }
+          ? { requestId: requestId.current, receivedAt: date || undefined, notes: notes.trim() || null, lines: lines.map((x) => ({ lineId: x.lineId, qty: x.qty, damagedQty: x.damagedQty ?? 0, garmentCodes: x.garmentCodes, damagedGarmentCodes: x.damagedGarmentCodes })) }
           : step === 'send-back'
-            ? { requestId: requestId.current, date: date || undefined, notes: notes.trim() || null, lines: lines.map((x) => ({ lineId: x.lineId, qty: x.qty })) }
-            : { requestId: requestId.current, date: date || undefined, reason: notes.trim(), lines: lines.map((x) => ({ lineId: x.lineId, qty: x.qty })) }
+            ? { requestId: requestId.current, date: date || undefined, notes: notes.trim() || null, lines: lines.map((x) => ({ lineId: x.lineId, qty: x.qty, garmentCodes: x.garmentCodes })) }
+            : { requestId: requestId.current, date: date || undefined, reason: notes.trim(), lines: lines.map((x) => ({ lineId: x.lineId, qty: x.qty, garmentCodes: x.garmentCodes })) }
       const res = await api.post<{ message?: string }>(`/inventory/transfers/${transfer.id}/${step}`, body)
       requestId.current = newRequestId()
       onDone(res.message ?? 'Saved.')
@@ -193,8 +219,10 @@ export function TransitStepDialog({
               {open.map((l, i) => {
                 const unit = l.item.uom?.symbol ?? ''
                 const whose = [l.ownership === 'CUSTOMER_OWNED' ? `${l.ownerCustomer?.name ?? 'Customer'}'s` : null, l.size ? `size ${l.size.code}` : null].filter(Boolean).join(' · ')
+                const tags = onRoad[l.id] ?? []
                 return (
-                  <tr key={l.id} data-grid-row>
+                  <Fragment key={l.id}>
+                  <tr data-grid-row>
                     <td className="text-muted-foreground px-3 py-2 text-xs">{i + 1}</td>
                     <td className="px-3 py-2">
                       <div className="text-foreground text-xs">
@@ -240,6 +268,43 @@ export function TransitStepDialog({
                       </td>
                     )}
                   </tr>
+                  {tags.length > 0 && (
+                    <tr data-grid-row="tags">
+                      <td />
+                      <td colSpan={step === 'receive' ? 4 : 3} className="pb-2 pt-0">
+                        <div className="border-border bg-secondary/40 rounded-lg border p-2">
+                          <p className="text-foreground flex items-center gap-1.5 text-xs font-medium">
+                            <Tags size={13} /> {tags.length} tagged {tags.length === 1 ? 'piece is' : 'pieces are'} on the road
+                            <span className="text-muted-foreground font-normal">
+                              {step === 'receive'
+                                ? ' — leave the boxes empty when all of it arrived and none is damaged; otherwise scan the tags that came, and those damaged.'
+                                : ' — leave empty when all of it goes; otherwise scan the tags of the pieces it covers.'}
+                            </span>
+                          </p>
+                          <div className={`mt-1.5 grid gap-2 ${step === 'receive' ? 'sm:grid-cols-2' : ''}`}>
+                            <textarea
+                              className="form-input min-h-[38px] font-mono text-xs"
+                              placeholder={step === 'receive' ? 'Tags that arrived good' : step === 'send-back' ? 'Tags going back' : 'Tags lost'}
+                              value={goodTags[l.id] ?? ''}
+                              onChange={(e) => setGoodTags((t) => ({ ...t, [l.id]: e.target.value }))}
+                              aria-label={`Tags on line ${i + 1}`}
+                            />
+                            {step === 'receive' && (
+                              <textarea
+                                className="form-input min-h-[38px] font-mono text-xs"
+                                placeholder="Tags that arrived damaged"
+                                value={badTags[l.id] ?? ''}
+                                onChange={(e) => setBadTags((t) => ({ ...t, [l.id]: e.target.value }))}
+                                aria-label={`Damaged tags on line ${i + 1}`}
+                              />
+                            )}
+                          </div>
+                          <p className="text-muted-foreground mt-1 break-all font-mono text-[10px]">On the road: {tags.join(' · ')}</p>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 )
               })}
             </tbody>

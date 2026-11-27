@@ -3,6 +3,7 @@ import { AppError } from '../middleware/errorHandler'
 import { lockRow } from '../lib/lockRow'
 import { recordMovement, transferStock } from './stock.service'
 import { cutOffForMove, lockPackage, positionOf, recordPackageMove, takeFromPackage } from './package.service'
+import { moveTags, tagsForRoadStep, transferTagsIn } from './garmentTransfer.service'
 
 /*
  * Transfers that go on the road first.
@@ -24,7 +25,9 @@ import { cutOffForMove, lockPackage, positionOf, recordPackageMove, takeFromPack
  *
  * Every step is written as a receipt on the transfer, kept as history, and
  * every stock row of every step carries the transfer's id, so reports name
- * the transfer whichever step it was.
+ * the transfer whichever step it was. Tagged garments travel as themselves:
+ * each step names the tags it covers wherever the stock alone cannot say
+ * which pieces (garmentTransfer.service).
  */
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000
@@ -126,10 +129,12 @@ function stepDate(t: OpenTransfer, asked: Date | undefined, what: string) {
 }
 
 /** The lines asked for, each checked against what is still on its way. */
-function linesAsked(t: OpenTransfer, asked: Array<{ lineId: string; qty?: number | null; damagedQty?: number | null }>, verb: string) {
+type Asked = { lineId: string; qty?: number | null; damagedQty?: number | null; garmentCodes?: string[] | null; damagedGarmentCodes?: string[] | null }
+
+function linesAsked(t: OpenTransfer, asked: Asked[], verb: string) {
   const byId = new Map(t.lines.map((l) => [l.id, l]))
   const seen = new Set<string>()
-  const out: Array<{ line: Line; qty: number; damaged: number }> = []
+  const out: Array<{ line: Line; qty: number; damaged: number; codes: string[]; damagedCodes: string[] }> = []
   for (const a of asked) {
     const line = byId.get(a.lineId)
     if (!line) throw new AppError(`That line is not on ${t.transferNumber}.`, 400, 'WRONG_LINE')
@@ -148,7 +153,7 @@ function linesAsked(t: OpenTransfer, asked: Array<{ lineId: string; qty?: number
         'MORE_THAN_ON_THE_WAY',
       )
     }
-    out.push({ line, qty, damaged })
+    out.push({ line, qty, damaged, codes: a.garmentCodes ?? [], damagedCodes: a.damagedGarmentCodes ?? [] })
   }
   if (!out.length) throw new AppError(`Say how much is ${verb}: nothing was entered.`, 400, 'NOTHING_ENTERED')
   return out
@@ -257,6 +262,30 @@ async function settleStatus(tx: Prisma.TransactionClient, transferId: string) {
 }
 
 const keyOf = (l: Line) => ({ ownership: l.ownership, ownerCustomerId: l.ownerCustomerId, sizeId: l.sizeId, grade: l.grade })
+const tagKeyOf = (l: Line) => ({ itemId: l.itemId, ...keyOf(l) })
+
+/** The tags one step covers on each line, checked before any stock moves. */
+async function stepTags(t: OpenTransfer, tx: Prisma.TransactionClient, doing: Array<{ line: Line; qty: number; damaged: number; codes: string[]; damagedCodes: string[] }>, verb: string) {
+  const out = new Map<string, Awaited<ReturnType<typeof tagsForRoadStep>>>()
+  for (const d of doing) {
+    out.set(
+      d.line.id,
+      await tagsForRoadStep(tx, {
+        transferId: t.id,
+        transitWarehouseId: t.transitWarehouseId,
+        key: tagKeyOf(d.line),
+        onTheWay: onTheWay(d.line),
+        qty: d.qty,
+        damaged: d.damaged,
+        codes: d.codes,
+        damagedCodes: d.damagedCodes,
+        label: d.line.item.name,
+        verb,
+      }),
+    )
+  }
+  return out
+}
 
 /**
  * The store it went to says what arrived. Good goods arrive as the grade they
@@ -266,13 +295,14 @@ const keyOf = (l: Line) => ({ ownership: l.ownership, ownerCustomerId: l.ownerCu
 export async function receiveTransfer(
   tx: Prisma.TransactionClient,
   id: string,
-  data: { receivedAt?: Date; notes?: string | null; lines: Array<{ lineId: string; qty?: number | null; damagedQty?: number | null }> },
+  data: { receivedAt?: Date; notes?: string | null; lines: Asked[] },
   userId: string | null,
 ) {
   const t = await openTransfer(tx, id)
   const when = stepDate(t, data.receivedAt, 'received')
   const doing = linesAsked(t, data.lines, 'received')
   await assertStickersOnTheRoad(tx, t, doing.map((d) => d.line))
+  const tags = await stepTags(t, tx, doing, 'received')
   const receipt = await tx.stockTransferReceipt.create({
     data: {
       transferId: t.id,
@@ -305,6 +335,10 @@ export async function receiveTransfer(
       await transferStock(tx, { ...base, qty: d.damaged, toGrade: 'R', notes: `${t.transferNumber}: arrived damaged at ${t.toWarehouse.name}, held as rejected` })
       reprint.push(...(await stickersOnward(tx, t, d.line, d.damaged, { toWarehouseId: t.toWarehouseId, grade: 'R', referenceType: 'STOCK_TRANSFER_RECEIVED', notes: `arrived damaged at ${t.toWarehouse.name}`, userId })))
     }
+    // Its tags arrive with it; a damaged piece's tag is held as R like the piece.
+    const tg = tags.get(d.line.id)!
+    await moveTags(tx, tg.good, t.toWarehouseId, { transferId: t.id, transferNumber: t.transferNumber, notes: `arrived at ${t.toWarehouse.name}` }, userId)
+    await moveTags(tx, tg.damaged, t.toWarehouseId, { transferId: t.id, transferNumber: t.transferNumber, notes: `arrived damaged at ${t.toWarehouse.name}` }, userId, { grade: 'R' })
     await tx.stockTransferLine.update({ where: { id: d.line.id }, data: { receivedQty: { increment: d.qty }, damagedQty: { increment: d.damaged } } })
   }
   const status = await settleStatus(tx, t.id)
@@ -315,13 +349,14 @@ export async function receiveTransfer(
 export async function sendBackTransfer(
   tx: Prisma.TransactionClient,
   id: string,
-  data: { date?: Date; notes?: string | null; lines: Array<{ lineId: string; qty?: number | null }> },
+  data: { date?: Date; notes?: string | null; lines: Asked[] },
   userId: string | null,
 ) {
   const t = await openTransfer(tx, id)
   const when = stepDate(t, data.date, 'sent back')
   const doing = linesAsked(t, data.lines, 'sent back')
   await assertStickersOnTheRoad(tx, t, doing.map((d) => d.line))
+  const tags = await stepTags(t, tx, doing, 'sent back')
   const receipt = await tx.stockTransferReceipt.create({
     data: { transferId: t.id, kind: 'RETURNED', receivedAt: when, byId: userId, notes: data.notes ?? null, lines: { create: doing.map((d) => ({ transferLineId: d.line.id, qty: d.qty })) } },
   })
@@ -341,6 +376,7 @@ export async function sendBackTransfer(
       stickers: 'caller',
     })
     reprint.push(...(await stickersOnward(tx, t, d.line, d.qty, { toWarehouseId: t.fromWarehouseId, referenceType: 'STOCK_TRANSFER_RETURNED', notes: `sent back to ${t.fromWarehouse.name}`, userId })))
+    await moveTags(tx, tags.get(d.line.id)!.good, t.fromWarehouseId, { transferId: t.id, transferNumber: t.transferNumber, notes: `sent back to ${t.fromWarehouse.name}` }, userId)
     await tx.stockTransferLine.update({ where: { id: d.line.id }, data: { returnedQty: { increment: d.qty } } })
   }
   const status = await settleStatus(tx, t.id)
@@ -355,13 +391,14 @@ export async function sendBackTransfer(
 export async function writeOffTransfer(
   tx: Prisma.TransactionClient,
   id: string,
-  data: { date?: Date; reason: string; lines: Array<{ lineId: string; qty?: number | null }> },
+  data: { date?: Date; reason: string; lines: Asked[] },
   userId: string | null,
 ) {
   const t = await openTransfer(tx, id)
   const when = stepDate(t, data.date, 'written off')
   const doing = linesAsked(t, data.lines, 'written off')
   await assertStickersOnTheRoad(tx, t, doing.map((d) => d.line))
+  const tags = await stepTags(t, tx, doing, 'written off')
   const receipt = await tx.stockTransferReceipt.create({
     data: { transferId: t.id, kind: 'WRITTEN_OFF', receivedAt: when, byId: userId, notes: data.reason, lines: { create: doing.map((d) => ({ transferLineId: d.line.id, qty: d.qty })) } },
   })
@@ -383,6 +420,8 @@ export async function writeOffTransfer(
     })
     value += d.qty * moved.unitRate
     await stickersOnward(tx, t, d.line, d.qty, { toWarehouseId: null, referenceType: 'STOCK_TRANSFER_LOST', notes: `Lost on the way: ${data.reason}`, userId })
+    // A lost piece's tag is written off with it.
+    await moveTags(tx, tags.get(d.line.id)!.good, t.transitWarehouseId, { transferId: t.id, transferNumber: t.transferNumber, notes: `Lost on the way: ${data.reason}` }, userId, { status: 'SCRAPPED' })
     await tx.stockTransferLine.update({ where: { id: d.line.id }, data: { lostQty: { increment: d.qty } } })
   }
   const status = await settleStatus(tx, t.id)
@@ -421,6 +460,7 @@ export async function cancelInTransit(tx: Prisma.TransactionClient, id: string, 
       stickers: 'caller',
     })
     await stickersOnward(tx, t, line, qty, { toWarehouseId: t.fromWarehouseId, referenceType: 'STOCK_TRANSFER_CANCELLED', notes: `${t.transferNumber} cancelled: back to ${t.fromWarehouse.name}`, userId })
+    await moveTags(tx, await transferTagsIn(tx, t.id, t.transitWarehouseId, tagKeyOf(line)), t.fromWarehouseId, { transferId: t.id, transferNumber: t.transferNumber, notes: `${t.transferNumber} cancelled: back to ${t.fromWarehouse.name}` }, userId)
   }
   await tx.stockTransfer.update({
     where: { id: t.id },

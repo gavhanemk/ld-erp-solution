@@ -167,6 +167,9 @@ async function run(tx: Prisma.TransactionClient) {
   // A bank payment 40 days old, never matched to the statement.
   const bankLedger = await tx.ledger.findFirstOrThrow({ where: { partyType: 'BANK', isActive: true }, select: { id: true } })
   const charges = await tx.ledger.findFirstOrThrow({ where: { systemKey: 'BANK_CHARGES' }, select: { id: true } })
+  // Bank charges are an expense: they take the ledger's usual department (phase 3).
+  const usualDept = await tx.department.findFirstOrThrow({ where: { isActive: true }, select: { id: true } })
+  await tx.ledger.update({ where: { id: charges.id }, data: { departmentId: usualDept.id } })
   const user = await tx.user.findFirstOrThrow({ where: { status: 'ACTIVE' }, select: { id: true } })
   const old = await writeVoucher(
     tx,

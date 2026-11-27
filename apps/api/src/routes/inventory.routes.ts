@@ -71,6 +71,7 @@ import {
   writeOffTransferSchema,
 } from '../schemas/inventory.schemas'
 import * as transit from '../services/transitTransfer.service'
+import { moveTags, tagPosition, tagsForTransferLine, transferTagsIn, type TagKey } from '../services/garmentTransfer.service'
 import { autoStickers, stickersNote, withdrawStickers } from '../services/stickers.service'
 import { assertOwnersFitOrder } from '../services/ownership.service'
 import { createOnce, onceFor, requestIdOf } from '../lib/onceFor'
@@ -1046,7 +1047,34 @@ export async function createTransfer(
   const whose: Array<Awaited<ReturnType<typeof whoseStock>>> = []
   for (const line of data.lines) whose.push(await whoseStock(tx, line))
 
+  // Tagged garments: each balance's tags checked against the store before
+  // anything moves — lines of the same item, size, grade and owner together.
+  const byBalance = new Map<string, { key: TagKey; qty: number; codes: string[] }>()
+  data.lines.forEach((l, i) => {
+    const key: TagKey = { itemId: l.itemId, sizeId: whose[i].sizeId ?? null, grade: l.grade ?? 'A', ownership: whose[i].ownership, ownerCustomerId: whose[i].ownerCustomerId ?? null }
+    const k = [key.itemId, key.sizeId ?? '', key.grade, key.ownership, key.ownerCustomerId ?? ''].join('|')
+    const g = byBalance.get(k) ?? { key, qty: 0, codes: [] }
+    g.qty += l.qty
+    g.codes.push(...(l.garmentCodes ?? []))
+    byBalance.set(k, g)
+  })
+
   const transferNumber = await nextDocumentNumber(tx, 'STN', when)
+
+  // Every balance the transfer touches, both sides, locked at once in one
+  // fixed order — after the number, as every document takes them — so two
+  // transfers going opposite ways wait for each other instead of deadlocking.
+  await lockBalances(
+    tx,
+    [...byBalance.values()].flatMap((g) => [
+      { ...g.key, warehouseId: data.fromWarehouseId },
+      { ...g.key, warehouseId: via?.id ?? data.toWarehouseId },
+    ]),
+  )
+  const tags: Array<{ id: string }> = []
+  for (const g of byBalance.values()) {
+    tags.push(...(await tagsForTransferLine(tx, { fromWarehouseId: data.fromWarehouseId, fromName: from.name, key: g.key, qty: g.qty, codes: g.codes })))
+  }
 
   const created = await tx.stockTransfer.create({
     data: {
@@ -1089,6 +1117,14 @@ export async function createTransfer(
       data: { unitRate: moved.unitRate },
     })
   }
+  // The tags go with their pieces: to the other store, or on the road.
+  await moveTags(
+    tx,
+    tags,
+    via?.id ?? data.toWarehouseId,
+    { transferId: created.id, transferNumber, notes: via ? `${from.name} → on the road to ${to.name}` : `${from.name} → ${to.name}` },
+    userId,
+  )
 
   return tx.stockTransfer.findUniqueOrThrow({
     where: { id: created.id },
@@ -1174,6 +1210,50 @@ router.get('/transfers', requirePermission(MODULE, 'view'), async (req, res) => 
   })
 })
 
+/**
+ * GET /api/inventory/tags?warehouseId=&itemId=&sizeId=&grade=&ownership=&ownerCustomerId=
+ *
+ * One balance's garment tags in a store, for a transfer line: what the ledger
+ * holds, how many of those pieces are tagged, and the tags that can move now
+ * (in stock, not on a challan, not in a carton, not waiting for a write-off).
+ */
+router.get('/tags', requirePermission(MODULE, 'view'), async (req, res) => {
+  const warehouseId = str(req.query.warehouseId)
+  const itemId = str(req.query.itemId)
+  if (!warehouseId || !itemId) throw new AppError('Say which store and item', 400, 'MISSING')
+  const key: TagKey = {
+    itemId,
+    sizeId: str(req.query.sizeId) ?? null,
+    grade: str(req.query.grade) ?? 'A',
+    ownership: (str(req.query.ownership) as TagKey['ownership']) ?? 'OWNED',
+    ownerCustomerId: str(req.query.ownerCustomerId) ?? null,
+  }
+  const [pos, free] = await Promise.all([
+    tagPosition(prisma, warehouseId, key),
+    prisma.garment.findMany({
+      where: { ...key, warehouseId, status: 'IN_STOCK', dcId: null, adjustmentId: null },
+      select: { code: true },
+      orderBy: { code: 'asc' },
+      take: 1000,
+    }),
+  ])
+  res.json({ success: true, data: { ...pos, codes: free.map((g) => g.code) } })
+})
+
+/** GET /api/inventory/transfers/:id/tags — each line's tags still on the road. */
+router.get('/transfers/:id/tags', requirePermission(MODULE, 'view'), async (req, res) => {
+  const t = await prisma.stockTransfer.findUnique({ where: { id: req.params.id }, include: { lines: true } })
+  if (!t) throw new AppError('That stock transfer does not exist', 404, 'NOT_FOUND')
+  const lines = []
+  for (const l of t.lines) {
+    const onRoad = t.transitWarehouseId
+      ? await transferTagsIn(prisma as unknown as Prisma.TransactionClient, t.id, t.transitWarehouseId, { itemId: l.itemId, sizeId: l.sizeId, grade: l.grade, ownership: l.ownership, ownerCustomerId: l.ownerCustomerId })
+      : []
+    lines.push({ lineId: l.id, onRoad: onRoad.map((g) => g.code) })
+  }
+  res.json({ success: true, data: { lines } })
+})
+
 router.get('/transfers/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const row = await prisma.stockTransfer.findUnique({
     where: { id: req.params.id },
@@ -1192,71 +1272,89 @@ router.get('/transfers/:id', requirePermission(MODULE, 'view'), async (req, res)
  * there — which is the right answer, because the goods have gone and pretending
  * otherwise would leave the rack and the book disagreeing.
  */
+/** The database half of cancelling a transfer, so it runs inside any transaction (and a rolled-back test). */
+export async function cancelTransfer(tx: Prisma.TransactionClient, id: string, reason: string, userId: string | null) {
+  await lockRow(tx, 'stockTransfer', id)
+  const before = await tx.stockTransfer.findUnique({
+    where: { id },
+    include: { lines: true, fromWarehouse: true, toWarehouse: true },
+  })
+  if (!before) throw new AppError('That stock transfer does not exist', 404, 'NOT_FOUND')
+
+  if (before.cancelledAt) {
+    throw new AppError(
+      `${before.transferNumber} was already cancelled on ${before.cancelledAt.toLocaleDateString('en-IN')}.`,
+      400,
+      'ALREADY_CANCELLED',
+    )
+  }
+
+  // Still on the road: it comes back from the transit store, before anything of it arrived.
+  if (before.mode === 'IN_TRANSIT') {
+    await transit.cancelInTransit(tx, before.id, reason, userId)
+    return tx.stockTransfer.findUniqueOrThrow({ where: { id: before.id }, include: transferInclude })
+  }
+
+  // What has since been issued or sent on from where it went cannot walk back.
+  await assertStockUnused(tx, {
+    referenceId: before.id,
+    label: before.transferNumber,
+    suggestion: `Move back only what is still in ${before.toWarehouse.name}, with a new transfer.`,
+  })
+  // Its tags walk back with the pieces; a tag that has moved on since stops it.
+  const movedTags = await tx.garmentEvent.findMany({ where: { referenceId: before.id, type: 'TRANSFERRED' }, select: { garmentId: true }, distinct: ['garmentId'] })
+  const backTags: Array<{ id: string }> = []
+  for (const line of before.lines) {
+    const key: TagKey = { itemId: line.itemId, sizeId: line.sizeId, grade: line.grade, ownership: line.ownership, ownerCustomerId: line.ownerCustomerId }
+    for (const g of await transferTagsIn(tx, before.id, before.toWarehouseId, key)) if (!backTags.some((b) => b.id === g.id)) backTags.push(g)
+  }
+  if (backTags.length < movedTags.length) {
+    throw new AppError(
+      `${movedTags.length - backTags.length} of the tagged pieces that came on ${before.transferNumber} have moved on from ${before.toWarehouse.name}, so it cannot walk back. Move back what is still there with a new transfer.`,
+      409,
+      'TAGS_MOVED_ON',
+    )
+  }
+
+  for (const line of before.lines) {
+    await transferStock(tx, {
+      itemId: line.itemId,
+      // Back the way it came, still whoever's it was.
+      fromWarehouseId: before.toWarehouseId,
+      toWarehouseId: before.fromWarehouseId,
+      qty: Number(line.qty),
+      ownership: line.ownership,
+      ownerCustomerId: line.ownerCustomerId,
+      sizeId: line.sizeId,
+      grade: line.grade,
+      referenceType: 'STOCK_TRANSFER_CANCELLED',
+      referenceId: before.id,
+      transactionDate: new Date(),
+      notes: `${before.transferNumber} cancelled: ${reason}`,
+      earlierDate: 'move-up',
+    })
+  }
+  await moveTags(tx, backTags, before.fromWarehouseId, { transferId: before.id, transferNumber: before.transferNumber, notes: `${before.transferNumber} cancelled: back to ${before.fromWarehouse.name}` }, userId)
+
+  return tx.stockTransfer.update({
+    where: { id: before.id },
+    data: {
+      cancelledAt: new Date(),
+      cancelledById: userId,
+      cancelReason: reason,
+      status: 'CANCELLED',
+    },
+    include: transferInclude,
+  })
+}
+
 router.patch(
   '/transfers/:id/cancel',
   requirePermission(MODULE, 'edit'),
   async (req: AuthRequest, res) => {
     const { reason } = cancelTransferSchema.parse(req.body ?? {})
 
-    const after = await prisma.$transaction(async (tx) => {
-      await lockRow(tx, 'stockTransfer', req.params.id)
-      const before = await tx.stockTransfer.findUnique({
-        where: { id: req.params.id },
-        include: { lines: true, fromWarehouse: true, toWarehouse: true },
-      })
-      if (!before) throw new AppError('That stock transfer does not exist', 404, 'NOT_FOUND')
-
-      if (before.cancelledAt) {
-        throw new AppError(
-          `${before.transferNumber} was already cancelled on ${before.cancelledAt.toLocaleDateString('en-IN')}.`,
-          400,
-          'ALREADY_CANCELLED',
-        )
-      }
-
-      // Still on the road: it comes back from the transit store, before anything of it arrived.
-      if (before.mode === 'IN_TRANSIT') {
-        await transit.cancelInTransit(tx, before.id, reason, req.user?.id ?? null)
-        return tx.stockTransfer.findUniqueOrThrow({ where: { id: before.id }, include: transferInclude })
-      }
-
-      // What has since been issued or sent on from where it went cannot walk back.
-      await assertStockUnused(tx, {
-        referenceId: before.id,
-        label: before.transferNumber,
-        suggestion: `Move back only what is still in ${before.toWarehouse.name}, with a new transfer.`,
-      })
-
-      for (const line of before.lines) {
-        await transferStock(tx, {
-          itemId: line.itemId,
-          // Back the way it came, still whoever's it was.
-          fromWarehouseId: before.toWarehouseId,
-          toWarehouseId: before.fromWarehouseId,
-          qty: Number(line.qty),
-          ownership: line.ownership,
-          ownerCustomerId: line.ownerCustomerId,
-          sizeId: line.sizeId,
-          grade: line.grade,
-          referenceType: 'STOCK_TRANSFER_CANCELLED',
-          referenceId: before.id,
-          transactionDate: new Date(),
-          notes: `${before.transferNumber} cancelled: ${reason}`,
-          earlierDate: 'move-up',
-        })
-      }
-
-      return tx.stockTransfer.update({
-        where: { id: before.id },
-        data: {
-          cancelledAt: new Date(),
-          cancelledById: req.user?.id ?? null,
-          cancelReason: reason,
-          status: 'CANCELLED',
-        },
-        include: transferInclude,
-      })
-    })
+    const after = await prisma.$transaction((tx) => cancelTransfer(tx, req.params.id, reason, req.user?.id ?? null))
 
     await writeAuditLog(req, {
       module: MODULE,

@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { LedgerParty, Prisma, VoucherKind, VoucherState } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
-import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { createOnce, requestIdOf } from '../lib/onceFor'
@@ -740,6 +740,7 @@ const voucherDetail = {
   id: true,
   kind: true,
   voucherNo: true,
+  legacyImport: true,
   financialYear: true,
   date: true,
   narration: true,
@@ -831,6 +832,10 @@ router.get('/vouchers/:id/print', requirePermission(MODULE, 'view'), async (req,
 
 router.post('/vouchers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const input = voucherSchema.parse(req.body)
+  // Expense lines without a department come in only as a marked legacy import, by an approver.
+  if (input.legacyImport && !userCan(req.user, MODULE, 'approve')) {
+    throw new AppError('Only someone who approves in Accounts may bring a voucher in without departments as a legacy import.', 403, 'LEGACY_IMPORT_NOT_ALLOWED')
+  }
   await ensureChart()
   // A double click or a retry saves it once: the voucher form sends one request id until it saves.
   const { doc: made, repeat } = await createOnce({
@@ -864,7 +869,7 @@ router.patch('/vouchers/:id', requirePermission(MODULE, 'edit'), async (req: Aut
   if (before.sourceType) throw new AppError(`${before.voucherNo} was written by its document. Change the document, and the voucher follows it.`, 409, 'FROM_DOCUMENT')
   const money = await moneyGroupIds(prisma)
   await prisma.$transaction(
-    (tx) => writeVoucher(tx, input, req.user!.id, { id: before.id, kind: before.kind, voucherNo: before.voucherNo, financialYear: before.financialYear, date: before.date }),
+    (tx) => writeVoucher(tx, input, req.user!.id, { id: before.id, kind: before.kind, voucherNo: before.voucherNo, financialYear: before.financialYear, date: before.date, legacyImport: before.legacyImport }),
     { timeout: 30_000 },
   )
   const after = await loadVoucher(before.id)

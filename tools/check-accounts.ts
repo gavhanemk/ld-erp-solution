@@ -105,7 +105,9 @@ async function run(tx: Prisma.TransactionClient, userId: string) {
   const customer = await tx.ledger.findFirstOrThrow({ where: { partyType: 'CUSTOMER', isActive: true }, select: { id: true, name: true } })
   const indirect = await tx.ledgerGroup.findUniqueOrThrow({ where: { systemKey: 'INDIRECT_EXPENSES' } })
   const capitalGroup = await tx.ledgerGroup.findUniqueOrThrow({ where: { systemKey: 'CAPITAL' } })
-  const rent = await tx.ledger.create({ data: { name: 'Factory Rent (check)', groupId: indirect.id } })
+  // An expense ledger with its usual department, as every expense now needs one (phase 3).
+  const usualDept = await tx.department.findFirstOrThrow({ where: { isActive: true }, select: { id: true } })
+  const rent = await tx.ledger.create({ data: { name: 'Factory Rent (check)', groupId: indirect.id, departmentId: usualDept.id } })
   const capital = await tx.ledger.create({ data: { name: 'Partners Capital (check)', groupId: capitalGroup.id } })
   const brand = await tx.costCentre.findFirstOrThrow({ where: { isActive: true }, select: { id: true } })
 

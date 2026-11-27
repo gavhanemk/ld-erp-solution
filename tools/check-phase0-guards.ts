@@ -84,7 +84,7 @@ async function main() {
       JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
       JOIN ld_erp.items i ON i.id = s."itemId"
       WHERE s.ownership::text = 'OWNED' AND s.grade = 'A' AND s."sizeId" IS NULL
-        AND w."isActive" AND w."departmentId" IS NULL AND w.purpose::text = 'GENERAL' AND i."isActive"
+        AND w."isActive" AND w."departmentId" IS NULL AND w.purpose::text = 'GENERAL' AND w.kind::text IN ('GENERAL', 'RAW_MATERIAL', 'FINISHED_GOODS') AND i."isActive"
         AND NOT EXISTS (SELECT 1 FROM ld_erp.stock_reservations r WHERE r."itemId" = s."itemId" AND r.status::text = 'ACTIVE')
         AND NOT EXISTS (SELECT 1 FROM ld_erp.stock_packages p WHERE p."itemId" = s."itemId" AND p.status::text = 'IN_STOCK')
       GROUP BY s."itemId", s."warehouseId"
@@ -95,7 +95,7 @@ async function main() {
     for (const c of candidates) {
       const other = await prisma.$queryRaw<{ id: string }[]>`
         SELECT w.id FROM ld_erp.warehouses w
-        WHERE w."isActive" AND w."departmentId" IS NULL AND w.purpose::text = 'GENERAL' AND w.id <> ${c.warehouseId}
+        WHERE w."isActive" AND w."departmentId" IS NULL AND w.purpose::text = 'GENERAL' AND w.kind::text IN ('GENERAL', 'RAW_MATERIAL', 'FINISHED_GOODS') AND w.id <> ${c.warehouseId}
           AND NOT EXISTS (SELECT 1 FROM ld_erp.stock_ledger s WHERE s."itemId" = ${c.itemId} AND s."warehouseId" = w.id)
         ORDER BY w.name LIMIT 1`
       if (other[0]) {
@@ -165,7 +165,7 @@ async function main() {
     }
 
     // ── 6. An FG receipt sent twice comes in once ──
-    const fgStore = await prisma.warehouse.findFirst({ where: { isActive: true, departmentId: null, purpose: 'GENERAL' }, orderBy: { name: 'asc' }, select: { id: true } })
+    const fgStore = await prisma.warehouse.findFirst({ where: { isActive: true, departmentId: null, purpose: 'GENERAL', kind: { in: ['GENERAL', 'FINISHED_GOODS'] } }, orderBy: { name: 'asc' }, select: { id: true } })
     const fgItem =
       (await prisma.item.findFirst({
         where: { isActive: true, type: 'FINISHED_GOOD', standardRate: { gt: 0 }, styleId: null, NOT: { name: { contains: 'VHAGAR', mode: 'insensitive' } } },

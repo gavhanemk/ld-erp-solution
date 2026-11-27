@@ -771,6 +771,11 @@ model User {
   stockMovements       StockLedger[]               @relation("StockLedgerCreatedBy")
   cancelledStock       StockTransfer[]             @relation("TransferCancelledBy")
   stockTransferReceipts StockTransferReceipt[]     @relation("TransferReceiptBy")
+  allocationRulesMade  AllocationRule[]           @relation("AllocationRuleBy")
+  allocationRunsMade   AllocationRun[]            @relation("AllocationRunBy")
+  allocationRunsApproved AllocationRun[]          @relation("AllocationRunApprovedBy")
+  allocationRunsPosted AllocationRun[]            @relation("AllocationRunPostedBy")
+  allocationRunsReversed AllocationRun[]          @relation("AllocationRunReversedBy")
   countedStock         StockAdjustment[]           @relation("AdjustmentMadeBy")
   receivedGoods        GRN[]                       @relation("GRNCreatedBy")
   uploadedGrnFiles     GRNAttachment[]             @relation("GRNAttachmentUploadedBy")
@@ -1838,6 +1843,7 @@ model Department {
   voucherLines      VoucherLine[]         @relation("VoucherLineDepartment")
   ledgersByDefault  Ledger[]              @relation("LedgerDefaultDepartment")
   billLines         PurchaseInvoiceLine[] @relation("BillLineDepartment")
+  allocationLines   AllocationRunLine[]
 
   @@map("departments")
 }
@@ -3166,6 +3172,9 @@ model PurchaseInvoice {
   balanceAmount       Decimal        @db.Decimal(12, 2)
   status              InvoiceStatus  @default(UNPAID)
   notes               String?
+  /// Brought in from the old books without the department its expense lines
+  /// now need: allowed only by someone who approves in Accounts, with a reason.
+  legacyImport        Boolean        @default(false)
   createdById         String
   createdBy           User           @relation("BillCreatedBy", fields: [createdById], references: [id])
   createdAt           DateTime       @default(now())
@@ -5137,6 +5146,7 @@ model Ledger {
 
   lines    VoucherLine[]
   billRefs BillRef[]
+  allocationLines AllocationRunLine[]
 
   @@index([groupId])
   @@map("ledgers")
@@ -5160,6 +5170,8 @@ model CostCentre {
   lines VoucherLine[]
   ledgersByDefault Ledger[] @relation("LedgerDefaultCentre")
   billLines        PurchaseInvoiceLine[] @relation("BillLineCentre")
+  allocationShares AllocationRuleShare[]
+  allocationLines  AllocationRunLine[]
 
   @@map("cost_centres")
 }
@@ -5196,6 +5208,10 @@ model Voucher {
   createdBy     User?         @relation("VoucherCreatedBy", fields: [createdById], references: [id])
   updatedById   String?
   updatedBy     User?         @relation("VoucherUpdatedBy", fields: [updatedById], references: [id])
+  /// Brought in from the old books as it was, without the department its
+  /// expense lines now need: allowed only by someone who approves in
+  /// Accounts, with a reason, and listed among the unallocated entries.
+  legacyImport  Boolean       @default(false)
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
@@ -7319,4 +7335,148 @@ enum FgCartonStatus {
   DISPATCHED
   /// Unpacked: its pieces are loose in the store again.
   OPENED
+}
+
+/// How a shared expense is split between the brands each month.
+enum AllocationBasis {
+  /// Each brand's sales that month.
+  REVENUE
+  /// Pieces each brand's orders took into finished goods that month.
+  PRODUCTION_QTY
+  /// Value of material issued to each brand's orders that month.
+  MATERIAL_CONSUMPTION
+  /// Machine hours typed for each brand on the run, until machines record them.
+  MACHINE_HOURS
+  /// The rule's own percentages.
+  FIXED_PERCENT
+  /// Percentages typed on the run.
+  MANUAL
+}
+
+enum AllocationRunStatus {
+  /// Worked out and saved; worked out again until it is approved.
+  DRAFT
+  /// Checked by someone other than its maker: ready to post.
+  APPROVED
+  /// Its journal is in the books.
+  POSTED
+  /// Its journal taken back by a recorded reversal; the month may run again.
+  REVERSED
+  /// Thrown away before it was posted.
+  DISCARDED
+}
+
+/// A rule for splitting shared expenses (lines with no brand) between the
+/// brands: which expenses, on what basis, between which brands. Rules are
+/// tried in order and an expense goes to the first that covers it.
+model AllocationRule {
+  id            String          @id @default(cuid())
+  name          String          @unique
+  basis         AllocationBasis
+  /// The expense ledgers it splits; empty: every expense ledger.
+  ledgerIds     String[] @default([])
+  /// Only expenses booked to these departments; empty: any.
+  departmentIds String[] @default([])
+  /// The brands that share, by their profit centres; empty: every own brand in use.
+  costCentreIds String[] @default([])
+  sortOrder     Int             @default(0)
+  isActive      Boolean         @default(true)
+  notes         String?
+  createdById   String?
+  createdBy     User?           @relation("AllocationRuleBy", fields: [createdById], references: [id])
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  shares   AllocationRuleShare[]
+  runLines AllocationRunLine[]
+
+  @@map("acc_allocation_rules")
+}
+
+/// A fixed-percent rule's share for one brand.
+model AllocationRuleShare {
+  id           String         @id @default(cuid())
+  ruleId       String
+  rule         AllocationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  costCentreId String
+  costCentre   CostCentre     @relation(fields: [costCentreId], references: [id], onDelete: Restrict)
+  percent      Decimal        @db.Decimal(9, 4)
+
+  @@unique([ruleId, costCentreId])
+  @@map("acc_allocation_rule_shares")
+}
+
+/// One month's split of the shared expenses: worked out, approved by someone
+/// other than its maker, posted as one journal, and reversed by a recorded
+/// reversal if it must be undone. Only one run of a month is live at a time.
+model AllocationRun {
+  id            String              @id @default(cuid())
+  runNumber     String              @unique
+  /// The month split: "2026-11".
+  period        String
+  status        AllocationRunStatus @default(DRAFT)
+  /// What was typed for the run: hours or percentages by rule and brand.
+  inputs        Json?
+  notes         String?
+  createdById   String?
+  createdBy     User?               @relation("AllocationRunBy", fields: [createdById], references: [id])
+  createdAt     DateTime            @default(now())
+  approvedById  String?
+  approvedBy    User?               @relation("AllocationRunApprovedBy", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+  postedById    String?
+  postedBy      User?               @relation("AllocationRunPostedBy", fields: [postedById], references: [id])
+  postedAt      DateTime?
+  reversedById  String?
+  reversedBy    User?               @relation("AllocationRunReversedBy", fields: [reversedById], references: [id])
+  reversedAt    DateTime?
+  reverseReason String?
+  discardedAt   DateTime?
+  discardReason String?
+  updatedAt     DateTime            @updatedAt
+
+  lines   AllocationRunLine[]
+  sources AllocationRunSource[]
+
+  @@index([period])
+  @@map("acc_allocation_runs")
+}
+
+/// One brand's share of one shared expense ledger and department, that month.
+model AllocationRunLine {
+  id           String         @id @default(cuid())
+  runId        String
+  run          AllocationRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  ruleId       String
+  rule         AllocationRule @relation(fields: [ruleId], references: [id], onDelete: Restrict)
+  ledgerId     String
+  ledger       Ledger         @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  departmentId String?
+  department   Department?    @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  costCentreId String
+  costCentre   CostCentre     @relation(fields: [costCentreId], references: [id], onDelete: Restrict)
+  /// The shared total of that ledger and department that month.
+  sharedAmount Decimal        @db.Decimal(14, 2)
+  /// The brand's own figure on the rule's basis: rupees of sales or material, pieces, hours, or a percent.
+  basisValue   Decimal        @db.Decimal(16, 4)
+  percent      Decimal        @db.Decimal(9, 6)
+  amount       Decimal        @db.Decimal(14, 2)
+
+  @@index([runId])
+  @@map("acc_allocation_run_lines")
+}
+
+/// The shared expense a run split, voucher by voucher, as it stood when the
+/// run was worked out: what the Allocation report ties back to.
+model AllocationRunSource {
+  id           String        @id @default(cuid())
+  runId        String
+  run          AllocationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  voucherId    String
+  ledgerId     String
+  departmentId String?
+  amount       Decimal       @db.Decimal(14, 2)
+
+  @@index([runId])
+  @@map("acc_allocation_run_sources")
 }

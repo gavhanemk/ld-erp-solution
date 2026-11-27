@@ -9,7 +9,7 @@ import { fitsPlaces, placesMessage, priceDocument, qtyPlaces, type ChargeGstMode
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
-import { postWithin } from '../services/accounts/posting.service'
+import { expenseLinesWithoutDepartment, postWithin } from '../services/accounts/posting.service'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { priceNote, notedQtyByGrnLine, syncBillAdjustments } from '../services/purchaseNote.service'
 import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
@@ -5329,6 +5329,27 @@ async function packBillLines<L extends { itemId: string; qty: number; grnLineId?
 }
 
 /**
+ * Every expense line of a bill says which department bears it — picked, the
+ * expense head's usual one, or its ledger's — unless the bill is a legacy
+ * import, which is marked and listed among the unallocated entries.
+ */
+async function assertExpenseDepartments(
+  tx: Prisma.TransactionClient,
+  lines: Array<{ itemId: string; grnLineId?: string | null; departmentId?: string | null }>,
+  legacy: boolean,
+) {
+  if (legacy) return
+  const missing = await expenseLinesWithoutDepartment(tx, lines)
+  if (!missing.length) return
+  const said = missing.map((m) => `line ${m.line} (${m.head})`).join(', ')
+  throw new AppError(
+    `Pick the department that bears ${said}: it is the expense's cost centre. Or give the expense head a usual department in Masters → Expense Heads.`,
+    400,
+    'DEPARTMENT_REQUIRED',
+  )
+}
+
+/**
  * A brand or department picked on a bill line must be one still in use: a
  * line cannot be booked to a department that was closed, or a brand dropped.
  */
@@ -5346,7 +5367,7 @@ async function assertLineTagsInUse(
   if (depts.length !== deptIds.length) throw new AppError('A department picked on a line is no longer in use. Pick another.', 400, 'NO_DEPARTMENT')
 }
 
-async function bookBill(
+export async function bookBill(
   tx: Prisma.TransactionClient,
   data: z.infer<typeof createBillSchema>,
   userId: string,
@@ -5354,6 +5375,7 @@ async function bookBill(
 ) {
   const billDate = data.billDate ?? new Date()
   await assertLineTagsInUse(tx, data.lines)
+  await assertExpenseDepartments(tx, data.lines, !!data.legacyImport)
 
   // The same supplier bill booked twice claims the input credit twice. The
   // unique index is the real guard; this is the message the clerk should see
@@ -5428,6 +5450,7 @@ async function bookBill(
       billNumber,
       supplierId: data.supplierId,
       poId: data.poId || null,
+      legacyImport: !!data.legacyImport,
       supplierInvoiceNo: data.supplierInvoiceNo ?? null,
       supplierInvoiceDate: data.supplierInvoiceDate ?? null,
       billDate,
@@ -5606,8 +5629,16 @@ async function bookBill(
   return { bill: created, debitNoteRaised: toDebitNote.length > 0 }
 }
 
+/** A legacy import comes in without departments only by someone who approves in Accounts. */
+function assertMayImportLegacy(req: AuthRequest, legacy: unknown) {
+  if (legacy && !userCan(req.user, 'accounts', 'approve')) {
+    throw new AppError('Only someone who approves in Accounts may bring a bill in without departments as a legacy import.', 403, 'LEGACY_IMPORT_NOT_ALLOWED')
+  }
+}
+
 router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createBillSchema.parse(req.body)
+  assertMayImportLegacy(req, data.legacyImport)
 
   const bill = await prisma.$transaction((tx) => bookBill(tx, data, req.user!.id, userCan(req.user, 'masters', 'edit')))
 
@@ -5638,6 +5669,7 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
  */
 router.post('/expenses/cash', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const { payment: pay, ...billData } = cashExpenseSchema.parse(req.body)
+  assertMayImportLegacy(req, billData.legacyImport)
 
   const result = await prisma.$transaction(async (tx) => {
     const booked = await bookBill(tx, billData, req.user!.id, userCan(req.user, 'masters', 'edit'))
@@ -5734,6 +5766,7 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
         departmentId: l.departmentId,
       }))
     await assertLineTagsInUse(tx, lines)
+    await assertExpenseDepartments(tx, lines, before.legacyImport)
     const { packed, stockLines } = await packBillLines(tx, lines)
 
     const supplierInvoiceNo =

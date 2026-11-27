@@ -104,6 +104,7 @@ export const unallocatedEntries: ReportDefinition = {
         brand: string | null
         department: string | null
         narration: string | null
+        legacy: boolean
       }>
     >(
       `${TOP_GROUP}
@@ -111,9 +112,11 @@ export const unallocatedEntries: ReportDefinition = {
               (led."costCentreId" IS NOT NULL OR led."departmentId" IS NOT NULL) AS "ledgerHasDefault",
               g.name AS grp, t.key AS top, g.nature::text AS nature,
               (l.debit - l.credit)::float8 AS amount, cc.name AS brand, d.name AS department,
-              COALESCE(l.narration, v.narration) AS narration
+              COALESCE(l.narration, v.narration) AS narration,
+              (v."legacyImport" OR COALESCE(pi."legacyImport", false)) AS legacy
          FROM ld_erp.acc_voucher_lines l
          JOIN ld_erp.acc_vouchers v ON v.id = l."voucherId"
+         LEFT JOIN ld_erp.purchase_invoices pi ON v."sourceType" = 'PURCHASE_BILL' AND pi.id = v."sourceId"
          JOIN ld_erp.ledgers led ON led.id = l."ledgerId"
          JOIN ld_erp.ledger_groups g ON g.id = led."groupId"
          JOIN tree t ON t.id = g.id
@@ -137,7 +140,9 @@ export const unallocatedEntries: ReportDefinition = {
         const noBrand = income && !r.brand
         const noDept = !r.department
         const missing = noBrand && noDept ? 'BOTH' : noBrand ? 'BRAND' : 'DEPARTMENT'
-        const action = r.sourceType
+        const action = r.legacy
+          ? `Brought in from the old books without departments (a legacy import). Give ${r.ledger} a usual ${noBrand && noDept ? 'brand and department' : noBrand ? 'brand' : 'department'} and post again, or leave it as imported.`
+          : r.sourceType
           ? `Give ${r.ledger} a usual ${noBrand && noDept ? 'brand and department' : noBrand ? 'brand' : 'department'} in Chart of Accounts, then post again (Accounts → Books → Post again)${r.sourceType === 'PURCHASE_BILL' ? ', or pick it on the bill line' : ''}.`
           : `Open the voucher and pick the ${noBrand && noDept ? 'brand and department' : noBrand ? 'brand' : 'department'} on this line.`
         return {

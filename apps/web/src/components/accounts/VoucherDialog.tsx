@@ -335,6 +335,16 @@ export function VoucherDialog({
       return [...ls, line]
     })
 
+  /**
+   * An expense line needs its department (the server fills the ledger's usual
+   * one, and refuses when there is none). Stock purchases and round off do not.
+   */
+  const needsDept = (l: Line) => {
+    const led = byId.get(l.ledgerId)
+    if (!led || led.nature !== 'EXPENSE' || l.departmentId || led.department?.id) return false
+    return led.group.systemKey !== 'PURCHASE_ACCOUNTS' && led.systemKey !== 'ROUND_OFF'
+  }
+
   const setLedger = (l: Line, ledgerId: string) => {
     const led = byId.get(ledgerId)
     const pl = led && (led.nature === 'INCOME' || led.nature === 'EXPENSE')
@@ -378,6 +388,7 @@ export function VoucherDialog({
     for (const [i, l] of used.entries()) {
       if (!l.ledgerId) return `Line ${i + 1} has no ledger`
       if (amountOf(l) <= 0) return `Line ${i + 1} has no amount`
+      if (needsDept(l)) return `Pick the department on line ${i + 1}: every expense says which department bears it`
       if (placed(l) > amountOf(l) + 0.005) return `The bills on line ${i + 1} add up to more than the line`
       for (const b of l.bills) {
         if ((b.kind === 'AGAINST_REF' || b.kind === 'NEW_REF') && !b.billNo.trim()) return `Say which bill on line ${i + 1}`
@@ -386,7 +397,8 @@ export function VoucherDialog({
     }
     if (totals.diff !== 0) return `Debits and credits differ by ₹${inr(totals.diff)}`
     return null
-  }, [loading, lines, totals.diff])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, lines, totals.diff, ledgers])
 
   const save = async () => {
     if (problem) {
@@ -674,7 +686,7 @@ export function VoucherDialog({
                               </td>
                               <td>
                                 {pl ? (
-                                  <SmartSelect className="form-input" value={l.departmentId} onChange={(e) => update(l.key, { departmentId: e.target.value })} aria-label={`Department on line ${i + 1}`}>
+                                  <SmartSelect className={`form-input ${needsDept(l) ? 'border-amber-500/70' : ''}`} value={l.departmentId} onChange={(e) => update(l.key, { departmentId: e.target.value })} aria-label={`Department on line ${i + 1}`} aria-invalid={needsDept(l)}>
                                     <option value="">No department</option>
                                     {departments.map((d) => (
                                       <option key={d.id} value={d.id}>

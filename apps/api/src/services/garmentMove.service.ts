@@ -249,18 +249,20 @@ export async function moveGarments(tx: Prisma.TransactionClient, data: { codes: 
     const why = blocker(g)
     if (why) throw new AppError(why, 409, 'CANNOT_MOVE')
     if (g.dcId) throw new AppError(`${label(g)} is on ${g.dc?.dcNumber}; take it off the challan first.`, 409, 'ON_CHALLAN')
-    // A stock transfer carries the size but not the grade.
-    if (g.grade === 'B') throw new AppError(`${label(g)} is B-grade; B-grade pieces cannot be moved between stores yet.`, 400, 'B_GRADE')
   }
   const from = [...new Set(pieces.map((g) => g.warehouseId))]
   if (from.length > 1) throw new AppError('These pieces are in different stores. Move one store’s pieces at a time.', 400, 'MIXED_STORES')
   if (from[0] === data.toWarehouseId) throw new AppError(`These pieces are already in ${pieces[0].warehouse.name}.`, 400, 'SAME_STORE')
 
-  const lines = new Map<string, { itemId: string; sizeId: string | null; ownership: 'OWNED' | 'CUSTOMER_OWNED'; ownerCustomerId: string | null; qty: number }>()
+  // One line per balance — item, size, grade and owner — naming its tags: the
+  // transfer moves the stock and the tags together, grade and all.
+  type Line = { itemId: string; sizeId: string | null; grade: 'A' | 'B' | 'R'; ownership: 'OWNED' | 'CUSTOMER_OWNED'; ownerCustomerId: string | null; qty: number; garmentCodes: string[] }
+  const lines = new Map<string, Line>()
   for (const g of pieces) {
-    const key = `${g.itemId}|${g.sizeId ?? ''}|${g.ownership}|${g.ownerCustomerId ?? ''}`
-    const l = lines.get(key) ?? { itemId: g.itemId, sizeId: g.sizeId, ownership: g.ownership, ownerCustomerId: g.ownerCustomerId, qty: 0 }
+    const key = `${g.itemId}|${g.sizeId ?? ''}|${g.grade}|${g.ownership}|${g.ownerCustomerId ?? ''}`
+    const l = lines.get(key) ?? { itemId: g.itemId, sizeId: g.sizeId, grade: g.grade as Line['grade'], ownership: g.ownership, ownerCustomerId: g.ownerCustomerId, qty: 0, garmentCodes: [] }
     l.qty += 1
+    l.garmentCodes.push(g.code)
     lines.set(key, l)
   }
   const note = await createTransfer(
@@ -269,8 +271,6 @@ export async function moveGarments(tx: Prisma.TransactionClient, data: { codes: 
     userId,
     { stickers: 'caller' },
   )
-  await tx.garment.updateMany({ where: { id: { in: pieces.map((g) => g.id) } }, data: { warehouseId: data.toWarehouseId } })
-  await event(tx, pieces.map((g) => g.id), 'TRANSFERRED', { type: 'STOCK_TRANSFER', id: note.id, number: note.transferNumber, notes: `${note.fromWarehouse.name} → ${note.toWarehouse.name}` }, userId)
   return { transferNumber: note.transferNumber, to: note.toWarehouse.name, pieces: pieces.length, available: await availableNow(tx, pieces, data.toWarehouseId) }
 }
 

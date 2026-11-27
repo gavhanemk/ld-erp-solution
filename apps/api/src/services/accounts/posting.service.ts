@@ -250,6 +250,38 @@ async function purchaseHeadFor(
   return { ledgerId: await keyedLedgerId(tx, `PURCHASE_CAT:${top.id}`, { name: `Purchase – ${top.name}`, group: 'PURCHASE_ACCOUNTS' }), expense: false }
 }
 
+/**
+ * A bill's expense-head lines that no source gives a department: not picked
+ * on the line, no usual department on the expense head, none on its ledger.
+ * A new bill may not have any (the department is its cost centre); a legacy
+ * import may, marked as such.
+ */
+export async function expenseLinesWithoutDepartment(
+  tx: Tx,
+  lines: Array<{ itemId: string; grnLineId?: string | null; departmentId?: string | null }>,
+): Promise<Array<{ line: number; head: string }>> {
+  const ids = [...new Set(lines.map((l) => l.itemId))]
+  if (!ids.length) return []
+  const [items, cats, ledgers] = await Promise.all([
+    tx.item.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, categoryId: true, departmentId: true } }),
+    tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, itemGroup: true } }),
+    tx.ledger.findMany({ where: { systemKey: { in: ids.map((id) => `EXPENSE:${id}`) } }, select: { systemKey: true, departmentId: true } }),
+  ])
+  const byCat = new Map(cats.map((c) => [c.id, c]))
+  const out: Array<{ line: number; head: string }> = []
+  lines.forEach((l, i) => {
+    if (l.grnLineId || l.departmentId) return
+    const item = items.find((x) => x.id === l.itemId)
+    if (!item) return
+    const chain: Category[] = []
+    for (let c = byCat.get(item.categoryId); c && chain.length < 10; c = c.parentId ? byCat.get(c.parentId) : undefined) chain.push(c)
+    if (chain[chain.length - 1]?.itemGroup === 'FIXED_ASSETS' || !chain.some((c) => /expense/i.test(c.name))) return
+    const ledgerDept = ledgers.find((x) => x.systemKey === `EXPENSE:${item.id}`)?.departmentId
+    if (!item.departmentId && !ledgerDept) out.push({ line: i + 1, head: item.name })
+  })
+  return out
+}
+
 /** The order line a bill line goes back to, by itself or through its receipt. */
 const orderTrace = {
   select: {

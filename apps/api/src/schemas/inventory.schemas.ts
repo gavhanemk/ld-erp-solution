@@ -215,7 +215,18 @@ export const transferSchema = z.object({
   transferDate: z.coerce.date().optional(),
   notes: z.string().max(1000).optional().nullable(),
   lines: z
-    .array(z.object({ itemId: id('an item'), qty, ...stockOwnerFields, grade: stockGrade }).refine(ownerNamed, ownerNamedMessage))
+    .array(
+      z
+        .object({
+          itemId: id('an item'),
+          qty,
+          ...stockOwnerFields,
+          grade: stockGrade,
+          /** Tagged garments: the tags of the pieces moving, scanned or picked. */
+          garmentCodes: z.array(z.string().trim().min(1)).max(5000).optional(),
+        })
+        .refine(ownerNamed, ownerNamedMessage),
+    )
     .min(1, 'Add at least one item'),
 })
 
@@ -354,11 +365,22 @@ const stepQty = z
   .max(9_999_999, 'That quantity looks like a typo')
 
 /** What arrived of a transfer on the road: good, and damaged (taken in as rejected). */
+/** Tags scanned or picked on a step: needed where the stock alone cannot say which pieces. */
+const stepTags = z.array(z.string().trim().min(1)).max(5000).optional()
+
 export const receiveTransferSchema = z.object({
   receivedAt: z.coerce.date().optional(),
   notes: z.string().max(1000).optional().nullable(),
   lines: z
-    .array(z.object({ lineId: id('a line'), qty: stepQty.optional().nullable(), damagedQty: stepQty.optional().nullable() }))
+    .array(
+      z.object({
+        lineId: id('a line'),
+        qty: stepQty.optional().nullable(),
+        damagedQty: stepQty.optional().nullable(),
+        garmentCodes: stepTags,
+        damagedGarmentCodes: stepTags,
+      }),
+    )
     .min(1, 'Say what arrived'),
 })
 
@@ -366,14 +388,14 @@ export const receiveTransferSchema = z.object({
 export const sendBackTransferSchema = z.object({
   date: z.coerce.date().optional(),
   notes: z.string().max(1000).optional().nullable(),
-  lines: z.array(z.object({ lineId: id('a line'), qty: stepQty.optional().nullable() })).min(1, 'Say what goes back'),
+  lines: z.array(z.object({ lineId: id('a line'), qty: stepQty.optional().nullable(), garmentCodes: stepTags })).min(1, 'Say what goes back'),
 })
 
 /** What was lost on the way, written off by a store manager with a reason. */
 export const writeOffTransferSchema = z.object({
   date: z.coerce.date().optional(),
   reason: z.string().trim().min(5, 'Say what happened to it — one line is enough').max(500),
-  lines: z.array(z.object({ lineId: id('a line'), qty: stepQty.optional().nullable() })).min(1, 'Say what was lost'),
+  lines: z.array(z.object({ lineId: id('a line'), qty: stepQty.optional().nullable(), garmentCodes: stepTags })).min(1, 'Say what was lost'),
 })
 
 /**
