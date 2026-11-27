@@ -3,6 +3,7 @@ import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf } from '../../lib/docNumber'
 import { logger } from '../../utils/logger'
 import { keyedLedgerId, partyLedgerId } from './chart.service'
+import { allocationJournal, runDay } from './allocation.service'
 import { bankDatesOf, bankKey, booksSettings, checkBalancedNow, dayText, dayValue, istDay, r2, type BooksSettings } from './books.service'
 
 /**
@@ -45,7 +46,16 @@ import { bankDatesOf, bankKey, booksSettings, checkBalancedNow, dayText, dayValu
 
 type Tx = Prisma.TransactionClient
 
-export type SourceType = 'SALES_INVOICE' | 'BROKERAGE' | 'SALES_RECEIPT' | 'CREDIT_NOTE' | 'PURCHASE_BILL' | 'SUPPLIER_PAYMENT' | 'PURCHASE_NOTE'
+export type SourceType =
+  | 'SALES_INVOICE'
+  | 'BROKERAGE'
+  | 'SALES_RECEIPT'
+  | 'CREDIT_NOTE'
+  | 'PURCHASE_BILL'
+  | 'SUPPLIER_PAYMENT'
+  | 'PURCHASE_NOTE'
+  | 'EXPENSE_ALLOCATION'
+  | 'EXPENSE_ALLOCATION_REVERSAL'
 
 /** What each source is called when Accounts names it. */
 export const SOURCE_LABEL: Record<SourceType, string> = {
@@ -56,6 +66,8 @@ export const SOURCE_LABEL: Record<SourceType, string> = {
   PURCHASE_BILL: 'Purchase bill',
   SUPPLIER_PAYMENT: 'Supplier payment',
   PURCHASE_NOTE: 'Purchase note',
+  EXPENSE_ALLOCATION: 'Expense allocation',
+  EXPENSE_ALLOCATION_REVERSAL: 'Expense allocation reversal',
 }
 
 interface PlanRef {
@@ -645,6 +657,18 @@ async function planPurchaseNote(tx: Tx, id: string): Promise<Plan | null> {
   }
 }
 
+/**
+ * A month's shared expenses split between the brands, from its allocation
+ * run: each brand's share debited, the whole credited back with no brand, on
+ * the same ledger and department. The lines say exactly what they carry, so
+ * no default brand or department is filled in.
+ */
+async function planAllocation(tx: Tx, id: string, reversal: boolean): Promise<Plan | null> {
+  const j = await allocationJournal(tx, id, reversal)
+  if (!j) return null
+  return { kind: 'JOURNAL', voucherNo: j.voucherNo, date: j.date, narration: j.narration, cancelled: false, lines: j.lines.map((l) => ({ ...l, refs: [] })) }
+}
+
 const PLANNERS: Record<SourceType, (tx: Tx, id: string) => Promise<Plan | null>> = {
   SALES_INVOICE: planSalesInvoice,
   BROKERAGE: planBrokerage,
@@ -653,6 +677,8 @@ const PLANNERS: Record<SourceType, (tx: Tx, id: string) => Promise<Plan | null>>
   PURCHASE_BILL: planPurchaseBill,
   SUPPLIER_PAYMENT: planSupplierPayment,
   PURCHASE_NOTE: planPurchaseNote,
+  EXPENSE_ALLOCATION: (tx, id) => planAllocation(tx, id, false),
+  EXPENSE_ALLOCATION_REVERSAL: (tx, id) => planAllocation(tx, id, true),
 }
 
 // ═══════════════════════════════════════════
@@ -877,7 +903,7 @@ export async function pendingDocuments(db: PrismaClient | Tx): Promise<{ booksSt
     else if (d.live && v?.status === 'CANCELLED') pending.push({ ...base, reason: 'reopen' })
   }
 
-  const [invoices, receipts, notes, bills, payments, pnotes] = await Promise.all([
+  const [invoices, receipts, notes, bills, payments, pnotes, runs] = await Promise.all([
     db.salesInvoice.findMany({ where: { invoiceDate: { gte: from0 } }, select: { id: true, invoiceNumber: true, invoiceDate: true, totalAmount: true, status: true, customer: { select: { name: true } } } }),
     db.paymentReceipt.findMany({ where: { receiptDate: { gte: from0 } }, select: { id: true, receiptNumber: true, receiptDate: true, amount: true, status: true, customer: { select: { name: true } } } }),
     db.creditNote.findMany({ where: { noteDate: { gte: from0 }, status: { in: ['ISSUED', 'CANCELLED'] } }, select: { id: true, noteNumber: true, noteDate: true, totalAmount: true, status: true, customer: { select: { name: true } } } }),
@@ -887,6 +913,7 @@ export async function pendingDocuments(db: PrismaClient | Tx): Promise<{ booksSt
       where: { noteDate: { gte: from0 }, OR: [{ status: 'POSTED' }, { status: 'CANCELLED', postedAt: { not: null } }] },
       select: { id: true, noteNumber: true, noteDate: true, totalAmount: true, status: true, supplier: { select: { name: true } } },
     }),
+    db.allocationRun.findMany({ where: { status: { in: ['POSTED', 'REVERSED'] } }, select: { id: true, runNumber: true, period: true, status: true, lines: { select: { amount: true } } } }),
   ])
   for (const d of invoices) check('SALES_INVOICE', { id: d.id, number: d.invoiceNumber, date: d.invoiceDate, party: d.customer.name, amount: n(d.totalAmount), live: d.status !== 'CANCELLED' })
   for (const d of receipts) check('SALES_RECEIPT', { id: d.id, number: d.receiptNumber, date: d.receiptDate, party: d.customer.name, amount: n(d.amount), live: d.status === 'POSTED' })
@@ -894,6 +921,14 @@ export async function pendingDocuments(db: PrismaClient | Tx): Promise<{ booksSt
   for (const d of bills) check('PURCHASE_BILL', { id: d.id, number: d.billNumber, date: d.billDate, party: d.supplier.name, amount: n(d.totalAmount), live: d.status !== 'CANCELLED' })
   for (const d of payments) check('SUPPLIER_PAYMENT', { id: d.id, number: d.paymentNumber, date: d.paymentDate, party: d.supplier.name, amount: n(d.amount), live: d.status === 'POSTED' })
   for (const d of pnotes) check('PURCHASE_NOTE', { id: d.id, number: d.noteNumber, date: d.noteDate, party: d.supplier.name, amount: n(d.totalAmount), live: d.status === 'POSTED' })
+  // A posted allocation run has its journal; a reversed one its reversal too.
+  for (const r of runs) {
+    const day = runDay(r.period)
+    if (day < s.booksStart) continue
+    const amount = r2(r.lines.reduce((t, l) => t + n(l.amount), 0))
+    check('EXPENSE_ALLOCATION', { id: r.id, number: r.runNumber, date: dayValue(day), party: '', amount, live: true })
+    check('EXPENSE_ALLOCATION_REVERSAL', { id: r.id, number: `${r.runNumber}-R`, date: dayValue(day), party: '', amount, live: r.status === 'REVERSED' })
+  }
 
   // Vouchers of documents dated before the books now start.
   for (const v of vouchers) {
@@ -939,7 +974,7 @@ export async function postPending(db: PrismaClient, userId: string | null, all =
   }
   const results = { posted: 0, unchanged: 0, failed: [] as Array<{ sourceType: SourceType; number: string; reason: string }> }
   // Invoices before the receipts and notes that settle them, bills before payments.
-  const ORDER: SourceType[] = ['SALES_INVOICE', 'PURCHASE_BILL', 'CREDIT_NOTE', 'PURCHASE_NOTE', 'SALES_RECEIPT', 'SUPPLIER_PAYMENT', 'BROKERAGE']
+  const ORDER: SourceType[] = ['SALES_INVOICE', 'PURCHASE_BILL', 'CREDIT_NOTE', 'PURCHASE_NOTE', 'SALES_RECEIPT', 'SUPPLIER_PAYMENT', 'BROKERAGE', 'EXPENSE_ALLOCATION', 'EXPENSE_ALLOCATION_REVERSAL']
   work.sort((a, b) => ORDER.indexOf(a.sourceType) - ORDER.indexOf(b.sourceType))
   for (const w of work) {
     try {

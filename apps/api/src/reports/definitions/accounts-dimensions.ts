@@ -277,3 +277,107 @@ export const costCentreExpenses: ReportDefinition = {
     }
   },
 }
+
+/**
+ * Each month's split of shared expenses between the brands, run by run.
+ *
+ * One row per brand's share of a shared amount: the rule that split it, on
+ * what basis, at what percentage. Only posted runs count in the books; a
+ * reversed run is listed as reversed, and a run not yet posted as it stands.
+ */
+export const expenseAllocationRegister: ReportDefinition = {
+  id: 'expense-allocation-register',
+  module: 'accounts',
+  title: 'Expense Allocation Register',
+  description: 'Shared expenses split between the brands, month by month: each run, rule, ledger, department and brand share.',
+  filters: [...dateRangeFilters],
+  columns: [
+    { key: 'month', label: 'Month', type: 'text', width: 10 },
+    { key: 'runNumber', label: 'Run', type: 'text', width: 14 },
+    { key: 'status', label: 'Status', type: 'text', width: 10 },
+    { key: 'rule', label: 'Rule', type: 'text', width: 22 },
+    { key: 'basis', label: 'Basis', type: 'text', width: 18 },
+    { key: 'ledger', label: 'Ledger', type: 'text', width: 24 },
+    { key: 'department', label: 'Department', type: 'text', width: 18 },
+    { key: 'brand', label: 'Brand', type: 'text', width: 16 },
+    { key: 'sharedAmount', label: 'Shared Amount', type: 'money' },
+    { key: 'percent', label: 'Share %', type: 'percent', total: 'none' },
+    { key: 'amount', label: 'Brand’s Part', type: 'money', total: 'sum' },
+  ],
+  summary: {
+    title: 'Allocated, by brand',
+    columns: ['month', 'runNumber', 'brand', 'amount'],
+    by: 'amount',
+    limit: 20,
+  },
+  pivot: undefined,
+
+  async run({ tx, params, rowCap }) {
+    const fromMonth = params.from ? String(params.from).slice(0, 7) : '0000-00'
+    const toMonth = params.to ? String(params.to).slice(0, 7) : '9999-99'
+    const BASIS: Record<string, string> = {
+      REVENUE: 'Sales',
+      PRODUCTION_QTY: 'Pieces produced',
+      MATERIAL_CONSUMPTION: 'Material consumed',
+      MACHINE_HOURS: 'Machine hours',
+      FIXED_PERCENT: 'Fixed %',
+      MANUAL: 'Typed %',
+    }
+    const rows = await tx.$queryRawUnsafe<
+      Array<{ period: string; runNumber: string; status: string; rule: string; basis: string; ledger: string; department: string | null; brand: string; sharedAmount: number; percent: number; amount: number }>
+    >(
+      `SELECT r.period, r."runNumber", r.status::text AS status, ru.name AS rule, ru.basis::text AS basis, led.name AS ledger, d.name AS department,
+              cc.name AS brand, l."sharedAmount"::float8 AS "sharedAmount", l.percent::float8 AS percent, l.amount::float8 AS amount
+         FROM ld_erp.acc_allocation_run_lines l
+         JOIN ld_erp.acc_allocation_runs r ON r.id = l."runId"
+         JOIN ld_erp.acc_allocation_rules ru ON ru.id = l."ruleId"
+         JOIN ld_erp.ledgers led ON led.id = l."ledgerId"
+         LEFT JOIN ld_erp.departments d ON d.id = l."departmentId"
+         JOIN ld_erp.cost_centres cc ON cc.id = l."costCentreId"
+        WHERE r.status::text <> 'DISCARDED' AND r.period >= $1 AND r.period <= $2
+        ORDER BY r.period DESC, r."runNumber" DESC, led.name, d.name NULLS FIRST, l.amount DESC`,
+      fromMonth,
+      toMonth,
+    )
+    const STATUS: Record<string, string> = { DRAFT: 'Draft', APPROVED: 'Approved', POSTED: 'Posted', REVERSED: 'Reversed' }
+    const shaped = rows.map((r) => ({
+      month: r.period,
+      runNumber: r.runNumber,
+      status: STATUS[r.status] ?? r.status,
+      rule: r.rule,
+      basis: BASIS[r.basis] ?? r.basis,
+      ledger: r.ledger,
+      department: r.department ?? 'No department',
+      brand: r.brand,
+      sharedAmount: r2(r.sharedAmount),
+      percent: Math.round(r.percent * 10000) / 1000000,
+      amount: r2(r.amount),
+    }))
+    const posted = shaped.filter((r) => r.status === 'Posted')
+    const total = r2(posted.reduce((s, r) => s + r.amount, 0))
+    const byBrand = new Map<string, number>()
+    for (const r of posted) byBrand.set(r.brand, r2((byBrand.get(r.brand) ?? 0) + r.amount))
+    const top = [...byBrand.entries()].sort((a, b) => b[1] - a[1])
+    const waiting = new Set(shaped.filter((r) => r.status === 'Draft' || r.status === 'Approved').map((r) => r.runNumber)).size
+    return {
+      rows: shaped.slice(0, rowCap),
+      ...(shaped.length > rowCap ? { totalRows: shaped.length } : {}),
+      analysis: {
+        headline: posted.length
+          ? `₹${total.toLocaleString('en-IN')} of shared expenses split between the brands: ${periodLabel(params)}.`
+          : `No posted split of shared expenses: ${periodLabel(params)}.`,
+        kpis: [
+          { label: 'Split (posted)', value: total, format: 'money', basis: 'posted runs; reversed and unposted runs left out' },
+          { label: 'Posted runs', value: new Set(posted.map((r) => r.runNumber)).size, format: 'integer', basis: 'one a month at most' },
+          { label: 'Waiting', value: waiting, format: 'integer', basis: 'runs drafted or approved, not yet posted', tone: waiting ? 'warn' : 'good' },
+        ],
+        panels: top.length ? [{ title: 'Allocated by brand', question: 'ranking', format: 'money', points: top.slice(0, 12).map(([label, value]) => ({ label, value })) }] : [],
+        insights: [],
+        caveats: [
+          'Splitting moves shared expenses onto the brands only: each ledger’s and each department’s total, and the company’s, stay as booked.',
+          'A reversed run is undone in the books by its own reversing journal (its number with -R).',
+        ],
+      },
+    }
+  },
+}

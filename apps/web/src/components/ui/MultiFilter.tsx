@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useEscape } from '@/lib/useEscape'
 
 export interface FilterOption {
   value: string
@@ -39,16 +40,11 @@ export function MultiFilter({
     const away = (e: MouseEvent) => {
       if (!box.current?.contains(e.target as Node)) setOpen(false)
     }
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
     document.addEventListener('mousedown', away)
-    document.addEventListener('keydown', esc)
-    return () => {
-      document.removeEventListener('mousedown', away)
-      document.removeEventListener('keydown', esc)
-    }
+    return () => document.removeEventListener('mousedown', away)
   }, [open])
+  // Escape closes the open list only, never a form it sits in.
+  useEscape(() => setOpen(false), open)
 
   const shown = useMemo(() => {
     const t = query.trim().toLowerCase()

@@ -169,6 +169,7 @@ export const navItems: NavItem[] = [
       { label: 'Bank Reconciliation', href: '/accounts/bank-reco' },
       { label: 'Trial Balance', href: '/accounts/trial-balance' },
       { label: 'Profit & Loss', href: '/accounts/profit-loss' },
+      { label: 'Expense Allocation', href: '/accounts/allocation' },
       { label: 'Balance Sheet', href: '/accounts/balance-sheet' },
       { label: 'Chart of Accounts', href: '/accounts/chart' },
       { label: 'Outstanding', href: '/accounts/outstanding' },

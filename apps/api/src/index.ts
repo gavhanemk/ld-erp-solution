@@ -42,6 +42,7 @@ import stockCountRoutes from './routes/stockCount.routes'
 import finishedGoodsRoutes from './routes/finishedGoods.routes'
 import productionRoutes from './routes/production.routes'
 import accountsRoutes from './routes/accounts.routes'
+import allocationRoutes from './routes/allocation.routes'
 import hrRoutes from './routes/hr.routes'
 import samplingRoutes from './routes/sampling.routes'
 import approvalRoutes from './routes/approvals.routes'
@@ -336,6 +337,7 @@ app.use('/api/stock-counts', authMiddleware, stockCountRoutes)
 // under Inventory's permissions, kept out of inventory.routes.ts.
 app.use('/api/finished-goods', authMiddleware, finishedGoodsRoutes)
 app.use('/api/production', authMiddleware, productionRoutes)
+app.use('/api/accounts/allocation', authMiddleware, allocationRoutes)
 app.use('/api/accounts', authMiddleware, accountsRoutes)
 app.use('/api/hr', authMiddleware, hrRoutes)
 app.use('/api/sampling', authMiddleware, samplingRoutes)

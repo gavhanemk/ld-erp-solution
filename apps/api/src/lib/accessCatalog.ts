@@ -237,6 +237,14 @@ export const ACCESS_CATALOG: AccessModule[] = [
       s('accounts.outstanding', 'Outstanding', READ, ['/accounts/outstanding'], ['/api/accounts/outstanding']),
       s('accounts.gst', 'GST Returns', READ, ['/accounts/gst'], ['/api/accounts/gst']),
       s('accounts.tds', 'TDS', READ, ['/accounts/tds'], ['/api/accounts/tds']),
+      s(
+        'accounts.allocation',
+        'Expense Allocation',
+        ['view', 'create', 'edit', 'delete', 'approve', 'post', 'export'],
+        ['/accounts/allocation'],
+        ['/api/accounts/allocation'],
+        'Shared expenses split between the brands each month: rules, runs, approval, posting',
+      ),
     ],
   },
   {

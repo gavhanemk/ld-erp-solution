@@ -24,7 +24,7 @@ import { customerMaterialStock } from './definitions/customer-material-stock'
 import { stockCountVariance } from './definitions/stock-count-variance'
 import { stockReconciliation } from './definitions/stock-reconciliation'
 import { wipReconciliation } from './definitions/wip-reconciliation'
-import { costCentreExpenses, unallocatedEntries } from './definitions/accounts-dimensions'
+import { costCentreExpenses, expenseAllocationRegister, unallocatedEntries } from './definitions/accounts-dimensions'
 import { packetBalances } from './definitions/packet-balances'
 import { fifoExceptions } from './definitions/fifo-exceptions'
 
@@ -68,6 +68,7 @@ export const REPORTS: ReportDefinition[] = [
   wipReconciliation,
   unallocatedEntries,
   costCentreExpenses,
+  expenseAllocationRegister,
   packetBalances,
   fifoExceptions,
   ...SALES_REPORTS,
