@@ -39,7 +39,9 @@ export const supplierFormFields: FormField[] = [
     name: 'category',
     label: 'Category',
     type: 'select',
-    required: true,
+    // Optional: left empty, the supplier is filed under Other.
+    noneLabel: 'Not chosen (saved as Other)',
+    nullWhenEmpty: true,
     section: 'Identity & Contact',
     options: Object.entries(SUPPLIER_CATEGORY_LABEL).map(([value, label]) => ({ value, label })),
   },

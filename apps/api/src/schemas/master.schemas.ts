@@ -236,7 +236,10 @@ const supplierFields = z.object({
   // somebody does supply one, so an imported code cannot be malformed.
   code: code.optional(),
   name,
-  category: SupplierCategoryEnum,
+  // Optional on the form and the import. Every supplier still has one (the
+  // column is required), so a new one without it, or one whose category is
+  // cleared, is Other. Left out of an edit, it stays as it was.
+  category: z.preprocess((v) => (v === '' || v === null ? 'OTHER' : v), SupplierCategoryEnum).default('OTHER'),
   gstin,
   pan,
   phone,
