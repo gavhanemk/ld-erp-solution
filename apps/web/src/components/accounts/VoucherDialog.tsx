@@ -42,6 +42,8 @@ interface Line {
   debit: string
   credit: string
   costCentreId: string
+  /** The department (cost centre) of an income or expense line. */
+  departmentId: string
   bills: BillRow[]
 }
 
@@ -59,6 +61,7 @@ interface VoucherDetail {
     side: 'DR' | 'CR'
     amount: number
     costCentre: { id: string } | null
+    department?: { id: string } | null
     ledger: { id: string }
     bills: Array<{ kind: BillKind; billNo: string; dueDate: string | null; amount: number }>
   }>
@@ -69,7 +72,7 @@ const key = () => `k${++seq}`
 const num = (s: string) => (s.trim() === '' ? 0 : Number(s) || 0)
 const sideOf = (l: Line): 'DR' | 'CR' => (num(l.debit) > 0 ? 'DR' : num(l.credit) > 0 ? 'CR' : l.side)
 const amountOf = (l: Line) => num(l.debit) || num(l.credit)
-const blankLine = (side: 'DR' | 'CR', ledgerId = ''): Line => ({ key: key(), ledgerId, side, debit: '', credit: '', costCentreId: '', bills: [] })
+const blankLine = (side: 'DR' | 'CR', ledgerId = ''): Line => ({ key: key(), ledgerId, side, debit: '', credit: '', costCentreId: '', departmentId: '', bills: [] })
 const IS_CHEQUE = new Set(['CHEQUE', 'PDC'])
 
 /**
@@ -103,8 +106,9 @@ const FIRST_SIDE: Record<ManualKind, ['DR' | 'CR', 'DR' | 'CR']> = {
  * payment is typed once. A party kept bill by bill opens a row under its line
  * for the bills it raises or settles: "Settle oldest first" takes the open
  * bills in date order until the money runs out, and whatever is not placed
- * goes on account. Income and expense lines carry a brand, so profit can be
- * read brand by brand.
+ * goes on account. Income and expense lines carry a brand and a department,
+ * filled from the ledger's usual ones, so profit can be read brand by brand
+ * and spending department by department.
  *
  * F4, F5, F6 and F7 switch a new voucher between Contra, Payment, Receipt and
  * Journal, as they do in Tally. Opened with `voucherId`, it alters that
@@ -131,6 +135,7 @@ export function VoucherDialog({
 
   const [ledgers, setLedgers] = useState<Ledger[]>([])
   const [centres, setCentres] = useState<CostCentre[]>([])
+  const [departments, setDepartments] = useState<Array<{ id: string; name: string }>>([])
   const [bills, setBills] = useState<Record<string, OpenBill[]>>({})
   const [loading, setLoading] = useState(false)
 
@@ -194,13 +199,15 @@ export function VoucherDialog({
     setLoading(true)
     ;(async () => {
       try {
-        const [l, c] = await Promise.all([
+        const [l, c, d] = await Promise.all([
           api.get<{ data: Ledger[] }>('/accounts/ledgers?active=1&balances=1'),
           api.get<{ data: CostCentre[] }>('/accounts/cost-centres'),
+          api.get<{ data: Array<{ id: string; name: string; isActive?: boolean }> }>('/masters/departments?limit=200&active=true&sort=name&order=asc'),
         ])
         if (gone) return
         setLedgers(l.data)
         setCentres(c.data.filter((x) => x.isActive))
+        setDepartments(d.data.filter((x) => x.isActive !== false))
         if (voucherId) {
           const v = (await api.get<{ data: VoucherDetail }>(`/accounts/vouchers/${voucherId}`)).data
           if (gone) return
@@ -220,6 +227,7 @@ export function VoucherDialog({
               debit: x.side === 'DR' ? String(x.amount) : '',
               credit: x.side === 'CR' ? String(x.amount) : '',
               costCentreId: x.costCentre?.id ?? '',
+              departmentId: x.department?.id ?? '',
               bills: x.bills.map((b) => ({ key: key(), kind: b.kind, billNo: b.billNo, dueDate: b.dueDate ?? '', amount: String(b.amount) })),
             })),
           )
@@ -330,7 +338,13 @@ export function VoucherDialog({
   const setLedger = (l: Line, ledgerId: string) => {
     const led = byId.get(ledgerId)
     const pl = led && (led.nature === 'INCOME' || led.nature === 'EXPENSE')
-    update(l.key, { ledgerId, bills: [], costCentreId: pl ? l.costCentreId : '' })
+    // An income or expense line keeps what was picked, else takes the ledger's usual brand and department.
+    update(l.key, {
+      ledgerId,
+      bills: [],
+      costCentreId: pl ? l.costCentreId || led?.costCentre?.id || '' : '',
+      departmentId: pl ? l.departmentId || led?.department?.id || '' : '',
+    })
     void loadBills(ledgerId)
   }
 
@@ -401,6 +415,7 @@ export function VoucherDialog({
           side: sideOf(l),
           amount,
           costCentreId: l.costCentreId || null,
+          departmentId: l.departmentId || null,
           bills: refs.map((b) => ({ kind: b.kind, billNo: b.billNo.trim() || null, dueDate: b.kind === 'NEW_REF' && b.dueDate ? b.dueDate : null, amount: num(b.amount) })),
         }
       }),
@@ -605,12 +620,13 @@ export function VoucherDialog({
                 }
               >
                 <div className="overflow-x-auto">
-                  <table className="data-table table-totals w-full min-w-[760px]">
+                  <table className="data-table table-totals w-full min-w-[920px]">
                     <thead>
                       <tr>
                         <th className="w-10">#</th>
                         <th>Ledger</th>
-                        <th className="w-48">Brand</th>
+                        <th className="w-44">Brand</th>
+                        <th className="w-44">Department</th>
                         <th className="w-40 text-right">Debit ₹</th>
                         <th className="w-40 text-right">Credit ₹</th>
                         <th className="w-10" />
@@ -657,6 +673,20 @@ export function VoucherDialog({
                                 )}
                               </td>
                               <td>
+                                {pl ? (
+                                  <SmartSelect className="form-input" value={l.departmentId} onChange={(e) => update(l.key, { departmentId: e.target.value })} aria-label={`Department on line ${i + 1}`}>
+                                    <option value="">No department</option>
+                                    {departments.map((d) => (
+                                      <option key={d.id} value={d.id}>
+                                        {d.name}
+                                      </option>
+                                    ))}
+                                  </SmartSelect>
+                                ) : (
+                                  <span className="text-muted-foreground text-xs">—</span>
+                                )}
+                              </td>
+                              <td>
                                 <StepInput
                                   decimals
                                   className="form-input text-right tabular-nums"
@@ -694,7 +724,7 @@ export function VoucherDialog({
                             {led?.billWise && (
                               <tr data-grid-row="sizes">
                                 <td />
-                                <td colSpan={5} className="pt-0">
+                                <td colSpan={6} className="pt-0">
                                   <div className="border-border bg-secondary/40 rounded-lg border p-2">
                                     <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                                       <p className="text-muted-foreground text-xs">
@@ -781,7 +811,7 @@ export function VoucherDialog({
                     </tbody>
                     <tfoot>
                       <tr>
-                        <td colSpan={3}>
+                        <td colSpan={4}>
                           <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={addLine} data-grid-add aria-keyshortcuts="Alt+A">
                             <Plus size={14} /> Add line
                           </button>

@@ -50,6 +50,8 @@ const lineSchema = z.object({
   side: z.enum(['DR', 'CR']),
   amount: money('The amount'),
   costCentreId: z.string().optional().nullable(),
+  /** The department (cost centre) an income or expense line belongs to. */
+  departmentId: z.string().optional().nullable(),
   narration: z.string().trim().max(500).optional().nullable(),
   bills: z.array(billSchema).max(100).optional(),
 })
@@ -191,16 +193,25 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
       break
   }
 
-  // ── Brands ──
+  // ── Brands and departments: on income and expense lines only ──
   const centreIds = [...new Set(input.lines.map((l) => l.costCentreId).filter((c): c is string => !!c))]
-  const centres = centreIds.length ? await tx.costCentre.findMany({ where: { id: { in: centreIds } }, select: { id: true, name: true, isActive: true } }) : []
+  const deptIds = [...new Set(input.lines.map((l) => l.departmentId).filter((d): d is string => !!d))]
+  const [centres, depts] = await Promise.all([
+    centreIds.length ? tx.costCentre.findMany({ where: { id: { in: centreIds } }, select: { id: true, name: true, isActive: true } }) : [],
+    deptIds.length ? tx.department.findMany({ where: { id: { in: deptIds } }, select: { id: true, name: true, isActive: true } }) : [],
+  ])
   input.lines.forEach((l, i) => {
-    if (!l.costCentreId) return
-    const c = centres.find((x) => x.id === l.costCentreId)
-    if (!c || !c.isActive) throw new AppError(`Line ${i + 1}: that brand is not in use`, 400, 'NO_COST_CENTRE')
     const nature = byId.get(l.ledgerId)!.group.nature
-    if (nature !== 'INCOME' && nature !== 'EXPENSE') {
-      throw new AppError(`Line ${i + 1}: a brand goes on income and expense lines only, not on ${byId.get(l.ledgerId)!.name}.`, 400, 'COST_CENTRE_PL_ONLY')
+    const pl = nature === 'INCOME' || nature === 'EXPENSE'
+    if (l.costCentreId) {
+      const c = centres.find((x) => x.id === l.costCentreId)
+      if (!c || !c.isActive) throw new AppError(`Line ${i + 1}: that brand is not in use`, 400, 'NO_COST_CENTRE')
+      if (!pl) throw new AppError(`Line ${i + 1}: a brand goes on income and expense lines only, not on ${byId.get(l.ledgerId)!.name}.`, 400, 'COST_CENTRE_PL_ONLY')
+    }
+    if (l.departmentId) {
+      const d = depts.find((x) => x.id === l.departmentId)
+      if (!d || !d.isActive) throw new AppError(`Line ${i + 1}: that department is not in use`, 400, 'NO_DEPARTMENT')
+      if (!pl) throw new AppError(`Line ${i + 1}: a department goes on income and expense lines only, not on ${byId.get(l.ledgerId)!.name}.`, 400, 'DEPARTMENT_PL_ONLY')
     }
   })
 
@@ -297,6 +308,7 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
         debit: l.side === 'DR' ? r2(l.amount) : 0,
         credit: l.side === 'CR' ? r2(l.amount) : 0,
         costCentreId: l.costCentreId || null,
+        departmentId: l.departmentId || null,
         narration: l.narration || null,
         bankDate: banked.get(bankKey(l.ledgerId, l.side === 'DR' ? l.amount : -l.amount)) ?? null,
         sortOrder: i,

@@ -5328,6 +5328,24 @@ async function packBillLines<L extends { itemId: string; qty: number; grnLineId?
   return { packed, stockLines: lines.map((l, i) => ({ ...l, qty: toStock(l.qty, packed[i].pack) })) }
 }
 
+/**
+ * A brand or department picked on a bill line must be one still in use: a
+ * line cannot be booked to a department that was closed, or a brand dropped.
+ */
+async function assertLineTagsInUse(
+  tx: Prisma.TransactionClient,
+  lines: Array<{ costCentreId?: string | null; departmentId?: string | null }>,
+) {
+  const centreIds = [...new Set(lines.map((l) => l.costCentreId).filter((x): x is string => !!x))]
+  const deptIds = [...new Set(lines.map((l) => l.departmentId).filter((x): x is string => !!x))]
+  const [centres, depts] = await Promise.all([
+    centreIds.length ? tx.costCentre.findMany({ where: { id: { in: centreIds }, isActive: true }, select: { id: true } }) : [],
+    deptIds.length ? tx.department.findMany({ where: { id: { in: deptIds }, isActive: true }, select: { id: true } }) : [],
+  ])
+  if (centres.length !== centreIds.length) throw new AppError('A brand picked on a line is no longer in use. Pick another, or leave it empty.', 400, 'NO_COST_CENTRE')
+  if (depts.length !== deptIds.length) throw new AppError('A department picked on a line is no longer in use. Pick another.', 400, 'NO_DEPARTMENT')
+}
+
 async function bookBill(
   tx: Prisma.TransactionClient,
   data: z.infer<typeof createBillSchema>,
@@ -5335,6 +5353,7 @@ async function bookBill(
   canOverride = false
 ) {
   const billDate = data.billDate ?? new Date()
+  await assertLineTagsInUse(tx, data.lines)
 
   // The same supplier bill booked twice claims the input credit twice. The
   // unique index is the real guard; this is the message the clerk should see
@@ -5459,6 +5478,8 @@ async function bookBill(
           igst: priced.pricedLines[i].igst,
           amount: priced.pricedLines[i].amount,
           sortOrder: i,
+          costCentreId: l.costCentreId || null,
+          departmentId: l.departmentId || null,
         })),
       },
       charges: {
@@ -5709,7 +5730,10 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
         unitPrice: Number(l.unitPrice),
         discount: Number(l.discount),
         gstRate: Number(l.gstRate),
+        costCentreId: l.costCentreId,
+        departmentId: l.departmentId,
       }))
+    await assertLineTagsInUse(tx, lines)
     const { packed, stockLines } = await packBillLines(tx, lines)
 
     const supplierInvoiceNo =
@@ -5835,6 +5859,8 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
             igst: priced.pricedLines[i].igst,
             amount: priced.pricedLines[i].amount,
             sortOrder: i,
+            costCentreId: l.costCentreId || null,
+            departmentId: l.departmentId || null,
           })),
         },
         charges: {

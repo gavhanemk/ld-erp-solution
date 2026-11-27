@@ -137,6 +137,8 @@ export interface PlLine {
   amount: number
   /** By brand: cost centre id → amount, and '' for what no brand carries. */
   centres: Record<string, number>
+  /** By department (cost centre): department id → amount, and '' for what none carries. */
+  departments: Record<string, number>
 }
 
 export interface PlBlock {
@@ -144,6 +146,7 @@ export interface PlBlock {
   title: string
   total: number
   centres: Record<string, number>
+  departments: Record<string, number>
   lines: PlLine[]
 }
 
@@ -160,7 +163,9 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
   const to = asked.to
   const whole = from === fyStart
 
-  const [{ byId, top }, figures, centreRows, centres] = await Promise.all([
+  const day0 = new Date(`${from}T00:00:00+05:30`)
+  const day1 = new Date(`${to}T23:59:59.999+05:30`)
+  const [{ byId, top }, figures, centreRows, deptRows, centres, depts] = await Promise.all([
     topKeys(tx),
     ledgerFigures(tx, { from, to }, s),
     tx.$queryRawUnsafe<Array<{ ledgerId: string; costCentreId: string; amount: number }>>(
@@ -168,19 +173,33 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
          FROM ld_erp.acc_voucher_lines l JOIN ld_erp.acc_vouchers v ON v.id = l."voucherId"
         WHERE v.status = 'POSTED' AND l."costCentreId" IS NOT NULL AND v.date >= $1 AND v.date <= $2
         GROUP BY l."ledgerId", l."costCentreId"`,
-      new Date(`${from}T00:00:00+05:30`),
-      new Date(`${to}T23:59:59.999+05:30`),
+      day0,
+      day1,
+    ),
+    tx.$queryRawUnsafe<Array<{ ledgerId: string; departmentId: string; amount: number }>>(
+      `SELECT l."ledgerId", l."departmentId", SUM(l.debit - l.credit)::float8 AS amount
+         FROM ld_erp.acc_voucher_lines l JOIN ld_erp.acc_vouchers v ON v.id = l."voucherId"
+        WHERE v.status = 'POSTED' AND l."departmentId" IS NOT NULL AND v.date >= $1 AND v.date <= $2
+        GROUP BY l."ledgerId", l."departmentId"`,
+      day0,
+      day1,
     ),
     tx.costCentre.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true, brand: { select: { type: true } } } }),
+    tx.department.findMany({ select: { id: true, name: true, parent: { select: { name: true } } } }),
   ])
-  const byCentre = new Map<string, Map<string, number>>()
-  for (const r of centreRows) {
-    const m = byCentre.get(r.ledgerId) ?? new Map<string, number>()
-    m.set(r.costCentreId, r2(r.amount))
-    byCentre.set(r.ledgerId, m)
+  const splitOf = (rows: Array<{ ledgerId: string; amount: number }>, key: (r: never) => string) => {
+    const out = new Map<string, Map<string, number>>()
+    for (const r of rows) {
+      const m = out.get(r.ledgerId) ?? new Map<string, number>()
+      m.set(key(r as never), r2(r.amount))
+      out.set(r.ledgerId, m)
+    }
+    return out
   }
+  const byCentre = splitOf(centreRows, (r: { costCentreId: string }) => r.costCentreId)
+  const byDept = splitOf(deptRows, (r: { departmentId: string }) => r.departmentId)
 
-  const blocks = new Map<PlKey, PlBlock>(PL_BLOCKS.map((b) => [b.key, { key: b.key, title: b.title, total: 0, centres: {}, lines: [] }]))
+  const blocks = new Map<PlKey, PlBlock>(PL_BLOCKS.map((b) => [b.key, { key: b.key, title: b.title, total: 0, centres: {}, departments: {}, lines: [] }]))
   for (const f of figures) {
     if (f.nature !== 'INCOME' && f.nature !== 'EXPENSE') continue
     const key = top.get(f.groupId) as PlKey | null
@@ -191,17 +210,24 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
     if (signed === 0) continue
     const sign = spec.income ? -1 : 1
     const amount = r2(sign * signed)
-    const split: Record<string, number> = {}
-    let placed = 0
-    for (const [cc, a] of byCentre.get(f.id) ?? []) {
-      split[cc] = r2(sign * a)
-      placed = r2(placed + split[cc])
+    // What each brand and each department carries of it; the rest is '' (not split, no department).
+    const spread = (m: Map<string, number> | undefined) => {
+      const out: Record<string, number> = {}
+      let placed = 0
+      for (const [k, a] of m ?? []) {
+        out[k] = r2(sign * a)
+        placed = r2(placed + out[k])
+      }
+      out[''] = r2(amount - placed)
+      return out
     }
-    split[''] = r2(amount - placed)
+    const split = spread(byCentre.get(f.id))
+    const bydept = spread(byDept.get(f.id))
     const block = blocks.get(spec.key)!
-    block.lines.push({ id: f.id, name: f.name, group: byId.get(f.groupId)?.name ?? '', amount, centres: split })
+    block.lines.push({ id: f.id, name: f.name, group: byId.get(f.groupId)?.name ?? '', amount, centres: split, departments: bydept })
     block.total = r2(block.total + amount)
     for (const [cc, a] of Object.entries(split)) block.centres[cc] = r2((block.centres[cc] ?? 0) + a)
+    for (const [d, a] of Object.entries(bydept)) block.departments[d] = r2((block.departments[d] ?? 0) + a)
   }
   for (const b of blocks.values()) b.lines.sort((x, y) => y.amount - x.amount || x.name.localeCompare(y.name))
 
@@ -223,6 +249,24 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
     return { id: c.id, name: c.name, stockChange: stock, grossProfit: gross, netProfit: r2(gross + at('INDIRECT_INCOMES', c.id) - at('INDIRECT_EXPENSES', c.id)) }
   })
 
+  // By department (cost centre): a column for each department that carries
+  // anything in the period, under its parent's name; stock, valued for the
+  // mill as a whole, sits with "No department".
+  const atD = (k: PlKey, d: string) => B(k).departments[d] ?? 0
+  const deptBooked = new Set(deptRows.filter((r) => r.amount !== 0).map((r) => r.departmentId))
+  const deptColumns = [
+    ...depts
+      .filter((d) => deptBooked.has(d.id))
+      .map((d) => ({ id: d.id, name: d.name, parent: d.parent?.name ?? null }))
+      .sort((a, b) => (a.parent ?? a.name).localeCompare(b.parent ?? b.name) || (a.parent ? 1 : 0) - (b.parent ? 1 : 0) || a.name.localeCompare(b.name)),
+    { id: '', name: 'No department', parent: null },
+  ]
+  const department = deptColumns.map((d) => {
+    const stock = d.id === '' ? r2(closing.value - opening.value) : 0
+    const gross = r2(atD('SALES_ACCOUNTS', d.id) + atD('DIRECT_INCOMES', d.id) + stock - atD('PURCHASE_ACCOUNTS', d.id) - atD('DIRECT_EXPENSES', d.id))
+    return { id: d.id, name: d.name, parent: d.parent, stockChange: stock, grossProfit: gross, netProfit: r2(gross + atD('INDIRECT_INCOMES', d.id) - atD('INDIRECT_EXPENSES', d.id)) }
+  })
+
   return {
     period: { from, to, asked: asked.from !== from ? asked.from : null },
     blocks: PL_BLOCKS.map((b) => B(b.key)),
@@ -232,6 +276,8 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
     netProfit,
     columns,
     brand,
+    deptColumns,
+    department,
   }
 }
 

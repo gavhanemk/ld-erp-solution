@@ -1834,6 +1834,10 @@ model Department {
   /// The process's own floor, where its work in progress is kept as stock.
   floor             Warehouse?         @relation("ProcessFloor")
   openingStockLines OpeningStockLine[] @relation("OpeningStockProcess")
+  /// As a cost centre: the accounts lines, ledgers and bill lines it carries.
+  voucherLines      VoucherLine[]         @relation("VoucherLineDepartment")
+  ledgersByDefault  Ledger[]              @relation("LedgerDefaultDepartment")
+  billLines         PurchaseInvoiceLine[] @relation("BillLineDepartment")
 
   @@map("departments")
 }
@@ -5118,6 +5122,13 @@ model Ledger {
   pan            String?
   gstin          String?
   notes          String?
+  /// An income or expense ledger's usual brand and department: a line on it
+  /// takes them when its document says nothing more particular. Office rent
+  /// sits with Administration; VHAGAR advertising with VHAGAR.
+  costCentreId   String?
+  costCentre     CostCentre?  @relation("LedgerDefaultCentre", fields: [costCentreId], references: [id], onDelete: SetNull)
+  departmentId   String?
+  department     Department?  @relation("LedgerDefaultDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
   isActive       Boolean      @default(true)
   createdById    String?
   createdBy      User?        @relation("LedgerCreatedBy", fields: [createdById], references: [id])
@@ -5147,6 +5158,8 @@ model CostCentre {
   updatedAt DateTime @updatedAt
 
   lines VoucherLine[]
+  ledgersByDefault Ledger[] @relation("LedgerDefaultCentre")
+  billLines        PurchaseInvoiceLine[] @relation("BillLineCentre")
 
   @@map("cost_centres")
 }
@@ -5207,6 +5220,10 @@ model VoucherLine {
   credit       Decimal     @default(0) @db.Decimal(14, 2)
   costCentreId String?
   costCentre   CostCentre? @relation(fields: [costCentreId], references: [id], onDelete: Restrict)
+  /// The department (cost centre) an income or expense line belongs to,
+  /// beside its brand (profit centre). Never on a bank, party or tax line.
+  departmentId String?
+  department   Department? @relation("VoucherLineDepartment", fields: [departmentId], references: [id], onDelete: Restrict)
   narration    String?
   /// The day the bank statement shows this line, set on reconciliation.
   bankDate     DateTime?
@@ -5216,6 +5233,7 @@ model VoucherLine {
 
   @@index([ledgerId])
   @@index([voucherId])
+  @@index([departmentId])
   @@map("acc_voucher_lines")
 }
 
@@ -5868,6 +5886,14 @@ model PurchaseInvoiceLine {
   igst         Decimal         @default(0) @db.Decimal(12, 2)
   amount       Decimal         @default(0) @db.Decimal(12, 2)
   sortOrder    Int             @default(0)
+  /// Picked on the bill, mostly for an expense: whose it is (a brand's profit
+  /// centre; blank is shared) and which department bears it. Left empty, the
+  /// order the goods were bought for, the expense head's default or the
+  /// ledger's default decides.
+  costCentreId String?
+  costCentre   CostCentre?     @relation("BillLineCentre", fields: [costCentreId], references: [id], onDelete: SetNull)
+  departmentId String?
+  department   Department?     @relation("BillLineDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
 
   /// Adjustments raised against this line. What is left to adjust is this
   /// line's quantity less what these already claim.

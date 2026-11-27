@@ -318,6 +318,8 @@ const ledgerSelect = {
   pan: true,
   gstin: true,
   notes: true,
+  costCentre: { select: { id: true, name: true } },
+  department: { select: { id: true, name: true } },
   isActive: true,
   createdAt: true,
   updatedAt: true,
@@ -344,6 +346,9 @@ function shapeLedger(l: LedgerRow, money: Set<string>) {
     pan: l.pan,
     gstin: l.gstin,
     notes: l.notes,
+    /** Its usual brand and department, for an income or expense ledger. */
+    costCentre: l.costCentre,
+    department: l.department,
     isActive: l.isActive,
     createdAt: l.createdAt,
     updatedAt: l.updatedAt,
@@ -409,8 +414,40 @@ const ledgerSchema = z.object({
     .nullable()
     .or(z.literal('')),
   notes: z.string().trim().max(500).optional().nullable(),
+  /** An income or expense ledger's usual brand (profit centre) and department (cost centre). */
+  costCentreId: z.string().optional().nullable(),
+  departmentId: z.string().optional().nullable(),
   isActive: z.boolean().optional(),
 })
+
+/**
+ * A ledger's usual brand and department, checked: in use, and only on an
+ * income or expense ledger — a bank, party or tax ledger carries neither.
+ */
+async function ledgerDefaults(
+  body: { costCentreId?: string | null; departmentId?: string | null },
+  nature: string,
+  name: string,
+): Promise<{ costCentreId?: string | null; departmentId?: string | null }> {
+  const out: { costCentreId?: string | null; departmentId?: string | null } = {}
+  const pl = nature === 'INCOME' || nature === 'EXPENSE'
+  for (const [key, what] of [['costCentreId', 'brand'], ['departmentId', 'department']] as const) {
+    const v = body[key]
+    if (v === undefined) continue
+    if (!v) {
+      out[key] = null
+      continue
+    }
+    if (!pl) throw new AppError(`A usual ${what} goes on an income or expense ledger only, not on ${name}.`, 400, 'DEFAULT_PL_ONLY')
+    const found =
+      key === 'costCentreId'
+        ? await prisma.costCentre.findUnique({ where: { id: v }, select: { isActive: true } })
+        : await prisma.department.findUnique({ where: { id: v }, select: { isActive: true } })
+    if (!found?.isActive) throw new AppError(`That ${what} is not in use.`, 400, key === 'costCentreId' ? 'NO_COST_CENTRE' : 'NO_DEPARTMENT')
+    out[key] = v
+  }
+  return out
+}
 
 /** Opening balances are as at the day the books start; once that day is closed they are too. */
 async function refuseClosedOpening() {
@@ -426,8 +463,10 @@ router.post('/ledgers', requirePermission(MODULE, 'create'), async (req: AuthReq
   if (!group) throw new AppError('That group does not exist', 400, 'NO_GROUP')
   await refuseNameClash('ledger', body.name)
   if (body.openingBalance) await refuseClosedOpening()
+  const defaults = await ledgerDefaults(body, group.nature, body.name)
   const made = await prisma.ledger.create({
     data: {
+      ...defaults,
       name: body.name,
       groupId: group.id,
       openingBalance: r2(body.openingBalance ?? 0),
@@ -483,6 +522,17 @@ router.patch('/ledgers/:id', requirePermission(MODULE, 'edit'), async (req: Auth
   if (body.pan !== undefined) data.pan = body.pan || null
   if (body.gstin !== undefined) data.gstin = body.gstin || null
   if (body.notes !== undefined) data.notes = body.notes || null
+  {
+    const nature = body.groupId && body.groupId !== before.groupId ? ((await prisma.ledgerGroup.findUnique({ where: { id: body.groupId }, select: { nature: true } }))?.nature ?? before.group.nature) : before.group.nature
+    const d = await ledgerDefaults(body, nature, before.name)
+    if (d.costCentreId !== undefined) data.costCentre = d.costCentreId ? { connect: { id: d.costCentreId } } : { disconnect: true }
+    if (d.departmentId !== undefined) data.department = d.departmentId ? { connect: { id: d.departmentId } } : { disconnect: true }
+    // Moved to a balance-sheet group: it carries no brand or department any more.
+    if (nature !== 'INCOME' && nature !== 'EXPENSE') {
+      if (before.costCentre) data.costCentre = { disconnect: true }
+      if (before.department) data.department = { disconnect: true }
+    }
+  }
   if (body.isActive !== undefined && body.isActive !== before.isActive) {
     if (before.partyType) throw new AppError(`${before.name} is switched on and off with its ${PARTY_LABEL[before.partyType].toLowerCase()}.`, 409, 'PARTY_ACTIVE')
     if (before.systemKey && !body.isActive) throw new AppError(`${before.name} is used by the posting rules and stays on.`, 409, 'SYSTEM_LEDGER')
@@ -664,7 +714,7 @@ router.get('/vouchers', requirePermission(MODULE, 'view'), async (req, res) => {
         createdBy: { select: { name: true } },
         lines: {
           orderBy: { sortOrder: 'asc' },
-          select: { debit: true, credit: true, ledger: { select: { id: true, name: true } }, costCentre: { select: { name: true } } },
+          select: { debit: true, credit: true, ledger: { select: { id: true, name: true } }, costCentre: { select: { name: true } }, department: { select: { name: true } } },
         },
       },
     }),
@@ -678,7 +728,7 @@ router.get('/vouchers', requirePermission(MODULE, 'view'), async (req, res) => {
       date: istDay(v.date),
       kindLabel: KIND_LABEL[v.kind],
       amount: Number(v.amount),
-      lines: v.lines.map((l) => ({ ledgerId: l.ledger.id, ledger: l.ledger.name, debit: Number(l.debit), credit: Number(l.credit), costCentre: l.costCentre?.name ?? null })),
+      lines: v.lines.map((l) => ({ ledgerId: l.ledger.id, ledger: l.ledger.name, debit: Number(l.debit), credit: Number(l.credit), costCentre: l.costCentre?.name ?? null, department: l.department?.name ?? null })),
     })),
     period,
     totalAmount: Number(sums._sum.amount ?? 0),
@@ -717,6 +767,7 @@ const voucherDetail = {
       narration: true,
       bankDate: true,
       costCentre: { select: { id: true, name: true } },
+      department: { select: { id: true, name: true } },
       ledger: { select: { id: true, name: true, billWise: true, groupId: true, group: { select: { name: true, nature: true } } } },
       billRefs: { select: { kind: true, billNo: true, billDate: true, dueDate: true, amount: true } },
     },
@@ -745,6 +796,7 @@ function shapeVoucher(v: Awaited<ReturnType<typeof loadVoucher>>, money: Set<str
       narration: l.narration,
       bankDate: l.bankDate ? istDay(l.bankDate) : null,
       costCentre: l.costCentre,
+      department: l.department,
       ledger: { id: l.ledger.id, name: l.ledger.name, billWise: l.ledger.billWise, group: l.ledger.group.name, nature: l.ledger.group.nature, isMoney: money.has(l.ledger.groupId) },
       bills: l.billRefs.map((b) => ({
         kind: b.kind,

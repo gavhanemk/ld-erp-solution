@@ -24,6 +24,9 @@ export interface Ledger {
   pan: string | null
   gstin: string | null
   notes: string | null
+  /** An income or expense ledger's usual brand and department, filled into its lines. */
+  costCentre?: { id: string; name: string } | null
+  department?: { id: string; name: string } | null
   isActive: boolean
   balance?: number
 }

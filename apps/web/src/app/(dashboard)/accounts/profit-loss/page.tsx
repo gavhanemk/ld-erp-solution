@@ -16,12 +16,14 @@ interface Line {
   group: string
   amount: number
   centres: Record<string, number>
+  departments?: Record<string, number>
 }
 interface Block {
   key: BlockKey
   title: string
   total: number
   centres: Record<string, number>
+  departments?: Record<string, number>
   lines: Line[]
 }
 interface Stock {
@@ -40,7 +42,13 @@ interface Pl {
   netProfit: number
   columns: Array<{ id: string; name: string }>
   brand: Array<{ id: string; name: string; stockChange: number; grossProfit: number; netProfit: number }>
+  /** By department (cost centre): its columns and each one's figures. */
+  deptColumns?: Array<{ id: string; name: string; parent: string | null }>
+  department?: Array<{ id: string; name: string; stockChange: number; grossProfit: number; netProfit: number }>
 }
+
+/** How the figures are split: not at all, by brand (profit centre) or by department (cost centre). */
+type Split = 'none' | 'brand' | 'department'
 
 const SOURCE: Record<Stock['source'], string> = {
   books: 'brought in with the opening balances',
@@ -58,15 +66,17 @@ const money = (n: number) => (n < 0 ? `− ${inr(n)}` : inr(n))
  *
  * Each heading opens to its ledgers, and a ledger opens its entries. "By
  * brand" splits every figure across LD Cotton Mills, VHAGAR and what no brand
- * carries. Closing stock comes from inventory unless the accountant values
- * the day themselves — a year-end count, work in progress taken in.
+ * carries; "By department" across the departments (cost centres) and what
+ * none carries. Closing stock comes from inventory unless the accountant
+ * values the day themselves — a year-end count, work in progress taken in.
  */
 export default function ProfitLossPage() {
   const [summary, setSummary] = useState<BooksSummary | null>(null)
   const [from, setFrom] = useState('')
   const [to, setTo] = useState(todayIst())
   const [pl, setPl] = useState<Pl | null>(null)
-  const [byBrand, setByBrand] = useState(false)
+  const [split, setSplit] = useState<Split>('none')
+  const byBrand = split !== 'none'
   const [open, setOpen] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -125,8 +135,10 @@ export default function ProfitLossPage() {
   }
 
   const block = (k: BlockKey) => pl?.blocks.find((b) => b.key === k)
-  const cols = pl?.columns ?? []
-  const brandOf = (id: string) => pl?.brand.find((b) => b.id === id)
+  const cols: Array<{ id: string; name: string }> = (split === 'department' ? pl?.deptColumns : pl?.columns) ?? []
+  const brandOf = (id: string) => (split === 'department' ? pl?.department : pl?.brand)?.find((b) => b.id === id)
+  /** A block's or a line's figures for the split shown. */
+  const pick = (x: { centres: Record<string, number>; departments?: Record<string, number> }) => (split === 'department' ? (x.departments ?? {}) : x.centres)
 
   /** One figure, or a row of them by brand. */
   const figures = (total: number, centres?: Record<string, number>, bold = false, negate = false) => {
@@ -159,7 +171,7 @@ export default function ProfitLossPage() {
               <span className="text-muted-foreground text-[11px]">{b.lines.length} {b.lines.length === 1 ? 'ledger' : 'ledgers'}</span>
             </span>
           </td>
-          {figures(b.total, b.centres, false, negate)}
+          {figures(b.total, pick(b), false, negate)}
         </tr>
         {isOpen &&
           b.lines.map((l) => (
@@ -170,7 +182,7 @@ export default function ProfitLossPage() {
                 </Link>
                 <span className="text-muted-foreground ml-2 text-[11px]">{l.group}</span>
               </td>
-              {figures(l.amount, l.centres, false, negate)}
+              {figures(l.amount, pick(l), false, negate)}
             </tr>
           ))}
       </Fragment>
@@ -225,13 +237,14 @@ export default function ProfitLossPage() {
     const add = (section: string, particulars: string, amount: number, centres?: Record<string, number>) =>
       rows.push({ section, particulars, amount, ...Object.fromEntries(cols.map((c) => [`c:${c.id}`, centres?.[c.id] ?? null])) })
     for (const b of pl.blocks) {
-      add(b.title, `${b.title} — total`, b.total, b.centres)
-      for (const l of b.lines) add(b.title, l.name, l.amount, l.centres)
+      add(b.title, `${b.title} — total`, b.total, pick(b))
+      for (const l of b.lines) add(b.title, l.name, l.amount, pick(l))
     }
     add('Stock', 'Opening stock', pl.openingStock.value)
     add('Stock', 'Closing stock', pl.closingStock.value)
-    add('Result', 'Gross profit', pl.grossProfit, Object.fromEntries(pl.brand.map((b) => [b.id, b.grossProfit])))
-    add('Result', 'Net profit', pl.netProfit, Object.fromEntries(pl.brand.map((b) => [b.id, b.netProfit])))
+    const results = (split === 'department' ? pl.department : pl.brand) ?? []
+    add('Result', 'Gross profit', pl.grossProfit, Object.fromEntries(results.map((b) => [b.id, b.grossProfit])))
+    add('Result', 'Net profit', pl.netProfit, Object.fromEntries(results.map((b) => [b.id, b.netProfit])))
     const columns: ExportColumn<Row>[] = [
       { header: 'Section', value: (r) => r.section },
       { header: 'Particulars', value: (r) => r.particulars },
@@ -262,10 +275,26 @@ export default function ProfitLossPage() {
         <input type="date" className="form-input h-9 w-[150px]" value={from} max={to} onChange={(e) => setFrom(e.target.value)} aria-label="From" />
         <span className="text-muted-foreground text-xs">to</span>
         <input type="date" className="form-input h-9 w-[150px]" value={to} min={from} max={todayIst()} onChange={(e) => setTo(e.target.value || todayIst())} aria-label="To" />
-        <label className="text-muted-foreground ml-auto flex items-center gap-1.5 text-sm">
-          <input type="checkbox" checked={byBrand} onChange={(e) => setByBrand(e.target.checked)} />
-          By brand
-        </label>
+        <div className="border-border bg-secondary ml-auto flex gap-1 rounded-lg border p-1" role="radiogroup" aria-label="Split the figures">
+          {(
+            [
+              ['none', 'Total'],
+              ['brand', 'By brand'],
+              ['department', 'By department'],
+            ] as const
+          ).map(([k, label]) => (
+            <button
+              key={k}
+              type="button"
+              role="radio"
+              aria-checked={split === k}
+              className={split === k ? 'bg-primary text-primary-foreground rounded-lg px-3 py-1 text-xs font-semibold' : 'text-muted-foreground rounded-lg px-3 py-1 text-xs'}
+              onClick={() => setSplit(k)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {error && (
@@ -385,9 +414,18 @@ export default function ProfitLossPage() {
               </table>
             </div>
           </div>
-          {byBrand && (
+          {split === 'brand' && (
             <p className="text-muted-foreground text-xs">
-              Sales carry the brand of their order; purchases and expenses the brand of the style they were for, or the one chosen on a voucher. Stock is valued for the mill as a whole, so its change, and anything no brand carries, sits under &quot;Not split&quot;.
+              Sales carry the brand of their order; purchases the brand of the order they were bought for; expenses the brand picked on the bill or voucher, else the ledger&apos;s usual one. Stock is valued for the mill as a whole, so its change, and anything no brand carries (shared expenses, central stock), sits under &quot;Not split&quot;.
+            </p>
+          )}
+          {split === 'department' && (
+            <p className="text-muted-foreground text-xs">
+              Each line sits with its department (cost centre): sales with Sales &amp; Marketing, job work with Production, purchases with the department whose indent they were for, expenses with the department picked or the expense head&apos;s usual one. Stock, and anything no department carries, sits under &quot;No department&quot; —{' '}
+              <Link href="/reports/unallocated-entries" className="text-primary hover:underline">
+                see Unallocated Entries
+              </Link>
+              .
             </p>
           )}
         </>

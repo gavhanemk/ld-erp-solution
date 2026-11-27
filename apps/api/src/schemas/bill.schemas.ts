@@ -75,6 +75,13 @@ export const billLineSchema = z.object({
    * debit note to the supplier for the difference.
    */
   rateAction: z.enum(['ACCEPT', 'DEBIT_NOTE']).optional().nullable(),
+  /**
+   * Picked on the line, mostly for an expense: the brand's profit centre it
+   * is for (empty: shared, or the order's) and the department that bears it
+   * (empty: the expense head's default, or the indent's).
+   */
+  costCentreId: z.string().optional().nullable(),
+  departmentId: z.string().optional().nullable(),
 })
 
 /**
