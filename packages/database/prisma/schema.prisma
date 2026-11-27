@@ -507,6 +507,14 @@ enum PurchaseOrderStatus {
   CANCELLED
 }
 
+/// What a manufacturing order is made for: a sales order, or — a direct
+/// order, with none — stock to sell later, or samples.
+enum MOPurpose {
+  ORDER
+  STOCK
+  SAMPLE
+}
+
 enum MOStatus {
   DRAFT
   RELEASED
@@ -4108,6 +4116,9 @@ model ManufacturingOrder {
   so               SalesOrder? @relation(fields: [soId], references: [id])
   brandId          String
   brand            Brand       @relation(fields: [brandId], references: [id])
+  /// ORDER when raised from a sales order; STOCK or SAMPLE for a direct one.
+  /// A direct order linked to a sales order later keeps what it was raised for.
+  purpose          MOPurpose   @default(ORDER)
   plannedStartDate DateTime?
   plannedEndDate   DateTime?
   actualStartDate  DateTime?

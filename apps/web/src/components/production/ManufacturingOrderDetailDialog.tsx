@@ -4,7 +4,7 @@ import { qtyProblem } from '@ld-erp/shared'
 import { QtyProblem } from '@/components/ui/QtyProblem'
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, History, Info, Layers, Loader2, Lock, PackageCheck, Pencil, Ruler, Send, X, Scissors } from 'lucide-react'
+import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, History, Info, Layers, Link2, Loader2, Lock, PackageCheck, Pencil, Ruler, Send, Undo2, X, Scissors } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
@@ -14,6 +14,7 @@ import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { StagesDialog } from './StagesDialog'
 import { MoDetailsDialog } from './MoDetailsDialog'
+import { LinkMoDialog } from './LinkMoDialog'
 import { MoFlowStrip, currentMoTab, type MoFlowFacts, type MoTab } from './MoFlowStrip'
 import { MoProductionPanel } from './floor/MoProductionPanel'
 import { bundleShort, PROGRESS, type Flow, type SizeChangeEntry } from './floor/types'
@@ -36,6 +37,8 @@ interface MoDetail {
   createdBy: { name: string } | null
   closedBy: { name: string } | null
   brand: { name: string }
+  /** ORDER from a sales order; STOCK or SAMPLE for a direct one. */
+  purpose?: 'ORDER' | 'STOCK' | 'SAMPLE'
   so: {
     id: string
     soNumber: string
@@ -206,7 +209,7 @@ export function ManufacturingOrderDetailDialog({
   const [requiredDate, setRequiredDate] = useState('')
   const [loading, setLoading] = useState(false)
   const [loadingPlan, setLoadingPlan] = useState(false)
-  const [busy, setBusy] = useState<'release' | 'raise' | 'close' | 'short' | null>(null)
+  const [busy, setBusy] = useState<'release' | 'raise' | 'close' | 'short' | 'unlink' | null>(null)
   const [closing, setClosing] = useState(false)
   /** The reason the Close box starts with: its sales order's, when that is what ended it. */
   const [closeWith, setCloseWith] = useState('')
@@ -339,6 +342,23 @@ export function ManufacturingOrderDetailDialog({
     if (moId) {
       await load(moId)
       await loadPlan(moId, swap)
+    }
+  }
+
+  // A direct order taken over by a sales order, or given back to stock.
+  const [linking, setLinking] = useState(false)
+  const unlinkIt = async () => {
+    if (!mo?.so) return
+    if (!window.confirm(`Give ${mo.moNumber} back to ${mo.purpose === 'SAMPLE' ? 'samples' : 'stock'}? It is no longer made for ${mo.so.soNumber}.`)) return
+    setBusy('unlink')
+    setError(null)
+    try {
+      const res = await api.post<{ message?: string }>(`/production/orders/${mo.id}/unlink`, {})
+      await refresh(res.message ?? `${mo.moNumber} is made for stock again.`)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not give it back.')
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -542,7 +562,10 @@ export function ManufacturingOrderDetailDialog({
               </div>
               {mo && (
                 <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
-                  {mo.so ? `${mo.so.soNumber} · ${mo.so.customer.name}` : 'No sales order'} · {mo.brand.name}
+                  {mo.so
+                    ? `${mo.so.soNumber} · ${mo.so.customer.name}${mo.purpose && mo.purpose !== 'ORDER' ? ` · raised for ${mo.purpose === 'SAMPLE' ? 'samples' : 'stock'}` : ''}`
+                    : `Direct — for ${mo.purpose === 'SAMPLE' ? 'samples' : 'stock'}, no sales order`}{' '}
+                  · {mo.brand.name}
                 </p>
               )}
             </div>
@@ -577,6 +600,16 @@ export function ManufacturingOrderDetailDialog({
                 </button>
               )
             })()}
+            {mo && !mo.so && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
+              <button className="btn-secondary" onClick={() => setLinking(true)} disabled={busy !== null} title="A sales order has come for these pieces: make this MO for it">
+                <Link2 size={15} /> Link to a sales order
+              </button>
+            )}
+            {mo?.so && mo.purpose && mo.purpose !== 'ORDER' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
+              <button className="btn-secondary" onClick={() => void unlinkIt()} disabled={busy !== null} title={`Raised for ${mo.purpose === 'SAMPLE' ? 'samples' : 'stock'}: no longer make it for ${mo.so.soNumber}`}>
+                {busy === 'unlink' ? <Loader2 size={15} className="animate-spin" /> : <Undo2 size={15} />} Give back to {mo.purpose === 'SAMPLE' ? 'samples' : 'stock'}
+              </button>
+            )}
             {mo?.status === 'DRAFT' && can('production', 'edit') && (
               <button className="btn-primary" onClick={() => void releaseIt()} disabled={busy !== null}>
                 {busy === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Release
@@ -1137,6 +1170,17 @@ export function ManufacturingOrderDetailDialog({
           busy={busy === 'short'}
           onCancel={() => setCompletingShort(false)}
           onConfirm={(reason) => void completeShort(reason)}
+        />
+      )}
+      {linking && mo && (
+        <LinkMoDialog
+          moId={mo.id}
+          moNumber={mo.moNumber}
+          onCancel={() => setLinking(false)}
+          onLinked={(msg) => {
+            setLinking(false)
+            void refresh(msg)
+          }}
         />
       )}
       {closing && mo && (

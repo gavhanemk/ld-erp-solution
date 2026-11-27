@@ -263,8 +263,22 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
   // Packed for a manufacturing order: it has to be released and not
   // finished, and its sales order is the one these are for.
   if (data.moId) {
-    const mo = await tx.manufacturingOrder.findUnique({ where: { id: data.moId }, select: { moNumber: true, status: true, soId: true } })
+    const mo = await tx.manufacturingOrder.findUnique({
+      where: { id: data.moId },
+      select: { moNumber: true, status: true, soId: true, lines: { select: { styleId: true, color: true } } },
+    })
     if (!mo) throw new AppError('That manufacturing order does not exist', 400, 'BAD_MO')
+    // A direct order (stock or samples) has no sales order to check against:
+    // every garment has to be one of the styles and colours it makes.
+    if (!mo.soId) {
+      const same = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase()
+      for (const l of data.lines) {
+        const it = itemById.get(l.itemId)
+        if (it && !mo.lines.some((m) => m.styleId === it.styleId && same(m.color, it.color))) {
+          throw new AppError(`${it.code} is not made on ${mo.moNumber}`, 400, 'NOT_ON_MO')
+        }
+      }
+    }
     if (mo.status === 'DRAFT' || mo.status === 'CLOSED') {
       throw new AppError(`${mo.moNumber} is ${mo.status === 'DRAFT' ? 'still a draft' : 'closed'}, so nothing is packed for it`, 400, 'MO_NOT_OPEN')
     }

@@ -422,15 +422,31 @@ router.get('/transfers/:id/print', requirePermission(MODULE, 'view'), async (req
   // else the item's standard rate; and the HSN it is billed under.
   const lines = await prisma.mOLine.findMany({
     where: { moId: t.moId },
-    select: { color: true, style: { select: { code: true } }, bom: { select: { costPerPiece: true, totalCost: true } }, soLine: { select: { item: { select: { name: true, hsnCode: true, standardRate: true } } } } },
+    select: {
+      color: true,
+      styleId: true,
+      style: { select: { code: true } },
+      bom: { select: { costPerPiece: true, totalCost: true } },
+      soLine: { select: { item: { select: { name: true, hsnCode: true, standardRate: true } } } },
+    },
   })
-  const goods = lines.map((l) => ({
-    style: l.style.code,
-    color: l.color,
-    item: l.soLine?.item.name ?? null,
-    hsnCode: l.soLine?.item.hsnCode ?? null,
-    rate: Number(l.bom?.totalCost ?? l.soLine?.item.standardRate ?? 0),
-  }))
+  // A direct order (stock or samples) has no order line: its finished item is the style's in that colour.
+  const own = await prisma.item.findMany({
+    where: { type: 'FINISHED_GOOD', styleId: { in: lines.filter((l) => !l.soLine).map((l) => l.styleId) } },
+    select: { styleId: true, color: true, name: true, hsnCode: true, standardRate: true },
+  })
+  const itemOf = (l: (typeof lines)[number]) =>
+    l.soLine?.item ?? own.find((i) => i.styleId === l.styleId && (i.color ?? '').trim().toLowerCase() === (l.color ?? '').trim().toLowerCase()) ?? null
+  const goods = lines.map((l) => {
+    const item = itemOf(l)
+    return {
+      style: l.style.code,
+      color: l.color,
+      item: item?.name ?? null,
+      hsnCode: item?.hsnCode ?? null,
+      rate: Number(l.bom?.totalCost ?? item?.standardRate ?? 0),
+    }
+  })
   res.json({ success: true, data: { ...header, brand: await orderBrand(prisma, { moId: t.moId }), transfer: t, goods } })
 })
 

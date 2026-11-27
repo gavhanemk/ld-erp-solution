@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, CheckCircle2, ClipboardList, Factory, FileText, Hash, Info, Loader2, Save, Wand2, X } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ClipboardList, Factory, FileText, Hash, Info, Loader2, Save, Tag, Wand2, X } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
@@ -10,6 +10,8 @@ import { useDialogFocus } from '@/lib/keys'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { loadInHouseBrands, suggestedBrand, type OwnBrand } from '@/components/sales/brand'
+import { DirectMoLines, directProblem, directTotal, newDirectLine, type DirectLine, type DirectStyle, type StyleInfo } from '@/components/production/DirectMoLines'
 
 interface Plannable {
   id: string
@@ -52,12 +54,18 @@ interface SavedMo {
   moNumber: string
   status: string
   soId: string | null
+  brandId: string
+  /** ORDER from a sales order; STOCK or SAMPLE for a direct one. */
+  purpose: 'ORDER' | 'STOCK' | 'SAMPLE'
   routingId: string | null
   plannedStartDate: string | null
   plannedEndDate: string | null
   notes: string | null
-  lines: Array<{ soLineId: string | null; totalQty: number; sizes: Array<{ sizeId: string; qty: number }> }>
+  lines: Array<{ soLineId: string | null; styleId: string; color: string; totalQty: number; sizes: Array<{ sizeId: string; qty: number }> }>
 }
+
+/** For a sales order, or direct: for stock or samples, with no order. */
+type Mode = 'order' | 'direct'
 
 /** A routing the order could take, with why not when it does not fit. */
 type Draft = Record<string, { sizes: Record<string, string>; qty: string }>
@@ -85,7 +93,8 @@ function Field({ label, icon: Icon, htmlFor, className = '', children }: { label
 
 /**
  * A manufacturing order: what the factory is to make for a confirmed sales
- * order.
+ * order — or, direct, for stock or samples, with no order: then the style,
+ * colour and sizes are picked here, under one of our own brands.
  *
  * Pick the order and its lines come in with their style, colour and approved
  * BOM, and per size what was ordered, what earlier manufacturing orders have
@@ -123,6 +132,15 @@ export function ManufacturingOrderDialog({
   const [finish, setFinish] = useState('')
   const [notes, setNotes] = useState('')
   const [routingId, setRoutingId] = useState('')
+  // A direct order: its brand (one of our own), what it is for, and its styles.
+  const [mode, setMode] = useState<Mode>('order')
+  const [brands, setBrands] = useState<OwnBrand[]>([])
+  const [brandId, setBrandId] = useState('')
+  const [brandPicked, setBrandPicked] = useState(false)
+  const [purpose, setPurpose] = useState<'STOCK' | 'SAMPLE'>('STOCK')
+  const [directStyles, setDirectStyles] = useState<DirectStyle[]>([])
+  const [directLines, setDirectLines] = useState<DirectLine[]>([newDirectLine()])
+  const [infos, setInfos] = useState<Record<string, StyleInfo>>({})
   const [loading, setLoading] = useState(false)
   const [loadingPlan, setLoadingPlan] = useState(false)
   const [saving, setSaving] = useState<'draft' | 'release' | null>(null)
@@ -157,18 +175,41 @@ export function ManufacturingOrderDialog({
     setNotes('')
     setSoId('')
     setRoutingId('')
+    setMode('order')
+    setBrandId('')
+    setBrandPicked(false)
+    setPurpose('STOCK')
+    setDirectLines([newDirectLine()])
     setLoading(true)
     void (async () => {
       try {
-        const [list, mo] = await Promise.all([
+        const [list, mo, styles, own] = await Promise.all([
           api.get<{ data: Plannable[] }>('/production/plannable'),
           moId ? api.get<{ data: SavedMo }>(`/production/orders/${moId}`) : Promise.resolve(null),
+          api.get<{ data: DirectStyle[] }>('/production/direct/styles').catch(() => ({ data: [] as DirectStyle[] })),
+          loadInHouseBrands().catch(() => [] as OwnBrand[]),
         ])
         if (!alive) return
         setOrders(list.data)
+        setDirectStyles(styles.data)
+        setBrands(own)
         if (mo) {
           setSaved(mo.data)
           setSoId(mo.data.soId ?? '')
+          // No sales order: a direct one, opened at its own brand, purpose and styles.
+          if (!mo.data.soId) {
+            setMode('direct')
+            setBrandId(mo.data.brandId)
+            setBrandPicked(true)
+            setPurpose(mo.data.purpose === 'SAMPLE' ? 'SAMPLE' : 'STOCK')
+            setDirectLines(
+              mo.data.lines.map((l) => ({
+                ...newDirectLine(l.styleId, l.color),
+                sizes: Object.fromEntries(l.sizes.map((z) => [z.sizeId, String(z.qty)])),
+                qty: l.sizes.length ? '' : String(l.totalQty),
+              }))
+            )
+          }
           setStart(day(mo.data.plannedStartDate))
           setFinish(day(mo.data.plannedEndDate))
           setNotes(mo.data.notes ?? '')
@@ -189,7 +230,7 @@ export function ManufacturingOrderDialog({
 
   // Each order picked: its lines as production plans them.
   useEffect(() => {
-    if (!open || !soId) {
+    if (!open || !soId || mode !== 'order') {
       setPlan(null)
       return
     }
@@ -226,7 +267,7 @@ export function ManufacturingOrderDialog({
     return () => {
       alive = false
     }
-  }, [open, soId, saved])
+  }, [open, soId, saved, mode])
 
   const rows = useMemo(
     () =>
@@ -237,8 +278,24 @@ export function ManufacturingOrderDialog({
       }),
     [plan, draft]
   )
-  const total = rows.reduce((t, r) => t + r.make, 0)
+  const direct = mode === 'direct'
+  const directTotals = directLines.map((l) => directTotal(l, infos[l.styleId]))
+  const total = direct ? directTotals.reduce((t, n) => t + n, 0) : rows.reduce((t, r) => t + r.make, 0)
   const blocked = rows.find((r) => r.make > 0 && !r.l.style)
+  const directIssue = direct
+    ? directLines.map((l) => directProblem(l, infos[l.styleId], directStyles.find((x) => x.id === l.styleId)?.code ?? 'This style')).find((x) => !!x) ?? null
+    : null
+  // Until someone picks a brand, a direct order's follows its styles: VHAGAR styles, VHAGAR.
+  const lineTypes = useMemo(
+    () => directLines.filter((l) => l.styleId).map((l) => directStyles.find((x) => x.id === l.styleId)?.brandType ?? null),
+    [directLines, directStyles]
+  )
+  useEffect(() => {
+    if (!direct || brandPicked || !brands.length) return
+    const next = suggestedBrand(brands, lineTypes, false)
+    if (next && next !== brandId) setBrandId(next)
+  }, [direct, brandPicked, brands, lineTypes, brandId])
+  const addInfo = useMemo(() => (id: string, info: StyleInfo) => setInfos((m) => ({ ...m, [id]: info })), [])
 
 
   const fillLeft = () => {
@@ -254,7 +311,17 @@ export function ManufacturingOrderDialog({
 
   const setLine = (id: string, patch: Partial<Draft[string]>) => setDraft((d) => ({ ...d, [id]: { ...(d[id] ?? { sizes: {}, qty: '' }), ...patch } }))
 
-  const blocker = !soId
+  const blocker = direct
+    ? !brandId
+      ? 'Pick the brand it is made under.'
+      : directIssue
+        ? directIssue
+        : total <= 0
+          ? 'Put the pieces to make on at least one style.'
+          : finish && start && finish < start
+            ? 'It cannot finish before it starts.'
+            : null
+    : !soId
     ? 'Pick the sales order to make.'
     : !plan
       ? null
@@ -269,22 +336,40 @@ export function ManufacturingOrderDialog({
   const releaseBlocker = blocker
 
   const save = async (release: boolean) => {
-    if ((release ? releaseBlocker : blocker) || !plan) return
+    if ((release ? releaseBlocker : blocker) || !ready) return
     setSaving(release ? 'release' : 'draft')
     setError(null)
-    const body = {
+    const head = {
       plannedStartDate: start || null,
       plannedEndDate: finish || null,
       notes: notes.trim() || null,
       routingId: routingId || null,
-      lines: rows
-        .filter((r) => r.make > 0)
-        .map((r) => ({
-          soLineId: r.l.soLineId,
-          sizes: r.l.sizes.length ? r.l.sizes.map((s) => ({ sizeId: s.sizeId, qty: Number(r.d.sizes[s.sizeId]) || 0 })).filter((s) => s.qty > 0) : undefined,
-          qty: r.l.sizes.length ? undefined : r.make,
-        })),
     }
+    const body = direct
+      ? {
+          ...head,
+          brandId,
+          purpose,
+          lines: directLines
+            .map((l, i) => ({ l, info: infos[l.styleId], n: directTotals[i] }))
+            .filter((x) => x.n > 0)
+            .map(({ l, info, n }) => ({
+              styleId: l.styleId,
+              color: l.color || null,
+              sizes: info?.sizes.length ? info.sizes.map((z) => ({ sizeId: z.id, qty: Number(l.sizes[z.id]) || 0 })).filter((z) => z.qty > 0) : undefined,
+              qty: info?.sizes.length ? undefined : n,
+            })),
+        }
+      : {
+          ...head,
+          lines: rows
+            .filter((r) => r.make > 0)
+            .map((r) => ({
+              soLineId: r.l.soLineId,
+              sizes: r.l.sizes.length ? r.l.sizes.map((s) => ({ sizeId: s.sizeId, qty: Number(r.d.sizes[s.sizeId]) || 0 })).filter((s) => s.qty > 0) : undefined,
+              qty: r.l.sizes.length ? undefined : r.make,
+            })),
+        }
     try {
       let id: string
       let message: string
@@ -297,7 +382,7 @@ export function ManufacturingOrderDialog({
           message = r2.message ?? message
         }
       } else {
-        const res = await api.post<{ message?: string; data: { id: string } }>('/production/orders', { ...body, soId, release })
+        const res = await api.post<{ message?: string; data: { id: string } }>('/production/orders', { ...body, soId: direct ? null : soId, release })
         id = res.data.id
         message = res.message ?? 'Manufacturing order saved.'
       }
@@ -311,8 +396,10 @@ export function ManufacturingOrderDialog({
   }
 
   if (!open || !mounted) return null
-  const o = plan?.order
+  const o = direct ? undefined : plan?.order
   const busy = saving !== null || loading
+  /** What the form has to have before it can be saved: an order's plan, or nothing more for a direct one. */
+  const ready = direct || !!plan
   /** Already on the floor: its plan is changed in place, not saved as a draft or released again. */
   const released = !!saved && saved.status !== 'DRAFT'
 
@@ -335,17 +422,19 @@ export function ManufacturingOrderDialog({
                     : `${saved.moNumber} — a draft can be changed until it is released`
                   : o
                     ? `Making ${o.soNumber} for ${o.customer.name}`
-                    : 'What the factory is to make for a sales order'}
+                    : direct
+                      ? `Direct — made for ${purpose === 'SAMPLE' ? 'samples' : 'stock'}, with no sales order`
+                      : 'What the factory is to make for a sales order'}
               </p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {released ? (
-              <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save(false)} disabled={busy || !!blocker || !plan}>
+              <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save(false)} disabled={busy || !!blocker || !ready}>
                 {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} Save changes
               </button>
             ) : (
-              <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save(true)} disabled={busy || !!releaseBlocker || !plan} title={releaseBlocker ?? undefined}>
+              <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save(true)} disabled={busy || !!releaseBlocker || !ready} title={releaseBlocker ?? undefined}>
                 {saving === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Save &amp; release
               </button>
             )}
@@ -367,7 +456,65 @@ export function ManufacturingOrderDialog({
           ) : (
             <>
               <Section icon={FileText} title="Basic Details">
+                {/* A new order: for a sales order, or direct. A saved one stays what it is. */}
+                {!saved && (
+                  <div className="mb-3 flex flex-wrap items-center gap-2" role="radiogroup" aria-label="Made for">
+                    <span className="form-label mb-0 mr-1">Made for</span>
+                    {(
+                      [
+                        ['order', 'A sales order'],
+                        ['direct', 'Direct — stock or samples'],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        role="radio"
+                        aria-checked={mode === key}
+                        className={mode === key ? 'btn-primary h-8 px-3 text-xs' : 'btn-secondary h-8 px-3 text-xs'}
+                        onClick={() => {
+                          setMode(key)
+                          setError(null)
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
+                  {direct ? (
+                    <>
+                      <Field label="Brand" icon={Tag} htmlFor="mo-brand">
+                        <SmartSelect
+                          id="mo-brand"
+                          className="form-input pl-9"
+                          value={brandId}
+                          onChange={(e) => {
+                            setBrandId(e.target.value)
+                            setBrandPicked(true)
+                          }}
+                        >
+                          {!brandId && <option value="">Choose the brand</option>}
+                          {brands.map((b) => (
+                            <option key={b.id} value={b.id} data-sub={b.type === 'VHAGAR' ? 'VHAGAR' : 'LD Cotton Mills'}>
+                              {b.name}
+                            </option>
+                          ))}
+                        </SmartSelect>
+                      </Field>
+                      <Field label="Purpose" htmlFor="mo-purpose">
+                        <SmartSelect id="mo-purpose" className="form-input" value={purpose} onChange={(e) => setPurpose(e.target.value === 'SAMPLE' ? 'SAMPLE' : 'STOCK')}>
+                          <option value="STOCK" data-sub="Into the finished goods store, to sell later">
+                            For stock
+                          </option>
+                          <option value="SAMPLE" data-sub="A trial or salesman's samples">
+                            Samples
+                          </option>
+                        </SmartSelect>
+                      </Field>
+                    </>
+                  ) : (
                   <Field label="Sales order" icon={ClipboardList} htmlFor="mo-so" className="sm:col-span-2">
                     <SmartSelect id="mo-so" className="form-input pl-9" value={soId} onChange={(e) => setSoId(e.target.value)} disabled={!!saved}>
                       <option value="">Choose an order to make</option>
@@ -380,6 +527,7 @@ export function ManufacturingOrderDialog({
                       ))}
                     </SmartSelect>
                   </Field>
+                  )}
                   <Field label="MO no." icon={Hash}>
                     <div className="form-input text-muted-foreground pl-9 font-mono">{saved?.moNumber ?? 'Given when saved'}</div>
                   </Field>
@@ -407,7 +555,9 @@ export function ManufacturingOrderDialog({
                 icon={Factory}
                 title="What to make"
                 actions={
-                  plan ? (
+                  direct ? (
+                    <span className="text-muted-foreground text-xs tabular-nums">{pcs(total)} pcs</span>
+                  ) : plan ? (
                     <div className="flex items-center gap-2">
                       <span className="text-muted-foreground text-xs tabular-nums">{pcs(total)} pcs</span>
                       <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={fillLeft}>
@@ -417,7 +567,9 @@ export function ManufacturingOrderDialog({
                   ) : undefined
                 }
               >
-                {!soId ? (
+                {direct ? (
+                  <DirectMoLines styles={directStyles} lines={directLines} infos={infos} onChange={setDirectLines} onInfo={addInfo} disabled={saving !== null} />
+                ) : !soId ? (
                   <p className="text-muted-foreground text-sm">Pick a confirmed sales order. Its lines come in with what is still to make.</p>
                 ) : loadingPlan || !plan ? (
                   <div className="skeleton h-40 w-full rounded-lg" />
@@ -534,7 +686,7 @@ export function ManufacturingOrderDialog({
         </div>
 
         <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-3 py-2.5 sm:gap-3 sm:px-5 sm:py-3.5">
-          {(blocker ?? (plan ? releaseBlocker : null)) && !loading && (
+          {(blocker ?? (ready ? releaseBlocker : null)) && !loading && (
             <p className="warn-text mr-auto flex max-w-xl basis-full items-start gap-1.5 text-xs sm:basis-auto">
               <AlertCircle size={13} className="mt-px shrink-0" />
               <span>{blocker ?? releaseBlocker}</span>
@@ -548,7 +700,7 @@ export function ManufacturingOrderDialog({
               type="button"
               className="btn-primary"
               onClick={() => void save(false)}
-              disabled={busy || !!blocker || !plan}
+              disabled={busy || !!blocker || !ready}
               data-hotkey="save"
               aria-keyshortcuts="Control+S Meta+S"
               title="Save the changes (Ctrl+S)"
@@ -561,7 +713,7 @@ export function ManufacturingOrderDialog({
                 type="button"
                 className="btn-secondary"
                 onClick={() => void save(false)}
-                disabled={busy || !!blocker || !plan}
+                disabled={busy || !!blocker || !ready}
                 data-hotkey="save"
                 aria-keyshortcuts="Control+S Meta+S"
                 title="Save as draft (Ctrl+S)"
@@ -570,7 +722,7 @@ export function ManufacturingOrderDialog({
                 <span className="sm:hidden">Draft</span>
                 <span className="hidden sm:inline">Save as draft</span>
               </button>
-              <button type="button" className="btn-primary" onClick={() => void save(true)} disabled={busy || !!releaseBlocker || !plan} title={releaseBlocker ?? undefined}>
+              <button type="button" className="btn-primary" onClick={() => void save(true)} disabled={busy || !!releaseBlocker || !ready} title={releaseBlocker ?? undefined}>
                 {saving === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Save &amp; release
               </button>
             </>

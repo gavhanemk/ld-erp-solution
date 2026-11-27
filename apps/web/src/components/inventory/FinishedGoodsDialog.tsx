@@ -85,7 +85,7 @@ export function FinishedGoodsDialog({
   const [soId, setSoId] = useState('')
   /** The manufacturing order packed for, among the order's open ones. */
   const [moId, setMoId] = useState('')
-  const [mos, setMos] = useState<Array<{ id: string; moNumber: string; totalPlannedQty: number; totalPackedQty: number }>>([])
+  const [mos, setMos] = useState<Array<{ id: string; moNumber: string; totalPlannedQty: number; totalPackedQty: number; purpose?: string }>>([])
   const [notes, setNotes] = useState('')
   const [lines, setLines] = useState<LineDraft[]>([blankLine()])
   const [rates, setRates] = useState<Record<string, Rate>>({})
@@ -114,6 +114,21 @@ export function FinishedGoodsDialog({
       })
       .catch(() => {})
   }
+
+  // Not for one order: the direct manufacturing orders (stock or samples) on the floor, to pack against.
+  useEffect(() => {
+    if (!open || soId) return
+    let alive = true
+    api
+      .get<{ data: Array<{ id: string; moNumber: string; status: string; totalPlannedQty: number; totalPackedQty: number; purpose?: string }> }>('/production/orders?direct=1&limit=50')
+      .then((res) => {
+        if (alive) setMos(res.data.filter((m) => !['DRAFT', 'CLOSED', 'COMPLETED'].includes(m.status)))
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [open, soId])
 
   // Escape closes this window only — not the ones behind it.
   useEscape(() => {
@@ -162,7 +177,7 @@ export function FinishedGoodsDialog({
         const last = wh.data.find((w) => w.id === lastIn.data[0]?.warehouseId)
         const fg = last ?? wh.data.find((w) => /finish/i.test(w.name)) ?? (wh.data.length === 1 ? wh.data[0] : null)
         setWarehouseId(fg?.id ?? '')
-        if (presetMoId) await fillFromOrder(presetMoId, () => alive)
+        if (presetMoId) await fillFromOrder(presetMoId, () => alive, it.rows)
       } catch (err) {
         if (alive) setError(err instanceof ApiError ? err.message : 'Could not load the items, sizes and stores.')
       } finally {
@@ -182,15 +197,16 @@ export function FinishedGoodsDialog({
    * size by size — and a B-grade line for what was set aside as B-grade. The
    * server takes exactly these off the floor, so nothing is typed twice.
    */
-  async function fillFromOrder(id: string, alive: () => boolean) {
+  async function fillFromOrder(id: string, alive: () => boolean, itemList: ItemOption[]) {
     type MoBrief = {
       id: string
       moNumber: string
       soId: string | null
+      purpose?: string
       totalPlannedQty: number
       totalPackedQty: number
       steps: Array<{ id: string }>
-      lines: Array<{ id: string; soLine: { item: { id: string } } | null }>
+      lines: Array<{ id: string; styleId: string; color: string; soLine: { item: { id: string } } | null }>
     }
     type FlowBrief = {
       steps: Array<{ id: string; last: boolean; kind: string; isQcStep: boolean; execution: string }>
@@ -204,7 +220,7 @@ export function FinishedGoodsDialog({
     const mo = (await api.get<{ data: MoBrief }>(`/production/orders/${id}`)).data
     if (!alive()) return
     setSoId(mo.soId ?? '')
-    setMos([{ id: mo.id, moNumber: mo.moNumber, totalPlannedQty: mo.totalPlannedQty, totalPackedQty: mo.totalPackedQty }])
+    setMos([{ id: mo.id, moNumber: mo.moNumber, totalPlannedQty: mo.totalPlannedQty, totalPackedQty: mo.totalPackedQty, purpose: mo.purpose }])
     setMoId(mo.id)
     if (!mo.steps.length) return
     const flow = (await api.get<{ data: FlowBrief }>(`/production/orders/${id}/flow`)).data
@@ -212,7 +228,11 @@ export function FinishedGoodsDialog({
     const last = new Set(flow.steps.filter((s) => s.last).map((s) => s.id))
     // A working last step on our own floor (packing) packs straight from in hand, as the server does.
     const fromHand = new Set(flow.steps.filter((s) => s.last && s.kind !== 'CUTTING' && !s.isQcStep && s.kind !== 'QC' && s.execution === 'IN_HOUSE').map((s) => s.id))
-    const itemOfLine = new Map(mo.lines.map((l) => [l.id, l.soLine?.item.id ?? '']))
+    // An order's line is its item; a direct order's (stock or samples), the style's finished item in that colour.
+    const same = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase()
+    const itemOfLine = new Map(
+      mo.lines.map((l) => [l.id, l.soLine?.item.id ?? itemList.find((i) => i.styleId === l.styleId && same(i.color, l.color))?.id ?? ''])
+    )
     const ready = new Map<string, { sizes: Record<string, number>; total: number }>()
     const add = (key: string, sizeId: string | null, n: number) => {
       const r = ready.get(key) ?? { sizes: {}, total: 0 }
@@ -402,7 +422,11 @@ export function FinishedGoodsDialog({
                       <SmartSelect className="form-input" value={moId} onChange={(e) => setMoId(e.target.value)}>
                         <option value="">Not against one</option>
                         {mos.map((m) => (
-                          <option key={m.id} value={m.id} data-sub={`${m.totalPackedQty} of ${m.totalPlannedQty} pcs packed`}>
+                          <option
+                            key={m.id}
+                            value={m.id}
+                            data-sub={`${m.purpose === 'SAMPLE' ? 'Samples · ' : m.purpose === 'STOCK' ? 'For stock · ' : ''}${m.totalPackedQty} of ${m.totalPlannedQty} pcs packed`}
+                          >
                             {m.moNumber}
                           </option>
                         ))}
