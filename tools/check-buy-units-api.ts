@@ -101,6 +101,14 @@ async function main() {
   // ── Return 10 pcs against the box bill: worth half a box ──
   const ret = await call('POST', '/purchase/returns', { billId: bill.body.data.id, returnDate: new Date().toISOString(), reasonNote: 'ZZTEST', lines: [{ billLineId: bl.id, warehouseId: store.id, qty: 10, reason: 'QUALITY_REJECTION' }] })
   check('Return: 10 pcs back against the box bill', okay(ret), ret)
+  // Its labels window, as the screen opens it: the pieces that went back come off their stickers
+  // (left undone, the stickers claim 10 pcs the store no longer holds, on Stock Reconciliation).
+  if (okay(ret)) {
+    const plan = await call('POST', '/packages/outward/plan', { type: 'PURCHASE_RETURN', id: ret.body.data.id })
+    const takes = (plan.body?.data?.spots ?? []).flatMap((s: any) => s.packages.filter((p: any) => p.take > 0).map((p: any) => ({ packageId: p.id, qty: p.take })))
+    const applied = takes.length ? await call('POST', '/packages/outward/apply', { type: 'PURCHASE_RETURN', id: ret.body.data.id, takes }) : plan
+    check('Return: its labels window takes the 10 pcs off their stickers', okay(applied), applied)
+  }
   const rl = ret.body?.data?.lines?.[0]
   check('Return line keeps the bill pack: 10 pcs at ₹99 a box of 20', Number(rl?.qty) === 10 && Number(rl?.uomFactor) === 20, rl)
   const note = ret.body?.data?.notes?.[0] ?? ret.body?.data?.debitNote ?? null
