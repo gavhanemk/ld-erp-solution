@@ -26,6 +26,8 @@ interface BinnedOrder {
   supplier: { id: string; name: string; code?: string | null } | null
   deletedAt: string
   deletedBy: string | null
+  /** Sent to the supplier before it was binned: restore and cancel it; it cannot be destroyed. */
+  wasSent?: boolean
 }
 
 export default function RecycleBinPage() {
@@ -208,6 +210,16 @@ export default function RecycleBinPage() {
                             <RotateCcw size={15} />
                           )}
                         </button>
+                        {/* An order the supplier had stays on record: restore and
+                          cancel it. Its number is never given out again. */}
+                        {row.wasSent ? (
+                          <span
+                            className="text-muted-foreground px-1.5 text-xs"
+                            title="It was sent to the supplier, so it stays on record. Restore it and cancel it."
+                          >
+                            Sent — restore and cancel
+                          </span>
+                        ) : (
                         <button
                           onClick={() => void destroy(row)}
                           disabled={busy === row.id}
@@ -217,6 +229,7 @@ export default function RecycleBinPage() {
                         >
                           <Trash2 size={15} />
                         </button>
+                        )}
                       </div>
                     </td>
                   </tr>

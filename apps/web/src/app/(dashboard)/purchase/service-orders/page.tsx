@@ -17,7 +17,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
-import { PurchaseOrderDialog, type PurchaseOrder } from '@/components/purchase/PurchaseOrderDialog'
+import { neverSentDraft, PurchaseOrderDialog, type PurchaseOrder } from '@/components/purchase/PurchaseOrderDialog'
 import { PurchaseBillDialog } from '@/components/purchase/PurchaseBillDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
@@ -231,7 +231,9 @@ export default function ServiceOrdersPage() {
         },
       })
     }
-    if (po.status === 'DRAFT' || po.status === 'SENT' || po.status === 'CANCELLED') {
+    // Only a draft never sent can be deleted, and its number goes back for the
+    // next purchase or service order — they share one series (28 Nov 2026).
+    if (neverSentDraft(po)) {
       items.push({
         key: 'delete',
         label: 'Delete order',
@@ -240,7 +242,7 @@ export default function ServiceOrdersPage() {
         onClick: () => {
           if (
             !confirm(
-              `Delete ${po.poNumber} for good? This is not the same as cancelling — nothing will be left saying it was called off. The number will not be reused.`
+              `Delete ${po.poNumber}? This draft was never sent, so it goes to the recycle bin and ${po.poNumber} is free again: the next purchase or service order takes it.`
             )
           )
             return

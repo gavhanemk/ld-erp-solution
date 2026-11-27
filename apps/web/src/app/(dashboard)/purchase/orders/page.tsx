@@ -24,6 +24,7 @@ import {
 import Link from 'next/link'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import {
+  neverSentDraft,
   PurchaseOrderDialog,
   type PurchaseOrder,
   type PoLine,
@@ -504,18 +505,10 @@ export default function PurchaseOrdersPage() {
    * again.
    */
   const remove = async (po: PurchaseOrder) => {
+    // Only a draft never sent can be deleted (28 Nov 2026); its number goes back.
     const warning =
-      `Delete ${po.poNumber} for good? This removes the order, its lines and anything ` +
-      'attached to it, and is not the same as cancelling — nothing will be left saying ' +
-      `it was called off. The number ${po.poNumber} will not be reused.` +
-      // Deleting one the supplier holds leaves them working from paper for an
-      // order that is no longer on the list. Cancelling is usually what was
-      // meant, so the prompt says so rather than quietly allowing it.
-      (po.status === 'SENT'
-        ? `
-
-The supplier already has this order. If it was real and fell through, cancel it instead so the file still shows what happened.`
-        : '')
+      `Delete ${po.poNumber}? This draft was never sent, so it goes to the recycle bin ` +
+      `and ${po.poNumber} is free again: the next purchase or service order takes it.`
     if (!confirm(warning)) return
     setBusy(true)
     setMessage(null)
@@ -604,11 +597,10 @@ The supplier already has this order. If it was real and fell through, cancel it 
       })
     }
 
-    // The server allows this only while nothing has been received or billed
-    // against the order, and those two are exactly the statuses that can still
-    // be true. Offering it on a partly or fully received order would be a
-    // button that always failed.
-    if (po.status === 'DRAFT' || po.status === 'SENT' || po.status === 'CANCELLED') {
+    // Only a draft never sent to the supplier can be deleted, and it gives its
+    // number back (28 Nov 2026). An order the supplier has had is cancelled
+    // instead, so it stays on record and its number is never used again.
+    if (neverSentDraft(po)) {
       items.push({
         key: 'delete',
         label: 'Delete order',

@@ -11,7 +11,7 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { postWithin } from '../services/accounts/posting.service'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { reclaimDocumentNumber, releaseDocumentNumber, releasedNumber, shownNumber } from '../lib/numberSeries'
+import { neverSent, nextPurchaseOrderNumber, reclaimDocumentNumber, releaseDocumentNumber, releasedNumber, shownNumber } from '../lib/numberSeries'
 import { ITEM_SHADE, assertInHouseBrand, itemShadeText } from '../lib/fabric'
 import { priceNote, notedQtyByGrnLine, syncBillAdjustments } from '../services/purchaseNote.service'
 import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
@@ -1374,8 +1374,10 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
   }
 
   const po = await prisma.$transaction(async (tx) => {
-    // A back-dated order belongs to its own financial year's series.
-    const poNumber = await nextDocumentNumber(tx, 'PO', data.poDate ?? new Date())
+    // A back-dated order belongs to its own financial year's series. Purchase
+    // and service orders share it, and a new one takes its lowest free number
+    // — a deleted draft's, when there is one (lib/numberSeries).
+    const poNumber = await nextPurchaseOrderNumber(tx, data.poDate ?? new Date())
 
     // Where the goods land is kept on the order for the delivery address. It
     // does not change the tax — see `purchaseTaxContext`.
@@ -1807,7 +1809,8 @@ router.patch(
 
     const after = await prisma.purchaseOrder.update({
       where: { id: before.id },
-      data: { status: 'SENT' },
+      // The first send is kept: put back to Draft later, it has still been sent.
+      data: { status: 'SENT', sentAt: before.sentAt ?? new Date() },
       include: poInclude,
     })
 
@@ -2141,16 +2144,19 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
   })
   if (!order || order.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
-  // No status check here any more. An order the supplier holds used to be
-  // refused outright, but the check below is the one that actually protects
-  // anything: an order nothing has arrived against and nothing has been
-  // billed against holds no history worth keeping. This is a soft delete —
-  // the order goes to the recycle bin — and when it is the newest order its
-  // number is given back for the next one (27 Nov 2026; see lib/numberSeries)
-  // so an order sent by mistake can be taken off the list, and recovered if
-  // that turns out to be wrong. Cancelling stays the right answer for an
-  // order that was real and fell through, and the wording on the button says
-  // which is which.
+  // Only a draft that never went to the supplier can be deleted (the user's
+  // rule, 28 Nov 2026). It goes to the recycle bin and gives its number back:
+  // the next purchase or service order takes the lowest free number, so
+  // PO-0002 deleted between 0001 and 0003 is the next order's. An order the
+  // supplier has had — sent, even if put back to Draft since — is cancelled
+  // instead: its history stays, and its number is never given out again.
+  if (!neverSent(order)) {
+    throw new AppError(
+      `${order.poNumber} has been sent to the supplier, so it cannot be deleted. Cancel it instead — it stays on record, and its number is never used again.`,
+      409,
+      'PO_SENT',
+    )
+  }
 
   if (order._count.grns > 0 || order._count.invoices > 0) {
     const against = [
@@ -2168,19 +2174,18 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
     )
   }
 
-  const { after, released } = await prisma.$transaction(async (tx) => {
-    // The newest order gives its number back; the binned row is re-labelled
-    // so the next order can carry it.
-    const released = await releaseDocumentNumber(tx, 'PO', order.poNumber)
-    const after = await tx.purchaseOrder.update({
+  const after = await prisma.$transaction(async (tx) => {
+    // The binned row is re-labelled so the next order can carry its number; the
+    // newest also steps the counter back, so Settings shows the true last one.
+    await releaseDocumentNumber(tx, 'PO', order.poNumber)
+    return tx.purchaseOrder.update({
       where: { id: order.id },
       data: {
         deletedAt: new Date(),
         deletedById: req.user?.id ?? null,
-        ...(released ? { poNumber: releasedNumber(order.poNumber) } : {}),
+        poNumber: releasedNumber(order.poNumber),
       },
     })
-    return { after, released }
   })
 
   // A binned order stops standing on its enquiry, the same as a cancelled one.
@@ -2197,7 +2202,7 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
 
   res.json({
     success: true,
-    message: `${order.poNumber} moved to the recycle bin.${released ? ` The next order will take ${order.poNumber}.` : ''}`,
+    message: `${order.poNumber} moved to the recycle bin. Its number is free again: the next purchase or service order takes it.`,
   })
 })
 
@@ -2240,6 +2245,9 @@ router.get('/recycle-bin', requirePermission(MODULE, 'view'), async (_req, res) 
       supplier: r.supplier,
       deletedAt: r.deletedAt,
       deletedBy: r.deletedById ? (nameById.get(r.deletedById) ?? 'Someone since removed') : null,
+      // Sent to the supplier before it was binned: it stays on record (restore
+      // and cancel it), so it can never be destroyed and its number never reused.
+      wasSent: !neverSent(r),
     })),
   })
 })
@@ -2296,7 +2304,7 @@ router.post(
       const poNumber =
         order.poNumber === own || (await reclaimDocumentNumber(tx, 'PO', own))
           ? own
-          : await nextDocumentNumber(tx, 'PO', new Date())
+          : await nextPurchaseOrderNumber(tx, new Date())
       return tx.purchaseOrder.update({
         where: { id: order.id },
         data: { deletedAt: null, deletedById: null, poNumber },
@@ -2359,6 +2367,15 @@ router.delete(
         `${shownNumber(order.poNumber)} has stock or bills against it now, so it cannot be destroyed. Restore it instead.`,
         409,
         'PO_HAS_DOCUMENTS'
+      )
+    }
+    // An order the supplier had stays on record, so its number is never used
+    // again (28 Nov 2026). One binned before that rule: restore and cancel it.
+    if (!neverSent(order)) {
+      throw new AppError(
+        `${shownNumber(order.poNumber)} was sent to the supplier, so it stays on record and cannot be destroyed. Restore it and cancel it instead.`,
+        409,
+        'PO_SENT',
       )
     }
 
