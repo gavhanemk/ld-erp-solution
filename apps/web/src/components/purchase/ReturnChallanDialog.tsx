@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, apiErrorMessage, can, masterResource } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
 import { Section } from '@/components/purchase/Section'
@@ -42,7 +43,8 @@ import {
  * deleting what is not.
  */
 
-interface ReturnableLine {
+/** With the item's Design No. and Colour: two lines of one bill can share a fabric's name. */
+interface ReturnableLine extends ShadeFields {
   billLineId: string
   itemId: string
   itemCode: string
@@ -154,6 +156,12 @@ const num = (v: string) => {
 
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+/** A line's item in a message, with its design and colour: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const named = (l: ReturnableLine) => {
+  const shade = itemShade(l)
+  return shade ? `${l.itemName} (${shade})` : l.itemName
+}
 
 const today = () => {
   const d = new Date()
@@ -332,7 +340,7 @@ export function ReturnChallanDialog({
     for (const [billLineId, qty] of goingByLine) {
       const l = lineById.get(billLineId)
       if (l && qty > l.remainingQty + 0.0005) {
-        out.push(`Only ${l.remainingQty} ${l.uom ?? ''} of ${l.itemName} can still go back`)
+        out.push(`Only ${l.remainingQty} ${l.uom ?? ''} of ${named(l)} can still go back`)
       }
     }
     if (going.some((r) => !r.warehouseId)) out.push('Every line needs the godown it leaves from')
@@ -342,7 +350,7 @@ export function ReturnChallanDialog({
       const k = r.billLineId + '::' + r.warehouseId + '::' + r.reason
       if (seen.has(k)) {
         out.push(
-          `${lineById.get(r.billLineId)?.itemName ?? 'An item'} is on two rows with the same godown and reason — give one of them another reason`
+          `${lineById.get(r.billLineId) ? named(lineById.get(r.billLineId)!) : 'An item'} is on two rows with the same godown and reason — give one of them another reason`
         )
         break
       }
@@ -614,6 +622,9 @@ export function ReturnChallanDialog({
                                 </span>
                               )}
                             </p>
+                            {itemShade(l) && (
+                              <p className="text-muted-foreground text-[11px]">{itemShade(l)}</p>
+                            )}
                             <p className="text-muted-foreground font-mono text-[10px]">
                               {l.itemCode}
                               {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}{l.packSymbol && (l.packFactor ?? 1) !== 1 ? ` / ${l.packSymbol}` : ''}
@@ -802,6 +813,9 @@ export function ReturnChallanDialog({
                                   <p className="text-foreground truncate font-medium">
                                     {l.itemName}
                                   </p>
+                                  {itemShade(l) && (
+                                    <p className="text-muted-foreground text-[10px]">{itemShade(l)}</p>
+                                  )}
                                   <p className="text-muted-foreground font-mono text-[10px]">
                                     {l.itemCode}
                                     {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}{l.packSymbol && (l.packFactor ?? 1) !== 1 ? ` / ${l.packSymbol}` : ''}

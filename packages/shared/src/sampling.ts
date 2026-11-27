@@ -138,6 +138,14 @@ export interface SampleItemOption {
   id: string
   code: string
   name: string
+  /**
+   * A fabric's Design No. and Colour, a thread's Colour, as typed in the Items
+   * master: several materials can share a name. styleId is set on a finished
+   * good, whose colour is in its name.
+   */
+  designNo?: string | null
+  color?: string | null
+  styleId?: string | null
   type: SampleMaterialType
   /** UOM has no code of its own: code is its symbol (m, pcs). */
   uom: { id: string; code: string; name: string; symbol: string } | null

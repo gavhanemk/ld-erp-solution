@@ -8,6 +8,8 @@
  * the dashboard bundle.
  */
 
+import type { ShadeFields } from '@/lib/items'
+
 /**
  * Three separate facts, where there used to be one flag.
  *
@@ -53,7 +55,8 @@ export interface NoteLine {
   remarks: string | null
   billLineId: string | null
   grnLineId: string | null
-  item: { id: string; code: string; name: string; uom: { symbol: string } | null }
+  /** With its Design No. and Colour, which tell same-name fabrics apart. */
+  item: { id: string; code: string; name: string; uom: { symbol: string } | null } & ShadeFields
 }
 
 export interface NoteFile {

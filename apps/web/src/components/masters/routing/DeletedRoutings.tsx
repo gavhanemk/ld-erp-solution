@@ -16,6 +16,8 @@ interface Deleted {
   style: { code: string; name: string } | null
   category: string | null
   fabric: string | null
+  /** The fabric's "Design No: 1164 · Colour: Navy": which of several same-name fabrics. '' when it has neither. */
+  fabricShade?: string
   steps: string[]
   deletedAt: string
   deletedBy: string | null
@@ -101,7 +103,7 @@ export function DeletedRoutings({ open, onClose, onRestored }: { open: boolean; 
                     </p>
                     <p className="text-muted-foreground text-xs">
                       {d.style ? `For ${d.style.code} — ${d.style.name}` : d.category ? `Shared by every ${d.category} style` : 'Shared by any style'}
-                      {d.fabric ? ` · ${d.fabric}` : ''} · {d.steps.length} steps: {d.steps.join(' → ')}
+                      {d.fabric ? ` · ${d.fabric}${d.fabricShade ? ` · ${d.fabricShade}` : ''}` : ''} · {d.steps.length} steps: {d.steps.join(' → ')}
                     </p>
                     <p className="text-muted-foreground text-[11px]">
                       Deleted {formatDate(d.deletedAt)}

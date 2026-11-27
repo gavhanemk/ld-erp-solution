@@ -1,5 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
+import { ITEM_SHADE } from '../../lib/fabric'
+import { shadeColumns, shadeOf } from './shared'
 import { categoryFilter, loadCategories, ownershipFilter, ownershipsOf, warehouseFilter } from './inventory-shared'
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
@@ -26,6 +28,7 @@ export const packetBalances: ReportDefinition = {
     { key: 'sticker', label: 'Sticker', type: 'text', width: 14 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'rack', label: 'Rack', type: 'text', width: 10 },
@@ -61,7 +64,8 @@ export const packetBalances: ReportDefinition = {
     const packages = await tx.stockPackage.findMany({
       where,
       take: rowCap,
-      orderBy: [{ item: { name: 'asc' } }, { warehouse: { name: 'asc' } }, { createdAt: 'asc' }, { code: 'asc' }],
+      // Item by item: the code keeps one name's designs apart rather than interleaved.
+      orderBy: [{ item: { name: 'asc' } }, { item: { code: 'asc' } }, { warehouse: { name: 'asc' } }, { createdAt: 'asc' }, { code: 'asc' }],
       select: {
         code: true,
         packType: true,
@@ -72,7 +76,7 @@ export const packetBalances: ReportDefinition = {
         grade: true,
         sourceRef: true,
         createdAt: true,
-        item: { select: { code: true, name: true, categoryId: true, uom: { select: { symbol: true } } } },
+        item: { select: { code: true, name: true, ...ITEM_SHADE, categoryId: true, uom: { select: { symbol: true } } } },
         warehouse: { select: { name: true } },
       },
     })
@@ -85,6 +89,7 @@ export const packetBalances: ReportDefinition = {
         sticker: p.code,
         itemCode: p.item.code,
         item: p.item.name,
+        ...shadeOf(p.item),
         category: cats.names(p.item.categoryId).category,
         store: p.warehouse.name,
         rack: p.rack ?? '',

@@ -19,12 +19,13 @@ import {
 import { compareRoutings, type ComparableRouting } from '@ld-erp/shared'
 import { useDialogFocus } from '@/lib/keys'
 import { useEscape } from '@/lib/useEscape'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import type { Routing, RoutingStep } from './RoutingFormDialog'
 
 type Current = ComparableRouting & {
   steps: RoutingStep[]
   style?: { code: string; name: string }
-  fabric?: { code: string; name: string }
+  fabric?: ShadeFields & { code: string; name: string }
 }
 export const routingTarget = (r: Pick<Routing, 'style' | 'styleId' | 'category'>) =>
   r.styleId
@@ -32,7 +33,10 @@ export const routingTarget = (r: Pick<Routing, 'style' | 'styleId' | 'category'>
     : r.category
       ? `Category · ${r.category}`
       : 'Any style'
-const fabricName = (r: Routing) => (r.fabric ? r.fabric.name : 'Any fabric')
+/** The fabric with its design and colour, which tell same-name fabrics apart. */
+const fabricLabel = (f: (ShadeFields & { name: string }) | null | undefined) =>
+  f ? [f.name, itemShade(f)].filter(Boolean).join(' · ') : 'Any fabric'
+const fabricName = (r: Routing) => fabricLabel(r.fabric)
 const number = (n: unknown) =>
   n == null || n === '' ? '—' : Number(n).toLocaleString('en-IN', { maximumFractionDigits: 3 })
 const skip = (v?: string) =>
@@ -395,7 +399,7 @@ export function RoutingPickerDialog({
                                 : 'text-muted-foreground'
                             }
                           >
-                            {current.fabric?.name ?? 'Any fabric'}
+                            {fabricLabel(current.fabric)}
                           </p>
                         </div>
                         <div>

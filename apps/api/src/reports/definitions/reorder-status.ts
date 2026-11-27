@@ -1,5 +1,6 @@
 import type { Panel, ReportDefinition } from '../types'
-import { round2, topWithRest } from './shared'
+import { ITEM_SHADE } from '../../lib/fabric'
+import { round2, rowItemLabel, shadeColumns, shadeOf, topWithRest } from './shared'
 import { categoryFilter, loadCategories, rupees, warehouseFilter } from './inventory-shared'
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
@@ -42,6 +43,7 @@ export const reorderStatus: ReportDefinition = {
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'onHand', label: 'On Hand', type: 'qty', total: 'none' },
     { key: 'reserved', label: 'Reserved', type: 'qty', total: 'none' },
@@ -77,7 +79,7 @@ export const reorderStatus: ReportDefinition = {
     const catalogue = await tx.item.findMany({
       where: { isActive: true, ...(catIds ? { categoryId: { in: catIds } } : {}) },
       select: {
-        id: true, code: true, name: true, categoryId: true,
+        id: true, code: true, name: true, categoryId: true, ...ITEM_SHADE,
         reorderLevel: true, minStock: true, maxStock: true, standardRate: true,
         uom: { select: { symbol: true } },
       },
@@ -153,6 +155,7 @@ export const reorderStatus: ReportDefinition = {
         category: cats.names(i.categoryId).category,
         itemCode: i.code,
         item: i.name,
+        ...shadeOf(i),
         uom: i.uom?.symbol ?? '',
         onHand: r3(onHand),
         reserved: r3(reservedOf.get(i.id) ?? 0),
@@ -188,7 +191,7 @@ export const reorderStatus: ReportDefinition = {
     const insights: string[] = []
     const urgent = rows.filter((r) => r.status === 'OUT' && r.wanted > 0)
     if (urgent.length)
-      insights.push(`${items(urgent.length)} out of stock while requisitions are waiting for them: ${urgent.slice(0, 3).map((r) => r.item).join(', ')}${urgent.length > 3 ? '…' : ''}.`)
+      insights.push(`${items(urgent.length)} out of stock while requisitions are waiting for them: ${urgent.slice(0, 3).map((r) => rowItemLabel(r)).join(', ')}${urgent.length > 3 ? '…' : ''}.`)
     if (buyValue) insights.push(`Buying everything suggested would cost about ${rupees(buyValue)}, at the rates the stock is carried at.`)
     if (excess) insights.push(`${rupees(excess)} is tied up above the maximum levels set.`)
     const covered = rows.filter((r) => r.status === 'REORDER' && r.onOrder > 0)

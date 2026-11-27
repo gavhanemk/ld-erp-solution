@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { addDropdowns, addHowToSheet, addTemplateSheet, readSheetRows, type SheetColumn } from '../lib/sheet'
 import { createCustomerGrnSchema } from '../schemas/inventory.schemas'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 
 /**
  * Customer receipts from a spreadsheet.
@@ -179,6 +180,8 @@ export interface CmRowPlan {
   challanNo: string | null
   item: string
   itemCode: string
+  /** The item's "Design No: 1164 · Colour: Navy", so same-name fabrics read apart before importing. */
+  shade: string
   challanQty: number | null
   arrivedQty: number | null
   uom: string
@@ -193,7 +196,7 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
   const [customers, stores, items, booked] = await Promise.all([
     prisma.customer.findMany({ select: { id: true, name: true, code: true } }),
     prisma.warehouse.findMany({ select: { id: true, name: true, code: true, isActive: true } }),
-    prisma.item.findMany({ select: { id: true, code: true, name: true, isActive: true, uom: { select: { symbol: true } } } }),
+    prisma.item.findMany({ select: { id: true, code: true, name: true, ...ITEM_SHADE, isActive: true, uom: { select: { symbol: true } } } }),
     prisma.customerGRN.findMany({
       where: { cancelledAt: null, challanNumber: { not: null } },
       select: { grnNumber: true, customerId: true, challanNumber: true },
@@ -210,7 +213,10 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
     if (w.code) storeBy.set(key(w.code), w)
   }
   const itemByCode = new Map(items.map((i) => [key(i.code), i]))
-  const itemByName = new Map(items.map((i) => [key(i.name), i]))
+  // Several items can share a name (Cotton Twill in 1164 Navy and 1165 Black):
+  // a row naming one without its code is asked which, never given one of them.
+  const itemsByName = new Map<string, typeof items>()
+  for (const i of items) itemsByName.set(key(i.name), [...(itemsByName.get(key(i.name)) ?? []), i])
   const bookedAs = new Map(booked.map((b) => [`${b.customerId}|${key(b.challanNumber)}`, b.grnNumber]))
 
   type Group = {
@@ -227,7 +233,8 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
     const problems: string[] = []
     const customer = customerBy.get(key(raw.customer))
     const store = storeBy.get(key(raw.store))
-    const item = raw.itemCode ? itemByCode.get(key(raw.itemCode)) : raw.itemName ? itemByName.get(key(raw.itemName)) : undefined
+    const named = !raw.itemCode && raw.itemName ? (itemsByName.get(key(raw.itemName)) ?? []) : []
+    const item = raw.itemCode ? itemByCode.get(key(raw.itemCode)) : named.length === 1 ? named[0] : undefined
     const receivedOn = parseDay(raw.receivedOn)
     const challanDate = parseDay(raw.challanDate)
     const gateEntryDate = parseDay(raw.gateEntryDate)
@@ -242,7 +249,10 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
     else if (!store) problems.push(`No store called "${raw.store}".`)
     else if (!store.isActive) problems.push(`${store.name} is no longer in use.`)
     if (!raw.itemCode && !raw.itemName) problems.push('Item Code is empty.')
-    else if (!item) problems.push(`No item with code "${raw.itemCode ?? raw.itemName}".`)
+    else if (named.length > 1) {
+      const which = named.map((i) => [i.code, itemShadeText(i)].filter(Boolean).join(' '))
+      problems.push(`${named.length} items are called ${raw.itemName} (${which.slice(0, 4).join('; ')}${which.length > 4 ? '; …' : ''}). Put the Item Code to say which one.`)
+    } else if (!item) problems.push(`No item with code "${raw.itemCode ?? raw.itemName}".`)
     if (receivedOn === 'bad') problems.push(`Received On "${raw.receivedOn}" is not a date. Write it as 2026-09-29.`)
     if (challanDate === 'bad') problems.push(`Their Challan Date "${raw.challanDate}" is not a date.`)
     if (gateEntryDate === 'bad') problems.push(`Gate Entry Date "${raw.gateEntryDate}" is not a date.`)
@@ -263,6 +273,7 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
       challanNo: raw.challanNo || null,
       item: item?.name ?? raw.itemName ?? '',
       itemCode: item?.code ?? raw.itemCode ?? '',
+      shade: itemShadeText(item),
       challanQty: onChallan !== null && !Number.isNaN(onChallan) ? onChallan : arrived !== null && !Number.isNaN(arrived) ? arrived : null,
       arrivedQty: arrived !== null && !Number.isNaN(arrived) ? arrived : null,
       uom: item?.uom?.symbol ?? '',

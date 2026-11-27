@@ -11,6 +11,7 @@ import {
   type SampleSpecification,
 } from '@ld-erp/shared'
 import { api } from '@/lib/api'
+import { itemShade } from '@/lib/items'
 import { cn, formatRupees } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { NewItemDialog } from '@/components/purchase/NewItemDialog'
@@ -241,7 +242,7 @@ export function MaterialsTab({
                           ((filled && !l.itemId) || dup) && 'border-accent'
                         )}
                         value={l.itemId}
-                        title={dup ?? (item ? `${item.code} — ${item.name}` : undefined)}
+                        title={dup ?? (item ? [`${item.code} — ${item.name}`, itemShade(item)].filter(Boolean).join(' · ') : undefined)}
                         aria-label={`Line ${i + 1} material`}
                         createNoun="material"
                         onCreate={(typed) => void createFor(l, typed)}
@@ -255,15 +256,23 @@ export function MaterialsTab({
                           <option
                             key={it.id}
                             value={it.id}
+                            // Its design and colour too, searched like the rest: same-name fabrics read apart.
                             data-sub={[
                               it.uom ? `${it.uom.name} (${it.uom.symbol})` : 'No unit',
                               ITEM_TYPE_LABEL[it.type]?.label ?? it.type,
-                            ].join(' · ')}
+                              itemShade(it),
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')}
                           >
                             {it.code} — {it.name}
                           </option>
                         ))}
                       </SmartSelect>
+                      {/* The box shows the code and name: the picked one's design and colour under it. */}
+                      {item && itemShade(item) && (
+                        <span className="text-muted-foreground mt-1 block text-xs">{itemShade(item)}</span>
+                      )}
                       {dup && <span className="warn-text mt-1 block text-xs">{dup}</span>}
                     </td>
                     <td className="px-1.5 py-1.5">

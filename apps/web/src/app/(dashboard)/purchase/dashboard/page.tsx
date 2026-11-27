@@ -17,6 +17,7 @@ import {
   type ChaseTab, type PurchaseDashboard,
 } from '@/components/purchase/PurchaseDashboardTables'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { itemShade } from '@/lib/items'
 
 /**
  * Purchase at a glance.
@@ -164,7 +165,8 @@ export default function PurchaseDashboardPage() {
         tone: TONE.rose,
         text: (
           <span>
-            <b className="font-semibold">{rise.name}</b> last bought {Math.round((rise.change ?? 0) * 100)}% above its usual rate
+            <b className="font-semibold">{rise.name}</b>
+            {itemShade(rise) ? ` (${itemShade(rise)})` : ''} last bought {Math.round((rise.change ?? 0) * 100)}% above its usual rate
           </span>
         ),
       })

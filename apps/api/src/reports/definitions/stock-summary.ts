@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { round2, topWithRest } from './shared'
+import { itemShadeText } from '../../lib/fabric'
+import { round2, sumByItem, topWithRest } from './shared'
 import {
   asOnEnd,
   asOnFilter,
@@ -72,6 +73,7 @@ export const stockSummary: ReportDefinition = {
         itemName: string
         designNo: string | null
         colour: string | null
+        styleId: string | null
         categoryId: string
         uom: string
         warehouseId: string
@@ -84,7 +86,7 @@ export const stockSummary: ReportDefinition = {
       }>
     >`
       SELECT i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", i."categoryId",
-             i."designNo", i.color AS colour,
+             i."designNo", i.color AS colour, i."styleId",
              u.symbol AS uom, w.id AS "warehouseId", w.name AS store,
              s.ownership::text AS ownership, cust.name AS owner,
              SUM(s."inQty" - s."outQty")::float8 AS qty,
@@ -99,9 +101,9 @@ export const stockSummary: ReportDefinition = {
         AND s.ownership::text IN (${Prisma.join(owners)})
         AND (${params.warehouseId ?? null}::text IS NULL OR s."warehouseId" = ${params.warehouseId ?? null})
         AND (${catIds}::text[] IS NULL OR i."categoryId" = ANY(${catIds}::text[]))
-      GROUP BY i.id, i.code, i.name, i."categoryId", i."designNo", i.color, u.symbol, w.id, w.name, s.ownership, cust.name
+      GROUP BY i.id, i.code, i.name, i."categoryId", i."designNo", i.color, i."styleId", u.symbol, w.id, w.name, s.ownership, cust.name
       HAVING ABS(SUM(s."inQty" - s."outQty")) > 0.0005
-      ORDER BY i.name, w.name
+      ORDER BY i.name, i.code, w.name
     `
 
     // Held for orders now. Only meaningful for today, and only on our stock.
@@ -123,6 +125,9 @@ export const stockSummary: ReportDefinition = {
         item: r.itemName,
         designNo: r.designNo ?? '',
         colour: r.colour ?? '',
+        // The words a chart or summary line names the item with. A finished
+        // good's colour is in its name already, so it is left out here.
+        itemShade: itemShadeText({ designNo: r.designNo, color: r.colour, styleId: r.styleId }),
         store: r.store,
         owner: own ? 'Ours' : (r.owner ?? 'Customer'),
         uom: r.uom,
@@ -146,7 +151,8 @@ export const stockSummary: ReportDefinition = {
       for (const r of ours) m.set(key(r), (m.get(key(r)) ?? 0) + r.value)
       return [...m].map(([label, v]) => ({ label, value: round2(v) }))
     }
-    const byItem = sumBy((r) => r.item).sort((a, b) => b.value - a.value)
+    // By item code, not name: one fabric in two designs is two holdings.
+    const byItem = sumByItem(ours, (r) => r.value).sort((a, b) => b.value - a.value)
     const top10 = byItem.slice(0, 10).reduce((s, e) => s + e.value, 0)
 
     const insights: string[] = []

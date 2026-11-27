@@ -51,6 +51,15 @@ import { formatDate, itemsPreview } from '@/lib/utils'
 import { shortCloseNoun, shortCloseVerb, wasNeverReceived } from '@/components/purchase/shortClose'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
+
+/** An item in a list of names: its name, then its design and colour when it has them. */
+const nameWithShade = (it: ({ name: string } & ShadeFields) | null | undefined) =>
+  it ? [it.name, itemShade(it)].filter(Boolean).join(' · ') : undefined
+
+/** An item named in a sentence: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const nameInWords = (it: ({ name: string } & ShadeFields) | null | undefined) =>
+  it ? (itemShade(it) ? `${it.name} (${itemShade(it)})` : it.name) : undefined
 
 const qty = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
@@ -224,7 +233,7 @@ export default function PurchaseOrdersPage() {
    * fetched once rather than on every keystroke.
    */
   const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([])
-  const [items, setItems] = useState<Array<{ id: string; name: string }>>([])
+  const [items, setItems] = useState<Array<{ id: string; name: string } & ShadeFields>>([])
 
   useEffect(() => {
     let cancelled = false
@@ -232,11 +241,13 @@ export default function PurchaseOrdersPage() {
       try {
         const [s, i] = await Promise.all([
           masterResource<{ id: string; name: string }>('suppliers').list({ limit: 500 }),
-          masterResource<{ id: string; name: string }>('items').list({ limit: 500 }),
+          // Every item, not the first 200 — switched-off ones too, as before,
+          // since an old order can still be looked up by them.
+          everyItem<{ id: string; name: string } & ShadeFields>(),
         ])
         if (cancelled) return
         setSuppliers([...s.data].sort((a, b) => a.name.localeCompare(b.name)))
-        setItems([...i.data].sort((a, b) => a.name.localeCompare(b.name)))
+        setItems([...i].sort((a, b) => a.name.localeCompare(b.name) || itemShade(a).localeCompare(itemShade(b))))
       } catch {
         // The filters just come up empty — the list itself still loads and
         // still works without them.
@@ -749,7 +760,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
             >
               <option value="">All items</option>
               {items.map((it) => (
-                <option key={it.id} value={it.id}>
+                <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                   {it.name}
                 </option>
               ))}
@@ -891,7 +902,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
                           <>
                             {lines.length} {lines.length === 1 ? 'item' : 'items'}
                             {(() => {
-                              const p = itemsPreview(lines.map((l) => l.item?.name))
+                              const p = itemsPreview(lines.map((l) => nameWithShade(l.item)))
                               return (
                                 p.shown && (
                                   <span className="text-muted-foreground" title={p.full}>
@@ -956,6 +967,9 @@ The supplier already has this order. If it was real and fell through, cancel it 
                               <p className="text-foreground text-sm font-medium leading-snug">
                                 {line.item?.name ?? '—'}
                               </p>
+                              {itemShade(line.item) && (
+                                <p className="text-muted-foreground mt-0.5 text-[11px]">{itemShade(line.item)}</p>
+                              )}
                               <p className="text-muted-foreground mt-0.5 truncate text-[10px]">
                                 <span className="font-mono">{line.item?.code ?? '—'}</span>
                                 {parent?.name || cat?.name ? (
@@ -1142,7 +1156,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
                                   {lines.length} {lines.length === 1 ? 'item' : 'items'}
                                 </div>
                                 {(() => {
-                                  const p = itemsPreview(lines.map((l) => l.item?.name))
+                                  const p = itemsPreview(lines.map((l) => nameWithShade(l.item)))
                                   return (
                                     <div
                                       className="text-muted-foreground truncate text-[10px] leading-tight"
@@ -1246,6 +1260,11 @@ The supplier already has this order. If it was real and fell through, cancel it 
                                             <div className="text-foreground truncate text-xs">
                                               {line.item?.name ?? '—'}
                                             </div>
+                                            {itemShade(line.item) && (
+                                              <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                {itemShade(line.item)}
+                                              </div>
+                                            )}
                                             {(line.description || line.item?.hsnCode) && (
                                               <div className="text-muted-foreground truncate text-[10px] leading-tight">
                                                 {line.description}
@@ -1309,7 +1328,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
                                                           type: 'reopen',
                                                           po,
                                                           lineId: line.id!,
-                                                          itemName: line.item?.name ?? 'this line',
+                                                          itemName: nameInWords(line.item) ?? 'this line',
                                                           receivedQty: line.receivedQty,
                                                         })
                                                       }
@@ -1337,11 +1356,11 @@ The supplier already has this order. If it was real and fell through, cancel it 
                                                           type: 'close',
                                                           po,
                                                           lineId: line.id!,
-                                                          itemName: line.item?.name ?? 'this line',
+                                                          itemName: nameInWords(line.item) ?? 'this line',
                                                           receivedQty: line.receivedQty,
                                                         })
                                                       }
-                                                      title={`Say the rest of ${line.item?.name ?? 'this line'} is not coming`}
+                                                      title={`Say the rest of ${nameInWords(line.item) ?? 'this line'} is not coming`}
                                                     >
                                                       {shortCloseVerb(line.receivedQty)}
                                                     </button>

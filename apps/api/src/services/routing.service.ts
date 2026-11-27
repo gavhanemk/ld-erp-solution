@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client'
 import type { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { styleInDevelopment } from '../lib/styleStage'
 import { checkRouteSteps } from './route.service'
 import type { createRoutingSchema, routingStepSchema, updateRoutingSchema } from '../schemas/master.schemas'
@@ -26,7 +27,8 @@ const person = { select: { id: true, name: true } } as const
 
 export const routingInclude = {
   style: { select: { id: true, code: true, name: true } },
-  fabric: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
+  // With its design and colour: several fabric items share a name.
+  fabric: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } }, ...ITEM_SHADE } },
   createdBy: person,
   updatedBy: person,
   steps: {
@@ -59,6 +61,10 @@ export interface FabricOption {
   id: string
   code: string
   name: string
+  /** Its design and colour (Masters → Items): what tells same-name fabrics apart. */
+  designNo: string | null
+  color: string | null
+  styleId: string | null
   uom: string
   /** Ours, in every store together — the figure the Stock screen shows. */
   onHand: number
@@ -74,8 +80,10 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000
  * stock ledger, as Inventory → Stock is, so the two never disagree.
  */
 export async function fabricStock(db: Db): Promise<FabricOption[]> {
-  const rows = await db.$queryRaw<Array<{ id: string; code: string; name: string; uom: string; onHand: number; customers: number }>>`
-    SELECT i.id, i.code, i.name, u.symbol AS "uom",
+  const rows = await db.$queryRaw<
+    Array<{ id: string; code: string; name: string; designNo: string | null; color: string | null; styleId: string | null; uom: string; onHand: number; customers: number }>
+  >`
+    SELECT i.id, i.code, i.name, i."designNo", i.color, i."styleId", u.symbol AS "uom",
            COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s."ownership" = 'OWNED'), 0)::float8 AS "onHand",
            COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s."ownership" <> 'OWNED'), 0)::float8 AS "customers"
     FROM ld_erp.items i
@@ -85,10 +93,11 @@ export async function fabricStock(db: Db): Promise<FabricOption[]> {
     JOIN ld_erp.stock_ledger s ON s."itemId" = i.id
     WHERE i."isActive" = true
       AND (c.name ILIKE '%fabric%' OR p.name ILIKE '%fabric%')
-    GROUP BY i.id, i.code, i.name, u.symbol`
+    GROUP BY i.id, i.code, i.name, i."designNo", i.color, i."styleId", u.symbol`
   return rows
     .map((r) => ({ ...r, onHand: round3(r.onHand), customers: round3(r.customers) }))
-    .sort((a, b) => Number(b.onHand + b.customers > 0) - Number(a.onHand + a.customers > 0) || a.name.localeCompare(b.name))
+    // Same-name fabrics (one item per design and colour) in code order, side by side.
+    .sort((a, b) => Number(b.onHand + b.customers > 0) - Number(a.onHand + a.customers > 0) || a.name.localeCompare(b.name) || a.code.localeCompare(b.code))
 }
 
 /**
@@ -104,15 +113,18 @@ export async function bomFabrics(db: Db) {
     // Fabrics and styles still in use only: one switched off is never offered or filled in.
     where: { componentItem: { ...fabricItemWhere, isActive: true }, bom: { isActive: true, status: { not: 'OBSOLETE' }, style: { isActive: true } } },
     select: {
-      componentItem: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
+      componentItem: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } }, ...ITEM_SHADE } },
       bom: { select: { styleId: true, color: true } },
     },
   })
   const pairs = new Map<string, { styleId: string; fabricItemId: string; colors: string[] }>()
-  const fabrics = new Map<string, { id: string; code: string; name: string; uom: string }>()
+  const fabrics = new Map<
+    string,
+    { id: string; code: string; name: string; designNo: string | null; color: string | null; styleId: string | null; uom: string }
+  >()
   for (const l of lines) {
     const it = l.componentItem
-    fabrics.set(it.id, { id: it.id, code: it.code, name: it.name, uom: it.uom?.symbol ?? '' })
+    fabrics.set(it.id, { id: it.id, code: it.code, name: it.name, designNo: it.designNo, color: it.color, styleId: it.styleId, uom: it.uom?.symbol ?? '' })
     const key = `${l.bom.styleId}|${it.id}`
     const pair = pairs.get(key) ?? { styleId: l.bom.styleId, fabricItemId: it.id, colors: [] }
     if (l.bom.color && !pair.colors.includes(l.bom.color)) pair.colors.push(l.bom.color)
@@ -123,11 +135,14 @@ export async function bomFabrics(db: Db) {
 
 /** The item picked as the fabric is one, and still in use — unless the routing has it already. */
 async function assertFabric(db: Db, itemId: string, current?: string | null) {
-  const item = await db.item.findUnique({ where: { id: itemId }, select: { id: true, name: true, isActive: true } })
+  const item = await db.item.findUnique({ where: { id: itemId }, select: { id: true, name: true, isActive: true, ...ITEM_SHADE } })
   if (!item) throw new AppError('That fabric no longer exists. Pick another.', 400, 'INVALID_FABRIC')
+  // Which of several same-name fabrics, by its design and colour.
+  const shade = itemShadeText(item)
+  const named = shade ? `${item.name} (${shade})` : item.name
   const isFabric = await db.item.count({ where: { id: itemId, ...fabricItemWhere } })
-  if (!isFabric) throw new AppError(`${item.name} is not a fabric. Pick one filed under Fabric in the item master.`, 400, 'NOT_A_FABRIC')
-  if (!item.isActive && itemId !== current) throw new AppError(`${item.name} is no longer in use. Pick another fabric.`, 400, 'FABRIC_INACTIVE')
+  if (!isFabric) throw new AppError(`${named} is not a fabric. Pick one filed under Fabric in the item master.`, 400, 'NOT_A_FABRIC')
+  if (!item.isActive && itemId !== current) throw new AppError(`${named} is no longer in use. Pick another fabric.`, 400, 'FABRIC_INACTIVE')
 }
 
 // ─── The code ─────────────────────────────────────────────────

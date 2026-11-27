@@ -17,6 +17,7 @@ import { contractorFormFields } from '@/components/masters/contractorFormFields'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import { RoutingReusePanel, type RoutingReuseHandle } from './RoutingReusePanel'
 import { fetchEveryPage } from '@/lib/export'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * A routing: the ordered path a garment takes through the factory.
@@ -74,7 +75,8 @@ export interface Routing {
   styleId: string | null
   category: string | null
   fabricItemId?: string | null
-  fabric?: { id: string; code: string; name: string; uom?: { symbol: string } | null } | null
+  /** With its design and colour (ShadeFields): several fabric items share a name. */
+  fabric?: (ShadeFields & { id: string; code: string; name: string; uom?: { symbol: string } | null }) | null
   version: number
   isLocked: boolean
   isActive: boolean
@@ -88,8 +90,8 @@ export interface Routing {
   _count?: { mos: number; boms?: number }
 }
 
-/** A fabric item with stock records, as GET /masters/routings/fabrics lists it. */
-interface Fabric {
+/** A fabric item with stock records, as GET /masters/routings/fabrics lists it, with its design and colour. */
+interface Fabric extends ShadeFields {
   id: string
   code: string
   name: string
@@ -146,7 +148,7 @@ interface StyleOption {
 /** Which fabrics each style's BOMs use (draft and approved), and those fabrics' names. */
 interface BomFabrics {
   pairs: Array<{ styleId: string; fabricItemId: string; colors: string[] }>
-  fabrics: Array<{ id: string; code: string; name: string; uom: string }>
+  fabrics: Array<ShadeFields & { id: string; code: string; name: string; uom: string }>
 }
 
 type Applies = 'STYLE' | 'CATEGORY' | 'ANY'
@@ -383,7 +385,8 @@ export function RoutingFormDialog({
       have.add(f.id)
     }
     const own = (source ?? record ?? preset?.from)?.fabric
-    if (own && !have.has(own.id)) list.push({ id: own.id, code: own.code, name: own.name, uom: own.uom?.symbol ?? '', onHand: 0, customers: 0, missing: true })
+    if (own && !have.has(own.id))
+      list.push({ id: own.id, code: own.code, name: own.name, designNo: own.designNo, color: own.color, styleId: own.styleId, uom: own.uom?.symbol ?? '', onHand: 0, customers: 0, missing: true })
     return list
   }, [fabrics, bomFab, record, preset, source])
   // A style's BOM fabrics (with the colours whose BOM has each), and a fabric's styles. Where a
@@ -820,7 +823,8 @@ export function RoutingFormDialog({
                   <option
                     key={f.id}
                     value={f.id}
-                    data-sub={[colors ? `On its BOM${colors.length ? ` · ${colors.join(', ')}` : ''}` : null, stockLine(f)].filter(Boolean).join(' · ')}
+                    // Its design and colour too, searched as well: same-name fabrics differ by them.
+                    data-sub={[colors ? `On its BOM${colors.length ? ` · ${colors.join(', ')}` : ''}` : null, stockLine(f), itemShade(f) || null].filter(Boolean).join(' · ')}
                   >
                     {f.name}
                   </option>
@@ -828,6 +832,10 @@ export function RoutingFormDialog({
               })}
             </SmartSelect>
           </label>
+          {(() => {
+            const picked = fabricOptions.find((f) => f.id === fabricItemId)
+            return picked && itemShade(picked) ? <p className="text-muted-foreground mt-1 text-[11px]">{itemShade(picked)}</p> : null
+          })()}
           {applies === 'STYLE' && styleId && filled !== 'style' && (
             <p className="text-muted-foreground mt-1 text-[11px]">
               {!styleBom ? (
@@ -1280,7 +1288,12 @@ export function RoutingFormDialog({
           onClose={() => setNewFabric(false)}
           onCreated={(item: NewItem) => {
             setNewFabric(false)
-            setFabrics((fs) => [...fs, { id: item.id, code: item.code, name: item.name, uom: item.uom?.symbol ?? '', onHand: 0, customers: 0 }])
+            // The saved item as the master sends it back, with the design and colour typed for it.
+            const shade = item as NewItem & ShadeFields
+            setFabrics((fs) => [
+              ...fs,
+              { id: item.id, code: item.code, name: item.name, designNo: shade.designNo ?? null, color: shade.color ?? null, styleId: shade.styleId ?? null, uom: item.uom?.symbol ?? '', onHand: 0, customers: 0 },
+            ])
             setFabricItemId(item.id)
           }}
         />

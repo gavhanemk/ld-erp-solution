@@ -17,7 +17,8 @@ import { MoDetailsDialog } from './MoDetailsDialog'
 import { LinkMoDialog } from './LinkMoDialog'
 import { MoFlowStrip, currentMoTab, type MoFlowFacts, type MoTab } from './MoFlowStrip'
 import { MoProductionPanel } from './floor/MoProductionPanel'
-import { bundleShort, PROGRESS, type Flow, type SizeChangeEntry } from './floor/types'
+import { bundleShort, fabricName, PROGRESS, type Flow, type SizeChangeEntry } from './floor/types'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { FLOOR_NOTE, LIVE_MO, moStage } from './status'
 import { directFor } from '@/components/production/moCustomer'
 
@@ -103,7 +104,7 @@ interface MoDetail {
     cutterName?: string | null
     moLine?: { color: string; style: { code: string } } | null
     _count?: { bundles: number }
-    fabricItem: { code: string; name: string; uom: { symbol: string } | null } | null
+    fabricItem: ({ code: string; name: string; uom: { symbol: string } | null } & ShadeFields) | null
     panelItem: { code: string } | null
   }>
   totalCutQty?: number
@@ -115,8 +116,11 @@ interface PlanRow {
   baseKey: string
   defaultOwnership: 'OWNED' | 'CUSTOMER_OWNED'
   issued: number
-  /** places: how many after the point its quantities may carry (0: whole numbers only). */
-  item: { id: string; code: string; name: string; type: string; uom: string | null; places?: number }
+  /**
+   * places: how many after the point its quantities may carry (0: whole numbers only).
+   * designNo / color: a fabric's design and colour, a thread's colour — same-name materials told apart.
+   */
+  item: { id: string; code: string; name: string; type: string; uom: string | null; places?: number } & ShadeFields
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomerId: string | null
   department: { id: string; name: string } | null
@@ -921,6 +925,8 @@ export function ManufacturingOrderDetailDialog({
                                         <div className="text-foreground text-sm font-medium">
                                           <span className="font-mono text-xs">{r.item.code}</span> — {r.item.name}
                                         </div>
+                                        {/* Which design and colour: two fabrics of one name can both be on the plan. */}
+                                        {itemShade(r.item) && <div className="text-muted-foreground text-[11px]">{itemShade(r.item)}</div>}
                                         <div className="text-muted-foreground flex flex-wrap items-center gap-1.5 text-[11px]">
                                           {r.styles.join(', ')}
                                           {live && mayRaise && plan.mo.so ? (
@@ -1077,7 +1083,7 @@ export function ManufacturingOrderDetailDialog({
                               <span className="font-mono text-xs">{c.cutOrderNumber}</span> <span className="text-muted-foreground text-xs">{formatDate(c.cutDate)}</span>
                               {c.fabricItem && (
                                 <span className="text-muted-foreground block text-[11px]">
-                                  {c.fabricItem.name}: {Number(c.fabricUsed ?? 0)} used, {Number(c.wastage ?? 0)} waste {c.fabricItem.uom?.symbol ?? ''}
+                                  {fabricName(c.fabricItem)}: {Number(c.fabricUsed ?? 0)} used, {Number(c.wastage ?? 0)} waste {c.fabricItem.uom?.symbol ?? ''}
                                   {c.panelItem ? ` · panels into stock as ${c.panelItem.code}` : ''}
                                 </span>
                               )}

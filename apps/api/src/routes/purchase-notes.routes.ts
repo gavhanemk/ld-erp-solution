@@ -8,6 +8,7 @@ import { assertPoolsHold, lockRequests, requestsOfBillLines, requestsOfGrnLines 
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
+import { ITEM_SHADE } from '../lib/fabric'
 import { postWithin } from '../services/accounts/posting.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
@@ -29,6 +30,7 @@ import {
   DOC_RULES,
   effectFor,
   GST_TREATMENTS,
+  lineItemName,
   moveNoteStock,
   notePacks, priceNote,
   REASON_RULES,
@@ -133,7 +135,9 @@ const noteInclude = {
       billLineId: true,
       grnLineId: true,
       item: {
-        select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
+        // Design No. and Colour, so the note's detail and its print tell
+        // same-name fabrics apart.
+        select: { id: true, code: true, name: true, uom: { select: { symbol: true } }, ...ITEM_SHADE },
       },
     },
   },
@@ -515,7 +519,7 @@ async function assertWithinBill(
     if (reduces && consumesQty && qty > line.remainingQty + 0.0005) {
       const unit = line.uom ? ` ${line.uom}` : ''
       throw new AppError(
-        `Only ${line.remainingQty}${unit} of ${line.itemName} can still be adjusted against this bill` +
+        `Only ${line.remainingQty}${unit} of ${lineItemName(line)} can still be adjusted against this bill` +
           (line.adjustedQty > 0
             ? ` — ${line.billedQty}${unit} was billed and ${line.adjustedQty}${unit} is already on other notes.`
             : '.') +
@@ -528,7 +532,7 @@ async function assertWithinBill(
     const value = round2(wantedValue.get(billLineId) ?? 0)
     if (reduces && value > line.remainingValue + 0.005) {
       throw new AppError(
-        `${line.itemName} was charged ₹${line.billedTaxable.toLocaleString('en-IN')} on this bill and ` +
+        `${lineItemName(line)} was charged ₹${line.billedTaxable.toLocaleString('en-IN')} on this bill and ` +
           `₹${line.remainingValue.toLocaleString('en-IN')} of that is still adjustable. ` +
           `This note claims ₹${value.toLocaleString('en-IN')} against it.`,
         400,

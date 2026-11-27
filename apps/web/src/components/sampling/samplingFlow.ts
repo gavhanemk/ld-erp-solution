@@ -848,6 +848,8 @@ export function roundItems(round: Pick<SampleRound, 'materials'>): SampleItemOpt
       id: m.itemId,
       code: it.code,
       name: it.name,
+      // Its design and colour, so the picker tells same-name materials apart.
+      ...shadeFields(it),
       type: it.type as SampleMaterialType,
       uom: it.uom
         ? {
@@ -867,23 +869,33 @@ export function roundItems(round: Pick<SampleRound, 'materials'>): SampleItemOpt
 /**
  * A BOM line's material as the round shows it: its own row's item (which
  * names one switched off since), else the item list's, else why there is none.
+ * With the item's design and colour for the screen to word (itemShade in
+ * lib/items, not imported here: the sampling checks run this file in Node).
  */
 export function lineItem(
   line: { id?: string; itemId: string },
   round: Pick<SampleRound, 'materials'>,
   items: Lookups['items']
-) {
+): { name: string; code: string; uom: string; designNo?: string; color?: string; styleId?: string } {
   const row =
     (line.id && round.materials.find((m) => m.id === line.id)) ||
     (line.itemId ? round.materials.find((m) => m.itemId === line.itemId) : undefined)
   if (row?.item)
-    return { name: row.item.name, code: row.item.code, uom: row.item.uom?.symbol ?? '' }
+    return { name: row.item.name, code: row.item.code, uom: row.item.uom?.symbol ?? '', ...shadeFields(row.item) }
   const item = line.itemId ? items.find((i) => i.id === line.itemId) : undefined
-  if (item) return { name: item.name, code: item.code, uom: item.uom?.symbol ?? '' }
+  if (item) return { name: item.name, code: item.code, uom: item.uom?.symbol ?? '', ...shadeFields(item) }
   return {
     name: line.itemId ? 'Material no longer in use' : 'No material picked',
     code: '',
     uom: '',
+  }
+}
+/** An item's Design No., Colour and style, only those it has (a material with none reads as before). */
+function shadeFields(i: { designNo?: string | null; color?: string | null; styleId?: string | null }) {
+  return {
+    ...(i.designNo ? { designNo: i.designNo } : {}),
+    ...(i.color ? { color: i.color } : {}),
+    ...(i.styleId ? { styleId: i.styleId } : {}),
   }
 }
 /** A line's colour in words: null is a line every colour uses. */

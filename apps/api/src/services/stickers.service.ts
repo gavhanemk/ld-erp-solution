@@ -1,6 +1,7 @@
 import { prisma, type Prisma } from '@ld-erp/database'
 import type { PackType } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE } from '../lib/fabric'
 import { logger } from '../utils/logger'
 import { lockedBalanceOf } from './stock.service'
 import {
@@ -261,7 +262,7 @@ export async function planStickers(data: InwardQuery) {
   const [items, stores, owners] = await Promise.all([
     prisma.item.findMany({
       where: { id: { in: [...new Set(came.map((c) => c.itemId))] } },
-      select: { id: true, code: true, name: true, categoryId: true, packType: true, packQty: true, contentQty: true, contentUnit: true, uom: { select: { symbol: true, name: true } } },
+      select: { id: true, code: true, name: true, ...ITEM_SHADE, categoryId: true, packType: true, packQty: true, contentQty: true, contentUnit: true, uom: { select: { symbol: true, name: true } } },
     }),
     prisma.warehouse.findMany({ where: { id: { in: [...new Set(came.map((c) => c.warehouseId))] } }, select: { id: true, name: true } }),
     prisma.customer.findMany({
@@ -317,6 +318,9 @@ export async function planStickers(data: InwardQuery) {
       itemId: c.itemId,
       itemCode: item.code,
       item: item.name,
+      designNo: item.designNo,
+      color: item.color,
+      styleId: item.styleId,
       unit: item.uom?.symbol ?? '',
       warehouseId: c.warehouseId,
       store: storeOf.get(c.warehouseId) ?? '',

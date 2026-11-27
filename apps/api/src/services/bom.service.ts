@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE } from '../lib/fabric'
 
 /**
  * A BOM's arithmetic and its version guard, shared by Masters → BOMs and by a
@@ -60,7 +61,8 @@ export async function priceBomLines(db: Db, lines: IncomingBomLine[]) {
   const itemIds = [...new Set(lines.map((l) => l.componentItemId))]
   const items = await db.item.findMany({
     where: { id: { in: itemIds } },
-    select: { id: true, code: true, name: true, standardRate: true },
+    // Design and colour, so a warning names which of several same-name fabrics.
+    select: { id: true, code: true, name: true, standardRate: true, ...ITEM_SHADE },
   })
 
   const missing = itemIds.filter((id) => !items.some((i) => i.id === id))
@@ -69,7 +71,14 @@ export async function priceBomLines(db: Db, lines: IncomingBomLine[]) {
   }
 
   const byId = new Map(items.map((i) => [i.id, i]))
-  const warnings: Array<{ itemId: string; code: string; name: string }> = []
+  const warnings: Array<{
+    itemId: string
+    code: string
+    name: string
+    designNo: string | null
+    color: string | null
+    styleId: string | null
+  }> = []
 
   const priced = lines.map((line, index) => {
     const item = byId.get(line.componentItemId)!
@@ -85,7 +94,7 @@ export async function priceBomLines(db: Db, lines: IncomingBomLine[]) {
     const rate = typed ?? standard
 
     if (rate === null) {
-      warnings.push({ itemId: item.id, code: item.code, name: item.name })
+      warnings.push({ itemId: item.id, code: item.code, name: item.name, designNo: item.designNo, color: item.color, styleId: item.styleId })
     }
 
     const unitCost = round(rate ?? 0, 4)

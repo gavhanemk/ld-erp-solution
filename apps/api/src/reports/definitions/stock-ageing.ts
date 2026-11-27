@@ -1,5 +1,5 @@
 import type { Panel, ReportDefinition } from '../types'
-import { round2 } from './shared'
+import { round2, rowItemLabel, shadeColumns } from './shared'
 import {
   categoryFilter,
   daysBetween,
@@ -46,6 +46,7 @@ export const stockAgeing: ReportDefinition = {
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'qty', label: 'On Hand', type: 'qty', total: 'sum' },
@@ -77,6 +78,8 @@ export const stockAgeing: ReportDefinition = {
       Array<{
         itemCode: string
         itemName: string
+        designNo: string | null
+        colour: string | null
         categoryId: string
         uom: string
         store: string
@@ -87,7 +90,9 @@ export const stockAgeing: ReportDefinition = {
         lastUsed: Date | null
       }>
     >`
-      SELECT i.code AS "itemCode", i.name AS "itemName", i."categoryId", u.symbol AS uom, w.name AS store,
+      SELECT i.code AS "itemCode", i.name AS "itemName",
+             i."designNo", CASE WHEN i."styleId" IS NULL THEN i.color END AS colour,
+             i."categoryId", u.symbol AS uom, w.name AS store,
              SUM(s."inQty" - s."outQty")::float8 AS qty,
              SUM((s."inQty" - s."outQty") * COALESCE(s."unitRate", 0))::float8 AS value,
              MIN(s."transactionDate") FILTER (WHERE s."inQty" > 0) AS "firstIn",
@@ -102,7 +107,7 @@ export const stockAgeing: ReportDefinition = {
       WHERE s.ownership = 'OWNED'
         AND (${params.warehouseId ?? null}::text IS NULL OR s."warehouseId" = ${params.warehouseId ?? null})
         AND (${catIds}::text[] IS NULL OR i."categoryId" = ANY(${catIds}::text[]))
-      GROUP BY i.id, i.code, i.name, i."categoryId", u.symbol, w.id, w.name
+      GROUP BY i.id, i.code, i.name, i."designNo", i.color, i."styleId", i."categoryId", u.symbol, w.id, w.name
       HAVING SUM(s."inQty" - s."outQty") > 0.0005
     `
 
@@ -118,6 +123,8 @@ export const stockAgeing: ReportDefinition = {
           category: cats.names(f.categoryId).category,
           itemCode: f.itemCode,
           item: f.itemName,
+          designNo: f.designNo ?? '',
+          colour: f.colour ?? '',
           store: f.store,
           uom: f.uom,
           qty: Math.round(f.qty * 1000) / 1000,
@@ -143,7 +150,7 @@ export const stockAgeing: ReportDefinition = {
     const insights: string[] = []
     if (total) insights.push(`${pctOf(idleValue, total)} of stock value (${rupees(idleValue)}) has not been used for over 90 days, or ever.`)
     const worst = all.filter((r) => r.band !== 'MOVING').sort((a, b) => b.value - a.value)[0]
-    if (worst) insights.push(`The biggest idle holding is ${worst.item} in ${worst.store}: ${rupees(worst.value)}, ${worst.lastUsed ? `last used ${worst.days} days ago` : `never used in ${worst.days} days`}.`)
+    if (worst) insights.push(`The biggest idle holding is ${rowItemLabel(worst)} in ${worst.store}: ${rupees(worst.value)}, ${worst.lastUsed ? `last used ${worst.days} days ago` : `never used in ${worst.days} days`}.`)
     if (neverItems) insights.push(`${neverItems} items have been received but never issued — check whether they are still needed before buying more.`)
 
     return {

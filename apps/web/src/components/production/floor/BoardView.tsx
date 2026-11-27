@@ -34,7 +34,7 @@ import { SheetView } from './SheetView'
 import { RouteStrip, stripNote } from './RouteStrip'
 import type { TransferRow } from './TransferDetailDialog'
 import { useJobCard } from './useFlow'
-import { fabricLine, isCheck, pcs, type FabricRecord, type FlowTransfer, type JobCardDetail, type StepFigures } from './types'
+import { fabricRecordLines, isCheck, pcs, type FabricRecord, type FlowTransfer, type JobCardDetail, type StepFigures } from './types'
 import { moCustomer } from '@/components/production/moCustomer'
 
 /**
@@ -323,9 +323,11 @@ function RowsTable({ rows, handlers }: { rows: BoardCard[]; handlers: (c: BoardC
                   <span className="text-muted-foreground block text-[11px]">
                     cut {pcs(c.cut)} · packed {pcs(c.packed)} of {pcs(c.line.totalQty)}
                   </span>
-                  {c.fabric.map((r) => (
-                    <span key={r.unit} className={`block text-[11px] ${r.leftOver || r.overUsed || r.notRecorded ? 'warn-text' : 'text-muted-foreground'}`}>
-                      Fabric: {fabricLine(r)}
+                  {/* Fabric by fabric, each design and colour its own line; the unit's total after two or more. */}
+                  {fabricRecordLines(c.fabric).map((r) => (
+                    <span key={r.key} className={`block text-[11px] ${r.warn ? 'warn-text' : 'text-muted-foreground'}`}>
+                      {r.total ? 'All fabric' : 'Fabric'}: {r.fabric ? `${r.fabric} — ` : ''}
+                      {r.text}
                     </span>
                   ))}
                 </td>

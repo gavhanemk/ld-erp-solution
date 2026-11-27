@@ -4,6 +4,7 @@ import { normaliseGarmentCode } from './garment.service'
 import { stepFigures, type FigureStep } from './floor.service'
 import { netSizeChanges, sizeChangeHistory } from './sizeChanges.service'
 import type { garmentDetail } from '../routes/garments.routes'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 
 /*
  * Track & trace: one place to look anything up — a garment by its tag, an
@@ -1263,6 +1264,16 @@ export async function findPieces(f: PieceFilter) {
 const amount = (q: number, unit: string | null | undefined, item: string) => `${Number(q.toFixed(3)).toLocaleString('en-IN')} ${unit ?? ''} ${item}`.replace(/\s+/g, ' ').trim()
 
 /**
+ * A material by name, with a fabric's design and colour (a thread's colour)
+ * after it: "Cotton Twill (Design No: 1164 · Colour: Navy)", so same-name
+ * fabrics read apart in the history.
+ */
+const named = (i: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null }) => {
+  const shade = itemShadeText(i)
+  return shade ? `${i.name} (${shade})` : i.name
+}
+
+/**
  * An order's materials, start to finish: each requisition line — what was
  * asked for, what the store gave, what had to be bought — and, for what was
  * bought, the purchase orders raised and the goods received on them; with
@@ -1289,7 +1300,7 @@ export async function materialsOf(moIds: string[], soId: string | null, db: Pris
           issuedQty: true,
           returnedQty: true,
           purchaseQty: true,
-          item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+          item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
           // Orders in the bin or called off were never bought; a cancelled receipt never came.
           poLines: {
             where: { po: { deletedAt: null, status: { not: 'CANCELLED' } } },
@@ -1307,7 +1318,7 @@ export async function materialsOf(moIds: string[], soId: string | null, db: Pris
   const moved = mrs.length
     ? await db.stockLedger.findMany({
         where: { referenceType: { in: ['MATERIAL_REQUISITION', 'MR_RETURN', 'MR_RETURN_CANCELLED'] }, referenceId: { in: mrs.map((m) => m.id) } },
-        select: { referenceId: true, referenceType: true, transactionDate: true, createdAt: true, inQty: true, outQty: true, item: { select: { name: true, uom: { select: { symbol: true } } } } },
+        select: { referenceId: true, referenceType: true, transactionDate: true, createdAt: true, inQty: true, outQty: true, item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } },
         orderBy: { createdAt: 'asc' },
       })
     : []
@@ -1329,7 +1340,7 @@ export async function materialsOf(moIds: string[], soId: string | null, db: Pris
       const back = list[0].referenceType === 'MR_RETURN'
       // A floor return entered by mistake and taken back.
       const undone = list[0].referenceType === 'MR_RETURN_CANCELLED'
-      const what = list.map((m) => amount(Number(back ? m.inQty : m.outQty), m.item.uom?.symbol, m.item.name)).join(', ')
+      const what = list.map((m) => amount(Number(back ? m.inQty : m.outQty), m.item.uom?.symbol, named(m.item))).join(', ')
       steps.push({
         at: list[0].createdAt,
         phase: 'material',
@@ -1349,14 +1360,14 @@ export async function materialsOf(moIds: string[], soId: string | null, db: Pris
         const po = pl.po
         if (!seenPo.has(po.id)) {
           seenPo.add(po.id)
-          const forThis = r.lines.flatMap((x) => x.poLines.filter((y) => y.po.id === po.id).map((y) => amount(Number(y.qty), x.item.uom?.symbol, x.item.name)))
+          const forThis = r.lines.flatMap((x) => x.poLines.filter((y) => y.po.id === po.id).map((y) => amount(Number(y.qty), x.item.uom?.symbol, named(x.item))))
           steps.push({ at: po.createdAt, phase: 'purchase', title: `Purchase order raised with ${po.supplier.name}`, detail: forThis.join(', '), ref: po.poNumber, by: po.createdBy?.name })
         }
         for (const gl of pl.grnLines) {
           const g = gl.grn
           if (seenGrn.has(g.id)) continue
           seenGrn.add(g.id)
-          steps.push({ at: g.grnDate, phase: 'purchase', title: 'Goods received from the supplier', detail: `${amount(Number(gl.acceptedQty), l.item.uom?.symbol, l.item.name)} · ${po.supplier.name}`, ref: g.grnNumber, by: g.createdBy?.name })
+          steps.push({ at: g.grnDate, phase: 'purchase', title: 'Goods received from the supplier', detail: `${amount(Number(gl.acceptedQty), l.item.uom?.symbol, named(l.item))} · ${po.supplier.name}`, ref: g.grnNumber, by: g.createdBy?.name })
         }
       }
     }
@@ -1369,6 +1380,9 @@ export async function materialsOf(moIds: string[], soId: string | null, db: Pris
       status: r.closedAt ? 'CLOSED' : r.status,
       item: l.item.name,
       code: l.item.code,
+      designNo: l.item.designNo,
+      color: l.item.color,
+      styleId: l.item.styleId,
       unit: l.item.uom?.symbol ?? '',
       asked: n(l.requestedQty),
       issued: n(l.issuedQty),

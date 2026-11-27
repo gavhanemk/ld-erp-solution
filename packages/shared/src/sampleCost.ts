@@ -49,7 +49,13 @@ export interface SampleCostMaterial {
   /** The BOM line; none for leftovers closed out as used in the sample. */
   materialId: string | null
   component: string
-  item: { code: string; name: string; unit: string }
+  /**
+   * With a fabric's Design No. and Colour (a thread's Colour) from the Items
+   * master, so same-name materials read apart; not on sheets finalised before
+   * 27 Nov 2026.
+   */
+  item: { code: string; name: string; unit: string; designNo?: string | null; color?: string | null; styleId?: string | null }
+  /** The round colour the line is for (null: every colour), not the material's own. */
   colour: string | null
   consumed: number
   rate: number
@@ -105,8 +111,11 @@ export interface SampleCostSheet extends SampleCostTotals {
   rounds: SampleCostRound[]
   /** Charges for the request as a whole, not one round. */
   requestCharges: SampleCostMisc[]
-  /** Bought for the request and still in the sample store: not a cost until it is closed out as used. */
-  notCosted: Array<{ item: string; qty: number; unit: string }>
+  /**
+   * Bought for the request and still in the sample store: not a cost until it
+   * is closed out as used. With the item's design and colour when it has them.
+   */
+  notCosted: Array<{ item: string; qty: number; unit: string; designNo?: string | null; color?: string | null; styleId?: string | null }>
   computedAt: string
 }
 
@@ -117,6 +126,15 @@ export interface SampleCostOrderLine {
   receivedQty: unknown
   /** After the line's own discount, before the order discount and tax. */
   amount: unknown
+}
+/** An item as the sheet reads it, with its design and colour when the request's records carry them. */
+interface CostItemIn {
+  code: string
+  name: string
+  uom?: { symbol: string } | null
+  designNo?: string | null
+  color?: string | null
+  styleId?: string | null
 }
 export interface SampleCostInput {
   id: string
@@ -155,7 +173,7 @@ export interface SampleCostInput {
       wasteQty: unknown
       issuedQty: unknown
       issuedValue?: unknown
-      item: { code: string; name: string; uom?: { symbol: string } | null } | null
+      item: CostItemIn | null
     }>
   }>
   charges?: Array<{
@@ -173,7 +191,7 @@ export interface SampleCostInput {
     kind: string
     qty: unknown
     value?: unknown
-    item: { code: string; name: string; uom?: { symbol: string } | null }
+    item: CostItemIn
   }>
   /** The purchase order lines bought for the request's lines, every round's. */
   orders: SampleCostOrderLine[]
@@ -222,6 +240,8 @@ export function sampleCostSheet(input: SampleCostInput, now: Date = new Date()):
   const made = [...input.rounds].filter((r) => r.state !== 'DRAFT').sort((a, b) => a.revision - b.revision)
   const rounds = made.map((r): SampleCostRound => {
       const unitOf = (i: { uom?: { symbol: string } | null } | null) => i?.uom?.symbol ?? ''
+      // Its design and colour as the records carry them, for the sheet to name it by.
+      const shadeOf = (i: CostItemIn | null) => ({ designNo: i?.designNo ?? null, color: i?.color ?? null, styleId: i?.styleId ?? null })
       const materials: SampleCostMaterial[] = []
       for (const m of r.materials) {
         if (!m.itemId) continue
@@ -240,7 +260,7 @@ export function sampleCostSheet(input: SampleCostInput, now: Date = new Date()):
         materials.push({
           materialId: m.id,
           component: m.component,
-          item: { code: m.item?.code ?? '', name: m.item?.name ?? '', unit: unitOf(m.item) },
+          item: { code: m.item?.code ?? '', name: m.item?.name ?? '', unit: unitOf(m.item), ...shadeOf(m.item) },
           colour: m.colour,
           consumed,
           rate,
@@ -267,7 +287,7 @@ export function sampleCostSheet(input: SampleCostInput, now: Date = new Date()):
         materials.push({
           materialId: null,
           component: 'Leftover used in the sample',
-          item: { code: c.item.code, name: c.item.name, unit: unitOf(c.item) },
+          item: { code: c.item.code, name: c.item.name, unit: unitOf(c.item), ...shadeOf(c.item) },
           colour: null,
           consumed: qty,
           rate,
@@ -347,13 +367,23 @@ export function sampleCostSheet(input: SampleCostInput, now: Date = new Date()):
     })
   const requestCharges = charges.filter((c) => !c.roundId).map(misc)
   // What the request bought and still holds: a note, not a cost.
-  const names = new Map<string, { name: string; unit: string }>()
+  const names = new Map<string, { name: string; unit: string; shade: { designNo?: string; color?: string; styleId?: string } }>()
   for (const r of input.rounds)
     for (const m of r.materials)
-      if (m.itemId && m.item) names.set(m.itemId, { name: m.item.name, unit: m.item.uom?.symbol ?? '' })
+      if (m.itemId && m.item)
+        names.set(m.itemId, {
+          name: m.item.name,
+          unit: m.item.uom?.symbol ?? '',
+          // Its design and colour, only those it has, for the screen to name a same-name fabric by.
+          shade: {
+            ...(m.item.designNo ? { designNo: m.item.designNo } : {}),
+            ...(m.item.color ? { color: m.item.color } : {}),
+            ...(m.item.styleId ? { styleId: m.item.styleId } : {}),
+          },
+        })
   const notCosted = (input.pool?.stores ?? [])
     .filter((s) => s.available > 0 && names.has(s.itemId))
-    .map((s) => ({ item: names.get(s.itemId)!.name, qty: round3(s.available), unit: names.get(s.itemId)!.unit }))
+    .map((s) => ({ item: names.get(s.itemId)!.name, qty: round3(s.available), unit: names.get(s.itemId)!.unit, ...names.get(s.itemId)!.shade }))
   return {
     requestId: input.id,
     number: input.number,

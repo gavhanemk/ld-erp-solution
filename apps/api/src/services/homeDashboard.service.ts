@@ -472,6 +472,10 @@ export async function homeDashboard(opts: { days: number; access: HomeAccess }) 
           .map((i) => ({
             itemId: i.itemId,
             name: i.itemName,
+            // A fabric's design and colour: same-name items told apart.
+            designNo: i.designNo,
+            color: i.color,
+            styleId: i.styleId,
             uom: i.uom,
             onHand: i.onHand,
             reorderLevel: i.reorderLevel,

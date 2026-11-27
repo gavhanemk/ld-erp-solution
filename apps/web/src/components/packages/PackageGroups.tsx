@@ -4,12 +4,13 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } f
 import Link from 'next/link'
 import { ChevronDown, ChevronRight, ChevronUp, Combine, Loader2, Printer } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { PACK_TYPES, STATUS, openPrintTab, packCount, packLabel, printLabels, qtyText } from './packageTypes'
 
 /** One item in one store, with how many packages of it there are. */
-export interface PackageGroup {
+export interface PackageGroup extends ShadeFields {
   key: string
   itemId: string
   itemCode: string
@@ -287,6 +288,7 @@ export function PackageGroups({
                     <td className="text-muted-foreground">{isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</td>
                     <td>
                       <div className="font-medium text-foreground">{g.item}</div>
+                      {itemShade(g) && <div className="text-xs text-muted-foreground">{itemShade(g)}</div>}
                       <div className="text-xs text-muted-foreground">
                         <span className="font-mono">{g.itemCode}</span>
                         {g.category ? ` · ${g.category}` : ''}

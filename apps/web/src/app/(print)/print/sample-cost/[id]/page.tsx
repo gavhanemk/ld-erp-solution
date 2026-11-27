@@ -5,6 +5,8 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { StoreSheet, Fact, Eyebrow, money, longDate, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
 import { rateFigure } from '@/components/sampling/specRules'
+import { SubLine } from '@/components/print/doc'
+import { itemShade } from '@/lib/items'
 import { SAMPLE_CHARGE_LABEL, SAMPLE_RATE_BASIS_LABEL, type SampleCostSheet } from '@ld-erp/shared'
 
 interface Payload {
@@ -68,6 +70,8 @@ export default function PrintSampleCostSheet() {
           desc: (
             <div>
               <div style={{ fontWeight: 600 }}>{m.item.name}</div>
+              {/* The material's own design and colour, when its item has them. */}
+              {itemShade(m.item) && <SubLine>{itemShade(m.item)}</SubLine>}
               <div style={{ fontSize: '9px', color: GREY }}>
                 {[m.component, m.colour, SAMPLE_RATE_BASIS_LABEL[m.basis]].filter(Boolean).join(' · ')}
               </div>
@@ -167,7 +171,8 @@ export default function PrintSampleCostSheet() {
               {sheet.notes || 'Material at what this request paid, after line discount and before GST. The buyer’s own material is free.'}
               {sheet.notCosted.length > 0 && (
                 <div style={{ marginTop: '4px' }}>
-                  Still in the sample store, not costed: {sheet.notCosted.map((n) => `${n.qty} ${n.unit} of ${n.item}`).join(', ')}.
+                  Still in the sample store, not costed:{' '}
+                  {sheet.notCosted.map((n) => `${n.qty} ${n.unit} of ${n.item}${itemShade(n) ? ` (${itemShade(n)})` : ''}`).join(', ')}.
                 </div>
               )}
             </div>

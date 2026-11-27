@@ -8,6 +8,7 @@ import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import type { InwardRef } from '@/components/packages/InwardStickers'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * Material back from the floor unused: the leftover fabric after cutting,
@@ -28,7 +29,7 @@ interface EarlierReturn {
   cancelledAt: string | null
   cancelledBy: string | null
   cancelReason: string | null
-  lines: Array<{ item: string; unit: string; qty: number; store: string }>
+  lines: Array<ShadeFields & { item: string; unit: string; qty: number; store: string }>
 }
 
 const when = (d: string) =>
@@ -39,7 +40,7 @@ interface ReturnLine {
   issuedQty: string | number
   returnedQty?: string | number
   itemId?: string
-  item: { id?: string; name: string; uom: { symbol: string } }
+  item: ShadeFields & { id?: string; name: string; uom: { symbol: string } }
   warehouse: { id: string; name: string }
   ownership?: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomerId?: string | null
@@ -167,6 +168,7 @@ export function FloorReturnDialog({
                   <tr key={l.id}>
                     <td>
                       <div className="text-foreground text-sm">{l.item.name}</div>
+                      {itemShade(l.item) && <div className="text-muted-foreground text-[11px]">{itemShade(l.item)}</div>}
                       {l.ownership === 'CUSTOMER_OWNED' && <div className="text-muted-foreground text-[11px]">{l.ownerCustomer?.name ?? 'Customer'}&apos;s</div>}
                     </td>
                     <td className="text-right text-sm tabular-nums">
@@ -219,7 +221,9 @@ export function FloorReturnDialog({
                     </span>
                     {f.cancelledAt && <span className="badge-danger">Cancelled</span>}
                   </div>
-                  <div className="text-foreground">{f.lines.map((l) => `${fmt(l.qty)} ${l.unit} ${l.item} into ${l.store}`).join(', ')}</div>
+                  <div className="text-foreground">
+                    {f.lines.map((l) => `${fmt(l.qty)} ${l.unit} ${l.item}${itemShade(l) ? ` (${itemShade(l)})` : ''} into ${l.store}`).join(', ')}
+                  </div>
                   {f.cancelledAt ? (
                     <div className="text-muted-foreground text-xs">
                       Cancelled {when(f.cancelledAt)}

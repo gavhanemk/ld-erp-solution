@@ -7,6 +7,7 @@ import type { Routing } from '@/components/masters/RoutingFormDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { useAppSettings } from '@/lib/appSettings'
+import { itemShade } from '@/lib/items'
 import { changed } from './track'
 
 /**
@@ -151,6 +152,8 @@ export function RoutingList({ reloadKey, onEdit, onMessage, onError }: { reloadK
                       <span className="inline-flex items-center gap-1">
                         <Layers size={12} className="shrink-0" aria-hidden />
                         {r.fabric ? <span className="text-foreground">{r.fabric.name}</span> : 'No fabric set'}
+                        {/* Which of several same-name fabrics. */}
+                        {r.fabric && itemShade(r.fabric) && <span>· {itemShade(r.fabric)}</span>}
                       </span>
                       {stamp && (
                         <span className="inline-flex items-center gap-1">

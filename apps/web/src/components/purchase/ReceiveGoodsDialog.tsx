@@ -49,6 +49,13 @@ import {
   storesForLine,
   type SampleMaterialRef,
 } from '@/components/purchase/sampleLines'
+import { itemShade, type ShadeFields } from '@/lib/items'
+
+/** An item named in a heading: its name, then its design and colour when it has them. */
+const nameWithShade = (it: { name: string } & ShadeFields) => [it.name, itemShade(it)].filter(Boolean).join(' · ')
+
+/** An item named in a sentence: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const nameInWords = (it: { name: string } & ShadeFields) => (itemShade(it) ? `${it.name} (${itemShade(it)})` : it.name)
 
 /**
  * Booking in what arrived against an order.
@@ -111,7 +118,7 @@ interface OrderLine {
     hsnCode?: string | null
     uom: { symbol: string } | null
     category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
-  }
+  } & ShadeFields
   /** Its stickers by the item's rule: whether it gets any, what one package is, how much one holds. */
   pack?: { tracked: boolean; packType: string; perPack: number | null } | null
 }
@@ -308,7 +315,7 @@ function PackedAs({
       </div>
       {sizing && (
         <PackageSizesDialog
-          item={line.item.name}
+          item={nameWithShade(line.item)}
           unit={unit}
           received={received}
           packType={type}
@@ -589,6 +596,9 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
               <>
                 <td rowSpan={allocs.length} className="align-top">
                   <div className="text-foreground text-sm font-medium">{line.item.name}</div>
+                  {itemShade(line.item) && (
+                    <div className="text-muted-foreground mt-0.5 text-[11px]">{itemShade(line.item)}</div>
+                  )}
                   <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px]">
                     <span className="font-mono">{line.item.code}</span>
                     {categoryLabel && (
@@ -771,6 +781,9 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
   return (
     <div key={line.id} className="border-border bg-card rounded-lg border p-3">
       <div className="text-foreground text-sm font-medium">{line.item.name}</div>
+      {itemShade(line.item) && (
+        <div className="text-muted-foreground mt-0.5 text-[11px]">{itemShade(line.item)}</div>
+      )}
       <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px]">
         <span className="font-mono">{line.item.code}</span>
         {categoryLabel && (
@@ -1520,7 +1533,7 @@ export function ReceiveGoodsDialog({
       // through a dropdown with nothing in it.
       if (storeless.line.sampleMaterialId && !warehouses.some(isSampleStore)) {
         return setError(
-          `${storeless.line.item.name} is bought for a sample and can only go into a sample store, and none is set up. Mark one as a sample store under Masters → Warehouses, then receive it.`
+          `${nameInWords(storeless.line.item)} is bought for a sample and can only go into a sample store, and none is set up. Mark one as a sample store under Masters → Warehouses, then receive it.`
         )
       }
       return setError('Every row needs a store to go into.')
@@ -1539,8 +1552,8 @@ export function ReceiveGoodsDialog({
       const store = allStores.find((w) => w.id === misplaced.alloc.warehouseId)
       return setError(
         misplaced.line.sampleMaterialId
-          ? `${misplaced.line.item.name} is bought for a sample and goes into a sample store only. Pick one in its Store box.`
-          : `${misplaced.line.item.name} cannot go into ${store?.name ?? 'that store'} — it is a sample store, kept for samples' material. Pick another store.`
+          ? `${nameInWords(misplaced.line.item)} is bought for a sample and goes into a sample store only. Pick one in its Store box.`
+          : `${nameInWords(misplaced.line.item)} cannot go into ${store?.name ?? 'that store'} — it is a sample store, kept for samples' material. Pick another store.`
       )
     }
 
@@ -1586,13 +1599,13 @@ export function ReceiveGoodsDialog({
     )
     if (doubled) {
       return setError(
-        `${doubled.line.item.name} is going into the same store on two rows. Put the whole quantity on one row, or pick another store.`
+        `${nameInWords(doubled.line.item)} is going into the same store on two rows. Put the whole quantity on one row, or pick another store.`
       )
     }
 
     // 2.5 cartons received: said under its box, and again here.
     const halfReceived = rows.find(({ line, alloc }) => qtyRules.placesProblem(alloc.received, typedIn(line, alloc)))
-    if (halfReceived) return setError(`${halfReceived.line.item.name}: ${qtyRules.placesProblem(halfReceived.alloc.received, typedIn(halfReceived.line, halfReceived.alloc))}`)
+    if (halfReceived) return setError(`${nameInWords(halfReceived.line.item)}: ${qtyRules.placesProblem(halfReceived.alloc.received, typedIn(halfReceived.line, halfReceived.alloc))}`)
     const offPacks = rows.find(({ line, alloc }) => {
       if (!alloc.exact || line.pack?.tracked === false) return false
       const qtys = packQtysOf(alloc)
@@ -1602,8 +1615,8 @@ export function ReceiveGoodsDialog({
       const qtys = packQtysOf(offPacks.alloc)
       return setError(
         qtys.length
-          ? `${offPacks.line.item.name}: the packages add up to ${qtyFmt(qtys.reduce((sum, q) => sum + q, 0))}, but ${qtyFmt(num(offPacks.alloc.received))} arrived. Make them match.`
-          : `${offPacks.line.item.name}: enter the size of each package (Enter sizes), or choose "All the same".`
+          ? `${nameInWords(offPacks.line.item)}: the packages add up to ${qtyFmt(qtys.reduce((sum, q) => sum + q, 0))}, but ${qtyFmt(num(offPacks.alloc.received))} arrived. Make them match.`
+          : `${nameInWords(offPacks.line.item)}: enter the size of each package (Enter sizes), or choose "All the same".`
       )
     }
 

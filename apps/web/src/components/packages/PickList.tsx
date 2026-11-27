@@ -43,6 +43,7 @@ const SHOWN = 5
 export function PickList({
   item,
   code,
+  shade,
   itemId,
   warehouseId,
   store,
@@ -59,6 +60,8 @@ export function PickList({
   item: string
   /** The item's code, shown before its name so the storeman knows which item the packets are. */
   code?: string
+  /** A fabric's "Design No: 1164 · Colour: Navy" after its name: same-name rolls told apart. */
+  shade?: string
   itemId: string
   warehouseId: string
   store: string
@@ -110,6 +113,7 @@ export function PickList({
           <span className="text-foreground text-base font-semibold">
             {code && <span className="text-muted-foreground mr-1.5 font-mono text-xs font-normal">{code}</span>}
             {item}
+            {shade && <span className="text-muted-foreground ml-1.5 text-xs font-normal">{shade}</span>}
           </span>
           <span className="text-muted-foreground text-xs">
             {store} · {whose}

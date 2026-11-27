@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { AlertTriangle, CheckCircle2, Filter, Loader2, MapPin, Package, Tags, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { StickerFinder, StickerScanner } from '@/components/packages/StickerSearch'
 import { PackageCard } from '@/components/packages/PackageCard'
 import { RackInput, useRacks } from '@/components/packages/RackInput'
@@ -15,7 +16,7 @@ import type { Carton } from '@/components/inventory/cartons/cartonTypes'
 import { StickerStock } from '@/components/packages/StickerStock'
 
 /** A sticker just scanned onto a rack. */
-interface PutAway {
+interface PutAway extends ShadeFields {
   id: string
   code: string
   item: string
@@ -215,7 +216,10 @@ function ScanScreen() {
                     {p.code}
                   </Link>
                   <span className="min-w-0 flex-1 text-foreground">
-                    {p.item} <span className="text-muted-foreground">· {qtyText(p.qty)} {p.unit} · {p.store}</span>
+                    {p.item}{' '}
+                    <span className="text-muted-foreground">
+                      {itemShade(p) ? `· ${itemShade(p)} ` : ''}· {qtyText(p.qty)} {p.unit} · {p.store}
+                    </span>
                   </span>
                   <span className="font-semibold text-foreground">
                     Rack {p.rack}

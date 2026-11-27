@@ -1,5 +1,6 @@
 import type { Panel, ReportDefinition } from '../types'
-import { round2 } from './shared'
+import { ITEM_SHADE } from '../../lib/fabric'
+import { round2, rowItemLabel, shadeColumns, shadeOf } from './shared'
 import { asOnEnd, asOnFilter, asOnLabel, bucketOf, daysBetween } from './inventory-shared'
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
@@ -23,6 +24,7 @@ export const customerMaterialStock: ReportDefinition = {
     { key: 'customer', label: 'Customer', type: 'text', width: 26 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'received', label: 'Received', type: 'qty', total: 'sum' },
     { key: 'rejected', label: 'Rejected at Gate', type: 'qty', total: 'sum' },
@@ -63,7 +65,7 @@ export const customerMaterialStock: ReportDefinition = {
         inQty: true,
         outQty: true,
         transactionDate: true,
-        item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+        item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
         ownerCustomer: { select: { name: true } },
       },
     })
@@ -85,13 +87,13 @@ export const customerMaterialStock: ReportDefinition = {
     const now = new Date()
     const byKey = new Map<
       string,
-      { customer: string; itemCode: string; item: string; uom: string; received: number; used: number; returned: number; other: number; held: number; firstIn: Date | null; lastMoved: Date }
+      { customer: string; itemCode: string; item: string; designNo: string; colour: string; uom: string; received: number; used: number; returned: number; other: number; held: number; firstIn: Date | null; lastMoved: Date }
     >()
     for (const e of entries) {
       const key = `${e.ownerCustomerId}|${e.itemId}`
       let r = byKey.get(key)
       if (!r) {
-        r = { customer: e.ownerCustomer?.name ?? 'Unknown', itemCode: e.item.code, item: e.item.name, uom: e.item.uom?.symbol ?? '', received: 0, used: 0, returned: 0, other: 0, held: 0, firstIn: null, lastMoved: e.transactionDate }
+        r = { customer: e.ownerCustomer?.name ?? 'Unknown', itemCode: e.item.code, item: e.item.name, ...shadeOf(e.item), uom: e.item.uom?.symbol ?? '', received: 0, used: 0, returned: 0, other: 0, held: 0, firstIn: null, lastMoved: e.transactionDate }
         byKey.set(key, r)
       }
       const net = Number(e.inQty) - Number(e.outQty)
@@ -111,6 +113,8 @@ export const customerMaterialStock: ReportDefinition = {
         customer: r.customer,
         itemCode: r.itemCode,
         item: r.item,
+        designNo: r.designNo,
+        colour: r.colour,
         uom: r.uom,
         received: r3(r.received),
         rejected: r3(rejected.get(key) ?? 0),
@@ -124,7 +128,7 @@ export const customerMaterialStock: ReportDefinition = {
         daysHeld: r.held > 0.0005 && r.firstIn ? daysBetween(r.firstIn, params.asOn ? end : now) : 0,
       }))
       .filter((r) => r.received || r.held || r.used || r.returned)
-      .sort((a, b) => a.customer.localeCompare(b.customer) || a.item.localeCompare(b.item))
+      .sort((a, b) => a.customer.localeCompare(b.customer) || a.item.localeCompare(b.item) || a.itemCode.localeCompare(b.itemCode))
     const rows = all.slice(0, rowCap)
 
     const holding = all.filter((r) => r.held > 0.0005)
@@ -135,7 +139,7 @@ export const customerMaterialStock: ReportDefinition = {
 
     const insights: string[] = []
     if (holding.length) insights.push(`We hold material for ${customers.size} customers across ${holding.length} item lines, as on ${asOnLabel(params)}.`)
-    if (old.length) insights.push(`${old.length} lines have been with us over 90 days: ${old.slice(0, 3).map((r) => `${r.item} for ${r.customer}`).join(', ')}${old.length > 3 ? '…' : ''}. Ask whether to use them or send them back.`)
+    if (old.length) insights.push(`${old.length} lines have been with us over 90 days: ${old.slice(0, 3).map((r) => `${rowItemLabel(r)} for ${r.customer}`).join(', ')}${old.length > 3 ? '…' : ''}. Ask whether to use them or send them back.`)
     if (withRejects.length) insights.push(`${withRejects.length} items arrived with some rejected at the gate; that quantity is in stock but flagged.`)
     const unused = holding.filter((r) => r.used === 0)
     if (unused.length) insights.push(`${unused.length} lines have not been used at all since they arrived.`)

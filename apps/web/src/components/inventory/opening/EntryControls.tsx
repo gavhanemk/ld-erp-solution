@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
 import { StepInput } from '@/components/ui/StepInput'
 import { isAdminRole } from '@/lib/access'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /*
  * Opening stock put right after it is in, never deleted: a line that came in
@@ -48,7 +49,7 @@ interface EntryLine {
   unitRate: string | number
   lotNo: string | null
   valuationPending: boolean
-  item: { code: string; name: string; uom: { symbol: string } | null }
+  item: ShadeFields & { code: string; name: string; uom: { symbol: string } | null }
   size: { code: string } | null
   warehouse: { name: string }
 }
@@ -341,7 +342,12 @@ function CorrectDialog({ doc, busy, error, onClose, onSend }: { doc: EntryDetail
                 <td className="text-muted-foreground px-3 py-1.5 tabular-nums">{l.rowNo}</td>
                 <td className="px-2 py-1.5">
                   <span className="font-mono text-xs text-teal-400">{l.item.code}</span> {l.item.name}
-                  <span className="text-muted-foreground text-xs">{[l.size?.code && `size ${l.size.code}`, l.lotNo && `lot ${l.lotNo}`, l.warehouse.name].filter(Boolean).map((x) => ` · ${x}`).join('')}</span>
+                  <span className="text-muted-foreground text-xs">
+                    {[itemShade(l.item), l.size?.code && `size ${l.size.code}`, l.lotNo && `lot ${l.lotNo}`, l.warehouse.name]
+                      .filter(Boolean)
+                      .map((x) => ` · ${x}`)
+                      .join('')}
+                  </span>
                 </td>
                 <td className="px-2 py-1.5 text-right tabular-nums">
                   {num(Number(l.qty))} {l.item.uom?.symbol ?? ''}

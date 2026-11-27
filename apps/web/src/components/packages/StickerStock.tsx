@@ -4,11 +4,12 @@ import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { AlertTriangle, ChevronDown, ChevronRight, Layers, Loader2, MapPin, Package, Search, Warehouse } from 'lucide-react'
 import { api } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { PickList } from './PickList'
 import { packCount, qtyText } from './packageTypes'
 
-interface Group {
+interface Group extends ShadeFields {
   key: string
   itemId: string
   itemCode: string
@@ -181,6 +182,7 @@ export function StickerStock({ onOpen }: { onOpen: (code: string) => void }) {
                         {g.item}
                         {g.owner && <span className="badge-purple ml-2 align-middle text-[10px]">{g.owner}&apos;s material</span>}
                       </span>
+                      {itemShade(g) && <span className="text-muted-foreground block text-xs">{itemShade(g)}</span>}
                       <span className="text-muted-foreground block text-[11px]">
                         <span className="font-mono">{g.itemCode}</span>
                         {g.category ? ` · ${g.category}` : ''}

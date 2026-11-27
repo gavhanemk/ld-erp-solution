@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle2, AlertTriangle } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * The order's material and pieces, accounted for — the check before a
@@ -24,7 +25,7 @@ import { api, ApiError } from '@/lib/api'
 interface Recon {
   sharedWithOtherOrders: number
   fabric: Array<{
-    item: { code: string; name: string; uom: string | null }
+    item: { code: string; name: string; uom: string | null } & ShadeFields
     challan: number
     shortOnChallan: number
     received: number
@@ -51,7 +52,7 @@ interface Recon {
     bomForOrder: number | null
   }>
   ownMaterial?: {
-    lines: Array<{ item: { code: string; name: string; uom: string | null }; qty: number; value: number }>
+    lines: Array<{ item: { code: string; name: string; uom: string | null } & ShadeFields; qty: number; value: number }>
     value: number
     /** IN_JOB_CHARGE: the job charge covers it. BILLED: billed to the customer as a charge. */
     billing?: 'IN_JOB_CHARGE' | 'BILLED'
@@ -120,6 +121,8 @@ export function OrderReconciliation({ orderId, isJobWork }: { orderId: string; i
                   <tr key={r.item.code}>
                     <td>
                       <div className="text-foreground">{r.item.name}</div>
+                      {/* Two of the customer's fabrics may share a name; the design and colour tell them apart. */}
+                      {itemShade(r.item) && <div className="text-muted-foreground text-[10px]">{itemShade(r.item)}</div>}
                       {r.shortOnChallan > 0 && (
                         <div className="warn-text text-[10px]">
                           {f(r.shortOnChallan)} {r.item.uom} short against their challan of {f(r.challan)}
@@ -193,7 +196,10 @@ export function OrderReconciliation({ orderId, isJobWork }: { orderId: string; i
             <tbody>
               {own.lines.map((m) => (
                 <tr key={m.item.code}>
-                  <td className="text-foreground">{m.item.name}</td>
+                  <td className="text-foreground">
+                    {m.item.name}
+                    {itemShade(m.item) && <div className="text-muted-foreground text-[10px]">{itemShade(m.item)}</div>}
+                  </td>
                   <td className="text-right tabular-nums">
                     {f(m.qty)} {m.item.uom}
                   </td>

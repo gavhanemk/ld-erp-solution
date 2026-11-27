@@ -7,6 +7,7 @@ import { ArrowLeft, AlertCircle, RefreshCw } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * One item: where it is, and the last fifty things that happened to it.
@@ -42,7 +43,7 @@ interface Movement {
 }
 
 interface Detail {
-  item: {
+  item: ShadeFields & {
     id: string
     code: string
     name: string
@@ -130,6 +131,8 @@ export default function StockItemPage() {
             <ArrowLeft size={13} /> All stock
           </Link>
           <h1 className="page-title mt-1">{item.name}</h1>
+          {/* A fabric's own design and colour: which of the same-name items this is. */}
+          {itemShade(item) && <p className="page-subtitle text-foreground">{itemShade(item)}</p>}
           <p className="page-subtitle font-mono">
             {item.code} · {item.category.name}
             {item.hsnCode ? ` · HSN ${item.hsnCode}` : ''}

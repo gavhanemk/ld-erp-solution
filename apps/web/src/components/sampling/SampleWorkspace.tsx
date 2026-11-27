@@ -10,6 +10,7 @@ import {
   PackageOpen,
 } from 'lucide-react'
 import { api, ApiError, apiErrorMessage, can } from '@/lib/api'
+import { itemShade } from '@/lib/items'
 import { formatDate, formatRupees } from '@/lib/utils'
 import {
   SAMPLE_MATERIAL_SOURCE_LABEL,
@@ -717,6 +718,9 @@ export function SampleWorkspace({
                                     <span className="text-muted-foreground block font-mono text-xs">
                                       {m.item.code}
                                     </span>
+                                    {itemShade(m.item) && (
+                                      <span className="text-muted-foreground block text-xs">{itemShade(m.item)}</span>
+                                    )}
                                   </>
                                 ) : (
                                   <span className="warn-text">No material picked</span>
@@ -906,6 +910,9 @@ export function SampleWorkspace({
                                     <span className="text-muted-foreground block font-mono text-xs">
                                       {m.item.code}
                                     </span>
+                                    {itemShade(m.item) && (
+                                      <span className="text-muted-foreground block text-xs">{itemShade(m.item)}</span>
+                                    )}
                                   </>
                                 ) : (
                                   <>
@@ -1064,6 +1071,7 @@ export function SampleWorkspace({
                                     <span className="text-muted-foreground block font-mono text-xs">
                                       {it?.code}
                                     </span>
+                                    {itemShade(it) && <span className="text-muted-foreground block text-xs">{itemShade(it)}</span>}
                                   </td>
                                   <td>{storeNamed(s.warehouseId)}</td>
                                   <td className="text-right tabular-nums">{s.received}</td>
@@ -1104,7 +1112,8 @@ export function SampleWorkspace({
                         {request.closeOuts!.map((c) => (
                           <li key={c.id}>
                             {formatDate(c.createdAt)} · {+c.qty} {c.item.uom?.symbol ?? ''} of{' '}
-                            {c.item.name} from {c.warehouse.name}:{' '}
+                            {c.item.name}
+                            {itemShade(c.item) ? ` (${itemShade(c.item)})` : ''} from {c.warehouse.name}:{' '}
                             {c.kind === 'MOVED'
                               ? `moved to ${c.toWarehouse?.name ?? 'a general store'}`
                               : 'used in the sample'}
@@ -1649,6 +1658,7 @@ function SpecView({ round, lookups }: { round: SampleRound; lookups: Lookups }) 
                           {it.code}
                         </span>
                       )}
+                      {itemShade(it) && <span className="text-muted-foreground block text-xs">{itemShade(it)}</span>}
                     </td>
                     <td>{lineColour(l.colour)}</td>
                     <td className="text-right tabular-nums">
@@ -1836,7 +1846,7 @@ function MaterialWindow({
     <FormFrame
       icon={PackageOpen}
       title={kind === 'ISSUE' ? 'Issue material' : 'Record material'}
-      subtitle={`${line.item?.name ?? 'Material'} · ${line.component || 'No part named'} · ${lineColour(line.colour)}`}
+      subtitle={`${line.item?.name ?? 'Material'}${itemShade(line.item) ? ` (${itemShade(line.item)})` : ''} · ${line.component || 'No part named'} · ${lineColour(line.colour)}`}
       width="max-w-2xl"
       primaryInHeader={false}
       busy={busy}
@@ -2060,7 +2070,7 @@ function WaiveWindow({
     <FormFrame
       icon={PackageOpen}
       title={undo ? 'Needed after all' : 'Not needed'}
-      subtitle={`${line.item?.name ?? 'Material'} · ${line.component || 'No part named'} · ${lineColour(line.colour)}`}
+      subtitle={`${line.item?.name ?? 'Material'}${itemShade(line.item) ? ` (${itemShade(line.item)})` : ''} · ${line.component || 'No part named'} · ${lineColour(line.colour)}`}
       width="max-w-xl"
       primaryInHeader={false}
       busy={busy}
@@ -2166,7 +2176,7 @@ function CloseOutWindow({
     <FormFrame
       icon={PackageOpen}
       title="Close out leftover material"
-      subtitle={`${item?.name ?? 'Material'} · ${available} ${unit} left in ${storeName}`}
+      subtitle={`${item?.name ?? 'Material'}${itemShade(item) ? ` (${itemShade(item)})` : ''} · ${available} ${unit} left in ${storeName}`}
       width="max-w-2xl"
       primaryInHeader={false}
       busy={busy}

@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, apiErrorMessage, can, masterResource, type Paginated } from '@/lib/api'
+import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { Pagination } from '@/components/tables/Pagination'
 import { RowPanel } from '@/components/tables/RowPanel'
@@ -48,7 +49,8 @@ interface ReturnLine {
     hsnCode: string | null
     grnLine: { grn: { id: string; grnNumber: string } } | null
   }
-  item: { id: string; code: string; name: string; uom: { symbol: string } | null }
+  /** With its Design No. and Colour, which tell same-name fabrics apart. */
+  item: { id: string; code: string; name: string; uom: { symbol: string } | null } & ShadeFields
   warehouse: { id: string; name: string }
 }
 
@@ -478,6 +480,9 @@ export default function PurchaseReturnsPage() {
                           <div key={l.id} className="flex items-start justify-between gap-3 p-2.5">
                             <div className="min-w-0">
                               <p className="text-xs font-medium">{l.item.name}</p>
+                              {itemShade(l.item) && (
+                                <p className="text-muted-foreground mt-0.5 text-[10px]">{itemShade(l.item)}</p>
+                              )}
                               <p className="text-muted-foreground mt-0.5 text-[10px]">
                                 <span className="font-mono">{l.item.code}</span>
                                 {' · '}from {l.warehouse.name}
@@ -547,6 +552,9 @@ export default function PurchaseReturnsPage() {
                   {rows.map((r, i) => {
                     const s = STATUS[r.status]
                     const expanded = open === r.id
+                    // A fabric's Design No. and Colour beside its name, when a
+                    // line carries either — same-name fabrics differ only there.
+                    const shaded = r.lines.some((l) => itemShade(l.item))
                     return (
                       <Fragment key={r.id}>
                         <tr className={expanded ? 'bg-secondary/30' : undefined} data-row tabIndex={i === 0 ? 0 : -1}>
@@ -652,16 +660,30 @@ export default function PurchaseReturnsPage() {
                                 <table className="subtable w-full table-fixed">
                                   <thead className="sticky top-0 z-10">
                                     <tr>
-                                      {[
-                                        ['Item code', '12%', false],
-                                        ['Item', '26%', false],
-                                        ['HSN', '8%', false],
-                                        ['Received on', '11%', false],
-                                        ['From godown', '15%', false],
-                                        ['Qty', '10%', true],
-                                        ['Rate', '9%', true],
-                                        ['Value', '9%', true],
-                                      ].map(([h, w, right]) => (
+                                      {(shaded
+                                        ? [
+                                            ['Item code', '10%', false],
+                                            ['Item', '20%', false],
+                                            ['Design No.', '9%', false],
+                                            ['Colour', '9%', false],
+                                            ['HSN', '7%', false],
+                                            ['Received on', '10%', false],
+                                            ['From godown', '13%', false],
+                                            ['Qty', '8%', true],
+                                            ['Rate', '7%', true],
+                                            ['Value', '7%', true],
+                                          ]
+                                        : [
+                                            ['Item code', '12%', false],
+                                            ['Item', '26%', false],
+                                            ['HSN', '8%', false],
+                                            ['Received on', '11%', false],
+                                            ['From godown', '15%', false],
+                                            ['Qty', '10%', true],
+                                            ['Rate', '9%', true],
+                                            ['Value', '9%', true],
+                                          ]
+                                      ).map(([h, w, right]) => (
                                         <th
                                           key={String(h)}
                                           style={{ width: String(w) }}
@@ -695,6 +717,16 @@ export default function PurchaseReturnsPage() {
                                             </p>
                                           )}
                                         </td>
+                                        {shaded && (
+                                          <>
+                                            <td className="px-3 py-1.5 text-xs">
+                                              {itemShadeCols(l.item).designNo}
+                                            </td>
+                                            <td className="px-3 py-1.5 text-xs">
+                                              {itemShadeCols(l.item).colour}
+                                            </td>
+                                          </>
+                                        )}
                                         <td className="text-muted-foreground px-3 py-1.5 text-xs">
                                           {l.billLine.hsnCode ?? '—'}
                                         </td>

@@ -1,3 +1,5 @@
+import { itemShadeCols, type ShadeFields } from '@/lib/items'
+
 /** Search individual requisitions before filtering/grouping/paging the register. */
 interface SearchableRequisition {
   id: string
@@ -12,7 +14,7 @@ interface SearchableRequisition {
   closedBy?: { name: string } | null
   notes?: string | null
   lines: Array<{
-    item: { code: string; name: string; category?: { name: string; parent?: { name: string } | null } | null }
+    item: ShadeFields & { code: string; name: string; category?: { name: string; parent?: { name: string } | null } | null }
     warehouse?: { name: string } | null
     purpose?: string | null
     styleNo?: string | null
@@ -43,10 +45,16 @@ export function indexRequisitions<T extends SearchableRequisition>(
         ...Object.values(references), row.department.name, row.department.code,
         row.so?.customer?.name, row.status, statusLabel(row),
         row.raisedBy?.name, row.approvedBy?.name, row.issuedBy?.name, row.closedBy?.name, row.notes,
-        ...row.lines.flatMap((line) => [
-          line.item.code, line.item.name, line.item.category?.name, line.item.category?.parent?.name,
-          line.warehouse?.name, line.purpose, line.styleNo, line.ownerCustomer?.name,
-        ]),
+        ...row.lines.flatMap((line) => {
+          // A fabric's name with its design no. and colour as one field, so
+          // "twill 1164" or "1164 navy" finds the line — never two items mixed.
+          const shade = itemShadeCols(line.item)
+          return [
+            line.item.code, line.item.name, [line.item.name, shade.designNo, shade.colour].filter(Boolean).join(' '),
+            line.item.category?.name, line.item.category?.parent?.name,
+            line.warehouse?.name, line.purpose, line.styleNo, line.ownerCustomer?.name,
+          ]
+        }),
       ].map(normalize).filter(Boolean),
     }
   })

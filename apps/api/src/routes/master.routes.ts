@@ -26,6 +26,7 @@ import { hsnUses } from '../lib/hsnUses'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { itemBeforeSave, itemInclude, itemUniqueScope, ITEM_UNIQUE_FIELDS } from '../lib/itemMaster'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { styleInDevelopment } from '../lib/styleStage'
 import {
   assertVersionFree,
@@ -821,12 +822,16 @@ router.use(
     uniqueFields: ITEM_UNIQUE_FIELDS,
     uniqueScope: itemUniqueScope,
     // Typing "linen" finds linen items by their category as well as their
-    // name; "cutting" finds what the cutting floor uses.
+    // name; "cutting" finds what the cutting floor uses. "1164" or "Navy"
+    // finds a fabric by its design and colour, which several same-name
+    // fabric items differ by.
     searchFields: [
       'name',
       'code',
       'description',
       'hsnCode',
+      'designNo',
+      'color',
       'category.name',
       'category.parent.name',
       'department.name',
@@ -2443,6 +2448,9 @@ router.get('/routings', requirePermission(MODULE, 'view'), async (req, res) => {
         { style: { code: { contains: q, mode: 'insensitive' } } },
         { fabric: { name: { contains: q, mode: 'insensitive' } } },
         { fabric: { code: { contains: q, mode: 'insensitive' } } },
+        // Same-name fabrics differ only by these.
+        { fabric: { designNo: { contains: q, mode: 'insensitive' } } },
+        { fabric: { color: { contains: q, mode: 'insensitive' } } },
         { id: { equals: q } },
         { steps: { some: { operation: { OR: [{ name: { contains: q, mode: 'insensitive' } }, { code: { contains: q, mode: 'insensitive' } }] } } } },
       ],
@@ -2608,8 +2616,18 @@ router.patch('/company/:id', requirePermission(MODULE, 'edit'), async (req: Auth
 
 const bomInclude = {
   copiedFrom: { select: { id: true, version: true, color: true, style: { select: { code: true, name: true } } } },
+  // A BOM has no brand of its own: it is its style's (Style.brandId), shown
+  // beside the style wherever the BOM is.
   style: {
-    select: { id: true, code: true, name: true, brandType: true, sizeGroupId: true, colors: true },
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      brandType: true,
+      sizeGroupId: true,
+      colors: true,
+      brand: { select: { id: true, name: true } },
+    },
   },
   baseSize: { select: { id: true, code: true, label: true } },
   approvedBy: { select: { id: true, name: true } },
@@ -2643,7 +2661,8 @@ const bomInclude = {
     orderBy: { sortOrder: 'asc' as const },
     include: {
       componentItem: {
-        select: { id: true, code: true, name: true, standardRate: true, uom: true, category: { include: { parent: true } } },
+        // With its design and colour: several fabric items share a name.
+        select: { id: true, code: true, name: true, standardRate: true, uom: true, category: { include: { parent: true } }, ...ITEM_SHADE },
       },
       department: { select: { id: true, code: true, name: true } },
       sizes: {
@@ -2652,6 +2671,12 @@ const bomInclude = {
       },
     },
   },
+}
+
+/** An item named in a message: "Cotton Twill (Design No: 1164 · Colour: Navy)", as same-name fabrics differ only by those. */
+const itemNamed = (i: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null }) => {
+  const shade = itemShadeText(i)
+  return shade ? `${i.name} (${shade})` : i.name
 }
 
 // 'style': by style code, then colour, newest first — a style's BOMs together, as the list shows them.
@@ -2731,7 +2756,14 @@ function assertMayCost(req: AuthRequest, costLines: unknown) {
   }
 }
 
-type RateWarning = { itemId: string; code: string; name: string }
+type RateWarning = {
+  itemId: string
+  code: string
+  name: string
+  designNo?: string | null
+  color?: string | null
+  styleId?: string | null
+}
 
 /**
  * Saving with a rate missing is allowed — a BOM is often costed before anyone
@@ -2742,7 +2774,7 @@ type RateWarning = { itemId: string; code: string; name: string }
  * somebody hunting down twelve lines to work out which three.
  */
 const rateWarning = (warnings: RateWarning[]): string => {
-  const names = warnings.map((w) => w.name).join(', ')
+  const names = warnings.map(itemNamed).join(', ')
   const subject =
     warnings.length === 1 ? 'One component has' : `${warnings.length} components have`
   const them = warnings.length === 1 ? 'it' : 'them'
@@ -2781,11 +2813,11 @@ async function assertActiveForBom(
   if (added.length === 0) return
   const retired = await prisma.item.findMany({
     where: { id: { in: added }, isActive: false },
-    select: { name: true },
+    select: { name: true, ...ITEM_SHADE },
   })
   if (retired.length > 0) {
     throw new AppError(
-      `${retired.map((i) => i.name).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deactivated, so ${retired.length === 1 ? 'it' : 'they'} cannot go on a BOM.`,
+      `${retired.map(itemNamed).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deactivated, so ${retired.length === 1 ? 'it' : 'they'} cannot go on a BOM.`,
       400,
       'BOM_COMPONENT_INACTIVE',
     )
@@ -2982,7 +3014,7 @@ router.get('/bom/facets', requirePermission(MODULE, 'view'), async (req: AuthReq
     color: true,
     sellingPrice: true,
     style: { select: { code: true, name: true, brand: { select: { id: true, name: true } } } },
-    lines: { select: { componentItemId: true, componentItem: { select: { code: true, name: true } } } },
+    lines: { select: { componentItemId: true, componentItem: { select: { code: true, name: true, ...ITEM_SHADE } } } },
   } as const
   type Row = Awaited<ReturnType<typeof prisma.bOM.findMany<{ select: typeof pick }>>>[number]
   const tally = async (facet: BomFacet, keys: (r: Row) => Array<{ value: string; label: string }>) => {
@@ -3001,7 +3033,13 @@ router.get('/bom/facets', requirePermission(MODULE, 'view'), async (req: AuthReq
     tally('styles', (r) => [{ value: r.styleId, label: `${r.style.code} — ${r.style.name}` }]),
     tally('colours', (r) => [{ value: r.color ?? 'none', label: r.color ?? 'Colour not set' }]),
     tally('brands', (r) => (r.style.brand ? [{ value: r.style.brand.id, label: r.style.brand.name }] : [])),
-    tally('items', (r) => r.lines.map((l) => ({ value: l.componentItemId, label: `${l.componentItem.code} — ${l.componentItem.name}` }))),
+    // Same-name fabrics told apart by their design and colour, which the menu's search finds too.
+    tally('items', (r) =>
+      r.lines.map((l) => {
+        const shade = itemShadeText(l.componentItem)
+        return { value: l.componentItemId, label: `${l.componentItem.code} — ${l.componentItem.name}${shade ? ` · ${shade}` : ''}` }
+      }),
+    ),
     tally('priced', (r) => [r.sellingPrice != null ? { value: 'yes', label: 'Priced' } : { value: 'no', label: 'Not priced yet' }]),
   ])
   res.json({ success: true, data: { styles, colours, brands, items, priced } })
@@ -3340,7 +3378,7 @@ router.patch(
     // or a component that has been retired.
     const retired = await prisma.item.findMany({
       where: { id: { in: before.lines.map((l) => l.componentItemId) }, isActive: false },
-      select: { name: true },
+      select: { name: true, ...ITEM_SHADE },
     })
     const styleNow = await prisma.style.findUnique({
       where: { id: before.styleId },
@@ -3355,7 +3393,7 @@ router.patch(
     }
     if (retired.length > 0) {
       throw new AppError(
-        `${retired.map((i) => i.name).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deactivated. Replace ${retired.length === 1 ? 'it' : 'them'} on the BOM before approving.`,
+        `${retired.map(itemNamed).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deactivated. Replace ${retired.length === 1 ? 'it' : 'them'} on the BOM before approving.`,
         409,
         'BOM_COMPONENT_INACTIVE',
       )
@@ -3365,7 +3403,7 @@ router.patch(
     // refused rather than freezing a total that quietly leaves components out.
     const rateless = before.lines.filter((l) => l.unitCost === null || Number(l.unitCost) === 0)
     if (rateless.length > 0) {
-      const names = rateless.map((l) => l.componentItem.name).join(', ')
+      const names = rateless.map((l) => itemNamed(l.componentItem)).join(', ')
       throw new AppError(
         `${rateless.length} component${rateless.length === 1 ? ' has' : 's have'} no rate yet — ${names}. Set a rate on the item, or type one on the line, before approving.`,
         409,

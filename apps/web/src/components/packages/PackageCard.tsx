@@ -19,6 +19,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
+import { itemShade } from '@/lib/items'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { QrCode } from './QrCode'
@@ -145,6 +146,8 @@ export function PackageCard({
             )}
           </div>
           <h2 className="text-xl font-semibold leading-tight text-foreground">{pkg.item.name}</h2>
+          {/* A fabric's design and colour (a thread's colour): what tells this roll from another of the same name. */}
+          {itemShade(pkg.item) && <p className="text-sm font-medium text-foreground">{itemShade(pkg.item)}</p>}
           <p className="text-sm text-muted-foreground">
             <span className="font-mono">{pkg.item.code}</span>
             {pkg.item.category ? ` · ${pkg.item.category.name}` : ''}

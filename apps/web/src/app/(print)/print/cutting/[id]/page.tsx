@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { StoreSheet, Fact, Eyebrow, qty, longDate, CODE, GREY, INK, MUTED, NAVY, RULE, TINT, type SheetColumn } from '@/components/print/StoreSheet'
 import { moCustomer } from '@/components/production/moCustomer'
+import { itemShadeCols, type ShadeFields } from '@/lib/items'
 
 interface Payload {
   /** The own brand the order is made under, carried from start to end. */
@@ -31,7 +32,8 @@ interface Payload {
     actualPieces: number
     notes: string | null
     createdBy: { name: string } | null
-    fabricItem: { code: string; name: string; uom: { symbol: string } | null } | null
+    /** With the fabric's own design no. and colour (the garment's are the order's). */
+    fabricItem: ({ code: string; name: string; uom: { symbol: string } | null } & ShadeFields) | null
     moLine: { color: string; totalQty: number; style: { code: string; name: string }; sizes: Array<{ sizeId: string; qty: number; size: { code: string; sequence: number } }> } | null
     mo: { id: string; moNumber: string; totalPlannedQty: number; so: { soNumber: string; customerPORef: string | null; customer: { name: string } } | null }
     bundles: Array<{ id: string; code: string; bundleNo: number; qty: number; size: { code: string } | null }>
@@ -70,6 +72,9 @@ export default function PrintCutting() {
   const cut = c.sizeBreakup ?? {}
   const bNo = (n: number) => `B${String(n).padStart(3, '0')}`
   const later = data.madeAsOtherSize ?? []
+  // The fabric's own design no. and colour, from its item. "Colour" and "Design no." above them are
+  // the garment's (the order line's colour and the style code) and stay as they always printed.
+  const fabricShade = itemShadeCols(c.fabricItem)
 
   // Sizes run across the page, as on the floor's own sheet.
   const columns: SheetColumn[] = [
@@ -120,10 +125,13 @@ export default function PrintCutting() {
           title: 'Fabric',
           body: (
             <>
-              <Fact label="Quality" value={c.fabricItem ? `${c.fabricItem.name}` : null} />
-              <Fact label="Colour" value={c.moLine?.color ?? null} />
-              <Fact label="Design no." value={c.moLine?.style.code ?? null} mono />
-              <Fact label="Lot / shade" value={c.lotNo} />
+              {/* A little wider than the kit's labels, for "Fabric design no." to sit clear of its colon. */}
+              <Fact label="Quality" value={c.fabricItem ? `${c.fabricItem.name}` : null} labelWidth={88} />
+              <Fact label="Colour" value={c.moLine?.color ?? null} labelWidth={88} />
+              <Fact label="Design no." value={c.moLine?.style.code ?? null} mono labelWidth={88} />
+              <Fact label="Lot / shade" value={c.lotNo} labelWidth={88} />
+              {fabricShade.designNo && <Fact label="Fabric design no." value={fabricShade.designNo} mono labelWidth={88} />}
+              {fabricShade.colour && <Fact label="Fabric colour" value={fabricShade.colour} labelWidth={88} />}
             </>
           ),
         },

@@ -4,6 +4,7 @@ import { ratePer } from '@/lib/packs'
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
+import { itemShade } from '@/lib/items'
 import type { NoteDoc, PurchaseNote } from '@/components/purchase/noteTypes'
 import {
   DocTable,
@@ -235,14 +236,13 @@ export default function PurchaseNotePrintPage() {
 
   const rows: DocRow[] = note.lines.map((l, i) => {
     const unit = l.item.uom ? ` ${l.item.uom.symbol}` : ''
-    // A fabric's own stock line may carry its design and colour.
-    const it = l.item as typeof l.item & { designNo?: string | null; color?: string | null }
-    const shade = [it.designNo && `D.${it.designNo.replace(/^d\.?\s*/i, '')}`, it.color].filter(Boolean).join(' / ')
+    // A fabric's Design No. and Colour (a thread's Colour), exactly as set in
+    // the Items master, on a line of its own under the name.
+    const shade = itemShade(l.item)
     /* The code, and what the bill said beside what is coming off it — a
        reader should not have to fetch the invoice to check the claim. */
     const sub = [
       l.item.code,
-      shade || null,
       l.description,
       l.originalQty != null
         ? `billed ${qtyFmt(l.originalQty)}${unit}${l.originalRate != null ? ` @ ₹${money(l.originalRate)}` : ''}`
@@ -258,6 +258,7 @@ export default function PurchaseNotePrintPage() {
         item: (
           <>
             <div style={{ fontWeight: 700 }}>{l.item.name}</div>
+            {shade && <SubLine>{shade}</SubLine>}
             {sub && <SubLine>{sub}</SubLine>}
             {l.remarks && <SubLine style={{ fontStyle: 'italic' }}>{l.remarks}</SubLine>}
           </>

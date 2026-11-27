@@ -1,4 +1,6 @@
 import type { ReportDefinition } from '../types'
+import { ITEM_SHADE } from '../../lib/fabric'
+import { itemLabel } from './shared'
 import { party, periodFilter, periodOf, uqcOf } from './itc04-shared'
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
@@ -64,7 +66,7 @@ export const itc04Received: ReportDefinition = {
         receivedQty: true,
         wastedQty: true,
         damagedQty: true,
-        item: { select: { name: true, uom: { select: { symbol: true } } } },
+        item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
         jobWorkReturn: { select: { returnNumber: true, returnDate: true, theirChallanNo: true } },
         challanLine: {
           select: {
@@ -91,7 +93,9 @@ export const itc04Received: ReportDefinition = {
           theirChallan: theirNo,
           theirDate: l.jobWorkReturn.returnDate,
           nature: l.challanLine.challan.process,
-          description: l.item.name,
+          // A fabric's design and colour ride in the form's own column, not
+          // in columns of their own that would break the form's order.
+          description: itemLabel(l.item.name, l.item),
           uqc: uqcOf(l.item.uom?.symbol),
           qty: r3(Number(l.receivedQty)),
           lossUqc: uqcOf(l.challanLine.item.uom?.symbol),
@@ -231,6 +235,7 @@ export const itc04Received: ReportDefinition = {
           "Only our own inputs; a customer's material is theirs to declare as principal.",
           "The job worker's challan date is the day we received the goods, as entered on our receipt.",
           'Losses & wastes are what the unit wasted plus what it damaged, in the unit the goods went out in.',
+          "A fabric's or thread's Design No. and Colour follow its name in the description of goods.",
           "Production's returns are matched to the challans their pieces went out on, oldest first.",
           'This is the form’s content, not the GST offline tool’s file: copy it into ITC_04_Offline.xls and let the tool check it.',
         ],

@@ -4,6 +4,7 @@ import { ratePer, valueAt } from '@/lib/packs'
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import {
   Band,
   Box,
@@ -64,14 +65,12 @@ interface Line {
       }
     } | null
   }
+  /** With its Design No. and Colour (styleId marks a finished good, left alone). */
   item: {
     code: string
     name: string
     uom: { symbol: string } | null
-    /** A fabric's own stock line carries its design and colour. */
-    designNo?: string | null
-    color?: string | null
-  }
+  } & ShadeFields
   /** The bill's pack the price is per (a box of 20 pcs); qty is in pieces. */
   uomFactor?: string | number
   uom?: { symbol: string } | null
@@ -209,9 +208,10 @@ export default function PurchaseReturnPrintPage() {
    * can find it at their end.
    */
   const rows = c.lines.map((l, i) => {
-    const shade = [l.item.designNo && `D.${l.item.designNo.replace(/^d\.?\s*/i, '')}`, l.item.color].filter(Boolean).join(' / ')
+    // A fabric's Design No. and Colour (a thread's Colour), exactly as set in
+    // the Items master, on a line of its own under the name.
+    const shade = itemShade(l.item)
     const sub = [
-      shade || null,
       mixed ? l.reasonLabel : null,
       l.billLine.description,
       l.remarks,
@@ -231,6 +231,7 @@ export default function PurchaseReturnPrintPage() {
               {/* A code breaks before itself, never inside. */}
               <span style={{ ...CODE, fontSize: '8.5px', letterSpacing: 0, whiteSpace: 'nowrap' }}>{l.item.code}</span>
             </div>
+            {shade && <SubLine>{shade}</SubLine>}
             {sub && <SubLine>{sub}</SubLine>}
           </>
         ),

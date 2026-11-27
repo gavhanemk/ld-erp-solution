@@ -9,9 +9,10 @@ import { ExportButton } from '@/components/tables/ExportButton'
 import { ReportDashboard, type Analysis, type Tone } from '@/components/reports/Dashboard'
 import { SummaryTable } from '@/components/reports/SummaryTable'
 import { MODULE_WORDS, moduleReportsHref } from '@/components/reports/modules'
-import { FilterBar, type Filter } from '@/components/reports/FilterBar'
+import { FilterBar, type Filter, type FilterOption } from '@/components/reports/FilterBar'
 import { RegisterSheet, type RegisterData } from '@/components/reports/RegisterSheet'
 import { describeReport, downloadReport, openRegisterPrint } from '@/lib/reportDownload'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 
 interface Column {
   key: string
@@ -57,7 +58,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
       when the two have drifted apart. */
   const [ranWith, setRanWith] = useState<Record<string, string>>({})
   const [result, setResult] = useState<RunResult | null>(null)
-  const [options, setOptions] = useState<Record<string, Array<{ id: string; name: string }>>>({})
+  const [options, setOptions] = useState<Record<string, FilterOption[]>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
@@ -98,10 +99,27 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         setFilters(mine?.filters ?? [])
 
         const needed = [...new Set((mine?.filters ?? []).map((f) => f.optionsFrom).filter(Boolean))]
-        const loaded: Record<string, Array<{ id: string; name: string }>> = {}
+        const loaded: Record<string, FilterOption[]> = {}
         await Promise.all(
           needed.map(async (resource) => {
             try {
+              /*
+               * Every item, not the first page: the list answers 200 a time,
+               * and with one item per design and colour that is passed soon.
+               * Each with its code, design and colour under the name, so the
+               * three "Cotton Twill" items can be told apart and found by
+               * their design number (27 Nov 2026).
+               */
+              if (resource === 'items') {
+                const items = await everyItem<{ id: string; code: string; name: string } & ShadeFields>()
+                loaded.items = items
+                  .map((i) => {
+                    const shade = itemShade(i)
+                    return { id: i.id, name: i.name, sub: [i.code, shade].filter(Boolean).join(' · '), shade }
+                  })
+                  .sort((a, b) => a.name.localeCompare(b.name) || a.sub.localeCompare(b.sub))
+                return
+              }
               const list = await masterResource<{ id: string; name: string }>(
                 resource as string
               ).list({ limit: 500 })

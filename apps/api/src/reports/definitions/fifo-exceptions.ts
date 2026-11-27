@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { dateRangeFilters, periodLabel } from './shared'
+import { ITEM_SHADE } from '../../lib/fabric'
+import { dateRangeFilters, periodLabel, shadeColumns, shadeOf } from './shared'
 import { categoryFilter, loadCategories, warehouseFilter } from './inventory-shared'
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
@@ -27,6 +28,7 @@ export const fifoExceptions: ReportDefinition = {
     { key: 'skipped', label: 'Older One Left', type: 'text', width: 14 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'qty', label: 'Qty', type: 'qty', total: 'none' },
@@ -61,7 +63,7 @@ export const fifoExceptions: ReportDefinition = {
         fifoReason: true,
         createdAt: true,
         createdBy: { select: { name: true } },
-        package: { select: { code: true, item: { select: { code: true, name: true, categoryId: true, uom: { select: { symbol: true } } } } } },
+        package: { select: { code: true, item: { select: { code: true, name: true, ...ITEM_SHADE, categoryId: true, uom: { select: { symbol: true } } } } } },
       },
     })
     const ids = [...new Set(moves.map((m) => m.fifoSkippedId).filter((x): x is string => !!x))]
@@ -80,6 +82,7 @@ export const fifoExceptions: ReportDefinition = {
       skipped: (m.fifoSkippedId && codeOf.get(m.fifoSkippedId)) || '',
       itemCode: m.package.item.code,
       item: m.package.item.name,
+      ...shadeOf(m.package.item),
       category: cats.names(m.package.item.categoryId).category,
       store: storeOf.get(m.warehouseId) ?? '',
       qty: r3(Math.abs(Number(m.qty))),

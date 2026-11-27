@@ -6,7 +6,7 @@ import { api, ApiError } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { StepInput } from '@/components/ui/StepInput'
-import { fabricQty, type JobCardCutting } from './types'
+import { fabricName, fabricQty, type JobCardCutting } from './types'
 
 /**
  * A received lay's fabric put right — what the contractor was given, used and
@@ -54,7 +54,7 @@ export function LayFabricDialog({ lay, onClose, onSaved }: { lay: JobCardCutting
     <FormFrame
       icon={Ruler}
       title={`Fabric on ${lay.cutOrderNumber}`}
-      subtitle={`${who}${lay.fabricItem ? ` · ${lay.fabricItem.name}` : ''} · received — only the fabric record changes`}
+      subtitle={`${who}${lay.fabricItem ? ` · ${fabricName(lay.fabricItem)}` : ''} · received — only the fabric record changes`}
       width="max-w-2xl"
       primary={
         <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving}>

@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { AlertCircle, AlertTriangle, ArrowLeft, CheckCircle2, ClipboardCheck, Info, Loader2 } from 'lucide-react'
 import { api, ApiError, can, type Paginated } from '@/lib/api'
+import { itemShade } from '@/lib/items'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { BomDetail } from './BomDetail'
 import type { Bom } from './BomFormDialog'
@@ -53,7 +54,14 @@ export function BomReviewDialog({
 
   // What the server would refuse, and what is only worth a look.
   const lines = bom?.lines ?? []
-  const names = (ls: typeof lines) => ls.map((l) => l.componentItem?.name ?? 'a component').join(', ')
+  // "Cotton Twill (Design No: 1164 · Colour: Navy)": same-name fabrics differ only by those.
+  const names = (ls: typeof lines) =>
+    ls
+      .map((l) => {
+        const shade = itemShade(l.componentItem)
+        return l.componentItem ? `${l.componentItem.name}${shade ? ` (${shade})` : ''}` : 'a component'
+      })
+      .join(', ')
   const blockers: string[] = []
   const warnings: string[] = []
   if (bom) {

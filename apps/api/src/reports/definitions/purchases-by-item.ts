@@ -1,13 +1,18 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
+import { ITEM_SHADE } from '../../lib/fabric'
 import {
   byMonth,
   dateRangeFilters,
   dayRange,
+  distinctLabels,
   itemFilter,
   mean,
   round2,
+  rowItemLabel,
   searchFilter,
+  shadeColumns,
+  shadeOf,
   supplierFilter,
   topWithRest,
 } from './shared'
@@ -57,6 +62,7 @@ export const purchasesByItem: ReportDefinition = {
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'hsnCode', label: 'HSN', type: 'text', width: 10 },
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'qty', label: 'Qty', type: 'qty', total: 'sum' },
@@ -150,6 +156,7 @@ export const purchasesByItem: ReportDefinition = {
           select: {
             code: true,
             name: true,
+            ...ITEM_SHADE,
             hsnCode: true,
             uom: { select: { symbol: true } },
             category: { select: { name: true } },
@@ -178,6 +185,7 @@ export const purchasesByItem: ReportDefinition = {
         category: l.item.category?.name ?? '',
         itemCode: l.item.code,
         item: l.item.name,
+        ...shadeOf(l.item),
         hsnCode: l.hsnCode ?? l.item.hsnCode ?? '',
         uom: l.item.uom?.symbol ?? '',
         qty: Number(l.qty),
@@ -198,12 +206,15 @@ export const purchasesByItem: ReportDefinition = {
     const gst = round2(rows.reduce((s, r) => s + r.gst, 0))
     const bills = new Set(rows.map((r) => r.billNumber)).size
 
+    // By item code, not name: one quality in two designs is two items, each
+    // named with its design and colour.
     const byItem = new Map<
       string,
-      { value: number; qty: number; uom: string; rates: number[]; suppliers: Set<string> }
+      { label: string; value: number; qty: number; uom: string; rates: number[]; suppliers: Set<string> }
     >()
     for (const r of rows) {
-      const e = byItem.get(r.item) ?? {
+      const e = byItem.get(r.itemCode) ?? {
+        label: rowItemLabel(r),
         value: 0,
         qty: 0,
         uom: r.uom,
@@ -214,8 +225,11 @@ export const purchasesByItem: ReportDefinition = {
       e.qty += r.qty
       e.rates.push(r.rate)
       e.suppliers.add(r.supplier)
-      byItem.set(r.item, e)
+      byItem.set(r.itemCode, e)
     }
+    const nameOf = new Map(
+      distinctLabels([...byItem].map(([code, e]) => ({ code, label: e.label }))).map((e) => [e.code, e.label])
+    )
     const byCategory = new Map<string, number>()
     for (const r of rows) {
       const c = r.category || 'No category'
@@ -224,7 +238,9 @@ export const purchasesByItem: ReportDefinition = {
     const bySupplier = new Map<string, number>()
     for (const r of rows) bySupplier.set(r.supplier, (bySupplier.get(r.supplier) ?? 0) + r.taxable)
 
-    const ranked = [...byItem].sort((a, b) => b[1].value - a[1].value)
+    const ranked = [...byItem]
+      .map(([code, e]) => [nameOf.get(code) ?? e.label, e] as const)
+      .sort((a, b) => b[1].value - a[1].value)
     const insights: string[] = []
     if (ranked.length) {
       const [name, top] = ranked[0]

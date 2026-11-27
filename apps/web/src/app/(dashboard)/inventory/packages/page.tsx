@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { AlertTriangle, Boxes, CheckCircle2, Printer, RefreshCw, ScanLine, Search, Settings2, Tags, Warehouse, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { InwardStickers, type LabelTarget } from '@/components/packages/InwardStickers'
@@ -16,7 +17,7 @@ import { StickerSettings } from '@/components/packages/StickerSettings'
 interface ToLabel {
   tracked: boolean
   grns: Array<{ id: string; grnNumber: string; grnDate: string; supplier: string }>
-  lines: Array<{
+  lines: Array<ShadeFields & {
     grnLineId: string
     grnId: string
     grnNumber: string
@@ -34,7 +35,7 @@ interface ToLabel {
     packType: string
     perPack: number | null
   }>
-  loose: Array<{
+  loose: Array<ShadeFields & {
     itemId: string
     itemCode: string
     item: string
@@ -155,8 +156,8 @@ function PackagesScreen() {
 
   const needle = lq.trim().toLowerCase()
   const hit = (...v: Array<string | null | undefined>) => !needle || v.some((x) => (x ?? '').toLowerCase().includes(needle))
-  const grnRows = (todo?.lines ?? []).filter((l) => l.toLabel > 0 && (!lstore || l.warehouseId === lstore) && hit(l.item, l.itemCode, l.store, l.grnNumber, l.supplier, l.lotNo))
-  const rackRows = grnFilter ? [] : (todo?.loose ?? []).filter((l) => (!lstore || l.warehouseId === lstore) && hit(l.item, l.itemCode, l.store, l.owner))
+  const grnRows = (todo?.lines ?? []).filter((l) => l.toLabel > 0 && (!lstore || l.warehouseId === lstore) && hit(l.item, l.itemCode, itemShade(l), l.store, l.grnNumber, l.supplier, l.lotNo))
+  const rackRows = grnFilter ? [] : (todo?.loose ?? []).filter((l) => (!lstore || l.warehouseId === lstore) && hit(l.item, l.itemCode, itemShade(l), l.store, l.owner))
   // Opens on whichever list has something in it, unless one was chosen.
   const from: LabelFrom = grnFilter ? 'grn' : fromParam === 'grn' || fromParam === 'racks' ? fromParam : grnRows.length || !rackRows.length ? 'grn' : 'racks'
 
@@ -449,7 +450,7 @@ interface ChangedRow {
   lotNo: string | null
   rack: string | null
   lastPrintedAt: string | null
-  item: { code: string; name: string }
+  item: { code: string; name: string } & ShadeFields
   warehouse: { name: string }
   changed: string[]
 }
@@ -518,6 +519,7 @@ function ChangedView({ rows, loading }: { rows: ChangedRow[] | null; loading: bo
                 </td>
                 <td>
                   <div className="font-medium text-foreground">{r.item.name}</div>
+                  {itemShade(r.item) && <div className="text-xs text-muted-foreground">{itemShade(r.item)}</div>}
                   <div className="font-mono text-xs text-muted-foreground">{r.item.code}</div>
                 </td>
                 <td className="whitespace-nowrap text-sm">
@@ -546,7 +548,7 @@ function ChangedView({ rows, loading }: { rows: ChangedRow[] | null; loading: bo
 /** Stickers made by themselves when stock came in, not printed yet: a group a document and item. */
 interface ReadyList {
   count: number
-  groups: Array<{
+  groups: Array<ShadeFields & {
     key: string
     sourceRef: string | null
     date: string
@@ -607,6 +609,7 @@ function ReadyView({ ready, loading, onChanged }: { ready: ReadyList | null; loa
                 </td>
                 <td>
                   <div className="font-medium text-foreground">{g.item}</div>
+                  {itemShade(g) && <div className="text-xs text-muted-foreground">{itemShade(g)}</div>}
                   <div className="text-xs text-muted-foreground">
                     <span className="font-mono">{g.itemCode}</span>
                     {g.lots?.length ? ` · Lot ${g.lots.join(', ')}` : ''}
@@ -731,6 +734,7 @@ function ToLabelView({
                     </td>
                     <td>
                       <div className="font-medium text-foreground">{l.item}</div>
+                      {itemShade(l) && <div className="text-xs text-muted-foreground">{itemShade(l)}</div>}
                       <div className="font-mono text-xs text-muted-foreground">{l.itemCode}</div>
                     </td>
                     <td className="whitespace-nowrap text-sm">{l.store}</td>
@@ -751,6 +755,9 @@ function ToLabelView({
                               itemId: l.itemId,
                               item: l.item,
                               itemCode: l.itemCode,
+                              designNo: l.designNo,
+                              color: l.color,
+                              styleId: l.styleId,
                               unit: l.unit,
                               warehouseId: l.warehouseId,
                               store: l.store,
@@ -804,6 +811,7 @@ function ToLabelView({
                 <tr key={`${l.itemId}-${l.warehouseId}-${l.ownerCustomerId ?? ''}`} data-row tabIndex={i === 0 ? 0 : -1}>
                   <td>
                     <div className="font-medium text-foreground">{l.item}</div>
+                    {itemShade(l) && <div className="text-xs text-muted-foreground">{itemShade(l)}</div>}
                     <div className="font-mono text-xs text-muted-foreground">{l.itemCode}</div>
                   </td>
                   <td className="whitespace-nowrap text-sm">{l.store}</td>
@@ -822,6 +830,9 @@ function ToLabelView({
                             itemId: l.itemId,
                             item: l.item,
                             itemCode: l.itemCode,
+                            designNo: l.designNo,
+                            color: l.color,
+                            styleId: l.styleId,
                             unit: l.unit,
                             warehouseId: l.warehouseId,
                             store: l.store,

@@ -7,6 +7,7 @@ import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
+import { ITEM_SHADE } from '../lib/fabric'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { reclaimDocumentNumber, releaseDocumentNumber, releasedNumber, shownNumber } from '../lib/numberSeries'
 import { getPrintHeader } from '../lib/printData'
@@ -95,6 +96,9 @@ const enquiryInclude = {
           name: true,
           hsnCode: true,
           uom: { select: { symbol: true } },
+          // Design No. and Colour: the list, the comparison and the printed
+          // requisition tell same-name fabrics apart by these.
+          ...ITEM_SHADE,
         },
       },
       // The pack it is asked in (qty is in pieces), for showing it.
@@ -304,6 +308,9 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
             { quotes: { some: { supplier: { name: { contains: q.q, mode: 'insensitive' } } } } },
             { lines: { some: { item: { code: { contains: q.q, mode: 'insensitive' } } } } },
             { lines: { some: { item: { name: { contains: q.q, mode: 'insensitive' } } } } },
+            // A fabric is found by its design number or colour as well.
+            { lines: { some: { item: { designNo: { contains: q.q, mode: 'insensitive' } } } } },
+            { lines: { some: { item: { color: { contains: q.q, mode: 'insensitive' } } } } },
           ],
         }
       : {}),

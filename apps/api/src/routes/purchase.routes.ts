@@ -12,7 +12,7 @@ import { writeAuditLog } from '../lib/audit'
 import { postWithin } from '../services/accounts/posting.service'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { reclaimDocumentNumber, releaseDocumentNumber, releasedNumber, shownNumber } from '../lib/numberSeries'
-import { assertInHouseBrand } from '../lib/fabric'
+import { ITEM_SHADE, assertInHouseBrand, itemShadeText } from '../lib/fabric'
 import { priceNote, notedQtyByGrnLine, syncBillAdjustments } from '../services/purchaseNote.service'
 import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
@@ -63,6 +63,15 @@ const MODULE = 'purchase'
 
 /** Money is stored to two decimals; accumulating floats without rounding drifts. */
 const round2 = (n: number) => Math.round(n * 100) / 100
+
+/**
+ * An item named in a message: "Cotton Twill (Design No: 1164 · Colour: Navy)",
+ * so a refusal about one of three same-name fabrics on a document says which.
+ */
+const itemInWords = (i: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null }) => {
+  const shade = itemShadeText(i)
+  return shade ? `${i.name} (${shade})` : i.name
+}
 
 const lineSchema = z.object({
   itemId: z.string().min(1, 'Pick an item'),
@@ -276,9 +285,9 @@ const poInclude = {
           name: true,
           hsnCode: true,
           // A fabric's design and colour, from the Items master, printed in
-          // the order's Design / Colour column.
-          color: true,
-          designNo: true,
+          // the order's Design / Colour column and shown under the item on
+          // the order list and the goods-in queue.
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
           // The category, and its parent where it has one. An item sits in
           // whichever level it was filed under, so the parent is what the list
@@ -332,6 +341,8 @@ const poReceivingInclude = {
           code: true,
           name: true,
           hsnCode: true,
+          // Which design and colour is arriving: same-name fabrics differ only by these.
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
           category: {
             select: { id: true, name: true, parent: { select: { id: true, name: true } } },
@@ -836,6 +847,8 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
           // The rate the form should offer for this item, so a line lifted off
           // an indent arrives taxed rather than at zero.
           taxRate: { select: { id: true, rate: true } },
+          // Which design and colour the indent asks for.
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
         },
       },
@@ -1204,7 +1217,7 @@ export async function assertIndentLines(
       requestedQty: true,
       purchaseQty: true,
       ownership: true,
-      item: { select: { name: true } },
+      item: { select: { name: true, ...ITEM_SHADE } },
       mr: { select: { mrNumber: true, status: true, closedAt: true } },
       poLines: { where: { po: { status: { not: 'CANCELLED' }, deletedAt: null, ...(exceptPoId ? { id: { not: exceptPoId } } : {}) } }, select: { qty: true } },
     },
@@ -1213,11 +1226,11 @@ export async function assertIndentLines(
     const m = mrLines.find((x) => x.id === id)
     if (!m) throw new AppError('One of the requisition lines this order buys for no longer exists. Pick it again from the indents.', 400, 'BAD_INDENT')
     const asked = linked.filter((l) => l.mrLineId === id)
-    if (asked.some((l) => l.itemId !== m.itemId)) throw new AppError(`${m.mr.mrNumber} asks for ${m.item.name}, not the item on this line.`, 400, 'BAD_INDENT')
+    if (asked.some((l) => l.itemId !== m.itemId)) throw new AppError(`${m.mr.mrNumber} asks for ${itemInWords(m.item)}, not the item on this line.`, 400, 'BAD_INDENT')
     if (m.mr.status !== 'APPROVED' || m.mr.closedAt) {
       throw new AppError(`${m.mr.mrNumber} is ${m.mr.closedAt ? 'closed' : 'not approved'}, so nothing is bought against it.`, 400, 'INDENT_NOT_OPEN')
     }
-    if (m.ownership === 'CUSTOMER_OWNED') throw new AppError(`${m.item.name} on ${m.mr.mrNumber} is the customer's material; it is never bought.`, 400, 'CUSTOMER_MATERIAL')
+    if (m.ownership === 'CUSTOMER_OWNED') throw new AppError(`${itemInWords(m.item)} on ${m.mr.mrNumber} is the customer's material; it is never bought.`, 400, 'CUSTOMER_MATERIAL')
     const toBuy = Number(m.purchaseQty ?? m.requestedQty)
     const ordered = m.poLines.reduce((s, l) => s + Number(l.qty), 0)
     // Ordering more than the indent asked is allowed — a full roll, the
@@ -1226,7 +1239,7 @@ export async function assertIndentLines(
     // left to buy against it; more goes on a line of its own.
     if (toBuy - ordered <= 1e-9) {
       throw new AppError(
-        `${m.item.name}: everything ${m.mr.mrNumber} asked to buy is already on order. Order more on a line of its own, not against the indent.`,
+        `${itemInWords(m.item)}: everything ${m.mr.mrNumber} asked to buy is already on order. Order more on a line of its own, not against the indent.`,
         400,
         'INDENT_ORDERED',
       )
@@ -2561,6 +2574,7 @@ const grnInclude = {
           code: true,
           name: true,
           hsnCode: true,
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
         },
       },
@@ -2856,7 +2870,7 @@ async function checkServiceLines(
       id: true,
       qty: true,
       shortClosed: true,
-      item: { select: { name: true } },
+      item: { select: { name: true, ...ITEM_SHADE } },
       po: {
         select: {
           id: true,
@@ -2911,8 +2925,8 @@ async function checkServiceLines(
     if (want > room + 0.0005) {
       throw new AppError(
         room > 0
-          ? `The bill claims ${want} of ${ol.item.name}, but only ${room} is left to bill on ${ol.po.poNumber}. Add the extra to the order first if it was agreed.`
-          : `${ol.item.name} on ${ol.po.poNumber} is already billed in full.`,
+          ? `The bill claims ${want} of ${itemInWords(ol.item)}, but only ${room} is left to bill on ${ol.po.poNumber}. Add the extra to the order first if it was agreed.`
+          : `${itemInWords(ol.item)} on ${ol.po.poNumber} is already billed in full.`,
         409,
         'BILLED_MORE_THAN_ORDERED'
       )
@@ -2962,7 +2976,8 @@ interface BookablePoLine {
   uomId?: string | null
   uomFactor?: Prisma.Decimal | number | string
   shortClosed: boolean
-  item: { name: string }
+  /** With its design and colour, so a refusal names which of two same-name fabrics. */
+  item: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null }
   /** Set when the line buys for a sample: it is received into a sample store only. */
   sampleMaterialId?: string | null
 }
@@ -3023,7 +3038,7 @@ function prepareGrnLines(
       const total = round3((already.get(poLineId) ?? 0) + booking)
       if (total > round3(ordered * (1 + OVER_RECEIPT_ALLOWANCE))) {
         throw new AppError(
-          `${poLine.item.name}: ${total} received against ${ordered} ordered — more than ` +
+          `${itemInWords(poLine.item)}: ${total} received against ${ordered} ordered — more than ` +
             `${OVER_RECEIPT_ALLOWANCE * 100}% over the order. Check the quantity; if it is right, ` +
             `say why in "Why more than ordered".`,
           400,
@@ -3045,7 +3060,7 @@ function prepareGrnLines(
 
     if (poLine.shortClosed) {
       throw new AppError(
-        `${poLine.item.name} was closed short — reopen that line on the order before receiving more against it.`,
+        `${itemInWords(poLine.item)} was closed short — reopen that line on the order before receiving more against it.`,
         400,
         'LINE_SHORT_CLOSED'
       )
@@ -3114,7 +3129,7 @@ async function grnLinesToStock<L extends { poLineId: string; receivedQty: number
 ): Promise<L[]> {
   const poLines = await db.purchaseOrderLine.findMany({
     where: { id: { in: [...new Set(lines.map((l) => l.poLineId))] } },
-    select: { id: true, itemId: true, uomFactor: true, uom: { select: { symbol: true, decimalPlaces: true } }, item: { select: { name: true, decimalPlaces: true, uom: { select: { symbol: true, decimalPlaces: true } } } } },
+    select: { id: true, itemId: true, uomFactor: true, uom: { select: { symbol: true, decimalPlaces: true } }, item: { select: { name: true, ...ITEM_SHADE, decimalPlaces: true, uom: { select: { symbol: true, decimalPlaces: true } } } } },
   })
   const byId = new Map(poLines.map((l) => [l.id, l]))
   return lines.map((l) => {
@@ -3126,7 +3141,7 @@ async function grnLinesToStock<L extends { poLineId: string; receivedQty: number
     const unit = loose ? po.item.uom.symbol : po.uom!.symbol
     for (const [what, v] of [['received', l.receivedQty], ['rejected', l.rejectedQty], ...(l.packQtys ?? []).map((q) => ['one package', q] as const)] as const) {
       if (v == null || !(Number(v) > 0)) continue
-      if (!fitsPlaces(Number(v), places)) throw new AppError(`${po.item.name} (${what}): ${Number(v)} ${unit}. ${placesMessage(places)}`, 400, 'QTY_NOT_IN_UNIT')
+      if (!fitsPlaces(Number(v), places)) throw new AppError(`${itemInWords(po.item)} (${what}): ${Number(v)} ${unit}. ${placesMessage(places)}`, 400, 'QTY_NOT_IN_UNIT')
     }
     const x = (q: number | undefined) => (q == null ? q : Math.round(Number(q) * factor * 1000) / 1000)
     return { ...l, receivedQty: x(l.receivedQty)!, rejectedQty: x(l.rejectedQty), packQtys: l.packQtys?.map((q) => x(q)!) }
@@ -3342,7 +3357,8 @@ router.get('/grn/filter-options', requirePermission(MODULE, 'view'), async (_req
     }),
     prisma.item.findMany({
       where: { grnLines: { some: {} } },
-      select: { id: true, code: true, name: true },
+      // With its design and colour: three "Cotton Twill" in the filter are three items.
+      select: { id: true, code: true, name: true, ...ITEM_SHADE },
       orderBy: { name: 'asc' },
     }),
   ])
@@ -3369,6 +3385,8 @@ router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res)
               code: true,
               name: true,
               hsnCode: true,
+              // Printed under the item: which design and colour came in.
+              ...ITEM_SHADE,
               uom: { select: { symbol: true } },
             },
           },
@@ -3561,7 +3579,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
     const po = await tx.purchaseOrder.findUnique({
       where: { id: data.poId },
       include: {
-        lines: { include: { item: { select: { name: true } } } },
+        lines: { include: { item: { select: { name: true, ...ITEM_SHADE } } } },
         deliveryWarehouse: { select: { id: true, name: true, address: true } },
       },
     })
@@ -3790,7 +3808,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     const po = await tx.purchaseOrder.findUnique({
       where: { id: before.poId },
       include: {
-        lines: { include: { item: { select: { name: true } } } },
+        lines: { include: { item: { select: { name: true, ...ITEM_SHADE } } } },
         deliveryWarehouse: { select: { id: true, name: true, address: true } },
       },
     })
@@ -3944,7 +3962,8 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       if (claimedQty <= 0) continue
 
       const match = pairs.find((pair) => pair.old?.id === line.id)
-      const itemName = poLines.get(line.poLineId ?? '')?.item?.name ?? 'That item'
+      const lineItem = poLines.get(line.poLineId ?? '')?.item
+      const itemName = lineItem ? itemInWords(lineItem) : 'That item'
       // Named by whichever document is actually holding it, so the message
       // points at the thing that has to be dealt with.
       const heldBy = claim?.bills.length
@@ -4485,6 +4504,8 @@ const billInclude = {
           code: true,
           name: true,
           hsnCode: true,
+          // The bill, its list row and its print say which design and colour was billed.
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
         },
       },
@@ -4824,7 +4845,7 @@ async function checkAgainstReceipts(
       id: true,
       receivedQty: true,
       itemId: true,
-      item: { select: { name: true } },
+      item: { select: { name: true, ...ITEM_SHADE } },
       grn: { select: { grnNumber: true, status: true, po: { select: { supplierId: true } } } },
     },
   })
@@ -4920,7 +4941,7 @@ async function checkAgainstReceipts(
     // Quantities are held to three decimals; comparing raw floats would refuse
     // a bill that is short by a millionth of a metre.
     if (round3(wanted) > room + 0.0005) {
-      const name = receipt.item.name
+      const name = itemInWords(receipt.item)
       throw new AppError(
         already > 0
           ? `The bill claims ${round3(wanted)} of ${name}, but only ${room} is left to bill on ${receipt.grn.grnNumber} — ${already} of the ${delivered} delivered has already been billed.`
@@ -5069,6 +5090,7 @@ router.get('/bills/match/:grnId', requirePermission(MODULE, 'view'), async (req,
               code: true,
               name: true,
               hsnCode: true,
+              ...ITEM_SHADE,
               uom: { select: { symbol: true } },
             },
           },
@@ -5196,7 +5218,7 @@ async function findRateVariances(
 
   const receiptLines = await tx.gRNLine.findMany({
     where: { id: { in: grnLineIds } },
-    select: { id: true, unitRate: true, uomFactor: true, item: { select: { id: true, name: true } } },
+    select: { id: true, unitRate: true, uomFactor: true, item: { select: { id: true, name: true, ...ITEM_SHADE } } },
   })
   const byId = new Map(receiptLines.map((r) => [r.id, r]))
 
@@ -5219,7 +5241,8 @@ async function findRateVariances(
 
     out.push({
       lineIndex,
-      itemName: receipt.item.name,
+      // Named with its design and colour: the refusal lists each line by it.
+      itemName: itemInWords(receipt.item),
       itemId: receipt.item.id,
       poRate,
       billedRate,

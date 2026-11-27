@@ -17,7 +17,9 @@ import {
   RULE,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
+import { SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 interface Payload {
   company: Record<string, string | null>
@@ -58,7 +60,7 @@ interface Payload {
       qty: string
       hsnCode: string | null
       notes: string | null
-      item: { code: string; name: string; hsnCode: string | null; uom: { symbol: string } | null }
+      item: { code: string; name: string; hsnCode: string | null; uom: { symbol: string } | null } & ShadeFields
     }>
   }
 }
@@ -116,6 +118,7 @@ export default function PrintCustomerReturn() {
       desc: (
         <>
           <div style={{ fontWeight: 600 }}>{l.item.name}</div>
+          {itemShade(l.item) && <SubLine>{itemShade(l.item)}</SubLine>}
           {l.notes && <div style={{ fontSize: '9px', color: GREY }}>{l.notes}</div>}
         </>
       ),

@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import type { ReportDefinition, ReportFilter, ReportParams } from './types'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 
 /**
  * What the reader actually asked for, in words.
@@ -24,9 +25,12 @@ const LOOKUPS: Record<
     (await tx.supplier.findUnique({ where: { id }, select: { name: true } }))?.name ?? null,
   customers: async (tx, id) =>
     (await tx.customer.findUnique({ where: { id }, select: { name: true } }))?.name ?? null,
+  // With its design and colour: three "Cotton Twill" items share the name.
   items: async (tx, id) => {
-    const item = await tx.item.findUnique({ where: { id }, select: { code: true, name: true } })
-    return item ? `${item.name} (${item.code})` : null
+    const item = await tx.item.findUnique({ where: { id }, select: { code: true, name: true, ...ITEM_SHADE } })
+    if (!item) return null
+    const shade = itemShadeText(item)
+    return `${item.name} (${item.code})${shade ? ` · ${shade}` : ''}`
   },
   warehouses: async (tx, id) =>
     (await tx.warehouse.findUnique({ where: { id }, select: { name: true } }))?.name ?? null,

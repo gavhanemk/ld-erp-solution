@@ -5,13 +5,16 @@ import { createPortal } from 'react-dom'
 import { Printer, Tags, X } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { openPrintTab, printLabels, qtyText } from './packageTypes'
 import type { InwardRef } from './InwardStickers'
 import { ChangeStickers } from './ChangeStickers'
 
 interface Ready {
   count: number
-  groups: Array<{ key: string; sourceRef: string | null; item: string; store: string; unit: string; qty: number; each?: number | null; packType?: string; lots?: string[]; ids: string[] }>
+  groups: Array<
+    { key: string; sourceRef: string | null; item: string; store: string; unit: string; qty: number; each?: number | null; packType?: string; lots?: string[]; ids: string[] } & ShadeFields
+  >
 }
 
 /**
@@ -103,6 +106,7 @@ function ReadyWindow({
             <li key={g.key} className="flex items-center gap-2 px-3 py-2.5">
               <div className="min-w-0 flex-1">
                 <p className="text-foreground truncate text-sm font-medium">{g.item}</p>
+                {itemShade(g) && <p className="text-muted-foreground truncate text-xs">{itemShade(g)}</p>}
                 <p className="text-muted-foreground text-xs">
                   {stickerLine(g)} · {g.store}
                   {g.lots?.length ? ` · Lot ${g.lots.join(', ')}` : ''}

@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
@@ -67,7 +68,8 @@ interface Category {
   parentId: string | null
 }
 
-interface Item {
+/** With its Design No. and Colour: same-name fabrics differ only by these. */
+interface Item extends ShadeFields {
   id: string
   code: string
   name: string
@@ -77,6 +79,9 @@ interface Item {
   buyUnits?: Array<{ factor: string | number; isDefault: boolean; uom: { id: string; symbol: string; decimalPlaces?: number } }>
   category: { id: string; name: string; parentId: string | null } | null
 }
+
+/** A picker's sub-line — the code, or the name — with the item's design and colour after it, so both can be searched. */
+const withShade = (text: string, it: ShadeFields) => [text, itemShade(it)].filter(Boolean).join(' · ')
 
 interface Warehouse {
   id: string
@@ -287,14 +292,16 @@ export function PurchaseEnquiryDialog({
     let alive = true
     Promise.all([
       api.get<{ data: Supplier[] }>('/masters/suppliers?limit=500&active=true'),
-      api.get<{ data: Item[] }>('/masters/items?limit=1000&active=true'),
+      // Every page: the list answers 200 a request, and one asked for 1000
+      // quietly got the first 200 names.
+      everyItem<Item>({ active: true }),
       api.get<{ data: Category[] }>('/masters/item-categories?limit=500'),
       api.get<{ data: Warehouse[] }>('/masters/warehouses?limit=200&active=true'),
     ])
       .then(([s, i, c, w]) => {
         if (!alive) return
         setSuppliers(s.data)
-        setItems(i.data)
+        setItems(i)
         setCategories(c.data)
         setWarehouses(w.data)
       })
@@ -360,6 +367,16 @@ export function PurchaseEnquiryDialog({
     },
     [items, subsOf]
   )
+
+  /**
+   * The chosen item's Design No. and Colour, said under the Item box: the box
+   * shows the name alone, and three "Cotton Twill" rows would read the same.
+   * A saved line's own item stands in when the item is no longer active.
+   */
+  const shadeOf = (l: Line) =>
+    l.itemId
+      ? itemShade(items.find((it) => it.id === l.itemId) ?? record?.lines.find((rl) => rl.itemId === l.itemId)?.item)
+      : ''
 
   /*
    * The rows as they are right now, for the handlers that need to read one
@@ -909,11 +926,14 @@ export function PurchaseEnquiryDialog({
                                 would replace the item, code and all. */}
                             {!l.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
                             {(l.itemId ? items.filter((it) => it.id === l.itemId) : itemsFor(l)).map((it) => (
-                              <option key={it.id} value={it.id} data-sub={it.code}>
+                              <option key={it.id} value={it.id} data-sub={withShade(it.code, it)}>
                                 {it.name}
                               </option>
                             ))}
                           </SmartSelect>
+                          {shadeOf(l) && (
+                            <p className="text-muted-foreground text-[10px]">{shadeOf(l)}</p>
+                          )}
                           {l.mrNumber && (
                             <p className="text-muted-foreground text-[10px]">
                               against indent {l.mrNumber}
@@ -932,7 +952,7 @@ export function PurchaseEnquiryDialog({
                           >
                             <option value="">Or pick by code</option>
                             {itemsFor(l).map((it) => (
-                              <option key={it.id} value={it.id} data-sub={it.name}>
+                              <option key={it.id} value={it.id} data-sub={withShade(it.name, it)}>
                                 {it.code}
                               </option>
                             ))}
@@ -1066,7 +1086,7 @@ export function PurchaseEnquiryDialog({
                             >
                               <option value="">Items Code</option>
                               {itemsFor(l).map((it) => (
-                                <option key={it.id} value={it.id} data-sub={it.name}>
+                                <option key={it.id} value={it.id} data-sub={withShade(it.name, it)}>
                                   {it.code}
                                 </option>
                               ))}
@@ -1085,11 +1105,14 @@ export function PurchaseEnquiryDialog({
                                   A new item is offered only on an empty row. */}
                               {!l.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
                               {(l.itemId ? items.filter((it) => it.id === l.itemId) : itemsFor(l)).map((it) => (
-                                <option key={it.id} value={it.id} data-sub={it.code}>
+                                <option key={it.id} value={it.id} data-sub={withShade(it.code, it)}>
                                   {it.name}
                                 </option>
                               ))}
                             </SmartSelect>
+                            {shadeOf(l) && (
+                              <p className="text-muted-foreground mt-0.5 text-[10px]">{shadeOf(l)}</p>
+                            )}
                             {l.mrNumber && (
                               <p className="text-muted-foreground mt-0.5 text-[10px]">
                                 against indent {l.mrNumber}

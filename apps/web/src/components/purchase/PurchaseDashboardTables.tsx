@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import { ArrowDownRight, ArrowUpRight } from 'lucide-react'
 import { PALETTE, TONE, inr, qtyFmt } from '@/components/dashboard/DashKit'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * The purchase dashboard's lists — what to chase, who to buy from, what it
@@ -88,8 +89,9 @@ export interface PurchaseDashboard {
       categories: Array<{ id: string; name: string; value: number; lines: number; items: number; share: number; qty: Qty; children?: Array<{ name: string; value: number; lines: number; items: number; share: number; qty: Qty }> }>
       departments: Array<{ name: string; value: number; lines: number; items: number; share: number; qty: Qty; children?: Array<{ name: string; value: number; lines: number; items: number; share: number; qty: Qty }> }>
     }
-    topItems: Array<{ id: string; name: string; uom: string; value: number; qty: number; orders: number }>
-    priceWatch: Array<{
+    /** Kept apart by item; a fabric's design and colour say which one it is. */
+    topItems: Array<{ id: string; name: string; uom: string; value: number; qty: number; orders: number } & ShadeFields>
+    priceWatch: Array<ShadeFields & {
       id: string
       name: string
       uom: string
@@ -259,6 +261,7 @@ export function PriceWatchList({ rows }: { rows: PurchaseDashboard['analysis']['
                 {Math.abs(c) <= 0.005 ? 'same as usual' : `${Math.round(Math.abs(c) * 100)}% ${c > 0 ? 'dearer' : 'cheaper'}`}
               </span>
             </div>
+            {itemShade(r) && <p className="truncate text-[10px] text-muted-foreground">{itemShade(r)}</p>}
             <div className="mt-1 flex items-center gap-2 text-[10px] tabular-nums text-muted-foreground">
               <span>
                 last <span className="font-semibold text-foreground">{rate(r.latestRate)}{unit}</span> · usual {rate(r.avgRate)}
@@ -412,7 +415,10 @@ export function TopItemsTable({ rows, total }: { rows: PurchaseDashboard['analys
             const share = total ? Math.round((r.value / total) * 100) : 0
             return (
               <tr key={r.id} className="border-b border-border/60">
-                <td className="max-w-[16rem] truncate py-2.5 pr-2 text-foreground">{r.name}</td>
+                <td className="max-w-[16rem] py-2.5 pr-2 text-foreground">
+                  <div className="truncate">{r.name}</div>
+                  {itemShade(r) && <div className="truncate text-[11px] text-muted-foreground">{itemShade(r)}</div>}
+                </td>
                 <td className="px-2 text-right">
                   <span className="whitespace-nowrap rounded-md bg-secondary px-1.5 py-0.5 text-[11px] tabular-nums text-foreground">
                     {qtyFmt(r.qty)} <span className="text-muted-foreground">{r.uom}</span>
