@@ -1,10 +1,12 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { AlertCircle, Loader2, Plus, Sparkles, Trash2 } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { AlertCircle, Loader2, PackagePlus, Plus, Trash2 } from 'lucide-react'
+import { api, ApiError, can } from '@/lib/api'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { itemFormFields } from '@/components/masters/itemFormFields'
 
 /** A style a direct order can make: switched on, out of sampling. */
 export interface DirectStyle {
@@ -49,15 +51,17 @@ export function directProblem(l: DirectLine, info: StyleInfo | undefined, code: 
   const colours = info.colours.filter((c) => c.color)
   if (colours.length && !l.color) return `${code}: pick the colour.`
   const c = info.colours.find((x) => x.color.toLowerCase() === l.color.toLowerCase())
-  if (c && !c.item && directTotal(l, info) > 0) return `${code}${l.color ? ` ${l.color}` : ''} has no finished item yet: press Make it on the line.`
+  if (c && !c.item && directTotal(l, info) > 0) return `${code}${l.color ? ` ${l.color}` : ''} has no finished item yet: add it with Add item on the line.`
   return null
 }
 
 /**
- * The lines of a direct manufacturing order (stock or samples): for each,
- * the style, its colour, the finished item its pieces are booked in as, the
- * BOM it is made to, and the pieces by size. A colour with no finished item
- * yet gets one with Make it, made like the style's other colours.
+ * The lines of a direct manufacturing order: for each, the style, its colour,
+ * the finished item its pieces are booked in as, the BOM it is made to, and
+ * the pieces by size. A colour with no finished item yet is added with Add
+ * item: the Items & Products form itself, over this one, started like the
+ * style's other colours — every field there to check, saved under the Items
+ * permission like any item.
  */
 export function DirectMoLines({
   styles,
@@ -75,8 +79,11 @@ export function DirectMoLines({
   onInfo: (styleId: string, info: StyleInfo) => void
   disabled?: boolean
 }) {
-  const [making, setMaking] = useState<string | null>(null)
+  // A colour's finished item being added on the Items & Products form, and what it starts at.
+  const [adding, setAdding] = useState<{ styleId: string; values: Record<string, unknown> } | null>(null)
+  const [opening, setOpening] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const mayAddItem = can('masters.items', 'create')
 
   // Each style picked: its sizes, colours, items and BOMs, once.
   useEffect(() => {
@@ -91,17 +98,30 @@ export function DirectMoLines({
 
   const set = (key: string, patch: Partial<DirectLine>) => onChange(lines.map((l) => (l.key === key ? { ...l, ...patch } : l)))
 
-  const makeItem = async (l: DirectLine) => {
-    setMaking(l.key)
+  // The item form, started like the style's other colours.
+  const addItem = async (l: DirectLine) => {
+    setOpening(l.key)
     setError(null)
     try {
-      await api.post('/production/direct/colour-item', { styleId: l.styleId, colour: l.color })
-      const r = await api.get<{ data: StyleInfo }>(`/production/direct/styles/${l.styleId}`)
-      onInfo(l.styleId, r.data)
+      const qs = new URLSearchParams({ styleId: l.styleId, colour: l.color })
+      const r = await api.get<{ data: { values: Record<string, unknown> } }>(`/production/direct/item-template?${qs}`)
+      setAdding({ styleId: l.styleId, values: r.data.values })
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not make the item.')
+      setError(err instanceof ApiError ? err.message : 'Could not open the item form.')
     } finally {
-      setMaking(null)
+      setOpening(null)
+    }
+  }
+  // Saved: the style's colours read again, so the line shows its new item.
+  const added = async () => {
+    const styleId = adding?.styleId
+    setAdding(null)
+    if (!styleId) return
+    try {
+      const r = await api.get<{ data: StyleInfo }>(`/production/direct/styles/${styleId}`)
+      onInfo(styleId, r.data)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not load the style again.')
     }
   }
 
@@ -179,9 +199,15 @@ export function DirectMoLines({
                     </span>
                   ) : (
                     <>
-                      <span className="warn-text">No finished item yet</span>
-                      <button type="button" className="btn-secondary h-7 px-2 text-xs" disabled={disabled || making === l.key} onClick={() => void makeItem(l)}>
-                        {making === l.key ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} Make it
+                      <span className="warn-text">No finished item for this colour yet</span>
+                      <button
+                        type="button"
+                        className="btn-secondary h-7 px-2 text-xs"
+                        disabled={disabled || opening === l.key || !mayAddItem}
+                        title={mayAddItem ? 'Add it on the Items & Products form, started like the style’s other colours' : 'Adding items needs the Items “Add” permission: ask for it to be added in Masters → Items & Products'}
+                        onClick={() => void addItem(l)}
+                      >
+                        {opening === l.key ? <Loader2 size={12} className="animate-spin" /> : <PackagePlus size={12} />} Add item
                       </button>
                     </>
                   )}
@@ -264,6 +290,20 @@ export function DirectMoLines({
       <button type="button" className="btn-secondary h-8 text-xs" onClick={() => onChange([...lines, newDirectLine()])} disabled={disabled}>
         <Plus size={13} /> Add a style
       </button>
+      {adding && (
+        <MasterFormDialog
+          open
+          stacked
+          wide
+          columns={4}
+          title="Item"
+          resource="items"
+          fields={itemFormFields}
+          initialValues={adding.values}
+          onClose={() => setAdding(null)}
+          onSaved={() => void added()}
+        />
+      )}
     </div>
   )
 }

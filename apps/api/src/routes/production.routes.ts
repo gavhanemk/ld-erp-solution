@@ -11,7 +11,7 @@ import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
 import { ensureJobCards, jobCardSchema, updateJobCard } from '../services/jobCard.service'
 import { attachLateBoms, findBom, materialPlan, MO_STAGES, moStages, orderForPlanning, PLANNABLE_ORDER_STATUSES, stageWhere, workStarted, type MoStage } from '../services/manufacturing.service'
-import { colourItem } from '../services/openingStock.service'
+import { garmentTemplate } from '../services/openingStock.service'
 import { breakupOf, cancelCutting, createCutting, cuttingPrep, cuttingSchema, cutterIssueDetailsSchema, piecesBeingSaved, updateCutterIssue } from '../services/cutting.service'
 import { applyRouting, routingProblem, stylesOfMo } from '../services/route.service'
 import floorRoutes from './productionFloor.routes'
@@ -205,7 +205,7 @@ async function shapeDirectLines(tx: Prisma.TransactionClient, input: { lines: Mo
       select: { id: true },
     })
     if (!item) {
-      throw new AppError(`${st.code}${color ? ` ${color}` : ''} has no finished item yet, to book its pieces in as: make it first (Make it, on the line).`, 400, 'NO_ITEM')
+      throw new AppError(`${st.code}${color ? ` ${color}` : ''} has no finished item yet, to book its pieces in as: add it first (Add item, on the line, or Masters → Items & Products).`, 400, 'NO_ITEM')
     }
     const bom = await findBom(tx, st.id, color)
     shaped.push({ styleId: st.id, color: color ?? '', total, sizes: picked, bomId: bom?.id ?? null })
@@ -880,19 +880,35 @@ router.get('/direct/styles/:id', requirePermission(MODULE, 'view'), async (req, 
 })
 
 /**
- * POST /direct/colour-item — the finished item for a style in a colour, made
- * like the style's other colours (category, unit, HSN, rate); with preview,
- * only what it would get. Its pieces are booked in as it when packed.
+ * GET /direct/item-template?styleId=&colour= — what the item form starts at
+ * for a style's colour with no finished item yet: like the style's other
+ * colours (category, unit, HSN, rate), or the finished-goods category that is
+ * plainly the style's. Only a suggestion: the item is added on the Items &
+ * Products form itself, under its own permission, every field there to check.
  */
-router.post('/direct/colour-item', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const body = z
-    .object({ styleId: z.string().min(1), colour: z.string().trim().min(1, 'Pick the colour').max(60), preview: z.boolean().optional(), categoryId: z.string().min(1).optional().nullable() })
-    .parse(req.body)
-  const made = await colourItem({ styleId: body.styleId, colour: body.colour, preview: body.preview, categoryId: body.categoryId ?? null })
-  if ('item' in made && made.made) {
-    await writeAuditLog(req, { module: 'masters', action: 'CREATE', entityType: 'Item', entityId: made.item.id, after: made.item })
+router.get('/direct/item-template', requirePermission(MODULE, 'view'), async (req, res) => {
+  const styleId = text(req.query.styleId)
+  const colour = text(req.query.colour) ?? ''
+  if (!styleId) throw new AppError('Pick the style', 400, 'NO_STYLE')
+  const style = await prisma.style.findUnique({ where: { id: styleId }, select: { id: true, code: true, name: true, category: true, colors: true } })
+  if (!style) throw new AppError('That style does not exist', 404, 'NOT_FOUND')
+  const color = style.colors.find((c) => c.trim().toLowerCase() === colour.toLowerCase()) ?? colour
+  const found = await garmentTemplate(style)
+  const values: Record<string, unknown> = { type: 'FINISHED_GOOD', name: `${style.name}${color ? ` — ${color}` : ''}`, styleId: style.id, color }
+  let copiedFrom: string | null = null
+  if (!('needCategory' in found)) {
+    const t = found.template
+    const cat = await prisma.itemCategory.findUnique({ where: { id: t.categoryId }, select: { id: true, parentId: true } })
+    Object.assign(values, {
+      mainCategoryId: cat?.parentId ?? cat?.id,
+      subCategoryId: cat?.parentId ? cat.id : undefined,
+      uomId: t.uomId,
+      hsnCode: t.hsnCode ?? undefined,
+      standardRate: t.standardRate != null ? Number(t.standardRate) : undefined,
+    })
+    copiedFrom = found.copiedFrom
   }
-  res.json({ success: true, data: made })
+  res.json({ success: true, data: { values, copiedFrom } })
 })
 
 /**

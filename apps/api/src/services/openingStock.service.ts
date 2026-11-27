@@ -1812,7 +1812,7 @@ export async function colourItem(input: { styleId: string; colour: string; categ
  * one chosen). When none is plain, the categories to choose from instead.
  */
 type GarmentTemplate = { categoryId: string; uomId: string; hsnCode: string | null; taxRateId: string | null; standardRate: unknown }
-async function garmentTemplate(
+export async function garmentTemplate(
   style: { id: string; name: string; category: string | null },
   categoryId?: string | null,
 ): Promise<{ template: GarmentTemplate; copiedFrom: string | null; hsnFrom: string } | { needCategory: true; categories: Array<{ id: string; name: string }> }> {

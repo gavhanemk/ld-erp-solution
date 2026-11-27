@@ -54,13 +54,27 @@ async function main() {
     const mine = info?.colours?.find((c: any) => c.color === colour)
     check('style detail: its sizes, and the new colour with no finished item yet', info?.sizes?.length >= 2 && !!mine && mine.item === null, { sizes: info?.sizes?.length, mine })
 
-    // 2. No finished item yet: refused, then made from the form.
+    // 2. No finished item yet: refused; then added on the Items & Products form, started from the style's other colours.
     const line = { styleId: st.id, color: colour, sizes: [{ sizeId: sizes[0].id, qty: 30 }, { sizeId: sizes[1].id, qty: 20 }] }
     const noItem = await call('POST', '/production/orders', { brandId: ldBrand.id, purpose: 'STOCK', lines: [line] })
-    check('no finished item for the colour: refused, saying to make it', noItem.status === 400 && noItem.body?.code === 'NO_ITEM', noItem.body)
-    const made = await call('POST', '/production/direct/colour-item', { styleId: st.id, colour })
-    check('Make it: the finished item made for the colour', okay(made) && made.body?.data?.made === true, made.body)
-    const item = made.body.data.item
+    check('no finished item for the colour: refused, saying to add it', noItem.status === 400 && noItem.body?.code === 'NO_ITEM' && /Add item/.test(noItem.body?.message ?? ''), noItem.body)
+    const gone = await call('POST', '/production/direct/colour-item', { styleId: st.id, colour })
+    check('no item is made by production on its own any more', gone.status === 404, gone.status)
+    const tpl = (await call('GET', `/production/direct/item-template?styleId=${st.id}&colour=${encodeURIComponent(colour)}`)).body?.data?.values
+    check('the item form starts as a finished good of the style in that colour, like its other colours', tpl?.type === 'FINISHED_GOOD' && tpl?.styleId === st.id && tpl?.color === colour && !!tpl?.uomId && !!(tpl?.subCategoryId || tpl?.mainCategoryId), tpl)
+    // Saved as the form saves it: through Items & Products.
+    const made = await call('POST', '/masters/items', {
+      name: tpl.name,
+      type: tpl.type,
+      categoryId: tpl.subCategoryId ?? tpl.mainCategoryId,
+      uomId: tpl.uomId,
+      styleId: tpl.styleId,
+      color: tpl.color,
+      ...(tpl.hsnCode ? { hsnCode: tpl.hsnCode } : {}),
+      ...(tpl.standardRate != null ? { standardRate: tpl.standardRate } : {}),
+    })
+    check('added on Items & Products', made.status === 201 || made.status === 200, made.body)
+    const item = made.body.data
     if (item?.id) await prisma.item.update({ where: { id: item.id }, data: { hsnCode: '6205' } })
     info = (await call('GET', `/production/direct/styles/${st.id}`)).body?.data
     check('style detail now shows it', info?.colours?.find((c: any) => c.color === colour)?.item?.id === item?.id)
