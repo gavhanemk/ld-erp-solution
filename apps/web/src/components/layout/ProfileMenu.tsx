@@ -381,10 +381,10 @@ function ProfileDialog({ onClose, onChangePassword }: { onClose: () => void; onC
                 <ProfileRow icon={Phone} label="Phone" value={me.phone} />
                 <ProfileRow icon={SquareUser} label="Employee code" value={me.employeeCode} />
               </ProfileSection>
+              {/* The role is the badge under the name; this says what it means. */}
               <ProfileSection title="Access">
-                <ProfileRow icon={superAdmin ? Crown : ShieldCheck} label="Role" value={me.role} />
                 <ProfileRow
-                  icon={LayoutGrid}
+                  icon={superAdmin ? Crown : LayoutGrid}
                   label="Can open"
                   value={
                     superAdmin
