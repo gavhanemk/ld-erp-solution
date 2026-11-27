@@ -46,7 +46,7 @@ type Raw = Partial<Record<SupplierKey, string>>
 export const SUPPLIER_COLUMNS: SheetColumn<SupplierKey>[] = [
   { key: 'code', head: 'Supplier Code', width: 13, note: 'Leave empty for a new supplier: the code is given when it is saved.' },
   { key: 'name', head: 'Supplier Name *', width: 30 },
-  { key: 'category', head: 'Category *', width: 13, list: 'categories' },
+  { key: 'category', head: 'Category', width: 13, list: 'categories', note: 'Empty: Other. Change it later on the supplier.' },
   { key: 'gstin', head: 'GSTIN', width: 18, note: '15 characters. Empty if unregistered: the order then carries no GST.' },
   { key: 'stateCode', head: 'GST State Code', width: 10, note: 'Two digits. Empty: taken from the GSTIN, or from State.' },
   { key: 'pan', head: 'PAN', width: 12, note: 'Empty: taken from the GSTIN.' },
@@ -143,7 +143,7 @@ export async function supplierWorkbook(rows: Array<Record<string, unknown>>, wit
       MAX_ROWS,
     )
     addHowToSheet(wb, [
-      'One row per supplier. Required: Supplier Name and Category.',
+      'One row per supplier. Required: Supplier Name. Category is optional: empty means Other.',
       'GSTIN, GST State Code and PAN must agree. Give the GSTIN and the other two are filled in from it; with no GSTIN, pick the State and its code is used.',
       'A supplier already in the system (the same name, ignoring capitals and spaces) is left as it is and the row is skipped. Change a supplier on its own form.',
       'A new supplier gets its code (SUP-…) when it is saved. Leave Supplier Code empty.',
@@ -231,9 +231,9 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
 
     if (raw.code) problems.push(`No supplier has the code ${raw.code}. Leave Supplier Code empty for a new one.`)
 
-    const category = CATEGORIES.get(low(raw.category))
-    if (!raw.category) problems.push('Category is empty.')
-    else if (!category) {
+    // Optional on the sheet; every supplier still has one, so an empty cell is Other.
+    const category = raw.category?.trim() ? CATEGORIES.get(low(raw.category)) : 'OTHER'
+    if (!category) {
       problems.push(`No category "${raw.category}". Pick one of: ${Object.values(SUPPLIER_CATEGORY_LABEL).join(', ')}.`)
     }
 

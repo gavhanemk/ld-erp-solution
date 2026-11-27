@@ -11,7 +11,8 @@ import {
   Tag, Layers
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { api, currentUser, tokens } from '@/lib/api'
+import { currentUser } from '@/lib/api'
+import { signOut as endSession } from '@/lib/session'
 import { useAppSettings } from '@/lib/appSettings'
 import { canDo, canOpen, useAccess } from '@/lib/access'
 import { INVENTORY_SECTIONS } from './inventorySections'
@@ -283,16 +284,7 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
     setUser(currentUser())
   }, [])
 
-  const signOut = async () => {
-    try {
-      await api.post('/auth/logout', {})
-    } catch {
-      // Signing out must work even when the server cannot be reached: the
-      // tokens live in this browser and clearing them is what actually matters.
-    }
-    tokens.clear()
-    router.push('/login')
-  }
+  const signOut = () => endSession((href) => router.push(href))
 
   const toggleMenu = (label: string) => {
     setOpenMenus((prev) =>
