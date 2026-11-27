@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 import { ITEM_TYPE_LABEL as TYPE_LABEL, itemFormFields } from '@/components/masters/itemFormFields'
+import { itemShade } from '@/lib/items'
 import { isProcessDepartment } from '@/components/masters/processDepartments'
 
 /*
@@ -129,7 +130,7 @@ function columnsFor(
           <div>
             <div>{i.name}</div>
             <div className="text-muted-foreground text-xs font-normal">
-              {[i.designNo ? `Design No: ${i.designNo}` : null, i.color ? `Colour: ${i.color}` : null].filter(Boolean).join(' · ')}
+              {itemShade(i)}
             </div>
           </div>
         ) : (

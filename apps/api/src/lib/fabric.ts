@@ -56,3 +56,23 @@ export async function assertInHouseBrand(tx: Tx, brandId: string | null | undefi
   if (!b.isActive) throw new AppError(`${b.name} is switched off in Masters → In House Brands.`, 400, 'BRAND_INACTIVE')
   return b
 }
+
+/**
+ * The item fields every screen needs to tell same-name fabric and thread
+ * apart (27 Nov 2026) — three "Cotton Twill" items differ only by these.
+ * Spread into an item select: `{ id: true, code: true, name: true, ...ITEM_SHADE }`.
+ * `styleId` is there so a finished good, whose colour is already in its name,
+ * is left alone. Raw SQL selects the same:
+ * `i."designNo", CASE WHEN i."styleId" IS NULL THEN i.color END AS colour`.
+ */
+export const ITEM_SHADE = { designNo: true, color: true, styleId: true } as const
+
+/**
+ * "Design No: 120 · Colour: Navy"; a thread "Colour: White"; '' for anything
+ * else. Exactly as typed in the Items master. The same words as the web's
+ * itemShade (apps/web/src/lib/items.ts), for reports, exports and trace text.
+ */
+export function itemShadeText(i: { designNo?: string | null; color?: string | null; styleId?: string | null } | null | undefined): string {
+  if (!i || i.styleId) return ''
+  return [i.designNo ? `Design No: ${i.designNo}` : null, i.color ? `Colour: ${i.color}` : null].filter(Boolean).join(' · ')
+}
