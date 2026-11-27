@@ -232,7 +232,7 @@ export default function ServiceOrdersPage() {
       })
     }
     // Only a draft never sent can be deleted, and its number goes back for the
-    // next purchase or service order — they share one series (28 Nov 2026).
+    // next purchase or service order — they share one series (27 Nov 2026).
     if (neverSentDraft(po)) {
       items.push({
         key: 'delete',

@@ -1,5 +1,5 @@
 /**
- * Purchase order numbers (the user's rules, 28 Nov 2026), and the running series:
+ * Purchase order numbers (the user's rules, 27 Nov 2026), and the running series:
  *   - purchase orders and service purchase orders share ONE PO series;
  *   - a new order takes the lowest free number of it — a deleted unsent
  *     draft's (PO-0002 deleted between 0001 and 0003 is the next order's), or
@@ -8,6 +8,7 @@
  *     deleted, only cancelled, and its number is never used again; one binned
  *     before that rule cannot be destroyed;
  *   - two orders saved at the same moment never get the same number;
+ *   - a number past the count that an order already carries is stepped over;
  *   - restored from the recycle bin, an order gets its own number back when
  *     free, else a fresh one;
  *   - Settings shows the last used and the true next number; Set moves the
@@ -131,6 +132,16 @@ async function main() {
     const denied = await buyer('PATCH', `/settings/number-series/${now.id}/next`, { nextNumber: ahead + 9 })
     check('15. a user who may not edit settings cannot change it', denied.status === 403, denied.status)
 
+    // ── A number past the count already on an order ────────────────────
+    // (an order the supplier had, binned under the earlier rule, keeps its
+    // number even where the count was stepped back for it)
+    const held = await newPo(false)
+    await prisma.numberSeries.update({ where: { id: original.id }, data: { lastNumber: { decrement: 1 } } })
+    const shown = (await series())?.nextNumber
+    const past = await newPo(true)
+    check(`16. a number past the count already on an order (${held.poNumber}) is stepped over: the next is ${past?.poNumber}, as Settings showed`,
+      !!past && tail(past.poNumber) === tail(held.poNumber) + 1 && shown === past.poNumber, { held: held.poNumber, shown, got: past?.poNumber })
+
     // ── Other documents keep the newest-only rule ──────────────────────
     const g = await newPo(false)
     await call('PATCH', `/purchase/orders/${g.id}/send`, {})
@@ -139,7 +150,7 @@ async function main() {
     const g1 = await grn()
     const del = await call('DELETE', `/purchase/grn/${g1?.id}`, { reason: 'test' })
     const g2 = await grn()
-    check(`16. the newest goods receipt deleted (${g1?.grnNumber}), the next one takes its number`, del.status < 300 && g2?.grnNumber === g1?.grnNumber, { del: del.status, g1: g1?.grnNumber, g2: g2?.grnNumber })
+    check(`17. the newest goods receipt deleted (${g1?.grnNumber}), the next one takes its number`, del.status < 300 && g2?.grnNumber === g1?.grnNumber, { del: del.status, g1: g1?.grnNumber, g2: g2?.grnNumber })
     if (g2?.id) await call('DELETE', `/purchase/grn/${g2.id}`, { reason: 'test' })
   } finally {
     // Test orders go for good, sent or not, and the series is put back.

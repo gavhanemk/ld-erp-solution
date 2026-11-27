@@ -2145,7 +2145,7 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
   if (!order || order.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
   // Only a draft that never went to the supplier can be deleted (the user's
-  // rule, 28 Nov 2026). It goes to the recycle bin and gives its number back:
+  // rule, 27 Nov 2026). It goes to the recycle bin and gives its number back:
   // the next purchase or service order takes the lowest free number, so
   // PO-0002 deleted between 0001 and 0003 is the next order's. An order the
   // supplier has had — sent, even if put back to Draft since — is cancelled
@@ -2370,7 +2370,7 @@ router.delete(
       )
     }
     // An order the supplier had stays on record, so its number is never used
-    // again (28 Nov 2026). One binned before that rule: restore and cancel it.
+    // again (27 Nov 2026). One binned before that rule: restore and cancel it.
     if (!neverSent(order)) {
       throw new AppError(
         `${shownNumber(order.poNumber)} was sent to the supplier, so it stays on record and cannot be destroyed. Restore it and cancel it instead.`,

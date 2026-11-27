@@ -505,7 +505,7 @@ export default function PurchaseOrdersPage() {
    * again.
    */
   const remove = async (po: PurchaseOrder) => {
-    // Only a draft never sent can be deleted (28 Nov 2026); its number goes back.
+    // Only a draft never sent can be deleted (27 Nov 2026); its number goes back.
     const warning =
       `Delete ${po.poNumber}? This draft was never sent, so it goes to the recycle bin ` +
       `and ${po.poNumber} is free again: the next purchase or service order takes it.`
@@ -598,7 +598,7 @@ export default function PurchaseOrdersPage() {
     }
 
     // Only a draft never sent to the supplier can be deleted, and it gives its
-    // number back (28 Nov 2026). An order the supplier has had is cancelled
+    // number back (27 Nov 2026). An order the supplier has had is cancelled
     // instead, so it stays on record and its number is never used again.
     if (neverSentDraft(po)) {
       items.push({

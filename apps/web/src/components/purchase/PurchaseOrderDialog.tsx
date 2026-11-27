@@ -207,7 +207,7 @@ export interface PoLine {
 
 /**
  * Whether an order may be deleted and give its number back: a draft never sent
- * to the supplier (the user's rule, 28 Nov 2026). Anything else is cancelled.
+ * to the supplier (the user's rule, 27 Nov 2026). Anything else is cancelled.
  */
 export const neverSentDraft = (po: Pick<PurchaseOrder, 'status' | 'sentAt' | 'approvedAt'>) =>
   po.status === 'DRAFT' && !po.sentAt && !po.approvedAt
@@ -240,7 +240,7 @@ export interface PurchaseOrder {
   deliveryDate: string | null
   deliveryWarehouseId: string | null
   deliveryCustomerId: string | null
-  /** When it was first sent to the supplier; never cleared (28 Nov 2026). */
+  /** When it was first sent to the supplier; never cleared (27 Nov 2026). */
   sentAt?: string | null
   approvedAt?: string | null
   /** The in-house brand the purchase is for; null for a common purchase. */

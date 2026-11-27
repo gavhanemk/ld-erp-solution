@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client'
-import { checkedNumber, formatDocumentNumber, nextDocumentNumber, seriesFor } from './docNumber'
+import { checkedNumber, formatDocumentNumber, seriesFor } from './docNumber'
 
 /**
  * Giving numbers back, and keeping them unique (the user's rules, 27 Nov 2026).
@@ -15,7 +15,7 @@ import { checkedNumber, formatDocumentNumber, nextDocumentNumber, seriesFor } fr
  * - The next number can be set in Settings, but never so that a number already
  *   on a document would be issued again.
  *
- * Purchase orders go further (the user's rules, 28 Nov 2026). Purchase orders
+ * Purchase orders go further (the user's rules, 27 Nov 2026). Purchase orders
  * and service purchase orders share the one PO series, and each new order
  * takes the LOWEST free number of it — so a draft deleted from the middle
  * (PO-0002 between 0001 and 0003) gives its number to the next order. Only a
@@ -167,6 +167,28 @@ export async function lowestFreeNumber(
 }
 
 /**
+ * The first number after the last one issued that no document carries. An
+ * order can hold one past the count — an order the supplier had keeps its
+ * number in the recycle bin even where the count was stepped back for it —
+ * and that number is stepped over, never issued twice.
+ */
+async function nextUnusedNumber(
+  tx: Prisma.TransactionClient,
+  docType: string,
+  series: { prefix: string; separator: string; financialYear: string; lastNumber: number; padding: number },
+): Promise<{ number: string; lastNumber: number }> {
+  for (let start = series.lastNumber + 1; ; start += 50) {
+    const batch = Array.from({ length: 50 }, (_, i) => ({
+      lastNumber: start + i,
+      number: formatDocumentNumber({ ...series, lastNumber: start + i }),
+    }))
+    const used = new Set(await numbersInUse(tx, docType, batch.map((b) => b.number)))
+    const next = batch.find((b) => !used.has(b.number))
+    if (next) return next
+  }
+}
+
+/**
  * The number a new purchase order (or service purchase order) takes: the
  * lowest free one in its financial year's PO series, else the next.
  *
@@ -180,7 +202,9 @@ export async function nextPurchaseOrderNumber(tx: Prisma.TransactionClient, docu
   const locked = await tx.numberSeries.findUniqueOrThrow({ where: { id: series.id } })
   const free = await lowestFreeNumber(tx, 'PO', locked)
   if (free) return checkedNumber(free)
-  return nextDocumentNumber(tx, 'PO', documentDate)
+  const next = await nextUnusedNumber(tx, 'PO', locked)
+  await tx.numberSeries.update({ where: { id: locked.id }, data: { lastNumber: next.lastNumber } })
+  return checkedNumber(next.number)
 }
 
 /** What a series will give next, without taking it — for Settings and the order form's preview. */
@@ -189,8 +213,7 @@ export async function peekNextNumber(
   series: { docType: string; prefix: string; separator: string; financialYear: string; lastNumber: number; padding: number; reuseFloor: number },
 ): Promise<string> {
   if (series.docType === 'PO') {
-    const free = await lowestFreeNumber(tx, 'PO', series)
-    if (free) return free
+    return (await lowestFreeNumber(tx, 'PO', series)) ?? (await nextUnusedNumber(tx, 'PO', series)).number
   }
   return formatDocumentNumber({ ...series, lastNumber: series.lastNumber + 1 })
 }

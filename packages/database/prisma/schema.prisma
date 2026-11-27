@@ -2729,7 +2729,7 @@ model PurchaseOrder {
   approvedById        String?
   approvedBy          User?                 @relation("POApprovedBy", fields: [approvedById], references: [id])
   approvedAt          DateTime?
-  /// When it was first sent to the supplier (28 Nov 2026). Never cleared: an
+  /// When it was first sent to the supplier (27 Nov 2026). Never cleared: an
   /// order put back to Draft afterwards has still been sent, so it can only be
   /// cancelled and its number is never given out again.
   sentAt              DateTime?
