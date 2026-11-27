@@ -9,21 +9,27 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { lineDetails } from '@/components/sales/OrderLinesView'
 import {
   StoreSheet,
+  Dash,
   Fact,
   Eyebrow,
+  Note,
+  PartyLine,
+  Terms,
+  TotalsBox,
+  WordsAndTotals,
   qty,
   money,
   longDate,
+  shortDate,
   CODE,
   GREY,
   INK,
   MUTED,
-  NAVY,
   NUM,
-  RULE,
-  RULE_SOFT,
   type SheetColumn,
+  type TotalLine,
 } from '@/components/print/StoreSheet'
+import { DocTable, type DocColumn, type DocRow } from '@/components/print/doc'
 
 interface Payload {
   /** The own brand the order is made under, carried from start to end. */
@@ -227,11 +233,43 @@ export default function PrintSalesInvoice() {
     ...(Math.abs(Number(inv.roundOff)) >= 0.005 ? ([['Rounding', money(inv.roundOff)]] as Array<[string, string]>) : []),
   ]
 
-  const th: React.CSSProperties = { border: `1px solid ${RULE_SOFT}`, padding: '3px 5px', fontSize: '8.5px', color: GREY, fontWeight: 600 }
-  const td: React.CSSProperties = { border: `1px solid ${RULE_SOFT}`, padding: '3px 5px', fontSize: '9px', color: INK, ...NUM }
   const bank = [company.bankName, company.bankBranch].filter(Boolean).join(', ')
   const termsText = inv.terms || template.termsText
+  const totals: TotalLine[] = [
+    { label: `Pieces${inv.dc?.cartons ? ` · ${inv.dc.cartons} cartons` : ''}`, value: qty(pieces) },
+    ...totalRows.map(([label, value]) => ({ label, value })),
+  ]
 
+  // The HSN-wise summary GST asks for: goods by code and rate, then each
+  // charge at a rate of its own. Drawn with the document kit's ruled table,
+  // as the purchase bill draws its own.
+  const hsnColumns: DocColumn[] = [
+    { key: 'hsn', head: 'HSN / charge', weight: 26 },
+    { key: 'taxable', head: 'Taxable value (₹)', weight: 18, align: 'right' },
+    { key: 'rate', head: 'Rate', weight: 9, align: 'center' },
+    ...(taxMode === 'IGST'
+      ? [{ key: 'igst', head: 'IGST (₹)', weight: 16, align: 'right' as const }]
+      : [
+          { key: 'cgst', head: 'CGST (₹)', weight: 14, align: 'right' as const },
+          { key: 'sgst', head: 'SGST (₹)', weight: 14, align: 'right' as const },
+        ]),
+    { key: 'tax', head: 'Total tax (₹)', weight: 16, align: 'right' },
+  ]
+  const hsnRows: DocRow[] = data.hsnSummary.map((r, i) => ({
+    key: `${r.hsn}-${r.rate}-${i}`,
+    cells: {
+      hsn: <span style={NUM}>{r.hsn}</span>,
+      taxable: money(r.taxable),
+      rate: `${r.rate}%`,
+      igst: money(r.igst),
+      cgst: money(r.cgst),
+      sgst: money(r.sgst),
+      tax: money(r.cgst + r.sgst + r.igst),
+    },
+  }))
+
+  // Laid out like the purchase order (27 Nov 2026): the buyer in the "Bill to"
+  // block with the invoice's facts beside it, then where the goods went.
   return (
     <StoreSheet
       company={company}
@@ -253,172 +291,92 @@ export default function PrintSalesInvoice() {
           </SmartSelect>
         </label>
       }
-      panels={[
+      party={{
+        heading: 'Bill to,',
+        name: c.name,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={billing || null} />
+            <PartyLine label="GST No" value={c.gstin ?? 'Unregistered'} mono={Boolean(c.gstin)} />
+            <PartyLine
+              label="State"
+              value={c.billingState ? `${c.billingState}${c.billingStateCode ? ` (${c.billingStateCode})` : ''}` : null}
+            />
+            <PartyLine label="Contact No" value={c.phone} mono />
+            <PartyLine
+              label="Place of supply"
+              value={
+                inv.placeOfSupplyCode
+                  ? `${data.placeOfSupplyState ?? ''} (${inv.placeOfSupplyCode})${taxMode === 'IGST' ? ', inter-state' : ''}`
+                  : null
+              }
+            />
+          </>
+        ),
+        meta: [
+          ['Invoice No', inv.invoiceNumber, true],
+          ['Invoice Date', shortDate(inv.invoiceDate), true],
+          !!inv.dueDate && ['Due date', shortDate(inv.dueDate), true],
+          !!inv.so && ['Our order', `${inv.so.soNumber}, ${shortDate(inv.so.orderDate)}`, true],
+          !!inv.so?.customerPORef && [
+            'Your PO',
+            `${inv.so.customerPORef}${inv.so.customerPODate ? `, ${shortDate(inv.so.customerPODate)}` : ''}`,
+          ],
+          !!inv.dc && ['Challan', `${inv.dc.dcNumber}, ${shortDate(inv.dc.dcDate)}`, true],
+          !!inv.eWayBillNumber && [
+            'E-way bill',
+            `${inv.eWayBillNumber}${inv.eWayBillDate ? `, ${shortDate(inv.eWayBillDate)}` : ''}`,
+            true,
+          ],
+          !!inv.transporter && ['Transporter', inv.transporter],
+          !!inv.vehicleNumber && ['Vehicle', inv.vehicleNumber, true],
+          !!inv.lrNumber && ['LR No', inv.lrNumber, true],
+          !!data.brand?.name && ['Brand', data.brand.name],
+          ['Reverse charge', 'No'],
+        ],
+      }}
+      bands={[
         {
-          title: 'Bill to',
+          icon: 'truck',
+          label: 'Ship to',
           body: (
             <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{c.name}</div>
-              {billing && <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{billing}</div>}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={c.gstin ?? 'Unregistered'} mono />
-                <Fact label="State" value={c.billingState ? `${c.billingState}${c.billingStateCode ? ` (${c.billingStateCode})` : ''}` : null} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'Ship to',
-          body: (
-            <>
-              <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55 }}>{inv.shippingAddress || billing}</div>
-              <div style={{ marginTop: '4px' }}>
-                <Fact
-                  label="Place of supply"
-                  value={inv.placeOfSupplyCode ? `${data.placeOfSupplyState ?? ''} (${inv.placeOfSupplyCode})` : null}
-                />
-                <Fact label="Transporter" value={inv.transporter} />
-                <Fact label="Vehicle" value={inv.vehicleNumber} mono />
-                <Fact label="LR No" value={inv.lrNumber} mono />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'Invoice',
-          body: (
-            <>
-              <Fact label="Due date" value={longDate(inv.dueDate)} />
-              <Fact label="Our order" value={inv.so ? `${inv.so.soNumber}, ${longDate(inv.so.orderDate)}` : null} mono />
-              <Fact label="Brand" value={data.brand?.name ?? null} />
-              <Fact
-                label="Your PO"
-                value={
-                  inv.so?.customerPORef
-                    ? `${inv.so.customerPORef}${inv.so.customerPODate ? `, ${longDate(inv.so.customerPODate)}` : ''}`
-                    : null
-                }
-              />
-              <Fact label="Challan" value={inv.dc ? `${inv.dc.dcNumber}, ${longDate(inv.dc.dcDate)}` : null} mono />
-              <Fact
-                label="E-way bill"
-                value={inv.eWayBillNumber ? `${inv.eWayBillNumber}${inv.eWayBillDate ? `, ${longDate(inv.eWayBillDate)}` : ''}` : null}
-                mono
-              />
-              <Fact label="Reverse charge" value="No" />
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{c.name}</div>
+              <div style={{ marginTop: '1px' }}>{inv.shippingAddress || billing || '—'}</div>
             </>
           ),
         },
       ]}
       columns={columns}
       rows={rows}
-      minRows={5}
       after={
         <>
-          {/* The HSN-wise summary GST asks for: goods by code and rate, then each charge. */}
-          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '8px' }}>
-            <thead>
-              <tr>
-                <th style={{ ...th, textAlign: 'left' }}>HSN / charge</th>
-                <th style={{ ...th, textAlign: 'right' }}>Taxable value</th>
-                <th style={{ ...th, textAlign: 'right' }}>Rate</th>
-                {taxMode === 'IGST' ? (
-                  <th style={{ ...th, textAlign: 'right' }}>IGST</th>
-                ) : (
-                  <>
-                    <th style={{ ...th, textAlign: 'right' }}>CGST</th>
-                    <th style={{ ...th, textAlign: 'right' }}>SGST</th>
-                  </>
+          <WordsAndTotals
+            words={template.showAmountInWords !== false ? data.totalInWords : null}
+            left={
+              <>
+                {template.showAmountInWords !== false && <Note title="Tax in words">{data.taxInWords}</Note>}
+                {template.showBankDetails !== false && (company.bankAccount || company.upiId) && (
+                  <Note title="Pay to">
+                    <Fact label="Bank" value={bank || null} labelWidth={52} />
+                    <Fact label="Account" value={company.bankAccount} mono labelWidth={52} />
+                    <Fact label="IFSC" value={company.bankIFSC} mono labelWidth={52} />
+                    <Fact label="UPI" value={company.upiId} mono labelWidth={52} />
+                  </Note>
                 )}
-                <th style={{ ...th, textAlign: 'right' }}>Total tax</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.hsnSummary.map((r, i) => (
-                <tr key={i}>
-                  <td style={{ ...td, textAlign: 'left' }}>{r.hsn}</td>
-                  <td style={{ ...td, textAlign: 'right' }}>{money(r.taxable)}</td>
-                  <td style={{ ...td, textAlign: 'right' }}>{r.rate}%</td>
-                  {taxMode === 'IGST' ? (
-                    <td style={{ ...td, textAlign: 'right' }}>{money(r.igst)}</td>
-                  ) : (
-                    <>
-                      <td style={{ ...td, textAlign: 'right' }}>{money(r.cgst)}</td>
-                      <td style={{ ...td, textAlign: 'right' }}>{money(r.sgst)}</td>
-                    </>
-                  )}
-                  <td style={{ ...td, textAlign: 'right' }}>{money(r.cgst + r.sgst + r.igst)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: '7px', marginTop: '8px' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
-              {template.showAmountInWords !== false && (
-                <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                  <Eyebrow style={{ color: GREY }}>Amount in words</Eyebrow>
-                  <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.55 }}>{data.totalInWords}</div>
-                  <div style={{ fontSize: '9px', color: GREY, marginTop: '3px' }}>Tax: {data.taxInWords}</div>
-                </div>
-              )}
-              {template.showBankDetails !== false && (company.bankAccount || company.upiId) && (
-                <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                  <Eyebrow style={{ color: GREY }}>Pay to</Eyebrow>
-                  <div style={{ marginTop: '3px' }}>
-                    <Fact label="Bank" value={bank || null} />
-                    <Fact label="Account" value={company.bankAccount} mono />
-                    <Fact label="IFSC" value={company.bankIFSC} mono />
-                    <Fact label="UPI" value={company.upiId} mono />
-                  </div>
-                </div>
-              )}
-              {inv.notes && (
-                <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                  <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-                  <div style={{ fontSize: '10px', color: GREY, marginTop: '3px', lineHeight: 1.55 }}>{inv.notes}</div>
-                </div>
-              )}
-            </div>
-            <div style={{ border: `1px solid ${RULE}`, display: 'flex', flexDirection: 'column' }}>
-              <div style={{ padding: '6px 11px', display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: GREY }}>
-                  <span>Pieces{inv.dc?.cartons ? ` · ${inv.dc.cartons} cartons` : ''}</span>
-                  <span style={NUM}>{qty(pieces)}</span>
-                </div>
-                {totalRows.map(([label, value]) => (
-                  <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: INK }}>
-                    <span>{label}</span>
-                    <span style={NUM}>{value}</span>
-                  </div>
-                ))}
-              </div>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  padding: '7px 11px',
-                  borderTop: '1.5pt solid #000',
-                  color: '#fff',
-                  marginTop: 'auto',
-                }}
-              >
-                <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>Invoice total</span>
-                <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(inv.totalAmount)}</span>
-              </div>
-            </div>
-          </div>
-          {termsText && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-              <Eyebrow style={{ color: GREY }}>Terms</Eyebrow>
-              <div style={{ fontSize: '9.5px', color: INK, marginTop: '3px', lineHeight: 1.6, whiteSpace: 'pre-line' }}>{termsText}</div>
+                <Note title="Special notes">{inv.notes || <Dash />}</Note>
+              </>
+            }
+            totals={<TotalsBox rows={totals} totalLabel="Invoice total" total={`₹ ${money(inv.totalAmount)}`} />}
+          />
+          {hsnRows.length > 0 && (
+            <div style={{ breakInside: 'avoid', marginTop: '9px' }}>
+              <Eyebrow>HSN-wise tax summary</Eyebrow>
+              <DocTable columns={hsnColumns} rows={hsnRows} style={{ marginTop: '3px' }} />
             </div>
           )}
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-            <Eyebrow style={{ color: GREY }}>Declaration</Eyebrow>
-            <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>{template.declaration || DECLARATION}</div>
-          </div>
+          <Terms text={termsText} />
+          <div style={{ fontSize: '9.5px', marginTop: '7px' }}>{template.declaration || DECLARATION}</div>
         </>
       }
       signatures={[

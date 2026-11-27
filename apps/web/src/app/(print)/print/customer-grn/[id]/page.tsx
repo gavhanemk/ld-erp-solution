@@ -5,19 +5,21 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import {
   StoreSheet,
-  Fact,
-  Eyebrow,
+  Dash,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
   qty,
   longDate,
+  shortDate,
   CODE,
-  GREY,
   INK,
   MUTED,
-  NAVY,
-  RULE,
   type SheetColumn,
+  type TotalLine,
 } from '@/components/print/StoreSheet'
-import { SubLine } from '@/components/print/doc'
+import { Box, SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { itemShade, type ShadeFields } from '@/lib/items'
 
@@ -90,6 +92,16 @@ const COLS: SheetColumn[] = [
 /** One copy for the customer's driver, one for our file. */
 const COPIES = ['Copy for the customer', 'Office copy']
 
+/** A figure per unit — metres and pieces are never added together: "20 mtr · 12 pcs". */
+function perUnit<T>(lines: T[], unitOf: (l: T) => string, figure: (l: T) => number): string {
+  const sums = new Map<string, number>()
+  for (const l of lines) sums.set(unitOf(l), (sums.get(unitOf(l)) ?? 0) + figure(l))
+  return [...sums.entries()].map(([unit, n]) => `${qty(n)} ${unit}`.trim()).join(' · ') || '0'
+}
+
+/** "ZZ-CH-12, 27/11/2026": a reference and its date. */
+const refOn = (no: string | null, date: string | null) => (no ? `${no}${date ? `, ${shortDate(date)}` : ''}` : null)
+
 /**
  * A customer's material, acknowledged.
  *
@@ -98,6 +110,10 @@ const COPIES = ['Copy for the customer', 'Office copy']
  * sticker numbers on the rolls, so the customer, the driver and the store all
  * hold the same paper. It is their property, received for job work: no value,
  * no tax.
+ *
+ * Laid out like the purchase order (27 Nov 2026): the customer the material
+ * came from in the "Received from," block with the receipt's facts beside it,
+ * the store it went into in a band.
  */
 export default function PrintCustomerGrn() {
   const { id } = useParams<{ id: string }>()
@@ -134,28 +150,28 @@ export default function PrintCustomerGrn() {
               <span style={CODE}>{l.item.code}</span> {l.item.name}
             </div>
             {itemShade(l.item) && <SubLine>{itemShade(l.item)}</SubLine>}
-            {(l.batchNumber || l.markings) && <div style={{ fontSize: '9px', color: GREY }}>{[l.batchNumber && `Lot ${l.batchNumber}`, l.markings].filter(Boolean).join(' · ')}</div>}
+            {(l.batchNumber || l.markings) && (
+              <SubLine>{[l.batchNumber && `Lot ${l.batchNumber}`, l.markings].filter(Boolean).join(' · ')}</SubLine>
+            )}
             {codes.length > 0 && (
-              <div style={{ fontSize: '8.5px', color: GREY, marginTop: '2px', lineHeight: 1.45 }}>
-                Stickers: {codes.map((p) => `${p.code}${p.grade === 'R' ? ' (held)' : ''}`).join(', ')}
-              </div>
+              <SubLine>Stickers: {codes.map((p) => `${p.code}${p.grade === 'R' ? ' (held)' : ''}`).join(', ')}</SubLine>
             )}
           </>
         ),
-        uom: <span style={{ fontSize: '9px', color: GREY }}>{l.item.uom?.symbol ?? ''}</span>,
+        uom: l.item.uom?.symbol ?? '',
         challan: qty(l.challanQty),
         received: <strong>{qty(l.receivedQty)}</strong>,
-        diff: diff === 0 ? <span style={{ color: GREY }}>—</span> : `${diff > 0 ? '+' : '−'}${qty(Math.abs(diff))}`,
+        diff: diff === 0 ? '—' : `${diff > 0 ? '+' : '−'}${qty(Math.abs(diff))}`,
         accepted: <strong>{qty(received - rejected)}</strong>,
         rejected:
           rejected > 0 ? (
             <>
               <strong>{qty(rejected)}</strong>
-              {l.rejectReason && <div style={{ fontSize: '9px', color: GREY }}>{l.rejectReason}</div>}
-              {Number(l.releasedQty) > 0 && <div style={{ fontSize: '9px', color: GREY }}>{qty(l.releasedQty)} released for use</div>}
+              {l.rejectReason && <SubLine>{l.rejectReason}</SubLine>}
+              {Number(l.releasedQty) > 0 && <SubLine>{qty(l.releasedQty)} released for use</SubLine>}
             </>
           ) : (
-            <span style={{ color: GREY }}>—</span>
+            '—'
           ),
       },
     }
@@ -165,8 +181,22 @@ export default function PrintCustomerGrn() {
     doc.status === 'CANCELLED'
       ? `CANCELLED${doc.cancelledAt ? ` on ${longDate(doc.cancelledAt)}` : ''}${doc.cancelledBy ? ` by ${doc.cancelledBy.name}` : ''}${doc.cancelReason ? ` — ${doc.cancelReason}` : ''}. This receipt is not on the books.`
       : doc.status !== 'POSTED'
-        ? `${doc.statusLabel.toUpperCase()}: not yet approved. Nothing on this receipt is on the books until it is posted.`
+        ? `${doc.statusLabel.toUpperCase()}: not yet approved. Nothing on this receipt is on the books until it is.`
         : null
+
+  // Their challan, what came, what was accepted and what is held — a figure per unit.
+  const unit = (l: Payload['doc']['lines'][number]) => l.item.uom?.symbol ?? ''
+  const rejectedTotal = doc.lines.reduce((s, l) => s + Number(l.rejectedQty), 0)
+  const totals: TotalLine[] = [
+    { label: 'Items', value: doc.lines.length },
+    { label: 'Their challan', value: perUnit(doc.lines, unit, (l) => Number(l.challanQty)) },
+    { label: 'Received', value: perUnit(doc.lines, unit, (l) => Number(l.receivedQty)) },
+    {
+      label: 'Rejected (held)',
+      value: rejectedTotal > 0 ? perUnit(doc.lines, unit, (l) => Number(l.rejectedQty)) : '—',
+    },
+  ]
+  const accepted = perUnit(doc.lines, unit, (l) => Number(l.receivedQty) - Number(l.rejectedQty))
 
   return (
     <StoreSheet
@@ -189,66 +219,76 @@ export default function PrintCustomerGrn() {
           </SmartSelect>
         </label>
       }
-      panels={[
+      party={{
+        heading: 'Received from, the customer (owner of the goods)',
+        name: c.name,
+        code: c.code,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={address || null} />
+            <PartyLine label="GST No" value={c.gstin ?? 'Unregistered'} mono={Boolean(c.gstin)} />
+            <PartyLine label="Contact No" value={c.phone} mono />
+            <PartyLine label="For order" value={doc.so?.soNumber ?? 'Not against an order'} />
+          </>
+        ),
+        meta: [
+          ['Receipt No', doc.grnNumber, true],
+          ['Receipt Date', shortDate(doc.receiptDate), true],
+          ['Their challan', refOn(doc.challanNumber, doc.challanDate), true],
+          ['Their bill', refOn(doc.billNumber, doc.billDate), true],
+          ['Gate entry', refOn(doc.gateEntryNumber, doc.gateEntryDate), true],
+          ['Vehicle No', doc.vehicleNo, true],
+          ['Transporter', doc.transporter],
+          !!doc.correctionOf && ['Corrects', doc.correctionOf.grnNumber, true],
+        ],
+      }}
+      bands={[
         {
-          title: 'Customer (owner of the goods)',
+          icon: 'truck',
+          label: 'Into store',
           body: (
             <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{c.name}</div>
-              {address && <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{address}</div>}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={c.gstin ?? 'Unregistered'} mono />
-                <Fact label="Phone" value={c.phone} />
-                <Fact label="For order" value={doc.so?.soNumber ?? 'Not against an order'} />
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{doc.warehouse.name}</div>
+              {doc.warehouse.address && <div style={{ marginTop: '1px' }}>{doc.warehouse.address}</div>}
+              <div style={{ marginTop: '1px' }}>
+                <strong>Status</strong> {doc.statusLabel}
+                <span style={{ marginLeft: '14px' }}>
+                  <strong>QC</strong>{' '}
+                  {doc.inspectedAt ? `${shortDate(doc.inspectedAt)}${doc.inspectedBy ? `, ${doc.inspectedBy.name}` : ''}` : '—'}
+                </span>
+                <span style={{ marginLeft: '14px' }}>
+                  <strong>Approved</strong>{' '}
+                  {doc.postedAt ? `${shortDate(doc.postedAt)}${doc.postedBy ? `, ${doc.postedBy.name}` : ''}` : '—'}
+                </span>
               </div>
-            </>
-          ),
-        },
-        {
-          title: 'Their paperwork',
-          body: (
-            <>
-              <Fact label="Their challan" value={doc.challanNumber ? `${doc.challanNumber}${doc.challanDate ? `, ${longDate(doc.challanDate)}` : ''}` : null} mono />
-              <Fact label="Their bill" value={doc.billNumber ? `${doc.billNumber}${doc.billDate ? `, ${longDate(doc.billDate)}` : ''}` : null} mono />
-              <Fact label="Gate entry" value={doc.gateEntryNumber ? `${doc.gateEntryNumber}${doc.gateEntryDate ? `, ${longDate(doc.gateEntryDate)}` : ''}` : null} mono />
-              <Fact label="Vehicle No" value={doc.vehicleNo} mono />
-              <Fact label="Transporter" value={doc.transporter} />
-            </>
-          ),
-        },
-        {
-          title: 'The receipt',
-          body: (
-            <>
-              <Fact label="Receipt No" value={doc.grnNumber} mono />
-              <Fact label="Into store" value={doc.warehouse.name} />
-              <Fact label="Status" value={doc.statusLabel} />
-              <Fact label="QC" value={doc.inspectedAt ? `${longDate(doc.inspectedAt)}${doc.inspectedBy ? `, ${doc.inspectedBy.name}` : ''}` : null} />
-              <Fact label="Approved" value={doc.postedAt ? `${longDate(doc.postedAt)}${doc.postedBy ? `, ${doc.postedBy.name}` : ''}` : null} />
-              <Fact label="Corrects" value={doc.correctionOf?.grnNumber ?? null} mono />
             </>
           ),
         },
       ]}
       columns={COLS}
       rows={rows}
-      minRows={5}
       after={
         <>
-          {(doc.inspectionNotes || doc.notes) && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '8px' }}>
-              <Eyebrow style={{ color: GREY }}>Notes</Eyebrow>
-              {doc.inspectionNotes && <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.55 }}>QC: {doc.inspectionNotes}</div>}
-              {doc.notes && <div style={{ fontSize: '10px', color: GREY, marginTop: '3px', lineHeight: 1.55 }}>{doc.notes}</div>}
-            </div>
-          )}
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-            <Eyebrow style={{ color: GREY }}>Declaration</Eyebrow>
-            <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>
-              {template.declaration ??
-                `The goods above are the property of ${c.name}, received by ${company.name} for job work. They are held on the customer's behalf and carry no value in our books. Rejected material is kept apart and is not used; it is returned to the customer or used only with their agreement.`}
-            </div>
-          </div>
+          <WordsAndTotals
+            words={null}
+            left={
+              <Note title="Notes">
+                {doc.inspectionNotes || doc.notes ? (
+                  <>
+                    {doc.inspectionNotes && <div>QC: {doc.inspectionNotes}</div>}
+                    {doc.notes && <div>{doc.notes}</div>}
+                  </>
+                ) : (
+                  <Dash />
+                )}
+              </Note>
+            }
+            totals={<TotalsBox rows={totals} totalLabel="Accepted" total={accepted} />}
+          />
+          <Box title="Declaration" style={{ marginTop: '7px' }}>
+            {template.declaration ??
+              `The goods above are the property of ${c.name}, received by ${company.name} for job work. They are held on the customer's behalf and carry no value in our books. Rejected material is kept apart and is not used; it is returned to the customer or used only with their agreement.`}
+          </Box>
         </>
       }
       signatures={[

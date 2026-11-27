@@ -7,19 +7,24 @@ import type { ChargeTaxTreatment } from '@ld-erp/shared'
 import { saleChargeRow } from '@/components/print/saleChargeRow'
 import {
   StoreSheet,
-  Fact,
-  Eyebrow,
+  Dash,
+  Note,
+  PartyLine,
+  TaxByRate,
+  Terms,
+  TotalsBox,
+  WordsAndTotals,
   qty,
   money,
   longDate,
+  shortDate,
   CODE,
   GREY,
   INK,
   MUTED,
-  NAVY,
   NUM,
-  RULE,
   type SheetColumn,
+  type TotalLine,
 } from '@/components/print/StoreSheet'
 import { lineDetails } from '@/components/sales/OrderLinesView'
 
@@ -220,7 +225,8 @@ export default function PrintSalesOrder() {
     .map(([rate, r]) => ({ rate, taxable: r.taxable, tax: r.tax }))
     .filter((r) => r.taxable > 0)
     .sort((a, b) => a.rate - b.rate)
-  const cell: React.CSSProperties = { padding: '2px 6px', fontSize: '9px', borderBottom: `1px solid ${RULE}` }
+  // GST at each rate, one line per rate, as the purchase order prints it.
+  const taxRows = gstSummary.map((r) => ({ gstRate: r.rate, taxable: r.taxable, cgst: r.tax / 2, sgst: r.tax / 2, igst: r.tax }))
 
   const banner =
     order.status === 'CANCELLED'
@@ -254,7 +260,10 @@ export default function PrintSalesOrder() {
     ...(Number(order.otherCharges) > 0 ? ([['Other charges', money(order.otherCharges)]] as Array<[string, string]>) : []),
     ...(Math.abs(Number(order.roundOff)) >= 0.005 ? ([['Rounding', money(order.roundOff)]] as Array<[string, string]>) : []),
   ]
+  const totals: TotalLine[] = [{ label: 'Pieces', value: qty(pieces) }, ...totalRows.map(([label, value]) => ({ label, value }))]
 
+  // Laid out like the purchase order (27 Nov 2026): the buyer in the "To,"
+  // block with the order's facts beside it, then where it goes.
   return (
     <StoreSheet
       company={company}
@@ -265,162 +274,61 @@ export default function PrintSalesOrder() {
       backHref="/sales/orders"
       backLabel="Sales orders"
       banner={banner}
-      panels={[
+      party={{
+        name: c.name,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={billing || null} />
+            <PartyLine label="GST No" value={c.gstin ?? 'Unregistered'} mono={Boolean(c.gstin)} />
+            <PartyLine label="Contact No" value={c.phone} mono />
+            <PartyLine
+              label="Place of supply"
+              value={
+                order.placeOfSupplyCode
+                  ? `${data.placeOfSupplyState ?? ''} (${order.placeOfSupplyCode})${taxMode === 'IGST' ? ', inter-state' : ''}`
+                  : null
+              }
+            />
+          </>
+        ),
+        meta: [
+          ['Order No', order.version > 1 ? `${order.soNumber} (v${order.version})` : order.soNumber, true],
+          ['Order Date', shortDate(order.orderDate), true],
+          !!order.deliveryDate && ['Ship by', shortDate(order.deliveryDate), true],
+          !!order.customerPORef && [
+            'Your PO',
+            `${order.customerPORef}${order.customerPODate ? `, ${shortDate(order.customerPODate)}` : ''}`,
+          ],
+          !!order.reference && ['Reference', order.reference],
+          ['Brand', order.brand.name],
+          order.isJobWork && ['Type', 'Job work (your fabric)'],
+          !!order.salesperson && ['Salesperson', order.salesperson],
+        ],
+      }}
+      bands={[
         {
-          title: 'Buyer',
+          icon: 'truck',
+          label: 'Deliver to',
           body: (
             <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{c.name}</div>
-              {billing && <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{billing}</div>}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={c.gstin ?? 'Unregistered'} mono />
-                <Fact label="Phone" value={c.phone} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'Delivery',
-          body: (
-            <>
-              <Fact label="Ship by" value={longDate(order.deliveryDate)} />
-              <Fact label="Deliver to" value={order.deliveryAddress} />
-              <Fact
-                label="Place of supply"
-                value={
-                  order.placeOfSupplyCode
-                    ? `${data.placeOfSupplyState ?? ''} (${order.placeOfSupplyCode})${taxMode === 'IGST' ? ', inter-state' : ''}`
-                    : null
-                }
-              />
-            </>
-          ),
-        },
-        {
-          title: 'Order',
-          body: (
-            <>
-              <Fact label="Order No" value={order.version > 1 ? `${order.soNumber} (version ${order.version})` : order.soNumber} mono />
-              <Fact
-                label="Your PO"
-                value={
-                  order.customerPORef
-                    ? `${order.customerPORef}${order.customerPODate ? `, ${longDate(order.customerPODate)}` : ''}`
-                    : null
-                }
-              />
-              <Fact label="Reference" value={order.reference} />
-              <Fact label="Brand" value={order.brand.name} />
-              <Fact label="Type" value={order.isJobWork ? 'Job work (your fabric)' : null} />
-              <Fact label="Salesperson" value={order.salesperson} />
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{c.name}</div>
+              <div style={{ marginTop: '1px' }}>{order.deliveryAddress || billing || '—'}</div>
             </>
           ),
         },
       ]}
       columns={columns}
       rows={rows}
-      minRows={6}
       after={
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: '7px', marginTop: '8px' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
-              {template.showAmountInWords !== false && (
-                <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                  <Eyebrow style={{ color: GREY }}>Amount in words</Eyebrow>
-                  <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.55 }}>{data.totalInWords}</div>
-                </div>
-              )}
-              {taxMode !== 'NONE' && gstSummary.length > 0 && (
-                <div style={{ border: `1px solid ${RULE}` }}>
-                  <div style={{ padding: '5px 10px 3px' }}>
-                    <Eyebrow style={{ color: GREY }}>GST summary</Eyebrow>
-                  </div>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', ...NUM }}>
-                    <thead>
-                      <tr style={{ color: GREY, textAlign: 'right' }}>
-                        <th style={{ ...cell, textAlign: 'left', fontWeight: 600 }}>Rate</th>
-                        <th style={{ ...cell, fontWeight: 600 }}>Taxable</th>
-                        {taxMode === 'CGST_SGST' ? (
-                          <>
-                            <th style={{ ...cell, fontWeight: 600 }}>CGST</th>
-                            <th style={{ ...cell, fontWeight: 600 }}>SGST</th>
-                          </>
-                        ) : (
-                          <th style={{ ...cell, fontWeight: 600 }}>IGST</th>
-                        )}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {gstSummary.map((r) => (
-                        <tr key={r.rate} style={{ color: INK, textAlign: 'right' }}>
-                          <td style={{ ...cell, textAlign: 'left' }}>{r.rate > 0 ? `${r.rate}%` : 'Nil'}</td>
-                          <td style={cell}>{money(r.taxable)}</td>
-                          {taxMode === 'CGST_SGST' ? (
-                            <>
-                              <td style={cell}>{money(r.tax / 2)}</td>
-                              <td style={cell}>{money(r.tax / 2)}</td>
-                            </>
-                          ) : (
-                            <td style={cell}>{money(r.tax)}</td>
-                          )}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-                <div style={{ fontSize: '10px', color: order.notes ? GREY : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
-                  {order.notes ?? 'None.'}
-                </div>
-              </div>
-            </div>
-            <div style={{ border: `1px solid ${RULE}`, display: 'flex', flexDirection: 'column' }}>
-              <div style={{ padding: '6px 11px', display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: GREY }}>
-                  <span>Pieces</span>
-                  <span style={NUM}>{qty(pieces)}</span>
-                </div>
-                {totalRows.map(([label, value]) => (
-                  <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: INK }}>
-                    <span>{label}</span>
-                    <span style={NUM}>{value}</span>
-                  </div>
-                ))}
-              </div>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  padding: '7px 11px',
-                  borderTop: '1.5pt solid #000',
-                  color: '#fff',
-                  marginTop: 'auto',
-                }}
-              >
-                <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>
-                  Order total
-                </span>
-                <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(order.totalAmount)}</span>
-              </div>
-            </div>
-          </div>
-          {termsText && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-              <Eyebrow style={{ color: GREY }}>Terms</Eyebrow>
-              <div style={{ fontSize: '9.5px', color: INK, marginTop: '3px', lineHeight: 1.6, whiteSpace: 'pre-line' }}>
-                {termsText}
-              </div>
-            </div>
-          )}
-          {template.declaration && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-              <Eyebrow style={{ color: GREY }}>Declaration</Eyebrow>
-              <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>{template.declaration}</div>
-            </div>
-          )}
+          <WordsAndTotals
+            words={template.showAmountInWords !== false ? data.totalInWords : null}
+            left={<Note title="Special notes">{order.notes || <Dash />}</Note>}
+            totals={<TotalsBox rows={totals} totalLabel="Order total" total={`₹ ${money(order.totalAmount)}`} />}
+          />
+          <TaxByRate rows={taxRows} split={taxMode} />
+          <Terms text={termsText} />
+          {template.declaration && <div style={{ fontSize: '9.5px', marginTop: '7px' }}>{template.declaration}</div>}
         </>
       }
       signatures={[

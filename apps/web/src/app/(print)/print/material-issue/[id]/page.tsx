@@ -5,17 +5,19 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import {
   StoreSheet,
-  Fact,
-  Eyebrow,
+  Dash,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
   qty,
   longDate,
+  shortDate,
   CODE,
-  GREY,
   INK,
   MUTED,
-  NAVY,
-  RULE,
   type SheetColumn,
+  type TotalLine,
 } from '@/components/print/StoreSheet'
 import { SubLine } from '@/components/print/doc'
 import { itemShade, type ShadeFields } from '@/lib/items'
@@ -78,12 +80,23 @@ const COLS: SheetColumn[] = [
   { key: 'owed', head: 'Owed', width: '10%', align: 'right' },
 ]
 
+/** A figure per unit — metres and pieces are never added together: "20 mtr · 12 pcs". */
+function perUnit<T>(lines: T[], unitOf: (l: T) => string, figure: (l: T) => number): string {
+  const sums = new Map<string, number>()
+  for (const l of lines) sums.set(unitOf(l), (sums.get(unitOf(l)) ?? 0) + figure(l))
+  return [...sums.entries()].map(([unit, n]) => `${qty(n)} ${unit}`.trim()).join(' · ') || '0'
+}
+
 /**
  * The slip a department signs for what the store handed it.
  *
  * Asked, given and still owed on every line, and each part handed over with its
  * date, because a requisition can be given in parts: this is the paper that
  * says which part arrived when, and whose signature is on it.
+ *
+ * Laid out like the purchase order (27 Nov 2026): the department it is issued
+ * to in the "Issued to," block with the slip's facts beside it, the store it
+ * comes out of in a band, then the lines and the totals.
  */
 export default function PrintMaterialIssue() {
   const { id } = useParams<{ id: string }>()
@@ -125,6 +138,8 @@ export default function PrintMaterialIssue() {
         ? 'NOT YET APPROVED. Nothing may be handed over against this slip until it is.'
         : null
 
+  const owedOf = (l: Payload['mr']['lines'][number]) => Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
+
   const rows = mr.lines.map((l, i) => {
     // Being bought: still owed to the department, handed over from the store once it arrives.
     const buying =
@@ -134,7 +149,7 @@ export default function PrintMaterialIssue() {
           ? Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
           : 0
     const toBuy = buying > 0
-    const owed = Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
+    const owed = owedOf(l)
     return {
       key: l.id,
       cells: {
@@ -146,25 +161,33 @@ export default function PrintMaterialIssue() {
             {/* A fabric's design and colour: the roll handed over is the one asked for. */}
             {itemShade(l.item) && <SubLine>{itemShade(l.item)}</SubLine>}
             {l.ownership === 'CUSTOMER_OWNED' && (
-              <div style={{ fontSize: '8.5px', fontWeight: 700, color: NAVY, marginTop: '1px' }}>
-                {l.ownerCustomer?.name ?? 'Customer'}&apos;s material — not ours
-              </div>
+              <SubLine style={{ fontWeight: 700 }}>{l.ownerCustomer?.name ?? 'Customer'}&apos;s material — not ours</SubLine>
             )}
             {(l.purpose || toBuy) && (
-              <div style={{ fontSize: '8.5px', color: MUTED, marginTop: '1px' }}>
-                {[l.purpose, toBuy ? `${qty(buying)} being bought` : null].filter(Boolean).join(' · ')}
-              </div>
+              <SubLine>{[l.purpose, toBuy ? `${qty(buying)} being bought` : null].filter(Boolean).join(' · ')}</SubLine>
             )}
           </>
         ),
-        store: <span style={{ fontSize: '9px', color: GREY }}>{l.warehouse.name}</span>,
-        uom: <span style={{ fontSize: '9px', color: GREY }}>{l.item.uom.symbol}</span>,
+        store: l.warehouse.name,
+        uom: l.item.uom.symbol,
         asked: qty(l.requestedQty),
         given: <strong>{qty(l.issuedQty)}</strong>,
         owed: owed > 0 ? qty(owed) : '—',
       },
     }
   })
+
+  // The stores the lines come out of, each once.
+  const stores = [...new Set(mr.lines.map((l) => l.warehouse.name))]
+
+  // Asked, given and owed, a figure per unit.
+  const unit = (l: Payload['mr']['lines'][number]) => l.item.uom.symbol
+  const owedTotal = mr.lines.reduce((s, l) => s + owedOf(l), 0)
+  const totals: TotalLine[] = [
+    { label: 'Items', value: mr.lines.length },
+    { label: 'Asked', value: perUnit(mr.lines, unit, (l) => Number(l.requestedQty)) },
+    { label: 'Still owed', value: owedTotal > 0 ? perUnit(mr.lines, unit, owedOf) : '—' },
+  ]
 
   return (
     <StoreSheet
@@ -176,63 +199,73 @@ export default function PrintMaterialIssue() {
       backHref="/inventory/requisitions"
       backLabel="Requisitions"
       banner={banner}
-      panels={[
+      party={{
+        heading: 'Issued to,',
+        name: mr.department.name,
+        code: mr.department.code,
+        lines: (
+          <>
+            <PartyLine label="Raised by" value={mr.raisedBy?.name ?? null} />
+            <PartyLine
+              label="Approved by"
+              value={
+                mr.approvedBy || mr.approvedAt
+                  ? [mr.approvedBy?.name, shortDate(mr.approvedAt)].filter(Boolean).join(', ')
+                  : null
+              }
+            />
+            <PartyLine label="Stage" value={stage} />
+          </>
+        ),
+        meta: [
+          ['MR No', mr.mrNumber, true],
+          ['MR Date', shortDate(mr.requestDate), true],
+          ['Needed by', shortDate(mr.requiredDate), true],
+          ['Against MO', mr.mo?.moNumber ?? null, true],
+          ['Brand', data.brand?.name ?? null],
+          ['Issued in full', shortDate(mr.issuedAt), true],
+        ],
+      }}
+      bands={[
         {
-          title: 'Asked by',
+          label: 'From store',
           body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: '#173a6c', lineHeight: 1.3 }}>
-                {mr.department.name}
-              </div>
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="Raised by" value={mr.raisedBy?.name ?? null} />
-                <Fact label="Needed by" value={longDate(mr.requiredDate)} />
-                <Fact label="Against" value={mr.mo?.moNumber ?? null} mono />
-                <Fact label="Brand" value={data.brand?.name ?? null} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'Decision',
-          body: (
-            <>
-              <Fact label="Stage" value={stage} />
-              <Fact label="Approved by" value={mr.approvedBy?.name ?? null} />
-              <Fact label="Approved on" value={longDate(mr.approvedAt)} />
-              <Fact label="Issued in full" value={longDate(mr.issuedAt)} />
-            </>
+            <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>
+              {stores.length ? stores.join(' · ') : <Dash />}
+            </div>
           ),
         },
       ]}
       columns={COLS}
       rows={rows}
-      minRows={6}
       after={
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '7px', marginTop: '8px' }}>
-          {/* Each part handed over, dated. A slip for a requisition given
-              in two goes has to say which metres went on which day. */}
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-            <Eyebrow style={{ color: GREY }}>Handed over</Eyebrow>
-            {handovers.length === 0 ? (
-              <div style={{ fontSize: '10px', color: MUTED, marginTop: '3px' }}>Nothing yet.</div>
-            ) : (
-              handovers.map((h, i) => (
-                <div key={i} style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.45 }}>
-                  <span style={{ color: GREY }}>{longDate(h.transactionDate)} · </span>
-                  {qty(h.outQty)} {h.item.uom.symbol} {h.item.name}
-                  {itemShade(h.item) ? ` (${itemShade(h.item)})` : ''}
-                </div>
-              ))
-            )}
-          </div>
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-            <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-            <div style={{ fontSize: '10px', color: mr.notes ? GREY : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
-              {mr.notes ?? 'None.'}
-            </div>
-          </div>
-        </div>
+        <WordsAndTotals
+          words={null}
+          left={
+            <>
+              {/* Each part handed over, dated. A slip for a requisition given
+                  in two goes has to say which metres went on which day. */}
+              <Note title="Handed over">
+                {handovers.length === 0
+                  ? 'Nothing yet.'
+                  : handovers.map((h, i) => (
+                      <div key={i}>
+                        {shortDate(h.transactionDate)} · {qty(h.outQty)} {h.item.uom.symbol} {h.item.name}
+                        {itemShade(h.item) ? ` (${itemShade(h.item)})` : ''}
+                      </div>
+                    ))}
+              </Note>
+              <Note title="Note">{mr.notes || <Dash />}</Note>
+            </>
+          }
+          totals={
+            <TotalsBox
+              rows={totals}
+              totalLabel="Given"
+              total={perUnit(mr.lines, unit, (l) => Number(l.issuedQty))}
+            />
+          }
+        />
       }
       signatures={[
         { role: 'Raised by', who: mr.raisedBy?.name },

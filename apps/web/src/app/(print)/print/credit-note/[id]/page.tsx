@@ -3,7 +3,25 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
-import { StoreSheet, Fact, Eyebrow, qty, money, longDate, CODE, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
+import {
+  StoreSheet,
+  Dash,
+  Note,
+  PartyLine,
+  TaxByRate,
+  TotalsBox,
+  WordsAndTotals,
+  qty,
+  money,
+  longDate,
+  shortDate,
+  CODE,
+  GREY,
+  INK,
+  MUTED,
+  type SheetColumn,
+  type TotalLine,
+} from '@/components/print/StoreSheet'
 
 interface Payload {
   /** The own brand the order is made under, carried from start to end. */
@@ -112,8 +130,27 @@ export default function PrintCreditNote() {
     ...(taxMode === 'CGST_SGST' ? ([['CGST', money(n.cgst)], ['SGST', money(n.sgst)]] as Array<[string, string]>) : taxMode === 'IGST' ? ([['IGST', money(n.igst)]] as Array<[string, string]>) : []),
     ...(Math.abs(Number(n.roundOff)) >= 0.005 ? ([['Rounding', money(n.roundOff)]] as Array<[string, string]>) : []),
   ]
+  const totalLines: TotalLine[] = totals.map(([label, value]) => ({ label, value }))
   const banner = n.status === 'CANCELLED' ? `CANCELLED on ${longDate(n.cancelledAt)}${n.cancelReason ? ` — ${n.cancelReason}` : ''}.` : null
 
+  // The GST reversed at each rate, one line per rate as the purchase order prints it.
+  const byRate = new Map<number, { taxable: number; cgst: number; sgst: number; igst: number }>()
+  for (const l of n.lines) {
+    const rate = Number(l.gstRate)
+    const r = byRate.get(rate) ?? { taxable: 0, cgst: 0, sgst: 0, igst: 0 }
+    r.taxable += Number(l.taxableValue)
+    r.cgst += Number(l.cgst)
+    r.sgst += Number(l.sgst)
+    r.igst += Number(l.igst)
+    byRate.set(rate, r)
+  }
+  const taxRows = [...byRate.entries()]
+    .filter(([, r]) => r.taxable > 0)
+    .sort((a, b) => a[0] - b[0])
+    .map(([rate, r]) => ({ gstRate: rate, ...r }))
+
+  // Laid out like the purchase order (27 Nov 2026): the customer in the "To,"
+  // block with the note's facts and the invoice it is against beside it.
   return (
     <StoreSheet
       company={company}
@@ -124,68 +161,44 @@ export default function PrintCreditNote() {
       backHref="/sales/returns"
       backLabel="Returns & credit notes"
       banner={banner}
-      panels={[
-        {
-          title: 'Customer',
-          body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY }}>{c.name}</div>
-              {address && <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{address}</div>}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={c.gstin ?? 'Unregistered'} mono />
-                <Fact label="State" value={c.billingState ? `${c.billingState}${c.billingStateCode ? ` (${c.billingStateCode})` : ''}` : null} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'Against',
-          body: (
-            <>
-              <Fact label="Invoice" value={n.invoice ? `${n.invoice.invoiceNumber}, ${longDate(n.invoice.invoiceDate)}` : null} mono />
-              <Fact label="Kind" value={isReturn ? 'Sales return' : 'Price adjustment'} />
-              <Fact label="Brand" value={data.brand?.name ?? null} />
-              <Fact label="Reason" value={n.reason} />
-              <Fact label="Place of supply" value={n.placeOfSupplyCode ? `${data.placeOfSupplyState ?? ''} (${n.placeOfSupplyCode})` : null} />
-              <Fact label="Goods into" value={n.warehouse?.name} />
-            </>
-          ),
-        },
-      ]}
+      party={{
+        name: c.name,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={address || null} />
+            <PartyLine label="GST No" value={c.gstin ?? 'Unregistered'} mono={Boolean(c.gstin)} />
+            <PartyLine
+              label="State"
+              value={c.billingState ? `${c.billingState}${c.billingStateCode ? ` (${c.billingStateCode})` : ''}` : null}
+            />
+            <PartyLine
+              label="Place of supply"
+              value={n.placeOfSupplyCode ? `${data.placeOfSupplyState ?? ''} (${n.placeOfSupplyCode})` : null}
+            />
+          </>
+        ),
+        meta: [
+          ['Credit Note No', n.noteNumber, true],
+          ['Date', shortDate(n.noteDate), true],
+          ['Against invoice', n.invoice ? `${n.invoice.invoiceNumber}, ${shortDate(n.invoice.invoiceDate)}` : null, true],
+          ['Kind', isReturn ? 'Sales return' : 'Price adjustment'],
+          !!data.brand?.name && ['Brand', data.brand.name],
+          !!n.warehouse?.name && ['Goods into', n.warehouse.name],
+        ],
+      }}
+      bands={[n.reason ? { label: 'Reason', body: n.reason } : null]}
       columns={columns}
       rows={rows}
-      minRows={4}
       after={
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: '7px', marginTop: '8px' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
-            {template.showAmountInWords !== false && (
-              <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                <Eyebrow style={{ color: GREY }}>Amount in words</Eyebrow>
-                <div style={{ fontSize: '10px', color: INK, marginTop: '3px' }}>{data.totalInWords}</div>
-              </div>
-            )}
-            {n.notes && (
-              <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-                <div style={{ fontSize: '10px', color: GREY, marginTop: '3px' }}>{n.notes}</div>
-              </div>
-            )}
-          </div>
-          <div style={{ border: `1px solid ${RULE}`, display: 'flex', flexDirection: 'column' }}>
-            <div style={{ padding: '6px 11px', display: 'flex', flexDirection: 'column', gap: '3px' }}>
-              {totals.map(([label, value]) => (
-                <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: INK }}>
-                  <span>{label}</span>
-                  <span style={NUM}>{value}</span>
-                </div>
-              ))}
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 11px', borderTop: '1.5pt solid #000', color: '#fff', marginTop: 'auto' }}>
-              <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>Credit total</span>
-              <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(n.totalAmount)}</span>
-            </div>
-          </div>
-        </div>
+        <>
+          <WordsAndTotals
+            words={template.showAmountInWords !== false ? data.totalInWords : null}
+            left={<Note title="Special notes">{n.notes || <Dash />}</Note>}
+            totals={<TotalsBox rows={totalLines} totalLabel="Credit total" total={`₹ ${money(n.totalAmount)}`} />}
+          />
+          <TaxByRate rows={taxRows} split={taxMode} />
+          {template.declaration && <div style={{ fontSize: '9.5px', marginTop: '7px' }}>{template.declaration}</div>}
+        </>
       }
       signatures={[
         { role: "Customer's acknowledgement", who: null },

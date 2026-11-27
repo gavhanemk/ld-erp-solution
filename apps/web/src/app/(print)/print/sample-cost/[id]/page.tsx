@@ -3,15 +3,28 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
-import { StoreSheet, Fact, Eyebrow, money, longDate, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
+import {
+  StoreSheet,
+  Note,
+  PartyLine,
+  Terms,
+  TotalsBox,
+  WordsAndTotals,
+  money,
+  longDate,
+  shortDate,
+  INK,
+  NUM,
+  type SheetColumn,
+} from '@/components/print/StoreSheet'
 import { rateFigure } from '@/components/sampling/specRules'
-import { SubLine } from '@/components/print/doc'
+import { HAIR, SubLine, type DocRow } from '@/components/print/doc'
 import { itemShade } from '@/lib/items'
 import { SAMPLE_CHARGE_LABEL, SAMPLE_RATE_BASIS_LABEL, type SampleCostSheet } from '@ld-erp/shared'
 
 interface Payload {
   company: Record<string, string | null>
-  template: { title: string; footerNote: string | null; declaration: string | null }
+  template: { title: string; footerNote: string | null; declaration: string | null; termsText?: string | null }
   sheet: SampleCostSheet & { notes?: string }
   finalised: { at: string; by: string | null } | null
   request: {
@@ -20,7 +33,19 @@ interface Payload {
     buyerRef: string | null
     buyerStyleRef: string | null
     season: string | null
-    customer: { name: string } | null
+    /** With the buyer's address and phone, as the request carries them. */
+    customer: {
+      name: string
+      phone?: string | null
+      billingAddress?: string | null
+      billingCity?: string | null
+      billingState?: string | null
+      billingPincode?: string | null
+      shippingAddress?: string | null
+      shippingCity?: string | null
+      shippingState?: string | null
+      shippingPincode?: string | null
+    } | null
     cancelledAt: string | null
   }
 }
@@ -50,13 +75,19 @@ export default function PrintSampleCostSheet() {
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not open the cost sheet.'))
   }, [id])
   if (error) return <p style={{ padding: 48, color: INK }}>{error}</p>
-  if (!data) return <p style={{ padding: 48, color: MUTED }}>Opening the cost sheet…</p>
+  if (!data) return <p style={{ padding: 48, color: INK }}>Opening the cost sheet…</p>
 
   const { company, template, sheet, finalised, request } = data
+  const buyer = request.customer
+  // Where the buyer is billed, else where their samples went.
+  const buyerAddress =
+    [buyer?.billingAddress, buyer?.billingCity, buyer?.billingState, buyer?.billingPincode].filter(Boolean).join(', ') ||
+    [buyer?.shippingAddress, buyer?.shippingCity, buyer?.shippingState, buyer?.shippingPincode].filter(Boolean).join(', ')
   let sn = 0
-  const rows: Array<{ key: string; cells: Record<string, React.ReactNode>; muted?: boolean }> = []
+  const rows: DocRow[] = []
+  // A round's (or the request's) heading row, in bold across the description.
   const head = (key: string, text: string) =>
-    rows.push({ key, muted: true, cells: { sn: '', desc: <strong style={{ color: NAVY }}>{text}</strong>, qty: '', rate: '', amount: '' } })
+    rows.push({ key, cells: { sn: '', desc: <strong>{text}</strong>, qty: '', rate: '', amount: '' } })
   for (const r of sheet.rounds) {
     head(
       `r-${r.roundId}`,
@@ -68,14 +99,12 @@ export default function PrintSampleCostSheet() {
         cells: {
           sn,
           desc: (
-            <div>
-              <div style={{ fontWeight: 600 }}>{m.item.name}</div>
+            <>
+              <div style={{ fontWeight: 700 }}>{m.item.name}</div>
               {/* The material's own design and colour, when its item has them. */}
               {itemShade(m.item) && <SubLine>{itemShade(m.item)}</SubLine>}
-              <div style={{ fontSize: '9px', color: GREY }}>
-                {[m.component, m.colour, SAMPLE_RATE_BASIS_LABEL[m.basis]].filter(Boolean).join(' · ')}
-              </div>
-            </div>
+              <SubLine>{[m.component, m.colour, SAMPLE_RATE_BASIS_LABEL[m.basis]].filter(Boolean).join(' · ')}</SubLine>
+            </>
           ),
           qty: `${m.consumed} ${m.item.unit}`,
           rate: m.basis === 'BUYER' ? '—' : rateFigure(m.rate),
@@ -98,15 +127,16 @@ export default function PrintSampleCostSheet() {
         key: `c-${r.roundId}-${++sn}`,
         cells: { sn, desc: `${SAMPLE_CHARGE_LABEL[c.kind]} · ${c.description}${c.billRef ? ` · ${c.billRef}` : ''}`, qty: '', rate: '', amount: money(c.amount) },
       })
+    // The round's sub-total: bold and ruled above.
     rows.push({
       key: `t-${r.roundId}`,
-      muted: true,
+      total: true,
       cells: {
         sn: '',
         desc: `Round ${r.revision}: material ${money(r.material)} · labour ${money(r.labour)} · other ${money(r.misc)}${r.perPiece === null ? '' : ` · ${money(r.perPiece)} a piece`}`,
         qty: '',
         rate: '',
-        amount: <strong>{money(r.total)}</strong>,
+        amount: money(r.total),
       },
     })
   }
@@ -118,6 +148,8 @@ export default function PrintSampleCostSheet() {
         cells: { sn, desc: `${SAMPLE_CHARGE_LABEL[c.kind]} · ${c.description}${c.billRef ? ` · ${c.billRef}` : ''}`, qty: '', rate: '', amount: money(c.amount) },
       })
   }
+  // Laid out like the purchase order (27 Nov 2026): the buyer the sample is
+  // for in the "For," block with the sheet's facts beside it, then the lines.
   return (
     <StoreSheet
       company={company}
@@ -128,76 +160,62 @@ export default function PrintSampleCostSheet() {
       backHref="/sampling"
       backLabel="Sampling"
       banner={finalised ? null : 'PROVISIONAL — the costs are not finalised, and these figures may still change.'}
-      panels={[
-        {
-          title: 'The sample',
-          body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{request.title}</div>
-              <Fact label="Request" value={request.number} mono />
-              <Fact label="Style" value={sheet.style ? `${sheet.style.code} · ${sheet.style.name}` : null} />
-              <Fact label="Season" value={request.season} />
-            </>
-          ),
-        },
-        {
-          title: 'The buyer',
-          body: (
-            <>
-              <Fact label="Buyer" value={request.customer?.name ?? null} />
-              <Fact label="Buyer style" value={request.buyerStyleRef} />
-              <Fact label="Buyer ref." value={request.buyerRef} />
-            </>
-          ),
-        },
-        {
-          title: 'Costs',
-          body: (
-            <>
-              <Fact label="Finalised by" value={finalised?.by ?? null} />
-              <Fact label="Pieces made" value={String(sheet.pieces)} />
-              <Fact label="Rounds" value={String(sheet.rounds.length)} />
-            </>
-          ),
-        },
-      ]}
+      party={{
+        heading: 'For,',
+        name: buyer?.name ?? 'Internal development',
+        lines: (
+          <>
+            {buyer && <PartyLine label="Address-" value={buyerAddress || null} />}
+            {buyer && <PartyLine label="Contact No" value={buyer.phone} mono />}
+            <PartyLine label="Sample" value={request.title} />
+            <PartyLine label="Style" value={sheet.style ? `${sheet.style.code} · ${sheet.style.name}` : null} />
+          </>
+        ),
+        meta: [
+          ['Sample No', request.number, true],
+          [finalised ? 'Finalised' : 'As on', shortDate(finalised?.at ?? sheet.computedAt), true],
+          ['Finalised by', finalised?.by ?? null],
+          ['Buyer style', request.buyerStyleRef],
+          ['Buyer ref.', request.buyerRef],
+          ['Season', request.season],
+          ['Pieces made', String(sheet.pieces)],
+          ['Rounds', String(sheet.rounds.length)],
+        ],
+      }}
       columns={COLS}
       rows={rows}
       after={
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 260px', gap: '7px', marginTop: '8px' }}>
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-            <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-            <div style={{ fontSize: '10px', color: GREY, marginTop: '3px', lineHeight: 1.55 }}>
-              {sheet.notes || 'Material at what this request paid, after line discount and before GST. The buyer’s own material is free.'}
-              {sheet.notCosted.length > 0 && (
-                <div style={{ marginTop: '4px' }}>
-                  Still in the sample store, not costed:{' '}
-                  {sheet.notCosted.map((n) => `${n.qty} ${n.unit} of ${n.item}${itemShade(n) ? ` (${itemShade(n)})` : ''}`).join(', ')}.
-                </div>
-              )}
-            </div>
-          </div>
-          <div style={{ border: `1px solid ${RULE}` }}>
-            {[
-              ['Material', sheet.material],
-              ['Labour and outside units', sheet.labour],
-              ['Other charges', sheet.misc],
-            ].map(([label, v]) => (
-              <div key={String(label)} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 10px', fontSize: '10px', color: INK }}>
-                <span>{label}</span>
-                <span style={NUM}>₹{money(Number(v))}</span>
-              </div>
-            ))}
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 11px', borderTop: '1.5pt solid #000', color: '#fff' }}>
-              <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>Total</span>
-              <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(sheet.total)}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 10px', fontSize: '10px', color: INK }}>
-              <span>A piece ({sheet.pieces} made)</span>
-              <span style={NUM}>{sheet.perPiece === null ? '—' : `₹${money(sheet.perPiece)}`}</span>
-            </div>
-          </div>
-        </div>
+        <>
+          <WordsAndTotals
+            left={
+              <Note title="Note">
+                {sheet.notes || 'Material at what this request paid, after line discount and before GST. The buyer’s own material is free.'}
+                {sheet.notCosted.length > 0 && (
+                  <div style={{ marginTop: '4px' }}>
+                    Still in the sample store, not costed:{' '}
+                    {sheet.notCosted.map((n) => `${n.qty} ${n.unit} of ${n.item}${itemShade(n) ? ` (${itemShade(n)})` : ''}`).join(', ')}.
+                  </div>
+                )}
+              </Note>
+            }
+            totals={
+              <>
+                <TotalsBox
+                  style={{ flex: 1 }}
+                  rows={[
+                    { label: 'Material', value: money(sheet.material) },
+                    { label: 'Labour and outside units', value: money(sheet.labour) },
+                    { label: 'Other charges', value: money(sheet.misc) },
+                  ]}
+                  total={`₹ ${money(sheet.total)}`}
+                />
+                <PerPiece pieces={sheet.pieces} perPiece={sheet.perPiece} />
+              </>
+            }
+          />
+          <Terms text={template.termsText} />
+          {template.declaration && <div style={{ fontSize: '9.5px', marginTop: '7px' }}>{template.declaration}</div>}
+        </>
       }
       signatures={[
         { role: 'Prepared by', who: finalised?.by ?? null },
@@ -206,5 +224,26 @@ export default function PrintSampleCostSheet() {
       ]}
       footerNote={template.footerNote ?? 'Internal cost sheet of a sample. Not for the buyer, and not a tax document.'}
     />
+  )
+}
+
+/** What a piece came to, under the total: worked out from it, not added to it. */
+function PerPiece({ pieces, perPiece }: { pieces: number; perPiece: number | null }) {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1fr) 8px minmax(92px, auto)',
+        alignItems: 'baseline',
+        gap: '6px',
+        padding: '3.5px 9px',
+        fontSize: '10px',
+        borderTop: HAIR,
+      }}
+    >
+      <span>A piece ({pieces} made)</span>
+      <span>:</span>
+      <span style={{ textAlign: 'right', fontWeight: 600, ...NUM }}>{perPiece === null ? '—' : `₹ ${money(perPiece)}`}</span>
+    </div>
   )
 }

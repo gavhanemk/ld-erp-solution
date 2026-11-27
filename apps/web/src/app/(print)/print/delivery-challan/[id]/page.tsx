@@ -5,20 +5,25 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import {
   StoreSheet,
-  Fact,
+  Dash,
   Eyebrow,
+  Note,
+  PartyLine,
+  Terms,
+  TotalsBox,
+  WordsAndTotals,
   qty,
   money,
   longDate,
+  shortDate,
   CODE,
-  GREY,
   INK,
   MUTED,
-  NAVY,
   NUM,
-  RULE,
   type SheetColumn,
+  type TotalLine,
 } from '@/components/print/StoreSheet'
+import { Box, DocTable, SubLine, type DocColumn } from '@/components/print/doc'
 
 interface Payload {
   /** The own brand the order is made under, carried from start to end. */
@@ -85,6 +90,14 @@ interface Payload {
   }
 }
 
+/** The packing list: one row per item in each carton. */
+const CARTON_COLUMNS: DocColumn[] = [
+  { key: 'carton', head: 'Carton', width: '15%' },
+  { key: 'item', head: 'Style · Item', width: '42%' },
+  { key: 'sizes', head: 'Sizes × pcs', width: '33%' },
+  { key: 'pcs', head: 'Pcs', width: '10%', align: 'right' },
+]
+
 /**
  * The delivery challan that travels with the goods.
  *
@@ -131,10 +144,10 @@ export default function PrintDeliveryChallan() {
             {l.item.name}
             {l.item.color ? ` · ${l.item.color}` : ''}
           </div>
-          <div style={{ fontSize: '8.5px', color: GREY, marginTop: '1px' }}>
+          <SubLine>
             <span style={CODE}>{l.item.code}</span>
             {l.overNote ? ` · ${l.overNote}` : ''}
-          </div>
+          </SubLine>
         </>
       ),
       sizes: l.sizes.length ? (
@@ -145,14 +158,39 @@ export default function PrintDeliveryChallan() {
             .join(' · ')}
         </span>
       ) : (
-        <span style={{ color: MUTED }}>—</span>
+        <Dash />
       ),
-      hsn: <span style={{ fontSize: '9px', color: GREY }}>{l.item.hsnCode ?? '—'}</span>,
+      hsn: <span style={{ fontSize: '9px', ...NUM }}>{l.item.hsnCode ?? <Dash />}</span>,
       qty: <strong>{qty(l.qty)}</strong>,
     },
   }))
 
   const pieces = dc.lines.reduce((s, l) => s + Number(l.qty), 0)
+
+  // Carton by carton: what is in each, by style, item and size.
+  const cartonRows = (dc.fgCartons ?? []).flatMap((carton) => {
+    const items = new Map<string, { label: string; sizes: string[]; pcs: number }>()
+    for (const l of carton.lines) {
+      const k = `${l.item.code}|${l.grade}`
+      const it = items.get(k) ?? {
+        label: `${l.item.style?.code ? `${l.item.style.code} · ` : ''}${l.item.code} ${l.item.color ?? ''}${l.grade === 'B' ? ' (B)' : ''}`,
+        sizes: [],
+        pcs: 0,
+      }
+      it.sizes.push(`${l.size.code}×${l.qty}`)
+      it.pcs += l.qty
+      items.set(k, it)
+    }
+    return [...items.values()].map((it, i) => ({
+      key: `${carton.code}-${i}`,
+      cells: {
+        carton: i === 0 ? <strong style={CODE}>{carton.code}</strong> : '',
+        item: it.label,
+        sizes: <span style={NUM}>{it.sizes.join('  ')}</span>,
+        pcs: it.pcs,
+      },
+    }))
+  })
 
   const banner =
     dc.status === 'CANCELLED'
@@ -163,6 +201,16 @@ export default function PrintDeliveryChallan() {
         ? 'DRAFT — not yet dispatched. The goods have not left the store.'
         : null
 
+  const totals: TotalLine[] = [
+    { label: 'Pieces', value: qty(pieces) },
+    { label: 'Cartons', value: dc.cartons != null ? String(dc.cartons) : <Dash /> },
+    { label: 'Value', value: money(data.value) },
+    { label: 'GST', value: money(data.gst) },
+  ]
+
+  // Laid out like the purchase order (27 Nov 2026): the consignee in the "To,"
+  // block with the challan's facts and how it travels beside it, then where
+  // it goes.
   return (
     <StoreSheet
       company={company}
@@ -173,160 +221,71 @@ export default function PrintDeliveryChallan() {
       backHref="/sales/challan?tab=challans"
       backLabel="Delivery challans"
       banner={banner}
-      panels={[
+      party={{
+        name: c.name,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={billing || null} />
+            <PartyLine label="GST No" value={c.gstin ?? 'Unregistered'} mono={Boolean(c.gstin)} />
+            <PartyLine label="Contact No" value={c.phone} mono />
+          </>
+        ),
+        meta: [
+          ['Challan No', dc.dcNumber, true],
+          ['Challan Date', shortDate(dc.dcDate), true],
+          ['Our Order', `${dc.so.soNumber}, ${shortDate(dc.so.orderDate)}`, true],
+          !!dc.so.customerPORef && [
+            'Your PO',
+            `${dc.so.customerPORef}${dc.so.customerPODate ? `, ${shortDate(dc.so.customerPODate)}` : ''}`,
+          ],
+          !!data.brand?.name && ['Brand', data.brand?.name],
+          dc.so.isJobWork && ['Type', 'Job work (your fabric)'],
+          ['From store', dc.warehouse?.name ?? null],
+          ['Transporter', dc.transporter],
+          ['Vehicle No', dc.vehicleNumber, true],
+          ['LR No', dc.lrNumber, true],
+          ['E-way Bill', dc.eWayBillNumber, true],
+        ],
+      }}
+      bands={[
         {
-          title: 'Consignee',
+          icon: 'truck',
+          label: 'Deliver to',
           body: (
             <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{c.name}</div>
-              {billing && <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{billing}</div>}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={c.gstin ?? 'Unregistered'} mono />
-                <Fact label="Phone" value={c.phone} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'Delivery',
-          body: (
-            <>
-              <Fact label="Deliver to" value={dc.deliveryAddress ?? billing} />
-              <Fact label="Transporter" value={dc.transporter} />
-              <Fact label="Vehicle" value={dc.vehicleNumber} mono />
-              <Fact label="LR No" value={dc.lrNumber} mono />
-              <Fact label="E-way bill" value={dc.eWayBillNumber} mono />
-            </>
-          ),
-        },
-        {
-          title: 'Against',
-          body: (
-            <>
-              <Fact label="Our order" value={`${dc.so.soNumber}, ${longDate(dc.so.orderDate)}`} mono />
-              <Fact label="Brand" value={data.brand?.name ?? null} />
-              <Fact
-                label="Your PO"
-                value={
-                  dc.so.customerPORef
-                    ? `${dc.so.customerPORef}${dc.so.customerPODate ? `, ${longDate(dc.so.customerPODate)}` : ''}`
-                    : null
-                }
-              />
-              <Fact label="Type" value={dc.so.isJobWork ? 'Job work (your fabric)' : null} />
-              <Fact label="From" value={dc.warehouse?.name} />
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{c.name}</div>
+              <div style={{ marginTop: '1px' }}>{dc.deliveryAddress || billing || <Dash />}</div>
             </>
           ),
         },
       ]}
       columns={columns}
       rows={rows}
-      minRows={6}
       after={
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: '7px', marginTop: '8px' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
-              <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                <Eyebrow style={{ color: GREY }}>Packing</Eyebrow>
-                {dc.fgCartons?.length ? (
-                  // Carton by carton: what is in each, by style, item and size.
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '9.5px', color: INK, marginTop: '4px' }}>
-                    <thead>
-                      <tr style={{ textAlign: 'left', color: GREY }}>
-                        <th style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}` }}>Carton</th>
-                        <th style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}` }}>Style · Item</th>
-                        <th style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}` }}>Sizes × pcs</th>
-                        <th style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}`, textAlign: 'right' }}>Pcs</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {dc.fgCartons.map((c) => {
-                        const items = new Map<string, { label: string; sizes: string[]; pcs: number }>()
-                        for (const l of c.lines) {
-                          const k = `${l.item.code}|${l.grade}`
-                          const it = items.get(k) ?? { label: `${l.item.style?.code ? `${l.item.style.code} · ` : ''}${l.item.code} ${l.item.color ?? ''}${l.grade === 'B' ? ' (B)' : ''}`, sizes: [], pcs: 0 }
-                          it.sizes.push(`${l.size.code}×${l.qty}`)
-                          it.pcs += l.qty
-                          items.set(k, it)
-                        }
-                        return [...items.values()].map((it, i) => (
-                          <tr key={`${c.code}-${i}`}>
-                            <td style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}`, fontWeight: 700 }}>{i === 0 ? c.code : ''}</td>
-                            <td style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}` }}>{it.label}</td>
-                            <td style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}` }}>{it.sizes.join('  ')}</td>
-                            <td style={{ padding: '2px 4px', borderBottom: `1px solid ${RULE}`, textAlign: 'right', ...NUM }}>{it.pcs}</td>
-                          </tr>
-                        ))
-                      })}
-                    </tbody>
-                  </table>
-                ) : (
-                  <div style={{ fontSize: '10px', color: dc.packingNote ? INK : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
-                    {dc.packingNote ?? 'None.'}
-                  </div>
-                )}
-                {dc.fgCartons?.length && dc.packingNote ? <div style={{ fontSize: '10px', color: INK, marginTop: '4px', lineHeight: 1.55 }}>{dc.packingNote}</div> : null}
-              </div>
-              {dc.notes && (
-                <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                  <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-                  <div style={{ fontSize: '10px', color: GREY, marginTop: '3px', lineHeight: 1.55 }}>{dc.notes}</div>
-                </div>
-              )}
-              {template.showAmountInWords !== false && (
-                <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                  <Eyebrow style={{ color: GREY }}>Value of goods, in words</Eyebrow>
-                  <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.55 }}>{data.valueInWords}</div>
-                </div>
-              )}
-            </div>
-            <div style={{ border: `1px solid ${RULE}`, display: 'flex', flexDirection: 'column' }}>
-              <div style={{ padding: '6px 11px', display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                {(
-                  [
-                    ['Pieces', qty(pieces)],
-                    ['Cartons', dc.cartons != null ? String(dc.cartons) : '—'],
-                    ['Value', money(data.value)],
-                    ['GST', money(data.gst)],
-                  ] as Array<[string, string]>
-                ).map(([label, value]) => (
-                  <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: INK }}>
-                    <span>{label}</span>
-                    <span style={NUM}>{value}</span>
-                  </div>
-                ))}
-              </div>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  padding: '7px 11px',
-                  borderTop: '1.5pt solid #000',
-                  color: '#fff',
-                  marginTop: 'auto',
-                }}
-              >
-                <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>
-                  Consignment value
-                </span>
-                <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(data.value + data.gst)}</span>
-              </div>
-            </div>
-          </div>
-          {template.termsText && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-              <Eyebrow style={{ color: GREY }}>Terms</Eyebrow>
-              <div style={{ fontSize: '9.5px', color: INK, marginTop: '3px', lineHeight: 1.6, whiteSpace: 'pre-line' }}>
-                {template.termsText}
-              </div>
-            </div>
+          {cartonRows.length > 0 && (
+            <>
+              <Eyebrow style={{ marginTop: '9px' }}>
+                Packing list — {dc.fgCartons!.length} carton{dc.fgCartons!.length === 1 ? '' : 's'}
+              </Eyebrow>
+              <DocTable columns={CARTON_COLUMNS} rows={cartonRows} fontSize={9} style={{ marginTop: '3px' }} />
+            </>
           )}
+          <WordsAndTotals
+            words={template.showAmountInWords !== false ? data.valueInWords : null}
+            left={
+              <>
+                {(cartonRows.length === 0 || dc.packingNote) && <Note title="Packing">{dc.packingNote || <Dash />}</Note>}
+                {dc.notes && <Note title="Note">{dc.notes}</Note>}
+              </>
+            }
+            totals={<TotalsBox rows={totals} totalLabel="Consignment value" total={`₹ ${money(data.value + data.gst)}`} />}
+          />
+          <Terms text={template.termsText} title="Terms" />
           {template.declaration && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-              <Eyebrow style={{ color: GREY }}>Declaration</Eyebrow>
-              <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>{template.declaration}</div>
-            </div>
+            <Box title="Declaration" style={{ marginTop: '7px' }}>
+              {template.declaration}
+            </Box>
           )}
         </>
       }

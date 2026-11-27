@@ -1,6 +1,7 @@
 'use client'
 
 import {
+  Band,
   Box,
   CODE,
   Dash,
@@ -9,26 +10,40 @@ import {
   Eyebrow,
   Fact,
   INK,
+  Note,
   NUM,
+  PartyBlock,
+  PartyLine,
   Signatures,
+  TaxByRate,
+  Terms,
+  TotalsBox,
+  WordsAndTotals,
   longDate,
   money,
   qty,
+  shortDate,
   type DocColumn,
+  type GlyphName,
+  type TotalLine,
 } from '@/components/print/doc'
 
 /**
  * The store's and the sales desk's printed papers — issue slip, transfer
  * note, count sheet, sales order, invoice, challan and the rest.
  *
- * Since 27 Nov 2026 every one of them is drawn by the shared document kit
- * (components/print/doc): the same black-and-white letterhead, title, ruled
- * boxes, line table, signatures and page footer as the purchase order. This
- * keeps the props it always had, so a page that used it needs no change.
+ * Every one of them is drawn by the shared document kit (components/print/doc)
+ * in black and white, with only the logo in colour. Since 27 Nov 2026 they are
+ * laid out like the purchase order too: "DOCUMENT" and the title, then the
+ * "To," block — the party on the left, the document's number, date and
+ * references on the right — then "Deliver to" bands, the lines with no blank
+ * filler rows, the amount in words beside the totals, GST by rate, terms and
+ * signatures. A page passes `party` (and `bands`) for that; `panels` is the
+ * older row of titled boxes, kept for anything that is not about a party.
  *
  * The colour names below are kept for the pages that import them, and all of
- * them are black or white now: a page that drew a navy heading or a tinted
- * strip with them prints black on white without being touched.
+ * them are black or white: a page that drew a navy heading or a tinted strip
+ * with them prints black on white without being touched.
  */
 
 export const NAVY = INK
@@ -41,7 +56,9 @@ export const RULE = INK
 export const RULE_SOFT = INK
 export const RED = INK
 
-export { CODE, Dash, Eyebrow, Fact, NUM, longDate, money, qty }
+export { CODE, Dash, Eyebrow, Fact, NUM, longDate, money, qty, shortDate }
+// The purchase order's own building blocks, for the part after the lines.
+export { Band, Note, PartyLine, TaxByRate, Terms, TotalsBox, WordsAndTotals, type TotalLine }
 
 /** A titled block. */
 export function Panel({ title, children }: { title: string; children: React.ReactNode }) {
@@ -55,6 +72,27 @@ export interface SheetColumn {
   align?: 'left' | 'right' | 'center'
 }
 
+/** The purchase order's "To," block: who the paper is for, and the document's own facts beside it. */
+export interface SheetParty {
+  /** "To," on most papers; "From," on a receipt or return. */
+  heading?: string
+  name: React.ReactNode
+  code?: string | null
+  /** Under the name: Address-, GST No, Contact No — `PartyLine`s. */
+  lines?: React.ReactNode
+  /** The column beside it: [label, value, mono?] — the number and date first. */
+  meta: Array<[string, React.ReactNode, boolean?] | null | false>
+}
+
+/** A full-width band under the party: "Deliver to", "From store". */
+export interface SheetBand {
+  icon?: GlyphName
+  label: string
+  body: React.ReactNode
+  /** A heavier rule, for an instruction that differs from the usual one. */
+  strong?: boolean
+}
+
 export function StoreSheet({
   company,
   title,
@@ -64,7 +102,9 @@ export function StoreSheet({
   backHref,
   backLabel,
   banner,
-  panels,
+  party,
+  bands,
+  panels = [],
   columns,
   rows,
   minRows = 0,
@@ -76,7 +116,7 @@ export function StoreSheet({
 }: {
   company: Record<string, string | null>
   title: string
-  /** The document's number, printed beside the title and in the footer. */
+  /** The document's number: in the "To," block when there is one, else beside the title; and in the footer. */
   number: string
   dateLabel: string
   date: string
@@ -84,10 +124,14 @@ export function StoreSheet({
   backLabel: string
   /** A band under the title, for a cancelled or closed document. */
   banner?: string | null
-  panels: Array<{ title: string; body: React.ReactNode }>
+  /** The purchase order's "To," block. Given, the number and date print in it rather than beside the title. */
+  party?: SheetParty
+  bands?: Array<SheetBand | null | false>
+  /** The older row of titled boxes, for facts that are not about a party. */
+  panels?: Array<{ title: string; body: React.ReactNode }>
   columns: SheetColumn[]
   rows: Array<{ key: string; cells: Record<string, React.ReactNode>; muted?: boolean }>
-  /** Ruled empty rows, for a sheet to be written on. */
+  /** Ruled empty rows — only for a sheet meant to be written on (a count sheet). */
   minRows?: number
   /** Anything between the table and the signatures. */
   after?: React.ReactNode
@@ -99,6 +143,7 @@ export function StoreSheet({
   copyLabel?: string | null
 }) {
   const cols: DocColumn[] = columns.map((c) => ({ key: c.key, head: c.head, width: c.width, align: c.align }))
+  const shownBands = (bands ?? []).filter(Boolean) as SheetBand[]
   return (
     <DocumentSheet
       company={company}
@@ -108,11 +153,24 @@ export function StoreSheet({
       date={date}
       copyLabel={copyLabel}
       banner={banner}
+      hideNumber={Boolean(party)}
       backHref={backHref}
       backLabel={backLabel}
       options={options}
       footerNote={footerNote}
     >
+      {party && (
+        <PartyBlock heading={party.heading} name={party.name} code={party.code} meta={party.meta}>
+          {party.lines}
+        </PartyBlock>
+      )}
+
+      {shownBands.map((b) => (
+        <Band key={b.label} icon={b.icon} label={b.label} strong={b.strong}>
+          {b.body}
+        </Band>
+      ))}
+
       {panels.length > 0 && (
         <div
           style={{

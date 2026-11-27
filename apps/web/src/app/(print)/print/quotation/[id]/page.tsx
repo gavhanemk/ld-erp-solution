@@ -5,7 +5,26 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import type { ChargeTaxTreatment } from '@ld-erp/shared'
 import { saleChargeRow } from '@/components/print/saleChargeRow'
-import { StoreSheet, Fact, Eyebrow, qty, money, longDate, CODE, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
+import {
+  StoreSheet,
+  Dash,
+  Note,
+  PartyLine,
+  TaxByRate,
+  Terms,
+  TotalsBox,
+  WordsAndTotals,
+  qty,
+  money,
+  longDate,
+  shortDate,
+  CODE,
+  GREY,
+  INK,
+  MUTED,
+  type SheetColumn,
+  type TotalLine,
+} from '@/components/print/StoreSheet'
 
 interface Payload {
   company: Record<string, string | null>
@@ -49,7 +68,17 @@ interface Payload {
       item: { code: string; name: string; color: string | null; hsnCode: string | null }
     }>
     /** Transport, packing: the order made from this quotation carries them as they are. */
-    charges?: Array<{ id: string; amount: string; netAmount?: string | null; taxTreatment?: ChargeTaxTreatment | null; gstRate: string; chargeType: { name: string } }>
+    charges?: Array<{
+      id: string
+      amount: string
+      netAmount?: string | null
+      taxTreatment?: ChargeTaxTreatment | null
+      gstRate: string
+      cgst?: string | null
+      sgst?: string | null
+      igst?: string | null
+      chargeType: { name: string }
+    }>
   }
 }
 
@@ -122,6 +151,39 @@ export default function PrintQuotation() {
   const terms = q.terms || template.termsText
   const banner = q.status === 'LOST' ? 'NOT ACCEPTED — this quotation was declined.' : q.status === 'DRAFT' ? 'DRAFT — not yet sent to the buyer.' : null
 
+  // GST at each rate, one line per rate as the purchase order prints it: the
+  // goods (after the quotation discount, spread across the lines as it was
+  // when priced) and the charges at their value without GST.
+  const subtotal = Number(q.subtotal)
+  const factor = subtotal > 0 ? Number(q.taxableAmount) / subtotal : 1
+  const byRate = new Map<number, { taxable: number; tax: number }>()
+  const addRate = (rate: number, base: number, tax: number) => {
+    const r = byRate.get(rate) ?? { taxable: 0, tax: 0 }
+    r.taxable += base
+    r.tax += tax
+    byRate.set(rate, r)
+  }
+  for (const l of q.lines) {
+    const rate = Number(l.gstRate)
+    const base = Number(l.amount) * factor
+    addRate(rate, base, (base * rate) / 100)
+  }
+  for (const ch of q.charges ?? []) {
+    if (ch.taxTreatment === 'NON_TAXABLE') continue
+    const rate = Number(ch.gstRate)
+    const base = Number(ch.netAmount ?? ch.amount)
+    const saved = ch.cgst != null || ch.sgst != null || ch.igst != null
+    addRate(rate, base, saved ? Number(ch.cgst ?? 0) + Number(ch.sgst ?? 0) + Number(ch.igst ?? 0) : (base * rate) / 100)
+  }
+  const taxRows = [...byRate.entries()]
+    .filter(([, r]) => r.taxable > 0)
+    .sort((a, b) => a[0] - b[0])
+    .map(([rate, r]) => ({ gstRate: rate, taxable: r.taxable, cgst: r.tax / 2, sgst: r.tax / 2, igst: r.tax }))
+
+  const totalLines: TotalLine[] = totals.map(([label, value]) => ({ label, value }))
+
+  // Laid out like the purchase order (27 Nov 2026): the buyer in the "To,"
+  // block with the quotation's facts beside it.
   return (
     <StoreSheet
       company={company}
@@ -132,75 +194,44 @@ export default function PrintQuotation() {
       backHref="/sales/quotations"
       backLabel="Quotations"
       banner={banner}
-      panels={[
-        {
-          title: 'To',
-          body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY }}>{c.name}</div>
-              {address && <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{address}</div>}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={c.gstin ?? 'Unregistered'} mono />
-                <Fact label="Phone" value={c.phone} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'Quotation',
-          body: (
-            <>
-              <Fact label="Valid until" value={longDate(q.validUntil)} />
-              <Fact label="Your reference" value={q.customerRef} />
-              <Fact label="Brand" value={q.brand.name} />
-              <Fact label="Type" value={q.isJobWork ? 'Job work (your fabric)' : null} />
-              <Fact label="Place of supply" value={q.placeOfSupplyCode ? `${data.placeOfSupplyState ?? ''} (${q.placeOfSupplyCode})` : null} />
-              <Fact label="Contact" value={q.salesperson} />
-            </>
-          ),
-        },
-      ]}
+      party={{
+        name: c.name,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={address || null} />
+            <PartyLine label="GST No" value={c.gstin ?? 'Unregistered'} mono={Boolean(c.gstin)} />
+            <PartyLine label="Contact No" value={c.phone} mono />
+            <PartyLine
+              label="Place of supply"
+              value={
+                q.placeOfSupplyCode
+                  ? `${data.placeOfSupplyState ?? ''} (${q.placeOfSupplyCode})${taxMode === 'IGST' ? ', inter-state' : ''}`
+                  : null
+              }
+            />
+          </>
+        ),
+        meta: [
+          ['Quotation No', q.quoteNumber, true],
+          ['Quotation Date', shortDate(q.quoteDate), true],
+          !!q.validUntil && ['Valid until', shortDate(q.validUntil), true],
+          !!q.customerRef && ['Your reference', q.customerRef],
+          ['Brand', q.brand.name],
+          q.isJobWork && ['Type', 'Job work (your fabric)'],
+          !!q.salesperson && ['Contact', q.salesperson],
+        ],
+      }}
       columns={columns}
       rows={rows}
-      minRows={5}
       after={
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: '7px', marginTop: '8px' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
-              {template.showAmountInWords !== false && (
-                <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                  <Eyebrow style={{ color: GREY }}>Amount in words</Eyebrow>
-                  <div style={{ fontSize: '10px', color: INK, marginTop: '3px' }}>{data.totalInWords}</div>
-                </div>
-              )}
-              {q.notes && (
-                <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                  <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-                  <div style={{ fontSize: '10px', color: GREY, marginTop: '3px', whiteSpace: 'pre-line' }}>{q.notes}</div>
-                </div>
-              )}
-            </div>
-            <div style={{ border: `1px solid ${RULE}`, display: 'flex', flexDirection: 'column' }}>
-              <div style={{ padding: '6px 11px', display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                {totals.map(([label, value]) => (
-                  <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: INK }}>
-                    <span>{label}</span>
-                    <span style={NUM}>{value}</span>
-                  </div>
-                ))}
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 11px', borderTop: '1.5pt solid #000', color: '#fff', marginTop: 'auto' }}>
-                <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>Quoted total</span>
-                <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(q.totalAmount)}</span>
-              </div>
-            </div>
-          </div>
-          {terms && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-              <Eyebrow style={{ color: GREY }}>Terms</Eyebrow>
-              <div style={{ fontSize: '9.5px', color: INK, marginTop: '3px', lineHeight: 1.6, whiteSpace: 'pre-line' }}>{terms}</div>
-            </div>
-          )}
+          <WordsAndTotals
+            words={template.showAmountInWords !== false ? data.totalInWords : null}
+            left={<Note title="Special notes">{q.notes || <Dash />}</Note>}
+            totals={<TotalsBox rows={totalLines} totalLabel="Quoted total" total={`₹ ${money(q.totalAmount)}`} />}
+          />
+          <TaxByRate rows={taxRows} split={taxMode} />
+          <Terms text={terms} />
         </>
       }
       signatures={[{ role: `For ${company.name}`, who: q.createdBy?.name }]}
