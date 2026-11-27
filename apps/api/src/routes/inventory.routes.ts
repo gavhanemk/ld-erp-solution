@@ -66,7 +66,11 @@ import {
   reserveRequisitionSchema,
   releaseReservationSchema,
   transferSchema,
+  receiveTransferSchema,
+  sendBackTransferSchema,
+  writeOffTransferSchema,
 } from '../schemas/inventory.schemas'
+import * as transit from '../services/transitTransfer.service'
 import { autoStickers, stickersNote, withdrawStickers } from '../services/stickers.service'
 import { assertOwnersFitOrder } from '../services/ownership.service'
 import { createOnce, onceFor, requestIdOf } from '../lib/onceFor'
@@ -567,9 +571,12 @@ const whoseInclude = {
 const transferInclude = {
   fromWarehouse: { select: { id: true, name: true } },
   toWarehouse: { select: { id: true, name: true } },
+  transitWarehouse: { select: { id: true, name: true } },
   movedBy: { select: { id: true, name: true } },
   cancelledBy: { select: { id: true, name: true } },
   lines: { include: { item: itemSelect, ...whoseInclude } },
+  /** What became of goods on the road, step by step. */
+  receipts: { orderBy: { createdAt: 'asc' as const }, include: { by: { select: { id: true, name: true } }, lines: true } },
 }
 
 const adjustmentInclude = {
@@ -722,6 +729,7 @@ export async function createAdjustment(tx: Prisma.TransactionClient, data: z.inf
 
   const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId } })
   if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
+  refuseTransitStore(warehouse, 'counted')
 
   const whose: Array<Awaited<ReturnType<typeof whoseStock>>> = []
   for (const line of data.lines) whose.push(await whoseStock(tx, line))
@@ -794,9 +802,10 @@ export async function createAdjustment(tx: Prisma.TransactionClient, data: z.inf
  */
 export async function createStockIn(tx: Prisma.TransactionClient, data: z.infer<typeof stockInSchema>, userId: string | null) {
   const when = data.adjustmentDate ?? new Date()
-  const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { name: true, isActive: true } })
+  const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { name: true, isActive: true, kind: true } })
   if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
   if (!warehouse.isActive) throw new AppError(`${warehouse.name} is switched off`, 400, 'INACTIVE')
+  refuseTransitStore(warehouse, 'taken into stock')
 
   const lines = []
   for (const l of data.lines) {
@@ -990,6 +999,20 @@ router.get('/adjustments/:id', requirePermission(MODULE, 'view'), async (req, re
   res.json({ success: true, data: row })
 })
 
+/**
+ * Goods on the road are counted at the other end, on their transfer: a count
+ * or a stock-in in the transit store itself is refused when it is saved, not
+ * only when it would be approved.
+ */
+function refuseTransitStore(w: { name: string; kind: string }, what: string) {
+  if (w.kind !== 'TRANSIT') return
+  throw new AppError(
+    `${w.name} holds goods on the road: nothing is ${what} there. Receive them, send them back or write them off on their transfer in Stock Documents → Transfers.`,
+    400,
+    'TRANSIT_STORE',
+  )
+}
+
 /** The database half of the route below, so it can run inside any transaction (and a rolled-back test). */
 export async function createTransfer(
   tx: Prisma.TransactionClient,
@@ -999,12 +1022,26 @@ export async function createTransfer(
   opts: { stickers?: 'window' | 'caller' } = {},
 ) {
   const when = data.transferDate ?? new Date()
+  const onTheRoad = data.mode === 'IN_TRANSIT'
 
   const [from, to] = await Promise.all([
     tx.warehouse.findUnique({ where: { id: data.fromWarehouseId } }),
     tx.warehouse.findUnique({ where: { id: data.toWarehouseId } }),
   ])
   if (!from || !to) throw new AppError('One of those warehouses does not exist', 404, 'NOT_FOUND')
+  // A transit store is where goods wait on the road, on their own transfer:
+  // never the store a transfer leaves or goes to.
+  for (const w of [from, to]) {
+    if (w.kind === 'TRANSIT') {
+      throw new AppError(
+        `${w.name} holds goods on the road. Pick the store it leaves and the store it goes to, and send it "In transit" to put it on the road.`,
+        400,
+        'TRANSIT_STORE',
+      )
+    }
+  }
+  if (from.id === to.id) throw new AppError('The two warehouses are the same, so nothing would move', 400, 'SAME_WAREHOUSE')
+  const via = onTheRoad ? await transit.transitStoreFor(tx, data.transitWarehouseId) : null
 
   const whose: Array<Awaited<ReturnType<typeof whoseStock>>> = []
   for (const line of data.lines) whose.push(await whoseStock(tx, line))
@@ -1019,6 +1056,10 @@ export async function createTransfer(
       transferDate: when,
       notes: data.notes ?? null,
       movedById: userId,
+      mode: onTheRoad ? 'IN_TRANSIT' : 'DIRECT',
+      // Direct: there already. In transit: on the road until it is received.
+      status: onTheRoad ? 'DISPATCHED' : 'RECEIVED',
+      transitWarehouseId: via?.id ?? null,
       lines: { create: data.lines.map((l, i) => ({ itemId: l.itemId, qty: l.qty, ...whose[i], grade: l.grade ?? 'A' })) },
     },
     include: { lines: true },
@@ -1027,31 +1068,25 @@ export async function createTransfer(
   for (const line of created.lines) {
     // A grade moves as itself: rejects go to a reject store still rejected.
     const key = { ownership: line.ownership, ownerCustomerId: line.ownerCustomerId, sizeId: line.sizeId, grade: line.grade }
-    // Read what it is carried at before it moves. transferStock prices the
-    // arriving stock at the same figure, so this is the rate the document
-    // should remember.
-    const carried = await balanceOf(tx, {
-      itemId: line.itemId,
-      warehouseId: data.fromWarehouseId,
-      ...key,
-    })
-
-    await transferStock(tx, {
+    const moved = await transferStock(tx, {
       itemId: line.itemId,
       fromWarehouseId: data.fromWarehouseId,
-      toWarehouseId: data.toWarehouseId,
+      // In transit it waits in the transit store, still whoever's it was.
+      toWarehouseId: via?.id ?? data.toWarehouseId,
       qty: Number(line.qty),
       ...key,
       referenceType: 'STOCK_TRANSFER',
       referenceId: created.id,
       transactionDate: when,
-      notes: `${transferNumber}: ${from.name} → ${to.name}`,
+      notes: via ? `${transferNumber}: ${from.name} → on the road to ${to.name}` : `${transferNumber}: ${from.name} → ${to.name}`,
       stickers: opts.stickers ?? 'window',
     })
 
+    // What it left at, which is what it arrived at (and, on the road, what it
+    // will leave the transit store at): the rate the document remembers.
     await tx.stockTransferLine.update({
       where: { id: line.id },
-      data: { unitRate: carried.avgRate },
+      data: { unitRate: moved.unitRate },
     })
   }
 
@@ -1097,7 +1132,10 @@ router.post('/transfers', requirePermission(MODULE, 'create'), async (req: AuthR
 
   res.status(repeat ? 200 : 201).json({
     success: true,
-    message: `${transfer.transferNumber} saved. ${transfer.lines.length} ${transfer.lines.length === 1 ? 'item' : 'items'} moved from ${transfer.fromWarehouse.name} to ${transfer.toWarehouse.name}.${repeat ? ' (That was the same request again: nothing more was saved.)' : ''}`,
+    message:
+      transfer.mode === 'IN_TRANSIT'
+        ? `${transfer.transferNumber} sent. ${transfer.lines.length} ${transfer.lines.length === 1 ? 'item is' : 'items are'} on the road from ${transfer.fromWarehouse.name} to ${transfer.toWarehouse.name}, held in ${transfer.transitWarehouse?.name ?? 'transit'} until ${transfer.toWarehouse.name} receives ${transfer.lines.length === 1 ? 'it' : 'them'}.${repeat ? ' (That was the same request again: nothing more was saved.)' : ''}`
+        : `${transfer.transferNumber} saved. ${transfer.lines.length} ${transfer.lines.length === 1 ? 'item' : 'items'} moved from ${transfer.fromWarehouse.name} to ${transfer.toWarehouse.name}.${repeat ? ' (That was the same request again: nothing more was saved.)' : ''}`,
     data: transfer,
     repeat,
   })
@@ -1115,6 +1153,8 @@ router.get('/transfers', requirePermission(MODULE, 'view'), async (req, res) => 
     ]
   }
   if (str(req.query.q)) where.transferNumber = { contains: str(req.query.q), mode: 'insensitive' }
+  // ?open=1: transfers with something still on the road.
+  if (str(req.query.open)) where.status = { in: transit.OPEN_TRANSIT }
 
   const [rows, total] = await Promise.all([
     prisma.stockTransfer.findMany({
@@ -1174,6 +1214,12 @@ router.patch(
         )
       }
 
+      // Still on the road: it comes back from the transit store, before anything of it arrived.
+      if (before.mode === 'IN_TRANSIT') {
+        await transit.cancelInTransit(tx, before.id, reason, req.user?.id ?? null)
+        return tx.stockTransfer.findUniqueOrThrow({ where: { id: before.id }, include: transferInclude })
+      }
+
       // What has since been issued or sent on from where it went cannot walk back.
       await assertStockUnused(tx, {
         referenceId: before.id,
@@ -1206,6 +1252,7 @@ router.patch(
           cancelledAt: new Date(),
           cancelledById: req.user?.id ?? null,
           cancelReason: reason,
+          status: 'CANCELLED',
         },
         include: transferInclude,
       })
@@ -1226,6 +1273,122 @@ router.patch(
     })
   },
 )
+
+/** "40 m arrived · 2 m damaged": what one step did, line by line, for its message. */
+function stepWords(done: Array<{ line: { item: { name: string; uom: { symbol: string } | null } }; qty: number; damaged?: number }>) {
+  return done
+    .map((d) => {
+      const unit = d.line.item.uom?.symbol ?? ''
+      const parts = [d.qty > 0 ? `${round3(d.qty)} ${unit}` : null, d.damaged ? `${round3(d.damaged)} ${unit} damaged` : null].filter(Boolean)
+      return `${d.line.item.name} ${parts.join(', ')}`.replace(/\s+/g, ' ')
+    })
+    .join('; ')
+}
+
+/** What is still on the road of a transfer, in words, or nothing when it is closed. */
+function stillOnTheWay(t: { lines: Array<{ qty: unknown; receivedQty: unknown; damagedQty: unknown; returnedQty: unknown; lostQty: unknown; item: { uom: { symbol: string } | null } }> }) {
+  const left = t.lines
+    .map((l) => ({ n: transit.onTheWay(l as Parameters<typeof transit.onTheWay>[0]), unit: l.item.uom?.symbol ?? '' }))
+    .filter((x) => x.n > 0.0005)
+  if (!left.length) return ''
+  const units = [...new Set(left.map((x) => x.unit))]
+  return units.length === 1
+    ? ` ${round3(left.reduce((s, x) => s + x.n, 0))} ${units[0]} still on the way.`
+    : ` ${left.length} ${left.length === 1 ? 'line' : 'lines'} still on the way.`
+}
+
+/**
+ * The store it went to says what arrived, of a transfer sent in transit: good,
+ * damaged (taken in as rejected), all of it or part of it now.
+ */
+router.post('/transfers/:id/receive', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = receiveTransferSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'transferLine', data.lines.flatMap((l) => [
+    { lineId: l.lineId, qty: l.qty, what: 'Arrived' },
+    { lineId: l.lineId, qty: l.damagedQty, what: 'Damaged' },
+  ]))
+  const userId = req.user?.id ?? null
+  let step: Awaited<ReturnType<typeof transit.receiveTransfer>> | null = null
+  const { doc, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'STOCK_TRANSFER_RECEIPT',
+    userId,
+    make: async (tx) => (step = await transit.receiveTransfer(tx, req.params.id, data, userId)),
+    load: (id) => prisma.stockTransferReceipt.findUniqueOrThrow({ where: { id }, select: { id: true } }),
+  })
+  const transfer = await prisma.stockTransfer.findUniqueOrThrow({ where: { id: req.params.id }, include: transferInclude })
+  if (!repeat) {
+    await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockTransfer', entityId: transfer.id, after: { received: doc.id, lines: data.lines, status: transfer.status } })
+  }
+  const done = step as Awaited<ReturnType<typeof transit.receiveTransfer>> | null
+  const reprint = done?.reprint ?? []
+  res.json({
+    success: true,
+    message: repeat
+      ? `${transfer.transferNumber}: that was the same receipt again, so nothing more was received.`
+      : `${transfer.transferNumber}: received at ${transfer.toWarehouse.name} — ${stepWords(done?.received ?? [])}.${done?.received.some((d) => d.damaged > 0) ? ' Damaged goods are held as rejected.' : ''}${stillOnTheWay(transfer)}${reprint.length ? ` ${reprint.length} new ${reprint.length === 1 ? 'sticker' : 'stickers'} to print (Stickers → Ready to print).` : ''}`,
+    data: transfer,
+    reprint,
+    repeat,
+  })
+})
+
+/** What did not arrive goes back to the store it left. */
+router.post('/transfers/:id/send-back', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = sendBackTransferSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'transferLine', data.lines.map((l) => ({ lineId: l.lineId, qty: l.qty, what: 'Sent back' })))
+  const userId = req.user?.id ?? null
+  let step: Awaited<ReturnType<typeof transit.sendBackTransfer>> | null = null
+  const { doc, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'STOCK_TRANSFER_RETURN',
+    userId,
+    make: async (tx) => (step = await transit.sendBackTransfer(tx, req.params.id, data, userId)),
+    load: (id) => prisma.stockTransferReceipt.findUniqueOrThrow({ where: { id }, select: { id: true } }),
+  })
+  const transfer = await prisma.stockTransfer.findUniqueOrThrow({ where: { id: req.params.id }, include: transferInclude })
+  if (!repeat) {
+    await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockTransfer', entityId: transfer.id, after: { sentBack: doc.id, lines: data.lines, status: transfer.status } })
+  }
+  const done = step as Awaited<ReturnType<typeof transit.sendBackTransfer>> | null
+  res.json({
+    success: true,
+    message: repeat
+      ? `${transfer.transferNumber}: that was the same request again, so nothing more went back.`
+      : `${transfer.transferNumber}: sent back to ${transfer.fromWarehouse.name} — ${stepWords(done?.settled ?? [])}.${stillOnTheWay(transfer)}`,
+    data: transfer,
+    reprint: done?.reprint ?? [],
+    repeat,
+  })
+})
+
+/** What was lost on the way, written off by a store manager with a reason. */
+router.post('/transfers/:id/write-off', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const data = writeOffTransferSchema.parse(req.body)
+  await assertLineQtyFitsUnits(prisma, 'transferLine', data.lines.map((l) => ({ lineId: l.lineId, qty: l.qty, what: 'Lost' })))
+  const userId = req.user?.id ?? null
+  let step: Awaited<ReturnType<typeof transit.writeOffTransfer>> | null = null
+  const { doc, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'STOCK_TRANSFER_WRITE_OFF',
+    userId,
+    make: async (tx) => (step = await transit.writeOffTransfer(tx, req.params.id, data, userId)),
+    load: (id) => prisma.stockTransferReceipt.findUniqueOrThrow({ where: { id }, select: { id: true } }),
+  })
+  const transfer = await prisma.stockTransfer.findUniqueOrThrow({ where: { id: req.params.id }, include: transferInclude })
+  if (!repeat) {
+    await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockTransfer', entityId: transfer.id, after: { writtenOff: doc.id, reason: data.reason, lines: data.lines, status: transfer.status } })
+  }
+  const done = step as Awaited<ReturnType<typeof transit.writeOffTransfer>> | null
+  res.json({
+    success: true,
+    message: repeat
+      ? `${transfer.transferNumber}: that was the same write-off again, so nothing more was written off.`
+      : `${transfer.transferNumber}: written off as lost on the way — ${stepWords(done?.settled ?? [])}, worth ₹${(done?.value ?? 0).toLocaleString('en-IN')}.${stillOnTheWay(transfer)}`,
+    data: transfer,
+    repeat,
+  })
+})
 
 // ── Material requisitions ───────────────────────────────────────────────────
 

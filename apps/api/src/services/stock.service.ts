@@ -67,6 +67,15 @@ export interface Movement extends StockKey {
    * value left behind would not match the quantity left behind.
    */
   unitRate?: number
+  /**
+   * Goods on the road only: what they leave a transit store at, which is what
+   * their own transfer put them in at. One transit store carries every
+   * consignment, and two of the same cloth sent at different rates must not
+   * blend on the way; nothing else moves stock there, so each leaving at its
+   * own rate keeps what is left exactly what is still on the road. Refused for
+   * any other store.
+   */
+  atRate?: number
   /** The document that caused this. Both halves are required; see rule 2. */
   referenceType: string
   referenceId: string
@@ -162,14 +171,28 @@ export async function lockBalances(tx: Prisma.TransactionClient, keys: StockKey[
 async function lockBalanceAndStore(
   tx: Prisma.TransactionClient,
   key: StockKey,
-): Promise<{ purpose: string | null; name: string | null }> {
+): Promise<{ purpose: string | null; name: string | null; kind: string | null }> {
   const token = lockToken(key)
-  const rows = await tx.$queryRaw<Array<{ purpose: string | null; name: string | null }>>`
-    SELECT w.purpose::text AS purpose, w.name
+  const rows = await tx.$queryRaw<Array<{ purpose: string | null; name: string | null; kind: string | null }>>`
+    SELECT w.purpose::text AS purpose, w.name, w.kind::text AS kind
     FROM (SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)) AS held
     LEFT JOIN ld_erp.warehouses w ON w.id = ${key.warehouseId}`
-  return rows[0] ?? { purpose: null, name: null }
+  return rows[0] ?? { purpose: null, name: null, kind: null }
 }
+
+/**
+ * The documents that may move stock into or out of a transit store: an
+ * in-transit transfer's dispatch, receipt, send-back, write-off and cancel.
+ * Goods on the road are counted at the other end, not issued or counted where
+ * they wait.
+ */
+export const TRANSIT_DOCUMENTS = new Set([
+  'STOCK_TRANSFER',
+  'STOCK_TRANSFER_RECEIVED',
+  'STOCK_TRANSFER_RETURNED',
+  'STOCK_TRANSFER_LOST',
+  'STOCK_TRANSFER_CANCELLED',
+])
 
 /**
  * What is on hand right now, and what it is carried at.
@@ -362,6 +385,17 @@ export async function recordMovement(
   if (store.purpose === 'SAMPLING' && !sampleStoreMayMove(m)) {
     throw sampleStoreRefused(store.name ?? 'That store', m.referenceType, m.ownership ?? 'OWNED')
   }
+  // Goods on the road move only on their own transfer.
+  if (store.kind === 'TRANSIT' && !TRANSIT_DOCUMENTS.has(m.referenceType)) {
+    throw new AppError(
+      `${store.name ?? 'That store'} holds goods on the road: they move only on their in-transit transfer. Receive them, send them back or write them off from Stock Documents → Transfers.`,
+      400,
+      'TRANSIT_STORE',
+    )
+  }
+  if (m.atRate !== undefined && (m.direction !== 'OUT' || store.kind !== 'TRANSIT')) {
+    throw new AppError('Only goods leaving a transit store go at their own transfer’s rate.', 500, 'RATE_NOT_ALLOWED')
+  }
 
   const transactionDate = await settleDate(tx, m)
   const before = await balanceOf(tx, m)
@@ -464,8 +498,16 @@ export async function recordMovement(
       }
     }
     // Stock leaves at what it is carried at. Any other rate would leave value
-    // behind that no quantity accounts for.
-    unitRate = before.avgRate
+    // behind that no quantity accounts for. Goods on the road leave at what
+    // their own transfer put them in at (see `atRate`).
+    unitRate = m.atRate !== undefined ? round2(m.atRate) : before.avgRate
+    if (m.atRate !== undefined && before.value - qty * unitRate < -0.05) {
+      throw new AppError(
+        `The transit store carries only ₹${before.value} of this item, less than the ${qty} going out at ₹${unitRate}. Run the Stock Reconciliation report before going on.`,
+        409,
+        'TRANSIT_VALUE',
+      )
+    }
   }
 
   const closing = round3(m.direction === 'IN' ? before.qty + qty : before.qty - qty)
@@ -695,8 +737,12 @@ export async function transferStock(
     earlierDate?: Movement['earlierDate']
     reservedFor?: string[]
     ignoreReservations?: boolean
+    /** Out of a transit store: the rate its own transfer put it in at (see `Movement.atRate`). */
+    atRate?: number
+    /** The grade it arrives as, when not the one it left as: goods that came in damaged arrive as R. */
+    toGrade?: string | null
   },
-): Promise<void> {
+): Promise<{ unitRate: number }> {
   if (args.fromWarehouseId === args.toWarehouseId) {
     throw new AppError(
       'The two warehouses are the same, so nothing would move',
@@ -708,9 +754,10 @@ export async function transferStock(
   // Both balances locked up front, in one fixed order: two transfers going
   // opposite ways between the same stores would otherwise deadlock.
   const whose = { ownership: args.ownership, ownerCustomerId: args.ownerCustomerId, sizeId: args.sizeId, grade: args.grade }
+  const arrivesAs = args.toGrade ?? args.grade
   await lockBalances(tx, [
     { itemId: args.itemId, warehouseId: args.fromWarehouseId, ...whose },
-    { itemId: args.itemId, warehouseId: args.toWarehouseId, ...whose },
+    { itemId: args.itemId, warehouseId: args.toWarehouseId, ...whose, grade: arrivesAs },
   ])
 
   const out = await recordMovement(tx, {
@@ -733,6 +780,7 @@ export async function transferStock(
     earlierDate: args.earlierDate,
     reservedFor: args.reservedFor,
     ignoreReservations: args.ignoreReservations,
+    ...(args.atRate !== undefined ? { atRate: args.atRate } : {}),
   })
 
   await recordMovement(tx, {
@@ -751,13 +799,14 @@ export async function transferStock(
     ownership: args.ownership,
     ownerCustomerId: args.ownerCustomerId,
     sizeId: args.sizeId,
-    grade: args.grade,
+    grade: arrivesAs,
     batchNumber: args.batchNumber,
     orderNo: args.orderNo,
     transactionDate: args.transactionDate,
     notes: args.notes,
     earlierDate: args.earlierDate,
   })
+  return { unitRate: out.unitRate }
 }
 
 /**

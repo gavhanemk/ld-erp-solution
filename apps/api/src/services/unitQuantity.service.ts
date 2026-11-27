@@ -67,7 +67,7 @@ export async function assertRequisitionFitsUnits(db: Db, mrId: string): Promise<
 }
 
 /** Lines another document points at, by what they are on. */
-export type LineKind = 'poLine' | 'grnLine' | 'billLine' | 'mrLine' | 'customerGrnLine' | 'jobWorkLine' | 'enquiryLine' | 'package'
+export type LineKind = 'poLine' | 'grnLine' | 'billLine' | 'mrLine' | 'customerGrnLine' | 'jobWorkLine' | 'enquiryLine' | 'package' | 'transferLine'
 
 /**
  * The item behind each line a document points at — a receipt line names its
@@ -94,7 +94,9 @@ export async function itemsOfLines(
                 ? await db.purchaseEnquiryLine.findMany(where)
                 : kind === 'package'
                   ? await db.stockPackage.findMany(where)
-                  : await db.jobWorkChallanLine.findMany(where)
+                  : kind === 'transferLine'
+                    ? await db.stockTransferLine.findMany(where)
+                    : await db.jobWorkChallanLine.findMany(where)
   return new Map(rows.filter((r) => r.itemId).map((r) => [r.id, r.itemId as string]))
 }
 

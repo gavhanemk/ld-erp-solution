@@ -41,6 +41,16 @@ async function repriceFrom(tx: Prisma.TransactionClient, first: Key): Promise<nu
   const queue = [first]
   const seen = new Set<string>()
   let changed = 0
+  // Goods on the road leave a transit store at what their own transfer put
+  // them in at, never at the store's blended average (stock.service `atRate`).
+  const kinds = new Map<string, string>()
+  const kindOf = async (warehouseId: string) => {
+    if (!kinds.has(warehouseId)) {
+      const w = await tx.warehouse.findUnique({ where: { id: warehouseId }, select: { kind: true } })
+      kinds.set(warehouseId, w?.kind ?? 'GENERAL')
+    }
+    return kinds.get(warehouseId)!
+  }
   // A closed period's stock is what its books closed on: never priced again.
   const lock = await stockLockedUpTo(tx)
   const closed = (d: Date) => lock !== null && new Date(d.getTime() + 330 * 60_000).toISOString().slice(0, 10) <= lock
@@ -61,6 +71,9 @@ async function repriceFrom(tx: Prisma.TransactionClient, first: Key): Promise<nu
       orderBy: [{ transactionDate: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
       select: { id: true, inQty: true, outQty: true, unitRate: true, transactionType: true, referenceType: true, referenceId: true, transactionDate: true },
     })
+    const transit = (await kindOf(key.warehouseId)) === 'TRANSIT'
+    /** In a transit store: the rate each transfer's goods came in at. */
+    const cameInAt = new Map<string, number>()
     let qty = 0
     let value = 0
     for (const r of rows) {
@@ -69,17 +82,20 @@ async function repriceFrom(tx: Prisma.TransactionClient, first: Key): Promise<nu
       if (inQ > 0) {
         qty = round3(qty + inQ)
         value += inQ * Number(r.unitRate ?? 0)
+        if (transit && r.referenceId) cameInAt.set(r.referenceId, Number(r.unitRate ?? 0))
       }
       if (!(outQ > 0)) continue
-      const rate = qty > 0.0005 ? round2(value / qty) : Number(r.unitRate ?? 0)
+      const own = transit && r.referenceId ? cameInAt.get(r.referenceId) : undefined
+      const rate = own !== undefined ? own : qty > 0.0005 ? round2(value / qty) : Number(r.unitRate ?? 0)
       if (Math.abs(rate - Number(r.unitRate ?? 0)) > 0.004) {
         if (closed(r.transactionDate)) refuseClosed()
         await tx.stockLedger.update({ where: { id: r.id }, data: { unitRate: rate } })
         changed++
         if (r.transactionType === 'TRANSFER') {
           // The same transfer's arrival in the other store: the same price, and that store priced again.
+          // Out of a transit store, goods that arrived damaged came in as R: any grade.
           const halves = await tx.stockLedger.findMany({
-            where: { referenceType: r.referenceType, referenceId: r.referenceId, itemId: key.itemId, sizeId: key.sizeId, grade: key.grade, inQty: { gt: 0 }, NOT: { warehouseId: key.warehouseId } },
+            where: { referenceType: r.referenceType, referenceId: r.referenceId, itemId: key.itemId, sizeId: key.sizeId, ...(transit ? {} : { grade: key.grade }), inQty: { gt: 0 }, NOT: { warehouseId: key.warehouseId } },
             select: { id: true, unitRate: true, itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, sizeId: true, grade: true, transactionDate: true },
           })
           for (const h of halves) {
@@ -88,6 +104,13 @@ async function repriceFrom(tx: Prisma.TransactionClient, first: Key): Promise<nu
             await tx.stockLedger.update({ where: { id: h.id }, data: { unitRate: rate } })
             changed++
             queue.push(keyOf(h))
+            // Goods put on the road: their transfer's line says what they travel at.
+            if (r.referenceType === 'STOCK_TRANSFER' && r.referenceId && (await kindOf(h.warehouseId)) === 'TRANSIT') {
+              await tx.stockTransferLine.updateMany({
+                where: { transferId: r.referenceId, itemId: h.itemId, sizeId: h.sizeId, grade: h.grade, ownership: h.ownership, ownerCustomerId: h.ownerCustomerId },
+                data: { unitRate: rate },
+              })
+            }
           }
         }
       }

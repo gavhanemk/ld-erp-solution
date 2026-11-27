@@ -38,13 +38,37 @@ interface Payload {
     toWarehouse: Store
     movedBy: { name: string } | null
     cancelledBy: { name: string } | null
+    /** DIRECT, or IN_TRANSIT: on the road through a transit store until received. */
+    mode?: 'DIRECT' | 'IN_TRANSIT'
+    status?: 'DISPATCHED' | 'PARTLY_RECEIVED' | 'RECEIVED' | 'DISCREPANCY' | 'CANCELLED'
+    transitWarehouse?: { name: string } | null
+    receipts?: Array<{
+      id: string
+      kind: 'RECEIVED' | 'RETURNED' | 'WRITTEN_OFF'
+      receivedAt: string
+      notes: string | null
+      by: { name: string } | null
+      lines: Array<{ transferLineId: string; qty: string; damagedQty: string }>
+    }>
     lines: Array<{
       id: string
       qty: string
       unitRate: string | null
+      receivedQty?: string
+      damagedQty?: string
+      returnedQty?: string
+      lostQty?: string
       item: { code: string; name: string; hsnCode: string | null; uom: { symbol: string } }
     }>
   }
+}
+
+const STATUS_WORDS: Record<string, string> = {
+  DISPATCHED: 'On the way',
+  PARTLY_RECEIVED: 'Partly received',
+  RECEIVED: 'Received in full',
+  DISCREPANCY: 'Closed with differences',
+  CANCELLED: 'Cancelled',
 }
 
 const COLS: SheetColumn[] = [
@@ -92,6 +116,22 @@ export default function PrintStockTransfer() {
   if (!data) return <p style={{ padding: 48, color: MUTED }}>Opening the transfer note…</p>
 
   const { company, template, transfer } = data
+  const onTheRoad = transfer.mode === 'IN_TRANSIT'
+  const lineOf = new Map(transfer.lines.map((l) => [l.id, l]))
+  // What became of goods on the road, step by step, in words.
+  const steps = (transfer.receipts ?? []).map((r) => {
+    const said = r.lines
+      .map((rl) => {
+        const l = lineOf.get(rl.transferLineId)
+        const unit = l?.item.uom.symbol ?? ''
+        const parts = [Number(rl.qty) > 0 ? `${qty(rl.qty)} ${unit}` : null, Number(rl.damagedQty) > 0 ? `${qty(rl.damagedQty)} ${unit} damaged` : null].filter(Boolean)
+        return `${l?.item.name ?? 'Item'} ${parts.join(', ')}`
+      })
+      .join('; ')
+    const verb = r.kind === 'RECEIVED' ? `Received at ${transfer.toWarehouse.name}` : r.kind === 'RETURNED' ? `Sent back to ${transfer.fromWarehouse.name}` : 'Written off as lost'
+    return { key: r.id, text: `${longDate(r.receivedAt)} · ${verb}${r.by ? ` by ${r.by.name}` : ''}: ${said}${r.notes ? ` — ${r.notes}` : ''}` }
+  })
+  const lastReceiver = [...(transfer.receipts ?? [])].reverse().find((r) => r.kind === 'RECEIVED')?.by?.name ?? null
   const value = (l: Payload['transfer']['lines'][number]) =>
     l.unitRate === null ? null : Number(l.qty) * Number(l.unitRate)
   const total = transfer.lines.reduce((s, l) => s + (value(l) ?? 0), 0)
@@ -115,7 +155,7 @@ export default function PrintStockTransfer() {
       company={company}
       title={template.title}
       number={transfer.transferNumber}
-      dateLabel="Moved"
+      dateLabel={onTheRoad ? 'Sent' : 'Moved'}
       date={longDate(transfer.transferDate) ?? ''}
       backHref="/inventory/documents"
       backLabel="Stock documents"
@@ -135,6 +175,8 @@ export default function PrintStockTransfer() {
               <Fact label="Date" value={longDate(transfer.transferDate)} />
               <Fact label="Sent by" value={transfer.movedBy?.name ?? null} />
               <Fact label="Lines" value={String(transfer.lines.length)} />
+              {onTheRoad && <Fact label="Goes" value={`In transit, through ${transfer.transitWarehouse?.name ?? 'transit'}`} />}
+              {onTheRoad && transfer.status && <Fact label="Status" value={STATUS_WORDS[transfer.status] ?? transfer.status} />}
             </>
           ),
         },
@@ -149,6 +191,14 @@ export default function PrintStockTransfer() {
             <div style={{ fontSize: '10px', color: transfer.notes ? GREY : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
               {transfer.notes ?? 'None.'}
             </div>
+            {onTheRoad && (
+              <>
+                <Eyebrow style={{ color: GREY, marginTop: '6px' }}>On arrival</Eyebrow>
+                <div style={{ fontSize: '10px', color: steps.length ? GREY : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
+                  {steps.length ? steps.map((x) => <div key={x.key}>{x.text}</div>) : 'Nothing received yet.'}
+                </div>
+              </>
+            )}
           </div>
           <div
             style={{
@@ -170,7 +220,7 @@ export default function PrintStockTransfer() {
       signatures={[
         { role: 'Sent by', who: transfer.movedBy?.name },
         { role: 'Carried by', who: null },
-        { role: 'Received by', who: null },
+        { role: 'Received by', who: lastReceiver },
       ]}
       footerNote={
         template.footerNote ?? 'Between our own stores. Not a sale, and not a tax invoice.'

@@ -174,12 +174,23 @@ async function main() {
   })
   const fix = await call('POST', '/inventory/adjustments', { warehouseId: store.id, reason: 'ZZTEST put the fraction right', lines: [{ itemId: carton.id, countedQty: 1 }] })
   check('Stock count: an old 0.6 carton is put right by counting 1 (the difference may be a fraction)', okay(fix), fix)
+  // A count waits for approval; approve it so the store is left whole (a 0.6 left behind
+  // disagrees with the carton's sticker on the Stock Reconciliation report).
+  const fixId = fix.body?.data?.id
+  const approved = fixId && fix.body?.data?.status === 'PENDING' ? await call('POST', `/inventory/adjustments/${fixId}/approve`, {}) : fix
+  const left = await prisma.stockLedger.findFirst({ where: { itemId: carton.id, warehouseId: store.id }, orderBy: [{ transactionDate: 'desc' }, { createdAt: 'desc' }], select: { closingStock: true } })
+  check('Stock count: once approved the carton stands at a whole 1 again', okay(approved) && Number(left?.closingStock) === 1, { approved: approved.body?.message, left: left?.closingStock })
 
   // ── A manufacturing order's material plan: whole units asked for whole ──
-  const mos = await prisma.manufacturingOrder.findMany({ where: { status: { not: 'DRAFT' } }, select: { id: true, moNumber: true }, take: 12, orderBy: { createdAt: 'desc' } })
+  // The newest orders are often other tests' orders with no BOM (no plan at all):
+  // look further back, and stop once a dozen orders with a plan have been read.
+  const mos = await prisma.manufacturingOrder.findMany({ where: { status: { not: 'DRAFT' } }, select: { id: true, moNumber: true }, take: 120, orderBy: { createdAt: 'desc' } })
   let wholeRows = 0, decimalRows = 0, badRows: string[] = []
+  let planned = 0
   for (const mo of mos) {
+    if (planned >= 12) break
     const plan = await call('GET', `/production/orders/${mo.id}/materials`)
+    if ((plan.body?.data?.rows ?? []).length) planned++
     for (const r of (plan.body?.data?.rows ?? []) as Array<{ item: { code: string; places: number }; required: number; toRequest: number }>) {
       if (r.item.places === 0) {
         wholeRows++

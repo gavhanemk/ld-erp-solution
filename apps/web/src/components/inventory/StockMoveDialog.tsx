@@ -14,6 +14,7 @@ import {
   ClipboardCheck,
   ArrowRightLeft,
   Warehouse,
+  Truck,
 } from 'lucide-react'
 import { api, apiErrorMessage, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
@@ -70,7 +71,12 @@ interface WarehouseOption {
   id: string
   code: string
   name: string
+  /** TRANSIT: where goods wait on the road. Never picked as a store here. */
+  kind?: string
 }
+
+/** How a transfer travels: straight there, or on the road until the other store receives it. */
+type Goes = 'DIRECT' | 'IN_TRANSIT'
 
 interface Line {
   itemId: string
@@ -140,7 +146,7 @@ const COPY: Record<
   transfer: {
     title: 'Move stock',
     blurb:
-      'Between two of our own stores. What it is worth and whose it is travel with it — a customer\'s cloth stays theirs.',
+      'Between two of our own stores. What it is worth and whose it is travel with it — a customer\'s cloth stays theirs. Send it in transit when the other store should confirm what arrives.',
     qtyLabel: 'Quantity',
     action: 'Move it',
   },
@@ -164,6 +170,8 @@ export function StockMoveDialog({
 
   const [warehouseId, setWarehouseId] = useState('')
   const [toWarehouseId, setToWarehouseId] = useState('')
+  const [goes, setGoes] = useState<Goes>('DIRECT')
+  const [transitId, setTransitId] = useState('')
   const [reason, setReason] = useState('')
   const [source, setSource] = useState('')
   const [notes, setNotes] = useState('')
@@ -220,8 +228,12 @@ export function StockMoveDialog({
         setItems(i.data)
         setWarehouses(w.data)
         // One store is the overwhelmingly common case, so choosing it for them
-        // removes a click without ever choosing wrongly.
-        if (w.data.length === 1) setWarehouseId(w.data[0].id)
+        // removes a click without ever choosing wrongly. A transit store is
+        // never one of them: goods wait there only on their own transfer.
+        const real = w.data.filter((x) => x.kind !== 'TRANSIT')
+        if (real.length === 1) setWarehouseId(real[0].id)
+        const via = w.data.filter((x) => x.kind === 'TRANSIT')
+        if (via.length === 1) setTransitId(via[0].id)
       } catch {
         if (!cancelled) setError('Could not load items and stores.')
       } finally {
@@ -234,6 +246,9 @@ export function StockMoveDialog({
   }, [])
 
   const itemsById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
+  const stores = useMemo(() => warehouses.filter((w) => w.kind !== 'TRANSIT'), [warehouses])
+  const transitStores = useMemo(() => warehouses.filter((w) => w.kind === 'TRANSIT'), [warehouses])
+  const onTheRoad = mode === 'transfer' && goes === 'IN_TRANSIT'
 
   const setLine = (index: number, patch: Partial<Line>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
@@ -255,6 +270,10 @@ export function StockMoveDialog({
     if (mode === 'transfer' && warehouseId === toWarehouseId) {
       return setError('The two stores are the same, so nothing would move.')
     }
+    if (onTheRoad && !transitStores.length) {
+      return setError('There is no transit store yet. Add one in Masters → Warehouses with the kind "In transit", or send it straight there.')
+    }
+    if (onTheRoad && !transitId) return setError('Choose the transit store it goes through.')
     if (mode === 'stockin' && !source) return setError('Say where it came from.')
     if (mode === 'stockin' && source === 'OTHER' && notes.trim().length < 5) {
       return setError('Say where it came from in the note, in a few words.')
@@ -338,6 +357,8 @@ export function StockMoveDialog({
           requestId: requestId.current,
           fromWarehouseId: warehouseId,
           toWarehouseId,
+          mode: goes,
+          transitWarehouseId: onTheRoad ? transitId : null,
           notes: notes || null,
           lines: filled.map((l) => ({ itemId: l.itemId, qty: Number(l.qty), ...parseWhose(l.whose) })),
         })
@@ -356,8 +377,8 @@ export function StockMoveDialog({
 
   const primary = (
     <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving}>
-      {saving ? <Loader2 size={15} className="animate-spin" /> : <Icon size={15} />}
-      {copy.action}
+      {saving ? <Loader2 size={15} className="animate-spin" /> : onTheRoad ? <Truck size={15} /> : <Icon size={15} />}
+      {onTheRoad ? 'Send it' : copy.action}
     </button>
   )
 
@@ -391,7 +412,7 @@ export function StockMoveDialog({
               autoFocus
             >
               <option value="">{loadingLists ? 'Loading...' : 'Choose a store...'}</option>
-              {warehouses.map((w) => (
+              {stores.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name}
                 </option>
@@ -411,7 +432,7 @@ export function StockMoveDialog({
                 disabled={loadingLists}
               >
                 <option value="">{loadingLists ? 'Loading...' : 'Choose a store...'}</option>
-                {warehouses
+                {stores
                   .filter((w) => w.id !== warehouseId)
                   .map((w) => (
                     <option key={w.id} value={w.id}>
@@ -420,6 +441,64 @@ export function StockMoveDialog({
                   ))}
               </SmartSelect>
             </label>
+          )}
+
+          {mode === 'transfer' && (
+            <div className="block min-w-0 sm:col-span-2">
+              <span className="form-label">How it goes</span>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="border-border bg-secondary flex gap-1 rounded-lg border p-1" role="radiogroup" aria-label="How it goes">
+                  {(
+                    [
+                      ['DIRECT', 'Straight there'],
+                      ['IN_TRANSIT', 'In transit'],
+                    ] as const
+                  ).map(([k, label]) => (
+                    <button
+                      key={k}
+                      type="button"
+                      role="radio"
+                      aria-checked={goes === k}
+                      className={
+                        goes === k
+                          ? 'bg-primary text-primary-foreground rounded-lg px-3 py-1 text-xs font-semibold'
+                          : 'text-muted-foreground rounded-lg px-3 py-1 text-xs'
+                      }
+                      onClick={() => setGoes(k)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {onTheRoad &&
+                  (transitStores.length === 0 ? (
+                    <span className="text-xs text-amber-500">
+                      No transit store yet: add one in Masters → Warehouses with the kind “In transit”.
+                    </span>
+                  ) : transitStores.length === 1 ? (
+                    <span className="text-muted-foreground text-xs">Through {transitStores[0].name}</span>
+                  ) : (
+                    <SmartSelect
+                      className="form-input h-9 max-w-xs"
+                      value={transitId}
+                      onChange={(e) => setTransitId(e.target.value)}
+                      aria-label="Transit store it goes through"
+                    >
+                      <option value="">Goes through...</option>
+                      {transitStores.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.name}
+                        </option>
+                      ))}
+                    </SmartSelect>
+                  ))}
+              </div>
+              <p className="text-muted-foreground mt-1 text-[11px]">
+                {onTheRoad
+                  ? 'It leaves now and waits in transit, still whoever’s it was and at what it left at. The other store receives what arrives — all, part, or damaged — from Stock Documents → Transfers.'
+                  : 'Out of one store and into the other in one go.'}
+              </p>
+            </div>
           )}
 
           {mode === 'count' && (

@@ -933,10 +933,16 @@ async function processStockSteps(refs: Array<string | null | undefined>): Promis
         transferDate: true,
         cancelledAt: true,
         notes: true,
+        mode: true,
         movedBy: { select: { name: true } },
         fromWarehouse: { select: { name: true } },
         toWarehouse: { select: { name: true } },
-        lines: { select: { qty: true, lotNo: true, bundleNo: true, size: { select: { code: true, sequence: true } } } },
+        transitWarehouse: { select: { name: true } },
+        lines: { select: { id: true, qty: true, lotNo: true, bundleNo: true, size: { select: { code: true, sequence: true } } } },
+        receipts: {
+          orderBy: { createdAt: 'asc' },
+          select: { kind: true, receivedAt: true, notes: true, by: { select: { name: true } }, lines: { select: { transferLineId: true, qty: true, damagedQty: true } } },
+        },
       },
     }),
   ])
@@ -973,15 +979,37 @@ async function processStockSteps(refs: Array<string | null | undefined>): Promis
   for (const t of moves) {
     const qty = t.lines.reduce((s, l) => s + n(l.qty), 0)
     const marks = [...new Set(t.lines.flatMap((l) => [l.lotNo && `lot ${l.lotNo}`, l.bundleNo && `bundle ${l.bundleNo}`]).filter(Boolean))]
+    const onTheRoad = t.mode === 'IN_TRANSIT'
     steps.push({
       at: t.transferDate,
       phase: 'production',
-      title: `${pcsOf(qty)} moved from ${t.fromWarehouse.name} to ${t.toWarehouse.name}`,
+      title: onTheRoad
+        ? `${pcsOf(qty)} sent from ${t.fromWarehouse.name} to ${t.toWarehouse.name}, on the road through ${t.transitWarehouse?.name ?? 'transit'}`
+        : `${pcsOf(qty)} moved from ${t.fromWarehouse.name} to ${t.toWarehouse.name}`,
       detail: [sizesSaid(t.lines.map((l) => ({ size: l.size, qty: n(l.qty) }))), ...marks, t.notes].filter(Boolean).join(' · ') || null,
       ref: t.transferNumber,
       by: t.movedBy?.name,
       undone: Boolean(t.cancelledAt),
     })
+    // Each step of goods on the road: what arrived (and damaged), what went back, what was lost.
+    const sizeOf = new Map(t.lines.map((l) => [l.id, l.size]))
+    for (const r of t.receipts) {
+      const good = r.lines.reduce((s, l) => s + n(l.qty), 0)
+      const damaged = r.lines.reduce((s, l) => s + n(l.damagedQty), 0)
+      steps.push({
+        at: r.receivedAt,
+        phase: 'production',
+        title:
+          r.kind === 'RECEIVED'
+            ? `${pcsOf(good + damaged)} received at ${t.toWarehouse.name}${damaged > 0 ? `, ${pcsOf(damaged)} of it damaged` : ''}`
+            : r.kind === 'RETURNED'
+              ? `${pcsOf(good)} sent back to ${t.fromWarehouse.name}`
+              : `${pcsOf(good)} written off as lost on the way`,
+        detail: [sizesSaid(r.lines.map((l) => ({ size: sizeOf.get(l.transferLineId) ?? null, qty: n(l.qty) + n(l.damagedQty) }))), r.notes].filter(Boolean).join(' · ') || null,
+        ref: t.transferNumber,
+        by: r.by?.name,
+      })
+    }
   }
   return steps
 }

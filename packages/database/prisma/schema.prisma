@@ -770,6 +770,7 @@ model User {
   movedStock           StockTransfer[]             @relation("TransferMovedBy")
   stockMovements       StockLedger[]               @relation("StockLedgerCreatedBy")
   cancelledStock       StockTransfer[]             @relation("TransferCancelledBy")
+  stockTransferReceipts StockTransferReceipt[]     @relation("TransferReceiptBy")
   countedStock         StockAdjustment[]           @relation("AdjustmentMadeBy")
   receivedGoods        GRN[]                       @relation("GRNCreatedBy")
   uploadedGrnFiles     GRNAttachment[]             @relation("GRNAttachmentUploadedBy")
@@ -1775,6 +1776,8 @@ model Warehouse {
   purchaseOrders    PurchaseOrder[]
   transfersOut      StockTransfer[]           @relation("TransferFrom")
   transfersIn       StockTransfer[]           @relation("TransferTo")
+  /// Transfers whose goods went on the road through this store (kind TRANSIT).
+  transfersVia      StockTransfer[]           @relation("TransferVia")
   adjustments       StockAdjustment[]
 
   supplierPayments SupplierPayment[]
@@ -3633,12 +3636,27 @@ model StockTransfer {
   cancelledById   String?
   cancelledBy     User?     @relation("TransferCancelledBy", fields: [cancelledById], references: [id])
   cancelReason    String?
+  /// DIRECT: out of one store and into the other in one go, as every transfer
+  /// was before. IN_TRANSIT: sent now and confirmed by the other store when it
+  /// arrives; until then the goods sit in the transit store, still ours (or
+  /// still the customer's), at what they left at.
+  mode               TransferMode   @default(DIRECT)
+  /// A direct transfer is RECEIVED the moment it is saved. One in transit is
+  /// DISPATCHED, PARTLY_RECEIVED as it arrives, and RECEIVED when all of it
+  /// came in good, or DISCREPANCY when it closed with some damaged, sent back
+  /// or lost on the way. CANCELLED either way when it was taken back.
+  status             TransferStatus @default(RECEIVED)
+  /// The store kind TRANSIT the goods wait in while on the road.
+  transitWarehouseId String?
+  transitWarehouse   Warehouse?     @relation("TransferVia", fields: [transitWarehouseId], references: [id])
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  lines StockTransferLine[]
+  lines    StockTransferLine[]
+  receipts StockTransferReceipt[]
 
   @@index([transferDate])
+  @@index([status])
   @@map("stock_transfers")
 }
 
@@ -3670,7 +3688,54 @@ model StockTransferLine {
   bundleNo        String?
   /// Which grade moved: A good, B seconds, R held or rejected.
   grade           String         @default("A")
+  /// In transit only (a direct transfer leaves them at 0): what became of what
+  /// was sent. What is still on the way
+  /// is qty less all four. Received good arrives as the grade it left as;
+  /// damaged arrives as R, held in the same store.
+  receivedQty     Decimal        @default(0) @db.Decimal(10, 3)
+  damagedQty      Decimal        @default(0) @db.Decimal(10, 3)
+  /// Sent back to the store it left (it never went, or came back).
+  returnedQty     Decimal        @default(0) @db.Decimal(10, 3)
+  /// Written off as lost on the way, with a store manager's approval.
+  lostQty         Decimal        @default(0) @db.Decimal(10, 3)
+  receiptLines    StockTransferReceiptLine[]
   @@map("stock_transfer_lines")
+}
+
+/// One thing done with goods on the road: a receipt at the other store, or a
+/// settlement of what did not arrive (sent back, or written off as lost).
+/// Kept as a history, so who confirmed what and when is never overwritten.
+model StockTransferReceipt {
+  id         String              @id @default(cuid())
+  transferId String
+  transfer   StockTransfer       @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  kind       TransferReceiptKind
+  /// The day it happened, as entered.
+  receivedAt DateTime            @default(now())
+  byId       String?
+  by         User?               @relation("TransferReceiptBy", fields: [byId], references: [id])
+  notes      String?
+  createdAt  DateTime            @default(now())
+
+  lines StockTransferReceiptLine[]
+
+  @@index([transferId])
+  @@map("stock_transfer_receipts")
+}
+
+model StockTransferReceiptLine {
+  id             String               @id @default(cuid())
+  receiptId      String
+  receipt        StockTransferReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  transferLineId String
+  transferLine   StockTransferLine    @relation(fields: [transferLineId], references: [id], onDelete: Cascade)
+  /// Received good, sent back, or written off, as the receipt's kind says.
+  qty            Decimal              @default(0) @db.Decimal(10, 3)
+  /// On a receipt: what arrived damaged, taken in as R.
+  damagedQty     Decimal              @default(0) @db.Decimal(10, 3)
+
+  @@index([transferLineId])
+  @@map("stock_transfer_receipt_lines")
 }
 
 /// A correction after somebody has physically counted the rack.
@@ -4479,6 +4544,19 @@ enum WipEventType {
   /// (out of the cut size, into the new one); before, carried on in a new bundle made from it.
   SIZE_CHANGE
   REVERSAL
+}
+
+/// How a stock transfer travels: straight there, or on the road first.
+enum TransferMode {
+  DIRECT
+  IN_TRANSIT
+}
+
+/// What a step on an in-transit transfer did with the goods on the road.
+enum TransferReceiptKind {
+  RECEIVED
+  RETURNED
+  WRITTEN_OFF
 }
 
 enum TransferStatus {

@@ -232,20 +232,30 @@ export async function loadOutward(type: OutwardType, id: string, q?: string | nu
     where: { id },
     select: {
       transferNumber: true,
+      mode: true,
+      status: true,
       fromWarehouse: { select: { id: true, name: true } },
       toWarehouse: { select: { id: true, name: true } },
+      transitWarehouse: { select: { id: true, name: true } },
       lines: { select: { id: true, itemId: true, qty: true, ownership: true, ownerCustomerId: true, sizeId: true, item, ownerCustomer: { select: { name: true } } } },
     },
   })
   if (!t) throw notFound()
+  // Sent in transit, its stickers go on the road with it, into the transit
+  // store, before anything is done at the other end; each receipt, send-back
+  // or write-off takes them on from there. Once one has, the labels window has
+  // nothing left to do for it (a step refuses to start while they are not on
+  // the road: transitTransfer.service).
+  const onTheRoad = t.mode === 'IN_TRANSIT'
+  const stillLabelling = !onTheRoad || (t.status === 'DISPATCHED' && !!t.transitWarehouse)
   return {
     type,
     id,
     number: t.transferNumber,
-    to: t.toWarehouse.name,
-    toWarehouseId: t.toWarehouse.id,
+    to: onTheRoad ? `${t.transitWarehouse?.name ?? 'transit'} (on the road to ${t.toWarehouse.name})` : t.toWarehouse.name,
+    toWarehouseId: onTheRoad ? (t.transitWarehouse?.id ?? null) : t.toWarehouse.id,
     lines: t.lines
-      .filter((l) => !l.sizeId)
+      .filter((l) => !l.sizeId && stillLabelling)
       .map((l) => ({
         key: l.id,
         itemId: l.itemId,

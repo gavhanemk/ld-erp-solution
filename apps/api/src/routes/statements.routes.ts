@@ -37,12 +37,14 @@ function bucketOf(type: string | null): Bucket {
   if (type === 'MATERIAL_REQUISITION' || type.startsWith('MR_RETURN') || type.startsWith('CUTTING') || type.startsWith('FG_RECEIPT')) return 'production'
   if (type.startsWith('JOB_WORK')) return 'jobwork'
   if (type.startsWith('DELIVERY_CHALLAN') || type.startsWith('CREDIT_NOTE')) return 'dispatched'
+  // Lost on the road is gone, not moved.
+  if (type === 'STOCK_TRANSFER_LOST') return 'adjusted'
   if (type.startsWith('STOCK_TRANSFER')) return 'moved'
   return 'adjusted'
 }
 
 /** Both legs of these are written together, out of one store and into another. */
-const PAIRED = new Set(['STOCK_TRANSFER', 'STOCK_TRANSFER_CANCELLED', 'JOB_WORK_CHALLAN', 'JOB_WORK_CHALLAN_CANCELLED'])
+const PAIRED = new Set(['STOCK_TRANSFER', 'STOCK_TRANSFER_CANCELLED', 'STOCK_TRANSFER_RECEIVED', 'STOCK_TRANSFER_RETURNED', 'JOB_WORK_CHALLAN', 'JOB_WORK_CHALLAN_CANCELLED'])
 
 type LedgerLine = {
   id: string

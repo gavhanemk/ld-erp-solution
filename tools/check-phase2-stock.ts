@@ -187,24 +187,35 @@ async function main() {
     if (okay(c2)) await call('POST', `/inventory/adjustments/${c2.body.data.id}/approve`, {})
     check('counted back to nothing', (await bal(X, B, 'R')) === 0, await bal(X, B, 'R'))
 
-    // 3. QC rejects moved to a reject godown are held as rejected.
+    // 3. QC rejects moved to a reject godown are held as rejected. A receipt is
+    // checked once, and a check whose rejects were used stands: so each run
+    // buys and receives 5 of its own to check.
+    const supplier = ((await call('GET', '/masters/suppliers?limit=5')).body?.data ?? [])[0]
+    const po = await call('POST', '/purchase/orders', { supplierId: supplier?.id, deliveryWarehouseId: A, notes: 'ZZTEST phase 2 QC', lines: [{ itemId: X, qty: 5, unitRate: 10, gstRate: 12 }] })
+    if (okay(po)) await call('PATCH', `/purchase/orders/${po.body.data.id}/send`, {})
+    const got = okay(po)
+      ? await call('POST', '/purchase/grn', { poId: po.body.data.id, challanNo: `ZZ-P2-${stamp}`, challanDate: new Date().toISOString(), lines: [{ poLineId: po.body.data.lines[0].id, warehouseId: A, receivedQty: 5 }] })
+      : po
+    check('setup: 5 bought and received, to be checked', okay(got), [got.status, got.body?.message])
+    const qcGrn = { id: got.body?.data?.id as string }
+    const qcLine = { id: got.body?.data?.lines?.[0]?.id as string }
     const before = await bal(X, A)
     const qc = await call('POST', '/purchase/qc', {
-      grnId: grn.id,
+      grnId: qcGrn.id,
       rejectWarehouseId: B,
-      lines: [{ grnLineId: line.id, rejectedQty: 2, reasonCode: 'QUALITY_REJECTION', reason: 'ZZTEST phase 2' }],
+      lines: [{ grnLineId: qcLine.id, rejectedQty: 2, reasonCode: 'QUALITY_REJECTION', reason: 'ZZTEST phase 2' }],
     })
     check('QC rejects reach the reject godown held as rejected', okay(qc) && (await bal(X, B, 'R')) === 2 && (await bal(X, A)) === r3(before - 2), [qc.status, qc.body?.message, await bal(X, B, 'R')])
     if (okay(qc)) {
-      const qcId = qc.body?.data?.id ?? (await prisma.inwardQC.findFirst({ where: { grnId: grn.id }, orderBy: { createdAt: 'desc' }, select: { id: true } }))?.id
+      const qcId = qc.body?.data?.id ?? (await prisma.inwardQC.findFirst({ where: { grnId: qcGrn.id }, orderBy: { createdAt: 'desc' }, select: { id: true } }))?.id
       const held = (await call('GET', '/purchase/qc/rejected?held=1')).body?.data ?? []
-      const mine = held.find((r: any) => r.grnLineId === line.id && r.qcId === qcId)
+      const mine = held.find((r: any) => r.grnLineId === qcLine.id && r.qcId === qcId)
       check('the rejects list shows them held in the godown', mine?.heldIn === 'GODOWN' && mine?.held === 2, mine)
-      const used = await call('POST', `/purchase/qc/${qcId}/use`, { grnLineId: line.id, qty: 1, reason: 'ZZTEST phase 2: close enough' })
+      const used = await call('POST', `/purchase/qc/${qcId}/use`, { grnLineId: qcLine.id, qty: 1, reason: 'ZZTEST phase 2: close enough' })
       check('used after all: back into good stock where it was received', okay(used) && (await bal(X, B, 'R')) === 1 && (await bal(X, A)) === r3(before - 1), [used.status, used.body?.message])
       const cancel = await call('POST', `/purchase/qc/${qcId}/cancel`, { reason: 'ZZTEST phase 2: try to cancel' })
       check('a check whose rejects were used stands', cancel.status === 409 && cancel.body?.code === 'QC_REJECTS_SETTLED', [cancel.status, cancel.body?.message])
-      const rest = await call('POST', `/purchase/qc/${qcId}/use`, { grnLineId: line.id, qty: 1, reason: 'ZZTEST phase 2: clean-up' })
+      const rest = await call('POST', `/purchase/qc/${qcId}/use`, { grnLineId: qcLine.id, qty: 1, reason: 'ZZTEST phase 2: clean-up' })
       check('the rest used too: the godown holds none, the store has them all back', okay(rest) && (await bal(X, B, 'R')) === 0 && (await bal(X, A)) === before, rest.body?.message)
     }
 
