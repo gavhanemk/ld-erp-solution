@@ -407,8 +407,9 @@ export function SalesInvoiceDialog({
         lrNumber: lrNumber.trim() || null,
         eWayBillNumber: eWayBillNumber.trim() || null,
         eWayBillDate: eWayBillDate || null,
+        // The charges the preview counts, the order's own included even if its type was switched off since.
         charges: totals.chargeRows
-          .filter((c) => c.type && c.value > 0)
+          .filter((c) => (c.type || c.sourceChargeId) && c.value > 0)
           .map((c) => ({
             chargeTypeId: c.chargeTypeId,
             amount: c.value,

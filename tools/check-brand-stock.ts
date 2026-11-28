@@ -212,7 +212,8 @@ async function main() {
           await tx.manufacturingOrder.update({ where: { id: mo.id }, data: { status: 'COMPLETED', heldAt: null, holdReason: null } })
           await refuses('completed: nor then', () => issue(5), 'MO_NOT_AUTHORISED')
           await tx.manufacturingOrder.update({ where: { id: mo.id }, data: { status: 'CUTTING' } })
-          await refuses(`more than it still needs (${room} left): refused`, () => issue(room + 5), 'OVER_REQUIREMENT')
+          // Past what the MO may use (plan + approved extras): refused before any share is looked at (28 Nov 2026).
+          await refuses(`more than it still needs (${room} left): refused, extra material asked for instead`, () => issue(room + 5), 'EXTRA_NEEDED')
           const r10 = await issue(10)
           const auto1 = await tx.stockReallocation.findFirst({ where: { mrId: mr.id, kind: 'AUTO' }, include: { lines: true } })
           check(`authorised, within need: 10 issued, central moved to A by itself (${auto1?.number})`, r10.autoMoved.length === 1 && auto1?.status === 'POSTED' && Number(auto1.lines[0].qty) === 10 && auto1.moId === mo.id && auto1.toBrandId === A, { autoMoved: r10.autoMoved, auto1 })

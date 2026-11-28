@@ -170,6 +170,8 @@ interface MoveArgs {
    * and the tags scanned onto it count as the giving share's to name.
    */
   challanId?: string
+  /** Putting an automatic move back: at the rate it moved at, not the giving share's average now. */
+  restoreAt?: number
 }
 
 /**
@@ -284,6 +286,7 @@ export async function moveShare(tx: Tx, a: MoveArgs): Promise<{ unitRate: number
     transactionDate: a.transactionDate,
     earlierDate: 'move-up',
     cartonsOn: a.challanId,
+    ...(a.restoreAt !== undefined ? { atRate: a.restoreAt, restoring: true } : {}),
   })
   await recordMovement(tx, {
     ...key,
@@ -292,6 +295,8 @@ export async function moveShare(tx: Tx, a: MoveArgs): Promise<{ unitRate: number
     direction: 'IN',
     qty,
     unitRate: out.unitRate,
+    // Exactly what left the giving share, part by part.
+    parts: out.parts,
     referenceType: 'STOCK_REALLOCATION',
     referenceId: a.referenceId,
     notes: `${a.number}: ${fromName} → ${toName}${a.notes ? ` (${a.notes})` : ''}`,
@@ -844,6 +849,26 @@ export async function dispatchShare(
     const centralFree = round3(Math.max(0, central.qty - (await sealedElsewhere(tx, k, null, a.dc.id))))
     if (fromCentral > centralFree + 0.0005) {
       const shares = (await sharesOf(tx, key)).filter((x) => x.brandId !== null && x.brandId !== brand && x.qty > 0)
+      // No other brand holds any: what keeps it back is pieces sealed in cartons, or simply too few.
+      if (!shares.length) {
+        const sealed = round3((await sealedElsewhere(tx, k, brand, a.dc.id)) + (await sealedElsewhere(tx, k, null, a.dc.id)))
+        if (sealed > 0.0005) {
+          const codes = (
+            await tx.fgCarton.findMany({
+              where: { status: 'PACKED', warehouseId: a.dc.warehouseId, OR: [{ dcId: null }, { dcId: { not: a.dc.id } }], lines: { some: { itemId: a.itemId, sizeId: a.sizeId ?? undefined, grade: a.grade } } },
+              select: { code: true },
+              orderBy: { code: 'asc' },
+              take: 7,
+            })
+          ).map((c) => c.code)
+          throw new AppError(
+            `Only ${round3(ownFree + centralFree)} pcs of ${what} in this store are loose: ${sealed} are sealed in ${codes.length === 1 ? 'carton' : 'cartons'} ${codes.slice(0, 6).join(', ')}${codes.length > 6 ? '…' : ''}. Load the cartons on the challan (Finished Goods → Cartons → Dispatch), or open a carton first.`,
+            400,
+            'PACKED_IN_CARTONS',
+          )
+        }
+        throw new AppError(`Only ${round3(own.qty + central.qty)} pcs of ${what} in this store. You are trying to send ${a.qty}.`, 400, 'INSUFFICIENT_STOCK')
+      }
       throw new AppError(
         `${a.so.soNumber}: ${what} in this store — ${brandName} has ${ownFree} free and central stock ${centralFree} free, short of the ${a.qty} on ${a.dc.dcNumber}.${shares.length ? ` ${shares.map((x) => `${x.qty} is earmarked for ${x.brand}`).join(', ')}: not this order's to send without moving it between the brands first (Inventory → Brand Stock, approved).` : ''}`,
         409,
@@ -935,6 +960,8 @@ export async function reverseChallanMoves(tx: Tx, dcId: string, userId: string, 
         userId,
         stickers: 'leave',
         garmentCodes: tags.map((t) => t.code),
+        // At the rate it moved at: both shares exactly as they were before the challan.
+        ...(l.unitRate !== null ? { restoreAt: Number(l.unitRate) } : {}),
       })
       // Cartons it moved that are back in the store sealed go back to central too.
       if (l.packageCodes.length) await tx.fgCarton.updateMany({ where: { code: { in: l.packageCodes }, status: 'PACKED' }, data: { brandId: null } })

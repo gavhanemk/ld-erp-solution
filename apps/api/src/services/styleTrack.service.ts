@@ -193,8 +193,12 @@ function stepAcross(key: string, floor: StyleFloor | undefined): { state: StepSt
     states.push(l.finished && here.state !== 'SKIPPED' ? 'DONE' : here.state)
   }
   const live = states.filter((s) => s !== 'SKIPPED')
+  // A step none of the style's counted orders carries (the routing gained it
+  // after they were staged, or they took another route) is left out on all of
+  // them: with orders being counted it reads as left out, not as not started,
+  // or a style whose every order is finished would still look in progress.
   const state: StepState = !states.length
-    ? 'NOT_STARTED'
+    ? (floor?.lines.length ? 'SKIPPED' : 'NOT_STARTED')
     : !live.length
       ? 'SKIPPED'
       : live.every((s) => s === 'DONE')

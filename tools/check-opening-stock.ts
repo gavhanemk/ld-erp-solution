@@ -15,6 +15,8 @@ const HEADS = [
   'Opening Date', 'Process', 'Department / Location', 'Order No.', 'Style / Article No.', 'Item Code', 'Item Description',
   'Item Category', 'Fabric / Material', 'Colour', 'Size', 'Lot / Batch / Roll No.', 'Bundle / Barcode No.', 'UOM',
   'Opening Qty', 'Unit Rate', 'Opening Value', 'Stock Status', 'Remarks', 'HSN Code', 'GST %', 'Design No.',
+  // Multi-brand phase 5 (28 Nov 2026): the own brand the stock is earmarked for; empty is central.
+  'Brand',
 ]
 
 let pass = 0, fail = 0

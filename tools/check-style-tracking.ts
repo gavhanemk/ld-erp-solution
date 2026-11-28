@@ -56,7 +56,8 @@ async function main() {
           const states = perLine.map((m) => (m ? m.get(s.key)?.state : 'NOT_STARTED')).filter(Boolean) as string[]
           const completed = perLine.reduce((n, m) => n + (m?.get(s.key)?.completed ?? 0), 0)
           const live = states.filter((x) => x !== 'SKIPPED')
-          const state = !states.length ? 'NOT_STARTED' : !live.length ? 'SKIPPED' : live.every((x) => x === 'DONE') ? 'DONE' : live.every((x) => x === 'NOT_STARTED') ? 'NOT_STARTED' : 'IN_PROGRESS'
+          // A step on none of the counted orders is left out on all of them (styleTrack.service stepAcross).
+          const state = !states.length ? (perLine.length ? 'SKIPPED' : 'NOT_STARTED') : !live.length ? 'SKIPPED' : live.every((x) => x === 'DONE') ? 'DONE' : live.every((x) => x === 'NOT_STARTED') ? 'NOT_STARTED' : 'IN_PROGRESS'
           return { state, completed }
         })
         check('every step\'s state is the floor\'s, across the style\'s orders', d.steps.every((s, i) => s.state === expected[i].state), d.steps.map((s) => `${s.name} ${s.state}`).join(', '))

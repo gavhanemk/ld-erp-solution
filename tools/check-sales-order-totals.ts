@@ -17,6 +17,7 @@ import { prisma } from '../packages/database/src/index'
 import { createSalesOrderSchema, prepareOrder } from '../apps/api/src/routes/sales.routes'
 import { withHsnRates } from '../apps/api/src/lib/hsn'
 import { orderTotals } from '../apps/web/src/components/sales/orderTotals'
+import { chargeConfigOf } from '../packages/shared/src/index'
 
 let pass = 0
 let fail = 0
@@ -46,7 +47,9 @@ async function main() {
     (typeof raw)[number] & { hsn: { gstRate: string | number; priceLimit: string | number | null; rateAbove: string | number | null } | null }
   >
   const priced = items.filter((i) => i.hsn || i.taxRate)
-  const charges = await prisma.chargeType.findMany({ where: { isActive: true, applyOnSale: true }, select: { id: true, defaultGstRate: true }, take: 2 })
+  // The charge types as the form loads them (Masters → Charge Types, with their sales HSN): since #71 a
+  // charge's GST comes from its type, so the form prices it from the same settings the server uses.
+  const charges = await prisma.chargeType.findMany({ where: { isActive: true, applyOnSale: true }, include: { salesHsnCode: true, defaultHsnCode: true }, take: 2 })
   const hsnRows = await prisma.hsnCode.findMany({ where: { isActive: true }, select: { code: true, gstRate: true } })
   const hsnIndex = new Map(hsnRows.map((h) => [h.code.replace(/\s+/g, ''), h]))
   if (!customer || !brand || priced.length < 2) throw new Error('needs a customer, a brand and two finished goods with GST')
@@ -90,7 +93,6 @@ async function main() {
       ),
     )
     const h = server.header
-    const typeRate = (id: string) => Number(charges.find((c) => c.id === id)!.defaultGstRate)
     const form = orderTotals({
       lines: o.lines.map((l) => ({
         qty: l.qty,
@@ -105,7 +107,11 @@ async function main() {
       isJobWork: !!o.isJobWork,
       hsnIndex,
       billDiscount: o.discount ?? 0,
-      charges: (o.charges ?? []).map((c) => ({ amount: c.amount, fallbackRate: typeRate(c.id) })),
+      // Each charge as the form's chargesToPrice builds it: its type's own sales settings.
+      charges: (o.charges ?? []).map((c, i) => {
+        const cfg = chargeConfigOf(charges.find((t) => t.id === c.id)! as never, 'sales')
+        return { key: `c${i}`, amount: c.amount, treatment: cfg.treatment, followsGoodsRate: cfg.followsGoodsRate, ownRate: cfg.ownRate, gstApplicable: cfg.gstApplicable, taxCategory: cfg.taxCategory, amountMode: 'FIXED' as const }
+      }),
       intra: o.pos === home,
       otherCharges: o.other ?? 0,
       brokerPct: 0,

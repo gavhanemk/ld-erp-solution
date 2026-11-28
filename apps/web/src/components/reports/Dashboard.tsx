@@ -92,6 +92,20 @@ export interface Analysis {
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
+/** One cell of a report's matrix, in its unit. */
+function matrixText(v: number, format: 'money' | 'qty' | 'integer' | 'percent'): string {
+  switch (format) {
+    case 'money':
+      return `₹${inr(v)}`
+    case 'percent':
+      return `${v.toLocaleString('en-IN', { maximumFractionDigits: 1 })}%`
+    case 'integer':
+      return Math.round(v).toLocaleString('en-IN')
+    default:
+      return v.toLocaleString('en-IN', { maximumFractionDigits: 3 })
+  }
+}
+
 /** A dash, never a nought — a nought is a claim, a dash is an absence. */
 function kpiText(k: Kpi): string {
   if (k.value == null) return '—'
@@ -230,6 +244,42 @@ export function ReportDashboard({
                 <p className="text-muted-foreground mt-1.5 text-[11px] leading-snug">{k.basis}</p>
               </div>
             ))}
+          </div>
+        </section>
+      )}
+
+      {/* A report's table of figures by two things at once — the Inventory
+        Matrix's company and each brand share across where the stock is, Stock
+        Ageing's categories across age bands. One unit throughout (rupees),
+        so its rows and columns may be read across; a dash is nothing there. */}
+      {analysis.matrix && analysis.matrix.rows.length > 0 && (
+        <section>
+          <SectionRule>{analysis.matrix.title}</SectionRule>
+          <div className="glass-card overflow-x-auto p-0">
+            <table className="data-table w-full min-w-[720px]">
+              <thead>
+                <tr>
+                  <th className="text-left">{analysis.matrix.rowLabel}</th>
+                  {analysis.matrix.columns.map((c) => (
+                    <th key={c} className="text-right">
+                      {c}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {analysis.matrix.rows.map((r, ri) => (
+                  <tr key={`${r.label}-${ri}`}>
+                    <td className="text-foreground font-medium">{r.label}</td>
+                    {r.values.map((v, i) => (
+                      <td key={i} className="text-right tabular-nums">
+                        {v == null ? '—' : matrixText(v, analysis.matrix!.format)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </section>
       )}

@@ -3,7 +3,27 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma, type Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
-import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
+import type { NextFunction, Response } from 'express'
+
+/**
+ * A guard for work that belongs to another screen as well as this one: allowed
+ * with the action on any of the screens named. Issuing a roll by scan is an
+ * issue against a requisition, so a store keeper who may issue requisitions
+ * (Material Requisitions: Edit) may issue by scan too, and one who may only
+ * label stock (Stickers & Scan: Edit) may not issue by it; the labels window
+ * after an issue, a transfer or a return is part of that document's work.
+ */
+const allowedOnAnyOf =
+  (screens: string[], action: string, what: string) => (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (screens.some((k) => userCan(req.user, k, action))) return next()
+    return res.status(403).json({
+      success: false,
+      message: `Your role does not allow you to ${what}. Ask an administrator to change it in Settings → People.`,
+      code: 'FORBIDDEN',
+      required: screens.map((k) => `${k}:${action}`).join(' or '),
+    })
+  }
 import { writeAuditLog } from '../lib/audit'
 import { createTransfer, issueRequisition } from './inventory.routes'
 import {
@@ -873,7 +893,7 @@ router.post('/outward/plan', requirePermission(MODULE, 'view'), async (req, res)
  * one becomes a new roll in the other store. A package keeps its code for
  * what stays in it. Returns the new packages, to print.
  */
-router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+router.post('/outward/apply', allowedOnAnyOf(['inventory.stickers', 'inventory.requisitions', 'inventory.documents'], 'edit', 'say which stickers went out'), async (req: AuthRequest, res) => {
   const data = outwardApplySchema.parse(req.body)
   await assertLineQtyFitsUnits(prisma, 'package', data.takes.map((t) => ({ lineId: t.packageId, qty: t.qty, what: 'Taken' })))
   const doc = await loadOutward(data.type, data.id, data.q)
@@ -1351,7 +1371,7 @@ router.post('/:id/rack', requirePermission(MODULE, 'edit'), async (req: AuthRequ
 })
 
 /** Issuing from a scanned package against a requisition. The rest stays in the package. */
-router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+router.post('/:id/issue', allowedOnAnyOf(['inventory.requisitions'], 'edit', 'issue material against a requisition'), async (req: AuthRequest, res) => {
   const data = issueSchema.parse(req.body)
   await assertLineQtyFitsUnits(prisma, 'package', [{ lineId: req.params.id, qty: data.qty, what: 'From the package' }])
   // Kept for the audit trail of a first issue; a repeat writes none.

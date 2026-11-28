@@ -14,6 +14,8 @@ const API = (process.env.E2E_API || 'http://localhost:5101/api').replace(/\/+$/,
 const ALL_HEADS = [
   'Opening Date', 'Process', 'Department / Location', 'Order No.', 'Style / Article No.', 'Item Code', 'Item Description', 'Item Category', 'Fabric / Material',
   'Colour', 'Size', 'Lot / Batch / Roll No.', 'Bundle / Barcode No.', 'UOM', 'Opening Qty', 'Unit Rate', 'Opening Value', 'Stock Status', 'Remarks', 'HSN Code', 'GST %', 'Design No.',
+  // Multi-brand phase 5 (28 Nov 2026).
+  'Brand',
 ]
 const REQUIRED = { ALL: ['Opening Date', 'Item Description', 'Opening Qty'], FG: ['Style / Article No.', 'Colour', 'Size', 'Opening Quantity'], RM: ['Item Name', 'Opening Quantity'] }
 const SHEET = { ALL: 'Opening Stock', FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' } as const
@@ -77,7 +79,7 @@ async function main() {
     check(`${kind} template: the example in grey italics`, ws.getRow(2).font?.italic === true)
   }
   const allWs = (await template('ALL')).getWorksheet(SHEET.ALL)!
-  check('19-column template: the same 19 columns, then HSN Code, GST % and a fabric’s Design No.', JSON.stringify(((allWs.getRow(1).values as unknown[]) ?? []).slice(1).map((v) => plain(String(v)))) === JSON.stringify(ALL_HEADS))
+  check('19-column template: the same 19 columns, then HSN Code, GST %, a fabric’s Design No. and the Brand', JSON.stringify(((allWs.getRow(1).values as unknown[]) ?? []).slice(1).map((v) => plain(String(v)))) === JSON.stringify(ALL_HEADS))
   const notes = Object.fromEntries(ALL_HEADS.map((h, i) => [h, String((allWs.getCell(1, i + 1).note as unknown as { texts?: Array<{ text: string }> })?.texts?.map((t) => t.text).join('') ?? allWs.getCell(1, i + 1).note ?? '')]))
   for (const h of ['Process', 'Department / Location', 'Order No.', 'Style / Article No.', 'Item Code', 'UOM', 'Unit Rate', 'Stock Status']) {
     check(`19-column template: ${h} says it is optional`, /^Optional/.test(notes[h]), notes[h])

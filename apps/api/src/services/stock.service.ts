@@ -89,6 +89,12 @@ export interface Movement extends StockKey {
    * any other store.
    */
   atRate?: number
+  /**
+   * An automatic reallocation put back with the document it was made for (a
+   * challan cancelled): the stock goes back at the rate it moved at, so both
+   * shares are exactly as they were. Allows `atRate` outside a transit store.
+   */
+  restoring?: boolean
   /** The document that caused this. Both halves are required; see rule 2. */
   referenceType: string
   referenceId: string
@@ -116,6 +122,12 @@ export interface Movement extends StockKey {
   cartonsOn?: string
   /** A check or a count found it: the stock is what it is, holds or not. */
   ignoreReservations?: boolean
+  /**
+   * Coming in as the other half of a movement out: the rates it went out at,
+   * part by part (see `Written.parts`), so what comes in is worth exactly what
+   * went out. Takes the place of `unitRate`; the parts add up to `qty`.
+   */
+  parts?: Array<{ qty: number; unitRate: number }>
   /**
    * Who keeps the stickers in step when stock goes out. 'auto' (the default)
    * takes this store's stickers down to what is left, oldest first; 'window'
@@ -373,10 +385,24 @@ async function outsideLock(tx: Prisma.TransactionClient, when: Date, earlierDate
  * it, so a receipt and the stock it brought in either both exist or neither
  * does. Returns the new balance so the caller can report it back.
  */
+/**
+ * What a movement wrote. `parts`: the rows, a quantity and a rate each — one,
+ * except when stock going out empties its balance and the average, kept to
+ * the paisa, would leave a few paisa on nothing: then the last unit carries
+ * the difference, so the balance leaves with exactly the value it had. A
+ * movement in that is the other half of one out takes these parts.
+ */
+export interface Written {
+  balance: Balance
+  unitRate: number
+  ledgerId: string
+  parts: Array<{ qty: number; unitRate: number }>
+}
+
 export async function recordMovement(
   tx: Prisma.TransactionClient,
   m: Movement,
-): Promise<{ balance: Balance; unitRate: number; ledgerId: string }> {
+): Promise<Written> {
   if (!(m.qty > 0)) {
     throw new AppError('A stock movement must be for more than zero', 400, 'INVALID_QTY')
   }
@@ -415,7 +441,7 @@ export async function recordMovement(
       'TRANSIT_STORE',
     )
   }
-  if (m.atRate !== undefined && (m.direction !== 'OUT' || store.kind !== 'TRANSIT')) {
+  if (m.atRate !== undefined && (m.direction !== 'OUT' || (store.kind !== 'TRANSIT' && !(m.restoring && m.referenceType === 'STOCK_REALLOCATION')))) {
     throw new AppError('Only goods leaving a transit store go at their own transfer’s rate.', 500, 'RATE_NOT_ALLOWED')
   }
 
@@ -425,18 +451,30 @@ export async function recordMovement(
 
   let unitRate: number
 
+  let parts: Array<{ qty: number; unitRate: number }>
   if (m.direction === 'IN') {
-    if (m.unitRate === undefined || m.unitRate === null) {
-      throw new AppError(
-        'Stock coming in needs a rate, or it cannot be valued',
-        400,
-        'NO_RATE',
-      )
+    if (m.parts?.length) {
+      // The other half of a movement out: its rows, as they were.
+      const sum = round3(m.parts.reduce((t, p) => t + p.qty, 0))
+      if (Math.abs(sum - qty) > 0.0005 || m.parts.some((p) => !(p.qty > 0) || p.unitRate < 0)) {
+        throw new AppError('The parts coming in do not add up to the quantity.', 500, 'BAD_PARTS')
+      }
+      parts = m.parts.map((p) => ({ qty: round3(p.qty), unitRate: round2(p.unitRate) }))
+      unitRate = parts[0].unitRate
+    } else {
+      if (m.unitRate === undefined || m.unitRate === null) {
+        throw new AppError(
+          'Stock coming in needs a rate, or it cannot be valued',
+          400,
+          'NO_RATE',
+        )
+      }
+      if (m.unitRate < 0) {
+        throw new AppError('A rate cannot be negative', 400, 'NEGATIVE_RATE')
+      }
+      unitRate = round2(m.unitRate)
+      parts = [{ qty, unitRate }]
     }
-    if (m.unitRate < 0) {
-      throw new AppError('A rate cannot be negative', 400, 'NEGATIVE_RATE')
-    }
-    unitRate = round2(m.unitRate)
   } else {
     if (qty > before.qty) {
       // Naming the shortfall is the whole point. "Insufficient stock" sends
@@ -542,49 +580,70 @@ export async function recordMovement(
     // behind that no quantity accounts for. Goods on the road leave at what
     // their own transfer put them in at (see `atRate`).
     unitRate = m.atRate !== undefined ? round2(m.atRate) : before.avgRate
+    parts = [{ qty, unitRate }]
+    // The last out of a balance takes exactly the value left: kept to the
+    // paisa, qty × average can miss it by a few paisa, which would sit on a
+    // balance of nothing. The last unit carries the difference.
+    if (m.atRate === undefined && before.qty > 0 && qty >= before.qty - 0.0005) {
+      const rest = round2(before.value - qty * unitRate)
+      if (Math.abs(rest) >= 0.005) {
+        if (qty > 1) {
+          const last = round2(unitRate + rest)
+          if (last >= 0) parts = [{ qty: round3(qty - 1), unitRate }, { qty: 1, unitRate: last }]
+        } else if (qty > 0) {
+          parts = [{ qty, unitRate: round2(before.value / qty) }]
+          unitRate = parts[0].unitRate
+        }
+      }
+    }
     if (m.atRate !== undefined && before.value - qty * unitRate < -0.05) {
       throw new AppError(
-        `The transit store carries only ₹${before.value} of this item, less than the ${qty} going out at ₹${unitRate}. Run the Stock Reconciliation report before going on.`,
+        m.restoring
+          ? `This share carries only ₹${before.value} of this item, less than the ${qty} going back at ₹${unitRate}. Run the Stock Reconciliation report before going on.`
+          : `The transit store carries only ₹${before.value} of this item, less than the ${qty} going out at ₹${unitRate}. Run the Stock Reconciliation report before going on.`,
         409,
-        'TRANSIT_VALUE',
+        m.restoring ? 'SHARE_VALUE' : 'TRANSIT_VALUE',
       )
     }
   }
 
-  const closing = round3(m.direction === 'IN' ? before.qty + qty : before.qty - qty)
-
-  const row = await tx.stockLedger.create({
-    select: { id: true },
-    data: {
-      itemId: m.itemId,
-      warehouseId: m.warehouseId,
-      transactionType: m.transactionType,
-      referenceType: m.referenceType,
-      referenceId: m.referenceId,
-      batchNumber: m.batchNumber ?? null,
-      orderNo: m.orderNo ?? null,
-      ownership: m.ownership ?? 'OWNED',
-      ownerCustomerId: m.ownerCustomerId ?? null,
-      sizeId: m.sizeId ?? null,
-      grade: m.grade ?? 'A',
-      brandId: share,
-      inQty: m.direction === 'IN' ? qty : 0,
-      outQty: m.direction === 'OUT' ? qty : 0,
-      // A snapshot for the ledger view to print, so a printed statement does
-      // not have to re-add every earlier row. The sum of the rows is still
-      // what `balanceOf` trusts.
-      closingStock: closing,
-      unitRate,
-      transactionDate,
-      notes: m.notes ?? null,
-      // Who asked for it: the signed-in user of the request this runs in.
-      createdById: currentUserId(),
-    },
-  })
+  let running = before.qty
+  let row: { id: string } = { id: '' }
+  for (const p of parts) {
+    running = round3(m.direction === 'IN' ? running + p.qty : running - p.qty)
+    row = await tx.stockLedger.create({
+      select: { id: true },
+      data: {
+        itemId: m.itemId,
+        warehouseId: m.warehouseId,
+        transactionType: m.transactionType,
+        referenceType: m.referenceType,
+        referenceId: m.referenceId,
+        batchNumber: m.batchNumber ?? null,
+        orderNo: m.orderNo ?? null,
+        ownership: m.ownership ?? 'OWNED',
+        ownerCustomerId: m.ownerCustomerId ?? null,
+        sizeId: m.sizeId ?? null,
+        grade: m.grade ?? 'A',
+        brandId: share,
+        inQty: m.direction === 'IN' ? p.qty : 0,
+        outQty: m.direction === 'OUT' ? p.qty : 0,
+        // A snapshot for the ledger view to print, so a printed statement does
+        // not have to re-add every earlier row. The sum of the rows is still
+        // what `balanceOf` trusts.
+        closingStock: running,
+        unitRate: p.unitRate,
+        transactionDate,
+        notes: m.notes ?? null,
+        // Who asked for it: the signed-in user of the request this runs in.
+        createdById: currentUserId(),
+      },
+    })
+  }
 
   if (m.direction === 'OUT' && (m.stickers ?? 'auto') === 'auto' && !m.sizeId) await keepStickersInStep(tx, m)
 
-  return { balance: await balanceOf(tx, { ...m, brandId: share }), unitRate, ledgerId: row.id }
+  return { balance: await balanceOf(tx, { ...m, brandId: share }), unitRate, ledgerId: row.id, parts }
 }
 
 /**
@@ -867,6 +926,8 @@ export async function transferStock(
     // whose rate is still pending) arrives at nothing; setting the opening
     // rate later prices both halves of the move (openingControl.repriceFrom).
     unitRate: out.unitRate,
+    // Exactly what left: part by part when the last out of a balance carried its paisa.
+    parts: out.parts,
     referenceType: args.referenceType,
     referenceId: args.referenceId,
     ownership: args.ownership,

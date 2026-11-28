@@ -49,6 +49,7 @@ function refuseUnlessLocal() {
 
 async function main() {
   refuseUnlessLocal()
+  const chargesBefore = await prisma.salesQuotationCharge.count()
   await prisma
     .$transaction(
       async (tx) => {
@@ -85,8 +86,13 @@ async function main() {
               charges,
               ...extra,
             }),
-            { piecesOnly: true },
+            // As a person who may change a charge's GST (Masters: Edit), since #71.
+            { piecesOnly: true, canOverride: true },
           )
+
+        // A row's GST changed on the form (Advanced Tax Settings, #71): an override with its reason.
+        const ON_TOP = { mode: 'INHERIT' as const, treatment: 'EXCLUSIVE' as const, gstRate: 0, taxCategory: 'TAXABLE' as const, reason: 'check: GST added on top' }
+        const NO_GST = { mode: 'NONE' as const, treatment: 'NON_TAXABLE' as const, gstRate: 0, taxCategory: 'NON_GST' as const, reason: 'check: no GST on it' }
 
         // ── The business's case: ₹1,200 of transport, GST included (the charge type's own setting) ──
         const a = await order([{ chargeTypeId: transport.id, amount: 1200 }])
@@ -97,11 +103,11 @@ async function main() {
         check('order: CGST = SGST = ₹7,588.57 (₹7,560 on the shirts + ₹28.57 inside the transport), goods taxable ₹3,02,400', N(a.header.cgst) === 7588.57 && N(a.header.sgst) === 7588.57 && N(a.header.taxableAmount) === 302400 && N(a.header.roundOff) === 0, a.header)
 
         // ── GST added on top, as before ──
-        const b = await order([{ chargeTypeId: transport.id, amount: 1200, taxTreatment: 'EXCLUSIVE' }])
+        const b = await order([{ chargeTypeId: transport.id, amount: 1200, taxOverride: ON_TOP }])
         check('order: GST added on top when the row says so: ₹3,18,780, ₹60 on the transport', N(b.header.totalAmount) === 318780 && N(b.charges[0].cgst) + N(b.charges[0].sgst) === 60 && N(b.charges[0].netAmount) === 1200, b.charges[0])
 
         // ── No GST ──
-        const c = await order([{ chargeTypeId: transport.id, amount: 1200, taxTreatment: 'NON_TAXABLE' }])
+        const c = await order([{ chargeTypeId: transport.id, amount: 1200, taxOverride: NO_GST }])
         check('order: no GST: ₹3,18,720, CGST = SGST = ₹7,560 (none on the charge)', N(c.header.totalAmount) === 318720 && N(c.header.cgst) === 7560 && N(c.charges[0].cgst) === 0 && N(c.charges[0].netAmount) === 1200 && c.charges[0].taxTreatment === 'NON_TAXABLE', c.charges[0])
 
         // ── Across states ──
@@ -112,7 +118,7 @@ async function main() {
         const e = await order(
           [
             { chargeTypeId: transport.id, amount: 1200 },
-            { chargeTypeId: packing.id, amount: 500, taxTreatment: 'EXCLUSIVE' },
+            { chargeTypeId: packing.id, amount: 500, taxOverride: ON_TOP },
           ],
           { discountAmount: 2400 },
         )
@@ -134,15 +140,17 @@ async function main() {
             lines: [{ itemId: item.id, qty: 800, unitPrice: 378 }],
             charges: [
               { chargeTypeId: transport.id, amount: 1200 },
-              { chargeTypeId: packing.id, amount: 300, taxTreatment: 'NON_TAXABLE' },
+              { chargeTypeId: packing.id, amount: 300, taxOverride: NO_GST },
             ],
           }),
           (await tx.user.findFirstOrThrow({ select: { id: true } })).id,
+          true,
         )
         const qBack = await tx.salesQuotation.findUniqueOrThrow({ where: { id: q.id }, include: { charges: { orderBy: { sortOrder: 'asc' } } } })
         check('quotation: saved with its charges, each with its treatment, value and GST', qBack.charges.length === 2 && qBack.charges[0].taxTreatment === 'INCLUSIVE' && N(qBack.charges[0].netAmount) === 1142.86 && qBack.charges[1].taxTreatment === 'NON_TAXABLE' && N(qBack.charges[1].netAmount) === 300, qBack.charges)
         check('quotation: total ₹3,19,020 = ₹3,02,400 + ₹15,120 + ₹1,200 incl. + ₹300 no GST', N(qBack.totalAmount) === 319020 && N(qBack.cgst) === 7588.57, { total: qBack.totalAmount, cgst: qBack.cgst })
-        const fromQuote = await order(qBack.charges.map((ch) => ({ chargeTypeId: ch.chargeTypeId, amount: N(ch.amount), taxTreatment: ch.taxTreatment })))
+        // Made from the quotation: each charge points at the quotation's own row, and keeps it.
+        const fromQuote = await order(qBack.charges.map((ch) => ({ chargeTypeId: ch.chargeTypeId, amount: N(ch.amount), sourceChargeId: ch.id })), { quotationId: q.id })
         check('order from the quotation: its charges carried as they were, the same total to the rupee', N(fromQuote.header.totalAmount) === N(qBack.totalAmount) && fromQuote.charges.map((x) => x.taxTreatment).join() === 'INCLUSIVE,NON_TAXABLE', { order: fromQuote.header.totalAmount, quote: qBack.totalAmount })
 
         // ── The invoice: the order billed whole, into the books and GSTR-1 ──
@@ -152,7 +160,7 @@ async function main() {
         await tx.company.update({ where: { id: co.id }, data: { booksStartDate: new Date(Date.now() - 3 * 86_400_000), booksLockedUpTo: null } })
         const io = await order([
           { chargeTypeId: transport.id, amount: 1200 },
-          { chargeTypeId: packing.id, amount: 300, taxTreatment: 'NON_TAXABLE' },
+          { chargeTypeId: packing.id, amount: 300, taxOverride: NO_GST },
         ])
         const it = await tx.item.findUniqueOrThrow({ where: { id: item.id }, select: { name: true, uomId: true } })
         const stamp = Date.now()
@@ -238,7 +246,8 @@ async function main() {
     .catch((e) => {
       if (e !== ROLLBACK) throw e
     })
-  const left = await prisma.salesQuotationCharge.count()
+  // Against what there was before: the database may hold quotations of its own.
+  const left = (await prisma.salesQuotationCharge.count()) - chargesBefore
   const transport = await prisma.chargeType.findFirst({ where: { name: 'Transport Charges' }, select: { taxTreatment: true } })
   check('nothing kept: no quotation charge saved, Transport Charges back to GST-inclusive', left === 0 && transport?.taxTreatment === 'INCLUSIVE', { left, transport })
   console.log(`\n${pass} passed, ${fail} failed`)

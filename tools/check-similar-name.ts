@@ -1,11 +1,13 @@
 /**
- * Checks looksLikeSameName (apps/web/src/lib/similarName.ts) against worked
+ * Checks looksLikeSameName (packages/shared/src/similarName.ts, moved there
+ * from the web app in #80, where the items form and the opening-stock import
+ * both use it) against worked
  * examples. Pure logic, no database, no server.
  *
  *     npx tsx tools/check-similar-name.ts
  */
 import assert from 'node:assert/strict'
-import { looksLikeSameName } from '../apps/web/src/lib/similarName'
+import { looksLikeSameName } from '../packages/shared/src/similarName'
 
 let passed = 0
 function check(name: string, fn: () => void) {

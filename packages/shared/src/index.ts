@@ -589,8 +589,11 @@ export function priceSaleCharge(c: SaleChargeInput, goods: SaleGoods[], intra: b
   const basis = goods.reduce((sum, g) => sum + Math.max(0, g.taxable), 0)
   const amount = r2(Math.max(0, Number(c.amount) || 0) * (c.amountMode === 'PERCENT' ? basis / 100 : 1))
   const ownRate = Number(c.ownRate) || 0
-  if (c.gstApplicable === false || c.treatment === 'NON_TAXABLE' || (c.taxCategory && !['TAXABLE', 'UNSPECIFIED'].includes(c.taxCategory)) || amount === 0) {
-    return { key: c.key, treatment: c.treatment, amount, net: amount, gstRate: 0, cgst: 0, sgst: 0, igst: 0, tax: 0, payable: amount, parts: [], rateText: '' }
+  // No GST on it (switched off, no-GST, or a category GST does not apply to): saved and printed as
+  // no GST, never as "GST included at 0%", and kept out of the HSN table's taxable rows.
+  const noGst = c.gstApplicable === false || c.treatment === 'NON_TAXABLE' || (!!c.taxCategory && !['TAXABLE', 'UNSPECIFIED'].includes(c.taxCategory))
+  if (noGst || amount === 0) {
+    return { key: c.key, treatment: noGst ? 'NON_TAXABLE' : c.treatment, amount, net: amount, gstRate: 0, cgst: 0, sgst: 0, igst: 0, tax: 0, payable: amount, parts: [], rateText: '' }
   }
   const shares = c.followsGoodsRate ? shareSaleCharge(amount, goods, ownRate) : [{ amount, gstRate: ownRate }]
   const parts = shares.map((p) => (c.treatment === 'INCLUSIVE' ? includedIn(p.amount, p.gstRate, intra) : addedOn(p.amount, p.gstRate, intra)))

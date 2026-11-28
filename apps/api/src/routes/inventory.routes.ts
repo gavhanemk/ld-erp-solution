@@ -7,16 +7,7 @@ import { isAdmin, requirePermission, userCan, type AuthRequest } from '../middle
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { getPrintHeader } from '../lib/printData'
-import {
-  assertStockUnused,
-  balanceOf,
-  lockBalances,
-  lockedBalanceOf,
-  onHand,
-  recordMovement,
-  reorderStatus,
-  transferStock,
-} from '../services/stock.service'
+import { assertStockUnused, balanceOf, lockBalances, lockedBalanceOf, onHand, recordMovement, reorderStatus, transferStock, sharesOf } from '../services/stock.service'
 import { lockRow } from '../lib/lockRow'
 import { MOVEMENT_DOC_JOIN, movementDocs } from '../services/movementDocs.service'
 import { decidePending } from '../services/requisition.service'
@@ -1100,9 +1091,20 @@ export async function createTransfer(
   // Each line moves one share (multi-brand phase 5): a brand's earmark, or central.
   const shares: Array<string | null> = []
   for (const [i, line] of data.lines.entries()) {
-    const b = line.brandId || null
+    let b = line.brandId || null
     if (b && whose[i].ownership !== 'OWNED') throw new AppError('A customer’s material is never a brand’s: only our own stock moves as a brand’s.', 400, 'CUSTOMER_STOCK_NO_BRAND')
     if (b) await assertOwnBrand(tx, b)
+    // Not said whose (a sender that names no share): central stock when it
+    // covers the line, else the one brand's earmark that does. A transfer
+    // moves a share as itself; it never changes whose the stock is.
+    if (line.brandId === undefined && whose[i].ownership === 'OWNED') {
+      const k = { itemId: line.itemId, warehouseId: data.fromWarehouseId, ownership: 'OWNED' as const, ownerCustomerId: null, sizeId: whose[i].sizeId ?? null, grade: line.grade ?? 'A' }
+      const central = await balanceOf(tx, { ...k, brandId: null })
+      if (central.qty + 1e-9 < line.qty) {
+        const fits = (await sharesOf(tx, k)).filter((x) => x.brandId && x.qty + 1e-9 >= line.qty)
+        if (fits.length === 1) b = fits[0].brandId
+      }
+    }
     shares.push(b)
   }
 

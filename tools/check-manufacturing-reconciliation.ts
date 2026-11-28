@@ -38,7 +38,7 @@ import { dispatch, dispatchSchema, receive, receiveSchema, recordWork, workSchem
 import { applyRouting } from '../apps/api/src/services/route.service'
 import { balancesOf } from '../apps/api/src/services/wip.service'
 import { balanceOf, recordMovement } from '../apps/api/src/services/stock.service'
-import { approveReallocation, raiseReallocation } from '../apps/api/src/services/brandStock.service'
+import { approveExtra, raiseExtra } from '../apps/api/src/services/materialExtra.service'
 import { stockReconciliation } from '../apps/api/src/reports/definitions/stock-reconciliation'
 import { wipReconciliation } from '../apps/api/src/reports/definitions/wip-reconciliation'
 
@@ -148,12 +148,12 @@ async function main() {
 
         // ── 3. Materials issued: 280 m to the routed order, 60 m to the other, each at the average ──
         const issue = async (moId: string, qty: number, no: string) => {
-          // Multi-brand phase 5: this fabric is not in the order's plan (it has no BOM), so central
-          // stock does not move to the order's brand by itself (decision 7): it is earmarked for
-          // the brand first, raised by one person and approved by another, then issued from it.
-          const { brandId } = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: moId }, select: { brandId: true } })
-          const ear = await raiseReallocation(tx, { kind: 'EARMARK', warehouseId: FAB.id, fromBrandId: null, toBrandId: brandId, moId, reason: `ZZTEST fabric for order ${no}`, lines: [{ itemId: fabric.id, qty }] }, user.id)
-          await approveReallocation(tx, ear.id, { id: other.id, admin: false })
+          // Multi-brand phase 5: this fabric is not in the order's plan (it has no BOM), so it is
+          // issued only as extra material, asked for by one person and approved by another (the
+          // user's rule of 28 Nov 2026: an earmark alone never allows it). Within the extra,
+          // central stock moves to the order's brand by itself (decision 7).
+          const extra = await raiseExtra(tx, moId, { itemId: fabric.id, qty, reason: `ZZTEST fabric for order ${no}` }, user.id)
+          await approveExtra(tx, extra.id, { id: other.id, admin: false })
           const mr = await tx.materialRequisition.create({
             data: { mrNumber: `ZZ-MRMR-${no}-${stamp}`, moId, soId: so.id, departmentId: cuttingDept.id, status: 'APPROVED', raisedById: null, lines: { create: [{ itemId: fabric.id, requestedQty: qty, warehouseId: FAB.id }] } },
             include: { lines: true },
