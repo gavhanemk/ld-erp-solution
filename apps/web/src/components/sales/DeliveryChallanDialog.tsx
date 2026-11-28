@@ -18,13 +18,14 @@ import {
   Wand2,
   X,
 } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, apiErrorMessage } from '@/lib/api'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { ChallanRollsSection, type ChallanRollDraft } from './ChallanRollsSection'
 
 interface PrepSize {
   sizeId: string
@@ -99,6 +100,8 @@ interface SavedChallan {
     overNote: string | null
     sizes: Array<{ sizeId: string; qty: string | number }>
   }>
+  /** On a job-work challan: the customer's rolls the pieces came from. */
+  rolls?: Array<{ rollId: string; soLineId: string | null; baleNo: string | null; pieces: string | number; grade: string }>
 }
 
 /**
@@ -192,6 +195,7 @@ export function DeliveryChallanDialog({
   const [packingNote, setPackingNote] = useState('')
   const [notes, setNotes] = useState('')
   const [send, setSend] = useState<SendDraft>({})
+  const [rolls, setRolls] = useState<ChallanRollDraft[]>([])
   const [saving, setSaving] = useState<'draft' | 'dispatch' | 'invoice' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -227,6 +231,7 @@ export function DeliveryChallanDialog({
     setPrep(null)
     setSaved(null)
     setSend({})
+    setRolls([])
     setDcDate(today())
     setTransporter('')
     setVehicleNumber('')
@@ -269,6 +274,15 @@ export function DeliveryChallanDialog({
                 : { ...d, sizes, qty, overNote: l.overNote ?? d.overNote }
           }
           setSend(next)
+          setRolls(
+            (draft.rolls ?? []).map((r) => ({
+              rollId: r.rollId,
+              soLineId: r.soLineId ?? '',
+              baleNo: r.baleNo ?? '',
+              pieces: String(Number(r.pieces)),
+              grade: r.grade === 'B' ? 'B' : 'A',
+            })),
+          )
         } else {
           setDeliveryAddress(p.order.deliveryAddress ?? '')
         }
@@ -372,6 +386,10 @@ export function DeliveryChallanDialog({
   const value = rows.reduce((t, r) => t + r.value + r.gst, 0)
   const noNote = rows.find((r) => r.now > 0 && r.over && !r.d.overNote.trim())
   const short = rows.find((r) => r.short)
+  // Job work: each roll named needs its pieces, and its garment when the order has several.
+  const jobWork = Boolean(prep?.order.isJobWork)
+  const badRoll = jobWork ? rolls.findIndex((r) => !(Number(r.pieces) > 0) || ((prep?.lines.length ?? 0) > 1 && !r.soLineId)) : -1
+  const piecesSent = { A: rows.reduce((t, r) => t + r.nowA, 0), B: rows.reduce((t, r) => t + r.nowB, 0) }
 
   const blocker = !prep
     ? null
@@ -383,7 +401,9 @@ export function DeliveryChallanDialog({
           ? noNote.l.pending > 0
             ? `${noNote.l.item.code}: ${pcs(noNote.now)} pcs is more than the ${pcs(noNote.l.pending)} the order still wants. Add a note saying why.`
             : `${noNote.l.item.code}: all the order wanted has been sent. Add a note saying why ${pcs(noNote.now)} more pcs go.`
-          : null
+          : badRoll >= 0
+            ? `Roll ${badRoll + 1} under Rolls & bales: enter the pieces made from it${(prep?.lines.length ?? 0) > 1 ? ' and its garment' : ''}, or remove it.`
+            : null
   // Short of stock still saves as a draft; it cannot go until the stock is there.
   const dispatchBlocker = blocker ?? (short ? `Not enough of ${short.l.item.code} in this store to dispatch.` : null)
 
@@ -429,6 +449,16 @@ export function DeliveryChallanDialog({
             ]
           : []),
       ]),
+      // The customer's rolls the pieces came from: job work only.
+      rolls: jobWork
+        ? rolls.map((r) => ({
+            rollId: r.rollId,
+            soLineId: r.soLineId || null,
+            baleNo: r.baleNo.trim() || null,
+            pieces: Number(r.pieces),
+            grade: r.grade,
+          }))
+        : undefined,
     }
     try {
       const res = saved
@@ -439,7 +469,7 @@ export function DeliveryChallanDialog({
       // One flow from the packing table to the bill (the business's answer of 9 Oct).
       if (invoice) router.push(`/sales/invoices?create=${res.data.id}`)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save the challan.')
+      setError(apiErrorMessage(err, 'Could not save the challan.'))
     } finally {
       setSaving(null)
     }
@@ -748,6 +778,20 @@ export function DeliveryChallanDialog({
                   ))}
                 </div>
               </Section>
+
+              {o?.isJobWork && (
+                <ChallanRollsSection
+                  soId={o.id}
+                  challanId={saved?.id ?? null}
+                  orderLines={(prep?.lines ?? []).map((l) => ({
+                    soLineId: l.soLineId,
+                    label: `${l.item.code} — ${l.item.name}${l.color || l.item.color ? ` · ${l.color || l.item.color}` : ''}`,
+                  }))}
+                  rows={rolls}
+                  onChange={setRolls}
+                  piecesSent={piecesSent}
+                />
+              )}
 
               <Section icon={Truck} title="Packing and transport">
                 <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-x-4 gap-y-3 md:grid-cols-4">
