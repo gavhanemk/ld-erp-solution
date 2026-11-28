@@ -50,7 +50,19 @@ LD Cotton Mills, Stich Code and VHAGAR are three brands of one company. There is
 
 ## 2. Moving stock between brands: Brand Stock
 
-Inventory → Stock → **Brand Stock**. The list filters by: All, Waiting for approval, Posted, Automatic (MO issues), and Refused, withdrawn, reversed.
+Inventory → Stock → **Brand Stock**. Each line shows:
+- the **Brand** it is about: grey for central stock, blue for a brand, and both for a move;
+- **What happened**, in plain words, for example "Set aside out of central stock" or "From central stock, for challan DC-…";
+- the item, with its quantity.
+
+**Brand** at the top shows one brand's lines only. **Show** picks:
+- what people raised (the default);
+- what waits for approval;
+- the automatic moves made by MOs and challans;
+- what was refused, withdrawn or reversed;
+- or all of it.
+
+The search box finds a number, an item, an MO or a challan.
 
 | Kind | From → to | Use it when |
 | --- | --- | --- |
@@ -102,12 +114,13 @@ An MO gets only the material its plan allows. More than that, or a material the 
 
 ## 4. Inventory Matrix
 
-Reports → Inventory → **Inventory Matrix — Company & Brands**.
+Reports → Inventory → **Inventory Matrix — Company & Brands**. Like every report, it opens on its **Full Report**: one row for each item and share, where the **Share** column reads "Central" or the brand's name.
 
 - **Filters:** As on (any date), Store, Brand, and What: Everything, Fabric, Thread, Raw materials (all), Semi-finished, Finished goods.
-- **Headline figures:** Physical stock value, Central stock, Earmarked for brands, Free to use, WIP on floors, In transit.
-- **Stock value — the company and each share:** one row each for the company, central stock and every brand. The columns are physical, raw and semi-finished, finished goods, WIP (floors and job workers), rejected and held, in transit, reserved, free, and issued to open MOs. Central plus the brands always equals the company.
-- **Item by item:** each item, with its design and colour, share by share. The **Share** column reads "Central" or the brand's name.
+- **The Summary tab:**
+  - **Headline figures:** Physical stock value, Central stock, Earmarked for brands, Free to use, WIP on floors, In transit.
+  - **Stock value by brand:** the brands run across (Central stock, each brand, Company), and the kinds of stock run down: physical, raw and semi-finished, finished goods, WIP, rejected and held, in transit, reserved, free to use, and issued to open MOs. Central plus the brands always equals the company.
+  - **Each item by brand:** every item, with its design and colour, showing how much is central stock and how much each brand's, then the total. Switch between **Quantity** (in the item's own unit) and **Value ₹**, and search for an item, design or colour.
 - **Export:** PDF / Print, Excel or CSV.
 
 Customers' own material is left out, because it is not ours. A "Shares below nothing" warning means a share went below zero: run Stock Reconciliation (section 8).
@@ -149,23 +162,33 @@ Then click **Save rule**. Each shared expense goes to the first rule in order th
 
 ## 7. The P&L by brand
 
-Accounts → **Profit & Loss** → **By brand**.
+Accounts → **Profit & Loss**, set out the SAB and Tally way.
 
-- **One column per brand in use.** A brand that is switched off, or a customer's brand, appears only if it had activity in the period.
-- **Not split** holds central stock and expenses not yet shared out. **Total ₹** is the company.
-- **Each brand's stock is its own share.** Stock moved between brands, or from central, shows on the rows "Add stock moved out" and "Less stock moved in", at the value it moved at. An earmark therefore never changes anyone's profit.
-- **The columns add up:** the brands plus Not split equal the company, line by line.
-- **Export:** Excel or CSV.
+- **Two accounts, two sides each.**
+  - The **Trading Account** puts opening stock, purchases and direct expenses (To) against sales, direct incomes and closing stock (By), down to gross profit.
+  - The **Profit & Loss Account** puts indirect expenses (To) against gross profit and indirect incomes (By), down to net profit.
+  - Each side of each account totals the same.
+- **Whose:** pick **Company**, **Brand-wise** or **Department-wise**, then the brand or department.
+- **A brand's stock is its own share.**
+  - Stock it took from central stock or another brand is **To Stock moved in**.
+  - Stock it gave up is **By Stock moved out**, at the value it moved at, so an earmark never changes anyone's profit.
+- **Not split** is central stock, plus expenses not yet shared out. The brands and Not split add up to the company.
+- **Ledgers:** click a heading to see them; a ledger opens its statement.
+- **On a phone** the two sides stack: To first, then By, each with its total.
+- **Export:** Excel or CSV, in the same two-sided form.
 - Post the month's expense allocation first (section 6), so shared expenses reach the brands.
 
-The **By department** view does the same for cost centres. The sidebar item "VHAGAR Brand → Brand P&L" is a placeholder for a later screen. Use Profit & Loss → By brand.
+The sidebar item "VHAGAR Brand → Brand P&L" is a placeholder for a later screen. Use Profit & Loss → Brand-wise.
 
 ## 8. Checks and controls
 
 - **Stock Reconciliation:** Reports → Inventory → **Stock Reconciliation**.
   - An empty report means stock, stickers, tags, cartons and holds all agree, share by share.
   - Each finding (Below zero, Value on nothing, Stickers over, Tags over, Cartons over, Holds over) has a **What to do** column.
-- **A voucher's history:** open the voucher → **History** → **See it as it was**. It shows every earlier version: who changed it, when and why.
+- **A voucher's history:** open the voucher (Accounts → Day Book). Its window shows Details, Entries, Narration and **History**.
+  - History lists each change with who made it, when, why, and what changed, for example "Amount ₹1,500.00 → ₹1,800.00".
+  - **Show the voucher as it was before this** opens the earlier version.
+  - A reversed voucher says which entry reversed it, and the two open each other.
 - **Correcting a voucher:**
   - **Alter** it, giving a reason;
   - or **Reverse** it, which writes a reversing entry on a date you choose, with a reason of at least 5 characters, linked to the original.
