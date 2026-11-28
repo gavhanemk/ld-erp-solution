@@ -358,6 +358,12 @@ export interface DocRow {
   muted?: boolean
   /** A sub-total or total row inside the table: bold, ruled above. */
   total?: boolean
+  /** A light grey ground, for a total row that should stand out (the delivery challan's). */
+  shade?: boolean
+  /** Cells that run down over the rows below: { garment: 3 } spans this and the next two. */
+  spans?: Record<string, number>
+  /** Cells covered by a span from a row above, so not drawn here. */
+  covered?: string[]
 }
 
 /**
@@ -456,11 +462,13 @@ export function DocTable({
         {rows.map((r, n) => (
           <Fragment key={r.key}>
             <tr>
-              {columns.map((c, i) => (
-                <td key={c.key} style={td(c, i, r)}>
-                  {r.cells[c.key] ?? ''}
-                </td>
-              ))}
+              {columns.map((c, i) =>
+                r.covered?.includes(c.key) ? null : (
+                  <td key={c.key} rowSpan={r.spans?.[c.key]} className={r.shade ? 'doc-shade' : undefined} style={td(c, i, r)}>
+                    {r.cells[c.key] ?? ''}
+                  </td>
+                ),
+              )}
             </tr>
             {pageFills
               ?.filter(([after]) => after === n)
@@ -813,6 +821,11 @@ const sheetCss = (footerLeft: string, pageMargin = '10mm 11mm 14mm 11mm') => `
     vertical-align: top;
     padding-top: 2mm;
   }
+  /* The browser's own header — date, time, page name — has no place on our
+     paper: these boxes take the top margin, so it is not drawn there. */
+  @top-left { content: "\\00a0"; }
+  @top-center { content: "\\00a0"; }
+  @top-right { content: "\\00a0"; }
   @bottom-right {
     content: "Page " counter(page) " of " counter(pages);
     font: 600 7pt/1.3 "Helvetica Neue", Arial, sans-serif;
@@ -860,6 +873,12 @@ const sheetCss = (footerLeft: string, pageMargin = '10mm 11mm 14mm 11mm') => `
   box-shadow: none !important; text-shadow: none !important; opacity: 1 !important;
 }
 .doc-sheet svg *:not(img) { stroke: #000 !important; }
+/* The one grey allowed: a total row asked to stand out (DocRow.shade), a light
+   tint that prints on any black-and-white printer. */
+.doc-sheet td.doc-shade {
+  background-color: #ececec !important;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
 .doc-sheet .doc-push { margin-top: auto; }
 .doc-sheet table.doc-lines thead { display: table-header-group; }
 .doc-sheet table.doc-lines tr { break-inside: avoid; page-break-inside: avoid; }

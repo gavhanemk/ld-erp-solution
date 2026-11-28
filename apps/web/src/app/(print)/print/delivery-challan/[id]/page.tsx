@@ -173,31 +173,32 @@ const ROLL_COLUMNS: SheetColumn[] = [
  * it on this challan, and the shortage, as three groups of columns under one
  * heading each (the user's layout of 28 Nov 2026).
  */
-const SUMMARY_GROUPS: Array<{ title: string; columns: Array<{ key: string; head: string; width: number; right?: boolean }> }> = [
+const SUMMARY_GROUPS: Array<{ title: string; columns: Array<{ key: string; head: string; width: number; right?: boolean; nowrap?: boolean }> }> = [
   {
     title: 'Material received',
     columns: [
-      { key: 'recDate', head: 'Received date', width: 9 },
-      { key: 'lot', head: 'Lot no.', width: 9 },
-      { key: 'party', head: 'Party challan no.', width: 12 },
-      { key: 'recPcs', head: 'Received pcs', width: 8, right: true },
-      { key: 'recMtr', head: 'Received mtr', width: 9, right: true },
+      { key: 'recDate', head: 'Received date', width: 11, nowrap: true },
+      { key: 'lot', head: 'Lot no.', width: 6 },
+      { key: 'party', head: 'Party challan no.', width: 13 },
+      // Fabric rolls received, not garment pieces: those are "Packed pcs".
+      { key: 'recPcs', head: 'Received rolls', width: 8, right: true },
+      { key: 'recMtr', head: 'Received mtr', width: 8, right: true },
     ],
   },
   {
     title: 'Material packed',
     columns: [
-      { key: 'pckDate', head: 'Packing date', width: 9 },
-      { key: 'chl', head: 'Challan no.', width: 12 },
+      { key: 'pckDate', head: 'Packing date', width: 11, nowrap: true },
+      { key: 'chl', head: 'Challan no.', width: 14, nowrap: true },
       { key: 'pckPcs', head: 'Packed pcs', width: 8, right: true },
-      { key: 'pcsMtr', head: 'Pcs.mtr', width: 8, right: true },
+      { key: 'pcsMtr', head: 'Pcs. mtr', width: 7, right: true },
     ],
   },
   {
     title: 'Shortage',
     columns: [
-      { key: 'shMtr', head: 'Sh.mtr', width: 8, right: true },
-      { key: 'shPct', head: 'Sh (%)', width: 8, right: true },
+      { key: 'shMtr', head: 'Sh. mtr', width: 7, right: true },
+      { key: 'shPct', head: 'Sh (%)', width: 7, right: true },
     ],
   },
 ]
@@ -206,8 +207,8 @@ const SUMMARY_GROUPS: Array<{ title: string; columns: Array<{ key: string; head:
 function ProductionSummary({ rows }: { rows: Array<{ key: string; cells: Record<string, React.ReactNode> }> }) {
   const cols = SUMMARY_GROUPS.flatMap((g, gi) => g.columns.map((c, ci) => ({ ...c, groupEnd: ci === g.columns.length - 1 && gi < SUMMARY_GROUPS.length - 1 })))
   const head: React.CSSProperties = {
-    padding: '3px 4px',
-    fontSize: '7.5px',
+    padding: '4px 6px',
+    fontSize: '8px',
     fontWeight: 700,
     letterSpacing: '.04em',
     textTransform: 'uppercase',
@@ -251,14 +252,15 @@ function ProductionSummary({ rows }: { rows: Array<{ key: string; cells: Record<
               <td
                 key={c.key}
                 style={{
-                  padding: '4px 4px',
-                  fontSize: '9px',
-                  lineHeight: 1.35,
+                  padding: '6px 6px',
+                  fontSize: '10px',
+                  lineHeight: 1.4,
                   verticalAlign: 'top',
                   textAlign: c.right ? 'right' : 'left',
                   borderTop: HAIR,
                   borderRight: i === cols.length - 1 ? undefined : c.groupEnd ? LINE : HAIR,
-                  overflowWrap: 'anywhere',
+                  // A date or a challan number on one line, never broken in two.
+                  ...(c.nowrap ? { whiteSpace: 'nowrap' } : { overflowWrap: 'anywhere' }),
                   ...(c.right ? NUM : {}),
                 }}
               >
@@ -366,9 +368,10 @@ export default function PrintDeliveryChallan() {
       <Dash />
     )
     const hsn = line?.soLine?.hsnCode ?? line?.item.hsnCode ?? null
-    // The garment and its SAC once, on its first roll; the rows under it are its rolls.
+    // The garment and its SAC once, run down beside all its rolls (one merged cell each).
     const body = g.rows.map((r, j) => ({
       key: r.id,
+      ...(j === 0 ? { spans: { garment: g.rows.length, hsn: g.rows.length } } : { covered: ['garment', 'hsn'] }),
       cells: {
         sn: ++sn,
         garment: j === 0 ? garment : '',
@@ -384,6 +387,7 @@ export default function PrintDeliveryChallan() {
     const total = {
       key: `${g.key}-total`,
       total: true,
+      shade: true,
       cells: {
         sn: '',
         garment: 'Total',
@@ -492,6 +496,12 @@ export default function PrintDeliveryChallan() {
             <PartyLine label="Address-" value={billing || null} />
             <PartyLine label="GST No" value={c.gstin ?? 'Unregistered'} mono={Boolean(c.gstin)} />
             <PartyLine label="Contact No" value={c.phone} mono />
+            {/* How it travels, under the customer: the left column filled, the right one shorter. */}
+            <div style={{ marginTop: '6px' }} />
+            <PartyLine label="Transporter" value={dc.transporter} />
+            <PartyLine label="Vehicle No" value={dc.vehicleNumber} mono />
+            <PartyLine label="LR No" value={dc.lrNumber} mono />
+            <PartyLine label="E-way Bill" value={dc.eWayBillNumber} mono />
           </>
         ),
         meta: [
@@ -507,10 +517,6 @@ export default function PrintDeliveryChallan() {
           !!dc.so.broker?.name && ['Broker', dc.so.broker?.name],
           byRolls && ['Bale No', bales.length ? `${bales.join(', ')} (${bales.length})` : null],
           ['From store', dc.warehouse?.name ?? null],
-          ['Transporter', dc.transporter],
-          ['Vehicle No', dc.vehicleNumber, true],
-          ['LR No', dc.lrNumber, true],
-          ['E-way Bill', dc.eWayBillNumber, true],
         ],
       }}
       bands={[
@@ -546,7 +552,8 @@ export default function PrintDeliveryChallan() {
             words={template.showAmountInWords !== false ? data.valueInWords : null}
             left={
               <>
-                {(cartonRows.length === 0 || dc.packingNote) && <Note title="Packing">{dc.packingNote || <Dash />}</Note>}
+                {/* Only when there is something to say about the packing. */}
+                {dc.packingNote && <Note title="Packing">{dc.packingNote}</Note>}
                 {dc.notes && <Note title="Note">{dc.notes}</Note>}
               </>
             }

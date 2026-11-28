@@ -132,8 +132,20 @@ export function StoreSheet({
   /** The older row of titled boxes, for facts that are not about a party. */
   panels?: Array<{ title: string; body: React.ReactNode }>
   columns: SheetColumn[]
-  /** `total`: a sub-total or total row, bold and ruled above (the job challan's per-garment totals). */
-  rows: Array<{ key: string; cells: Record<string, React.ReactNode>; muted?: boolean; total?: boolean }>
+  /**
+   * `total`: a sub-total or total row, bold and ruled above (the job challan's
+   * per-garment totals), `shade` greyed; `spans`/`covered`: a cell run down
+   * over the rows below it (the garment over its rolls).
+   */
+  rows: Array<{
+    key: string
+    cells: Record<string, React.ReactNode>
+    muted?: boolean
+    total?: boolean
+    shade?: boolean
+    spans?: Record<string, number>
+    covered?: string[]
+  }>
   /** Ruled empty rows — only for a sheet meant to be written on (a count sheet). */
   minRows?: number
   /** Anything between the table and the signatures. */
