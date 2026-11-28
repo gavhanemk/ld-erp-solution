@@ -332,7 +332,7 @@ export function Band({
           <Glyph name={icon} size={15} />
         </div>
       )}
-      <Eyebrow style={{ flexShrink: 0, paddingTop: '2px', width: '72px' }}>{label}</Eyebrow>
+      <Eyebrow style={{ flexShrink: 0, paddingTop: '2px', width: '88px' }}>{label}</Eyebrow>
       <div style={{ minWidth: 0, flex: 1, fontSize: '9.5px', lineHeight: 1.55 }}>{children}</div>
     </div>
   )
@@ -576,7 +576,7 @@ export function TaxByRate({
   if (!rows.length || split === 'NONE') return null
   return (
     <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', marginTop: '5px', border: LINE, padding: '3px 9px', breakInside: 'avoid' }}>
-      <Eyebrow style={{ flexShrink: 0, paddingTop: '1.5px', width: '72px' }}>GST by rate</Eyebrow>
+      <Eyebrow style={{ flexShrink: 0, paddingTop: '1.5px', width: '88px' }}>GST by rate</Eyebrow>
       <div style={{ minWidth: 0, flex: 1 }}>
         {rows.map((r) => (
           <div key={String(r.gstRate)} style={{ fontSize: '9.5px', lineHeight: 1.5, ...NUM }}>

@@ -5,19 +5,21 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import {
   StoreSheet,
-  Fact,
-  Eyebrow,
+  Dash,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
   qty,
   longDate,
+  shortDate,
   CODE,
-  GREY,
   INK,
   MUTED,
-  NAVY,
-  RULE,
   type SheetColumn,
+  type TotalLine,
 } from '@/components/print/StoreSheet'
-import { SubLine } from '@/components/print/doc'
+import { Box, SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { itemShade, type ShadeFields } from '@/lib/items'
 
@@ -77,6 +79,13 @@ const COLS: SheetColumn[] = [
 /** The original goes with the goods to the customer, the duplicate with the transporter, the triplicate stays. */
 const COPIES = ['Original for customer', 'Duplicate for transporter', 'Triplicate for us']
 
+/** A figure per unit — metres and pieces are never added together: "20 mtr · 12 pcs". */
+function perUnit<T>(lines: T[], unitOf: (l: T) => string, figure: (l: T) => number): string {
+  const sums = new Map<string, number>()
+  for (const l of lines) sums.set(unitOf(l), (sums.get(unitOf(l)) ?? 0) + figure(l))
+  return [...sums.entries()].map(([unit, n]) => `${qty(n)} ${unit}`.trim()).join(' · ') || '0'
+}
+
 /**
  * The delivery challan that goes with a customer's own material back to them.
  *
@@ -84,6 +93,9 @@ const COPIES = ['Original for customer', 'Duplicate for transporter', 'Triplicat
  * wants a challan naming both parties with each item's HSN and quantity, and
  * the receipt it came in on is quoted where there is one, so both sides can
  * put the two documents side by side.
+ *
+ * Laid out like the purchase order (27 Nov 2026): the customer in the "To,"
+ * block with the challan's facts beside it, the store the goods leave in a band.
  */
 export default function PrintCustomerReturn() {
   const { id } = useParams<{ id: string }>()
@@ -119,14 +131,16 @@ export default function PrintCustomerReturn() {
         <>
           <div style={{ fontWeight: 600 }}>{l.item.name}</div>
           {itemShade(l.item) && <SubLine>{itemShade(l.item)}</SubLine>}
-          {l.notes && <div style={{ fontSize: '9px', color: GREY }}>{l.notes}</div>}
+          {l.notes && <SubLine>{l.notes}</SubLine>}
         </>
       ),
-      hsn: <span style={{ fontSize: '9px', color: GREY }}>{l.hsnCode ?? l.item.hsnCode ?? '—'}</span>,
-      uom: <span style={{ fontSize: '9px', color: GREY }}>{l.item.uom?.symbol ?? ''}</span>,
+      hsn: l.hsnCode ?? l.item.hsnCode ?? '—',
+      uom: l.item.uom?.symbol ?? '',
       qty: <strong>{qty(l.qty)}</strong>,
     },
   }))
+
+  const totals: TotalLine[] = [{ label: 'Items', value: doc.lines.length }]
 
   return (
     <StoreSheet
@@ -153,62 +167,71 @@ export default function PrintCustomerReturn() {
           </SmartSelect>
         </label>
       }
-      panels={[
+      party={{
+        heading: 'To, the customer (consignee)',
+        name: c.name,
+        code: c.code,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={address || null} />
+            <PartyLine label="GST No" value={c.gstin ?? 'Unregistered'} mono={Boolean(c.gstin)} />
+            <PartyLine label="Contact No" value={c.phone} mono />
+            <PartyLine
+              label="Place of supply"
+              value={
+                ship.state
+                  ? `${ship.state}${ship.stateCode ? ` (${ship.stateCode})` : ''}${interState ? ', inter-state' : ''}`
+                  : null
+              }
+            />
+          </>
+        ),
+        meta: [
+          ['Challan No', doc.returnNumber, true],
+          ['Challan Date', shortDate(doc.returnDate), true],
+          ['Reason', doc.reasonLabel],
+          ['Came in on', doc.grn ? `${doc.grn.grnNumber}, ${shortDate(doc.grn.receiptDate)}` : null, true],
+          [
+            'Their challan',
+            doc.grn?.challanNumber ? `${doc.grn.challanNumber}${doc.grn.challanDate ? `, ${shortDate(doc.grn.challanDate)}` : ''}` : null,
+            true,
+          ],
+          ['Vehicle No', doc.vehicleNo, true],
+          ['Transporter', doc.transporter],
+          ['LR No', doc.lrNumber, true],
+        ],
+      }}
+      bands={[
         {
-          title: 'Customer (consignee)',
+          icon: 'truck',
+          label: 'From store',
           body: (
             <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{c.name}</div>
-              {address && <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{address}</div>}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={c.gstin ?? 'Unregistered'} mono />
-                <Fact label="State" value={ship.state ? `${ship.state}${ship.stateCode ? ` (${ship.stateCode})` : ''}` : null} />
-                <Fact label="Phone" value={c.phone} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'Dispatch',
-          body: (
-            <>
-              <Fact label="From store" value={doc.warehouse.name} />
-              <Fact label="Vehicle No" value={doc.vehicleNo} mono />
-              <Fact label="Transporter" value={doc.transporter} />
-              <Fact label="LR No" value={doc.lrNumber} mono />
-              <Fact label="Place of supply" value={ship.state ? `${ship.state}${interState ? ' (inter-state)' : ''}` : null} />
-            </>
-          ),
-        },
-        {
-          title: 'The return',
-          body: (
-            <>
-              <Fact label="Challan No" value={doc.returnNumber} mono />
-              <Fact label="Reason" value={doc.reasonLabel} />
-              <Fact label="Came in on" value={doc.grn ? `${doc.grn.grnNumber}, ${longDate(doc.grn.receiptDate)}` : null} />
-              <Fact label="Their challan" value={doc.grn?.challanNumber ? `${doc.grn.challanNumber}${doc.grn.challanDate ? `, ${longDate(doc.grn.challanDate)}` : ''}` : null} />
-              <Fact label="Items" value={String(doc.lines.length)} />
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{doc.warehouse.name}</div>
+              {doc.warehouse.address && <div style={{ marginTop: '1px' }}>{doc.warehouse.address}</div>}
             </>
           ),
         },
       ]}
       columns={COLS}
       rows={rows}
-      minRows={6}
       after={
         <>
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '8px' }}>
-            <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-            <div style={{ fontSize: '10px', color: doc.notes ? GREY : MUTED, marginTop: '3px', lineHeight: 1.55 }}>{doc.notes ?? 'None.'}</div>
-          </div>
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-            <Eyebrow style={{ color: GREY }}>Declaration</Eyebrow>
-            <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>
-              {template.declaration ??
-                `The goods above are the property of ${c.name}, received by ${company.name}${doc.grn ? ` on ${doc.grn.grnNumber}` : ''}, and are being returned to them unworked. This is not a supply under the CGST Act, 2017; the challan is issued under rule 55 of the CGST Rules, 2017, and carries no value and no tax.`}
-            </div>
-          </div>
+          <WordsAndTotals
+            words={null}
+            left={<Note title="Note">{doc.notes || <Dash />}</Note>}
+            totals={
+              <TotalsBox
+                rows={totals}
+                totalLabel="Quantity"
+                total={perUnit(doc.lines, (l) => l.item.uom?.symbol ?? '', (l) => Number(l.qty))}
+              />
+            }
+          />
+          <Box title="Declaration" style={{ marginTop: '7px' }}>
+            {template.declaration ??
+              `The goods above are the property of ${c.name}, received by ${company.name}${doc.grn ? ` on ${doc.grn.grnNumber}` : ''}, and are being returned to them unworked. This is not a supply under the CGST Act, 2017; the challan is issued under rule 55 of the CGST Rules, 2017, and carries no value and no tax.`}
+          </Box>
         </>
       }
       signatures={[

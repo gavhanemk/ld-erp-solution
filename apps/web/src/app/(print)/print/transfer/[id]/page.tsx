@@ -3,7 +3,24 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
-import { StoreSheet, Fact, Eyebrow, qty, money, longDate, CODE, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
+import {
+  StoreSheet,
+  Dash,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
+  qty,
+  money,
+  longDate,
+  shortDate,
+  CODE,
+  INK,
+  MUTED,
+  type SheetColumn,
+  type TotalLine,
+} from '@/components/print/StoreSheet'
+import { Box, SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { moCustomer } from '@/components/production/moCustomer'
 
@@ -69,11 +86,19 @@ const yearOn = (d: string) => {
   return x
 }
 
+/** "Stitching (Kaj Button)": a step, and its department when that says more. */
+const stepName = (s: { name: string; department: { name: string } }) =>
+  s.department.name && s.department.name !== s.name ? `${s.name} (${s.department.name})` : s.name
+
 /**
  * The transfer card that travels with the bundles from one department to the
  * next — sent, counted in, and signed by both. To an outside unit it is the
  * job-work delivery challan instead (rule 55): both parties, the goods with
  * HSN, pieces and value, and why no tax is charged.
+ *
+ * Both are laid out like the purchase order (27 Nov 2026): whoever receives the
+ * bundles — the next process, or the job worker — in the "To," block with the
+ * card's facts beside it, the process they leave in a band.
  */
 export default function PrintTransfer() {
   const { id } = useParams<{ id: string }>()
@@ -96,6 +121,7 @@ export default function PrintTransfer() {
   const lines = [...t.lines].sort((a, b) => a.bundle.bundleNo - b.bundle.bundleNo)
   const sent = lines.reduce((s, l) => s + l.dispatchedQty, 0)
   const banner = t.status === 'CANCELLED' ? `CANCELLED${t.cancelReason ? ` — ${t.cancelReason}` : ''}. The bundles did not go on this card.` : null
+  const order = mo.so ? `${mo.so.soNumber}${mo.so.customerPORef ? ` · PO ${mo.so.customerPORef}` : ''}` : null
 
   if (t.vendor) {
     // One row per style and colour, its sizes and pieces, at what it is carried at.
@@ -116,15 +142,15 @@ export default function PrintTransfer() {
         cells: {
           sn: i + 1,
           desc: (
-            <div>
+            <>
               <div style={{ fontWeight: 600 }}>{good?.item ?? g.name}</div>
-              <div style={{ fontSize: '9px', color: GREY }}>
+              <SubLine>
                 {g.style} · {g.color} · cut pieces for {t.toStep.name.toLowerCase()}
-              </div>
-            </div>
+              </SubLine>
+            </>
           ),
-          hsn: <span style={{ fontSize: '9px', color: GREY }}>{good?.hsnCode ?? '—'}</span>,
-          sizes: <span style={{ fontSize: '9px', color: GREY }}>{[...g.sizes.entries()].map(([s, n]) => `${s}:${n}`).join(' ') || '—'}</span>,
+          hsn: good?.hsnCode ?? '—',
+          sizes: [...g.sizes.entries()].map(([s, n]) => `${s}:${n}`).join(' ') || '—',
           qty: <strong>{qty(g.pieces)}</strong>,
           rate: good?.rate ? money(good.rate) : '—',
           value: value ? money(value) : '—',
@@ -133,6 +159,10 @@ export default function PrintTransfer() {
     })
     const total = rows.reduce((s, r) => s + r.value, 0)
     const v = t.vendor
+    const totals: TotalLine[] = [
+      { label: 'Bundles', value: lines.length },
+      { label: 'Pieces', value: qty(sent) },
+    ]
     return (
       <StoreSheet
         company={company}
@@ -154,68 +184,63 @@ export default function PrintTransfer() {
             </SmartSelect>
           </label>
         }
-        panels={[
+        party={{
+          heading: 'To, the job worker (consignee)',
+          name: v.name,
+          lines: (
+            <>
+              <PartyLine label="Address-" value={[v.address, v.city, v.state].filter(Boolean).join(', ') || null} />
+              <PartyLine label="GST No" value={v.gstin ?? 'Unregistered'} mono={Boolean(v.gstin)} />
+              <PartyLine label="State" value={v.state ? `${v.state}${v.stateCode ? ` (${v.stateCode})` : ''}` : null} />
+            </>
+          ),
+          meta: [
+            ['Challan No', t.transferNumber, true],
+            ['Challan Date', shortDate(t.dispatchDate), true],
+            ['Process', `${t.toStep.name}${t.isRework ? ' — to put right' : ''}`],
+            ['Job order', t.jobWorkOrder?.orderNumber ?? null, true],
+            ['Mfg. order', t.jobCard ? `${mo.moNumber} · ${t.jobCard.jobCardNumber}` : mo.moNumber, true],
+            ['Order', order],
+            ['Brand', data.brand?.name ?? null],
+            ['Print / design', t.jobCard?.designNo ?? null, true],
+          ],
+        }}
+        bands={[
           {
-            title: 'Job worker (consignee)',
+            icon: 'truck',
+            label: 'From process',
             body: (
               <>
-                <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{v.name}</div>
-                <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{[v.address, v.city, v.state].filter(Boolean).join(', ')}</div>
-                <div style={{ marginTop: '4px' }}>
-                  <Fact label="GSTIN" value={v.gstin ?? 'Unregistered'} mono />
-                  <Fact label="State" value={v.state ? `${v.state}${v.stateCode ? ` (${v.stateCode})` : ''}` : null} />
+                <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{stepName(t.fromStep)}</div>
+                <div style={{ marginTop: '1px' }}>
+                  <strong>Vehicle No</strong> <span style={CODE}>{t.vehicleNo || '—'}</span>
+                  <span style={{ marginLeft: '14px' }}>
+                    <strong>Sent by</strong> {t.issuedBy ?? t.createdBy.name}
+                  </span>
                 </div>
-              </>
-            ),
-          },
-          {
-            title: 'The job',
-            body: (
-              <>
-                <Fact label="Process" value={`${t.toStep.name}${t.isRework ? ' — to put right' : ''}`} />
-                <Fact label="Job order" value={t.jobWorkOrder?.orderNumber ?? null} mono />
-                <Fact label="Mfg. order" value={t.jobCard ? `${mo.moNumber} · ${t.jobCard.jobCardNumber}` : mo.moNumber} mono />
-                <Fact label="Brand" value={data.brand?.name ?? null} />
-                <Fact label="Print / design" value={t.jobCard?.designNo ?? null} mono />
-                <Fact label="Bundles" value={`${lines.length} · ${qty(sent)} pieces`} />
-              </>
-            ),
-          },
-          {
-            title: 'Dispatch',
-            body: (
-              <>
-                <Fact label="Vehicle No" value={t.vehicleNo} mono />
-                <Fact label="Sent by" value={t.issuedBy ?? t.createdBy.name} />
-                <Fact label="Order" value={mo.so ? `${mo.so.soNumber}${mo.so.customerPORef ? ` · PO ${mo.so.customerPORef}` : ''}` : null} />
               </>
             ),
           },
         ]}
         columns={CHALLAN_COLS}
         rows={rows}
-        minRows={3}
         after={
           <>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: '7px', marginTop: '8px' }}>
-              <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-                <Eyebrow style={{ color: GREY }}>Bundles</Eyebrow>
-                <div style={{ fontSize: '9px', color: INK, marginTop: '3px', lineHeight: 1.6, ...CODE }}>
-                  {lines.map((l) => `${l.bundle.code.split('-').pop()}${l.bundle.size ? `/${l.bundle.size.code}` : ''}:${l.dispatchedQty}`).join('  ')}
-                </div>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 11px', borderTop: '1.5pt solid #000', color: '#fff' }}>
-                <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>Value of goods</span>
-                <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(total)}</span>
-              </div>
-            </div>
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-              <Eyebrow style={{ color: GREY }}>Declaration</Eyebrow>
-              <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>
-                {template.declaration ??
-                  `Goods sent for job work (${t.toStep.name.toLowerCase()}) under section 143 of the CGST Act, 2017, and rule 55 of the CGST Rules, 2017. This is not a supply and no GST is charged. The goods remain the property of ${company.name} and are to be returned, processed, by ${longDate(yearOn(t.dispatchDate))} — one year from this challan.`}
-              </div>
-            </div>
+            <WordsAndTotals
+              words={null}
+              left={
+                <Note title="Bundles">
+                  <span style={CODE}>
+                    {lines.map((l) => `${l.bundle.code.split('-').pop()}${l.bundle.size ? `/${l.bundle.size.code}` : ''}:${l.dispatchedQty}`).join('  ')}
+                  </span>
+                </Note>
+              }
+              totals={<TotalsBox rows={totals} totalLabel="Value of goods" total={`₹ ${money(total)}`} />}
+            />
+            <Box title="Declaration" style={{ marginTop: '7px' }}>
+              {template.declaration ??
+                `Goods sent for job work (${t.toStep.name.toLowerCase()}) under section 143 of the CGST Act, 2017, and rule 55 of the CGST Rules, 2017. This is not a supply and no GST is charged. The goods remain the property of ${company.name} and are to be returned, processed, by ${longDate(yearOn(t.dispatchDate))} — one year from this challan.`}
+            </Box>
           </>
         }
         signatures={[
@@ -247,6 +272,21 @@ export default function PrintTransfer() {
       },
     }
   })
+  // What was counted in at the other end, once anything has been.
+  const counted = lines.some((l) => l.receivedQty > 0 || l.shortQty > 0)
+  const received = lines.reduce((s, l) => s + l.receivedQty, 0)
+  const short = lines.reduce((s, l) => s + l.shortQty, 0)
+  const over = lines.reduce((s, l) => s + l.excessQty, 0)
+  const totals: TotalLine[] = [
+    { label: 'Bundles', value: lines.length },
+    ...(counted
+      ? [
+          { label: 'Received', value: qty(received) },
+          ...(short ? [{ label: 'Short', value: qty(short) }] : []),
+          ...(over ? [{ label: 'Over', value: qty(over) }] : []),
+        ]
+      : []),
+  ]
   return (
     <StoreSheet
       company={company}
@@ -257,49 +297,53 @@ export default function PrintTransfer() {
       backHref="/production/orders"
       backLabel="Production"
       banner={banner}
-      panels={[
+      party={{
+        name: t.toStep.name,
+        code: t.toStep.department.name !== t.toStep.name ? t.toStep.department.name : null,
+        // A process has no address: under it, who counts the bundles in, and
+        // whose order and which fabric they are.
+        lines: (
+          <>
+            <PartyLine label="Received by" value={t.receivedBy} />
+            <PartyLine label="Counted on" value={shortDate(t.receivedAt)} />
+            <PartyLine
+              label="Customer"
+              value={mo.so ? `${mo.so.customer.name}${mo.so.customerPORef ? ` · PO ${mo.so.customerPORef}` : ''}` : moCustomer(mo)}
+            />
+            <PartyLine
+              label="Fabric · lot"
+              value={t.jobCard ? [t.jobCard.fabricQuality, t.jobCard.lotNo].filter(Boolean).join(' · ') || null : null}
+            />
+          </>
+        ),
+        meta: [
+          ['Card No', t.transferNumber, true],
+          ['Sent on', shortDate(t.dispatchDate), true],
+          ['Job card', t.jobCard ? `${t.jobCard.jobCardNumber} · ${mo.moNumber}` : mo.moNumber, true],
+          ['Ref no.', t.jobCard ? [t.jobCard.orderNo, t.jobCard.projectId, t.jobCard.designNo].filter(Boolean).join('/') || null : null, true],
+        ],
+      }}
+      bands={[
         {
-          title: 'Order',
+          label: 'From process',
           body: (
             <>
-              <Fact label="Ref no." value={t.jobCard ? [t.jobCard.orderNo, t.jobCard.projectId, t.jobCard.designNo].filter(Boolean).join('/') || null : null} mono />
-              <Fact label="Job card" value={t.jobCard ? `${t.jobCard.jobCardNumber} · ${mo.moNumber}` : mo.moNumber} mono />
-              <Fact label="Customer" value={mo.so ? `${mo.so.customer.name}${mo.so.customerPORef ? ` · PO ${mo.so.customerPORef}` : ''}` : moCustomer(mo)} />
-              <Fact label="Fabric · lot" value={t.jobCard ? [t.jobCard.fabricQuality, t.jobCard.lotNo].filter(Boolean).join(' · ') || null : null} />
-            </>
-          ),
-        },
-        {
-          title: 'From → to',
-          body: (
-            <>
-              <Fact label="From" value={`${t.fromStep.name} (${t.fromStep.department.name})`} />
-              <Fact label="To" value={`${t.toStep.name} (${t.toStep.department.name})`} />
-              <Fact label="Bundles" value={`${lines.length} · ${qty(sent)} pieces`} />
-            </>
-          ),
-        },
-        {
-          title: 'Hand-over',
-          body: (
-            <>
-              <Fact label="Issued by" value={t.issuedBy} />
-              <Fact label="Received by" value={t.receivedBy} />
-              <Fact label="Counted on" value={longDate(t.receivedAt)} />
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{stepName(t.fromStep)}</div>
+              <div style={{ marginTop: '1px' }}>
+                <strong>Issued by</strong> {t.issuedBy || '—'}
+              </div>
             </>
           ),
         },
       ]}
       columns={CARD_COLS}
       rows={rows}
-      minRows={Math.max(0, 8 - rows.length)}
       after={
-        t.notes ? (
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '8px' }}>
-            <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-            <div style={{ fontSize: '10px', color: GREY, marginTop: '3px' }}>{t.notes}</div>
-          </div>
-        ) : null
+        <WordsAndTotals
+          words={null}
+          left={<Note title="Note">{t.notes || <Dash />}</Note>}
+          totals={<TotalsBox rows={totals} totalLabel="Pieces sent" total={qty(sent)} />}
+        />
       }
       signatures={[
         { role: `Issued by — ${t.fromStep.department.name}`, who: t.issuedBy },

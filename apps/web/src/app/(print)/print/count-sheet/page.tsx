@@ -5,15 +5,14 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { api, ApiError, masterResource } from '@/lib/api'
 import {
   StoreSheet,
-  Fact,
+  Dash,
   Eyebrow,
+  PartyLine,
   qty,
   longDate,
+  shortDate,
   CODE,
-  GREY,
   INK,
-  MUTED,
-  NAVY,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -28,6 +27,21 @@ interface Payload {
   printedAt: string
 }
 
+/** Facts run on across a band: a bold label, its value, then the next — wrapping, never squeezed. */
+function Facts({ items }: { items: Array<[string, React.ReactNode, boolean?] | null | false> }) {
+  const shown = items.filter(Boolean) as Array<[string, React.ReactNode, boolean?]>
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '18px', rowGap: '1px' }}>
+      {shown.map(([label, value, mono]) => (
+        <span key={label}>
+          <span style={{ fontWeight: 700 }}>{label}</span>
+          <span style={{ marginLeft: '5px', ...(mono && value ? CODE : {}) }}>{value || value === 0 ? value : <Dash />}</span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
 /**
  * The sheet a keeper carries to the rack and writes on.
  *
@@ -35,6 +49,11 @@ interface Payload {
  * racks. The book quantity is left off unless asked for: a keeper who can see
  * what the book says tends to find exactly that, and the count exists to catch
  * the book being wrong. What comes back is typed into Stock → Count.
+ *
+ * Laid out like the purchase order (27 Nov 2026): the store in the "Store,"
+ * block with its code, the date printed and the number of items beside it;
+ * the count's own write-in boxes and how to fill it in bands; then the list,
+ * with blank ruled lines under it for anything found that is not on it.
  */
 function CountSheet() {
   const params = useSearchParams()
@@ -132,8 +151,8 @@ function CountSheet() {
           {itemShade(r) && <SubLine>{itemShade(r)}</SubLine>}
         </>
       ),
-      cat: <span style={{ fontSize: '9px', color: GREY }}>{r.category}</span>,
-      uom: <span style={{ fontSize: '9px', color: GREY }}>{r.uom}</span>,
+      cat: <span style={{ fontSize: '9px' }}>{r.category}</span>,
+      uom: <span style={{ fontSize: '9px' }}>{r.uom}</span>,
       book: r.bookQty ? qty(r.bookQty) : '—',
       counted: '',
       remark: '',
@@ -150,51 +169,47 @@ function CountSheet() {
       backHref="/inventory/stock"
       backLabel="Stock"
       options={options}
-      panels={[
+      party={{
+        heading: 'Store,',
+        name: data.warehouse.name,
+        lines: <PartyLine label="Address-" value={data.warehouse.address} />,
+        meta: [
+          ['Store code', data.warehouse.code, true],
+          ['Printed', shortDate(data.printedAt), true],
+          ['Items', String(data.rows.length), true],
+        ],
+      }}
+      bands={[
         {
-          title: 'Store',
+          label: 'The count',
           body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>
-                {data.warehouse.name}
-              </div>
-              {data.warehouse.address && (
-                <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>
-                  {data.warehouse.address}
-                </div>
-              )}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="Items" value={String(data.rows.length)} />
-              </div>
-            </>
+            // Written in by the keeper at the rack.
+            <Facts
+              items={[
+                ['Counted on', '____ / ____ / ________'],
+                ['Started at', '______ : ______'],
+                ['Book shown', showBook ? 'Yes' : 'No — count what is there'],
+              ]}
+            />
           ),
         },
         {
-          title: 'The count',
+          label: 'To fill it',
           body: (
             <>
-              <Fact label="Counted on" value="____ / ____ / ________" />
-              <Fact label="Started at" value="______ : ______" />
-              <Fact label="Book shown" value={showBook ? 'Yes' : 'No — count what is there'} />
+              Write what is on the rack, in the unit shown. Anything not on this sheet goes on a blank line at the end. Enter the figures in
+              Stock → Count.
             </>
-          ),
-        },
-        {
-          title: 'How to fill it',
-          body: (
-            <div style={{ fontSize: '9.5px', color: GREY, lineHeight: 1.5 }}>
-              Write what is on the rack, in the unit shown. Anything not on this sheet goes on a blank
-              line at the end. Enter the figures in Stock → Count.
-            </div>
           ),
         },
       ]}
       columns={columns}
       rows={rows}
+      // Blank ruled lines for what is found on the rack but not listed.
       minRows={rows.length + 6}
       after={
-        <div style={{ marginTop: '8px', fontSize: '9.5px', color: MUTED }}>
-          <Eyebrow style={{ color: GREY, display: 'inline' }}>Found, not listed · </Eyebrow>
+        <div style={{ marginTop: '7px', fontSize: '9.5px' }}>
+          <Eyebrow style={{ display: 'inline' }}>Found, not listed · </Eyebrow>
           write it on the blank lines above with its code or a description.
         </div>
       }
