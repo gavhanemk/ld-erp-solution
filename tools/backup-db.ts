@@ -21,6 +21,9 @@ async function main() {
     WHERE table_schema = 'ld_erp' AND table_type = 'BASE TABLE' ORDER BY table_name`
   const data: Record<string, unknown[]> = {}
   let rows = 0
+  // The counters that number stickers, garment tags and cartons: a copy without them would
+  // start again at 1 and clash with the codes already given out.
+  let sequences: Record<string, string | null> = {}
   await prisma.$transaction(
     async (tx) => {
       for (const t of tables) {
@@ -28,14 +31,17 @@ async function main() {
         data[t.table_name] = r
         rows += r.length
       }
+      const seqs = await tx.$queryRaw<Array<{ name: string; value: string | null }>>`
+        SELECT sequencename AS name, last_value::text AS value FROM pg_sequences WHERE schemaname = 'ld_erp'`
+      sequences = Object.fromEntries(seqs.map((s) => [s.name, s.value]))
     },
     { isolationLevel: 'RepeatableRead', timeout: 300_000, maxWait: 60_000 },
   )
   writeFileSync(
     out,
-    JSON.stringify({ takenAt: new Date().toISOString(), database: db, schema: 'ld_erp', tables: data }, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)),
+    JSON.stringify({ takenAt: new Date().toISOString(), database: db, schema: 'ld_erp', tables: data, sequences }, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)),
   )
-  console.log(`Backed up ${tables.length} tables, ${rows} rows of ${db} → ${out}`)
+  console.log(`Backed up ${tables.length} tables, ${rows} rows and ${Object.keys(sequences).length} counters of ${db} → ${out}`)
 }
 
 main()

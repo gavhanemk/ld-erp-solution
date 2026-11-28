@@ -31,7 +31,13 @@ async function main() {
   const [{ db }] = await prisma.$queryRaw<{ db: string }[]>`SELECT current_database() AS db`
   if (db !== name) throw new Error('Refusing to run: connected to another database than the one named')
 
-  const backup = JSON.parse(readFileSync(file, 'utf8')) as { takenAt: string; database: string; tables: Record<string, Record<string, unknown>[]> }
+  const backup = JSON.parse(readFileSync(file, 'utf8')) as {
+    takenAt: string
+    database: string
+    tables: Record<string, Record<string, unknown>[]>
+    /** The code counters (stickers, tags, cartons); a backup made before 28 Nov 2026 has none. */
+    sequences?: Record<string, string | null>
+  }
   // The migrations' own record stays as migrate deploy wrote it here.
   const tables = Object.keys(backup.tables).filter((t) => t !== '_prisma_migrations')
   const here = new Set(
@@ -78,6 +84,23 @@ async function main() {
     }
   }
   console.log(`Restored ${tables.length} tables, ${total} rows, from ${backup.database} as it was at ${backup.takenAt}: ${differ ? `${differ} tables differ` : "every table holds the backup's rows"}`)
+
+  // The code counters, as they stood: without them the next sticker, tag or carton would take a code already given out.
+  const here2 = (await prisma.$queryRaw<Array<{ name: string }>>`SELECT sequencename AS name FROM pg_sequences WHERE schemaname = 'ld_erp'`).map((s) => s.name)
+  const counters = backup.sequences ?? {}
+  const unset = here2.filter((n) => !(n in counters))
+  for (const [name, value] of Object.entries(counters)) {
+    if (!here2.includes(name)) continue
+    // A counter never used stays unused; one in use goes on from where it stood.
+    if (value === null) await prisma.$executeRawUnsafe(`SELECT setval('ld_erp."${name.replace(/"/g, '""')}"', 1, false)`)
+    else await prisma.$executeRawUnsafe(`SELECT setval('ld_erp."${name.replace(/"/g, '""')}"', $1::bigint, true)`, value)
+  }
+  const now = await prisma.$queryRaw<Array<{ name: string; value: string | null }>>`SELECT sequencename AS name, last_value::text AS value FROM pg_sequences WHERE schemaname = 'ld_erp' ORDER BY 1`
+  console.log(`Code counters: ${now.map((s) => `${s.name} at ${s.value ?? 'unused'}`).join(', ') || 'none'}`)
+  if (unset.length) {
+    differ++
+    console.log(`The backup holds no value for ${unset.join(', ')} (taken before counters were backed up): set each past the highest code in use before making new stickers, tags or cartons in this copy.`)
+  }
   if (differ) process.exitCode = 1
 }
 
