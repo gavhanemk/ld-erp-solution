@@ -89,7 +89,7 @@ export async function assertOneBrand(
     const owner = l.styleId ? owners.get(l.styleId) : undefined
     if (owner && owner.brandId !== brand.id) {
       throw new AppError(
-        `${l.label} (${owner.code}) is a ${owner.name} style, and this ${what} is for ${brand.name}. One ${what} carries one brand: put ${owner.name}'s styles on a ${what} of their own.`,
+        `${l.label} (${owner.code}) is a ${owner.name} style, and this ${what} is for ${brand.name}. One ${what} carries one brand: put ${owner.name}'s styles on their own ${what}.`,
         400,
         'BRAND_MIX',
       )
