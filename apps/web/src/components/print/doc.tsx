@@ -1,5 +1,6 @@
 'use client'
 
+import { Fragment } from 'react'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { SecondAddress } from '@/components/print/SecondAddress'
 
@@ -375,6 +376,9 @@ export function DocTable({
   fontSize = 9.5,
   style,
   dense = false,
+  fill = 0,
+  pageFills,
+  tableRef,
 }: {
   columns: DocColumn[]
   rows: DocRow[]
@@ -384,6 +388,15 @@ export function DocTable({
   style?: React.CSSProperties
   /** Tight cells (3 px), for the compact tax invoice. */
   dense?: boolean
+  /** Height (px) of one empty last row whose column rules run on down — the tax invoice's table taking up the page. */
+  fill?: number
+  /**
+   * Where a page breaks inside the table, the room left at its foot: [after
+   * row index, px]. Printed only — the table's rules run to the foot of every
+   * page and the next page starts after it.
+   */
+  pageFills?: Array<[number, number]>
+  tableRef?: React.Ref<HTMLTableElement>
 }) {
   const totalWeight = columns.reduce((s, c) => s + (c.width ? 0 : (c.weight ?? 10)), 0)
   const fixedPct = columns.reduce((s, c) => s + (c.width ? parseFloat(c.width) : 0), 0)
@@ -393,11 +406,11 @@ export function DocTable({
   const last = columns.length - 1
 
   const th = (c: DocColumn, i: number): React.CSSProperties => ({
-    padding: dense ? '2.5px 4px' : '4px 4px',
-    fontSize: '7.5px',
+    padding: dense ? '4px 4px' : '4px 4px',
+    fontSize: dense ? '9.5px' : '7.5px',
     fontWeight: 700,
-    letterSpacing: '.04em',
-    textTransform: 'uppercase',
+    letterSpacing: dense ? 0 : '.04em',
+    textTransform: dense ? 'none' : 'uppercase',
     lineHeight: 1.25,
     textAlign: c.align ?? 'left',
     verticalAlign: 'bottom',
@@ -411,16 +424,20 @@ export function DocTable({
     lineHeight: dense ? 1.3 : 1.4,
     textAlign: c.align ?? 'left',
     verticalAlign: 'top',
-    borderTop: r?.total ? LINE : HAIR,
+    ...(dense && !r?.total ? { borderBottom: HAIR } : { borderTop: r?.total ? LINE : HAIR }),
     borderRight: i === last ? undefined : HAIR,
-    overflowWrap: 'anywhere',
+    overflowWrap: dense && c.align === 'right' ? 'normal' : 'anywhere',
     fontWeight: r?.total ? 700 : undefined,
     fontStyle: r?.muted ? 'italic' : undefined,
     ...(c.align === 'right' ? NUM : {}),
   })
 
   return (
-    <table className="doc-lines" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', border: LINE, marginTop: '7px', ...style }}>
+    <table
+      ref={tableRef}
+      className="doc-lines"
+      style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', border: LINE, marginTop: '7px', ...style }}
+    >
       <colgroup>
         {columns.map((c) => (
           <col key={c.key} style={{ width: widthOf(c) }} />
@@ -436,14 +453,28 @@ export function DocTable({
         </tr>
       </thead>
       <tbody>
-        {rows.map((r) => (
-          <tr key={r.key}>
-            {columns.map((c, i) => (
-              <td key={c.key} style={td(c, i, r)}>
-                {r.cells[c.key] ?? ''}
-              </td>
-            ))}
-          </tr>
+        {rows.map((r, n) => (
+          <Fragment key={r.key}>
+            <tr>
+              {columns.map((c, i) => (
+                <td key={c.key} style={td(c, i, r)}>
+                  {r.cells[c.key] ?? ''}
+                </td>
+              ))}
+            </tr>
+            {pageFills
+              ?.filter(([after]) => after === n)
+              .map(([, height]) => (
+                <tr key="page-fill" className="doc-page-fill" data-fill="" style={{ breakAfter: 'page', pageBreakAfter: 'always' }}>
+                  {columns.map((c, i) => (
+                    <td
+                      key={c.key}
+                      style={{ height: `${Math.max(0, height)}px`, padding: 0, borderRight: i === last ? undefined : HAIR, borderBottom: LINE }}
+                    />
+                  ))}
+                </tr>
+              ))}
+          </Fragment>
         ))}
         {Array.from({ length: blanks }).map((_, b) => (
           <tr key={`blank-${b}`}>
@@ -452,6 +483,13 @@ export function DocTable({
             ))}
           </tr>
         ))}
+        {fill > 0 && (
+          <tr data-fill="" style={{ breakBefore: 'avoid' }}>
+            {columns.map((c, i) => (
+              <td key={c.key} style={{ height: `${fill}px`, padding: 0, borderRight: i === last ? undefined : HAIR }} />
+            ))}
+          </tr>
+        )}
       </tbody>
     </table>
   )
@@ -825,6 +863,7 @@ const sheetCss = (footerLeft: string, pageMargin = '10mm 11mm 14mm 11mm') => `
 .doc-sheet .doc-push { margin-top: auto; }
 .doc-sheet table.doc-lines thead { display: table-header-group; }
 .doc-sheet table.doc-lines tr { break-inside: avoid; page-break-inside: avoid; }
+.doc-sheet table.doc-lines tr.doc-page-fill { display: none; }
 .doc-screen-foot {
   display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; padding-top: 4px;
   border-top: 0.75pt solid #000; font: 600 7pt/1.3 "Helvetica Neue", Arial, sans-serif;
@@ -840,6 +879,7 @@ const sheetCss = (footerLeft: string, pageMargin = '10mm 11mm 14mm 11mm') => `
     min-height: 272mm;
   }
   .doc-screen-foot { display: none !important; }
+  .doc-sheet table.doc-lines tr.doc-page-fill { display: table-row; }
 }
 `
 
@@ -923,7 +963,7 @@ export function DocumentSheet({
       <PrintToolbar backHref={backHref} backLabel={backLabel} copies={copies} fileName={fileName ?? number} />
       {options && <div className="no-print doc-options">{options}</div>}
 
-      <div className="doc-sheet" style={bare ? { padding: '8mm 8mm 6mm' } : undefined}>
+      <div className="doc-sheet" style={bare ? { padding: pageMargin ?? '8mm 8mm 6mm' } : undefined}>
         {!bare && (
         <>
         {/* ── Letterhead ── */}
