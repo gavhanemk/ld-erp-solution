@@ -714,6 +714,8 @@ enum BOMCostBasis {
 // ═══════════════════════════════════════════
 
 model User {
+  materialExtrasAsked   MaterialExtra[]     @relation("MaterialExtraBy")
+  materialExtrasDecided MaterialExtra[]     @relation("MaterialExtraDecidedBy")
   reallocationsRaised   StockReallocation[] @relation("ReallocationBy")
   reallocationsApproved StockReallocation[] @relation("ReallocationApprovedBy")
   reallocationsRejected StockReallocation[] @relation("ReallocationRejectedBy")
@@ -1010,6 +1012,11 @@ model Brand {
   reallocationsFrom   StockReallocation[]  @relation("ReallocationFrom")
   reallocationsTo     StockReallocation[]  @relation("ReallocationTo")
   floorReturnLines    FloorReturnLine[]    @relation("FloorReturnLineBrand")
+  grnLines            GRNLine[]            @relation("GrnLineBrand")
+  openingLines        OpeningStockLine[]   @relation("OpeningLineBrand")
+  fgReceipts          FinishedGoodsReceipt[] @relation("FgReceiptBrand")
+  challanLines        DeliveryChallanLine[] @relation("ChallanLineBrand")
+  fgCartons           FgCarton[]           @relation("FgCartonBrand")
 
   @@map("brands")
 }
@@ -1260,6 +1267,7 @@ model ItemUnit {
 
 model Item {
   reallocationLines StockReallocationLine[] @relation("ReallocationLineItem")
+  materialExtras    MaterialExtra[]         @relation("MaterialExtraItem")
   sampleMaterials SampleMaterial[]
   sampleCloseOuts SampleCloseOut[]
 
@@ -2255,6 +2263,8 @@ model DeliveryChallan {
   garments Garment[] @relation("GarmentChallan")
   /// Cartons loaded on it, scanned or picked: its lines come from their contents.
   fgCartons FgCarton[] @relation("FgCartonChallan")
+  /// Central stock moved to the order's brand for it, put back if it is cancelled.
+  reallocations StockReallocation[] @relation("ReallocationChallan")
 }
 
 model DeliveryChallanLine {
@@ -2280,6 +2290,10 @@ model DeliveryChallanLine {
   /// "A" for first quality, "B" for B-grade: made, but not first quality.
   /// B-grade pieces are counted apart from good ones and billed at their own rate.
   grade      String   @default("A")
+  /// The share it left from: the order's brand (central stock moved to it
+  /// first, on an automatic reallocation). Blank for a customer's goods.
+  brandId    String?
+  brand      Brand?   @relation("ChallanLineBrand", fields: [brandId], references: [id], onDelete: Restrict)
   @@index([soLineId])
   @@map("delivery_challan_lines")
 }
@@ -2327,6 +2341,10 @@ model FinishedGoodsReceipt {
   lines FinishedGoodsReceiptLine[]
   /// On an order with a route: the pieces it took off the last stage.
   wipEvents WipEvent[] @relation("FGRWipEvents")
+  /// The share the pieces came into: the MO's brand when they were booked in
+  /// (multi-brand phase 5). A cancellation takes them out of the same share.
+  brandId String?
+  brand   Brand?  @relation("FgReceiptBrand", fields: [brandId], references: [id], onDelete: Restrict)
 
   @@index([soId])
   @@map("finished_goods_receipts")
@@ -3149,6 +3167,12 @@ model GRNLine {
   billLines PurchaseInvoiceLine[]
   noteLines PurchaseNoteLine[]
 
+  /// The share it went into (multi-brand phase 5): its PO's brand, else the
+  /// brand of the MO its indent was raised for, else the style's own brand;
+  /// blank is central stock. Its QC, stickers, returns and bill follow it.
+  brandId String?
+  brand   Brand?  @relation("GrnLineBrand", fields: [brandId], references: [id], onDelete: Restrict)
+
   @@map("grn_lines")
 }
 
@@ -3673,6 +3697,9 @@ model OpeningStockLine {
   valuationPending Boolean    @default(false)
   /// The stock movement this line posted, for a later revaluation or correction.
   ledgerId       String?
+  /// The own brand the stock is earmarked for (multi-brand phase 5); blank is central.
+  brandId        String?
+  brand          Brand?     @relation("OpeningLineBrand", fields: [brandId], references: [id], onDelete: Restrict)
 
   @@index([openingStockId])
   @@index([itemId, warehouseId])
@@ -4297,6 +4324,7 @@ model JobWorkReturnLine {
 
 model ManufacturingOrder {
   reallocations    StockReallocation[] @relation("ReallocationMO")
+  materialExtras   MaterialExtra[]     @relation("MaterialExtraMO")
   id               String      @id @default(cuid())
   moNumber         String      @unique
   soId             String?
@@ -7374,6 +7402,9 @@ model FgCarton {
   /// Opened: its pieces back in the store, loose.
   openedAt      DateTime?
   openReason    String?
+  /// The share its pieces are on (multi-brand phase 5): the order's brand, or blank for central.
+  brandId       String?
+  brand         Brand?           @relation("FgCartonBrand", fields: [brandId], references: [id], onDelete: Restrict)
   createdById   String?
   createdBy     User?            @relation("FgCartonPackedBy", fields: [createdById], references: [id])
   createdAt     DateTime         @default(now())
@@ -7607,6 +7638,9 @@ model StockReallocation {
   mo             ManufacturingOrder? @relation("ReallocationMO", fields: [moId], references: [id])
   mrId           String?
   mr             MaterialRequisition? @relation("ReallocationMR", fields: [mrId], references: [id])
+  /// The challan an automatic one was made for: central stock moved to the order's brand to go on it.
+  dcId           String?
+  dc             DeliveryChallan?   @relation("ReallocationChallan", fields: [dcId], references: [id])
   reason         String
   requestedById  String
   requestedBy    User               @relation("ReallocationBy", fields: [requestedById], references: [id])
@@ -7634,6 +7668,7 @@ model StockReallocation {
   @@index([status])
   @@index([moId])
   @@index([mrId])
+  @@index([dcId])
   @@map("stock_reallocations")
 }
 
@@ -7656,4 +7691,48 @@ model StockReallocationLine {
 
   @@index([reallocationId])
   @@map("stock_reallocation_lines")
+}
+
+/// Where an extra-material request stands.
+enum MaterialExtraStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+/// More of a material than an MO's plan allows, or a material its plan does
+/// not call for, asked for with a reason and approved by a production manager
+/// other than whoever asked (multi-brand phase 5, separate from any earmark).
+/// Approved, it raises what the MO may be issued of that material by its
+/// quantity; nothing else does.
+model MaterialExtra {
+  id              String              @id @default(cuid())
+  number          String              @unique
+  moId            String
+  mo              ManufacturingOrder  @relation("MaterialExtraMO", fields: [moId], references: [id])
+  itemId          String
+  item            Item                @relation("MaterialExtraItem", fields: [itemId], references: [id])
+  ownership       StockOwnership      @default(OWNED)
+  ownerCustomerId String?
+  qty             Decimal             @db.Decimal(10, 3)
+  reason          String
+  status          MaterialExtraStatus @default(PENDING)
+  requestedById   String
+  requestedBy     User                @relation("MaterialExtraBy", fields: [requestedById], references: [id])
+  requestedAt     DateTime            @default(now())
+  decidedById     String?
+  decidedBy       User?               @relation("MaterialExtraDecidedBy", fields: [decidedById], references: [id])
+  decidedAt       DateTime?
+  /// Why it was turned down.
+  rejectReason    String?
+  /// An Admin approving their own request, as an override with a reason.
+  selfApproved    Boolean             @default(false)
+  overrideReason  String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([moId, itemId])
+  @@index([status])
+  @@map("material_extras")
 }

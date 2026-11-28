@@ -14,6 +14,7 @@ import { lockRow } from '../lib/lockRow'
 import { syncMoPacked } from '../services/manufacturing.service'
 import { packForReceipt, unpackForReceipt } from '../services/floor.service'
 import { voidForCancelledReceipt } from '../services/garment.service'
+import { ownShare } from '../services/brandStock.service'
 
 /**
  * Finished goods in: packed garments going into the finished-goods store.
@@ -359,6 +360,15 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
     }
   }
 
+  // Multi-brand phase 5: the pieces come in on the MO's brand (its order's
+  // when packed without an MO). A customer's pieces are never a brand's.
+  let shareId: string | null = null
+  if (!jobWorkFor) {
+    const mo = data.moId ? await tx.manufacturingOrder.findUnique({ where: { id: data.moId }, select: { brandId: true } }) : null
+    const so = !mo && data.soId ? await tx.salesOrder.findUnique({ where: { id: data.soId }, select: { brandId: true } }) : null
+    shareId = await ownShare(tx, mo?.brandId ?? so?.brandId ?? null)
+  }
+
   // Checked first, so a refused receipt never takes a number.
   const fgrNumber = await nextDocumentNumber(tx, 'FGR', receiptDate)
   const created = await tx.finishedGoodsReceipt.create({
@@ -368,6 +378,7 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
       warehouseId: data.warehouseId,
       soId: data.soId ?? null,
       moId: data.moId ?? null,
+      brandId: shareId,
       notes: data.notes ?? null,
       createdById: userId,
       lines: {
@@ -389,6 +400,7 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
 
   for (const line of created.lines) {
     await recordMovement(tx, {
+      brandId: shareId,
       itemId: line.itemId,
       warehouseId: created.warehouseId,
       sizeId: line.sizeId,
@@ -471,6 +483,8 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
       const ins = await tx.stockLedger.findMany({ where: { referenceType: 'FG_RECEIPT', referenceId: before.id, inQty: { gt: 0 } } })
       for (const row of ins) {
         await recordMovement(tx, {
+          // Out of the share they came in on.
+          brandId: row.brandId,
           itemId: row.itemId,
           warehouseId: row.warehouseId,
           sizeId: row.sizeId,

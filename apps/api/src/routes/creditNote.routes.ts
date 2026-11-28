@@ -10,6 +10,7 @@ import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
 import { assertStockUnused, recordMovement } from '../services/stock.service'
+import { ownShare } from '../services/brandStock.service'
 import { lockRow } from '../lib/lockRow'
 import { planAllocations, syncInvoiceFromReceipts } from '../services/salesReceipt.service'
 import { fgRates } from './finishedGoods.routes'
@@ -79,7 +80,7 @@ type CreditNoteInput = z.infer<typeof creditNoteSchema>
 
 const invoiceForCredit = {
   customer: { select: { id: true, name: true } },
-  so: { select: { isJobWork: true, customerId: true } },
+  so: { select: { isJobWork: true, customerId: true, brandId: true } },
   dc: { select: { dcNumber: true, warehouseId: true, lines: { select: { soLineId: true, grade: true, sizes: { select: { sizeId: true, qty: true, size: { select: { code: true, sequence: true } } } } } } } },
   lines: {
     orderBy: { sortOrder: 'asc' },
@@ -279,11 +280,14 @@ export async function createCreditNote(tx: Prisma.TransactionClient, data: Credi
   if (data.type === 'RETURN') {
     const items = [...new Map(lines.map((l) => [l.s.line.item.id, l.s.line.item])).values()]
     const rates = await fgRates(tx, items)
+    // Multi-brand phase 5: back on the original order's brand; a customer's goods are never a brand's.
+    const share = inv.so?.isJobWork ? null : await ownShare(tx, inv.so?.brandId)
     for (const l of lines) {
       const rate = rates.get(l.s.line.itemId)?.rate ?? (l.qty > 0 ? l.taxable / l.qty : 0)
       const parts = l.sizes.length ? l.sizes.map((z) => ({ sizeId: z.sizeId as string | null, qty: z.qty })) : [{ sizeId: null, qty: l.qty }]
       for (const p of parts) {
         await recordMovement(tx, {
+          brandId: share,
           itemId: l.s.line.itemId,
           warehouseId: data.warehouseId!,
           sizeId: p.sizeId,
@@ -380,6 +384,7 @@ export async function cancelCreditNote(tx: Prisma.TransactionClient, id: string,
     const ins = await tx.stockLedger.findMany({ where: { referenceType: 'CREDIT_NOTE', referenceId: before.id, inQty: { gt: 0 } } })
     for (const row of ins) {
       await recordMovement(tx, {
+        brandId: row.brandId,
         itemId: row.itemId,
         warehouseId: row.warehouseId,
         sizeId: row.sizeId,

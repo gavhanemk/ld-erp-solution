@@ -97,13 +97,13 @@ async function take(): Promise<Snapshot> {
   const stickersOver = (
     await prisma.$queryRaw<Array<{ k: string; tagged: number; book: number }>>`
       WITH p AS (
-        SELECT "itemId", "warehouseId", ownership::text AS o, COALESCE("ownerCustomerId", '') AS c, SUM(qty)::float8 AS tagged
-        FROM ld_erp.stock_packages WHERE status::text = 'IN_STOCK' GROUP BY 1, 2, 3, 4),
+        SELECT "itemId", "warehouseId", ownership::text AS o, COALESCE("ownerCustomerId", '') AS c, COALESCE("brandId", '') AS b, SUM(qty)::float8 AS tagged
+        FROM ld_erp.stock_packages WHERE status::text = 'IN_STOCK' GROUP BY 1, 2, 3, 4, 5),
       l AS (
-        SELECT "itemId", "warehouseId", ownership::text AS o, COALESCE("ownerCustomerId", '') AS c, SUM("inQty" - "outQty")::float8 AS book
-        FROM ld_erp.stock_ledger GROUP BY 1, 2, 3, 4)
-      SELECT p."itemId" || '|' || p."warehouseId" || '|' || p.o || '|' || p.c AS k, p.tagged, COALESCE(l.book, 0) AS book
-      FROM p LEFT JOIN l USING ("itemId", "warehouseId", o, c)
+        SELECT "itemId", "warehouseId", ownership::text AS o, COALESCE("ownerCustomerId", '') AS c, COALESCE("brandId", '') AS b, SUM("inQty" - "outQty")::float8 AS book
+        FROM ld_erp.stock_ledger GROUP BY 1, 2, 3, 4, 5)
+      SELECT p."itemId" || '|' || p."warehouseId" || '|' || p.o || '|' || p.c || '|' || p.b AS k, p.tagged, COALESCE(l.book, 0) AS book
+      FROM p LEFT JOIN l USING ("itemId", "warehouseId", o, c, b)
       WHERE p.tagged > COALESCE(l.book, 0) + 0.0005`
   ).map((x) => `${x.k} stickers ${r3(x.tagged)} > book ${r3(x.book)}`)
 
@@ -111,13 +111,13 @@ async function take(): Promise<Snapshot> {
   const tagsOver = (
     await prisma.$queryRaw<Array<{ k: string; tagged: number; book: number }>>`
       WITH g AS (
-        SELECT "itemId", "warehouseId", COALESCE("sizeId", '') AS s, grade, ownership::text AS o, COALESCE("ownerCustomerId", '') AS c, COUNT(*)::float8 AS tagged
-        FROM ld_erp.garments WHERE status::text IN ('IN_STOCK', 'PACKED') GROUP BY 1, 2, 3, 4, 5, 6),
+        SELECT "itemId", "warehouseId", COALESCE("sizeId", '') AS s, grade, ownership::text AS o, COALESCE("ownerCustomerId", '') AS c, COALESCE("brandId", '') AS b, COUNT(*)::float8 AS tagged
+        FROM ld_erp.garments WHERE status::text IN ('IN_STOCK', 'PACKED') GROUP BY 1, 2, 3, 4, 5, 6, 7),
       l AS (
-        SELECT "itemId", "warehouseId", COALESCE("sizeId", '') AS s, grade, ownership::text AS o, COALESCE("ownerCustomerId", '') AS c, SUM("inQty" - "outQty")::float8 AS book
-        FROM ld_erp.stock_ledger GROUP BY 1, 2, 3, 4, 5, 6)
-      SELECT g."itemId" || '|' || g."warehouseId" || '|' || g.s || '|' || g.grade || '|' || g.o AS k, g.tagged, COALESCE(l.book, 0) AS book
-      FROM g LEFT JOIN l USING ("itemId", "warehouseId", s, grade, o, c)
+        SELECT "itemId", "warehouseId", COALESCE("sizeId", '') AS s, grade, ownership::text AS o, COALESCE("ownerCustomerId", '') AS c, COALESCE("brandId", '') AS b, SUM("inQty" - "outQty")::float8 AS book
+        FROM ld_erp.stock_ledger GROUP BY 1, 2, 3, 4, 5, 6, 7)
+      SELECT g."itemId" || '|' || g."warehouseId" || '|' || g.s || '|' || g.grade || '|' || g.o || '|' || g.b AS k, g.tagged, COALESCE(l.book, 0) AS book
+      FROM g LEFT JOIN l USING ("itemId", "warehouseId", s, grade, o, c, b)
       WHERE g.tagged > COALESCE(l.book, 0) + 0.0005`
   ).map((x) => `${x.k} tags ${x.tagged} > book ${r3(x.book)}`)
 
@@ -125,14 +125,14 @@ async function take(): Promise<Snapshot> {
   const cartonsOver = (
     await prisma.$queryRaw<Array<{ k: string; sealed: number; book: number }>>`
       WITH c AS (
-        SELECT l."itemId", c."warehouseId", l."sizeId" AS s, l.grade, SUM(l.qty)::float8 AS sealed
+        SELECT l."itemId", c."warehouseId", l."sizeId" AS s, l.grade, COALESCE(c."brandId", '') AS b, SUM(l.qty)::float8 AS sealed
         FROM ld_erp.fg_carton_lines l JOIN ld_erp.fg_cartons c ON c.id = l."cartonId"
-        WHERE c.status::text = 'PACKED' GROUP BY 1, 2, 3, 4),
+        WHERE c.status::text = 'PACKED' GROUP BY 1, 2, 3, 4, 5),
       l AS (
-        SELECT "itemId", "warehouseId", "sizeId" AS s, grade, SUM("inQty" - "outQty")::float8 AS book
-        FROM ld_erp.stock_ledger WHERE ownership::text = 'OWNED' GROUP BY 1, 2, 3, 4)
-      SELECT c."itemId" || '|' || c."warehouseId" || '|' || c.s || '|' || c.grade AS k, c.sealed, COALESCE(l.book, 0) AS book
-      FROM c LEFT JOIN l USING ("itemId", "warehouseId", s, grade)
+        SELECT "itemId", "warehouseId", "sizeId" AS s, grade, COALESCE("brandId", '') AS b, SUM("inQty" - "outQty")::float8 AS book
+        FROM ld_erp.stock_ledger WHERE ownership::text = 'OWNED' GROUP BY 1, 2, 3, 4, 5)
+      SELECT c."itemId" || '|' || c."warehouseId" || '|' || c.s || '|' || c.grade || '|' || c.b AS k, c.sealed, COALESCE(l.book, 0) AS book
+      FROM c LEFT JOIN l USING ("itemId", "warehouseId", s, grade, b)
       WHERE c.sealed > COALESCE(l.book, 0) + 0.0005`
   ).map((x) => `${x.k} sealed ${x.sealed} > book ${r3(x.book)}`)
 

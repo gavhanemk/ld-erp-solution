@@ -260,23 +260,35 @@ export async function positionsOf(tx: Prisma.TransactionClient, spots: StockSpot
   const itemIds = [...new Set(spots.map((s) => s.itemId))]
   const [ledger, packed] = itemIds.length
     ? await Promise.all([
-        tx.$queryRaw<Array<{ itemId: string; warehouseId: string; ownership: StockOwnership; ownerCustomerId: string | null; qty: number }>>`
-          SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId", COALESCE(SUM("inQty" - "outQty"), 0)::float8 AS qty
+        tx.$queryRaw<Array<{ itemId: string; warehouseId: string; ownership: StockOwnership; ownerCustomerId: string | null; brandId: string | null; qty: number }>>`
+          SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId", "brandId", COALESCE(SUM("inQty" - "outQty"), 0)::float8 AS qty
           FROM ld_erp.stock_ledger
           WHERE "itemId" = ANY(${itemIds}::text[]) AND "sizeId" IS NULL AND grade IN ('A', 'R')
-          GROUP BY 1, 2, 3, 4`,
+          GROUP BY 1, 2, 3, 4, 5`,
         tx.stockPackage.groupBy({
-          by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],
+          by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId', 'brandId'],
           where: { itemId: { in: itemIds }, status: 'IN_STOCK' },
           _sum: { qty: true },
         }),
       ])
     : [[], []]
-  const inStore = new Map(ledger.map((r) => [spotKey(r), round3(Number(r.qty))]))
-  const inPackages = new Map(packed.map((r) => [spotKey(r), round3(Number(r._sum.qty ?? 0))]))
+  // By spot and share (multi-brand phase 5): a spot naming a share reads that
+  // share's; one naming none reads every share together.
+  const add = (m: Map<string, number>, k: string, q: number) => m.set(k, round3((m.get(k) ?? 0) + q))
+  const inStore = new Map<string, number>()
+  const inPackages = new Map<string, number>()
+  for (const r of ledger) {
+    add(inStore, spotKey(r), Number(r.qty))
+    add(inStore, `${spotKey(r)}#${r.brandId ?? ''}`, Number(r.qty))
+  }
+  for (const r of packed) {
+    add(inPackages, spotKey(r), Number(r._sum.qty ?? 0))
+    add(inPackages, `${spotKey(r)}#${r.brandId ?? ''}`, Number(r._sum.qty ?? 0))
+  }
   return (s: StockSpot) => {
-    const store = inStore.get(spotKey(s)) ?? 0
-    const pk = inPackages.get(spotKey(s)) ?? 0
+    const k = s.brandId === undefined ? spotKey(s) : `${spotKey(s)}#${s.brandId ?? ''}`
+    const store = inStore.get(k) ?? 0
+    const pk = inPackages.get(k) ?? 0
     return { inStore: store, inPackages: pk, loose: round3(store - pk) }
   }
 }
@@ -483,6 +495,13 @@ export async function createPackages(
     }
   }
 
+  // The share its stock is on (multi-brand phase 5): the one named, else a
+  // part keeps its roll's, else central.
+  let brandId: string | null = input.spot.brandId ?? null
+  if (input.spot.brandId === undefined && input.parentId) {
+    brandId = (await tx.stockPackage.findUnique({ where: { id: input.parentId }, select: { brandId: true } }))?.brandId ?? null
+  }
+
   const created = []
   for (const [i, q] of qtys.entries()) {
     const note = input.notesEach?.[i]?.trim() || input.notes || null
@@ -508,6 +527,7 @@ export async function createPackages(
         sourceLineId: input.sourceLineId ?? null,
         parentId: input.parentId ?? null,
         grade: input.grade ?? 'A',
+        brandId,
         createdById: input.userId,
         // Its own barcode is already on it: labelled, nothing to print.
         ...(barcode ? { barcode, printCount: 1, lastPrintedAt: new Date() } : {}),
@@ -847,9 +867,11 @@ export async function mergePackages(
     differs((p) => `${p.ownership}|${p.ownerCustomerId ?? ''}`, 'whose stock it is'),
     differs((p) => (p.lotNo ?? '').trim().toUpperCase(), 'lot'),
     differs((p) => p.grade, 'hold'),
+    // A brand's earmark and central stock stay on stickers of their own.
+    differs((p) => p.brandId ?? '', 'brand'),
   ].filter(Boolean)
   if (why.length) {
-    throw new AppError(`Only stickers of the same item, store, lot and hold can be put together: these differ in ${why.join(', ')}.`, 400, 'MERGE_MIXED')
+    throw new AppError(`Only stickers of the same item, store, lot, hold and brand can be put together: these differ in ${why.join(', ')}.`, 400, 'MERGE_MIXED')
   }
   const unit = first.item.uom?.symbol ?? ''
   const qty = round3(pkgs.reduce((t, p) => t + Number(p.qty), 0))
@@ -876,6 +898,7 @@ export async function mergePackages(
       grnLineId: oneOf((p) => p.grnLineId ?? '') || null,
       sourceLineId: oneOf((p) => p.sourceLineId ?? '') || null,
       grade: first.grade,
+      brandId: first.brandId,
       createdById: input.userId,
       // As old as the oldest it holds: first in, first out still goes by it.
       createdAt: pkgs.reduce((d, p) => (p.createdAt < d ? p.createdAt : d), first.createdAt),

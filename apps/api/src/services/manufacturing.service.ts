@@ -300,6 +300,8 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     department: { id: string; name: string } | null
     styles: Set<string>
     required: number
+    /** A material the BOM does not call for, on the plan only for its approved extra. */
+    extraOnly?: boolean
   }
   const rows = new Map<string, Row>()
   const missing: Array<{ style: string; color: string; pieces: number }> = []
@@ -359,6 +361,51 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
       rows.set(key, row)
     }
   }
+
+  /*
+   * Extra material approved for this MO (multi-brand phase 5): it raises what
+   * may be asked for and issued of that material. One the BOM does not call
+   * for gets a row of its own, so it can be asked for from the plan.
+   */
+  const extras = await db.materialExtra.groupBy({ by: ['itemId', 'ownership', 'ownerCustomerId'], where: { moId: mo.id, status: 'APPROVED' }, _sum: { qty: true } })
+  const extraOf = new Map(extras.map((e) => [`${e.itemId}|${e.ownership}|${e.ownerCustomerId ?? ''}`, round3(Number(e._sum.qty ?? 0))]))
+  const unplanned = extras.filter((e) => ![...rows.values()].some((r) => r.item.id === e.itemId && r.ownership === e.ownership && (r.ownerCustomerId ?? null) === (e.ownerCustomerId ?? null)))
+  if (unplanned.length) {
+    const extraItems = await db.item.findMany({
+      where: { id: { in: unplanned.map((e) => e.itemId) } },
+      select: { id: true, code: true, name: true, ...ITEM_SHADE, type: true, decimalPlaces: true, uom: { select: { symbol: true, decimalPlaces: true } }, category: { select: { name: true, parent: { select: { name: true } } } } },
+    })
+    for (const e of unplanned) {
+      const it = extraItems.find((i) => i.id === e.itemId)
+      if (!it) continue
+      const key = `${e.itemId}|${e.ownership}|${e.ownerCustomerId ?? ''}|extra`
+      rows.set(key, {
+        key,
+        baseKey: `${e.itemId}|`,
+        defaultOwnership: e.ownership as Row['defaultOwnership'],
+        item: {
+          id: it.id,
+          code: it.code,
+          name: it.name,
+          designNo: it.designNo,
+          color: it.color,
+          styleId: it.styleId,
+          type: it.type,
+          uom: it.uom?.symbol ?? null,
+          places: qtyPlaces(it),
+          category: [it.category?.parent?.name, it.category?.name].filter(Boolean).join(' › '),
+        },
+        ownership: e.ownership as Row['ownership'],
+        ownerCustomerId: e.ownerCustomerId ?? null,
+        department: null,
+        styles: new Set<string>(),
+        required: 0,
+        extraOnly: true,
+      })
+    }
+  }
+  // An extra counts once, on the first row of its material and owner.
+  const extraGiven = new Set<string>()
 
   const itemIds = [...new Set([...rows.values()].map((r) => r.item.id))]
   const [stock, warehouses, asked, heldElsewhere] = await Promise.all([
@@ -434,8 +481,11 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     // Up to what can actually be handed over: a carton for every 24 shirts on
     // 50 shirts is 2.08 cartons, asked for as 3; metres stay as worked out.
     const required = roundUpToPlaces(round3(r.required), r.item.places)
+    const ek = `${r.item.id}|${r.ownership}|${r.ownerCustomerId ?? ''}`
+    const extra = extraGiven.has(ek) ? 0 : (extraOf.get(ek) ?? 0)
+    extraGiven.add(ek)
     // Also up: an older requisition asked for 2.1 of 3 cartons leaves 1 to ask, not 0.9.
-    const toRequest = roundUpToPlaces(round3(Math.max(0, required - requested)), r.item.places)
+    const toRequest = roundUpToPlaces(round3(Math.max(0, required + extra - requested)), r.item.places)
     return {
       key: r.key,
       baseKey: r.baseKey,
@@ -447,6 +497,9 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
       department: r.department,
       styles: [...r.styles],
       required,
+      /** Approved extra material for it (multi-brand phase 5), on top of what the BOM needs. */
+      extra,
+      extraOnly: !!r.extraOnly,
       inStock,
       requested,
       toRequest,

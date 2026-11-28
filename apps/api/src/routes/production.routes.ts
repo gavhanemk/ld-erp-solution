@@ -4,7 +4,9 @@ import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { assertOneBrand } from '../lib/brandRules'
-import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
+import { isAdmin, requirePermission, userCan, type AuthRequest } from '../middleware/auth'
+import { createOnce, requestIdOf } from '../lib/onceFor'
+import { approveExtra, listExtras, raiseExtra, rejectExtra, withdrawExtra } from '../services/materialExtra.service'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { assertStylesInProduction } from '../lib/styleStage'
@@ -1456,6 +1458,79 @@ router.post('/orders/:id/requisitions', requirePermission(MODULE, 'create'), asy
     message: `${raised.map((m) => m.mrNumber).join(', ')} raised for ${mo.moNumber}. They wait for approval in Inventory → Material Requisitions.`,
     data: raised.map((m) => ({ id: m.id, mrNumber: m.mrNumber })),
   })
+})
+
+// ═══ Extra material (multi-brand phase 5) ═══
+// More of a material than an MO's plan allows, or one it does not call for,
+// is issued only once a production manager other than whoever asked approves
+// it. An earmark never stands in for it.
+
+const extraSchema = z.object({
+  itemId: z.string().min(1, 'Pick the material'),
+  qty: z.number().positive('Ask for more than nothing'),
+  reason: z.string().trim().min(5, 'Say why the extra is needed'),
+  ownership: z.enum(['OWNED', 'CUSTOMER_OWNED']).optional(),
+})
+const decideExtraSchema = z.object({ overrideReason: z.string().trim().max(500).optional().nullable() })
+const rejectExtraSchema = z.object({ reason: z.string().trim().min(3, 'Say why it is turned down') })
+
+// GET /api/production/orders/:id/extras
+router.get('/orders/:id/extras', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
+  const rows = await prisma.$transaction((tx) => listExtras(tx, req.params.id))
+  res.json({ success: true, data: rows, mayApprove: userCan(req.user, MODULE, 'approve') })
+})
+
+// POST /api/production/orders/:id/extras — ask for extra material
+router.post('/orders/:id/extras', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = extraSchema.parse(req.body)
+  const { doc, repeat } = await createOnce({
+    requestId: requestIdOf(req),
+    kind: 'MATERIAL_EXTRA',
+    userId: req.user!.id,
+    make: (tx) => raiseExtra(tx, req.params.id, data, req.user!.id),
+    load: (id) => prisma.materialExtra.findUniqueOrThrow({ where: { id }, include: { item: { select: { name: true, ...ITEM_SHADE } }, mo: { select: { moNumber: true } } } }),
+  })
+  if (!repeat) await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'MaterialExtra', entityId: doc.id, after: doc })
+  res.status(repeat ? 200 : 201).json({
+    success: true,
+    message: `${doc.number}: ${Number(doc.qty)} more of ${doc.item.name} asked for on ${doc.mo.moNumber}. It waits for a production manager.`,
+    data: doc,
+    repeat,
+  })
+})
+
+// POST /api/production/orders/extras/:extraId/approve
+router.post('/orders/extras/:extraId/approve', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { overrideReason } = decideExtraSchema.parse(req.body ?? {})
+  const doc = await prisma.$transaction((tx) => approveExtra(tx, req.params.extraId, { id: req.user!.id, admin: isAdmin(req.user) }, overrideReason))
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'APPROVE',
+    entityType: 'MaterialExtra',
+    entityId: doc.id,
+    // An Admin's own, approved as an override: marked so, with its reason, in the audit trail.
+    after: { ...doc, ...(doc.selfApproved ? { override: true, overrideReason: doc.overrideReason } : {}) },
+  })
+  res.json({
+    success: true,
+    message: `${doc.number} approved${doc.selfApproved ? ' as an Admin override' : ''}: ${doc.mo.moNumber} may now be issued ${Number(doc.qty)} more of ${doc.item.name}.`,
+    data: doc,
+  })
+})
+
+// POST /api/production/orders/extras/:extraId/reject
+router.post('/orders/extras/:extraId/reject', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { reason } = rejectExtraSchema.parse(req.body ?? {})
+  const doc = await prisma.$transaction((tx) => rejectExtra(tx, req.params.extraId, req.user!.id, reason))
+  await writeAuditLog(req, { module: MODULE, action: 'REJECT', entityType: 'MaterialExtra', entityId: doc.id, after: doc })
+  res.json({ success: true, message: `${doc.number} turned down.`, data: doc })
+})
+
+// POST /api/production/orders/extras/:extraId/withdraw
+router.post('/orders/extras/:extraId/withdraw', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const doc = await prisma.$transaction((tx) => withdrawExtra(tx, req.params.extraId, { id: req.user!.id, admin: isAdmin(req.user) }))
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'MaterialExtra', entityId: doc.id, after: doc })
+  res.json({ success: true, message: `${doc.number} withdrawn.`, data: doc })
 })
 
 // GET /api/production/entries?moId=&from=&to=

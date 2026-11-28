@@ -123,15 +123,16 @@ export const stockReconciliation: ReportDefinition = {
     // Pieces sealed in cartons still in the store.
     const cartons = await tx.$queryRaw<Found[]>`
       WITH c AS (
-        SELECT cl."itemId", c."warehouseId", cl."sizeId", cl.grade, SUM(cl.qty)::float8 AS claimed
+        SELECT cl."itemId", c."warehouseId", cl."sizeId", cl.grade, c."brandId", SUM(cl.qty)::float8 AS claimed
         FROM ld_erp.fg_carton_lines cl JOIN ld_erp.fg_cartons c ON c.id = cl."cartonId"
         WHERE c.status::text = 'PACKED' ${inStore('c."warehouseId"')}
-        GROUP BY 1, 2, 3, 4),
+        GROUP BY 1, 2, 3, 4, 5),
       l AS (
-        SELECT "itemId", "warehouseId", "sizeId", grade, SUM("inQty" - "outQty")::float8 AS ledger
-        FROM ld_erp.stock_ledger WHERE ownership::text = 'OWNED' GROUP BY 1, 2, 3, 4)
-      SELECT c."itemId", c."warehouseId", 'OWNED' AS ownership, NULL::text AS owner, c."sizeId", c.grade, COALESCE(l.ledger, 0) AS ledger, c.claimed
+        SELECT "itemId", "warehouseId", "sizeId", grade, "brandId", SUM("inQty" - "outQty")::float8 AS ledger
+        FROM ld_erp.stock_ledger WHERE ownership::text = 'OWNED' GROUP BY 1, 2, 3, 4, 5)
+      SELECT c."itemId", c."warehouseId", 'OWNED' AS ownership, NULL::text AS owner, c."sizeId", c.grade, c."brandId", COALESCE(l.ledger, 0) AS ledger, c.claimed
       FROM c LEFT JOIN l ON l."itemId" = c."itemId" AND l."warehouseId" = c."warehouseId" AND l."sizeId" IS NOT DISTINCT FROM c."sizeId" AND l.grade = c.grade
+        AND l."brandId" IS NOT DISTINCT FROM c."brandId"
       WHERE c.claimed > COALESCE(l.ledger, 0) + 0.0005`
 
     // Holds for requisitions, against our good stock in the store.

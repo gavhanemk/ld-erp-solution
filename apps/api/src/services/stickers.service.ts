@@ -9,6 +9,7 @@ import {
   packageRule,
   packageRules,
   positionsOf,
+  sharePositions,
   round3,
   stickerDefaultsFrom,
   suggestQtys,
@@ -55,6 +56,11 @@ export interface StickerGroup {
   remember?: boolean
   /** 'R': held stock, rejected at receipt; its stickers are held too. */
   grade?: string
+  /**
+   * The share it labels (multi-brand phase 5): a brand's earmark, or null
+   * for central stock. Left out, the share whose loose stock covers it.
+   */
+  brandId?: string | null
 }
 
 /** An inward document, and — when the document alone cannot say — what came in on it. */
@@ -70,6 +76,28 @@ export interface InwardQuery {
     qty: number
     lotNo?: string | null
   }>
+}
+
+/**
+ * The share a group of stickers labels (multi-brand phase 5): the one it
+ * names; a GRN line's own; else the share whose loose stock covers them,
+ * central first. Stickers answer for their own share's stock, so loose stock
+ * split between shares is labelled share by share.
+ */
+async function shareToLabel(
+  tx: Prisma.TransactionClient,
+  base: { itemId: string; warehouseId: string; ownership: 'OWNED' | 'CUSTOMER_OWNED'; ownerCustomerId: string | null },
+  g: StickerGroup,
+): Promise<string | null> {
+  if (g.brandId !== undefined) return g.brandId
+  if (g.grnLineId) return (await tx.gRNLine.findUnique({ where: { id: g.grnLineId }, select: { brandId: true } }))?.brandId ?? null
+  if (base.ownership !== 'OWNED') return null
+  const total = round3(g.qtys.reduce((s, q) => s + q, 0))
+  const fits = (await sharePositions(tx, base))
+    .filter((x) => x.loose + 1e-9 >= total)
+    .sort((a, b) => Number(b.brandId === null) - Number(a.brandId === null) || b.loose - a.loose)
+  // None covers them: central, and the loose check says what is loose there.
+  return fits[0]?.brandId ?? null
 }
 
 /**
@@ -93,7 +121,7 @@ export async function labelGroup(
       'NOT_TRACKED',
     )
   }
-  const spot = {
+  const base = {
     itemId: g.itemId,
     warehouseId: g.warehouseId,
     ownership: g.ownership,
@@ -101,7 +129,8 @@ export async function labelGroup(
   }
   // Held to the end of the transaction, before anything is counted: what a
   // GRN line has had stickered, and what is loose, cannot change under us.
-  await lockedBalanceOf(tx, spot)
+  await lockedBalanceOf(tx, base)
+  const spot = { ...base, brandId: await shareToLabel(tx, base, g) }
   let sourceType: PackageSource = source.type
   let sourceId = source.id
   let sourceRef = source.ref
@@ -197,6 +226,8 @@ type Came = {
   packNotes?: string[]
   /** 'R' for what came in held (rejected at a customer's receipt). */
   grade?: string
+  /** The share it came in on: a brand's, or null for central. */
+  brandId?: string | null
 }
 
 /** What came in on one inward document: its GRN lines, the lines given, or its rows on the stock ledger. */
@@ -204,10 +235,11 @@ async function whatCameIn(data: InwardQuery): Promise<Came[]> {
   if (data.sourceType === 'GRN') {
     const lines = await prisma.gRNLine.findMany({
       where: { grnId: data.sourceId, acceptedQty: { gt: 0 } },
-      select: { id: true, itemId: true, warehouseId: true, acceptedQty: true, batchNumber: true, packType: true, packQtys: true, packNotes: true },
+      select: { id: true, itemId: true, warehouseId: true, acceptedQty: true, batchNumber: true, packType: true, packQtys: true, packNotes: true, brandId: true },
       orderBy: { id: 'asc' },
     })
     return lines.map((l) => ({
+      brandId: l.brandId,
       itemId: l.itemId,
       warehouseId: l.warehouseId,
       ownership: 'OWNED' as const,
@@ -226,12 +258,12 @@ async function whatCameIn(data: InwardQuery): Promise<Came[]> {
   // Every inward writes its rows on the ledger, so that is where to read it.
   const rows = await prisma.stockLedger.findMany({
     where: { referenceType: LEDGER_REF[data.sourceType], referenceId: data.sourceId, inQty: { gt: 0 }, sizeId: null },
-    select: { itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, inQty: true, batchNumber: true, grade: true },
+    select: { itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, inQty: true, batchNumber: true, grade: true, brandId: true },
     orderBy: { createdAt: 'asc' },
   })
   const byKey = new Map<string, Came>()
   for (const r of rows) {
-    const key = [r.itemId, r.warehouseId, r.ownership, r.ownerCustomerId ?? '', r.batchNumber ?? '', r.grade].join('|')
+    const key = [r.itemId, r.warehouseId, r.ownership, r.ownerCustomerId ?? '', r.batchNumber ?? '', r.grade, r.brandId ?? ''].join('|')
     const had = byKey.get(key)
     if (had) had.qty = round3(had.qty + Number(r.inQty))
     else
@@ -244,6 +276,7 @@ async function whatCameIn(data: InwardQuery): Promise<Came[]> {
         lotNo: r.batchNumber,
         grnLineId: null,
         grade: r.grade,
+        brandId: r.brandId,
       })
   }
   return [...byKey.values()]
@@ -273,7 +306,7 @@ export async function planStickers(data: InwardQuery) {
   const itemOf = new Map(items.map((i) => [i.id, i]))
   const storeOf = new Map(stores.map((w) => [w.id, w.name]))
   const ownerOf = new Map(owners.map((c) => [c.id, c.name]))
-  const spotOf = (c: Came) => ({ itemId: c.itemId, warehouseId: c.warehouseId, ownership: c.ownership, ownerCustomerId: c.ownerCustomerId })
+  const spotOf = (c: Came) => ({ itemId: c.itemId, warehouseId: c.warehouseId, ownership: c.ownership, ownerCustomerId: c.ownerCustomerId, brandId: c.brandId ?? null })
   // Read for every line at once: rules, positions, and what this document has
   // had labelled already — a second look at the same GRN offers only the rest.
   const [ruleOf, positionOf, byLine, bySpot] = await Promise.all([
@@ -285,14 +318,14 @@ export async function planStickers(data: InwardQuery) {
       _sum: { initialQty: true },
     }),
     prisma.stockPackage.groupBy({
-      by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId', 'grade'],
+      by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId', 'grade', 'brandId'],
       where: { sourceType: data.sourceType, sourceId: data.sourceId, status: { not: 'VOID' } },
       _sum: { initialQty: true },
     }),
   ])
   const doneByLine = new Map(byLine.map((r) => [r.grnLineId, Number(r._sum.initialQty ?? 0)]))
-  const spotKey = (x: { itemId: string; warehouseId: string; ownership: string; ownerCustomerId: string | null; grade?: string }) =>
-    [x.itemId, x.warehouseId, x.ownership, x.ownerCustomerId ?? '', x.grade ?? 'A'].join('|')
+  const spotKey = (x: { itemId: string; warehouseId: string; ownership: string; ownerCustomerId: string | null; grade?: string; brandId?: string | null }) =>
+    [x.itemId, x.warehouseId, x.ownership, x.ownerCustomerId ?? '', x.grade ?? 'A', x.brandId ?? ''].join('|')
   const doneBySpot = new Map(bySpot.map((r) => [spotKey(r), Number(r._sum.initialQty ?? 0)]))
 
   const targets = []
@@ -313,8 +346,9 @@ export async function planStickers(data: InwardQuery) {
     // none has one yet and they add up to what is to be stickered.
     const packs = c.packQtys?.length && done <= 0.0005 && Math.abs(round3(c.packQtys.reduce((x, q) => x + q, 0)) - max) <= 0.0005 ? c.packQtys : null
     targets.push({
-      key: c.grnLineId ?? [c.itemId, c.warehouseId, c.ownership, c.ownerCustomerId ?? '', c.lotNo ?? '', c.grade ?? 'A'].join('|'),
+      key: c.grnLineId ?? [c.itemId, c.warehouseId, c.ownership, c.ownerCustomerId ?? '', c.lotNo ?? '', c.grade ?? 'A', c.brandId ?? ''].join('|'),
       grade: c.grade ?? 'A',
+      brandId: c.brandId ?? null,
       itemId: c.itemId,
       itemCode: item.code,
       item: item.name,
@@ -370,7 +404,7 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
           const done = await tx.stockPackage.aggregate({
             where: t.grnLineId
               ? { grnLineId: t.grnLineId, parentId: null, status: { not: 'VOID' }, mergedFrom: { none: {} } }
-              : { ...spot, grade: t.grade, sourceType: query.sourceType, sourceId: query.sourceId, status: { not: 'VOID' }, mergedFrom: { none: {} } },
+              : { ...spot, brandId: t.brandId, grade: t.grade, sourceType: query.sourceType, sourceId: query.sourceId, status: { not: 'VOID' }, mergedFrom: { none: {} } },
             _sum: { initialQty: true },
           })
           const remaining = round3(t.came - Number(done._sum.initialQty ?? 0))
@@ -395,6 +429,7 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
                 lotNo: t.lotNo,
                 grnLineId: t.grnLineId,
                 grade: t.grade,
+                brandId: t.brandId,
               },
               { type: query.sourceType, id: query.sourceId, ref: plan.sourceRef },
               userId,
@@ -565,6 +600,7 @@ export async function restickStickers(
     select: {
       id: true,
       code: true,
+      brandId: true,
       itemId: true,
       warehouseId: true,
       ownership: true,
@@ -596,10 +632,12 @@ export async function restickStickers(
     p.sourceType === first.sourceType &&
     (p.sourceId ?? null) === (first.sourceId ?? null) &&
     (p.grnLineId ?? null) === (first.grnLineId ?? null) &&
-    (p.sourceLineId ?? null) === (first.sourceLineId ?? null)
+    (p.sourceLineId ?? null) === (first.sourceLineId ?? null) &&
+    (p.brandId ?? null) === (first.brandId ?? null)
   if (!list.every(sameGroup)) throw new AppError('Those stickers are not all the same item from the same delivery. Change them one line at a time.', 400, 'MIXED')
 
-  const spot = { itemId: first.itemId, warehouseId: first.warehouseId, ownership: first.ownership, ownerCustomerId: first.ownerCustomerId }
+  // Labelled again on the share they are on (multi-brand phase 5).
+  const spot = { itemId: first.itemId, warehouseId: first.warehouseId, ownership: first.ownership, ownerCustomerId: first.ownerCustomerId, brandId: first.brandId }
   await lockedBalanceOf(tx, spot)
   // Read again under the lock: nothing may have been issued from them meanwhile.
   const now = await tx.stockPackage.findMany({ where: { id: { in: ids } }, select: { code: true, qty: true, initialQty: true, status: true, children: { select: { id: true } } } })

@@ -1,6 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
-import { lockedBalanceOf } from './stock.service'
+import { lockedBalanceOf, balanceOf } from './stock.service'
 import { dispatchChallan, loadOpenOrder, writeChallan } from '../routes/challan.routes'
 
 /*
@@ -58,13 +58,21 @@ const spotKey = (itemId: string, warehouseId: string, sizeId: string, grade: str
  */
 export async function packedBySpot(tx: Prisma.TransactionClient, itemIds: string[], exceptDcId?: string | null) {
   if (!itemIds.length) return new Map<string, number>()
-  const rows = await tx.$queryRaw<Array<{ itemId: string; warehouseId: string; sizeId: string; grade: string; qty: number }>>`
-    SELECT l."itemId", c."warehouseId", l."sizeId", l.grade, SUM(l.qty)::float8 AS qty
+  const rows = await tx.$queryRaw<Array<{ itemId: string; warehouseId: string; sizeId: string; grade: string; brandId: string | null; qty: number }>>`
+    SELECT l."itemId", c."warehouseId", l."sizeId", l.grade, c."brandId", SUM(l.qty)::float8 AS qty
     FROM ld_erp.fg_carton_lines l JOIN ld_erp.fg_cartons c ON c.id = l."cartonId"
     WHERE c.status::text = 'PACKED' AND l."itemId" = ANY(${itemIds}::text[])
       AND (c."dcId" IS NULL OR c."dcId" <> ${exceptDcId ?? ''})
-    GROUP BY 1, 2, 3, 4`
-  return new Map(rows.map((r) => [spotKey(r.itemId, r.warehouseId, r.sizeId, r.grade), Number(r.qty)]))
+    GROUP BY 1, 2, 3, 4, 5`
+  // By spot, every share together; and by spot and share, as `${spotKey(...)}#${brandId}` (multi-brand phase 5).
+  const out = new Map<string, number>()
+  for (const r of rows) {
+    const k = spotKey(r.itemId, r.warehouseId, r.sizeId, r.grade)
+    out.set(k, (out.get(k) ?? 0) + Number(r.qty))
+    const ks = `${k}#${r.brandId ?? ''}`
+    out.set(ks, (out.get(ks) ?? 0) + Number(r.qty))
+  }
+  return out
 }
 
 export interface PackLine {
@@ -122,8 +130,12 @@ export async function packCarton(
 
   // Packed for an order: an order still open, with every item in the carton on it.
   let soNumber: string | null = null
+  let orderBrand: string | null = null
   if (input.soId) {
-    const order = await tx.salesOrder.findUnique({ where: { id: input.soId }, select: { soNumber: true, status: true, lines: { select: { itemId: true } } } })
+    const order = await tx.salesOrder.findUnique({
+      where: { id: input.soId },
+      select: { soNumber: true, status: true, isJobWork: true, brand: { select: { id: true, type: true } }, lines: { select: { itemId: true } } },
+    })
     if (!order) throw new AppError('That sales order does not exist.', 404, 'NOT_FOUND')
     if (!['CONFIRMED', 'IN_PRODUCTION', 'PARTIALLY_DISPATCHED'].includes(order.status)) {
       throw new AppError(`${order.soNumber} is ${order.status.toLowerCase().replace(/_/g, ' ')}: cartons are packed for an open order.`, 400, 'ORDER_NOT_OPEN')
@@ -131,20 +143,52 @@ export async function packCarton(
     const off = lines.find((l) => !order.lines.some((ol) => ol.itemId === l.itemId))
     if (off) throw new AppError(`${itemOf.get(off.itemId)!.code} is not on ${order.soNumber}.`, 400, 'NOT_ON_ORDER')
     soNumber = order.soNumber
+    if (!order.isJobWork && order.brand && order.brand.type !== 'CUSTOM') orderBrand = order.brand.id
   }
 
   // What is free to pack: the store's pieces under their stock lock, less those already sealed.
-  const balances = new Map<string, number>()
   for (const l of lines) {
-    const b = await lockedBalanceOf(tx, { itemId: l.itemId, warehouseId: input.warehouseId, sizeId: l.sizeId, grade: l.grade, ownership: 'OWNED', ownerCustomerId: null })
-    balances.set(spotKey(l.itemId, input.warehouseId, l.sizeId, l.grade), b.qty)
+    await lockedBalanceOf(tx, { itemId: l.itemId, warehouseId: input.warehouseId, sizeId: l.sizeId, grade: l.grade, ownership: 'OWNED', ownerCustomerId: null })
   }
   const packed = await packedBySpot(tx, [...new Set(lines.map((l) => l.itemId))])
+  /*
+   * Multi-brand phase 5: a carton seals one share's pieces. For an order, its
+   * brand's own when they cover every line, else central stock's; for no
+   * order, central's, else the one brand's that covers them all. Another
+   * brand's earmark is never sealed for an order.
+   */
+  const freeIn = async (brandId: string | null, l: (typeof lines)[number]) => {
+    const b = await balanceOf(tx, { itemId: l.itemId, warehouseId: input.warehouseId, sizeId: l.sizeId, grade: l.grade, ownership: 'OWNED', ownerCustomerId: null, brandId })
+    return Math.max(0, b.qty - (packed.get(`${spotKey(l.itemId, input.warehouseId, l.sizeId, l.grade)}#${brandId ?? ''}`) ?? 0))
+  }
+  const covers = async (brandId: string | null) => {
+    for (const l of lines) if (l.qty > (await freeIn(brandId, l)) + 1e-9) return false
+    return true
+  }
+  let share: string | null | undefined
+  if (orderBrand && (await covers(orderBrand))) share = orderBrand
+  else if (await covers(null)) share = null
+  else if (!input.soId) {
+    for (const b of await tx.brand.findMany({ where: { type: { not: 'CUSTOM' } }, select: { id: true } })) {
+      if (await covers(b.id)) {
+        share = b.id
+        break
+      }
+    }
+  }
   for (const l of lines) {
     const k = spotKey(l.itemId, input.warehouseId, l.sizeId, l.grade)
-    const have = balances.get(k) ?? 0
+    const have = (await balanceOf(tx, { itemId: l.itemId, warehouseId: input.warehouseId, sizeId: l.sizeId, grade: l.grade, ownership: 'OWNED', ownerCustomerId: null })).qty
     const sealed = packed.get(k) ?? 0
-    const free = Math.max(0, have - sealed)
+    const free = share === undefined ? Math.max(0, have - sealed) : await freeIn(share, l)
+    if (share === undefined && l.qty <= free + 1e-9) {
+      const it = itemOf.get(l.itemId)!
+      throw new AppError(
+        `The ${it.code} pieces here are split between central stock and brands' earmarks, and no one share holds all this carton needs${soNumber ? ` for ${soNumber}` : ''}. Pack it from one share, or move the earmark first (Inventory → Brand Stock).`,
+        400,
+        'SHARES_SPLIT',
+      )
+    }
     if (l.qty > free + 1e-9) {
       const it = itemOf.get(l.itemId)!
       const sz = sizeOf.get(l.sizeId)!
@@ -162,6 +206,7 @@ export async function packCarton(
       code,
       warehouseId: input.warehouseId,
       soId: input.soId ?? null,
+      brandId: share ?? null,
       notes: input.notes?.trim() || null,
       createdById: userId,
       lines: { create: lines.map((l) => ({ itemId: l.itemId, sizeId: l.sizeId, grade: l.grade, qty: l.qty })) },

@@ -325,9 +325,11 @@ export async function returnGarments(tx: Prisma.TransactionClient, data: { codes
     userId,
   )
   const noteNumber = (note as { noteNumber?: string }).noteNumber ?? 'the credit note'
+  // Back on the share the return put the pieces on: the original order's brand (multi-brand phase 5).
+  const share = (await tx.stockLedger.findFirst({ where: { referenceType: 'CREDIT_NOTE', referenceId: (note as { id: string }).id, inQty: { gt: 0 } }, select: { brandId: true } }))?.brandId ?? null
   await tx.garment.updateMany({
     where: { id: { in: pieces.map((g) => g.id) } },
-    data: { status: 'IN_STOCK', dcId: null, warehouseId: data.warehouseId, creditNoteId: (note as { id: string }).id },
+    data: { status: 'IN_STOCK', dcId: null, warehouseId: data.warehouseId, creditNoteId: (note as { id: string }).id, brandId: share },
   })
   await event(tx, pieces.map((g) => g.id), 'RETURNED', { type: 'CREDIT_NOTE', id: (note as { id: string }).id, number: noteNumber, notes: data.reason }, userId)
   return { noteNumber, invoiceNumber: inv.invoiceNumber, pieces: pieces.length, available: await availableNow(tx, pieces, data.warehouseId) }

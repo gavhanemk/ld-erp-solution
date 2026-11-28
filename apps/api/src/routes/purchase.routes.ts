@@ -36,6 +36,7 @@ import {
   storagePathFor,
 } from '../lib/storage'
 import { assertStockUnused, recordMovement } from '../services/stock.service'
+import { grnShares } from '../services/brandStock.service'
 import {
   assertGrnSampleStores,
   assertSampleLines,
@@ -3709,6 +3710,9 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
 
     await assertWarehousesUsable(tx, [...new Set(prepared.map((p) => p.warehouseId))])
     await assertGrnSampleStores(tx, prepared)
+    // Multi-brand phase 5: the share each line's goods go into — the PO's brand,
+    // else its indent's MO brand, else its style's; anything else is central.
+    const shareOf = await grnShares(tx, prepared.map((p) => ({ poLineId: p.poLine.id, warehouseId: p.warehouseId })))
 
     const grnNumber = await nextDocumentNumber(tx, 'GRN', when)
 
@@ -3771,6 +3775,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
             poLineId: p.poLine.id,
             itemId: p.poLine.itemId,
             warehouseId: p.warehouseId,
+            brandId: shareOf(p.poLine.id, p.warehouseId),
             orderedQty: p.orderedQty,
             receivedQty: p.received,
             rejectedQty: p.rejected,
@@ -3795,6 +3800,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
       if (p.accepted <= 0) continue
 
       await recordMovement(tx, {
+        brandId: shareOf(p.poLine.id, p.warehouseId),
         itemId: p.poLine.itemId,
         warehouseId: p.warehouseId,
         transactionType: 'PURCHASE',
@@ -3955,6 +3961,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       const accepted = Number(line.acceptedQty)
       if (accepted <= 0) continue
       await recordMovement(tx, {
+        brandId: line.brandId,
         itemId: line.itemId,
         warehouseId: line.warehouseId,
         transactionType: 'RETURN',
@@ -4002,6 +4009,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       before.lines.map((l) => [grnLineKey(l.poLineId, l.warehouseId, l.batchNumber), l])
     )
     const matchedOldIds = new Set<string>()
+    const shareOf = await grnShares(tx, prepared.map((p) => ({ poLineId: p.poLine.id, warehouseId: p.warehouseId })))
     const pairs = prepared.map((p) => {
       const old = oldByKey.get(grnLineKey(p.poLine.id, p.warehouseId, p.batchNumber))
       if (old && !matchedOldIds.has(old.id)) {
@@ -4080,9 +4088,11 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     const repacked: string[] = []
     for (const { prepared: p, old } of pairs) {
       if (!old) continue
+      const share = shareOf(p.poLine.id, p.warehouseId)
       await tx.gRNLine.update({
         where: { id: old.id },
         data: {
+          brandId: share,
           orderedQty: p.orderedQty,
           receivedQty: p.received,
           rejectedQty: p.rejected,
@@ -4104,6 +4114,10 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       else if (p.packQtys.length && (old.packNotes ?? []).join('\u0001') !== p.packNotes.join('\u0001')) {
         const made = await tx.stockPackage.findMany({ where: { grnLineId: old.id, sourceType: 'GRN', status: { not: 'VOID' } }, orderBy: { code: 'asc' }, select: { id: true } })
         for (const [i, pk] of made.entries()) await tx.stockPackage.update({ where: { id: pk.id }, data: { notes: p.packNotes[i] || null } })
+      }
+      // Its stickers carry the share the corrected line is on.
+      if ((old.brandId ?? null) !== share) {
+        await tx.stockPackage.updateMany({ where: { grnLineId: old.id, status: 'IN_STOCK' }, data: { brandId: share } })
       }
       // A lot corrected is corrected on the line's stickers too.
       if ((old.batchNumber ?? null) !== p.batchNumber) {
@@ -4142,6 +4156,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
               poLineId: p.poLine.id,
               itemId: p.poLine.itemId,
               warehouseId: p.warehouseId,
+              brandId: shareOf(p.poLine.id, p.warehouseId),
               orderedQty: p.orderedQty,
               receivedQty: p.received,
               rejectedQty: p.rejected,
@@ -4162,6 +4177,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     for (const p of prepared) {
       if (p.accepted <= 0) continue
       await recordMovement(tx, {
+        brandId: shareOf(p.poLine.id, p.warehouseId),
         itemId: p.poLine.itemId,
         warehouseId: p.warehouseId,
         transactionType: 'PURCHASE',
@@ -4245,6 +4261,7 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
         const accepted = Number(line.acceptedQty)
         if (accepted <= 0) continue
         await recordMovement(tx, {
+          brandId: line.brandId,
           itemId: line.itemId,
           warehouseId: line.warehouseId,
           transactionType: 'RETURN',
@@ -4483,6 +4500,7 @@ router.patch(
         if (accepted <= 0) continue
 
         await recordMovement(tx, {
+          brandId: line.brandId,
           itemId: line.itemId,
           warehouseId: line.warehouseId,
           transactionType: 'RETURN',

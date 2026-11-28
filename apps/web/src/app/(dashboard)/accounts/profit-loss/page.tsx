@@ -41,7 +41,18 @@ interface Pl {
   grossProfit: number
   netProfit: number
   columns: Array<{ id: string; name: string }>
-  brand: Array<{ id: string; name: string; stockChange: number; grossProfit: number; netProfit: number }>
+  /** By brand: each brand's own stock and what moved between the shares (multi-brand phase 6). */
+  brand: Array<{
+    id: string
+    name: string
+    openingStock?: number
+    closingStock?: number
+    transfersIn?: number
+    transfersOut?: number
+    stockChange: number
+    grossProfit: number
+    netProfit: number
+  }>
   /** By department (cost centre): its columns and each one's figures. */
   deptColumns?: Array<{ id: string; name: string; parent: string | null }>
   department?: Array<{ id: string; name: string; stockChange: number; grossProfit: number; netProfit: number }>
@@ -189,7 +200,9 @@ export default function ProfitLossPage() {
     )
   }
 
-  const stockRow = (label: string, st: Stock, negate: boolean) => (
+  // By brand, each brand's own stock from its share; by department, stock is the mill's as a whole.
+  const ownStock = (id: string, which: 'openingStock' | 'closingStock') => (split === 'brand' ? pl?.brand.find((b) => b.id === id)?.[which] : undefined)
+  const stockRow = (label: string, st: Stock, negate: boolean, which: 'openingStock' | 'closingStock') => (
     <tr>
       <td>
         <span className="text-foreground pl-5 font-medium">{label}</span>
@@ -199,16 +212,43 @@ export default function ProfitLossPage() {
       </td>
       {byBrand ? (
         <>
-          {cols.map((c) => (
-            <td key={c.id || 'none'} className="text-right tabular-nums">
-              {c.id === '' ? money(negate ? -st.value : st.value) : ''}
-            </td>
-          ))}
+          {cols.map((c) => {
+            const own = ownStock(c.id, which)
+            const v = own !== undefined ? own : c.id === '' ? st.value : null
+            return (
+              <td key={c.id || 'none'} className="text-right tabular-nums">
+                {v === null ? '' : money(negate ? -v : v)}
+              </td>
+            )
+          })}
           <td className="text-right tabular-nums">{money(negate ? -st.value : st.value)}</td>
         </>
       ) : (
         <td className="text-right tabular-nums">{money(negate ? -st.value : st.value)}</td>
       )}
+    </tr>
+  )
+
+  /**
+   * Stock moved between the brands and central stock (earmarks, moves,
+   * releases, automatic allocations), at the value it moved at: in for the
+   * share that got it, out for the one that gave it. They cancel across the
+   * columns, so the company's total is nothing.
+   */
+  const moves = split === 'brand' ? (pl?.brand ?? []) : []
+  const anyMoved = moves.some((b) => (b.transfersIn ?? 0) !== 0 || (b.transfersOut ?? 0) !== 0)
+  const transferRow = (label: string, key: 'transfersIn' | 'transfersOut') => (
+    <tr>
+      <td>
+        <span className="text-foreground pl-5 font-medium">{label}</span>
+        <span className="text-muted-foreground ml-2 text-[11px]">between the brands and central stock</span>
+      </td>
+      {cols.map((c) => (
+        <td key={c.id || 'none'} className="text-right tabular-nums">
+          {money(moves.find((b) => b.id === c.id)?.[key] ?? 0)}
+        </td>
+      ))}
+      <td className="text-muted-foreground text-right tabular-nums">{money(0)}</td>
     </tr>
   )
 
@@ -240,8 +280,14 @@ export default function ProfitLossPage() {
       add(b.title, `${b.title} — total`, b.total, pick(b))
       for (const l of b.lines) add(b.title, l.name, l.amount, pick(l))
     }
-    add('Stock', 'Opening stock', pl.openingStock.value)
-    add('Stock', 'Closing stock', pl.closingStock.value)
+    const bStock = (k: 'openingStock' | 'closingStock' | 'transfersIn' | 'transfersOut') =>
+      split === 'brand' ? Object.fromEntries(pl.brand.map((b) => [b.id, b[k] ?? 0])) : undefined
+    add('Stock', 'Opening stock', pl.openingStock.value, bStock('openingStock'))
+    add('Stock', 'Closing stock', pl.closingStock.value, bStock('closingStock'))
+    if (split === 'brand') {
+      add('Stock', 'Stock moved in from other shares', 0, bStock('transfersIn'))
+      add('Stock', 'Stock moved out to other shares', 0, bStock('transfersOut'))
+    }
     const results = (split === 'department' ? pl.department : pl.brand) ?? []
     add('Result', 'Gross profit', pl.grossProfit, Object.fromEntries(results.map((b) => [b.id, b.grossProfit])))
     add('Result', 'Net profit', pl.netProfit, Object.fromEntries(results.map((b) => [b.id, b.netProfit])))
@@ -397,8 +443,10 @@ export default function ProfitLossPage() {
                   </tr>
                   {blockRows('SALES_ACCOUNTS', 'Sales')}
                   {blockRows('DIRECT_INCOMES', 'Direct income')}
-                  {stockRow('Add closing stock', pl.closingStock, false)}
-                  {stockRow('Less opening stock', pl.openingStock, false)}
+                  {stockRow('Add closing stock', pl.closingStock, false, 'closingStock')}
+                  {anyMoved && transferRow('Add stock moved out', 'transfersOut')}
+                  {stockRow('Less opening stock', pl.openingStock, false, 'openingStock')}
+                  {anyMoved && transferRow('Less stock moved in', 'transfersIn')}
                   {blockRows('PURCHASE_ACCOUNTS', 'Less purchases')}
                   {blockRows('DIRECT_EXPENSES', 'Less direct expenses')}
                   {resultRow('Gross profit', pl.grossProfit, 'grossProfit')}
@@ -416,7 +464,7 @@ export default function ProfitLossPage() {
           </div>
           {split === 'brand' && (
             <p className="text-muted-foreground text-xs">
-              Sales carry the brand of their order; purchases the brand of the order they were bought for; expenses the brand picked on the bill or voucher, else the ledger&apos;s usual one. Stock is valued for the mill as a whole, so its change, and anything no brand carries (shared expenses, central stock), sits under &quot;Not split&quot;.
+              Sales carry the brand of their order; purchases the brand of the order they were bought for; expenses the brand picked on the bill or voucher, else the ledger&apos;s usual one. Each brand&apos;s opening and closing stock is its own earmarked stock, at its own average. Stock moved to a brand from central stock or another brand counts as moved in for it and moved out for the giver, at the value it moved at, so moving stock never makes a profit or a loss. Central stock, and anything no brand carries (shared expenses), sits under &quot;Not split&quot;. The columns add up to the total.
             </p>
           )}
           {split === 'department' && (

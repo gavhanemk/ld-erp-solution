@@ -520,6 +520,7 @@ export async function recordMovement(
         FROM ld_erp.fg_carton_lines l JOIN ld_erp.fg_cartons c ON c.id = l."cartonId"
         WHERE c.status::text = 'PACKED' AND l."itemId" = ${m.itemId} AND c."warehouseId" = ${m.warehouseId}
           AND l."sizeId" = ${m.sizeId} AND l.grade = ${m.grade ?? 'A'}
+          AND c."brandId" IS NOT DISTINCT FROM ${share}::text
           AND (c."dcId" IS NULL OR c."dcId" <> ${m.cartonsOn ?? ''})`
       const packed = round3(Number(sealed[0]?.qty ?? 0))
       const free = round3(Math.max(0, before.qty - packed))

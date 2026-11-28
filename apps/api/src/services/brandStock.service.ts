@@ -1,10 +1,9 @@
 import type { Prisma, ReallocationKind, StockPackage } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { financialYearOf, nextDocumentNumber } from '../lib/docNumber'
-import { balanceOf, lockBalances, recordMovement, type StockKey } from './stock.service'
+import { balanceOf, lockBalances, recordMovement, type StockKey, sharesOf } from './stock.service'
 import { createPackages, recordPackageMove } from './package.service'
 import { assertQtyFitsUnits } from './unitQuantity.service'
-import { materialPlan } from './manufacturing.service'
 
 /*
  * Brand stock (multi-brand phase 5): central stock earmarked for brands.
@@ -48,6 +47,67 @@ const STATUS_WORDS: Record<string, string> = {
 export async function shareName(tx: Tx, brandId: Share): Promise<string> {
   if (!brandId) return 'central stock'
   return (await tx.brand.findUnique({ where: { id: brandId }, select: { name: true } }))?.name ?? 'a brand'
+}
+
+/**
+ * A brand that can hold a share: one of our own. A customer's brand never
+ * holds stock, so what would be theirs is central.
+ */
+export async function ownShare(tx: Tx, brandId: string | null | undefined): Promise<Share> {
+  if (!brandId) return null
+  const b = await tx.brand.findUnique({ where: { id: brandId }, select: { type: true } })
+  return b && b.type !== 'CUSTOM' ? brandId : null
+}
+
+/**
+ * The share a purchase line's goods go into, and so the brand its bill is
+ * booked to: the PO's own brand, else the brand of the MO its indent was
+ * raised for, else its style's own brand. Anything else is central stock.
+ * One rule for the GRN and the bill, so stock and purchases agree by brand.
+ */
+export async function purchaseShareOf(tx: Tx, poLineId: string | null | undefined): Promise<Share> {
+  if (!poLineId) return null
+  const line = await tx.purchaseOrderLine.findUnique({
+    where: { id: poLineId },
+    select: {
+      po: { select: { brandId: true } },
+      style: { select: { brandId: true } },
+      mrLine: { select: { mr: { select: { mo: { select: { brandId: true } } } } } },
+    },
+  })
+  if (!line) return null
+  return (
+    (await ownShare(tx, line.po.brandId)) ??
+    (await ownShare(tx, line.mrLine?.mr?.mo?.brandId)) ??
+    (await ownShare(tx, line.style?.brandId))
+  )
+}
+
+/**
+ * The share each GRN line's goods go into, by `purchaseShareOf`. Goods for a
+ * sample store are Sampling's own and stay central.
+ */
+export async function grnShares(tx: Tx, lines: Array<{ poLineId: string; warehouseId: string }>) {
+  const stores = await tx.warehouse.findMany({ where: { id: { in: [...new Set(lines.map((l) => l.warehouseId))] } }, select: { id: true, purpose: true } })
+  const sampling = new Set(stores.filter((w) => w.purpose === 'SAMPLING').map((w) => w.id))
+  const byLine = new Map<string, Share>()
+  for (const l of lines) if (!byLine.has(l.poLineId)) byLine.set(l.poLineId, await purchaseShareOf(tx, l.poLineId))
+  return (poLineId: string, warehouseId: string): Share => (sampling.has(warehouseId) ? null : (byLine.get(poLineId) ?? null))
+}
+
+/**
+ * The share goods traced to a receipt or a bill line are on: the GRN line's,
+ * else the bill line's GRN line's, else its PO line's by the purchase rule.
+ * A return to the supplier takes them out of it; a note putting them back in
+ * puts them back on it.
+ */
+export async function billLineShare(tx: Tx, a: { grnLineId?: string | null; billLineId?: string | null }): Promise<Share> {
+  if (a.grnLineId) return (await tx.gRNLine.findUnique({ where: { id: a.grnLineId }, select: { brandId: true } }))?.brandId ?? null
+  if (!a.billLineId) return null
+  const b = await tx.purchaseInvoiceLine.findUnique({ where: { id: a.billLineId }, select: { poLineId: true, grnLine: { select: { brandId: true } } } })
+  if (!b) return null
+  if (b.grnLine) return b.grnLine.brandId ?? null
+  return purchaseShareOf(tx, b.poLineId)
 }
 
 /** Only an own brand in use can hold an earmark. */
@@ -105,6 +165,11 @@ interface MoveArgs {
   /** Requisition lines whose own holds this move may take (an automatic move for that line's issue). */
   reservedFor?: string[]
   transactionDate?: Date
+  /**
+   * A challan the move is for: its own cartons are not sealed against it,
+   * and the tags scanned onto it count as the giving share's to name.
+   */
+  challanId?: string
 }
 
 /**
@@ -177,7 +242,16 @@ export async function moveShare(tx: Tx, a: MoveArgs): Promise<{ unitRate: number
   const tagIds: string[] = []
   if (a.sizeId) {
     const tags = await tx.garment.findMany({
-      where: { itemId: a.itemId, sizeId: a.sizeId, grade, warehouseId: a.warehouseId, ownership: 'OWNED', status: 'IN_STOCK', brandId: a.from, dcId: null },
+      where: {
+        itemId: a.itemId,
+        sizeId: a.sizeId,
+        grade,
+        warehouseId: a.warehouseId,
+        ownership: 'OWNED',
+        status: 'IN_STOCK',
+        brandId: a.from,
+        OR: [{ dcId: null }, ...(a.challanId ? [{ dcId: a.challanId }] : [])],
+      },
       select: { id: true, code: true },
     })
     const share = await balanceOf(tx, { ...key, brandId: a.from })
@@ -209,6 +283,7 @@ export async function moveShare(tx: Tx, a: MoveArgs): Promise<{ unitRate: number
     reservedFor: a.reservedFor,
     transactionDate: a.transactionDate,
     earlierDate: 'move-up',
+    cartonsOn: a.challanId,
   })
   await recordMovement(tx, {
     ...key,
@@ -541,6 +616,7 @@ export async function assertAutoAllowed(
 ) {
   const brand = await shareName(tx, a.mo.brandId)
   const instead = `Earmark it for ${brand} first (Inventory → Brand Stock, approved by someone else), then issue.`
+  const extraInstead = 'Ask for extra material on the MO (Production → Manufacturing Orders → Extra material), approved by a production manager.'
   if (!(AUTHORISED_MO_STATUSES as readonly string[]).includes(a.mo.status)) {
     throw new AppError(
       `${a.mo.moNumber} is ${STATUS_WORDS[a.mo.status] ?? a.mo.status.toLowerCase()}: central stock moves to ${brand} by itself only for an MO from Released to Packing. ${instead}`,
@@ -552,16 +628,15 @@ export async function assertAutoAllowed(
     throw new AppError(`${a.mo.moNumber} is on hold${a.mo.holdReason ? ` (${a.mo.holdReason})` : ''}: nothing moves to it from central stock until it is resumed.`, 409, 'MO_ON_HOLD')
   }
   if (a.mrStatus !== 'APPROVED') throw new AppError('The requisition is not approved: central stock does not move for it.', 409, 'NOT_APPROVED')
-  const plan = await materialPlan(tx, a.mo.id)
-  const rows = plan.rows.filter((r) => r.item.id === a.itemId && r.ownership === 'OWNED')
-  const required = round3(rows.reduce((t, r) => t + r.required, 0))
-  const issued = round3(rows.reduce((t, r) => t + r.issued, 0))
-  const room = round3(Math.max(0, required - issued - a.alreadyThisIssue))
+  // Within what the MO is permitted: its plan and its approved extra material.
+  const { roomFor } = await import('./materialExtra.service')
+  const r = await roomFor(tx, { moId: a.mo.id, itemId: a.itemId, ownership: 'OWNED', ownerCustomerId: null })
+  const room = round3(Math.max(0, r.room - a.alreadyThisIssue))
   if (a.autoQty > room + 0.0005) {
     throw new AppError(
-      required > 0
-        ? `${a.mo.moNumber} needs ${required} ${a.unit} of ${a.itemName}; ${issued} ${a.unit} is issued already${a.alreadyThisIssue > 0 ? ` and ${round3(a.alreadyThisIssue)} ${a.unit} goes now from ${brand}’s own stock` : ''}. Another ${round3(a.autoQty)} ${a.unit} from central stock would go past what it needs by ${round3(a.autoQty - room)} ${a.unit}. ${instead}`
-        : `${a.mo.moNumber}'s plan does not call for ${a.itemName}, so central stock does not move to ${brand} for it by itself. ${instead}`,
+      r.required + r.extra > 0
+        ? `${a.mo.moNumber} may be issued ${round3(r.required + r.extra)} ${a.unit} of ${a.itemName}; ${r.issued} ${a.unit} is issued already${a.alreadyThisIssue > 0 ? ` and ${round3(a.alreadyThisIssue)} ${a.unit} goes now from ${brand}’s own stock` : ''}. Another ${round3(a.autoQty)} ${a.unit} from central stock would go past it by ${round3(a.autoQty - room)} ${a.unit}. ${extraInstead}`
+        : `${a.mo.moNumber}'s plan does not call for ${a.itemName}. ${extraInstead}`,
       409,
       'OVER_REQUIREMENT',
     )
@@ -660,6 +735,213 @@ export async function returnShares(
     parts.push({ brandId: null, qty: left, rate: all > 0 ? round2(value / all) : 0 })
   }
   return parts
+}
+
+/*
+ * Dispatch (multi-brand phase 5). A challan sends the order's goods from its
+ * brand's own share. What that share is short of comes from free central
+ * stock, moved to the brand first on an automatic reallocation for the
+ * challan — at central's average, so the brand bears the cost of what it
+ * sells — together with any central cartons and tags loaded on the challan.
+ * Another brand's earmark is never sent; it has to be moved between the
+ * brands first, approved. Cancelling the challan puts the move back.
+ */
+
+/** The pieces of one item, size and grade a challan's cartons and scanned tags carry, by share. */
+async function loadedByShare(tx: Tx, dcId: string, k: { itemId: string; sizeId: string | null; grade: string }) {
+  const cartons = await tx.fgCarton.findMany({
+    where: { dcId, status: 'PACKED', lines: { some: { itemId: k.itemId, sizeId: k.sizeId ?? undefined, grade: k.grade } } },
+    select: { id: true, code: true, brandId: true, lines: { where: { itemId: k.itemId, sizeId: k.sizeId ?? undefined, grade: k.grade }, select: { qty: true } } },
+  })
+  const tags = await tx.garment.findMany({
+    where: { dcId, status: 'IN_STOCK', itemId: k.itemId, sizeId: k.sizeId, grade: k.grade },
+    select: { id: true, code: true, brandId: true },
+  })
+  return { cartons: cartons.map((c) => ({ ...c, qty: c.lines.reduce((t, l) => t + l.qty, 0) })), tags }
+}
+
+/** Pieces of a share sealed in cartons not on this challan: not free to send on it. */
+async function sealedElsewhere(tx: Tx, k: { itemId: string; warehouseId: string; sizeId: string | null; grade: string }, brandId: Share, dcId: string) {
+  if (!k.sizeId) return 0
+  const [row] = await tx.$queryRaw<Array<{ qty: number }>>`
+    SELECT COALESCE(SUM(l.qty), 0)::float8 AS qty
+    FROM ld_erp.fg_carton_lines l JOIN ld_erp.fg_cartons c ON c.id = l."cartonId"
+    WHERE c.status::text = 'PACKED' AND l."itemId" = ${k.itemId} AND c."warehouseId" = ${k.warehouseId}
+      AND l."sizeId" = ${k.sizeId} AND l.grade = ${k.grade}
+      AND c."brandId" IS NOT DISTINCT FROM ${brandId}::text
+      AND (c."dcId" IS NULL OR c."dcId" <> ${dcId})`
+  return round3(Number(row?.qty ?? 0))
+}
+
+/**
+ * The share one part of a challan (an item, size and grade) leaves from: the
+ * order's own brand, after moving to it from free central stock what it is
+ * short of; central for an order with no own brand. Refused, by name, for
+ * another brand's cartons or tags loaded on it, and when the brand and free
+ * central stock together are short.
+ */
+export async function dispatchShare(
+  tx: Tx,
+  a: {
+    dc: { id: string; dcNumber: string; warehouseId: string; dcDate: Date }
+    so: { id: string; soNumber: string; brandId: Share }
+    itemId: string
+    sizeId: string | null
+    grade: string
+    qty: number
+    userId: string
+  },
+): Promise<{ brandId: Share; moved: { number: string; qty: number } | null }> {
+  const brand = a.so.brandId
+  const k = { itemId: a.itemId, warehouseId: a.dc.warehouseId, sizeId: a.sizeId, grade: a.grade }
+  const key: StockKey = { ...k, ownership: 'OWNED', ownerCustomerId: null }
+  await lockBalances(tx, [key])
+  const [item, size] = await Promise.all([
+    tx.item.findUnique({ where: { id: a.itemId }, select: { name: true, code: true } }),
+    a.sizeId ? tx.size.findUnique({ where: { id: a.sizeId }, select: { code: true } }) : null,
+  ])
+  const what = `${item?.code ?? 'that item'}${size ? ` size ${size.code}` : ''}${a.grade === 'B' ? ' (B-grade)' : ''}`
+  const loaded = await loadedByShare(tx, a.dc.id, k)
+  const brandName = await shareName(tx, brand)
+  const foreign = [...loaded.cartons.map((c) => ({ code: c.code, brandId: c.brandId })), ...loaded.tags.map((t) => ({ code: t.code, brandId: t.brandId }))].find(
+    (x) => x.brandId !== null && x.brandId !== brand,
+  )
+  if (foreign) {
+    throw new AppError(
+      `${foreign.code} on ${a.dc.dcNumber} is earmarked for ${await shareName(tx, foreign.brandId)}, not ${brand ? brandName : 'central stock'}: it is not ${a.so.soNumber}'s to send. Take it off, or move it between the brands first (Inventory → Brand Stock, approved).`,
+      409,
+      'OTHER_BRANDS_STOCK',
+    )
+  }
+  const centralLoaded = round3(
+    loaded.cartons.filter((c) => c.brandId === null).reduce((t, c) => t + c.qty, 0) + loaded.tags.filter((t) => t.brandId === null).length,
+  )
+
+  // The tagged part of what leaves must be the tags scanned onto the challan.
+  const tagsAt = async (share: Share) =>
+    tx.garment.count({
+      where: { itemId: a.itemId, sizeId: a.sizeId, grade: a.grade, warehouseId: a.dc.warehouseId, ownership: 'OWNED', status: 'IN_STOCK', brandId: share, OR: [{ dcId: null }, { dcId: a.dc.id }] },
+    })
+
+  if (!brand) {
+    // An order with no own brand: central stock, as before brands had shares.
+    if (a.sizeId) {
+      const bal = await balanceOf(tx, { ...key, brandId: null })
+      const untagged = round3(bal.qty - (await tagsAt(null)))
+      if (a.qty - loaded.tags.length > untagged + 1e-9) {
+        throw new AppError(`${round3(a.qty - loaded.tags.length - untagged)} of the ${what} pieces leaving carry tags: scan them onto ${a.dc.dcNumber} first.`, 400, 'TAGS_NEEDED')
+      }
+    }
+    return { brandId: null, moved: null }
+  }
+
+  const own = await balanceOf(tx, { ...key, brandId: brand })
+  const ownFree = round3(Math.max(0, own.qty - (await sealedElsewhere(tx, k, brand, a.dc.id))))
+  const fromCentral = round3(Math.min(a.qty, Math.max(centralLoaded, a.qty - ownFree)))
+  let moved: { number: string; qty: number } | null = null
+  if (fromCentral > 0.0005) {
+    const central = await balanceOf(tx, { ...key, brandId: null })
+    const centralFree = round3(Math.max(0, central.qty - (await sealedElsewhere(tx, k, null, a.dc.id))))
+    if (fromCentral > centralFree + 0.0005) {
+      const shares = (await sharesOf(tx, key)).filter((x) => x.brandId !== null && x.brandId !== brand && x.qty > 0)
+      throw new AppError(
+        `${a.so.soNumber}: ${what} in this store — ${brandName} has ${ownFree} free and central stock ${centralFree} free, short of the ${a.qty} on ${a.dc.dcNumber}.${shares.length ? ` ${shares.map((x) => `${x.qty} is earmarked for ${x.brand}`).join(', ')}: not this order's to send without moving it between the brands first (Inventory → Brand Stock, approved).` : ''}`,
+        409,
+        'OTHER_BRANDS_STOCK',
+      )
+    }
+    if (a.sizeId) {
+      const untagged = round3(central.qty - (await tagsAt(null)))
+      const centralTags = loaded.tags.filter((t) => t.brandId === null).length
+      if (fromCentral - centralTags > untagged + 1e-9) {
+        throw new AppError(`${round3(fromCentral - centralTags - untagged)} of the ${what} pieces coming from central stock carry tags: scan them onto ${a.dc.dcNumber} first.`, 400, 'TAGS_NEEDED')
+      }
+    }
+    const now = new Date()
+    const number = await nextNumber(tx, now)
+    const doc = await tx.stockReallocation.create({
+      data: {
+        number,
+        kind: 'AUTO',
+        status: 'POSTED',
+        warehouseId: a.dc.warehouseId,
+        fromBrandId: null,
+        toBrandId: brand,
+        dcId: a.dc.id,
+        reason: `Automatic: central stock for ${a.so.soNumber} on ${a.dc.dcNumber}`,
+        requestedById: a.userId,
+        postedAt: now,
+        lines: { create: [{ itemId: a.itemId, sizeId: a.sizeId, grade: a.grade, qty: fromCentral }] },
+      },
+      include: { lines: true },
+    })
+    const r = await moveShare(tx, {
+      itemId: a.itemId,
+      warehouseId: a.dc.warehouseId,
+      sizeId: a.sizeId,
+      grade: a.grade,
+      qty: fromCentral,
+      from: null,
+      to: brand,
+      referenceId: doc.id,
+      number,
+      notes: `${a.dc.dcNumber} for ${a.so.soNumber}`,
+      userId: a.userId,
+      stickers: 'leave',
+      garmentCodes: loaded.tags.filter((t) => t.brandId === null).map((t) => t.code),
+      transactionDate: a.dc.dcDate,
+      challanId: a.dc.id,
+    })
+    // Central cartons on the challan become the brand's with their pieces.
+    const cartonCodes = loaded.cartons.filter((c) => c.brandId === null).map((c) => c.code)
+    if (cartonCodes.length) await tx.fgCarton.updateMany({ where: { code: { in: cartonCodes } }, data: { brandId: brand } })
+    // Carton codes ride in the line's codes beside any stickers: a reversal names them.
+    await tx.stockReallocationLine.update({ where: { id: doc.lines[0].id }, data: { unitRate: r.unitRate, packageCodes: cartonCodes, garmentCodes: r.garmentCodes } })
+    moved = { number, qty: fromCentral }
+  }
+  if (a.sizeId) {
+    const after = await balanceOf(tx, { ...key, brandId: brand })
+    const untagged = round3(after.qty - (await tagsAt(brand)))
+    if (a.qty - loaded.tags.length > untagged + 1e-9) {
+      throw new AppError(`${round3(a.qty - loaded.tags.length - untagged)} of the ${what} pieces leaving carry tags: scan them onto ${a.dc.dcNumber} first.`, 400, 'TAGS_NEEDED')
+    }
+  }
+  return { brandId: brand, moved }
+}
+
+/**
+ * A cancelled challan's automatic moves put back: what central stock gave
+ * the order's brand for it goes back to central, at the brand's average,
+ * with the tags it moved. Called once the goods are back in the store.
+ */
+export async function reverseChallanMoves(tx: Tx, dcId: string, userId: string, reason: string) {
+  const docs = await tx.stockReallocation.findMany({ where: { dcId, kind: 'AUTO', status: 'POSTED' }, include: { lines: true } })
+  for (const doc of docs) {
+    for (const l of doc.lines) {
+      const tags = l.garmentCodes.length
+        ? await tx.garment.findMany({ where: { code: { in: l.garmentCodes }, status: 'IN_STOCK', brandId: doc.toBrandId, warehouseId: doc.warehouseId }, select: { code: true } })
+        : []
+      await moveShare(tx, {
+        itemId: l.itemId,
+        warehouseId: doc.warehouseId,
+        sizeId: l.sizeId,
+        grade: l.grade,
+        qty: Number(l.qty),
+        from: doc.toBrandId,
+        to: null,
+        referenceId: doc.id,
+        number: `${doc.number}-R`,
+        notes: reason,
+        userId,
+        stickers: 'leave',
+        garmentCodes: tags.map((t) => t.code),
+      })
+      // Cartons it moved that are back in the store sealed go back to central too.
+      if (l.packageCodes.length) await tx.fgCarton.updateMany({ where: { code: { in: l.packageCodes }, status: 'PACKED' }, data: { brandId: null } })
+    }
+    await tx.stockReallocation.update({ where: { id: doc.id }, data: { status: 'REVERSED', reversedById: userId, reversedAt: new Date(), reverseReason: reason } })
+  }
+  return docs.length
 }
 
 export { KIND_WORDS }

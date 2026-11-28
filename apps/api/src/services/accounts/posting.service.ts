@@ -1,4 +1,5 @@
 import type { BillRefKind, LedgerParty, Prisma, PrismaClient, VoucherKind } from '@prisma/client'
+import { purchaseShareOf } from '../brandStock.service'
 import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf } from '../../lib/docNumber'
 import { logger } from '../../utils/logger'
@@ -320,8 +321,9 @@ async function billLines(tx: Tx, billId: string) {
       costCentreId: true,
       departmentId: true,
       item: { select: { id: true, name: true, categoryId: true, departmentId: true } },
+      poLineId: true,
       poLine: orderTrace,
-      grnLine: { select: { poLine: orderTrace } },
+      grnLine: { select: { brandId: true, poLine: orderTrace } },
     },
   })
   const cats = new Map((await tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, itemGroup: true } })).map((c) => [c.id, c]))
@@ -330,7 +332,11 @@ async function billLines(tx: Tx, billId: string) {
     const head = await purchaseHeadFor(tx, cats, line)
     const po = line.poLine ?? line.grnLine?.poLine ?? null
     const indent = po?.mrLine?.mr ?? null
-    const brandId = indent?.mo?.brandId ?? po?.style?.brandId ?? null
+    // The brand whose share its goods went into (multi-brand phase 5): the GRN
+    // line's; billed without a receipt, the same purchase rule a GRN follows
+    // (the PO's brand, else its indent's MO, else its style's own brand).
+    // Stock and purchases then agree by brand; anything else is central.
+    const brandId = line.grnLineId ? (line.grnLine?.brandId ?? null) : await purchaseShareOf(tx, line.poLineId ?? null)
     out.push({
       ledgerId: head.ledgerId,
       value: n(line.taxableValue),

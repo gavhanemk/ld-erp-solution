@@ -48,6 +48,47 @@ export async function inventoryValue(tx: Tx, day: string): Promise<number> {
   return r2(rows[0]?.value ?? 0)
 }
 
+/**
+ * The same, share by share (multi-brand phase 6): each brand's earmarked
+ * stock, and central stock under '', at the rate of each movement. The
+ * shares add up to `inventoryValue` exactly: they are its rows, grouped.
+ */
+export async function inventoryValueByShare(tx: Tx, day: string): Promise<Map<string, number>> {
+  const rows = await tx.$queryRawUnsafe<Array<{ brandId: string | null; value: number | null }>>(
+    `SELECT l."brandId", COALESCE(SUM((l."inQty" - l."outQty") * COALESCE(l."unitRate", 0)), 0)::float8 AS value
+       FROM ld_erp.stock_ledger l
+       JOIN ld_erp.items i ON i.id = l."itemId"
+      WHERE l.ownership = 'OWNED' AND l."transactionDate" <= $1 AND i.type::text <> 'FIXED_ASSET'
+      GROUP BY l."brandId"`,
+    new Date(`${day}T23:59:59.999+05:30`),
+  )
+  return new Map(rows.map((r) => [r.brandId ?? '', r2(r.value ?? 0)]))
+}
+
+/**
+ * Stock moved between shares in a period (multi-brand phase 6): earmarks,
+ * moves between brands, releases and automatic allocations, by the share it
+ * went into and the share it came out of, at the value it moved at. Every
+ * move is an out and an in of the same value, so across the shares the two
+ * always cancel: a reallocation changes no profit, the company's or the
+ * brands' together.
+ */
+export async function shareTransfers(tx: Tx, from: string, to: string): Promise<Map<string, { in: number; out: number }>> {
+  const rows = await tx.$queryRawUnsafe<Array<{ brandId: string | null; inValue: number; outValue: number }>>(
+    `SELECT l."brandId",
+            COALESCE(SUM(l."inQty" * COALESCE(l."unitRate", 0)), 0)::float8 AS "inValue",
+            COALESCE(SUM(l."outQty" * COALESCE(l."unitRate", 0)), 0)::float8 AS "outValue"
+       FROM ld_erp.stock_ledger l
+       JOIN ld_erp.items i ON i.id = l."itemId"
+      WHERE l.ownership = 'OWNED' AND l."referenceType" = 'STOCK_REALLOCATION'
+        AND l."transactionDate" >= $1 AND l."transactionDate" <= $2 AND i.type::text <> 'FIXED_ASSET'
+      GROUP BY l."brandId"`,
+    new Date(`${from}T00:00:00+05:30`),
+    new Date(`${to}T23:59:59.999+05:30`),
+  )
+  return new Map(rows.map((r) => [r.brandId ?? '', { in: r2(r.inValue), out: r2(r.outValue) }]))
+}
+
 /** Every group under the Stock-in-Hand group, itself included. */
 async function stockGroups(tx: Tx): Promise<Set<string>> {
   const groups = await tx.ledgerGroup.findMany({ select: { id: true, parentId: true, systemKey: true } })
@@ -184,7 +225,7 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
       day0,
       day1,
     ),
-    tx.costCentre.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true, brand: { select: { type: true } } } }),
+    tx.costCentre.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true, brandId: true, brand: { select: { type: true } } } }),
     tx.department.findMany({ select: { id: true, name: true, parent: { select: { name: true } } } }),
   ])
   const splitOf = (rows: Array<{ ledgerId: string; amount: number }>, key: (r: never) => string) => {
@@ -237,16 +278,71 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
   const grossProfit = r2(B('SALES_ACCOUNTS').total + B('DIRECT_INCOMES').total + closing.value - opening.value - B('PURCHASE_ACCOUNTS').total - B('DIRECT_EXPENSES').total)
   const netProfit = r2(grossProfit + B('INDIRECT_INCOMES').total - B('INDIRECT_EXPENSES').total)
 
-  // By brand: stock is valued for the mill as a whole, so its change sits with what no brand carries.
-  // A column for each of our own brands' profit centres; a customer's brand
-  // only when something was booked to it in the period, so nothing is hidden.
+  /*
+   * By brand (multi-brand phase 6). Each brand's own stock is its share of
+   * the balances: its opening and closing stock are its shares' value on the
+   * two days, and what moved to it from central stock or another brand, or
+   * from it, is set beside them as stock moved in and out — so a brand bears
+   * the cost of what it uses and sells, and a reallocation, an out and an in
+   * of the same value, makes no profit or loss for anyone. Central stock, and
+   * any difference between the books' stock and inventory's (stock brought in
+   * with the opening balances, or a value the accountant set), stays with
+   * what no brand carries. The columns always add up to the company.
+   *
+   * A column for each of our own brands' profit centres; a customer's brand
+   * only when something was booked to it in the period, so nothing is hidden.
+   */
   const booked = new Set(centreRows.filter((r) => r.amount !== 0).map((r) => r.costCentreId))
   const shown = centres.filter((c) => c.brand?.type !== 'CUSTOM' || booked.has(c.id))
   const columns = [...shown.map((c) => ({ id: c.id, name: c.name })), { id: '', name: 'Not split' }]
+  const [openShares, closeShares, moved] = await Promise.all([inventoryValueByShare(tx, dayBefore(from)), inventoryValueByShare(tx, to), shareTransfers(tx, from, to)])
+  // A brand's share is shown under its profit centre; one with none (yet) stays with Not split.
+  const brandOfCentre = new Map(shown.filter((c) => c.brandId).map((c) => [c.id, c.brandId!]))
+  const placed = new Set(brandOfCentre.values())
+  const stockFor = (brandId: string) => ({
+    opening: openShares.get(brandId) ?? 0,
+    closing: closeShares.get(brandId) ?? 0,
+    in: moved.get(brandId)?.in ?? 0,
+    out: moved.get(brandId)?.out ?? 0,
+  })
+  const notPlaced = { opening: 0, closing: 0, in: 0, out: 0 }
+  for (const k of new Set([...openShares.keys(), ...closeShares.keys(), ...moved.keys()])) {
+    if (k !== '' && placed.has(k)) continue
+    const f = stockFor(k)
+    notPlaced.opening = r2(notPlaced.opening + f.opening)
+    notPlaced.closing = r2(notPlaced.closing + f.closing)
+    notPlaced.in = r2(notPlaced.in + f.in)
+    notPlaced.out = r2(notPlaced.out + f.out)
+  }
+  const placedOpening = r2([...placed].reduce((t, b) => t + (openShares.get(b) ?? 0), 0))
+  const placedClosing = r2([...placed].reduce((t, b) => t + (closeShares.get(b) ?? 0), 0))
   const brand = columns.map((c) => {
-    const stock = c.id === '' ? r2(closing.value - opening.value) : 0
-    const gross = r2(at('SALES_ACCOUNTS', c.id) + at('DIRECT_INCOMES', c.id) + stock - at('PURCHASE_ACCOUNTS', c.id) - at('DIRECT_EXPENSES', c.id))
-    return { id: c.id, name: c.name, stockChange: stock, grossProfit: gross, netProfit: r2(gross + at('INDIRECT_INCOMES', c.id) - at('INDIRECT_EXPENSES', c.id)) }
+    const b = brandOfCentre.get(c.id)
+    // Not split: the company's stock less every placed brand's, which is
+    // central stock (and inventory's difference from the books' figure).
+    const f =
+      c.id === ''
+        ? { opening: r2(opening.value - placedOpening), closing: r2(closing.value - placedClosing), in: notPlaced.in, out: notPlaced.out }
+        : b
+          ? stockFor(b)
+          : { opening: 0, closing: 0, in: 0, out: 0 }
+    const stock = r2(f.closing - f.opening)
+    const gross = r2(
+      at('SALES_ACCOUNTS', c.id) + at('DIRECT_INCOMES', c.id) + stock - at('PURCHASE_ACCOUNTS', c.id) - f.in + f.out - at('DIRECT_EXPENSES', c.id),
+    )
+    return {
+      id: c.id,
+      name: c.name,
+      openingStock: f.opening,
+      closingStock: f.closing,
+      /** Stock moved to this share from central stock or another brand, at the value it moved at. */
+      transfersIn: f.in,
+      /** Stock moved from this share to another. */
+      transfersOut: f.out,
+      stockChange: stock,
+      grossProfit: gross,
+      netProfit: r2(gross + at('INDIRECT_INCOMES', c.id) - at('INDIRECT_EXPENSES', c.id)),
+    }
   })
 
   // By department (cost centre): a column for each department that carries

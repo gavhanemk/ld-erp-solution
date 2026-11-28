@@ -16,6 +16,7 @@ import { afterChallanCancelled, afterChallanDispatched } from '../services/garme
 import { cartonsAfterCancel, cartonsAfterDispatch, cartonsOnChallan } from '../services/fgCartonHooks.service'
 import { netSizeChanges } from '../services/sizeChanges.service'
 import { orderBrand } from '../lib/orderBrand'
+import { dispatchShare, ownShare, reverseChallanMoves } from '../services/brandStock.service'
 
 /**
  * Delivery challans: the goods leaving for the buyer against a sales order.
@@ -462,15 +463,34 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
     include: { lines: { include: { sizes: true } } },
   })
   if (!dc.warehouseId) throw new AppError('Say which store the goods leave from', 400, 'NO_WAREHOUSE')
-  const so = await tx.salesOrder.findUniqueOrThrow({ where: { id: dc.soId }, select: { isJobWork: true, customerId: true } })
+  const so = await tx.salesOrder.findUniqueOrThrow({ where: { id: dc.soId }, select: { isJobWork: true, customerId: true, soNumber: true, brandId: true } })
   const owner = ownerFor(so)
+  // Multi-brand phase 5: our own goods leave from the order's brand's share (see dispatchShare).
+  const brand = so.isJobWork ? null : await ownShare(tx, so.brandId)
 
   for (const line of dc.lines) {
     if (!line.itemId || !line.soLineId) continue
     const parts = line.sizes.length ? line.sizes.map((s) => ({ sizeId: s.sizeId as string | null, qty: Number(s.qty) })) : [{ sizeId: null, qty: Number(line.qty) }]
+    let lineShare: string | null = null
     for (const part of parts) {
       if (part.qty <= 0) continue
+      const share =
+        owner.ownership === 'OWNED'
+          ? (
+              await dispatchShare(tx, {
+                dc: { id: dc.id, dcNumber: dc.dcNumber, warehouseId: dc.warehouseId, dcDate: dc.dcDate },
+                so: { id: dc.soId, soNumber: so.soNumber, brandId: brand },
+                itemId: line.itemId,
+                sizeId: part.sizeId,
+                grade: line.grade,
+                qty: part.qty,
+                userId,
+              })
+            ).brandId
+          : null
+      lineShare = share
       await recordMovement(tx, {
+        brandId: share,
         itemId: line.itemId,
         warehouseId: dc.warehouseId,
         sizeId: part.sizeId,
@@ -495,6 +515,7 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
         })
       }
     }
+    if (lineShare) await tx.deliveryChallanLine.update({ where: { id: line.id }, data: { brandId: lineShare } })
     const soLine = await tx.salesOrderLine.findUniqueOrThrow({ where: { id: line.soLineId } })
     const delivered = round2(Number(soLine.deliveredQty) + Number(line.qty))
     await tx.salesOrderLine.update({
@@ -723,6 +744,8 @@ export async function cancelChallan(tx: Prisma.TransactionClient, dcId: string, 
     })
     for (const o of outs) {
       await recordMovement(tx, {
+        // Back on the share it left from.
+        brandId: o.brandId,
         itemId: o.itemId,
         warehouseId: o.warehouseId,
         sizeId: o.sizeId,
@@ -771,6 +794,8 @@ export async function cancelChallan(tx: Prisma.TransactionClient, dcId: string, 
 
   // Its tagged pieces are back in the store and free for another challan.
   await afterChallanCancelled(tx, before.id, userId)
+  // Central stock moved to the order's brand for it goes back to central (multi-brand phase 5).
+  await reverseChallanMoves(tx, before.id, userId, `${before.dcNumber} cancelled: ${reason}`)
   // Its cartons stay sealed in the store, free for another challan.
   await cartonsAfterCancel(tx, before.id)
   const after = await tx.deliveryChallan.update({

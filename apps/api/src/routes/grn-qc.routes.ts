@@ -57,15 +57,16 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000
  */
 async function rejectsBack(
   tx: Prisma.TransactionClient,
-  a: { itemId: string; from: string; to: string; qty: number; referenceType: string; referenceId: string; when: Date; notes: string },
+  a: { itemId: string; from: string; to: string; qty: number; referenceType: string; referenceId: string; when: Date; notes: string; brandId: string | null },
 ) {
-  const asR = Math.min(a.qty, (await balanceOf(tx, { itemId: a.itemId, warehouseId: a.from, grade: REJECTED_GRADE })).qty)
+  const asR = Math.min(a.qty, (await balanceOf(tx, { itemId: a.itemId, warehouseId: a.from, grade: REJECTED_GRADE, brandId: a.brandId })).qty)
   const parts = [
     { grade: REJECTED_GRADE, qty: round3(asR) },
     { grade: 'A', qty: round3(a.qty - asR) },
   ].filter((p) => p.qty > 0)
   for (const p of parts) {
     const out = await recordMovement(tx, {
+      brandId: a.brandId,
       itemId: a.itemId,
       warehouseId: a.from,
       transactionType: 'TRANSFER',
@@ -80,6 +81,7 @@ async function rejectsBack(
       earlierDate: 'move-up',
     })
     await recordMovement(tx, {
+      brandId: a.brandId,
       itemId: a.itemId,
       warehouseId: a.to,
       transactionType: 'TRANSFER',
@@ -95,11 +97,19 @@ async function rejectsBack(
   }
 }
 
+/** The share each GRN line's goods went into (multi-brand phase 5): a check keeps them on it. */
+async function lineShares(tx: Prisma.TransactionClient, grnLineIds: string[]) {
+  const rows = await tx.gRNLine.findMany({ where: { id: { in: grnLineIds } }, select: { id: true, brandId: true } })
+  const of = new Map(rows.map((r) => [r.id, r.brandId]))
+  return (id: string) => of.get(id) ?? null
+}
+
 async function regrade(
   tx: Prisma.TransactionClient,
-  a: { itemId: string; warehouseId: string; qty: number; from: string; to: string; referenceType: string; referenceId: string; when: Date; notes: string },
+  a: { itemId: string; warehouseId: string; qty: number; from: string; to: string; referenceType: string; referenceId: string; when: Date; notes: string; brandId: string | null },
 ) {
   const out = await recordMovement(tx, {
+    brandId: a.brandId,
     itemId: a.itemId,
     warehouseId: a.warehouseId,
     transactionType: 'TRANSFER',
@@ -118,6 +128,7 @@ async function regrade(
     earlierDate: 'move-up',
   })
   await recordMovement(tx, {
+    brandId: a.brandId,
     itemId: a.itemId,
     warehouseId: a.warehouseId,
     transactionType: 'TRANSFER',
@@ -424,8 +435,10 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
     // value it was carried at — a move, not a loss. Nothing moves without one.
     // They arrive held as rejected (grade R): never offered to issue, and taken
     // out as rejects when they go back to the supplier or are used after all.
+    const shareOf = await lineShares(tx, lines.map((l) => l.grnLineId))
     for (const l of rejectWarehouseId ? rejecting : []) {
       const out = await recordMovement(tx, {
+        brandId: shareOf(l.grnLineId),
         itemId: l.itemId,
         warehouseId: l.warehouseId,
         transactionType: 'TRANSFER',
@@ -439,6 +452,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         earlierDate: 'move-up',
       })
       await recordMovement(tx, {
+        brandId: shareOf(l.grnLineId),
         itemId: l.itemId,
         warehouseId: rejectWarehouseId!,
         transactionType: 'TRANSFER',
@@ -455,7 +469,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
     }
 
     for (const l of hold ? rejecting : []) {
-      await regrade(tx, {
+      await regrade(tx, { brandId: shareOf(l.grnLineId),
         itemId: l.itemId,
         warehouseId: l.warehouseId,
         qty: l.rejectedQty,
@@ -526,6 +540,7 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
     // some have already left the reject godown — on a return challan — the
     // move is refused by name, and that challan has to be cancelled first.
     const now = new Date()
+    const shareOf = await lineShares(tx, d.lines.map((l) => l.grnLineId))
     if (d.hold === 'SAME_STORE') {
       const touched = d.lines.find((l) => (l.usedQty ?? 0) > 0 || (l.returnedQty ?? 0) > 0)
       if (touched) {
@@ -539,7 +554,7 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
       }
       for (const l of d.lines) {
         if (!(l.rejectedQty > 0)) continue
-        await regrade(tx, {
+        await regrade(tx, { brandId: shareOf(l.grnLineId),
           itemId: l.itemId,
           warehouseId: l.warehouseId,
           qty: l.rejectedQty,
@@ -585,7 +600,7 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
     }
     for (const l of d.lines) {
       if (!(l.rejectedQty > 0) || !d.rejectWarehouseId) continue
-      await rejectsBack(tx, {
+      await rejectsBack(tx, { brandId: shareOf(l.grnLineId),
         itemId: l.itemId,
         from: d.rejectWarehouseId,
         to: l.warehouseId,
@@ -761,12 +776,13 @@ router.post('/:id/use', requirePermission(MODULE, 'edit'), async (req: AuthReque
     if (data.qty > held + 0.0005) throw new AppError(`Only ${held} is still held as rejected on this line.`, 400, 'MORE_THAN_HELD')
     const qty = round3(data.qty)
     const now = new Date()
+    const shareOf = await lineShares(tx, [l.grnLineId])
     const notes = `Rejected on QC of ${row.grn.grnNumber}, used after all: ${data.reason}`
     if (d.hold === 'SAME_STORE') {
-      await regrade(tx, { itemId: l.itemId, warehouseId: l.warehouseId, qty, from: REJECTED_GRADE, to: 'A', referenceType: 'GRN_QC_USED', referenceId: row.id, when: now, notes })
+      await regrade(tx, { brandId: shareOf(l.grnLineId), itemId: l.itemId, warehouseId: l.warehouseId, qty, from: REJECTED_GRADE, to: 'A', referenceType: 'GRN_QC_USED', referenceId: row.id, when: now, notes })
     } else {
       // From the reject godown, back into good stock where it was received.
-      await rejectsBack(tx, { itemId: l.itemId, from: d.rejectWarehouseId!, to: l.warehouseId, qty, referenceType: 'GRN_QC_USED', referenceId: row.id, when: now, notes })
+      await rejectsBack(tx, { brandId: shareOf(l.grnLineId), itemId: l.itemId, from: d.rejectWarehouseId!, to: l.warehouseId, qty, referenceType: 'GRN_QC_USED', referenceId: row.id, when: now, notes })
     }
     l.usedQty = round3((l.usedQty ?? 0) + qty)
     l.events = [...(l.events ?? []), { at: now.toISOString(), by: req.user?.name ?? '', kind: 'USED', qty, note: data.reason }]

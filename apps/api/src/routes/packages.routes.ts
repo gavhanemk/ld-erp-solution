@@ -159,6 +159,8 @@ const pkgInclude = {
   },
   warehouse: { select: { id: true, name: true } },
   ownerCustomer: { select: { id: true, name: true } },
+  // The share it is on (multi-brand phase 5): a brand's earmark, or central stock.
+  brand: { select: { id: true, name: true } },
 } satisfies Prisma.StockPackageInclude
 
 /** Everything the scan screen shows about one package, and what can be done with it. */
@@ -712,6 +714,8 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           designNo: r.item.designNo,
           color: r.item.color,
           styleId: r.item.styleId,
+          // The brand the roll is earmarked for, printed beside its design and colour; central stock prints none.
+          brand: r.brand?.name ?? null,
           category: r.item.category?.name ?? '',
           store: r.warehouse.name,
           lotNo: r.lotNo,

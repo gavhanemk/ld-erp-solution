@@ -9,6 +9,7 @@ import { ITEM_SHADE } from '../lib/fabric'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, recordMovement } from '../services/stock.service'
+import { billLineShare } from '../services/brandStock.service'
 import { assertSampleStoreLines } from '../services/sampleSourcing.service'
 import { assertPoolsHold, lockRequests, requestsOfBillLines } from '../services/samplePool.service'
 import { lockRow } from '../lib/lockRow'
@@ -616,7 +617,9 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         : 0
       // Rejects held in a reject godown before they were kept as R are still
       // good-graded there: what the store does not hold as R goes as it is.
-      const heldR = credited > 0 ? (await balanceOf(tx, { itemId: b.itemId, warehouseId: l.warehouseId, grade: REJECTED_GRADE })).qty : 0
+      // Multi-brand phase 5: out of the share the goods came in on.
+      const share = await billLineShare(tx, { grnLineId, billLineId: l.billLineId })
+      const heldR = credited > 0 ? (await balanceOf(tx, { itemId: b.itemId, warehouseId: l.warehouseId, grade: REJECTED_GRADE, brandId: share })).qty : 0
       const fromHeld = round3(Math.min(credited, heldR))
       const parts = [
         { qty: fromHeld, grade: REJECTED_GRADE },
@@ -624,6 +627,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       ].filter((p) => p.qty > 0)
       for (const p of parts) {
         await recordMovement(tx, {
+          brandId: share,
           itemId: b.itemId,
           warehouseId: l.warehouseId,
           direction: 'OUT',
@@ -796,11 +800,12 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
 
     const out = await tx.stockLedger.findMany({
       where: { referenceType: 'PurchaseReturn', referenceId: before.id, outQty: { gt: 0 } },
-      select: { itemId: true, warehouseId: true, outQty: true, unitRate: true, grade: true },
+      select: { itemId: true, warehouseId: true, outQty: true, unitRate: true, grade: true, brandId: true },
     })
     for (const m of out) {
-      // Back in the grade it left: rejected goods are held as rejected again.
+      // Back in the grade it left, on the share it left: rejected goods are held as rejected again.
       await recordMovement(tx, {
+        brandId: m.brandId,
         itemId: m.itemId,
         warehouseId: m.warehouseId,
         direction: 'IN',

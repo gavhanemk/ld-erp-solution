@@ -201,6 +201,20 @@ export default function StockDocumentsPage() {
   const [open, setOpen] = useState<string | null>(null)
   const [refusing, setRefusing] = useState<Adjustment | null>(null)
   const [approving, setApproving] = useState<Adjustment | null>(null)
+  // What approving a count would take out of each brand's earmark (shortages come from central first).
+  const [losses, setLosses] = useState<Array<{ lineId: string; brand: string; item: string; size: string | null; unit: string; qty: number; named: boolean }> | null>(null)
+  useEffect(() => {
+    setLosses(null)
+    if (!approving || approving.kind === 'STOCK_IN') return
+    let live = true
+    api
+      .get<{ data: NonNullable<typeof losses> }>(`/inventory/adjustments/${approving.id}/brand-losses`)
+      .then((r) => live && setLosses(r.data))
+      .catch(() => live && setLosses([]))
+    return () => {
+      live = false
+    }
+  }, [approving])
   /** Only transfers with something still on the road. */
   const [onlyOpen, setOnlyOpen] = useState(false)
   /** A step on a transfer in transit: receive, send back, write off. */
@@ -816,7 +830,30 @@ export default function StockDocumentsPage() {
               ? `${approving.lines.length} ${approving.lines.length === 1 ? 'item goes' : 'items go'} into stock in ${approving.warehouse.name} now, worth ${formatRupees(
                   approving.lines.reduce((s, l) => s + Number(l.difference) * Number(l.unitRate ?? 0), 0),
                 )}. This cannot be undone except by a stock count.`
-              : `The ${approving.lines.filter((l) => Number(l.difference) !== 0).length} counted difference(s) in ${approving.warehouse.name} go into stock now. This cannot be undone except by another count.`
+              : (
+                  <>
+                    {`The ${approving.lines.filter((l) => Number(l.difference) !== 0).length} counted difference(s) in ${approving.warehouse.name} go into stock now. This cannot be undone except by another count.`}
+                    {' '}
+                    {losses === null
+                      ? 'Checking whose stock the shortages come from…'
+                      : losses.length === 0
+                        ? 'Shortages come out of central stock; gains go to central stock.'
+                        : (
+                            <>
+                              {'Gains go to central stock. Shortages come out of central stock first, but these come out of a brand’s earmark: '}
+                              {losses.map((l, i) => (
+                                <span key={`${l.lineId}-${i}`} className="text-foreground font-medium">
+                                  {i > 0 ? '; ' : ''}
+                                  {l.brand} −{l.qty} {l.unit} {l.item}
+                                  {l.size ? ` size ${l.size}` : ''}
+                                  {l.named ? ' (its own, not found in the count)' : ''}
+                                </span>
+                              ))}
+                              .
+                            </>
+                          )}
+                  </>
+                )
           }
           confirmLabel={approving.kind === 'STOCK_IN' ? 'Approve and add to stock' : 'Approve and correct stock'}
           requireReason={false}

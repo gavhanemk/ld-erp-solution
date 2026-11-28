@@ -11,6 +11,7 @@ import { tdsRegister } from './definitions/tds-register'
 import { SALES_REPORTS } from './definitions/sales'
 import { stockSummary } from './definitions/stock-summary'
 import { fabricStock } from './definitions/fabric-stock'
+import { inventoryMatrix } from './definitions/inventory-matrix'
 import { stockMovement } from './definitions/stock-movement'
 import { itemStockLedger } from './definitions/item-stock-ledger'
 import { reorderStatus } from './definitions/reorder-status'
@@ -53,6 +54,7 @@ export const REPORTS: ReportDefinition[] = [
   tdsRegister,
   // Inventory
   stockSummary,
+  inventoryMatrix,
   fabricStock,
   stockMovement,
   itemStockLedger,
