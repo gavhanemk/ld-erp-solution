@@ -10,6 +10,7 @@
  *   E2E_EMAIL=... E2E_PASSWORD=... E2E_API=http://localhost:5105/api npx tsx ../../tools/check-order-brand.ts
  */
 import { prisma } from '../packages/database/src/index'
+import { checksCustomer, closeTestOrder } from './test-orders'
 
 const API = (process.env.E2E_API || 'http://localhost:5101/api').replace(/\/+$/, '')
 let pass = 0, fail = 0
@@ -36,6 +37,8 @@ async function main() {
   token = (await fetch(`${API}/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) }).then((r) => r.json())).accessToken
   if (!token) throw new Error('login failed')
   const stamp = Date.now().toString().slice(-6)
+  // This run's order, closed in the finally below so it never counts against anyone's credit.
+  let soId: string | undefined
 
   // 1. Brands of this run's own: one in-house, one a customer's.
   const own = await call('POST', '/masters/brands', { name: `ZZTEST Own ${stamp}`, type: 'LD_COTTON_MILLS', isActive: true })
@@ -44,16 +47,19 @@ async function main() {
   const ownId = own.body.data.id as string
   const inHouse = (await call('GET', '/masters/brands?active=true&type=LD_COTTON_MILLS,VHAGAR&limit=100')).body?.data ?? []
   check("the Brand box's list: in-house brands only", inHouse.some((b: any) => b.id === ownId) && !inHouse.some((b: any) => b.id === cust.body.data.id), inHouse.map((b: any) => b.name))
-  const ldMain = await prisma.brand.findFirstOrThrow({ where: { type: 'LD_COTTON_MILLS', isActive: true, name: { contains: 'LD Cotton', mode: 'insensitive' } }, select: { id: true, name: true } })
+  const ldMain = await prisma.brand.findFirstOrThrow({ where: { isDefault: true }, select: { id: true, name: true } })
 
   // The ZZTEST style's item and customer (never VHAGAR's).
-  const st = await prisma.style.findFirstOrThrow({ where: { code: 'ZZTEST-SH-01' }, select: { id: true, isActive: true, sizeGroupId: true } })
+  const st = await prisma.style.findFirstOrThrow({ where: { code: 'ZZTEST-SH-01' }, select: { id: true, isActive: true, sizeGroupId: true, brandId: true, brandType: true } })
   const wasActive = st.isActive
-  await prisma.style.update({ where: { id: st.id }, data: { isActive: true } })
+  // For this run the shirt carries the customer's label: an order may then go
+  // under any of our brands (one brand per order binds only our own brands'
+  // styles — see check-phase1-brands.ts). Put back at the end.
+  await prisma.style.update({ where: { id: st.id }, data: { isActive: true, brandId: cust.body.data.id, brandType: 'CUSTOM' } })
   try {
     const item = await prisma.item.findFirstOrThrow({ where: { styleId: st.id, type: 'FINISHED_GOOD', isActive: true }, select: { id: true, hsnCode: true } })
     if (!item.hsnCode) await prisma.item.update({ where: { id: item.id }, data: { hsnCode: '6205' } })
-    const customer = await prisma.customer.findFirstOrThrow({ where: { name: { startsWith: 'ZZTEST' }, isActive: true }, select: { id: true } })
+    const customer = await checksCustomer(prisma, call)
     const sizes = await prisma.size.findMany({ where: { sizeGroupId: st.sizeGroupId! }, orderBy: { sequence: 'asc' }, take: 2, select: { id: true } })
 
     // 2. The quotation: a customer's brand refused; an in-house one kept; none, the styles'.
@@ -64,7 +70,7 @@ async function main() {
     check('a quotation under the picked in-house brand', okay(quote) && quote.body?.data?.brandId === ownId, quote.body?.data?.brandId ?? quote.body)
     const plain = await call('POST', '/sales/quotations', { customerId: customer.id, lines: [quoteLine] })
     const plainBrand = plain.body?.data?.brandId ? await prisma.brand.findUnique({ where: { id: plain.body.data.brandId }, select: { type: true } }) : null
-    check('no brand picked: an LD Cotton Mills style goes under LD Cotton Mills', okay(plain) && plainBrand?.type === 'LD_COTTON_MILLS', plain.body?.data?.brandId)
+    check("no brand picked: a customer's label goes under the default brand", okay(plain) && plain.body?.data?.brandId === ldMain.id, plain.body?.data?.brandId)
 
     // 3. The sales order under it, confirmed.
     const so = await call('POST', '/sales/orders', {
@@ -76,7 +82,7 @@ async function main() {
       creditReleaseReason: 'Demo test order',
       lines: [{ itemId: item.id, totalQty: 20, unitPrice: 250, sizes: [{ sizeId: sizes[0].id, qty: 12 }, { sizeId: sizes[1].id, qty: 8 }] }],
     })
-    const soId = so.body?.data?.id
+    soId = so.body?.data?.id
     check('a sales order under the picked brand, confirmed', so.status === 201 && so.body?.data?.brandId === ownId, so.body?.message ?? so.body)
     const custSo = await call('POST', '/sales/orders', { customerId: customer.id, brandId: cust.body.data.id, lines: [{ itemId: item.id, totalQty: 1, unitPrice: 1, sizes: [{ sizeId: sizes[0].id, qty: 1 }] }] })
     check("a sales order under a customer's brand: refused", custSo.status === 400 && custSo.body?.code === 'NOT_OWN_BRAND', custSo.body)
@@ -139,10 +145,11 @@ async function main() {
     if (okay(trace)) check('Track & Trace: the order with its brand', traceSo?.brand?.name === ldMain.name, traceSo?.brand)
     else console.log(`SKIP  Track & Trace: ${trace.status} on /trace/order`)
   } finally {
-    await prisma.style.update({ where: { id: st.id }, data: { isActive: wasActive } })
+    await prisma.style.update({ where: { id: st.id }, data: { isActive: wasActive, brandId: st.brandId, brandType: st.brandType } })
     // This run's brands are switched off, not left in the lists.
     await call('PATCH', `/masters/brands/${ownId}`, { isActive: false })
     await call('PATCH', `/masters/brands/${cust.body?.data?.id}`, { isActive: false })
+    console.log(`clean-up: the test order ${await closeTestOrder(call, soId)}`)
   }
 
   console.log(`\n${pass} passed, ${fail} failed`)

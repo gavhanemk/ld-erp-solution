@@ -17,6 +17,8 @@ Read them in this order. The first two are compulsory before you write any code.
 | 8 | [Inventory handover](08-inventory-handover.md) | Before you touch stock. What the single writer guarantees, what is built, what is left, and the traps. |
 | 9 | [Production handover](09-production-handover.md) | Before you touch production. The floor's ledger, the flow the mill asked for (MO → materials → stages → job cards → cutting sheet → transfers → stage sheets), what is left, and the traps. |
 | 10 | [Sampling handover](10-sampling-handover.md) | Before you touch sampling. Why it was rebuilt, the decisions it was built to, the flow from tech pack to handover, every action and rule, what it changed in Purchase, Inventory and Masters, how to run and test it, what is left. |
+| 11 | [Multi-brand go-live checklist](11-multibrand-go-live-checklist.md) | Before the multi-brand release goes live, and if it ever has to be rolled back. Test data kept off live, the backup and its proven restore, the migrations in order (with the two branches released alongside), masters, opening stock, re-posting, the rollback build plain `main` cannot replace, and the proven repair for rolling forward again. |
+| 12 | [Multi-brand user guide](12-multibrand-user-guide.md) | For the people using the ERP. Picking the brand, moving stock between brands, extra material for an MO, the Inventory Matrix, cost and profit centres, sharing expenses, the P&L by brand, and the checks and controls. |
 
 ## The short version
 

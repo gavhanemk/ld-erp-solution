@@ -46,6 +46,12 @@ export interface Screen {
   api: string[]
   /** A line under the name in the matrix, where the name alone could mislead. */
   hint?: string
+  /**
+   * Granted only by name: a module-wide grant ("sales:edit") never includes
+   * it, and saving a role with one does not spell it out. For a right that
+   * must be given on purpose, like changing a sales charge's GST.
+   */
+  explicit?: boolean
 }
 
 export interface AccessModule {
@@ -118,6 +124,17 @@ export const ACCESS_CATALOG: AccessModule[] = [
       s('sales.invoices', 'Invoices', DOC, ['/sales/invoices'], ['/api/sales/invoices']),
       s('sales.payments', 'Payments Received', DOC, ['/sales/payments'], ['/api/sales/receipts']),
       s('sales.returns', 'Returns & Credit Notes', DOC, ['/sales/returns'], ['/api/sales/credit-notes']),
+      {
+        ...s(
+          'sales.charge-gst',
+          'Override Sales Charge GST',
+          ['edit'],
+          [],
+          [],
+          'Change an extra charge’s GST on one quotation, order or invoice, with a reason kept on it. The GST master is not changed. Given only by ticking it here: a Sales-wide grant does not include it.',
+        ),
+        explicit: true,
+      },
     ],
   },
   {
@@ -171,6 +188,14 @@ export const ACCESS_CATALOG: AccessModule[] = [
         'Finished goods in, garment tags, garment in / out, cartons',
       ),
       s('inventory.trace', 'Track & Trace', LOOK, ['/inventory/trace'], ['/api/trace']),
+      s(
+        'inventory.brand-stock',
+        'Brand Stock',
+        DOC,
+        ['/inventory/brand-stock'],
+        ['/api/inventory/reallocations'],
+        'Central stock earmarked for brands: earmark, move between brands, release; approved by someone else',
+      ),
       s('inventory.job-work', 'Job Work Out', DOC, ['/inventory/job-work'], ['/api/inventory/job-work', '/api/inventory/floor-returns'], 'Goods sent to job workers on a Job Work Challan'),
       s(
         'inventory.customer-material',
@@ -234,9 +259,28 @@ export const ACCESS_CATALOG: AccessModule[] = [
         ['/api/accounts/groups', '/api/accounts/cost-centres', '/api/accounts/opening', '/api/accounts/stock-value', '/api/accounts/settings'],
         'Groups, ledgers to start from, opening balances, stock value',
       ),
+      {
+        ...s(
+          'accounts.books-reopen',
+          'Reopen closed periods',
+          ['approve'],
+          [],
+          [],
+          'Move the books’ closing date back, or clear it, with a reason kept and every administrator told. Given only by ticking it here: an Accounts-wide grant does not include it.',
+        ),
+        explicit: true,
+      },
       s('accounts.outstanding', 'Outstanding', READ, ['/accounts/outstanding'], ['/api/accounts/outstanding']),
       s('accounts.gst', 'GST Returns', READ, ['/accounts/gst'], ['/api/accounts/gst']),
       s('accounts.tds', 'TDS', READ, ['/accounts/tds'], ['/api/accounts/tds']),
+      s(
+        'accounts.allocation',
+        'Expense Allocation',
+        ['view', 'create', 'edit', 'delete', 'approve', 'post', 'export'],
+        ['/accounts/allocation'],
+        ['/api/accounts/allocation'],
+        'Shared expenses split between the brands each month: rules, runs, approval, posting',
+      ),
     ],
   },
   {

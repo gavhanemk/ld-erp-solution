@@ -27,6 +27,8 @@ const ROLLBACK = new Error('ROLLBACK')
 const stepSelect = { id: true, sequence: true, operationId: true, kind: true, isQcStep: true, skippedAt: true, name: true, execution: true } as const
 
 async function main() {
+  const [{ current_database: dbName }] = await prisma.$queryRaw<{ current_database: string }[]>`select current_database()`
+  if (dbName !== 'lderp_demo') { console.error('Refusing to run: not lderp_demo.'); process.exitCode = 2; return }
   const style = await prisma.style.findUnique({ where: { code: 'LD-SH-2601' }, select: { id: true, code: true } })
   if (!style) throw new Error('Needs the demo style LD-SH-2601')
   const runsBefore = await prisma.styleStepRun.count()
@@ -47,16 +49,18 @@ async function main() {
         })
         const perLine = await Promise.all(
           lines.map(async (l) => {
-            if (!l.mo.steps.length) return null
+            // Not staged: a finished order is done at every step, one not finished has not started (stepAcross).
+            if (!l.mo.steps.length) return l.mo.status === 'COMPLETED' ? ('DONE' as const) : null
             const figs = new Map((await stepFigures(tx, l.mo.id, l.mo.steps, l.totalQty, l.id)).map((f) => [f.stepId, f]))
             return new Map(withOccurrence([...l.mo.steps].sort((a, b) => a.sequence - b.sequence)).map((s) => [runKey(s.operationId, s.occurrence), { state: l.mo.status === 'COMPLETED' ? 'DONE' : figs.get(s.id)!.state, completed: figs.get(s.id)!.completed }]))
           }),
         )
         const expected = d.steps.map((s) => {
-          const states = perLine.map((m) => (m ? m.get(s.key)?.state : 'NOT_STARTED')).filter(Boolean) as string[]
-          const completed = perLine.reduce((n, m) => n + (m?.get(s.key)?.completed ?? 0), 0)
+          const states = perLine.map((m) => (m === 'DONE' ? 'DONE' : m ? m.get(s.key)?.state : 'NOT_STARTED')).filter(Boolean) as string[]
+          const completed = perLine.reduce((n, m) => n + (m && m !== 'DONE' ? (m.get(s.key)?.completed ?? 0) : 0), 0)
           const live = states.filter((x) => x !== 'SKIPPED')
-          const state = !states.length ? 'NOT_STARTED' : !live.length ? 'SKIPPED' : live.every((x) => x === 'DONE') ? 'DONE' : live.every((x) => x === 'NOT_STARTED') ? 'NOT_STARTED' : 'IN_PROGRESS'
+          // A step on none of the counted orders is left out on all of them (styleTrack.service stepAcross).
+          const state = !states.length ? (perLine.length ? 'SKIPPED' : 'NOT_STARTED') : !live.length ? 'SKIPPED' : live.every((x) => x === 'DONE') ? 'DONE' : live.every((x) => x === 'NOT_STARTED') ? 'NOT_STARTED' : 'IN_PROGRESS'
           return { state, completed }
         })
         check('every step\'s state is the floor\'s, across the style\'s orders', d.steps.every((s, i) => s.state === expected[i].state), d.steps.map((s) => `${s.name} ${s.state}`).join(', '))

@@ -3,8 +3,11 @@ import { Router } from 'express'
 import type { Prisma, SalesOrderStatus } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { AuthRequest, isAdmin, requirePermission, userCan } from '../middleware/auth'
+import { mayOverrideSaleChargeGst } from '../middleware/auth'
+import { overridesMade } from '../services/salesCharges'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
+import { assertJobWorkBrand, assertOneBrand, suggestedBrandId } from '../lib/brandRules'
 import { writeAuditLog } from '../lib/audit'
 import { postWithin } from '../services/accounts/posting.service'
 import { nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
@@ -643,36 +646,24 @@ router.get('/customers/:id/last-rates', requirePermission(MODULE, 'view'), async
 type OrderInput = z.infer<typeof createSalesOrderSchema>
 
 /**
- * The brand an order is booked under, which the form no longer asks for.
- *
- * VHAGAR is a brand of LD Cotton Mills, not a company of its own, so every
- * sale is LD Cotton's; the brand only says whose label the garments carry,
- * for the dashboard and the reports. That is in the styles: an order whose
- * every garment is a VHAGAR style is a VHAGAR order, anything else (a mix,
- * a customer's own label, a garment with no style, job work) the mill's own.
+ * Each line's style: the style number typed on it when the master has it,
+ * else the garment item's own. What an order's brand is worked out and
+ * checked from.
  */
-async function brandOf(
+async function lineStyleIds(
   tx: Prisma.TransactionClient,
   data: OrderInput,
-  itemById: Map<string, { style: { brandType: string } | null }>,
-): Promise<string> {
-  const brands = await tx.brand.findMany({ where: { isActive: true }, select: { id: true, type: true }, orderBy: { createdAt: 'asc' } })
-  const own = brands.find((b) => b.type === 'LD_COTTON_MILLS') ?? brands[0]
-  if (!own) throw new AppError('No brand is set up. Add LD Cotton Mills in Masters → Brands.', 400, 'NO_BRAND')
-  const vhagar = brands.find((b) => b.type === 'VHAGAR')
-  if (!vhagar || data.isJobWork) return own.id
-  // A style number typed on the line is the garment's style when the master
-  // has it; else the item's own.
+  itemById: Map<string, { style: { id: string } | null }>,
+): Promise<Array<string | null>> {
   const typed = [...new Set(data.lines.map((l) => l.styleCode?.trim()).filter((c): c is string => Boolean(c)))]
   const styles = typed.length
-    ? await tx.style.findMany({ where: { OR: typed.map((code) => ({ code: { equals: code, mode: 'insensitive' as const } })) }, select: { code: true, brandType: true } })
+    ? await tx.style.findMany({ where: { OR: typed.map((code) => ({ code: { equals: code, mode: 'insensitive' as const } })) }, select: { id: true, code: true } })
     : []
-  const typedType = new Map(styles.map((s) => [s.code.toLowerCase(), s.brandType as string]))
-  const allVhagar = data.lines.every((l) => {
+  const byCode = new Map(styles.map((st) => [st.code.toLowerCase(), st.id]))
+  return data.lines.map((l) => {
     const code = l.styleCode?.trim()
-    return ((code && typedType.get(code.toLowerCase())) || itemById.get(l.itemId)?.style?.brandType) === 'VHAGAR'
+    return (code ? byCode.get(code.toLowerCase()) : undefined) ?? itemById.get(l.itemId)?.style?.id ?? null
   })
-  return allVhagar ? vhagar.id : own.id
 }
 
 /**
@@ -710,12 +701,15 @@ export async function prepareOrder(
       hsnCode: true,
       color: true,
       taxRate: { select: { rate: true } },
-      style: { select: { code: true, sizeGroupId: true, brandType: true, stage: true } },
+      style: { select: { id: true, code: true, sizeGroupId: true, brandType: true, stage: true } },
     },
   })
   const itemById = new Map(items.map((i) => [i.id, i]))
 
-  const brandId = data.brandId || (await brandOf(tx, data, itemById))
+  // The brand: as picked, else the one every garment's style belongs to,
+  // else the default (LD Cotton Mills) — worked out from the brands themselves.
+  const styleIds = await lineStyleIds(tx, data, itemById)
+  const brandId = data.brandId || (await suggestedBrandId(tx, styleIds, Boolean(data.isJobWork)))
   const brand = await tx.brand.findUnique({ where: { id: brandId }, select: { name: true, isActive: true, type: true } })
   if (!brand) throw new AppError('That brand does not exist', 400, 'BAD_BRAND')
   if (!brand.isActive) throw new AppError(`The brand ${brand.name} is switched off`, 400, 'INACTIVE')
@@ -723,6 +717,11 @@ export async function prepareOrder(
   if (brand.type === 'CUSTOM') {
     throw new AppError(`${brand.name} is a customer's brand. Pick one of your own, from Masters → In House Brands.`, 400, 'NOT_OWN_BRAND')
   }
+  // One brand per order (and quotation): no garment may be another own brand's
+  // style, and job work goes under the default brand.
+  const what = opts.piecesOnly ? 'quotation' : 'order'
+  await assertOneBrand(tx, { id: brandId, name: brand.name }, data.lines.map((_, i) => ({ styleId: styleIds[i], label: `Line ${i + 1}` })), what)
+  await assertJobWorkBrand(tx, { id: brandId, name: brand.name }, data.isJobWork, what)
 
   const sizeIds = [...new Set(data.lines.flatMap((l) => l.sizes?.map((s) => s.sizeId) ?? []))]
   const sizes = sizeIds.length
@@ -918,13 +917,20 @@ router.get('/orders/:id/close-check', requirePermission(MODULE, 'view'), async (
   res.json({ success: true, data: { ...check, mayException: userCan(req.user, MODULE, 'approve') && userCan(req.user, 'inventory', 'approve') } })
 })
 
+/** One audit entry for each change of a charge's GST a save made: who, when, why, from what to what. */
+async function auditChargeOverrides(req: AuthRequest, doc: { id: string; number: string }, after: Array<{ chargeTypeId: string; taxSnapshot?: unknown }>, before: Array<{ taxSnapshot?: unknown }> = []) {
+  for (const o of overridesMade(after, before)) {
+    await writeAuditLog(req, { module: 'sales', action: 'UPDATE', entityType: 'SalesChargeGstOverride', entityId: doc.id, after: { document: doc.number, ...o } })
+  }
+}
+
 // POST /api/sales/orders
 router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSalesOrderSchema.parse(req.body)
 
   const { order, confirmed } = await prisma.$transaction(async (tx) => {
     // Checked and priced first, so a refused order never takes a number.
-    const { header, lines, charges } = await prepareOrder(tx, data, { canOverride: userCan(req.user, 'masters', 'edit') })
+    const { header, lines, charges } = await prepareOrder(tx, data, { canOverride: mayOverrideSaleChargeGst(req.user), by: { id: req.user!.id } })
     if (data.quotationId) await winQuote(tx, data.quotationId, data.customerId)
     const soNumber = await nextDocumentNumber(tx, 'SO', data.orderDate ?? new Date())
 
@@ -955,6 +961,9 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
     entityId: order.id,
     after: order,
   })
+  // An override carried from the quotation was recorded there, under whoever made it; only a new one is this user's.
+  const fromQuote = data.quotationId ? await prisma.salesQuotationCharge.findMany({ where: { quoteId: data.quotationId }, select: { taxSnapshot: true } }) : []
+  await auditChargeOverrides(req, { id: order.id, number: order.soNumber }, order.charges, fromQuote)
 
   res.status(201).json({
     success: true,
@@ -988,7 +997,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
 
     // A form that leaves it out keeps how the order bills our own material.
     data.ownMaterialBilling = data.ownMaterialBilling ?? (before.ownMaterialBilling as 'IN_JOB_CHARGE' | 'BILLED')
-    const { header, lines, charges } = await prepareOrder(tx, data, { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
+    const { header, lines, charges } = await prepareOrder(tx, data, { saved: before.charges, canOverride: mayOverrideSaleChargeGst(req.user), by: { id: req.user!.id } })
 
     // The lines are replaced whole. A draft has nothing pointing at its lines
     // yet — no production, no challan — so nothing is cut loose.
@@ -1018,6 +1027,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     before,
     after,
   })
+  await auditChargeOverrides(req, { id: after.id, number: after.soNumber }, after.charges, before.charges)
 
   res.json({
     success: true,
@@ -1241,7 +1251,7 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       }
     }
 
-    const { header, lines, charges } = await prepareOrder(tx, data, { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
+    const { header, lines, charges } = await prepareOrder(tx, data, { saved: before.charges, canOverride: mayOverrideSaleChargeGst(req.user), by: { id: req.user!.id } })
 
     // A change that raises the order's value meets the credit limit, as confirming it did.
     const release = await creditForAmendment(
@@ -1325,6 +1335,7 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
     before,
     after,
   })
+  await auditChargeOverrides(req, { id: after.id, number: after.soNumber }, after.charges, before.charges)
 
   res.json({
     success: true,

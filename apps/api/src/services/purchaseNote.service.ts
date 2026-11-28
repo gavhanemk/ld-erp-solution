@@ -9,6 +9,7 @@ import type {
 import { AppError } from '../middleware/errorHandler'
 import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { recordMovement } from './stock.service'
+import { billLineShare } from './brandStock.service'
 import { assertSampleStoreLines } from './sampleSourcing.service'
 
 /**
@@ -921,6 +922,9 @@ export async function moveNoteStock(
       unitPrice: Prisma.Decimal | number
       /** What one of the pack the price is per holds; stock is valued per piece. */
       uomFactor?: Prisma.Decimal | number
+      /** The receipt or bill line the goods trace to: their share (multi-brand phase 5). */
+      grnLineId?: string | null
+      billLineId?: string | null
     }>
   },
   /** POST moves the goods the way the note says; REVERSE puts them back. */
@@ -963,6 +967,8 @@ export async function moveNoteStock(
     const qty = round3(Number(line.qty))
     if (qty <= 0) continue
     await recordMovement(tx, {
+      // Multi-brand phase 5: the share the goods came in on, both ways.
+      brandId: await billLineShare(tx, { grnLineId: line.grnLineId, billLineId: line.billLineId }),
       itemId: line.itemId,
       warehouseId: note.warehouseId,
       direction,

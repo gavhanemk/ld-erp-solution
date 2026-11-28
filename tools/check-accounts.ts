@@ -44,8 +44,9 @@ async function main() {
   const [groups, ledgers, centres, brands] = await Promise.all([
     prisma.ledgerGroup.findMany({ select: { systemKey: true } }),
     prisma.ledger.findMany({ select: { name: true, systemKey: true, partyType: true, customerId: true, supplierId: true, brokerId: true, contractorId: true, bankAccountId: true } }),
-    prisma.costCentre.findMany({ select: { brandId: true } }),
-    prisma.brand.count(),
+    // A profit centre per own brand; customers' brands get none (made earlier ones stay, unused).
+    prisma.costCentre.findMany({ where: { brand: { type: { not: 'CUSTOM' } } }, select: { brandId: true } }),
+    prisma.brand.count({ where: { type: { not: 'CUSTOM' } } }),
   ])
   const keys = new Set(groups.map((g) => g.systemKey))
   check('every standard group is there', STANDARD_GROUPS.every((g) => keys.has(g.key)), `${groups.length} groups`)
@@ -63,7 +64,7 @@ async function main() {
   check('one ledger per broker and contractor', ledgers.filter((l) => l.brokerId).length === brokers && ledgers.filter((l) => l.contractorId).length === contractors)
   check('one ledger per bank account', ledgers.filter((l) => l.bankAccountId).length === banks, `${banks} banks`)
   check('ledger names are unique', new Set(ledgers.map((l) => l.name.toLowerCase())).size === ledgers.length)
-  check('one cost centre per brand', centres.filter((c) => c.brandId).length === brands, `${brands} brands`)
+  check('one profit centre per own brand', centres.filter((c) => c.brandId).length === brands, `${brands} own brands`)
   const series = await prisma.numberSeries.findMany({ where: { docType: { in: Object.values(VOUCHER_SERIES) } }, select: { docType: true } })
   check('a number series for each voucher type', new Set(series.map((s) => s.docType)).size === 4)
   const count = await prisma.ledger.count()
@@ -104,7 +105,9 @@ async function run(tx: Prisma.TransactionClient, userId: string) {
   const customer = await tx.ledger.findFirstOrThrow({ where: { partyType: 'CUSTOMER', isActive: true }, select: { id: true, name: true } })
   const indirect = await tx.ledgerGroup.findUniqueOrThrow({ where: { systemKey: 'INDIRECT_EXPENSES' } })
   const capitalGroup = await tx.ledgerGroup.findUniqueOrThrow({ where: { systemKey: 'CAPITAL' } })
-  const rent = await tx.ledger.create({ data: { name: 'Factory Rent (check)', groupId: indirect.id } })
+  // An expense ledger with its usual department, as every expense now needs one (phase 3).
+  const usualDept = await tx.department.findFirstOrThrow({ where: { isActive: true }, select: { id: true } })
+  const rent = await tx.ledger.create({ data: { name: 'Factory Rent (check)', groupId: indirect.id, departmentId: usualDept.id } })
   const capital = await tx.ledger.create({ data: { name: 'Partners Capital (check)', groupId: capitalGroup.id } })
   const brand = await tx.costCentre.findFirstOrThrow({ where: { isActive: true }, select: { id: true } })
 

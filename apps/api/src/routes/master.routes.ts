@@ -5,7 +5,7 @@ import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { samplingEnabled } from '../lib/pilot'
 import { crudRouter, type DeleteUse } from '../lib/crud'
-import { nextStyleCode } from '../lib/masterCode'
+import { nextBrandCode, nextMasterCode, nextStyleCode } from '../lib/masterCode'
 import { createRouting, deleteRouting, bomFabrics, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
 import { similarRoutings } from '../services/routingSimilarity.service'
 import { styleOrderStages } from '../services/styleOrders.service'
@@ -1063,6 +1063,8 @@ router.use(
     },
     filters: {
       brandType: { where: (v) => ({ brandType: { in: v } }), facets: ['brandType'] },
+      // By the brand itself: Stich Code's styles apart from LD Cotton Mills'.
+      brandId: { where: (v) => ({ brandId: { in: v } }), facets: ['brandId'] },
       // DEVELOPMENT (still in sampling) or PRODUCTION. Left out lists both, as
       // the Styles master does; order, BOM and production pickers ask for
       // PRODUCTION. A value that is neither matches nothing.
@@ -1096,7 +1098,7 @@ router.use(
         facets: ['colour'],
       },
     },
-    facets: ['brandType', 'stage', 'category', 'season', 'fabricType', 'fit', 'sizeGroupId', 'colour'],
+    facets: ['brandType', 'brandId', 'stage', 'category', 'season', 'fabricType', 'fit', 'sizeGroupId', 'colour'],
     // Colours are a list on each style, so they are counted one by one: a
     // style in White and Navy counts once under each.
     customFacets: {
@@ -1306,6 +1308,16 @@ router.use(
     permanentDelete: WAREHOUSE_USES,
     beforeSave: async (data, before) => {
       const purpose = data.purpose as string | undefined
+      // A process floor is work in progress; a sample store is for samples, and
+      // only a sample store is.
+      const samples = (purpose ?? before?.purpose) === 'SAMPLING'
+      if (before?.departmentId && data.kind && data.kind !== 'WIP') {
+        throw new AppError(`${String(before.name)} is a process floor, so its stock is work in progress.`, 400, 'FLOOR_KIND')
+      }
+      if (samples) data.kind = 'SAMPLE'
+      else if (data.kind === 'SAMPLE') {
+        throw new AppError('Only a sample store holds samples. Set what the store is for to sample material instead.', 400, 'SAMPLE_KIND')
+      } else if (purpose === 'GENERAL' && before?.kind === 'SAMPLE' && !data.kind) data.kind = 'GENERAL'
       if (purpose === 'SAMPLING' && before?.purpose !== 'SAMPLING' && !samplingEnabled()) {
         throw new AppError(
           'Sampling is not switched on here, so no store can be a sample store.',
@@ -1337,6 +1349,67 @@ router.use(
   }),
 )
 
+/**
+ * The multi-brand plan's cost centres, on request: the departments it names
+ * that are not there yet (Production, Quality Control, Administration,
+ * Purchase, Sales & Marketing, Maintenance, Shared Overheads), and today's
+ * departments rolled up under them — the four QC departments under Quality
+ * Control, the production departments under Production, Accounts and HR &
+ * Admin under Administration. A department already rolled up somewhere is
+ * left where it is; nothing is renamed or merged, so routings are untouched.
+ * Safe to run again.
+ */
+const STANDARD_COST_CENTRES: Array<{ name: string; parent?: string; under: string[] }> = [
+  { name: 'Production', under: ['CUT', 'Cutting', 'FUS', 'Fusing', 'EMB', 'Embroidery', 'STI', 'Stitching', 'KAJ', 'Kaj Button', 'WSH', 'Washing', 'FIN', 'Finishing', 'PKG', 'Packing', 'JW', 'Job Work'] },
+  { name: 'Quality Control', parent: 'Production', under: ['CUTQC', 'Cutting QC', 'EMBQC', 'Embroidery QC', 'LINEQC', 'Line QC', 'FINQC', 'Final QC'] },
+  { name: 'Administration', under: ['ACC', 'Accounts', 'HR', 'HR & Admin'] },
+  { name: 'Purchase', under: [] },
+  { name: 'Sales & Marketing', under: [] },
+  { name: 'Maintenance', under: [] },
+  { name: 'Shared Overheads', under: [] },
+]
+
+router.post('/departments/standard-cost-centres', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { companyId } = (await currentCompanyId()) as { companyId: string }
+  const created: string[] = []
+  const linked: string[] = []
+  const all = await prisma.department.findMany({ select: { id: true, name: true, code: true, parentId: true } })
+  const byName = (n: string) => all.find((d) => d.name.trim().toLowerCase() === n.toLowerCase())
+  for (const c of STANDARD_COST_CENTRES) {
+    if (byName(c.name)) continue
+    const code = await nextMasterCode('department', { name: c.name })
+    const made = await prisma.department.create({ data: { companyId, name: c.name, code }, select: { id: true, name: true, code: true, parentId: true } })
+    all.push(made)
+    created.push(made.name)
+  }
+  for (const c of STANDARD_COST_CENTRES) {
+    const top = byName(c.name)!
+    if (c.parent && !top.parentId) {
+      const parent = byName(c.parent)!
+      await prisma.department.update({ where: { id: top.id }, data: { parentId: parent.id } })
+      top.parentId = parent.id
+      linked.push(`${top.name} → ${parent.name}`)
+    }
+    const wanted = new Set(c.under.map((u) => u.toLowerCase()))
+    for (const d of all) {
+      if (d.parentId || d.id === top.id) continue
+      if (!wanted.has(d.code.toLowerCase()) && !wanted.has(d.name.trim().toLowerCase())) continue
+      await prisma.department.update({ where: { id: d.id }, data: { parentId: top.id } })
+      d.parentId = top.id
+      linked.push(`${d.name} → ${top.name}`)
+    }
+  }
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'Department', entityId: 'standard-cost-centres', after: { created, linked } })
+  res.json({
+    success: true,
+    message:
+      created.length || linked.length
+        ? `${created.length ? `Added ${created.join(', ')}. ` : ''}${linked.length ? `Rolled up: ${linked.join('; ')}.` : ''}`.trim()
+        : 'Every cost centre is already there and rolled up.',
+    data: { created, linked },
+  })
+})
+
 router.use(
   '/departments',
   crudRouter({
@@ -1352,12 +1425,27 @@ router.use(
     sortableFields: ['name', 'code'],
     defaultSort: { field: 'name', order: 'asc' },
     // The counts say what a department is holding up before anyone renames or
-    // deactivates it.
+    // deactivates it; the parent, what it rolls up into as a cost centre.
     include: {
       operations: true,
+      parent: { select: { id: true, name: true } },
       _count: {
         select: Object.fromEntries(Object.keys(DEPARTMENT_USES).map((k) => [k, true])),
       },
+    },
+    beforeSave: async (data, before) => {
+      // A department rolls up into another, never into itself or one below it.
+      if (data.parentId) {
+        const self = before ? String(before.id) : null
+        let at: string | null = String(data.parentId)
+        for (let guard = 0; at && guard < 50; guard++) {
+          if (at === self) throw new AppError('A department cannot roll up into itself or into one that rolls up into it.', 400, 'PARENT_LOOP')
+          const up: { parentId: string | null } | null = await prisma.department.findUnique({ where: { id: at }, select: { parentId: true } })
+          if (!up) throw new AppError('That parent department does not exist', 400, 'BAD_PARENT')
+          at = up.parentId
+        }
+      }
+      return { data }
     },
     // A department is a process when the floor works in it: it has at least
     // one process in use under Routing Masters → Processes. Accounts, HR &
@@ -1852,6 +1940,94 @@ router.use(
   }),
 )
 
+/**
+ * A brand's save, checked: its code (made from the name when left out), the
+ * default brand (only one of our own, switched on, and never left without
+ * one), its finished-goods store (a store, not a process floor or a sample
+ * store) and its profit centre's name (free). The profit centre name and the
+ * default flag are written after the save, by `brandAfterSave`.
+ */
+async function brandBeforeSave(data: Record<string, unknown>, before?: Record<string, unknown>) {
+  const { profitCentreName, isDefault, ...out } = data
+  const type = String(out.type ?? before?.type ?? '')
+  const name = String(out.name ?? before?.name ?? '')
+
+  if (!before && !out.code) out.code = await nextBrandCode(name, type)
+  if (before && !out.code) delete out.code
+
+  if (isDefault === true) {
+    if (type === 'CUSTOM') throw new AppError("A customer's brand cannot be the default brand. Pick one of your own.", 400, 'DEFAULT_BRAND')
+    if ((out.isActive ?? before?.isActive) === false) throw new AppError('Switch the brand on before making it the default.', 400, 'DEFAULT_BRAND')
+  } else if (isDefault === false && before?.isDefault) {
+    throw new AppError(`${before.name} is the default brand. To change that, make another brand the default.`, 409, 'DEFAULT_BRAND')
+  }
+  if (before?.isDefault && type === 'CUSTOM') {
+    throw new AppError(`${before.name} is the default brand, so it stays one of your own.`, 409, 'DEFAULT_BRAND')
+  }
+
+  if (out.defaultWarehouseId === '') out.defaultWarehouseId = null
+  if (out.defaultWarehouseId) {
+    const w = await prisma.warehouse.findUnique({
+      where: { id: String(out.defaultWarehouseId) },
+      select: { name: true, isActive: true, departmentId: true, purpose: true },
+    })
+    if (!w) throw new AppError('That store does not exist', 400, 'BAD_STORE')
+    if (!w.isActive) throw new AppError(`${w.name} is switched off`, 400, 'BAD_STORE')
+    if (w.departmentId) throw new AppError(`${w.name} is a process floor. Pick the store its finished goods are kept in.`, 400, 'BAD_STORE')
+    if (w.purpose === 'SAMPLING') throw new AppError(`${w.name} holds samples. Pick the store its finished goods are kept in.`, 400, 'BAD_STORE')
+  }
+
+  const wanted = typeof profitCentreName === 'string' ? profitCentreName.trim() : ''
+  if (wanted) {
+    const own = before ? await prisma.costCentre.findUnique({ where: { brandId: String(before.id) }, select: { id: true } }) : null
+    const clash = await prisma.costCentre.findFirst({
+      where: { name: { equals: wanted, mode: 'insensitive' }, ...(own ? { id: { not: own.id } } : {}) },
+      select: { name: true },
+    })
+    if (clash) throw new AppError(`There is already a profit centre called ${clash.name}.`, 409, 'NAME_TAKEN')
+  }
+  return { data: out }
+}
+
+/**
+ * What follows a brand's save: the default switched over in one step (the
+ * old default off, this one on), and an own brand's profit centre made if it
+ * has none, with the brand's code, the name given and its on/off state.
+ */
+async function brandAfterSave(saved: Record<string, any>, input: Record<string, unknown>) {
+  if (input.isDefault === true && !saved.isDefault) {
+    await prisma.$transaction([
+      prisma.brand.updateMany({ where: { isDefault: true, id: { not: saved.id } }, data: { isDefault: false } }),
+      prisma.brand.update({ where: { id: saved.id }, data: { isDefault: true } }),
+    ])
+  }
+  if (saved.type === 'CUSTOM') return
+  // A fresh install has no default yet: LD Cotton Mills takes it when it is
+  // added, or the first own brand does — whichever comes first. It can be
+  // moved to another brand afterwards.
+  if (saved.isActive && !(await prisma.brand.count({ where: { isDefault: true } }))) {
+    const others = await prisma.brand.count({ where: { type: { not: 'CUSTOM' }, isActive: true, id: { not: saved.id } } })
+    if (/ld\s*cotton/i.test(String(saved.name)) || others === 0) {
+      await prisma.brand.update({ where: { id: saved.id }, data: { isDefault: true } })
+    }
+  }
+  const wanted = typeof input.profitCentreName === 'string' ? input.profitCentreName.trim() : ''
+  const centre = await prisma.costCentre.findUnique({ where: { brandId: saved.id } })
+  if (!centre) {
+    let name = wanted || saved.name
+    for (let n = 2; await prisma.costCentre.findFirst({ where: { name: { equals: name, mode: 'insensitive' } }, select: { id: true } }); n++) {
+      name = `${wanted || saved.name} (${n})`
+    }
+    await prisma.costCentre.create({ data: { name, code: saved.code, brandId: saved.id, isActive: saved.isActive } })
+    return
+  }
+  const data: Record<string, unknown> = {}
+  if (centre.code !== saved.code) data.code = saved.code
+  if (centre.isActive !== saved.isActive) data.isActive = saved.isActive
+  if (wanted && wanted !== centre.name) data.name = wanted
+  if (Object.keys(data).length) await prisma.costCentre.update({ where: { id: centre.id }, data })
+}
+
 router.use(
   '/brands',
   crudRouter({
@@ -1861,14 +2037,28 @@ router.use(
     createSchema: createBrandSchema,
     updateSchema: updateBrandSchema,
     injectOnCreate: currentCompanyId,
-    // How many orders carry each brand, so nobody switches one off unaware.
-    include: { _count: { select: { salesOrders: true, manufacturingOrders: true } } },
-    searchFields: ['name', 'description'],
-    sortableFields: ['name', 'createdAt'],
+    // How many orders carry each brand, so nobody switches one off unaware;
+    // its profit centre in Accounts, and its finished-goods store.
+    include: {
+      _count: { select: { salesOrders: true, manufacturingOrders: true } },
+      costCentre: { select: { id: true, name: true, code: true } },
+      defaultWarehouse: { select: { id: true, name: true } },
+    },
+    searchFields: ['name', 'description', 'code'],
+    sortableFields: ['name', 'code', 'createdAt'],
     defaultSort: { field: 'name', order: 'asc' },
-    // In House Brands (LD Cotton Mills, VHAGAR) and customers' brands (Custom) are listed apart.
+    uniqueFields: ['code'],
+    // In House Brands (our own) and customers' brands (Custom) are listed apart.
     filters: {
       type: { where: (v) => ({ type: { in: v.filter((t) => ['LD_COTTON_MILLS', 'VHAGAR', 'CUSTOM'].includes(t)) } }) },
+      own: { where: (v) => (v.includes('true') ? { type: { not: 'CUSTOM' } } : {}) },
+    },
+    beforeSave: brandBeforeSave,
+    afterSave: brandAfterSave,
+    beforeDeactivate: async (before) => {
+      if (before.isDefault) {
+        throw new AppError(`${before.name} is the default brand: B2B and job work are booked under it. Make another brand the default first.`, 409, 'DEFAULT_BRAND')
+      }
     },
   }),
 )

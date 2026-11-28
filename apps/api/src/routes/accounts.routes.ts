@@ -2,9 +2,10 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { LedgerParty, Prisma, VoucherKind, VoucherState } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
-import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
+import { createOnce, requestIdOf } from '../lib/onceFor'
 import { ensureChart } from '../services/accounts/chart.service'
 import {
   booksSettings,
@@ -21,7 +22,9 @@ import {
   todayIst,
   trialBalance,
 } from '../services/accounts/books.service'
-import { cancelVoucher, moneyGroupIds, voucherSchema, writeVoucher } from '../services/accounts/voucher.service'
+import { cancelVoucher, moneyGroupIds, reverseVoucher, voucherSchema, writeVoucher } from '../services/accounts/voucher.service'
+import { checkDatesChange, datesChangeOf, periodEvents, recordDatesChange, refuseClosedRegroup, REOPEN_RIGHT, tellAdminsReopened } from '../services/accounts/period.service'
+import { describeChange, type VoucherSnap } from '../services/accounts/revision.service'
 import { pendingDocuments, postPending, SOURCE_LABEL } from '../services/accounts/posting.service'
 import { outstanding } from '../services/accounts/outstanding.service'
 import { bankReco, setBankDates } from '../services/accounts/bankReco.service'
@@ -100,6 +103,8 @@ router.get('/summary', requirePermission(MODULE, 'view'), async (_req, res) => {
 const settingsSchema = z.object({
   booksStart: ymd.optional(),
   lockedUpTo: ymd.nullable().optional(),
+  /** Why: needed to reopen a closed period, or to move the start once it is set. */
+  reason: z.string().trim().max(500).optional().nullable(),
 })
 
 /**
@@ -113,6 +118,8 @@ router.patch('/settings', requirePermission(MODULE, 'approve'), async (req: Auth
   const company = await prisma.company.findFirst({ select: { id: true } })
   if (!company) throw new AppError('Company profile is not set up yet', 409, 'NO_COMPANY')
   const before = await booksSettings(prisma)
+  // Reopening needs its own right and a reason; moving a set start, a reason.
+  checkDatesChange(before, body, userCan(req.user, REOPEN_RIGHT, 'approve'))
   const start = body.booksStart ?? before.booksStart
   if (body.booksStart && body.booksStart !== before.booksStart) {
     // A voucher typed here stays; one written by a document simply leaves the
@@ -139,19 +146,29 @@ router.patch('/settings', requirePermission(MODULE, 'approve'), async (req: Auth
       }
     }
   }
-  await prisma.company.update({
-    where: { id: company.id },
-    data: {
-      ...(body.booksStart ? { booksStartDate: dayValue(body.booksStart) } : {}),
-      ...(body.lockedUpTo !== undefined ? { booksLockedUpTo: body.lockedUpTo ? dayValue(body.lockedUpTo) : null } : {}),
-    },
+  // The dates and their events are written together: neither without the other.
+  const { events, userName } = await prisma.$transaction(async (tx) => {
+    await tx.company.update({
+      where: { id: company.id },
+      data: {
+        ...(body.booksStart ? { booksStartDate: dayValue(body.booksStart) } : {}),
+        ...(body.lockedUpTo !== undefined ? { booksLockedUpTo: body.lockedUpTo ? dayValue(body.lockedUpTo) : null } : {}),
+      },
+    })
+    return recordDatesChange(tx, before, body, req.user!.id)
   })
   const after = await booksSettings(prisma)
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'BooksSettings', entityId: company.id, before, after })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'BooksSettings', entityId: company.id, before, after: { ...after, reason: body.reason ?? null, events } })
+  if (datesChangeOf(before, body).reopening) await tellAdminsReopened(prisma, before, body, userName)
   // A new start brings the documents from that day into the books, and takes
   // out the ones now before it.
   const posting = after.booksStart !== before.booksStart ? await postPending(prisma, req.user!.id) : null
   res.json({ success: true, data: after, posting })
+})
+
+/** GET /api/accounts/settings/events — every closing, reopening and move of the start, with who and why. */
+router.get('/settings/events', requirePermission(MODULE, 'view'), async (_req, res) => {
+  res.json({ success: true, data: await periodEvents(prisma) })
 })
 
 // ═══════════════════════════════════════════
@@ -317,6 +334,8 @@ const ledgerSelect = {
   pan: true,
   gstin: true,
   notes: true,
+  costCentre: { select: { id: true, name: true } },
+  department: { select: { id: true, name: true } },
   isActive: true,
   createdAt: true,
   updatedAt: true,
@@ -343,6 +362,9 @@ function shapeLedger(l: LedgerRow, money: Set<string>) {
     pan: l.pan,
     gstin: l.gstin,
     notes: l.notes,
+    /** Its usual brand and department, for an income or expense ledger. */
+    costCentre: l.costCentre,
+    department: l.department,
     isActive: l.isActive,
     createdAt: l.createdAt,
     updatedAt: l.updatedAt,
@@ -408,8 +430,40 @@ const ledgerSchema = z.object({
     .nullable()
     .or(z.literal('')),
   notes: z.string().trim().max(500).optional().nullable(),
+  /** An income or expense ledger's usual brand (profit centre) and department (cost centre). */
+  costCentreId: z.string().optional().nullable(),
+  departmentId: z.string().optional().nullable(),
   isActive: z.boolean().optional(),
 })
+
+/**
+ * A ledger's usual brand and department, checked: in use, and only on an
+ * income or expense ledger — a bank, party or tax ledger carries neither.
+ */
+async function ledgerDefaults(
+  body: { costCentreId?: string | null; departmentId?: string | null },
+  nature: string,
+  name: string,
+): Promise<{ costCentreId?: string | null; departmentId?: string | null }> {
+  const out: { costCentreId?: string | null; departmentId?: string | null } = {}
+  const pl = nature === 'INCOME' || nature === 'EXPENSE'
+  for (const [key, what] of [['costCentreId', 'brand'], ['departmentId', 'department']] as const) {
+    const v = body[key]
+    if (v === undefined) continue
+    if (!v) {
+      out[key] = null
+      continue
+    }
+    if (!pl) throw new AppError(`A usual ${what} goes on an income or expense ledger only, not on ${name}.`, 400, 'DEFAULT_PL_ONLY')
+    const found =
+      key === 'costCentreId'
+        ? await prisma.costCentre.findUnique({ where: { id: v }, select: { isActive: true } })
+        : await prisma.department.findUnique({ where: { id: v }, select: { isActive: true } })
+    if (!found?.isActive) throw new AppError(`That ${what} is not in use.`, 400, key === 'costCentreId' ? 'NO_COST_CENTRE' : 'NO_DEPARTMENT')
+    out[key] = v
+  }
+  return out
+}
 
 /** Opening balances are as at the day the books start; once that day is closed they are too. */
 async function refuseClosedOpening() {
@@ -425,8 +479,10 @@ router.post('/ledgers', requirePermission(MODULE, 'create'), async (req: AuthReq
   if (!group) throw new AppError('That group does not exist', 400, 'NO_GROUP')
   await refuseNameClash('ledger', body.name)
   if (body.openingBalance) await refuseClosedOpening()
+  const defaults = await ledgerDefaults(body, group.nature, body.name)
   const made = await prisma.ledger.create({
     data: {
+      ...defaults,
       name: body.name,
       groupId: group.id,
       openingBalance: r2(body.openingBalance ?? 0),
@@ -467,6 +523,7 @@ router.patch('/ledgers/:id', requirePermission(MODULE, 'edit'), async (req: Auth
     if ((before.systemKey || before.partyType) && group.nature !== before.group.nature) {
       throw new AppError(`${before.name} can only move to another ${before.group.nature.toLowerCase()} group.`, 409, 'OTHER_NATURE')
     }
+    await refuseClosedRegroup(prisma, before, before.group.nature, group.nature)
     data.group = { connect: { id: group.id } }
   }
   if (body.openingBalance !== undefined && r2(body.openingBalance) !== Number(before.openingBalance)) {
@@ -482,6 +539,17 @@ router.patch('/ledgers/:id', requirePermission(MODULE, 'edit'), async (req: Auth
   if (body.pan !== undefined) data.pan = body.pan || null
   if (body.gstin !== undefined) data.gstin = body.gstin || null
   if (body.notes !== undefined) data.notes = body.notes || null
+  {
+    const nature = body.groupId && body.groupId !== before.groupId ? ((await prisma.ledgerGroup.findUnique({ where: { id: body.groupId }, select: { nature: true } }))?.nature ?? before.group.nature) : before.group.nature
+    const d = await ledgerDefaults(body, nature, before.name)
+    if (d.costCentreId !== undefined) data.costCentre = d.costCentreId ? { connect: { id: d.costCentreId } } : { disconnect: true }
+    if (d.departmentId !== undefined) data.department = d.departmentId ? { connect: { id: d.departmentId } } : { disconnect: true }
+    // Moved to a balance-sheet group: it carries no brand or department any more.
+    if (nature !== 'INCOME' && nature !== 'EXPENSE') {
+      if (before.costCentre) data.costCentre = { disconnect: true }
+      if (before.department) data.department = { disconnect: true }
+    }
+  }
   if (body.isActive !== undefined && body.isActive !== before.isActive) {
     if (before.partyType) throw new AppError(`${before.name} is switched on and off with its ${PARTY_LABEL[before.partyType].toLowerCase()}.`, 409, 'PARTY_ACTIVE')
     if (before.systemKey && !body.isActive) throw new AppError(`${before.name} is used by the posting rules and stays on.`, 409, 'SYSTEM_LEDGER')
@@ -569,7 +637,8 @@ router.get('/ledgers/:id/bills', requirePermission(MODULE, 'view'), async (req, 
 
 router.get('/cost-centres', requirePermission(MODULE, 'view'), async (_req, res) => {
   await ensureChart()
-  const rows = await prisma.costCentre.findMany({ orderBy: { name: 'asc' }, include: { brand: { select: { id: true, name: true } } } })
+  // With the brand's kind: the voucher's Brand box offers our own brands' profit centres only.
+  const rows = await prisma.costCentre.findMany({ orderBy: { name: 'asc' }, include: { brand: { select: { id: true, name: true, type: true } } } })
   res.json({ success: true, data: rows })
 })
 
@@ -662,7 +731,7 @@ router.get('/vouchers', requirePermission(MODULE, 'view'), async (req, res) => {
         createdBy: { select: { name: true } },
         lines: {
           orderBy: { sortOrder: 'asc' },
-          select: { debit: true, credit: true, ledger: { select: { id: true, name: true } }, costCentre: { select: { name: true } } },
+          select: { debit: true, credit: true, ledger: { select: { id: true, name: true } }, costCentre: { select: { name: true } }, department: { select: { name: true } } },
         },
       },
     }),
@@ -676,7 +745,7 @@ router.get('/vouchers', requirePermission(MODULE, 'view'), async (req, res) => {
       date: istDay(v.date),
       kindLabel: KIND_LABEL[v.kind],
       amount: Number(v.amount),
-      lines: v.lines.map((l) => ({ ledgerId: l.ledger.id, ledger: l.ledger.name, debit: Number(l.debit), credit: Number(l.credit), costCentre: l.costCentre?.name ?? null })),
+      lines: v.lines.map((l) => ({ ledgerId: l.ledger.id, ledger: l.ledger.name, debit: Number(l.debit), credit: Number(l.credit), costCentre: l.costCentre?.name ?? null, department: l.department?.name ?? null })),
     })),
     period,
     totalAmount: Number(sums._sum.amount ?? 0),
@@ -688,6 +757,7 @@ const voucherDetail = {
   id: true,
   kind: true,
   voucherNo: true,
+  legacyImport: true,
   financialYear: true,
   date: true,
   narration: true,
@@ -715,6 +785,7 @@ const voucherDetail = {
       narration: true,
       bankDate: true,
       costCentre: { select: { id: true, name: true } },
+      department: { select: { id: true, name: true } },
       ledger: { select: { id: true, name: true, billWise: true, groupId: true, group: { select: { name: true, nature: true } } } },
       billRefs: { select: { kind: true, billNo: true, billDate: true, dueDate: true, amount: true } },
     },
@@ -743,6 +814,7 @@ function shapeVoucher(v: Awaited<ReturnType<typeof loadVoucher>>, money: Set<str
       narration: l.narration,
       bankDate: l.bankDate ? istDay(l.bankDate) : null,
       costCentre: l.costCentre,
+      department: l.department,
       ledger: { id: l.ledger.id, name: l.ledger.name, billWise: l.ledger.billWise, group: l.ledger.group.name, nature: l.ledger.group.nature, isMoney: money.has(l.ledger.groupId) },
       bills: l.billRefs.map((b) => ({
         kind: b.kind,
@@ -755,9 +827,14 @@ function shapeVoucher(v: Awaited<ReturnType<typeof loadVoucher>>, money: Set<str
   }
 }
 
-/** A voucher, with every change made to it — the edit log the Companies Act asks for. */
+/**
+ * A voucher, with every change made to it — the edit log the Companies Act
+ * asks for: its revisions (each holding the voucher as it stood before the
+ * change), the entry that reversed it or the one it reverses, and the audit
+ * trail's entries from before revisions were kept.
+ */
 router.get('/vouchers/:id', requirePermission(MODULE, 'view'), async (req, res) => {
-  const [v, money, history] = await Promise.all([
+  const [v, money, audit, revisions, links] = await Promise.all([
     loadVoucher(req.params.id),
     moneyGroupIds(prisma),
     prisma.auditLog.findMany({
@@ -765,8 +842,120 @@ router.get('/vouchers/:id', requirePermission(MODULE, 'view'), async (req, res) 
       orderBy: { createdAt: 'asc' },
       select: { id: true, action: true, createdAt: true, before: true, after: true, user: { select: { name: true } } },
     }),
+    prisma.voucherRevision.findMany({
+      where: { voucherId: req.params.id },
+      orderBy: { revision: 'asc' },
+      select: { revision: true, action: true, reason: true, source: true, changedByName: true, changedAt: true, periodEventId: true, snapshot: true },
+    }),
+    prisma.voucher.findUnique({
+      where: { id: req.params.id },
+      select: {
+        reversalOf: { select: { id: true, voucherNo: true, date: true } },
+        reversals: { orderBy: { createdAt: 'asc' }, select: { id: true, voucherNo: true, date: true, status: true } },
+      },
+    }),
   ])
-  res.json({ success: true, data: { ...shapeVoucher(v, money), history } })
+  // Since revisions are kept, a change writes one and an audit entry just after; only the older entries add to them.
+  const firstKept = revisions[0]?.changedAt
+  const history = firstKept ? audit.filter((h) => h.action === 'CREATE' || h.createdAt < firstKept) : audit
+  // What each change did: the voucher before it against the voucher before the next one, or as it stands now.
+  const now = revisions.length
+    ? await prisma.voucher.findUnique({ where: { id: req.params.id }, include: { lines: { orderBy: { sortOrder: 'asc' }, include: { billRefs: true } } } })
+    : null
+  const snaps = [...revisions.map((r) => r.snapshot as unknown as VoucherSnap), ...(now ? [now as unknown as VoucherSnap] : [])]
+  const idsOf = (pick: (l: VoucherSnap['lines'][number]) => string | null) => [...new Set(snaps.flatMap((s) => s.lines.map(pick)).filter((x): x is string => !!x))]
+  const [ledgerNames, brandNames, deptNames] = revisions.length
+    ? await Promise.all([
+        prisma.ledger.findMany({ where: { id: { in: idsOf((l) => l.ledgerId) } }, select: { id: true, name: true } }),
+        prisma.costCentre.findMany({ where: { id: { in: idsOf((l) => l.costCentreId) } }, select: { id: true, name: true } }),
+        prisma.department.findMany({ where: { id: { in: idsOf((l) => l.departmentId) } }, select: { id: true, name: true } }),
+      ])
+    : [[], [], []]
+  const named = (rows: Array<{ id: string; name: string }>, id: string | null, none: string) => (id ? (rows.find((r) => r.id === id)?.name ?? '(no longer in the chart)') : none)
+  const names = {
+    ledger: (id: string) => named(ledgerNames, id, ''),
+    brand: (id: string | null) => named(brandNames, id, 'Not split'),
+    department: (id: string | null) => named(deptNames, id, 'none'),
+  }
+  res.json({
+    success: true,
+    data: {
+      ...shapeVoucher(v, money),
+      history,
+      revisions: revisions.map(({ snapshot: _kept, ...r }, i) => ({ ...r, changes: describeChange(snaps[i], snaps[i + 1], names) })),
+      reversalOf: links?.reversalOf ? { ...links.reversalOf, date: istDay(links.reversalOf.date) } : null,
+      reversals: (links?.reversals ?? []).map((r) => ({ ...r, date: istDay(r.date) })),
+    },
+  })
+})
+
+/** GET /api/accounts/vouchers/:id/revisions/:n — the voucher exactly as it stood before change n. */
+router.get('/vouchers/:id/revisions/:n', requirePermission(MODULE, 'view'), async (req, res) => {
+  const rev = await prisma.voucherRevision.findUnique({ where: { voucherId_revision: { voucherId: req.params.id, revision: Number(req.params.n) || 0 } } })
+  if (!rev) throw new AppError('That revision does not exist', 404, 'NOT_FOUND')
+  type Snap = {
+    voucherNo: string
+    kind: VoucherKind
+    date: string
+    narration: string | null
+    amount: string
+    status: VoucherState
+    cancelReason: string | null
+    mode: string | null
+    referenceNo: string | null
+    chequeNo: string | null
+    lines: Array<{
+      ledgerId: string
+      debit: string
+      credit: string
+      costCentreId: string | null
+      departmentId: string | null
+      narration: string | null
+      bankDate: string | null
+      billRefs: Array<{ kind: string; billNo: string; amount: string }>
+    }>
+  }
+  const snap = rev.snapshot as unknown as Snap
+  const ids = (pick: (l: Snap['lines'][number]) => string | null) => [...new Set(snap.lines.map(pick).filter((x): x is string => !!x))]
+  const [ledgers, centres, depts] = await Promise.all([
+    prisma.ledger.findMany({ where: { id: { in: ids((l) => l.ledgerId) } }, select: { id: true, name: true } }),
+    prisma.costCentre.findMany({ where: { id: { in: ids((l) => l.costCentreId) } }, select: { id: true, name: true } }),
+    prisma.department.findMany({ where: { id: { in: ids((l) => l.departmentId) } }, select: { id: true, name: true } }),
+  ])
+  const nameOf = (rows: Array<{ id: string; name: string }>, id: string | null) => (id ? (rows.find((r) => r.id === id)?.name ?? '(no longer in the chart)') : null)
+  res.json({
+    success: true,
+    data: {
+      revision: rev.revision,
+      action: rev.action,
+      reason: rev.reason,
+      source: rev.source,
+      changedByName: rev.changedByName,
+      changedAt: rev.changedAt,
+      voucher: {
+        voucherNo: snap.voucherNo,
+        kindLabel: KIND_LABEL[snap.kind],
+        date: istDay(new Date(snap.date)),
+        narration: snap.narration,
+        amount: Number(snap.amount),
+        status: snap.status,
+        cancelReason: snap.cancelReason,
+        mode: snap.mode,
+        referenceNo: snap.referenceNo,
+        chequeNo: snap.chequeNo,
+        lines: snap.lines.map((l) => ({
+          ledger: nameOf(ledgers, l.ledgerId),
+          debit: Number(l.debit),
+          credit: Number(l.credit),
+          costCentre: nameOf(centres, l.costCentreId),
+          department: nameOf(depts, l.departmentId),
+          narration: l.narration,
+          bankDate: l.bankDate ? istDay(new Date(l.bankDate)) : null,
+          bills: l.billRefs.map((b) => ({ kind: b.kind, billNo: b.billNo, amount: Math.abs(Number(b.amount)) })),
+        })),
+      },
+    },
+  })
 })
 
 /** GET /api/accounts/vouchers/:id/print — the voucher as it is filed, signed for. */
@@ -777,27 +966,65 @@ router.get('/vouchers/:id/print', requirePermission(MODULE, 'view'), async (req,
 
 router.post('/vouchers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const input = voucherSchema.parse(req.body)
+  // Expense lines without a department come in only as a marked legacy import, by an approver.
+  if (input.legacyImport && !userCan(req.user, MODULE, 'approve')) {
+    throw new AppError('Only someone who approves in Accounts may bring a voucher in without departments as a legacy import.', 403, 'LEGACY_IMPORT_NOT_ALLOWED')
+  }
   await ensureChart()
-  const made = await prisma.$transaction((tx) => writeVoucher(tx, input, req.user!.id), { timeout: 30_000 })
-  const v = await loadVoucher(made.id)
-  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'Voucher', entityId: made.id, after: shapeVoucher(v, await moneyGroupIds(prisma)) })
-  res.status(201).json({ success: true, data: { id: made.id, voucherNo: made.voucherNo }, message: `${KIND_LABEL[input.kind]} ${made.voucherNo} saved` })
+  // A double click or a retry saves it once: the voucher form sends one request id until it saves.
+  const { doc: made, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'VOUCHER',
+    userId: req.user!.id,
+    make: async (tx) => {
+      const v = await writeVoucher(tx, input, req.user!.id)
+      return { id: v.id, voucherNo: v.voucherNo }
+    },
+    load: (id) => prisma.voucher.findUniqueOrThrow({ where: { id }, select: { id: true, voucherNo: true } }),
+    timeout: 30_000,
+  })
+  if (!repeat) {
+    const v = await loadVoucher(made.id)
+    await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'Voucher', entityId: made.id, after: shapeVoucher(v, await moneyGroupIds(prisma)) })
+  }
+  res.status(repeat ? 200 : 201).json({
+    success: true,
+    data: { id: made.id, voucherNo: made.voucherNo },
+    message: `${KIND_LABEL[input.kind]} ${made.voucherNo} saved${repeat ? '. (That was the same request again: nothing more was saved.)' : ''}`,
+    repeat,
+  })
 })
 
 /** Alters a voucher typed here. One written by a document changes only with its document. */
 router.patch('/vouchers/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const input = voucherSchema.parse(req.body)
+  const { alterReason } = z
+    .object({ alterReason: z.string({ required_error: 'Say why the voucher is being altered' }).trim().min(5, 'Say why the voucher is being altered').max(500) })
+    .parse(req.body)
   const before = await loadVoucher(req.params.id)
   if (before.status === 'CANCELLED') throw new AppError(`${before.voucherNo} is cancelled and cannot be changed`, 409, 'CANCELLED')
   if (before.sourceType) throw new AppError(`${before.voucherNo} was written by its document. Change the document, and the voucher follows it.`, 409, 'FROM_DOCUMENT')
   const money = await moneyGroupIds(prisma)
   await prisma.$transaction(
-    (tx) => writeVoucher(tx, input, req.user!.id, { id: before.id, kind: before.kind, voucherNo: before.voucherNo, financialYear: before.financialYear, date: before.date }),
+    (tx) => writeVoucher(tx, input, req.user!.id, { id: before.id, kind: before.kind, voucherNo: before.voucherNo, financialYear: before.financialYear, date: before.date, legacyImport: before.legacyImport, reason: alterReason }),
     { timeout: 30_000 },
   )
   const after = await loadVoucher(before.id)
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'Voucher', entityId: before.id, before: shapeVoucher(before, money), after: shapeVoucher(after, money) })
   res.json({ success: true, data: { id: before.id, voucherNo: before.voucherNo }, message: `${before.voucherNo} altered` })
+})
+
+/**
+ * POST /api/accounts/vouchers/:id/reverse — undoes a voucher typed here with a
+ * reversing entry on an open day, leaving the voucher itself as it was. The
+ * same people who may cancel a voucher may reverse one.
+ */
+router.post('/vouchers/:id/reverse', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
+  const { date, reason } = z.object({ date: ymd, reason: z.string({ required_error: 'Say why it is being reversed' }).trim().min(5, 'Say why it is being reversed').max(500) }).parse(req.body)
+  const made = await prisma.$transaction((tx) => reverseVoucher(tx, req.params.id, { date, reason }, req.user!.id), { timeout: 30_000 })
+  const v = await loadVoucher(made.id)
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'Voucher', entityId: made.id, after: { ...shapeVoucher(v, await moneyGroupIds(prisma)), reverses: made.original } })
+  res.status(201).json({ success: true, data: { id: made.id, voucherNo: made.voucherNo }, message: `${made.original} reversed by ${made.voucherNo}` })
 })
 
 router.post('/vouchers/:id/cancel', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
@@ -867,7 +1094,7 @@ const bankDatesSchema = z.object({
 
 router.patch('/bank-reco', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const { entries } = bankDatesSchema.parse(req.body)
-  const n = await prisma.$transaction((tx) => setBankDates(tx, entries))
+  const n = await prisma.$transaction((tx) => setBankDates(tx, entries, req.user!.id))
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'BankReconciliation', entityId: entries[0].lineId, after: { entries } })
   res.json({ success: true, message: `${n} bank date${n === 1 ? '' : 's'} saved` })
 })

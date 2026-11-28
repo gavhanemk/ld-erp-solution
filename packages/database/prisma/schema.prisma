@@ -547,6 +547,9 @@ enum TransactionType {
   /// A customer's own material arriving for us to work on. Held apart from
   /// PURCHASE because nothing was bought and nobody is owed.
   CUSTOMER_MATERIAL
+  /// Stock moved from one share of a balance to another in the same store:
+  /// earmarked for a brand, moved between brands, released to central.
+  REALLOCATION
 }
 
 enum VoucherType {
@@ -711,6 +714,12 @@ enum BOMCostBasis {
 // ═══════════════════════════════════════════
 
 model User {
+  materialExtrasAsked   MaterialExtra[]     @relation("MaterialExtraBy")
+  materialExtrasDecided MaterialExtra[]     @relation("MaterialExtraDecidedBy")
+  reallocationsRaised   StockReallocation[] @relation("ReallocationBy")
+  reallocationsApproved StockReallocation[] @relation("ReallocationApprovedBy")
+  reallocationsRejected StockReallocation[] @relation("ReallocationRejectedBy")
+  reallocationsReversed StockReallocation[] @relation("ReallocationReversedBy")
   id           String     @id @default(cuid())
   openingStocks OpeningStock[] @relation("OpeningStockCreatedBy")
   openingStocksReversed OpeningStock[] @relation("OpeningStockReversedBy")
@@ -759,6 +768,8 @@ model User {
   vouchersCreated        Voucher[]                 @relation("VoucherCreatedBy")
   vouchersUpdated        Voucher[]                 @relation("VoucherUpdatedBy")
   vouchersCancelled      Voucher[]                 @relation("VoucherCancelledBy")
+  voucherRevisions       VoucherRevision[]         @relation("VoucherRevisionBy")
+  periodEvents           PeriodEvent[]             @relation("PeriodEventBy")
   stockValuesSet         StockValue[]              @relation("StockValueSetBy")
   mosClosed              ManufacturingOrder[]      @relation("MOClosedBy")
   quotesCreated          SalesQuotation[]          @relation("QuoteCreatedBy")
@@ -768,7 +779,14 @@ model User {
   uploadedReceiptFiles   PaymentReceiptAttachment[] @relation("ReceiptAttachmentUploadedBy")
   uploadedEnquiryFiles PurchaseEnquiryAttachment[] @relation("EnquiryAttachmentUploadedBy")
   movedStock           StockTransfer[]             @relation("TransferMovedBy")
+  stockMovements       StockLedger[]               @relation("StockLedgerCreatedBy")
   cancelledStock       StockTransfer[]             @relation("TransferCancelledBy")
+  stockTransferReceipts StockTransferReceipt[]     @relation("TransferReceiptBy")
+  allocationRulesMade  AllocationRule[]           @relation("AllocationRuleBy")
+  allocationRunsMade   AllocationRun[]            @relation("AllocationRunBy")
+  allocationRunsApproved AllocationRun[]          @relation("AllocationRunApprovedBy")
+  allocationRunsPosted AllocationRun[]            @relation("AllocationRunPostedBy")
+  allocationRunsReversed AllocationRun[]          @relation("AllocationRunReversedBy")
   countedStock         StockAdjustment[]           @relation("AdjustmentMadeBy")
   receivedGoods        GRN[]                       @relation("GRNCreatedBy")
   uploadedGrnFiles     GRNAttachment[]             @relation("GRNAttachmentUploadedBy")
@@ -969,10 +987,19 @@ model Brand {
   companyId   String
   company     Company   @relation(fields: [companyId], references: [id])
   name        String
+  /// Short and unique: LD, ST, VH. New style codes of the brand start with it.
+  code        String?   @unique
   type        BrandType
   description String?
   logoUrl     String?
   isActive    Boolean   @default(true)
+  /// The own brand B2B and job work are booked under, and the one an order
+  /// falls back to when its styles do not say: LD Cotton Mills. Only one
+  /// (a partial unique index in the migration keeps it so).
+  isDefault   Boolean   @default(false)
+  /// Where its finished goods come in by default.
+  defaultWarehouseId String?
+  defaultWarehouse   Warehouse? @relation("BrandDefaultStore", fields: [defaultWarehouseId], references: [id], onDelete: SetNull)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -982,6 +1009,19 @@ model Brand {
   styles              Style[]
   costCentre          CostCentre?
   purchaseOrders      PurchaseOrder[]  @relation("PurchaseOrderBrand")
+  stockRows           StockLedger[]        @relation("StockLedgerBrand")
+  stockHolds          StockReservation[]   @relation("ReservationBrand")
+  stockPackages       StockPackage[]       @relation("PackageBrand")
+  garments            Garment[]            @relation("GarmentBrand")
+  transferLines       StockTransferLine[]  @relation("TransferLineBrand")
+  reallocationsFrom   StockReallocation[]  @relation("ReallocationFrom")
+  reallocationsTo     StockReallocation[]  @relation("ReallocationTo")
+  floorReturnLines    FloorReturnLine[]    @relation("FloorReturnLineBrand")
+  grnLines            GRNLine[]            @relation("GrnLineBrand")
+  openingLines        OpeningStockLine[]   @relation("OpeningLineBrand")
+  fgReceipts          FinishedGoodsReceipt[] @relation("FgReceiptBrand")
+  challanLines        DeliveryChallanLine[] @relation("ChallanLineBrand")
+  fgCartons           FgCarton[]           @relation("FgCartonBrand")
 
   @@map("brands")
 }
@@ -1231,6 +1271,8 @@ model ItemUnit {
 }
 
 model Item {
+  reallocationLines StockReallocationLine[] @relation("ReallocationLineItem")
+  materialExtras    MaterialExtra[]         @relation("MaterialExtraItem")
   sampleMaterials SampleMaterial[]
   sampleCloseOuts SampleCloseOut[]
 
@@ -1346,6 +1388,23 @@ enum StyleStage {
 enum WarehousePurpose {
   GENERAL
   SAMPLING
+}
+
+/// What kind of place a store is, so stock can be told apart by status: raw
+/// material, work in progress (a process floor), finished goods, held for QC,
+/// rejected, scrap, at a job worker, on the way, or for samples. GENERAL until
+/// someone says otherwise. Physical place only: no store is copied per brand.
+enum WarehouseKind {
+  GENERAL
+  RAW_MATERIAL
+  WIP
+  FINISHED_GOODS
+  QC_HOLD
+  REJECTED
+  SCRAP
+  JOB_WORK
+  TRANSIT
+  SAMPLE
 }
 
 model Style {
@@ -1732,6 +1791,7 @@ model Supplier {
 }
 
 model Warehouse {
+  reallocations     StockReallocation[] @relation("ReallocationStore")
   sampleMaterials SampleMaterial[]
   sampleCloseOutsFrom SampleCloseOut[] @relation("SampleCloseOutFrom")
   sampleCloseOutsTo   SampleCloseOut[] @relation("SampleCloseOutTo")
@@ -1747,6 +1807,8 @@ model Warehouse {
   /// apart from it: only sample purchases are received there, only Sampling
   /// issues from it, and general documents cannot draw on it (lib/sampleStore).
   purpose   WarehousePurpose @default(GENERAL)
+  /// What kind of place it is (see WarehouseKind). A process floor is WIP.
+  kind      WarehouseKind    @default(GENERAL)
   /// Set on a process's own floor (Cutting Floor, Stitching Floor…): the work
   /// in progress at that process is kept here, size by size. Empty for a store
   /// or an outside unit. One floor per process.
@@ -1762,6 +1824,8 @@ model Warehouse {
   purchaseOrders    PurchaseOrder[]
   transfersOut      StockTransfer[]           @relation("TransferFrom")
   transfersIn       StockTransfer[]           @relation("TransferTo")
+  /// Transfers whose goods went on the road through this store (kind TRANSIT).
+  transfersVia      StockTransfer[]           @relation("TransferVia")
   adjustments       StockAdjustment[]
 
   supplierPayments SupplierPayment[]
@@ -1771,6 +1835,8 @@ model Warehouse {
 
   reservations StockReservation[] @relation("WarehouseReservations")
   cuttingPanels CuttingOrder[] @relation("CuttingPanelStore")
+  /// Brands whose finished goods come into this store by default.
+  defaultForBrands Brand[] @relation("BrandDefaultStore")
   @@map("warehouses")
   customerMaterialReceipts CustomerGRN[]    @relation("CustomerMaterialReceipts")
   customerMaterialReturns CustomerMaterialReturn[] @relation("CustomerMaterialReturns")
@@ -1793,6 +1859,11 @@ model Department {
   name      String
   code      String  @unique
   isActive  Boolean @default(true)
+  /// The department it rolls up into, as a cost centre: Line QC into Quality
+  /// Control, Quality Control into Production. Empty at the top.
+  parentId  String?
+  parent    Department?  @relation("DepartmentParent", fields: [parentId], references: [id], onDelete: SetNull)
+  children  Department[] @relation("DepartmentParent")
 
   operations        Operation[]
   employees         Employee[]
@@ -1811,6 +1882,11 @@ model Department {
   /// The process's own floor, where its work in progress is kept as stock.
   floor             Warehouse?         @relation("ProcessFloor")
   openingStockLines OpeningStockLine[] @relation("OpeningStockProcess")
+  /// As a cost centre: the accounts lines, ledgers and bill lines it carries.
+  voucherLines      VoucherLine[]         @relation("VoucherLineDepartment")
+  ledgersByDefault  Ledger[]              @relation("LedgerDefaultDepartment")
+  billLines         PurchaseInvoiceLine[] @relation("BillLineDepartment")
+  allocationLines   AllocationRunLine[]
 
   @@map("departments")
 }
@@ -2214,6 +2290,8 @@ model DeliveryChallan {
   garments Garment[] @relation("GarmentChallan")
   /// Cartons loaded on it, scanned or picked: its lines come from their contents.
   fgCartons FgCarton[] @relation("FgCartonChallan")
+  /// Central stock moved to the order's brand for it, put back if it is cancelled.
+  reallocations StockReallocation[] @relation("ReallocationChallan")
 }
 
 model DeliveryChallanLine {
@@ -2239,6 +2317,10 @@ model DeliveryChallanLine {
   /// "A" for first quality, "B" for B-grade: made, but not first quality.
   /// B-grade pieces are counted apart from good ones and billed at their own rate.
   grade      String   @default("A")
+  /// The share it left from: the order's brand (central stock moved to it
+  /// first, on an automatic reallocation). Blank for a customer's goods.
+  brandId    String?
+  brand      Brand?   @relation("ChallanLineBrand", fields: [brandId], references: [id], onDelete: Restrict)
   @@index([soLineId])
   @@map("delivery_challan_lines")
 }
@@ -2286,6 +2368,10 @@ model FinishedGoodsReceipt {
   lines FinishedGoodsReceiptLine[]
   /// On an order with a route: the pieces it took off the last stage.
   wipEvents WipEvent[] @relation("FGRWipEvents")
+  /// The share the pieces came into: the MO's brand when they were booked in
+  /// (multi-brand phase 5). A cancellation takes them out of the same share.
+  brandId String?
+  brand   Brand?  @relation("FgReceiptBrand", fields: [brandId], references: [id], onDelete: Restrict)
 
   @@index([soId])
   @@map("finished_goods_receipts")
@@ -3108,6 +3194,12 @@ model GRNLine {
   billLines PurchaseInvoiceLine[]
   noteLines PurchaseNoteLine[]
 
+  /// The share it went into (multi-brand phase 5): its PO's brand, else the
+  /// brand of the MO its indent was raised for, else the style's own brand;
+  /// blank is central stock. Its QC, stickers, returns and bill follow it.
+  brandId String?
+  brand   Brand?  @relation("GrnLineBrand", fields: [brandId], references: [id], onDelete: Restrict)
+
   @@map("grn_lines")
 }
 
@@ -3177,6 +3269,9 @@ model PurchaseInvoice {
   balanceAmount       Decimal        @db.Decimal(12, 2)
   status              InvoiceStatus  @default(UNPAID)
   notes               String?
+  /// Brought in from the old books without the department its expense lines
+  /// now need: allowed only by someone who approves in Accounts, with a reason.
+  legacyImport        Boolean        @default(false)
   createdById         String
   createdBy           User           @relation("BillCreatedBy", fields: [createdById], references: [id])
   createdAt           DateTime       @default(now())
@@ -3310,6 +3405,10 @@ model StockLedger {
   transactionDate DateTime        @default(now())
   notes           String?
   createdAt       DateTime        @default(now())
+  /// Who wrote the movement: the signed-in user whose request it was. Empty
+  /// for a script, a seed or anything written before this was kept.
+  createdById     String?
+  createdBy       User?           @relation("StockLedgerCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
   /// "A" for first quality, "B" for B-grade finished goods, kept apart from
   /// good ones. Everything that is not a graded garment is "A".
@@ -3318,7 +3417,14 @@ model StockLedger {
   /// the ERP), on work in progress and finished goods moved process to process.
   /// Not part of the balance: it splits a process's size-wise stock by order.
   orderNo         String?
+  /// Whose share of the balance this is: an own brand's, earmarked for it,
+  /// or blank for central stock, the company's for no brand. Part of the
+  /// balance, and each share keeps its own moving average (multi-brand
+  /// phase 5, decision 5).
+  brandId         String?
+  brand           Brand?          @relation("StockLedgerBrand", fields: [brandId], references: [id], onDelete: Restrict)
   @@index([itemId, warehouseId])
+  @@index([itemId, warehouseId, brandId])
   @@index([transactionDate])
   @@index([ownership, ownerCustomerId])
   @@index([itemId, warehouseId, sizeId])
@@ -3348,6 +3454,7 @@ enum RequisitionFulfilment {
 }
 
 model MaterialRequisition {
+  reallocations   StockReallocation[] @relation("ReallocationMR")
   id              String              @id @default(cuid())
   mrNumber        String              @unique
   moId            String?
@@ -3426,6 +3533,9 @@ model FloorReturnLine {
   itemId      String
   warehouseId String
   qty         Decimal                 @db.Decimal(10, 3)
+  /// The share it came back into: the brand it was issued for, or blank for central.
+  brandId     String?
+  brand       Brand?                  @relation("FloorReturnLineBrand", fields: [brandId], references: [id], onDelete: Restrict)
 
   @@index([returnId])
   @@index([mrLineId])
@@ -3614,6 +3724,9 @@ model OpeningStockLine {
   valuationPending Boolean    @default(false)
   /// The stock movement this line posted, for a later revaluation or correction.
   ledgerId       String?
+  /// The own brand the stock is earmarked for (multi-brand phase 5); blank is central.
+  brandId        String?
+  brand          Brand?     @relation("OpeningLineBrand", fields: [brandId], references: [id], onDelete: Restrict)
 
   @@index([openingStockId])
   @@index([itemId, warehouseId])
@@ -3647,12 +3760,27 @@ model StockTransfer {
   cancelledById   String?
   cancelledBy     User?     @relation("TransferCancelledBy", fields: [cancelledById], references: [id])
   cancelReason    String?
+  /// DIRECT: out of one store and into the other in one go, as every transfer
+  /// was before. IN_TRANSIT: sent now and confirmed by the other store when it
+  /// arrives; until then the goods sit in the transit store, still ours (or
+  /// still the customer's), at what they left at.
+  mode               TransferMode   @default(DIRECT)
+  /// A direct transfer is RECEIVED the moment it is saved. One in transit is
+  /// DISPATCHED, PARTLY_RECEIVED as it arrives, and RECEIVED when all of it
+  /// came in good, or DISCREPANCY when it closed with some damaged, sent back
+  /// or lost on the way. CANCELLED either way when it was taken back.
+  status             TransferStatus @default(RECEIVED)
+  /// The store kind TRANSIT the goods wait in while on the road.
+  transitWarehouseId String?
+  transitWarehouse   Warehouse?     @relation("TransferVia", fields: [transitWarehouseId], references: [id])
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  lines StockTransferLine[]
+  lines    StockTransferLine[]
+  receipts StockTransferReceipt[]
 
   @@index([transferDate])
+  @@index([status])
   @@map("stock_transfers")
 }
 
@@ -3682,7 +3810,59 @@ model StockTransferLine {
   orderNo         String?
   lotNo           String?
   bundleNo        String?
+  /// Which grade moved: A good, B seconds, R held or rejected.
+  grade           String         @default("A")
+  /// In transit only (a direct transfer leaves them at 0): what became of what
+  /// was sent. What is still on the way
+  /// is qty less all four. Received good arrives as the grade it left as;
+  /// damaged arrives as R, held in the same store.
+  receivedQty     Decimal        @default(0) @db.Decimal(10, 3)
+  damagedQty      Decimal        @default(0) @db.Decimal(10, 3)
+  /// Sent back to the store it left (it never went, or came back).
+  returnedQty     Decimal        @default(0) @db.Decimal(10, 3)
+  /// Written off as lost on the way, with a store manager's approval.
+  lostQty         Decimal        @default(0) @db.Decimal(10, 3)
+  /// The share it moved: a brand's, or blank for central. It arrives as the same share.
+  brandId         String?
+  brand           Brand?         @relation("TransferLineBrand", fields: [brandId], references: [id], onDelete: Restrict)
+  receiptLines    StockTransferReceiptLine[]
   @@map("stock_transfer_lines")
+}
+
+/// One thing done with goods on the road: a receipt at the other store, or a
+/// settlement of what did not arrive (sent back, or written off as lost).
+/// Kept as a history, so who confirmed what and when is never overwritten.
+model StockTransferReceipt {
+  id         String              @id @default(cuid())
+  transferId String
+  transfer   StockTransfer       @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  kind       TransferReceiptKind
+  /// The day it happened, as entered.
+  receivedAt DateTime            @default(now())
+  byId       String?
+  by         User?               @relation("TransferReceiptBy", fields: [byId], references: [id])
+  notes      String?
+  createdAt  DateTime            @default(now())
+
+  lines StockTransferReceiptLine[]
+
+  @@index([transferId])
+  @@map("stock_transfer_receipts")
+}
+
+model StockTransferReceiptLine {
+  id             String               @id @default(cuid())
+  receiptId      String
+  receipt        StockTransferReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  transferLineId String
+  transferLine   StockTransferLine    @relation(fields: [transferLineId], references: [id], onDelete: Cascade)
+  /// Received good, sent back, or written off, as the receipt's kind says.
+  qty            Decimal              @default(0) @db.Decimal(10, 3)
+  /// On a receipt: what arrived damaged, taken in as R.
+  damagedQty     Decimal              @default(0) @db.Decimal(10, 3)
+
+  @@index([transferLineId])
+  @@map("stock_transfer_receipt_lines")
 }
 
 /// A correction after somebody has physically counted the rack.
@@ -3752,6 +3932,8 @@ model StockAdjustmentLine {
   /// A finished garment's size; empty for anything without one.
   sizeId          String?
   size            Size?          @relation("AdjustmentLineSize", fields: [sizeId], references: [id])
+  /// Which grade was counted: A good, B seconds, R held or rejected.
+  grade           String         @default("A")
   @@map("stock_adjustment_lines")
 }
 
@@ -4191,6 +4373,8 @@ model JobWorkReturnLine {
 // ═══════════════════════════════════════════
 
 model ManufacturingOrder {
+  reallocations    StockReallocation[] @relation("ReallocationMO")
+  materialExtras   MaterialExtra[]     @relation("MaterialExtraMO")
   id               String      @id @default(cuid())
   moNumber         String      @unique
   soId             String?
@@ -4512,6 +4696,19 @@ enum WipEventType {
   /// (out of the cut size, into the new one); before, carried on in a new bundle made from it.
   SIZE_CHANGE
   REVERSAL
+}
+
+/// How a stock transfer travels: straight there, or on the road first.
+enum TransferMode {
+  DIRECT
+  IN_TRANSIT
+}
+
+/// What a step on an in-transit transfer did with the goods on the road.
+enum TransferReceiptKind {
+  RECEIVED
+  RETURNED
+  WRITTEN_OFF
 }
 
 enum TransferStatus {
@@ -5073,6 +5270,13 @@ model Ledger {
   pan            String?
   gstin          String?
   notes          String?
+  /// An income or expense ledger's usual brand and department: a line on it
+  /// takes them when its document says nothing more particular. Office rent
+  /// sits with Administration; VHAGAR advertising with VHAGAR.
+  costCentreId   String?
+  costCentre     CostCentre?  @relation("LedgerDefaultCentre", fields: [costCentreId], references: [id], onDelete: SetNull)
+  departmentId   String?
+  department     Department?  @relation("LedgerDefaultDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
   isActive       Boolean      @default(true)
   createdById    String?
   createdBy      User?        @relation("LedgerCreatedBy", fields: [createdById], references: [id])
@@ -5081,16 +5285,21 @@ model Ledger {
 
   lines    VoucherLine[]
   billRefs BillRef[]
+  allocationLines AllocationRunLine[]
 
   @@index([groupId])
   @@map("ledgers")
 }
 
-/// Where income and spending is booked to, so profit can be read by brand.
-/// One per brand, made for it; shared costs are split across them.
+/// Where income and spending is booked to, so profit can be read by brand:
+/// the brand's profit centre. One per own brand, made for it; shared costs are
+/// split across them. (Department cost centres are the Departments master.)
 model CostCentre {
   id        String   @id @default(cuid())
   name      String   @unique
+  /// The brand's code, kept in step with it.
+  code        String?  @unique
+  description String?
   brandId   String?  @unique
   brand     Brand?   @relation(fields: [brandId], references: [id], onDelete: Restrict)
   isActive  Boolean  @default(true)
@@ -5098,6 +5307,10 @@ model CostCentre {
   updatedAt DateTime @updatedAt
 
   lines VoucherLine[]
+  ledgersByDefault Ledger[] @relation("LedgerDefaultCentre")
+  billLines        PurchaseInvoiceLine[] @relation("BillLineCentre")
+  allocationShares AllocationRuleShare[]
+  allocationLines  AllocationRunLine[]
 
   @@map("cost_centres")
 }
@@ -5107,8 +5320,10 @@ model CostCentre {
 /// A voucher typed in Accounts has no source. One written for a sales
 /// invoice, a receipt or a purchase bill names its document, takes that
 /// document's number, and is rewritten whenever the document changes. Nothing
-/// is ever deleted: a voucher is cancelled, keeping its number and its lines,
-/// and stops counting.
+/// is ever deleted (the database refuses it): a voucher is cancelled, keeping
+/// its number and its lines, and stops counting; or a reversing entry undoes it
+/// on an open day. Every change keeps the voucher as it stood before, as a
+/// numbered revision (Phase 7, 30 Nov 2026).
 model Voucher {
   id            String        @id @default(cuid())
   kind          VoucherKind
@@ -5134,16 +5349,104 @@ model Voucher {
   createdBy     User?         @relation("VoucherCreatedBy", fields: [createdById], references: [id])
   updatedById   String?
   updatedBy     User?         @relation("VoucherUpdatedBy", fields: [updatedById], references: [id])
+  /// Brought in from the old books as it was, without the department its
+  /// expense lines now need: allowed only by someone who approves in
+  /// Accounts, with a reason, and listed among the unallocated entries.
+  legacyImport  Boolean       @default(false)
+  /// How many times it has changed since it was written: its last revision's number.
+  revision      Int           @default(0)
+  /// For a reversing entry: the voucher it undoes, which stays as it was.
+  reversalOfId  String?
+  reversalOf    Voucher?      @relation("VoucherReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversals     Voucher[]     @relation("VoucherReversal")
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
-  lines VoucherLine[]
+  lines             VoucherLine[]
+  revisions         VoucherRevision[]
+  allocationSources AllocationRunSource[]
 
   @@unique([kind, voucherNo])
   @@unique([sourceType, sourceId])
   @@index([date])
   @@index([financialYear, kind])
+  @@index([reversalOfId])
   @@map("acc_vouchers")
+}
+
+/// What happened to a voucher.
+enum VoucherRevisionAction {
+  /// A voucher typed in Accounts, altered there.
+  ALTERED
+  /// Rewritten to match its document: the document changed, or the books were posted again.
+  REWRITTEN
+  /// Only which bills its amounts settle changed: allowed in a closed period.
+  BILLS_CHANGED
+  CANCELLED
+  /// A cancelled voucher standing again, with its document.
+  REINSTATED
+  /// Taken out of the books (dated before they now start, or nothing left to post): kept, cancelled.
+  REMOVED
+  /// Bank statement dates set or cleared on reconciliation.
+  BANK_DATES
+  /// A reversing entry was posted against it; the voucher itself is unchanged.
+  REVERSED
+}
+
+/// One change to a voucher, holding the voucher exactly as it stood before it:
+/// its header, lines, bills and bank dates. Written in the same transaction as
+/// the change, and never altered or deleted after (the database refuses both).
+model VoucherRevision {
+  id            String                @id @default(cuid())
+  voucherId     String
+  voucher       Voucher               @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  /// 1 for the first change, then 2, 3…
+  revision      Int
+  action        VoucherRevisionAction
+  /// The voucher before the change, as stored.
+  snapshot      Json
+  reason        String?
+  /// Where the change came from: "accounts" (typed there), the document type (SALES_INVOICE…), "repost", "bank-reco".
+  source        String
+  changedById   String?
+  changedBy     User?                 @relation("VoucherRevisionBy", fields: [changedById], references: [id], onDelete: Restrict)
+  /// The name as it was on the day, kept if the user is renamed later.
+  changedByName String?
+  /// Set when the change fell in a closed period that stood reopened.
+  periodEventId String?
+  periodEvent   PeriodEvent?          @relation(fields: [periodEventId], references: [id], onDelete: Restrict)
+  changedAt     DateTime              @default(now())
+
+  @@unique([voucherId, revision])
+  @@index([changedAt])
+  @@map("acc_voucher_revisions")
+}
+
+/// Closing the books, reopening them, and moving the day they start.
+enum PeriodEventKind {
+  CLOSED
+  REOPENED
+  START_SET
+}
+
+/// One change to the books' dates, with who made it and why. A reopening
+/// needs a reason and its own right; revisions made while it stands name it.
+model PeriodEvent {
+  id        String            @id @default(cuid())
+  kind      PeriodEventKind
+  /// The closing date (or the start) before and after; empty means none.
+  fromDate  DateTime?
+  toDate    DateTime?
+  reason    String?
+  userId    String?
+  user      User?             @relation("PeriodEventBy", fields: [userId], references: [id], onDelete: Restrict)
+  userName  String?
+  at        DateTime          @default(now())
+
+  revisions VoucherRevision[]
+
+  @@index([at])
+  @@map("acc_period_events")
 }
 
 /// One ledger debited or credited by a voucher. Exactly one of debit and
@@ -5158,6 +5461,10 @@ model VoucherLine {
   credit       Decimal     @default(0) @db.Decimal(14, 2)
   costCentreId String?
   costCentre   CostCentre? @relation(fields: [costCentreId], references: [id], onDelete: Restrict)
+  /// The department (cost centre) an income or expense line belongs to,
+  /// beside its brand (profit centre). Never on a bank, party or tax line.
+  departmentId String?
+  department   Department? @relation("VoucherLineDepartment", fields: [departmentId], references: [id], onDelete: Restrict)
   narration    String?
   /// The day the bank statement shows this line, set on reconciliation.
   bankDate     DateTime?
@@ -5167,6 +5474,7 @@ model VoucherLine {
 
   @@index([ledgerId])
   @@index([voucherId])
+  @@index([departmentId])
   @@map("acc_voucher_lines")
 }
 
@@ -5680,6 +5988,7 @@ model SizeGroup {
 }
 
 model Size {
+  reallocationLines StockReallocationLine[] @relation("ReallocationLineSize")
   id          String    @id @default(cuid())
   sizeGroupId String
   sizeGroup   SizeGroup @relation(fields: [sizeGroupId], references: [id], onDelete: Cascade)
@@ -5823,6 +6132,14 @@ model PurchaseInvoiceLine {
   igst         Decimal         @default(0) @db.Decimal(12, 2)
   amount       Decimal         @default(0) @db.Decimal(12, 2)
   sortOrder    Int             @default(0)
+  /// Picked on the bill, mostly for an expense: whose it is (a brand's profit
+  /// centre; blank is shared) and which department bears it. Left empty, the
+  /// order the goods were bought for, the expense head's default or the
+  /// ledger's default decides.
+  costCentreId String?
+  costCentre   CostCentre?     @relation("BillLineCentre", fields: [costCentreId], references: [id], onDelete: SetNull)
+  departmentId String?
+  department   Department?     @relation("BillLineDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
 
   /// Adjustments raised against this line. What is left to adjust is this
   /// line's quantity less what these already claim.
@@ -6880,6 +7197,9 @@ model StockReservation {
   releasedById  String?
   releasedBy    User?                   @relation("ReservationReleasedBy", fields: [releasedById], references: [id])
   releaseReason String?
+  /// The share the hold is on: the order's brand, or blank for central stock.
+  brandId       String?
+  brand         Brand?                  @relation("ReservationBrand", fields: [brandId], references: [id], onDelete: Restrict)
 
   @@index([itemId, warehouseId, status])
   @@index([mrId])
@@ -6920,6 +7240,8 @@ enum PackageStatus {
 }
 
 enum PackageMoveType {
+  /// Its share changed: earmarked for a brand, moved between brands, released to central.
+  EARMARKED
   CREATED
   ISSUED
   TRANSFERRED
@@ -7006,6 +7328,11 @@ model StockPackage {
   /// Merged into another package: the one that now holds its contents.
   mergedIntoId    String?
   mergedInto      StockPackage?  @relation("PackageMerge", fields: [mergedIntoId], references: [id])
+  /// The share this sticker's metres are: a brand's, or blank for central.
+  /// Part of a roll earmarked for a brand rides on the roll as its own child
+  /// sticker (same lot), so stickers agree with the ledger share by share.
+  brandId         String?
+  brand           Brand?         @relation("PackageBrand", fields: [brandId], references: [id], onDelete: Restrict)
   mergedFrom      StockPackage[] @relation("PackageMerge")
   createdById     String?
   createdAt       DateTime       @default(now())
@@ -7091,6 +7418,8 @@ enum GarmentStatus {
 }
 
 enum GarmentEventType {
+  /// Its share changed: earmarked for a brand, moved between brands, released to central.
+  EARMARKED
   TAGGED
   PACKED
   UNPACKED
@@ -7150,6 +7479,9 @@ model Garment {
   /// How often its label has been printed. A reprint keeps the same code.
   printCount      Int                @default(0)
   lastPrintedAt   DateTime?
+  /// The share the piece is: the brand it was made for, or blank for central.
+  brandId         String?
+  brand           Brand?             @relation("GarmentBrand", fields: [brandId], references: [id], onDelete: Restrict)
   createdById     String?
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
@@ -7229,6 +7561,9 @@ model FgCarton {
   /// Opened: its pieces back in the store, loose.
   openedAt      DateTime?
   openReason    String?
+  /// The share its pieces are on (multi-brand phase 5): the order's brand, or blank for central.
+  brandId       String?
+  brand         Brand?           @relation("FgCartonBrand", fields: [brandId], references: [id], onDelete: Restrict)
   createdById   String?
   createdBy     User?            @relation("FgCartonPackedBy", fields: [createdById], references: [id])
   createdAt     DateTime         @default(now())
@@ -7267,4 +7602,297 @@ enum FgCartonStatus {
   DISPATCHED
   /// Unpacked: its pieces are loose in the store again.
   OPENED
+}
+
+/// How a shared expense is split between the brands each month.
+enum AllocationBasis {
+  /// Each brand's sales that month.
+  REVENUE
+  /// Pieces each brand's orders took into finished goods that month.
+  PRODUCTION_QTY
+  /// Value of material issued to each brand's orders that month.
+  MATERIAL_CONSUMPTION
+  /// Machine hours typed for each brand on the run, until machines record them.
+  MACHINE_HOURS
+  /// The rule's own percentages.
+  FIXED_PERCENT
+  /// Percentages typed on the run.
+  MANUAL
+}
+
+enum AllocationRunStatus {
+  /// Worked out and saved; worked out again until it is approved.
+  DRAFT
+  /// Checked by someone other than its maker: ready to post.
+  APPROVED
+  /// Its journal is in the books.
+  POSTED
+  /// Its journal taken back by a recorded reversal; the month may run again.
+  REVERSED
+  /// Thrown away before it was posted.
+  DISCARDED
+}
+
+/// A rule for splitting shared expenses (lines with no brand) between the
+/// brands: which expenses, on what basis, between which brands. Rules are
+/// tried in order and an expense goes to the first that covers it.
+model AllocationRule {
+  id            String          @id @default(cuid())
+  name          String          @unique
+  basis         AllocationBasis
+  /// The expense ledgers it splits; empty: every expense ledger.
+  ledgerIds     String[] @default([])
+  /// Only expenses booked to these departments; empty: any.
+  departmentIds String[] @default([])
+  /// The brands that share, by their profit centres; empty: every own brand in use.
+  costCentreIds String[] @default([])
+  sortOrder     Int             @default(0)
+  isActive      Boolean         @default(true)
+  notes         String?
+  createdById   String?
+  createdBy     User?           @relation("AllocationRuleBy", fields: [createdById], references: [id])
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  shares   AllocationRuleShare[]
+  runLines AllocationRunLine[]
+
+  @@map("acc_allocation_rules")
+}
+
+/// A fixed-percent rule's share for one brand.
+model AllocationRuleShare {
+  id           String         @id @default(cuid())
+  ruleId       String
+  rule         AllocationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  costCentreId String
+  costCentre   CostCentre     @relation(fields: [costCentreId], references: [id], onDelete: Restrict)
+  percent      Decimal        @db.Decimal(9, 4)
+
+  @@unique([ruleId, costCentreId])
+  @@map("acc_allocation_rule_shares")
+}
+
+/// One month's split of the shared expenses: worked out, approved by someone
+/// other than its maker, posted as one journal, and reversed by a recorded
+/// reversal if it must be undone. Only one run of a month is live at a time.
+model AllocationRun {
+  id            String              @id @default(cuid())
+  runNumber     String              @unique
+  /// The month split: "2026-11".
+  period        String
+  status        AllocationRunStatus @default(DRAFT)
+  /// What was typed for the run: hours or percentages by rule and brand.
+  inputs        Json?
+  notes         String?
+  createdById   String?
+  createdBy     User?               @relation("AllocationRunBy", fields: [createdById], references: [id])
+  createdAt     DateTime            @default(now())
+  approvedById  String?
+  approvedBy    User?               @relation("AllocationRunApprovedBy", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+  postedById    String?
+  postedBy      User?               @relation("AllocationRunPostedBy", fields: [postedById], references: [id])
+  postedAt      DateTime?
+  reversedById  String?
+  reversedBy    User?               @relation("AllocationRunReversedBy", fields: [reversedById], references: [id])
+  reversedAt    DateTime?
+  reverseReason String?
+  discardedAt   DateTime?
+  discardReason String?
+  updatedAt     DateTime            @updatedAt
+
+  lines   AllocationRunLine[]
+  sources AllocationRunSource[]
+
+  @@index([period])
+  @@map("acc_allocation_runs")
+}
+
+/// One brand's share of one shared expense ledger and department, that month.
+model AllocationRunLine {
+  id           String         @id @default(cuid())
+  runId        String
+  run          AllocationRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  ruleId       String
+  rule         AllocationRule @relation(fields: [ruleId], references: [id], onDelete: Restrict)
+  ledgerId     String
+  ledger       Ledger         @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  departmentId String?
+  department   Department?    @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  costCentreId String
+  costCentre   CostCentre     @relation(fields: [costCentreId], references: [id], onDelete: Restrict)
+  /// The shared total of that ledger and department that month.
+  sharedAmount Decimal        @db.Decimal(14, 2)
+  /// The brand's own figure on the rule's basis: rupees of sales or material, pieces, hours, or a percent.
+  basisValue   Decimal        @db.Decimal(16, 4)
+  percent      Decimal        @db.Decimal(9, 6)
+  amount       Decimal        @db.Decimal(14, 2)
+
+  @@index([runId])
+  @@map("acc_allocation_run_lines")
+}
+
+/// The shared expense a run split, voucher by voucher, as it stood when the
+/// run was worked out: what the Allocation report ties back to.
+model AllocationRunSource {
+  id           String        @id @default(cuid())
+  runId        String
+  run          AllocationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  voucherId    String
+  voucher      Voucher       @relation(fields: [voucherId], references: [id], onDelete: Restrict)
+  ledgerId     String
+  departmentId String?
+  amount       Decimal       @db.Decimal(14, 2)
+
+  @@index([runId])
+  @@map("acc_allocation_run_sources")
+}
+
+/// What a stock reallocation does to whose share stock is.
+enum ReallocationKind {
+  /// Central stock earmarked for a brand.
+  EARMARK
+  /// One brand's stock handed to another.
+  MOVE
+  /// A brand's earmark given back to central stock.
+  RELEASE
+  /// Central stock moved to an MO's brand by the material issue itself (decision 7).
+  AUTO
+}
+
+enum ReallocationStatus {
+  /// Raised, waiting for someone other than its maker to approve it.
+  PENDING
+  /// Approved and in the stock ledger.
+  POSTED
+  REJECTED
+  /// Withdrawn by its maker before anyone approved it.
+  CANCELLED
+  /// Posted, then put back by an opposite movement (both kept).
+  REVERSED
+}
+
+/// Stock moved from one share of a store's balance to another: central
+/// stock earmarked for a brand, one brand's handed to another, or given back.
+/// Nothing moves physically. It posts as an out of one share and an in to
+/// the other on the stock ledger, at the giving share's average, so the
+/// company's stock and value never change. Raised by one person and approved
+/// by another; an Admin may approve their own only as an override with a
+/// reason, kept on the document and in the audit trail. An MO's material
+/// issue makes its own (AUTO), under decision 7's conditions.
+model StockReallocation {
+  id             String             @id @default(cuid())
+  number         String             @unique
+  kind           ReallocationKind
+  status         ReallocationStatus @default(PENDING)
+  warehouseId    String
+  warehouse      Warehouse          @relation("ReallocationStore", fields: [warehouseId], references: [id])
+  /// Blank is central stock.
+  fromBrandId    String?
+  fromBrand      Brand?             @relation("ReallocationFrom", fields: [fromBrandId], references: [id], onDelete: Restrict)
+  toBrandId      String?
+  toBrand        Brand?             @relation("ReallocationTo", fields: [toBrandId], references: [id], onDelete: Restrict)
+  /// The MO it is for, on an automatic one or when the maker names it.
+  moId           String?
+  mo             ManufacturingOrder? @relation("ReallocationMO", fields: [moId], references: [id])
+  mrId           String?
+  mr             MaterialRequisition? @relation("ReallocationMR", fields: [mrId], references: [id])
+  /// The challan an automatic one was made for: central stock moved to the order's brand to go on it.
+  dcId           String?
+  dc             DeliveryChallan?   @relation("ReallocationChallan", fields: [dcId], references: [id])
+  reason         String
+  requestedById  String
+  requestedBy    User               @relation("ReallocationBy", fields: [requestedById], references: [id])
+  requestedAt    DateTime           @default(now())
+  approvedById   String?
+  approvedBy     User?              @relation("ReallocationApprovedBy", fields: [approvedById], references: [id])
+  approvedAt     DateTime?
+  /// Approved by its own maker: only an Admin, only with a reason.
+  selfApproved   Boolean            @default(false)
+  overrideReason String?
+  rejectedById   String?
+  rejectedBy     User?              @relation("ReallocationRejectedBy", fields: [rejectedById], references: [id])
+  rejectedAt     DateTime?
+  rejectReason   String?
+  postedAt       DateTime?
+  reversedById   String?
+  reversedBy     User?              @relation("ReallocationReversedBy", fields: [reversedById], references: [id])
+  reversedAt     DateTime?
+  reverseReason  String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  lines StockReallocationLine[]
+
+  @@index([status])
+  @@index([moId])
+  @@index([mrId])
+  @@index([dcId])
+  @@map("stock_reallocations")
+}
+
+/// One item's quantity moving share. Its rate is the giving share's average
+/// when it posted; the stickers and tags named move with it.
+model StockReallocationLine {
+  id             String            @id @default(cuid())
+  reallocationId String
+  reallocation   StockReallocation @relation(fields: [reallocationId], references: [id], onDelete: Cascade)
+  itemId         String
+  item           Item              @relation("ReallocationLineItem", fields: [itemId], references: [id])
+  sizeId         String?
+  size           Size?             @relation("ReallocationLineSize", fields: [sizeId], references: [id])
+  grade          String            @default("A")
+  qty            Decimal           @db.Decimal(10, 3)
+  unitRate       Decimal?          @db.Decimal(10, 2)
+  /// Stickers named, whole or part; a part rides on its roll as a child sticker.
+  packageCodes   String[]          @default([])
+  garmentCodes   String[]          @default([])
+
+  @@index([reallocationId])
+  @@map("stock_reallocation_lines")
+}
+
+/// Where an extra-material request stands.
+enum MaterialExtraStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+/// More of a material than an MO's plan allows, or a material its plan does
+/// not call for, asked for with a reason and approved by a production manager
+/// other than whoever asked (multi-brand phase 5, separate from any earmark).
+/// Approved, it raises what the MO may be issued of that material by its
+/// quantity; nothing else does.
+model MaterialExtra {
+  id              String              @id @default(cuid())
+  number          String              @unique
+  moId            String
+  mo              ManufacturingOrder  @relation("MaterialExtraMO", fields: [moId], references: [id])
+  itemId          String
+  item            Item                @relation("MaterialExtraItem", fields: [itemId], references: [id])
+  ownership       StockOwnership      @default(OWNED)
+  ownerCustomerId String?
+  qty             Decimal             @db.Decimal(10, 3)
+  reason          String
+  status          MaterialExtraStatus @default(PENDING)
+  requestedById   String
+  requestedBy     User                @relation("MaterialExtraBy", fields: [requestedById], references: [id])
+  requestedAt     DateTime            @default(now())
+  decidedById     String?
+  decidedBy       User?               @relation("MaterialExtraDecidedBy", fields: [decidedById], references: [id])
+  decidedAt       DateTime?
+  /// Why it was turned down.
+  rejectReason    String?
+  /// An Admin approving their own request, as an override with a reason.
+  selfApproved    Boolean             @default(false)
+  overrideReason  String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([moId, itemId])
+  @@index([status])
+  @@map("material_extras")
 }

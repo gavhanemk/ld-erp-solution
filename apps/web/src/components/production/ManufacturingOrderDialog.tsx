@@ -297,16 +297,16 @@ export function ManufacturingOrderDialog({
   const directIssue = direct
     ? directLines.map((l) => directProblem(l, infos[l.styleId], directStyles.find((x) => x.id === l.styleId)?.code ?? 'This style')).find((x) => !!x) ?? null
     : null
-  // Until someone picks a brand, a direct order's follows its styles: VHAGAR styles, VHAGAR.
-  const lineTypes = useMemo(
-    () => directLines.filter((l) => l.styleId).map((l) => directStyles.find((x) => x.id === l.styleId)?.brandType ?? null),
+  // Until someone picks a brand, a direct order's follows its styles: Stich Code styles, Stich Code.
+  const lineBrandIds = useMemo(
+    () => directLines.filter((l) => l.styleId).map((l) => directStyles.find((x) => x.id === l.styleId)?.brandId ?? null),
     [directLines, directStyles]
   )
   useEffect(() => {
     if (!direct || brandPicked || !brands.length) return
-    const next = suggestedBrand(brands, lineTypes, false)
+    const next = suggestedBrand(brands, lineBrandIds, false)
     if (next && next !== brandId) setBrandId(next)
-  }, [direct, brandPicked, brands, lineTypes, brandId])
+  }, [direct, brandPicked, brands, lineBrandIds, brandId])
   const addInfo = useMemo(() => (id: string, info: StyleInfo) => setInfos((m) => ({ ...m, [id]: info })), [])
 
 
@@ -512,7 +512,7 @@ export function ManufacturingOrderDialog({
                         >
                           {!brandId && <option value="">Choose the brand</option>}
                           {brands.map((b) => (
-                            <option key={b.id} value={b.id} data-sub={b.type === 'VHAGAR' ? 'VHAGAR' : 'LD Cotton Mills'}>
+                            <option key={b.id} value={b.id} data-sub={b.isDefault ? 'B2B and job work' : (b.code ?? undefined)}>
                               {b.name}
                             </option>
                           ))}

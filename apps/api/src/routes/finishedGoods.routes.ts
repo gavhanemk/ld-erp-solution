@@ -6,6 +6,7 @@ import { AuthRequest, requirePermission } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { assertNotCancelling } from '../services/orderCancel.service'
 import { writeAuditLog } from '../lib/audit'
+import { createOnce, requestIdOf } from '../lib/onceFor'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { assertStylesInProduction } from '../lib/styleStage'
 import { assertStockUnused, recordMovement } from '../services/stock.service'
@@ -13,6 +14,7 @@ import { lockRow } from '../lib/lockRow'
 import { syncMoPacked } from '../services/manufacturing.service'
 import { packForReceipt, unpackForReceipt } from '../services/floor.service'
 import { voidForCancelledReceipt } from '../services/garment.service'
+import { ownShare } from '../services/brandStock.service'
 
 /**
  * Finished goods in: packed garments going into the finished-goods store.
@@ -358,6 +360,15 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
     }
   }
 
+  // Multi-brand phase 5: the pieces come in on the MO's brand (its order's
+  // when packed without an MO). A customer's pieces are never a brand's.
+  let shareId: string | null = null
+  if (!jobWorkFor) {
+    const mo = data.moId ? await tx.manufacturingOrder.findUnique({ where: { id: data.moId }, select: { brandId: true } }) : null
+    const so = !mo && data.soId ? await tx.salesOrder.findUnique({ where: { id: data.soId }, select: { brandId: true } }) : null
+    shareId = await ownShare(tx, mo?.brandId ?? so?.brandId ?? null)
+  }
+
   // Checked first, so a refused receipt never takes a number.
   const fgrNumber = await nextDocumentNumber(tx, 'FGR', receiptDate)
   const created = await tx.finishedGoodsReceipt.create({
@@ -367,6 +378,7 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
       warehouseId: data.warehouseId,
       soId: data.soId ?? null,
       moId: data.moId ?? null,
+      brandId: shareId,
       notes: data.notes ?? null,
       createdById: userId,
       lines: {
@@ -388,6 +400,7 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
 
   for (const line of created.lines) {
     await recordMovement(tx, {
+      brandId: shareId,
       itemId: line.itemId,
       warehouseId: created.warehouseId,
       sizeId: line.sizeId,
@@ -427,14 +440,23 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
  */
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSchema.parse(req.body)
-  const receipt = await prisma.$transaction((tx) => createFgReceipt(tx, data, req.user!.id), { timeout: 30_000 })
+  // A double click or a retry receives it once: the form sends one request id until it saves.
+  const { doc: receipt, repeat } = await createOnce({
+    requestId: requestIdOf(req.body),
+    kind: 'FG_RECEIPT',
+    userId: req.user!.id,
+    make: (tx) => createFgReceipt(tx, data, req.user!.id),
+    load: (id) => prisma.finishedGoodsReceipt.findUniqueOrThrow({ where: { id }, include: receiptInclude }),
+    timeout: 30_000,
+  })
 
-  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'FinishedGoodsReceipt', entityId: receipt.id, after: receipt })
+  if (!repeat) await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'FinishedGoodsReceipt', entityId: receipt.id, after: receipt })
   const pieces = receipt.lines.reduce((s, l) => s + Number(l.qty), 0)
-  res.status(201).json({
+  res.status(repeat ? 200 : 201).json({
     success: true,
-    message: `${receipt.fgrNumber}: ${pieces.toLocaleString('en-IN')} pcs into ${receipt.warehouse.name}`,
+    message: `${receipt.fgrNumber}: ${pieces.toLocaleString('en-IN')} pcs into ${receipt.warehouse.name}${repeat ? '. (That was the same request again: nothing more was saved.)' : ''}`,
     data: receipt,
+    repeat,
   })
 })
 
@@ -461,6 +483,8 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
       const ins = await tx.stockLedger.findMany({ where: { referenceType: 'FG_RECEIPT', referenceId: before.id, inQty: { gt: 0 } } })
       for (const row of ins) {
         await recordMovement(tx, {
+          // Out of the share they came in on.
+          brandId: row.brandId,
           itemId: row.itemId,
           warehouseId: row.warehouseId,
           sizeId: row.sizeId,

@@ -1,6 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
-import { chargeConfigOf, chargeSnapshot, type ChargeTaxSnapshot } from '@ld-erp/shared'
+import { chargeConfigOf, chargeSnapshot, type ChargeTaxSnapshot, type ChargeTaxSetting } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 
 export const chargeEntryFields = {
@@ -47,7 +47,19 @@ export interface SavedChargeConfig {
 export interface ChargeResolveOptions {
   saved?: SavedChargeConfig[]
   canOverride?: boolean
+  /** Whoever saves the document: an override records them. */
+  by?: { id: string } | null
 }
+
+/** A charge's GST as a setting, for an override's record. */
+const settingOf = (c: ChargeTaxSnapshot): ChargeTaxSetting => ({
+  gstApplicable: c.gstApplicable !== false && c.treatment !== 'NON_TAXABLE',
+  treatment: c.treatment,
+  followsGoodsRate: c.followsGoodsRate,
+  ownRate: c.ownRate,
+  hsnCode: c.hsnCode,
+  taxCategory: c.taxCategory,
+})
 
 /** Only server-loaded source rows can supply a historical configuration. */
 export async function resolveChargeConfigurations(
@@ -141,11 +153,14 @@ export async function resolveChargeConfigurations(
       if (c.taxOverride) {
         if (!opts.canOverride)
           throw new AppError(
-            'Changing charge tax requires Masters edit permission.',
+            side === 'sales'
+              ? 'Changing a charge’s GST on a sales document needs the “Override Sales Charge GST” permission (Settings → People).'
+              : 'Changing charge tax requires Masters edit permission.',
             403,
             'CHARGE_TAX_FORBIDDEN'
           )
         const o = c.taxOverride
+        const was = settingOf(config)
         if (o.applicabilityOnly) {
           config = {
             ...config,
@@ -190,6 +205,12 @@ export async function resolveChargeConfigurations(
             taxCategory: o.taxCategory,
             overrideReason: o.reason,
           }
+        }
+        // Kept on the charge, beside every earlier one: who, when, why, and what it was.
+        const now = settingOf(config)
+        if (JSON.stringify(now) !== JSON.stringify(was)) {
+          const byName = opts.by?.id ? ((await tx.user.findUnique({ where: { id: opts.by.id }, select: { name: true } }))?.name ?? null) : null
+          config.overrides = [...(previous?.overrides ?? []), { at: new Date().toISOString(), by: opts.by?.id ?? null, byName, reason: o.reason.trim(), from: was, to: now }]
         }
       }
       config.amountMode = c.amountMode ?? previous?.amountMode ?? 'FIXED'

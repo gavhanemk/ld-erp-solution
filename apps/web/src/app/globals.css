@@ -331,6 +331,21 @@
     @apply text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider py-3 px-4;
   }
 
+  /* A heading that asks to sit right, or in the middle, does — over its figures.
+
+     The rule above scores one class and three elements, above a plain
+     `text-right`, so every "Amount ₹" and "Value" heading stood at the left of
+     its column while the figures under it sat at the right, the two lined up
+     with nothing (the owner's Inventory Matrix and Brand Stock, 28 Nov 2026).
+     Two classes here beat it, for the headings that ask and no others. */
+  .data-table > thead > tr > th.text-right {
+    text-align: right;
+  }
+
+  .data-table > thead > tr > th.text-center {
+    text-align: center;
+  }
+
   .data-table > tbody > tr {
     @apply border-b border-border/50 transition-colors;
   }

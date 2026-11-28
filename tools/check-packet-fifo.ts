@@ -44,9 +44,11 @@ async function main() {
   const [where] = await prisma.$queryRaw<Array<{ db: string; port: number }>>`select current_database() as db, inet_server_port() as port`
   if (where.db !== 'lderp_demo' || Number(where.port) !== 5433) throw new Error(`Not the demo database (${where.db}:${where.port}) — stopping.`)
 
-  const admin = await prisma.user.findFirstOrThrow({ where: { role: { name: 'Admin' } }, include: { role: true } })
+  // Admin became Super Admin in #79; either is the administrator here.
+  const admin = await prisma.user.findFirstOrThrow({ where: { role: { name: { in: ['Super Admin', 'Admin'] } } }, include: { role: true } })
   const other = await prisma.user.findFirstOrThrow({ where: { id: { not: admin.id } } })
-  const asAdmin = { id: admin.id, email: admin.email, name: admin.name, roleId: admin.roleId, role: admin.role.name }
+  // Built as the sign-in builds it: since #79 a Super Admin is let through on the flag, not the role's name.
+  const asAdmin = { id: admin.id, email: admin.email, name: admin.name, roleId: admin.roleId, role: admin.role.name, superAdmin: true, permissions: [] as string[] }
   // A storekeeper: can issue and move, cannot approve.
   const asClerk = { id: other.id, email: other.email, name: other.name, roleId: other.roleId, role: 'ZZ Storekeeper', permissions: ['inventory:view', 'inventory:create', 'inventory:edit'] }
 
@@ -75,7 +77,8 @@ async function main() {
   const made = { categoryId: '', itemId: '', mrId: '', requestIds: [] as string[], settingCreated: false, customerItemDone: false }
   try {
     const uom = await prisma.uOM.findFirstOrThrow({ where: { isActive: true, OR: [{ symbol: 'pcs' }, { name: { contains: 'Piece' } }] } })
-    const [storeA, storeB] = await prisma.warehouse.findMany({ where: { isActive: true }, take: 2, orderBy: { name: 'asc' } })
+    // Two general stores that issue: never a process floor, a transit or a sample store.
+    const [storeA, storeB] = await prisma.warehouse.findMany({ where: { isActive: true, kind: 'GENERAL', purpose: { not: 'SAMPLING' }, departmentId: null }, take: 2, orderBy: { name: 'asc' } })
     const dept = await prisma.department.findFirstOrThrow({ where: { isActive: true } })
     const customer = await prisma.customer.findFirstOrThrow({ where: { isActive: true, NOT: { name: { contains: 'VHAGAR', mode: 'insensitive' } } } })
     const cat = await prisma.itemCategory.create({ data: { name: `${tag} Buttons`, trackPackages: true, packType: 'PACKET' } })

@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import { AlertTriangle } from 'lucide-react'
 
 /**
@@ -85,12 +86,33 @@ export interface Analysis {
     rows: Array<{ label: string; values: Array<number | null> }>
     format: 'money' | 'qty' | 'integer' | 'percent'
   }
+  /** Each item by who holds it (the Inventory Matrix): quantity in its own unit, and value. */
+  crosstab?: {
+    title: string
+    rowLabel: string
+    columns: string[]
+    rows: Array<{ label: string; detail: string; code: string; unit: string; qty: Array<number | null>; value: Array<number | null> }>
+  }
   insights: string[]
   caveats: string[]
 }
 
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+/** One cell of a report's matrix, in its unit. */
+function matrixText(v: number, format: 'money' | 'qty' | 'integer' | 'percent'): string {
+  switch (format) {
+    case 'money':
+      return `₹${inr(v)}`
+    case 'percent':
+      return `${v.toLocaleString('en-IN', { maximumFractionDigits: 1 })}%`
+    case 'integer':
+      return Math.round(v).toLocaleString('en-IN')
+    default:
+      return v.toLocaleString('en-IN', { maximumFractionDigits: 3 })
+  }
+}
 
 /** A dash, never a nought — a nought is a claim, a dash is an absence. */
 function kpiText(k: Kpi): string {
@@ -159,6 +181,92 @@ function SectionRule({ children }: { children: React.ReactNode }) {
       </h3>
       <span className="bg-border h-px flex-1" aria-hidden />
     </div>
+  )
+}
+
+/**
+ * Each item across the shares that hold it — central stock, each brand, the
+ * total — in its own unit or in rupees. The biggest by value first; the rest
+ * on asking, so a long list does not push everything below off the page.
+ */
+function CrosstabTable({ x }: { x: NonNullable<Analysis['crosstab']> }) {
+  const [by, setBy] = useState<'qty' | 'value'>('qty')
+  const [all, setAll] = useState(false)
+  const [q, setQ] = useState('')
+  const needle = q.trim().toLowerCase()
+  const hits = needle ? x.rows.filter((r) => `${r.label} ${r.code} ${r.detail}`.toLowerCase().includes(needle)) : x.rows
+  const rows = all || needle ? hits : hits.slice(0, 25)
+  const cell = (v: number | null, unit: string) =>
+    v == null ? <span className="text-muted-foreground">—</span> : by === 'qty' ? `${v.toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit}` : `₹${inr(v)}`
+  return (
+    <section>
+      <SectionRule>{x.title}</SectionRule>
+      <div className="glass-card overflow-hidden p-0">
+        <div className="border-border flex flex-wrap items-center gap-2 border-b px-3 py-2">
+          <div className="border-border bg-secondary flex gap-1 rounded-lg border p-1" role="radiogroup" aria-label="Show">
+            {(
+              [
+                ['qty', 'Quantity'],
+                ['value', 'Value ₹'],
+              ] as const
+            ).map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                role="radio"
+                aria-checked={by === k}
+                className={by === k ? 'bg-primary text-primary-foreground rounded-md px-3 py-1 text-xs font-semibold' : 'text-muted-foreground rounded-md px-3 py-1 text-xs'}
+                onClick={() => setBy(k)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="text-muted-foreground text-xs">Grey dash: none of it there. Every item, biggest value first.</p>
+          <input id="crosstab-search" className="form-input ml-auto h-8 w-56 text-xs" placeholder="Find an item, design or colour…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Find an item" />
+        </div>
+        <div className="overflow-x-auto">
+          <table className="data-table w-full min-w-[760px]">
+            <thead>
+              <tr>
+                <th className="text-left">{x.rowLabel}</th>
+                {x.columns.map((c, i) => (
+                  <th key={c} className={`text-right ${i === x.columns.length - 1 ? 'bg-secondary/40' : ''}`}>
+                    {c}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const vs = by === 'qty' ? r.qty : r.value
+                return (
+                  <tr key={r.code}>
+                    <td>
+                      <span className="text-foreground">{r.label}</span>
+                      <span className="text-muted-foreground block text-[11px]">
+                        {r.code}
+                        {r.detail ? ` · ${r.detail}` : ''}
+                      </span>
+                    </td>
+                    {vs.map((v, i) => (
+                      <td key={i} className={`whitespace-nowrap text-right tabular-nums ${i === vs.length - 1 ? 'bg-secondary/40 font-semibold' : ''}`}>
+                        {cell(v, r.unit)}
+                      </td>
+                    ))}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        {!needle && hits.length > 25 && (
+          <button type="button" className="text-primary border-border w-full border-t px-3 py-2 text-left text-xs hover:underline" onClick={() => setAll((a) => !a)}>
+            {all ? 'Show the biggest 25 only' : `Show all ${hits.length.toLocaleString('en-IN')} items`}
+          </button>
+        )}
+      </div>
+    </section>
   )
 }
 
@@ -233,6 +341,44 @@ export function ReportDashboard({
           </div>
         </section>
       )}
+
+      {/* A report's table of figures by two things at once — the Inventory
+        Matrix's company and each brand share across where the stock is, Stock
+        Ageing's categories across age bands. One unit throughout (rupees),
+        so its rows and columns may be read across; a dash is nothing there. */}
+      {analysis.matrix && analysis.matrix.rows.length > 0 && (
+        <section>
+          <SectionRule>{analysis.matrix.title}</SectionRule>
+          <div className="glass-card overflow-x-auto p-0">
+            <table className="data-table w-full min-w-[720px]">
+              <thead>
+                <tr>
+                  <th className="text-left">{analysis.matrix.rowLabel}</th>
+                  {analysis.matrix.columns.map((c) => (
+                    <th key={c} className="text-right">
+                      {c}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {analysis.matrix.rows.map((r, ri) => (
+                  <tr key={`${r.label}-${ri}`}>
+                    <td className="text-foreground font-medium">{r.label}</td>
+                    {r.values.map((v, i) => (
+                      <td key={i} className="text-right tabular-nums">
+                        {v == null ? '—' : matrixText(v, analysis.matrix!.format)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {analysis.crosstab && analysis.crosstab.rows.length > 0 && <CrosstabTable x={analysis.crosstab} />}
 
       {children}
 

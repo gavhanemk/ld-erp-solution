@@ -14,9 +14,10 @@ import { prisma } from '../packages/database/src/index'
 
 const API = (process.env.E2E_API || 'http://localhost:5101/api').replace(/\/+$/, '')
 const HEADS = {
-  FG: ['Style / Article No.', 'Item Code', 'Colour', 'Size', 'Opening Quantity', 'Rate Per Piece', 'Location', 'Stock Status', 'Remarks'],
-  SFG: ['Style / Article No.', 'Process', 'Colour', 'Size', 'Opening Quantity', 'Rate / Valuation', 'Department', 'Location', 'Order Reference', 'Batch / Bundle Reference', 'Stock Status', 'Remarks'],
-  RM: ['Material Category', 'Item Code', 'Item Name', 'Lot / Batch / Roll Number', 'Bundle / Barcode Number', 'UOM', 'Opening Quantity', 'Unit Rate', 'Location', 'Package Type', 'Package Count', 'Qty per Package', 'Package Quantities', 'Package References', 'Stock Status', 'Remarks', 'HSN Code', 'GST %'],
+  // Brand last on each (multi-brand phase 5, 28 Nov 2026): the own brand it is earmarked for; empty is central.
+  FG: ['Style / Article No.', 'Item Code', 'Colour', 'Size', 'Opening Quantity', 'Rate Per Piece', 'Location', 'Stock Status', 'Remarks', 'Brand'],
+  SFG: ['Style / Article No.', 'Process', 'Colour', 'Size', 'Opening Quantity', 'Rate / Valuation', 'Department', 'Location', 'Order Reference', 'Batch / Bundle Reference', 'Stock Status', 'Remarks', 'Brand'],
+  RM: ['Material Category', 'Item Code', 'Item Name', 'Lot / Batch / Roll Number', 'Bundle / Barcode Number', 'UOM', 'Opening Quantity', 'Unit Rate', 'Location', 'Package Type', 'Package Count', 'Qty per Package', 'Package Quantities', 'Package References', 'Stock Status', 'Remarks', 'HSN Code', 'GST %', 'Design No.', 'Colour', 'Brand'],
 } as const
 type K = keyof typeof HEADS
 const SHEET: Record<K, string> = { FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' }

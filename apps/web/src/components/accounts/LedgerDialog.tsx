@@ -11,7 +11,9 @@ import { NATURE_LABEL, r2, type Group, type Ledger } from './books'
 
 /**
  * A ledger made or changed by hand: its group, its opening balance on the
- * day the books start, and whether its bills are kept one by one.
+ * day the books start, and whether its bills are kept one by one. An income
+ * or expense ledger also has a usual brand and department, which its lines
+ * take whenever their document says nothing more particular.
  *
  * A party's ledger is named after its customer, supplier, broker or bank and
  * switched on and off with it, so those two are shown but not offered here.
@@ -40,6 +42,10 @@ export function LedgerDialog({
   const [gstin, setGstin] = useState('')
   const [notes, setNotes] = useState('')
   const [isActive, setIsActive] = useState(true)
+  const [costCentreId, setCostCentreId] = useState('')
+  const [departmentId, setDepartmentId] = useState('')
+  const [centres, setCentres] = useState<Array<{ id: string; name: string; isActive: boolean; brand?: { type?: string } | null }>>([])
+  const [departments, setDepartments] = useState<Array<{ id: string; name: string }>>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [mounted, setMounted] = useState(false)
@@ -62,10 +68,33 @@ export function LedgerDialog({
     setGstin(ledger?.gstin ?? '')
     setNotes(ledger?.notes ?? '')
     setIsActive(ledger?.isActive ?? true)
+    setCostCentreId(ledger?.costCentre?.id ?? '')
+    setDepartmentId(ledger?.department?.id ?? '')
   }, [open, ledger])
+
+  // The brands and departments a usual one may be picked from.
+  useEffect(() => {
+    if (!open) return
+    let gone = false
+    void Promise.all([
+      api.get<{ data: Array<{ id: string; name: string; isActive: boolean; brand?: { type?: string } | null }> }>('/accounts/cost-centres'),
+      api.get<{ data: Array<{ id: string; name: string; isActive?: boolean }> }>('/masters/departments?limit=200&active=true&sort=name&order=asc'),
+    ])
+      .then(([c, d]) => {
+        if (gone) return
+        setCentres(c.data.filter((x) => x.isActive && x.brand?.type !== 'CUSTOM'))
+        setDepartments(d.data.filter((x) => x.isActive !== false))
+      })
+      .catch(() => {})
+    return () => {
+      gone = true
+    }
+  }, [open])
 
   const party = !!ledger?.partyType
   const group = groups.find((g) => g.id === groupId)
+  // Only an income or expense ledger carries a brand or a department.
+  const pl = group?.nature === 'INCOME' || group?.nature === 'EXPENSE'
   // A ledger that stands for a party or that the posting rules use keeps its nature.
   const fixedNature = ledger && (ledger.partyType || ledger.systemKey) ? ledger.nature : null
   const groupOptions = useMemo(() => {
@@ -97,6 +126,8 @@ export function LedgerDialog({
       pan: pan.trim() || null,
       gstin: gstin.trim() || null,
       notes: notes.trim() || null,
+      costCentreId: pl ? costCentreId || null : null,
+      departmentId: pl ? departmentId || null : null,
     }
     if (!party) {
       body.name = name.trim()
@@ -182,6 +213,41 @@ export function LedgerDialog({
             </div>
             <p className="text-muted-foreground mt-1 text-[11px]">As the old books showed it the day before the books start here.</p>
           </div>
+          {pl && (
+            <div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="form-label" htmlFor="led-brand">
+                    Usual brand
+                  </label>
+                  <SmartSelect id="led-brand" className="form-input" value={costCentreId} onChange={(e) => setCostCentreId(e.target.value)}>
+                    <option value="">None (shared, or as the document says)</option>
+                    {centres.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </SmartSelect>
+                </div>
+                <div>
+                  <label className="form-label" htmlFor="led-dept">
+                    Usual department
+                  </label>
+                  <SmartSelect id="led-dept" className="form-input" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)}>
+                    <option value="">None</option>
+                    {departments.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </SmartSelect>
+                </div>
+              </div>
+              <p className="text-muted-foreground mt-1 text-[11px]">
+                A line on this ledger takes these when its document says nothing more particular — an order’s brand or an indent’s department comes first. Office rent: Administration; VHAGAR advertising: VHAGAR.
+              </p>
+            </div>
+          )}
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" className="mt-0.5" checked={billWise} onChange={(e) => setBillWise(e.target.checked)} />
             <span>

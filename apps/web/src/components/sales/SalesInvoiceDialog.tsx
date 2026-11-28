@@ -23,7 +23,7 @@ import {
   Truck,
   X,
 } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, can } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { GST_STATES } from '@/lib/gstStates'
 import { formatDate, formatRupees } from '@/lib/utils'
@@ -497,8 +497,9 @@ export function SalesInvoiceDialog({
         linePcs: prep.lines
           .filter((l) => l.needsPcs && (linePcs[lineKey(l)] ?? '').trim() !== '')
           .map((l) => ({ soLineId: l.soLineId, grade: l.grade ?? 'A', pcs: Number(linePcs[lineKey(l)]) || 0 })),
+        // The charges the preview counts, the order's own included even if its type was switched off since.
         charges: totals.chargeRows
-          .filter((c) => c.type && c.value > 0)
+          .filter((c) => (c.type || c.sourceChargeId) && c.value > 0)
           .map((c) => ({
             chargeTypeId: c.chargeTypeId,
             amount: c.value,
@@ -905,7 +906,7 @@ export function SalesInvoiceDialog({
                               <div className="flex justify-end" role="group" aria-label={`Charge ${i + 1} amount type`}>
                                 {(['FIXED', 'PERCENT'] as const).map(mode => <button key={mode} type="button" className="btn-ghost px-2 text-xs" aria-pressed={(c.amountMode ?? 'FIXED') === mode} onClick={() => setCharge(c.key, { amountMode: mode })}>{mode === 'FIXED' ? '₹' : '%'}</button>)}
                               </div>
-                              <ChargeTaxDetails config={c.config} priced={{ ...c.priced, amount: c.priced.net }} onOverride={value => setCharge(c.key, { taxOverride: value })} />
+                              <ChargeTaxDetails mayOverride={can('sales.charge-gst', 'edit')} requireReason config={c.config} priced={{ ...c.priced, amount: c.priced.net }} onOverride={value => setCharge(c.key, { taxOverride: value })} />
                             </>}
                             </div>
                           )

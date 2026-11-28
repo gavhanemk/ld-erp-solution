@@ -74,6 +74,20 @@ export const errorHandler = (
     })
   }
 
+  /*
+   * The database refused a voucher whose debits and credits differ (the
+   * balance check on acc_voucher_lines). Every writer checks this before it
+   * writes, so reaching here is a fault, and nothing was saved.
+   */
+  const unbalanced = /VOUCHER_NOT_BALANCED: voucher (\S+) debits ([\d.]+) but credits ([\d.]+)/.exec(err.message)
+  if (unbalanced) {
+    return res.status(400).json({
+      success: false,
+      message: `${unbalanced[1]} does not balance: debits ₹${unbalanced[2]}, credits ₹${unbalanced[3]}. Nothing was saved. Check the amounts and save again.`,
+      code: 'VOUCHER_NOT_BALANCED',
+    })
+  }
+
   // Prisma errors
   if (err.name === 'PrismaClientKnownRequestError') {
     const prismaErr = err as any

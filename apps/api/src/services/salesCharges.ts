@@ -12,6 +12,18 @@ import { AppError } from '../middleware/errorHandler'
 
 export const chargeTreatmentSchema = z.enum(CHARGE_TAX_TREATMENTS as [ChargeTaxTreatment, ...ChargeTaxTreatment[]])
 
+/**
+ * The overrides a save made: those on the saved charges that the document did
+ * not have before. Each becomes its own audit entry.
+ */
+export function overridesMade(after: Array<{ chargeTypeId: string; taxSnapshot?: unknown }>, before: Array<{ taxSnapshot?: unknown }> = []) {
+  const seen = new Set(before.flatMap((c) => (chargeSnapshot(c.taxSnapshot)?.overrides ?? []).map((o) => `${o.at}|${o.reason}`)))
+  return after.flatMap((c) => {
+    const snap = chargeSnapshot(c.taxSnapshot)
+    return (snap?.overrides ?? []).filter((o) => !seen.has(`${o.at}|${o.reason}`)).map((o) => ({ chargeTypeId: c.chargeTypeId, charge: snap!.name, ...o }))
+  })
+}
+
 /** A charge row as a sales form sends it. */
 export const saleChargeSchema = z.object({
   ...chargeEntryFields,

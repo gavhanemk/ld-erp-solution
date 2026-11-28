@@ -162,6 +162,7 @@ export async function regradeStock(
     direction: 'IN',
     qty: a.qty,
     unitRate: out.unitRate,
+    parts: out.parts,
     grade: a.to,
     referenceType: a.referenceType,
     referenceId: a.referenceId,

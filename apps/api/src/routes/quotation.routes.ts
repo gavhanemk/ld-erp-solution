@@ -1,5 +1,7 @@
 import type { ChargeResolveOptions } from '../services/chargeConfiguration'
 import { userCan } from '../middleware/auth'
+import { mayOverrideSaleChargeGst } from '../middleware/auth'
+import { overridesMade } from '../services/salesCharges'
 import { Router } from 'express'
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
@@ -270,6 +272,8 @@ router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
       code: true,
       name: true,
       brandType: true,
+      brandId: true,
+      brand: { select: { id: true, name: true, type: true } },
       category: true,
       colors: true,
       // Its own size run: a line of this style is quoted size by size in it.
@@ -286,6 +290,9 @@ router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
       code: st.code,
       name: st.name,
       brandType: st.brandType,
+      // Whose brand the style is, by the brand itself: the picker groups by it.
+      brandId: st.brandId,
+      brand: st.brand,
       category: st.category,
       sizeGroupId: st.sizeGroupId,
       colors: [...new Set([...st.colors, ...st.items.map((i) => i.color).filter((c): c is string => !!c)])],
@@ -410,7 +417,7 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
 
 /** Saves a quotation inside the caller's transaction. Exported for the checks that roll it back. */
 export async function createQuote(tx: Prisma.TransactionClient, data: QuoteInput, userId: string, canOverride = false) {
-  const { header, lines, charges } = await priceQuote(tx, data, { canOverride })
+  const { header, lines, charges } = await priceQuote(tx, data, { canOverride, by: { id: userId } })
   const quoteDate = data.quoteDate ?? new Date()
   // Priced and checked first: a refused quotation takes no number.
   const quoteNumber = await nextDocumentNumber(tx, 'QT', quoteDate)
@@ -429,10 +436,18 @@ export async function createQuote(tx: Prisma.TransactionClient, data: QuoteInput
   })
 }
 
+/** One audit entry for each change of a charge's GST a save made: who, when, why, from what to what. */
+async function auditChargeOverrides(req: AuthRequest, doc: { id: string; number: string }, after: Array<{ chargeTypeId: string; taxSnapshot?: unknown }>, before: Array<{ taxSnapshot?: unknown }> = []) {
+  for (const o of overridesMade(after, before)) {
+    await writeAuditLog(req, { module: 'sales', action: 'UPDATE', entityType: 'SalesChargeGstOverride', entityId: doc.id, after: { document: doc.number, ...o } })
+  }
+}
+
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = quoteSchema.parse(req.body)
-  const quote = await prisma.$transaction((tx) => createQuote(tx, data, req.user!.id, userCan(req.user, 'masters', 'edit')), { timeout: 30_000 })
+  const quote = await prisma.$transaction((tx) => createQuote(tx, data, req.user!.id, mayOverrideSaleChargeGst(req.user)), { timeout: 30_000 })
   await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'SalesQuotation', entityId: quote.id, after: quote })
+  await auditChargeOverrides(req, { id: quote.id, number: quote.quoteNumber }, quote.charges)
   res.status(201).json({ success: true, message: `${quote.quoteNumber} ${quote.status === 'SENT' ? 'saved and marked sent' : 'saved as a draft'}`, data: quote })
 })
 
@@ -446,7 +461,7 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
       if (before.status === 'WON' || before.status === 'LOST') {
         throw new AppError(`${before.quoteNumber} is ${before.status.toLowerCase()}, so it can no longer change. Copy it into a new one.`, 409, 'DECIDED')
       }
-      const { header, lines, charges } = await priceQuote(tx, data, { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
+      const { header, lines, charges } = await priceQuote(tx, data, { saved: before.charges, canOverride: mayOverrideSaleChargeGst(req.user), by: { id: req.user!.id } })
       await tx.salesQuotationLine.deleteMany({ where: { quoteId: before.id } })
       await tx.salesQuotationCharge.deleteMany({ where: { quoteId: before.id } })
       const sending = data.send && before.status === 'DRAFT'
@@ -466,6 +481,7 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
     { timeout: 30_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'SalesQuotation', entityId: after.id, before, after })
+  await auditChargeOverrides(req, { id: after.id, number: after.quoteNumber }, after.charges, before.charges)
   res.json({ success: true, message: `${after.quoteNumber} saved`, data: after })
 })
 

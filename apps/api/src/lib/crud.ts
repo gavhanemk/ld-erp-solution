@@ -87,6 +87,18 @@ export interface CrudOptions {
     before?: Record<string, unknown>,
   ) => Promise<{ data: Record<string, unknown>; onSaveError?: (err: unknown) => void }>
   /**
+   * What has to follow a record once it is saved — a brand's profit centre
+   * takes the brand's code and name. Runs after a create or an edit has
+   * succeeded, with the record as saved, what the form sent (fields
+   * `beforeSave` kept off the record included) and, on an edit, the record
+   * before it.
+   */
+  afterSave?: (
+    saved: Record<string, any>,
+    input: Record<string, unknown>,
+    before?: Record<string, unknown>,
+  ) => Promise<void>
+  /**
    * Turns on GET /export: every record the list would show, with the same
    * search, filters and sort but no pages, handed to this to make the file.
    */
@@ -225,6 +237,7 @@ export function crudRouter(options: CrudOptions): Router {
     activeFlag = softDelete,
     injectOnCreate,
     beforeSave,
+    afterSave,
     filters = {},
     facets = [],
     customFacets = {},
@@ -388,8 +401,10 @@ export function crudRouter(options: CrudOptions): Router {
     }
 
     const parsed = createSchema.parse(body) as Record<string, unknown>
-    await assertUnique(parsed)
+    if (!uniqueScope) await assertUnique(parsed)
     const { data, onSaveError } = beforeSave ? await beforeSave(parsed) : { data: parsed, onSaveError: undefined }
+    // A scoped name (an item's, by its design and colour) needs what beforeSave worked out, such as the type.
+    if (uniqueScope) await assertUnique(data)
 
     // The form no longer asks for a code, so one is made up here. Two people
     // saving at the same instant can both read the same highest number; the
@@ -407,6 +422,7 @@ export function crudRouter(options: CrudOptions): Router {
       onSaveError?.(err)
       throw err
     }
+    if (afterSave) await afterSave(created, parsed)
 
     await writeAuditLog(req, {
       module,
@@ -425,10 +441,11 @@ export function crudRouter(options: CrudOptions): Router {
     const before = await delegate().findUnique({ where: { id: req.params.id } })
     if (!before) throw new AppError(`${entityType} not found`, 404, 'NOT_FOUND')
     if (beforeDeactivate && parsed.isActive === false && before.isActive !== false) await beforeDeactivate(before)
-    await assertUnique(parsed, req.params.id, before)
+    if (!uniqueScope) await assertUnique(parsed, req.params.id, before)
     const { data, onSaveError } = beforeSave
       ? await beforeSave(parsed, before)
       : { data: parsed, onSaveError: undefined }
+    if (uniqueScope) await assertUnique(data, req.params.id, before)
 
     let updated
     try {
@@ -437,6 +454,7 @@ export function crudRouter(options: CrudOptions): Router {
       onSaveError?.(err)
       throw err
     }
+    if (afterSave) await afterSave(updated, parsed, before)
 
     await writeAuditLog(req, {
       module,

@@ -38,6 +38,8 @@ export type OsKey =
   | 'hsn' | 'gst'
   /** Optional, fabric only (27 Nov 2026): with its name and colour, which fabric item the row is. */
   | 'designNo'
+  /** Optional (multi-brand phase 5): the own brand the stock is earmarked for; empty is central. */
+  | 'brand'
   /** Only on the Semi Finished Goods template: checked against the process. */
   | 'department'
   /** Raw Materials template, optional: how the row's stock is packed. */
@@ -57,6 +59,14 @@ export const KIND_LABEL: Record<OsKind, string> = { FG: 'Finished Goods', SFG: '
  * (27 Nov 2026): on a sheet the two say which of the items of a name a row
  * is, and a fabric made on import carries them.
  */
+/*
+ * Stock can come in earmarked for one of our own brands (multi-brand phase
+ * 5): the brand's share of the balance, at the rate given. Empty is central
+ * stock, the company's for no brand, which is what every row was before.
+ */
+const BRAND_NOTE =
+  'Optional. One of our own brands (Masters → In House Brands), when this stock is already that brand’s: it comes in earmarked for it. Empty: central stock, for any brand to use.'
+
 const DESIGN_NOTE =
   'Optional. Fabric only: its design number, exactly as on the roll. With the item name and Colour it finds the fabric item — or makes it, one item per design and colour.'
 const COLOUR_NOTE =
@@ -91,6 +101,8 @@ export const OS_COLUMNS: SheetColumn<OsKey>[] = [
   { key: 'gst', head: 'GST %', width: 8, note: "Optional. Only for an item made on import: checked against its HSN code's rate. Its GST always comes from the HSN code." },
   // Added at the end (27 Nov 2026), so a sheet made from an older template still reads.
   { key: 'designNo', head: 'Design No.', width: 12, note: DESIGN_NOTE },
+  // And after it (28 Nov 2026), for the same reason.
+  { key: 'brand', head: 'Brand', width: 16, list: 'brands', note: BRAND_NOTE },
 ]
 
 /** Each kind's template: only its own columns, in this order. */
@@ -105,6 +117,7 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'location', head: 'Location', width: 22, list: 'stores', note: 'Optional. Empty: the finished goods store.' },
     { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'Optional. OK, Hold, Rejected or B-Grade. Empty is OK.' },
     { key: 'remarks', head: 'Remarks', width: 24, note: 'Optional.' },
+    { key: 'brand', head: 'Brand', width: 16, list: 'brands', note: BRAND_NOTE },
   ],
   SFG: [
     { key: 'style', head: 'Style / Article No. *', width: 18, list: 'styles', note: 'Required. The style, as in Masters → Styles.' },
@@ -119,6 +132,7 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     { key: 'bundle', head: 'Batch / Bundle Reference', width: 20, note: 'Optional.' },
     { key: 'status', head: 'Stock Status', width: 12, list: 'statuses', note: 'Optional. OK, Hold, Rejected or B-Grade. Empty is OK.' },
     { key: 'remarks', head: 'Remarks', width: 24, note: 'Optional.' },
+    { key: 'brand', head: 'Brand', width: 16, list: 'brands', note: BRAND_NOTE },
   ],
   RM: [
     { key: 'category', head: 'Material Category', width: 18, list: 'materials', note: "Needed for a new item: its subcategory (Fabric, Thread…). For an item already there it is checked against the item's category." },
@@ -142,6 +156,8 @@ export const TYPE_COLUMNS: Record<OsKind, SheetColumn<OsKey>[]> = {
     // Added at the end (27 Nov 2026): fabric is one item per design and colour, thread one per colour.
     { key: 'designNo', head: 'Design No.', width: 12, note: DESIGN_NOTE },
     { key: 'colour', head: 'Colour', width: 12, note: COLOUR_NOTE },
+    // And after them (28 Nov 2026).
+    { key: 'brand', head: 'Brand', width: 16, list: 'brands', note: BRAND_NOTE },
   ],
   FA: [
     { key: 'category', head: 'Asset Category', width: 18, list: 'assetCategories', note: "Needed for a new item: its subcategory under Fixed Assets (Machines, Computers…). For an item already there it is checked against the item's category." },
@@ -461,6 +477,8 @@ export interface OsRowPlan {
   stickers: number
   /** No rate given: in at nought, its value to be set later. */
   valuationPending?: boolean
+  /** The own brand it comes in earmarked for; null is central stock. */
+  brand?: string | null
 }
 
 /** What posting needs for a row the check passed. */
@@ -480,6 +498,8 @@ interface Ready {
   orderNo: string | null
   lotNo: string | null
   bundleNo: string | null
+  /** The share it comes in on (multi-brand phase 5): an own brand, or null for central. */
+  brandId: string | null
   sticker: boolean
   /** Its stickers: null for stock not labelled by package (garments by size, untracked categories). */
   pack: PackPlan | null
@@ -508,7 +528,7 @@ interface NewItem {
 const NEW = 'new:'
 
 async function loadMasters() {
-  const [items, warehouses, departments, styles, sizes, units] = await Promise.all([
+  const [items, warehouses, departments, styles, sizes, units, brands] = await Promise.all([
     prisma.item.findMany({
       where: { isActive: true },
       select: {
@@ -527,8 +547,9 @@ async function loadMasters() {
     prisma.style.findMany({ select: { id: true, code: true, name: true, sizeGroupId: true, category: true, isActive: true, colors: true } }),
     prisma.size.findMany({ select: { id: true, code: true, label: true, sizeGroupId: true } }),
     prisma.uOM.findMany({ where: { isActive: true }, select: { id: true, symbol: true, name: true, decimalPlaces: true } }),
+    prisma.brand.findMany({ select: { id: true, name: true, code: true, type: true, isActive: true } }),
   ])
-  return { items, warehouses, departments, styles, sizes, units }
+  return { items, warehouses, departments, styles, sizes, units, brands }
 }
 
 /** The active item categories, each with its group (its own, else its main category's). */
@@ -611,6 +632,7 @@ async function buildKindTemplate(kind: OsKind): Promise<Buffer> {
     units: m.units.map((u) => u.symbol).sort(),
     statuses: kind === 'RM' || kind === 'FA' ? ['OK', 'Hold', 'Rejected'] : Object.values(STATUS_LABEL),
     packTypes: ['Roll', 'Box', 'Carton', 'Bag', 'Bundle', 'Packet', 'Other'],
+    brands: m.brands.filter((b) => b.type !== 'CUSTOM' && b.isActive).map((b) => b.name).sort(),
   }
   const used = new Set(columns.map((c) => c.list).filter(Boolean) as string[])
   addDropdowns(wb, sheet, columns, Object.fromEntries(Object.entries(all).filter(([k]) => used.has(k))), MAX_ROWS)
@@ -642,6 +664,7 @@ export async function buildTemplate(kind?: OsKind): Promise<Buffer> {
       locations: m.warehouses.map((w) => w.name).sort(),
       units: m.units.map((u) => u.symbol).sort(),
       statuses: Object.values(STATUS_LABEL),
+      brands: m.brands.filter((b) => b.type !== 'CUSTOM' && b.isActive).map((b) => b.name).sort(),
     },
     MAX_ROWS,
   )
@@ -1354,6 +1377,20 @@ export async function planImport(
       if (status === 'B_GRADE' && (plan.group === 'RAW_MATERIALS' || plan.group === 'FIXED_ASSETS')) problems.push('B-Grade is for semi-finished and finished goods only.')
     }
 
+    // Brand (multi-brand phase 5): one of our own, the stock earmarked for it; empty is central.
+    let brandId: string | null = null
+    const brandText = squash(raw.brand)
+    if (brandText) {
+      const b = m.brands.find((x) => squash(x.name) === brandText || (x.code && squash(x.code) === brandText))
+      if (!b) problems.push(`${L('brand')} "${(raw.brand ?? '').trim()}" is not one of our brands: pick one from Masters → In House Brands, or leave it empty for central stock.`)
+      else if (b.type === 'CUSTOM') problems.push(`${b.name} is a customer’s brand: stock is earmarked only for our own brands. Leave ${L('brand')} empty for central stock.`)
+      else if (plan.group === 'FIXED_ASSETS') problems.push(`A fixed asset is not a brand’s stock: leave ${L('brand')} empty.`)
+      else {
+        brandId = b.id
+        plan.brand = b.name
+      }
+    }
+
     // Its stickers: raw materials of a category labelled by package, kept without sizes.
     let pack: PackPlan | null = null
     const packInput = packGiven ?? packFromRow(raw, problems, L)
@@ -1423,6 +1460,7 @@ export async function planImport(
             orderNo: plan.order,
             lotNo: plan.lot,
             bundleNo: plan.bundle,
+            brandId,
             sticker: false,
             pack,
             newItem,
@@ -1439,7 +1477,7 @@ export async function planImport(
 /** Where a row's stock sits, for telling one row from another: a floor not made yet goes by its process. */
 const placeOf = (r: Ready) => r.warehouseId ?? `floor:${r.floorOf}`
 const dedupeKey = (r: Ready, warehouseId: string) =>
-  [r.itemId, warehouseId, r.sizeId ?? '', r.grade, squash(r.orderNo), squash(r.lotNo), squash(r.bundleNo)].join('|')
+  [r.itemId, warehouseId, r.sizeId ?? '', r.grade, squash(r.orderNo), squash(r.lotNo), squash(r.bundleNo), ...(r.brandId ? [r.brandId] : [])].join('|')
 
 /**
  * Nothing in twice: the same item, place, size, status, order, lot and bundle
@@ -1723,6 +1761,7 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
         const d = r.ready!
         const note = [`${number} ${byHand ? 'line' : 'row'} ${r.plan.row}`, d.bundleNo ? `bundle ${d.bundleNo}` : null, (d.raw.remarks ?? '').trim() || null].filter(Boolean).join(' · ')
         const posted = await recordMovement(tx, {
+          brandId: d.brandId,
           itemId: d.itemId,
           warehouseId: d.warehouseId!,
           transactionType: 'OPENING',
@@ -1776,6 +1815,7 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
             // In without a rate: valued at nought until its rate is set.
             valuationPending: d.rate === 0,
             ledgerId: posted.ledgerId,
+            brandId: d.brandId,
           },
         })
 
@@ -1783,7 +1823,7 @@ async function postImport(rows: Resolved[], opts: Parameters<typeof runImport>[1
         // line waiting for its sizes has none yet and its stock stays loose.
         if (d.pack && d.pack.qtys.length) {
           const pkgs = await createPackages(tx, {
-            spot: { itemId: d.itemId, warehouseId: d.warehouseId!, ownership: 'OWNED', ownerCustomerId: null },
+            spot: { itemId: d.itemId, warehouseId: d.warehouseId!, ownership: 'OWNED', ownerCustomerId: null, brandId: d.brandId },
             packType: d.pack.packType,
             qtys: d.pack.qtys,
             notesEach: d.pack.refs.map((ref) => (ref ? `${item.type === 'FIXED_ASSET' ? 'S/N' : 'Ref'} ${ref}`.slice(0, 120) : null)),
@@ -2020,7 +2060,7 @@ export async function packLine(lineId: string, input: PackInput, userId: string 
     if (problems.length) throw new AppError(problems.join(' '), 400, 'BAD_PACKAGES')
     if (!plan.qtys.length) throw new AppError(`Give the packages for the ${left} ${unit} not yet on stickers.`, 400, 'NO_PACKAGES')
     const pkgs = await createPackages(tx, {
-      spot: { itemId: line.itemId, warehouseId: line.warehouseId, ownership: 'OWNED', ownerCustomerId: null },
+      spot: { itemId: line.itemId, warehouseId: line.warehouseId, ownership: 'OWNED', ownerCustomerId: null, brandId: line.brandId },
       packType: plan.packType,
       qtys: plan.qtys,
       notesEach: plan.refs.map((ref) => (ref ? `${line.item.type === 'FIXED_ASSET' ? 'S/N' : 'Ref'} ${ref}`.slice(0, 120) : null)),

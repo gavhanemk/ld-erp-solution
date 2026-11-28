@@ -1,4 +1,5 @@
 import type { MOStatus, Prisma, PrismaClient } from '@prisma/client'
+import { offeredStock, offeringStore } from './availability.service'
 import { qtyPlaces, roundUpToPlaces } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
 import { ITEM_SHADE } from '../lib/fabric'
@@ -299,6 +300,8 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     department: { id: string; name: string } | null
     styles: Set<string>
     required: number
+    /** A material the BOM does not call for, on the plan only for its approved extra. */
+    extraOnly?: boolean
   }
   const rows = new Map<string, Row>()
   const missing: Array<{ style: string; color: string; pieces: number }> = []
@@ -359,18 +362,64 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     }
   }
 
+  /*
+   * Extra material approved for this MO (multi-brand phase 5): it raises what
+   * may be asked for and issued of that material. One the BOM does not call
+   * for gets a row of its own, so it can be asked for from the plan.
+   */
+  const extras = await db.materialExtra.groupBy({ by: ['itemId', 'ownership', 'ownerCustomerId'], where: { moId: mo.id, status: 'APPROVED' }, _sum: { qty: true } })
+  const extraOf = new Map(extras.map((e) => [`${e.itemId}|${e.ownership}|${e.ownerCustomerId ?? ''}`, round3(Number(e._sum.qty ?? 0))]))
+  const unplanned = extras.filter((e) => ![...rows.values()].some((r) => r.item.id === e.itemId && r.ownership === e.ownership && (r.ownerCustomerId ?? null) === (e.ownerCustomerId ?? null)))
+  if (unplanned.length) {
+    const extraItems = await db.item.findMany({
+      where: { id: { in: unplanned.map((e) => e.itemId) } },
+      select: { id: true, code: true, name: true, ...ITEM_SHADE, type: true, decimalPlaces: true, uom: { select: { symbol: true, decimalPlaces: true } }, category: { select: { name: true, parent: { select: { name: true } } } } },
+    })
+    for (const e of unplanned) {
+      const it = extraItems.find((i) => i.id === e.itemId)
+      if (!it) continue
+      const key = `${e.itemId}|${e.ownership}|${e.ownerCustomerId ?? ''}|extra`
+      rows.set(key, {
+        key,
+        baseKey: `${e.itemId}|`,
+        defaultOwnership: e.ownership as Row['defaultOwnership'],
+        item: {
+          id: it.id,
+          code: it.code,
+          name: it.name,
+          designNo: it.designNo,
+          color: it.color,
+          styleId: it.styleId,
+          type: it.type,
+          uom: it.uom?.symbol ?? null,
+          places: qtyPlaces(it),
+          category: [it.category?.parent?.name, it.category?.name].filter(Boolean).join(' › '),
+        },
+        ownership: e.ownership as Row['ownership'],
+        ownerCustomerId: e.ownerCustomerId ?? null,
+        department: null,
+        styles: new Set<string>(),
+        required: 0,
+        extraOnly: true,
+      })
+    }
+  }
+  // An extra counts once, on the first row of its material and owner.
+  const extraGiven = new Set<string>()
+
   const itemIds = [...new Set([...rows.values()].map((r) => r.item.id))]
-  const [stock, warehouses, asked] = await Promise.all([
+  const [stock, warehouses, asked, heldElsewhere] = await Promise.all([
     itemIds.length
       ? db.stockLedger.groupBy({
           by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],
-          // Goods a quality check rejected are held apart, not in stock to ask for;
-          // so is material bought for samples, kept in a sample store.
-          where: { itemId: { in: itemIds }, grade: { not: 'R' }, warehouse: { purpose: { not: 'SAMPLING' } } },
+          // By the one rule (services/availability.service): good stock in
+          // stores that issue — not rejected or B-grade, not in a sample, QC
+          // hold, reject, scrap or in-transit store.
+          where: { itemId: { in: itemIds }, ...offeredStock },
           _sum: { inQty: true, outQty: true },
         })
       : Promise.resolve([]),
-    db.warehouse.findMany({ where: { isActive: true, purpose: { not: 'SAMPLING' } }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    db.warehouse.findMany({ where: { isActive: true, ...offeringStore }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
     db.materialRequisitionLine.findMany({
       where: { mr: { moId: mo.id, status: { not: 'REJECTED' } } },
       select: {
@@ -383,8 +432,17 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
         mr: { select: { departmentId: true, closedAt: true } },
       },
     }),
+    // Held on the racks for anything but this order's own requisitions: not free for it.
+    itemIds.length
+      ? db.stockReservation.findMany({
+          where: { status: 'ACTIVE', itemId: { in: itemIds }, mr: { OR: [{ moId: null }, { moId: { not: mo.id } }] } },
+          select: { itemId: true, warehouseId: true, qty: true },
+        })
+      : Promise.resolve([]),
   ])
   const storeName = new Map(warehouses.map((w) => [w.id, w.name]))
+  const heldFor = (itemId: string, warehouseId: string) =>
+    heldElsewhere.filter((h) => h.itemId === itemId && h.warehouseId === warehouseId).reduce((t, h) => t + Number(h.qty), 0)
 
   // Rows of the same material and owner: a requisition counts against its own
   // department's row, but where the material has one row only it counts
@@ -399,7 +457,12 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
   const data = [...rows.values()].map((r) => {
     const stores = stock
       .filter((s) => s.itemId === r.item.id && s.ownership === r.ownership && (s.ownerCustomerId ?? null) === r.ownerCustomerId)
-      .map((s) => ({ id: s.warehouseId, name: storeName.get(s.warehouseId) ?? 'Store', qty: round3(Number(s._sum.inQty ?? 0) - Number(s._sum.outQty ?? 0)) }))
+      // Free, by the one rule: less what is held for other work (our own stock only is ever held).
+      .map((s) => ({
+        id: s.warehouseId,
+        name: storeName.get(s.warehouseId) ?? 'Store',
+        qty: round3(Number(s._sum.inQty ?? 0) - Number(s._sum.outQty ?? 0) - (s.ownership === 'OWNED' ? heldFor(s.itemId, s.warehouseId) : 0)),
+      }))
       .filter((s) => s.qty > 0 && storeName.has(s.id))
       .sort((a, b) => b.qty - a.qty)
     const inStock = round3(stores.reduce((s, x) => s + x.qty, 0))
@@ -418,8 +481,11 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     // Up to what can actually be handed over: a carton for every 24 shirts on
     // 50 shirts is 2.08 cartons, asked for as 3; metres stay as worked out.
     const required = roundUpToPlaces(round3(r.required), r.item.places)
+    const ek = `${r.item.id}|${r.ownership}|${r.ownerCustomerId ?? ''}`
+    const extra = extraGiven.has(ek) ? 0 : (extraOf.get(ek) ?? 0)
+    extraGiven.add(ek)
     // Also up: an older requisition asked for 2.1 of 3 cartons leaves 1 to ask, not 0.9.
-    const toRequest = roundUpToPlaces(round3(Math.max(0, required - requested)), r.item.places)
+    const toRequest = roundUpToPlaces(round3(Math.max(0, required + extra - requested)), r.item.places)
     return {
       key: r.key,
       baseKey: r.baseKey,
@@ -431,6 +497,9 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
       department: r.department,
       styles: [...r.styles],
       required,
+      /** Approved extra material for it (multi-brand phase 5), on top of what the BOM needs. */
+      extra,
+      extraOnly: !!r.extraOnly,
       inStock,
       requested,
       toRequest,

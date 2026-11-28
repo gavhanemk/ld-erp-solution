@@ -54,6 +54,8 @@ interface Row {
   documentNumber: string | null
   /** Who was on the other side of it. */
   party: { kind: PartyKind | null; id: string; name: string | null } | null
+  /** Who made the movement; none on rows from before this was kept. */
+  createdBy: { id: string; name: string } | null
 }
 
 type PartyKind = 'supplier' | 'customer' | 'jobworker' | 'department' | 'store' | 'production'
@@ -564,6 +566,7 @@ function LedgerScreen() {
             Rate: m.unitRate === null ? '' : Number(m.unitRate),
             Value: m.value ?? '',
             Note: m.notes ?? '',
+            By: m.createdBy?.name ?? '',
           }
         }),
       )
@@ -1039,7 +1042,14 @@ function LedgerScreen() {
                   }
                   out.push(
                     <tr key={r.id} data-row tabIndex={i === 0 ? 0 : -1}>
-                      <td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">{timeOf(r.transactionDate)}</td>
+                      <td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
+                        {timeOf(r.transactionDate)}
+                        {r.createdBy && (
+                          <div className="text-[11px]" title={`Made by ${r.createdBy.name}`}>
+                            {r.createdBy.name}
+                          </div>
+                        )}
+                      </td>
                       <td className="whitespace-nowrap">
                         <span className={m.cls}>{m.label}</span>
                         {r.referenceType && (

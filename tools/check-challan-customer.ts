@@ -11,8 +11,9 @@ async function main() {
   assert.equal(url.pathname, '/lderp_charge_test_20261114')
   const requireApi = createRequire(new URL('../apps/api/package.json', import.meta.url))
   const jwt = requireApi('jsonwebtoken')
-  const admin = await prisma.user.findFirstOrThrow({ where: { role: { name: 'Admin' } } })
-  const token = jwt.sign({ id: admin.id, role: 'Admin' }, process.env.JWT_SECRET!, {
+  // Admin became Super Admin in #79; either is the administrator here.
+  const admin = await prisma.user.findFirstOrThrow({ where: { role: { name: { in: ['Super Admin', 'Admin'] } } }, include: { role: true } })
+  const token = jwt.sign({ id: admin.id, role: admin.role.name }, process.env.JWT_SECRET!, {
     expiresIn: '1h',
   })
   const order = await prisma.salesOrder.findFirstOrThrow({ include: { customer: true } })

@@ -3,6 +3,8 @@ import { AppError } from '../middleware/errorHandler'
 import { SAMPLE_STORE_IDS, sampleStoreMayMove, sampleStoreRefused } from '../lib/sampleStore'
 // package.service imports this file too; each only calls the other from inside a function.
 import { takeFromPackage } from './package.service'
+import { currentUserId } from '../lib/requestContext'
+import { OFFERING_STORE_IDS, storeOffers } from './availability.service'
 
 /**
  * The only place in the system that is allowed to write a stock movement.
@@ -32,6 +34,13 @@ import { takeFromPackage } from './package.service'
  * Valuation is weighted average, chosen once for the whole system. It is what a
  * Tally-trained accountant expects, it survives a part-received order, and it
  * does not need batches to be tracked before the mill is ready to track them.
+ *
+ * And from multi-brand phase 5, whose share: each balance is central stock
+ * (the company's, for no brand) and any brand's earmarked share of it. Each
+ * share keeps its own moving average (decision 5). A movement is on one share:
+ * central unless it names a brand, so nothing that does not ask for a brand
+ * can take stock earmarked for one. Read without a brand, a balance is every
+ * share together: the physical stock a count, a sticker or a screen means.
  */
 
 /** Quantities are stored to three decimals; fabric is issued in metres. */
@@ -53,6 +62,12 @@ export interface StockKey {
    * which are counted apart from good ones and never sent in their place.
    */
   grade?: 'A' | 'B' | string | null
+  /**
+   * Whose share: a brand's id, or null for central stock. On a movement, left
+   * out means central. On a read (balanceOf), left out means every share
+   * together, the physical stock; null means central only.
+   */
+  brandId?: string | null
 }
 
 export interface Movement extends StockKey {
@@ -65,6 +80,21 @@ export interface Movement extends StockKey {
    * value left behind would not match the quantity left behind.
    */
   unitRate?: number
+  /**
+   * Goods on the road only: what they leave a transit store at, which is what
+   * their own transfer put them in at. One transit store carries every
+   * consignment, and two of the same cloth sent at different rates must not
+   * blend on the way; nothing else moves stock there, so each leaving at its
+   * own rate keeps what is left exactly what is still on the road. Refused for
+   * any other store.
+   */
+  atRate?: number
+  /**
+   * An automatic reallocation put back with the document it was made for (a
+   * challan cancelled): the stock goes back at the rate it moved at, so both
+   * shares are exactly as they were. Allows `atRate` outside a transit store.
+   */
+  restoring?: boolean
   /** The document that caused this. Both halves are required; see rule 2. */
   referenceType: string
   referenceId: string
@@ -92,6 +122,12 @@ export interface Movement extends StockKey {
   cartonsOn?: string
   /** A check or a count found it: the stock is what it is, holds or not. */
   ignoreReservations?: boolean
+  /**
+   * Coming in as the other half of a movement out: the rates it went out at,
+   * part by part (see `Written.parts`), so what comes in is worth exactly what
+   * went out. Takes the place of `unitRate`; the parts add up to `qty`.
+   */
+  parts?: Array<{ qty: number; unitRate: number }>
   /**
    * Who keeps the stickers in step when stock goes out. 'auto' (the default)
    * takes this store's stickers down to what is left, oldest first; 'window'
@@ -121,7 +157,13 @@ export interface Balance {
  * an item stuck.
  */
 async function lockBalance(tx: Prisma.TransactionClient, key: StockKey): Promise<void> {
-  const token = [
+  const token = lockToken(key)
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)`
+}
+
+/** The name a balance's lock goes by: everything that makes it one balance. */
+function lockToken(key: StockKey): string {
+  return [
     key.itemId,
     key.warehouseId,
     key.ownership ?? 'OWNED',
@@ -129,8 +171,21 @@ async function lockBalance(tx: Prisma.TransactionClient, key: StockKey): Promise
     key.sizeId ?? '',
     key.grade ?? 'A',
   ].join('|')
+}
 
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)`
+/**
+ * Locks several balances at once, always in the same order.
+ *
+ * A document that touches two balances — a transfer takes from one store and
+ * puts into another — locking them in the order it meets them can deadlock
+ * against one going the other way: A→B holds A and waits for B while B→A
+ * holds B and waits for A. Taken in one fixed order, the second simply waits
+ * for the first. Each lock is held to the end of the transaction, and taking
+ * one again later (as `recordMovement` does) is harmless.
+ */
+export async function lockBalances(tx: Prisma.TransactionClient, keys: StockKey[]): Promise<void> {
+  const tokens = [...new Set(keys.map(lockToken))].sort()
+  for (const token of tokens) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)`
 }
 
 /**
@@ -141,21 +196,28 @@ async function lockBalance(tx: Prisma.TransactionClient, key: StockKey): Promise
 async function lockBalanceAndStore(
   tx: Prisma.TransactionClient,
   key: StockKey,
-): Promise<{ purpose: string | null; name: string | null }> {
-  const token = [
-    key.itemId,
-    key.warehouseId,
-    key.ownership ?? 'OWNED',
-    key.ownerCustomerId ?? '',
-    key.sizeId ?? '',
-    key.grade ?? 'A',
-  ].join('|')
-  const rows = await tx.$queryRaw<Array<{ purpose: string | null; name: string | null }>>`
-    SELECT w.purpose::text AS purpose, w.name
+): Promise<{ purpose: string | null; name: string | null; kind: string | null }> {
+  const token = lockToken(key)
+  const rows = await tx.$queryRaw<Array<{ purpose: string | null; name: string | null; kind: string | null }>>`
+    SELECT w.purpose::text AS purpose, w.name, w.kind::text AS kind
     FROM (SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)) AS held
     LEFT JOIN ld_erp.warehouses w ON w.id = ${key.warehouseId}`
-  return rows[0] ?? { purpose: null, name: null }
+  return rows[0] ?? { purpose: null, name: null, kind: null }
 }
+
+/**
+ * The documents that may move stock into or out of a transit store: an
+ * in-transit transfer's dispatch, receipt, send-back, write-off and cancel.
+ * Goods on the road are counted at the other end, not issued or counted where
+ * they wait.
+ */
+export const TRANSIT_DOCUMENTS = new Set([
+  'STOCK_TRANSFER',
+  'STOCK_TRANSFER_RECEIVED',
+  'STOCK_TRANSFER_RETURNED',
+  'STOCK_TRANSFER_LOST',
+  'STOCK_TRANSFER_CANCELLED',
+])
 
 /**
  * What is on hand right now, and what it is carried at.
@@ -171,6 +233,8 @@ export async function balanceOf(
   tx: Prisma.TransactionClient,
   key: StockKey,
 ): Promise<Balance> {
+  // A brand named (or null for central): that share. Left out: every share, the physical stock.
+  const everyShare = key.brandId === undefined
   const rows = await tx.$queryRaw<Array<{ qty: number | null; value: number | null }>>`
     SELECT
       COALESCE(SUM("inQty" - "outQty"), 0)::float8                        AS qty,
@@ -182,6 +246,7 @@ export async function balanceOf(
       AND "ownerCustomerId" IS NOT DISTINCT FROM ${key.ownerCustomerId ?? null}::text
       AND "sizeId" IS NOT DISTINCT FROM ${key.sizeId ?? null}::text
       AND "grade" = ${key.grade ?? 'A'}
+      AND (${everyShare}::boolean OR "brandId" IS NOT DISTINCT FROM ${key.brandId ?? null}::text)
   `
 
   const qty = round3(rows[0]?.qty ?? 0)
@@ -209,6 +274,16 @@ export async function lockedBalanceOf(
 
 /** The calendar day in India, as YYYY-MM-DD: what "dated the 28th" means at the mill. */
 const indianDay = (d: Date) => new Date(d.getTime() + 330 * 60_000).toISOString().slice(0, 10)
+
+/**
+ * The day the books are locked up to (Accounts → Chart of Accounts → Books),
+ * as YYYY-MM-DD in India, or null when nothing is locked. Stock in a closed
+ * period is closed too: its value is the closing stock those books carry.
+ */
+export async function stockLockedUpTo(tx: Prisma.TransactionClient): Promise<string | null> {
+  const rows = await tx.$queryRaw<Array<{ d: Date | null }>>`SELECT "booksLockedUpTo" AS d FROM ld_erp.company LIMIT 1`
+  return rows[0]?.d ? indianDay(rows[0].d) : null
+}
 
 const readableDay = (d: Date) =>
   d.toLocaleDateString('en-IN', {
@@ -263,12 +338,12 @@ async function settleDate(
       AND "grade" = ${key.grade ?? 'A'}
   `
   const last = rows[0]?.last ?? null
-  if (!last) return asked
+  if (!last) return outsideLock(tx, asked, key.earlierDate)
 
   // A correction, a cancellation, an approval or a despatch happens now: it
   // goes in just after the last movement rather than being refused for the
   // date its document carries.
-  if (key.earlierDate === 'move-up' && asked <= last) return new Date(last.getTime() + 1)
+  if (key.earlierDate === 'move-up' && asked <= last) return outsideLock(tx, new Date(last.getTime() + 1), key.earlierDate)
 
   if (indianDay(asked) < indianDay(last)) {
     const [item, warehouse] = await Promise.all([
@@ -282,7 +357,25 @@ async function settleDate(
     )
   }
 
-  return asked <= last ? new Date(last.getTime() + 1) : asked
+  return outsideLock(tx, asked <= last ? new Date(last.getTime() + 1) : asked, key.earlierDate)
+}
+
+/**
+ * A movement's date, kept out of a closed period: stock up to the lock date
+ * is as the books closed it. A correction, cancellation or approval happens
+ * now, so it is written now; anything else dated in the closed period is
+ * refused, saying so.
+ */
+async function outsideLock(tx: Prisma.TransactionClient, when: Date, earlierDate?: 'refuse' | 'move-up'): Promise<Date> {
+  const lock = await stockLockedUpTo(tx)
+  if (!lock || indianDay(when) > lock) return when
+  const now = new Date()
+  if (earlierDate === 'move-up' && indianDay(now) > lock) return now
+  throw new AppError(
+    `Stock up to ${readableDay(new Date(`${lock}T00:00:00+05:30`))} is closed: the books are locked to that day (Accounts → Chart of Accounts → Books). Date this after it, or reopen the period first.`,
+    400,
+    'PERIOD_LOCKED',
+  )
 }
 
 /**
@@ -292,10 +385,24 @@ async function settleDate(
  * it, so a receipt and the stock it brought in either both exist or neither
  * does. Returns the new balance so the caller can report it back.
  */
+/**
+ * What a movement wrote. `parts`: the rows, a quantity and a rate each — one,
+ * except when stock going out empties its balance and the average, kept to
+ * the paisa, would leave a few paisa on nothing: then the last unit carries
+ * the difference, so the balance leaves with exactly the value it had. A
+ * movement in that is the other half of one out takes these parts.
+ */
+export interface Written {
+  balance: Balance
+  unitRate: number
+  ledgerId: string
+  parts: Array<{ qty: number; unitRate: number }>
+}
+
 export async function recordMovement(
   tx: Prisma.TransactionClient,
   m: Movement,
-): Promise<{ balance: Balance; unitRate: number; ledgerId: string }> {
+): Promise<Written> {
   if (!(m.qty > 0)) {
     throw new AppError('A stock movement must be for more than zero', 400, 'INVALID_QTY')
   }
@@ -314,31 +421,60 @@ export async function recordMovement(
     )
   }
 
+  // The share it is on: the brand named, or central. A customer's material is never a brand's.
+  const share = m.brandId ?? null
+  if (share && (m.ownership ?? 'OWNED') !== 'OWNED') {
+    throw new AppError('A customer’s material is never a brand’s: only our own stock can be earmarked.', 400, 'CUSTOMER_STOCK_NO_BRAND')
+  }
+
   const store = await lockBalanceAndStore(tx, m)
   // A sample store holds what was bought for samples, apart from bulk stock:
   // only the documents lib/sampleStore names may move stock in or out of it.
   if (store.purpose === 'SAMPLING' && !sampleStoreMayMove(m)) {
     throw sampleStoreRefused(store.name ?? 'That store', m.referenceType, m.ownership ?? 'OWNED')
   }
+  // Goods on the road move only on their own transfer.
+  if (store.kind === 'TRANSIT' && !TRANSIT_DOCUMENTS.has(m.referenceType)) {
+    throw new AppError(
+      `${store.name ?? 'That store'} holds goods on the road: they move only on their in-transit transfer. Receive them, send them back or write them off from Stock Documents → Transfers.`,
+      400,
+      'TRANSIT_STORE',
+    )
+  }
+  if (m.atRate !== undefined && (m.direction !== 'OUT' || (store.kind !== 'TRANSIT' && !(m.restoring && m.referenceType === 'STOCK_REALLOCATION')))) {
+    throw new AppError('Only goods leaving a transit store go at their own transfer’s rate.', 500, 'RATE_NOT_ALLOWED')
+  }
 
   const transactionDate = await settleDate(tx, m)
-  const before = await balanceOf(tx, m)
+  const before = await balanceOf(tx, { ...m, brandId: share })
   const qty = round3(m.qty)
 
   let unitRate: number
 
+  let parts: Array<{ qty: number; unitRate: number }>
   if (m.direction === 'IN') {
-    if (m.unitRate === undefined || m.unitRate === null) {
-      throw new AppError(
-        'Stock coming in needs a rate, or it cannot be valued',
-        400,
-        'NO_RATE',
-      )
+    if (m.parts?.length) {
+      // The other half of a movement out: its rows, as they were.
+      const sum = round3(m.parts.reduce((t, p) => t + p.qty, 0))
+      if (Math.abs(sum - qty) > 0.0005 || m.parts.some((p) => !(p.qty > 0) || p.unitRate < 0)) {
+        throw new AppError('The parts coming in do not add up to the quantity.', 500, 'BAD_PARTS')
+      }
+      parts = m.parts.map((p) => ({ qty: round3(p.qty), unitRate: round2(p.unitRate) }))
+      unitRate = parts[0].unitRate
+    } else {
+      if (m.unitRate === undefined || m.unitRate === null) {
+        throw new AppError(
+          'Stock coming in needs a rate, or it cannot be valued',
+          400,
+          'NO_RATE',
+        )
+      }
+      if (m.unitRate < 0) {
+        throw new AppError('A rate cannot be negative', 400, 'NEGATIVE_RATE')
+      }
+      unitRate = round2(m.unitRate)
+      parts = [{ qty, unitRate }]
     }
-    if (m.unitRate < 0) {
-      throw new AppError('A rate cannot be negative', 400, 'NEGATIVE_RATE')
-    }
-    unitRate = round2(m.unitRate)
   } else {
     if (qty > before.qty) {
       // Naming the shortfall is the whole point. "Insufficient stock" sends
@@ -356,6 +492,23 @@ export async function recordMovement(
         : null
       const unit = item?.uom?.symbol ?? ''
       const what = `${m.grade === 'B' ? 'B-grade ' : ''}${item?.name ?? 'that item'}${size ? ` in size ${size.code}` : ''}`
+
+      // More on the rack than in this share: say whose the rest is, not just "short".
+      const whole = await balanceOf(tx, { ...m, brandId: undefined })
+      if (whole.qty >= qty - 1e-9) {
+        const shares = await sharesOf(tx, m)
+        const others = shares.filter((x) => x.brandId !== share && x.qty > 0)
+        const said = others.map((x) => `${x.qty} ${unit} ${x.brandId ? `earmarked for ${x.brand}` : 'central stock'}`).join(', ')
+        const mine = share ? `earmarked for ${shares.find((x) => x.brandId === share)?.brand ?? 'that brand'}` : 'central stock'
+        throw new AppError(
+          `Only ${before.qty} ${unit} of ${what} in ${warehouse?.name ?? 'that warehouse'} is ${mine}; the rest is ${said}. You are trying to take out ${qty}. ${share ? 'Earmark more for the brand first (Inventory → Brand Stock), or issue it through an authorised MO.' : 'Release or move the earmark first (Inventory → Brand Stock), or issue it for that brand’s order.'}`.replace(
+            /\s+/g,
+            ' ',
+          ),
+          400,
+          'STOCK_EARMARKED',
+        )
+      }
 
       throw new AppError(
         `Only ${before.qty} ${unit} of ${what} in ${warehouse?.name ?? 'that warehouse'}. You are trying to take out ${qty}.`.replace(
@@ -378,6 +531,7 @@ export async function recordMovement(
         JOIN ld_erp.material_requisitions mr ON mr.id = r."mrId"
         LEFT JOIN ld_erp.customers c ON c.id = r."customerId"
         WHERE r.status::text = 'ACTIVE' AND r."itemId" = ${m.itemId} AND r."warehouseId" = ${m.warehouseId}
+          AND r."brandId" IS NOT DISTINCT FROM ${share}::text
           AND NOT (r."mrLineId" = ANY(${m.reservedFor ?? []}::text[]))`
       const held = round3(holds.reduce((t, h) => t + Number(h.qty), 0))
       const free = round3(Math.max(0, before.qty - held))
@@ -404,6 +558,7 @@ export async function recordMovement(
         FROM ld_erp.fg_carton_lines l JOIN ld_erp.fg_cartons c ON c.id = l."cartonId"
         WHERE c.status::text = 'PACKED' AND l."itemId" = ${m.itemId} AND c."warehouseId" = ${m.warehouseId}
           AND l."sizeId" = ${m.sizeId} AND l.grade = ${m.grade ?? 'A'}
+          AND c."brandId" IS NOT DISTINCT FROM ${share}::text
           AND (c."dcId" IS NULL OR c."dcId" <> ${m.cartonsOn ?? ''})`
       const packed = round3(Number(sealed[0]?.qty ?? 0))
       const free = round3(Math.max(0, before.qty - packed))
@@ -422,41 +577,98 @@ export async function recordMovement(
       }
     }
     // Stock leaves at what it is carried at. Any other rate would leave value
-    // behind that no quantity accounts for.
-    unitRate = before.avgRate
+    // behind that no quantity accounts for. Goods on the road leave at what
+    // their own transfer put them in at (see `atRate`).
+    unitRate = m.atRate !== undefined ? round2(m.atRate) : before.avgRate
+    parts = [{ qty, unitRate }]
+    // The last out of a balance takes exactly the value left: kept to the
+    // paisa, qty × average can miss it by a few paisa, which would sit on a
+    // balance of nothing. The last unit carries the difference.
+    if (m.atRate === undefined && before.qty > 0 && qty >= before.qty - 0.0005) {
+      const rest = round2(before.value - qty * unitRate)
+      if (Math.abs(rest) >= 0.005) {
+        if (qty > 1) {
+          const last = round2(unitRate + rest)
+          if (last >= 0) parts = [{ qty: round3(qty - 1), unitRate }, { qty: 1, unitRate: last }]
+        } else if (qty > 0) {
+          parts = [{ qty, unitRate: round2(before.value / qty) }]
+          unitRate = parts[0].unitRate
+        }
+      }
+    }
+    if (m.atRate !== undefined && before.value - qty * unitRate < -0.05) {
+      throw new AppError(
+        m.restoring
+          ? `This share carries only ₹${before.value} of this item, less than the ${qty} going back at ₹${unitRate}. Run the Stock Reconciliation report before going on.`
+          : `The transit store carries only ₹${before.value} of this item, less than the ${qty} going out at ₹${unitRate}. Run the Stock Reconciliation report before going on.`,
+        409,
+        m.restoring ? 'SHARE_VALUE' : 'TRANSIT_VALUE',
+      )
+    }
   }
 
-  const closing = round3(m.direction === 'IN' ? before.qty + qty : before.qty - qty)
-
-  const row = await tx.stockLedger.create({
-    select: { id: true },
-    data: {
-      itemId: m.itemId,
-      warehouseId: m.warehouseId,
-      transactionType: m.transactionType,
-      referenceType: m.referenceType,
-      referenceId: m.referenceId,
-      batchNumber: m.batchNumber ?? null,
-      orderNo: m.orderNo ?? null,
-      ownership: m.ownership ?? 'OWNED',
-      ownerCustomerId: m.ownerCustomerId ?? null,
-      sizeId: m.sizeId ?? null,
-      grade: m.grade ?? 'A',
-      inQty: m.direction === 'IN' ? qty : 0,
-      outQty: m.direction === 'OUT' ? qty : 0,
-      // A snapshot for the ledger view to print, so a printed statement does
-      // not have to re-add every earlier row. The sum of the rows is still
-      // what `balanceOf` trusts.
-      closingStock: closing,
-      unitRate,
-      transactionDate,
-      notes: m.notes ?? null,
-    },
-  })
+  let running = before.qty
+  let row: { id: string } = { id: '' }
+  for (const p of parts) {
+    running = round3(m.direction === 'IN' ? running + p.qty : running - p.qty)
+    row = await tx.stockLedger.create({
+      select: { id: true },
+      data: {
+        itemId: m.itemId,
+        warehouseId: m.warehouseId,
+        transactionType: m.transactionType,
+        referenceType: m.referenceType,
+        referenceId: m.referenceId,
+        batchNumber: m.batchNumber ?? null,
+        orderNo: m.orderNo ?? null,
+        ownership: m.ownership ?? 'OWNED',
+        ownerCustomerId: m.ownerCustomerId ?? null,
+        sizeId: m.sizeId ?? null,
+        grade: m.grade ?? 'A',
+        brandId: share,
+        inQty: m.direction === 'IN' ? p.qty : 0,
+        outQty: m.direction === 'OUT' ? p.qty : 0,
+        // A snapshot for the ledger view to print, so a printed statement does
+        // not have to re-add every earlier row. The sum of the rows is still
+        // what `balanceOf` trusts.
+        closingStock: running,
+        unitRate: p.unitRate,
+        transactionDate,
+        notes: m.notes ?? null,
+        // Who asked for it: the signed-in user of the request this runs in.
+        createdById: currentUserId(),
+      },
+    })
+  }
 
   if (m.direction === 'OUT' && (m.stickers ?? 'auto') === 'auto' && !m.sizeId) await keepStickersInStep(tx, m)
 
-  return { balance: await balanceOf(tx, m), unitRate, ledgerId: row.id }
+  return { balance: await balanceOf(tx, { ...m, brandId: share }), unitRate, ledgerId: row.id, parts }
+}
+
+/**
+ * Every share of a balance with something in it: central stock and each
+ * brand's earmark, for saying whose stock is where.
+ */
+export async function sharesOf(
+  tx: Prisma.TransactionClient,
+  key: StockKey,
+): Promise<Array<{ brandId: string | null; brand: string; qty: number; value: number }>> {
+  const rows = await tx.$queryRaw<Array<{ brandId: string | null; brand: string | null; qty: number; value: number }>>`
+    SELECT s."brandId", b.name AS brand,
+           COALESCE(SUM(s."inQty" - s."outQty"), 0)::float8 AS qty,
+           COALESCE(SUM((s."inQty" - s."outQty") * COALESCE(s."unitRate", 0)), 0)::float8 AS value
+    FROM ld_erp.stock_ledger s
+    LEFT JOIN ld_erp.brands b ON b.id = s."brandId"
+    WHERE s."itemId" = ${key.itemId} AND s."warehouseId" = ${key.warehouseId}
+      AND s.ownership = ${key.ownership ?? 'OWNED'}::ld_erp."StockOwnership"
+      AND s."ownerCustomerId" IS NOT DISTINCT FROM ${key.ownerCustomerId ?? null}::text
+      AND s."sizeId" IS NOT DISTINCT FROM ${key.sizeId ?? null}::text
+      AND s.grade = ${key.grade ?? 'A'}
+    GROUP BY s."brandId", b.name`
+  return rows
+    .map((r) => ({ brandId: r.brandId, brand: r.brand ?? 'central stock', qty: round3(r.qty), value: round2(r.value) }))
+    .filter((r) => r.qty !== 0 || r.value !== 0)
 }
 
 /**
@@ -473,8 +685,10 @@ export async function recordMovement(
 async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
   const ownership = m.ownership ?? 'OWNED'
   const owner = m.ownerCustomerId ?? null
+  // Share by share: a brand's stickers answer for that brand's metres, central's for central's.
+  const share = m.brandId ?? null
   const packages = await tx.stockPackage.findMany({
-    where: { itemId: m.itemId, warehouseId: m.warehouseId, ownership, ownerCustomerId: owner, status: 'IN_STOCK' },
+    where: { itemId: m.itemId, warehouseId: m.warehouseId, ownership, ownerCustomerId: owner, status: 'IN_STOCK', brandId: share },
     orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
   })
   if (!packages.length) return
@@ -488,6 +702,7 @@ async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
     WHERE "itemId" = ${m.itemId} AND "warehouseId" = ${m.warehouseId}
       AND ownership = ${ownership}::ld_erp."StockOwnership"
       AND "ownerCustomerId" IS NOT DISTINCT FROM ${owner}::text
+      AND "brandId" IS NOT DISTINCT FROM ${share}::text
       AND "sizeId" IS NULL AND grade IN ('A', 'R')`
   let over = round3(packages.reduce((t, p) => t + Number(p.qty), 0) - Number(row?.qty ?? 0))
   for (const p of packages) {
@@ -651,8 +866,14 @@ export async function transferStock(
     earlierDate?: Movement['earlierDate']
     reservedFor?: string[]
     ignoreReservations?: boolean
+    /** Out of a transit store: the rate its own transfer put it in at (see `Movement.atRate`). */
+    atRate?: number
+    /** The grade it arrives as, when not the one it left as: goods that came in damaged arrive as R. */
+    toGrade?: string | null
+    /** The share it moves: a brand's, or central (left out). It arrives as the same share. */
+    brandId?: string | null
   },
-): Promise<void> {
+): Promise<{ unitRate: number }> {
   if (args.fromWarehouseId === args.toWarehouseId) {
     throw new AppError(
       'The two warehouses are the same, so nothing would move',
@@ -660,6 +881,15 @@ export async function transferStock(
       'SAME_WAREHOUSE',
     )
   }
+
+  // Both balances locked up front, in one fixed order: two transfers going
+  // opposite ways between the same stores would otherwise deadlock.
+  const whose = { ownership: args.ownership, ownerCustomerId: args.ownerCustomerId, sizeId: args.sizeId, grade: args.grade }
+  const arrivesAs = args.toGrade ?? args.grade
+  await lockBalances(tx, [
+    { itemId: args.itemId, warehouseId: args.fromWarehouseId, ...whose },
+    { itemId: args.itemId, warehouseId: args.toWarehouseId, ...whose, grade: arrivesAs },
+  ])
 
   const out = await recordMovement(tx, {
     itemId: args.itemId,
@@ -681,6 +911,8 @@ export async function transferStock(
     earlierDate: args.earlierDate,
     reservedFor: args.reservedFor,
     ignoreReservations: args.ignoreReservations,
+    brandId: args.brandId ?? null,
+    ...(args.atRate !== undefined ? { atRate: args.atRate } : {}),
   })
 
   await recordMovement(tx, {
@@ -689,33 +921,27 @@ export async function transferStock(
     transactionType: 'TRANSFER',
     direction: 'IN',
     qty: args.qty,
-    // An empty source values at 0, which would quietly write the stock off on
-    // arrival. Falling back to the destination's own average keeps it whole.
-    unitRate:
-      out.unitRate > 0
-        ? out.unitRate
-        : (
-            await balanceOf(tx, {
-              itemId: args.itemId,
-              warehouseId: args.toWarehouseId,
-              ownership: args.ownership,
-              ownerCustomerId: args.ownerCustomerId,
-              sizeId: args.sizeId,
-              grade: args.grade,
-            })
-          ).avgRate,
+    // At what it left at, always: a move across the yard neither makes nor
+    // loses value. Stock carried at nothing (a customer's, or an opening line
+    // whose rate is still pending) arrives at nothing; setting the opening
+    // rate later prices both halves of the move (openingControl.repriceFrom).
+    unitRate: out.unitRate,
+    // Exactly what left: part by part when the last out of a balance carried its paisa.
+    parts: out.parts,
     referenceType: args.referenceType,
     referenceId: args.referenceId,
     ownership: args.ownership,
     ownerCustomerId: args.ownerCustomerId,
     sizeId: args.sizeId,
-    grade: args.grade,
+    grade: arrivesAs,
     batchNumber: args.batchNumber,
     orderNo: args.orderNo,
     transactionDate: args.transactionDate,
     notes: args.notes,
     earlierDate: args.earlierDate,
+    brandId: args.brandId ?? null,
   })
+  return { unitRate: out.unitRate }
 }
 
 /**
@@ -780,8 +1006,10 @@ export async function reorderStatus(
     FROM ld_erp.items i
     JOIN ld_erp.uom             u ON u.id = i."uomId"
     JOIN ld_erp.item_categories c ON c.id = i."categoryId"
-    -- Material bought for samples is not stock the mill reorders against.
-    LEFT JOIN ld_erp.stock_ledger s ON s."itemId" = i.id AND s."warehouseId" NOT IN (${SAMPLE_STORE_IDS})
+    -- By the one rule (services/availability.service): good stock in stores
+    -- that issue. Samples, rejects, QC holds, scrap and goods in transit are
+    -- not stock the mill reorders against.
+    LEFT JOIN ld_erp.stock_ledger s ON s."itemId" = i.id AND s.grade = 'A' AND s."warehouseId" IN (${OFFERING_STORE_IDS})
     WHERE i."isActive" = true
       AND i."reorderLevel" > 0
       AND (${filters.itemId ?? null}::text IS NULL OR i.id = ${filters.itemId ?? null})
@@ -845,6 +1073,16 @@ export async function onHand(
     ownerCustomerId: string | null
     ownerName: string | null
     qty: number
+    /** Of qty: good stock (grade A), B-grade, and held or rejected (grade R). */
+    good: number
+    bGrade: number
+    held: number
+    /** What kind of store it is (Masters → Warehouses). */
+    storeKind: string
+    /** Held for requisitions, of the good stock. */
+    reserved: number
+    /** Free by the one rule: good stock in a store that issues, less what is held. */
+    free: number
     value: number
     avgRate: number
     /** The item needs reordering: our own stock, every store together, is at or below its reorder level. */
@@ -871,6 +1109,11 @@ export async function onHand(
       ownerCustomerId: string | null
       ownerName: string | null
       qty: number
+      good: number
+      bGrade: number
+      held: number
+      storeKind: string
+      storePurpose: string
       value: number
       lastMovedAt: Date | null
     }>
@@ -887,10 +1130,16 @@ export async function onHand(
       i."reorderLevel"::float8               AS "reorderLevel",
       w.id                                   AS "warehouseId",
       w.name                                 AS "warehouseName",
+      w.kind::text                           AS "storeKind",
+      w.purpose::text                        AS "storePurpose",
       s."ownership"                          AS "ownership",
       s."ownerCustomerId"                    AS "ownerCustomerId",
       cust.name                              AS "ownerName",
       SUM(s."inQty" - s."outQty")::float8    AS "qty",
+      -- Every grade apart: good, B-grade, and held or rejected.
+      COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s.grade = 'A'), 0)::float8 AS "good",
+      COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s.grade = 'B'), 0)::float8 AS "bGrade",
+      COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s.grade NOT IN ('A', 'B')), 0)::float8 AS "held",
       SUM((s."inQty" - s."outQty") * COALESCE(s."unitRate", 0))::float8 AS "value",
       MAX(s."transactionDate")               AS "lastMovedAt"
     FROM ld_erp.stock_ledger s
@@ -915,22 +1164,37 @@ export async function onHand(
            OR (SELECT bool_and(i.name || ' ' || i.code || ' ' || COALESCE(i."designNo", '') || ' ' || COALESCE(i.color, '') ILIKE '%' || w || '%')
                FROM unnest(${filters.searchWords ?? null}::text[]) AS w))
     GROUP BY i.id, i.code, i.name, i."designNo", i.color, i."styleId", u.symbol, c.name, i."reorderLevel",
-             w.id, w.name, s."ownership", s."ownerCustomerId", cust.name
+             w.id, w.name, w.kind, w.purpose, s."ownership", s."ownerCustomerId", cust.name
     HAVING SUM(s."inQty" - s."outQty") <> 0
     -- Same-name fabric design by design, then store by store.
     ORDER BY i.name ASC, i."designNo" ASC NULLS FIRST, i.color ASC NULLS FIRST, w.name ASC
   `
 
   const status = new Map((await reorderStatus(tx, { itemId: filters.itemId })).map((r) => [r.itemId, r]))
+  // Held for requisitions, by item and store: only our own good stock is ever held.
+  const holds = new Map(
+    (
+      await tx.stockReservation.groupBy({ by: ['itemId', 'warehouseId'], where: { status: 'ACTIVE' }, _sum: { qty: true } })
+    ).map((h) => [`${h.itemId}|${h.warehouseId}`, Number(h._sum.qty ?? 0)]),
+  )
 
   const out = rows
     .map((r) => {
+      const { storePurpose, ...row } = r
       const qty = round3(r.qty)
       const value = round2(r.value)
       const item = status.get(r.itemId)
+      const good = round3(r.good)
+      const offers = storeOffers({ purpose: storePurpose, kind: r.storeKind })
+      const reserved = r.ownership === 'OWNED' ? round3(Math.min(Math.max(good, 0), holds.get(`${r.itemId}|${r.warehouseId}`) ?? 0)) : 0
       return {
-        ...r,
+        ...row,
         qty,
+        good,
+        bGrade: round3(r.bGrade),
+        held: round3(r.held),
+        reserved,
+        free: offers ? round3(Math.max(0, good - reserved)) : 0,
         value,
         avgRate: qty > 0 ? round2(value / qty) : 0,
         // A customer's fabric is not ours to reorder.
@@ -965,10 +1229,16 @@ export async function onHand(
         reorderLevel: item.reorderLevel,
         warehouseId: '',
         warehouseName: 'None in any store',
+        storeKind: 'GENERAL',
         ownership: 'OWNED',
         ownerCustomerId: null,
         ownerName: null,
         qty: 0,
+        good: 0,
+        bGrade: 0,
+        held: 0,
+        reserved: 0,
+        free: 0,
         value: 0,
         avgRate: 0,
         isLow: true,

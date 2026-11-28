@@ -1,9 +1,12 @@
 import type { BillRefKind, LedgerParty, Prisma, PrismaClient, VoucherKind } from '@prisma/client'
+import { purchaseShareOf } from '../brandStock.service'
 import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf } from '../../lib/docNumber'
 import { logger } from '../../utils/logger'
 import { keyedLedgerId, partyLedgerId } from './chart.service'
-import { bankDatesOf, bankKey, booksSettings, dayText, dayValue, istDay, r2, type BooksSettings } from './books.service'
+import { allocationJournal, runDay } from './allocation.service'
+import { bankDatesOf, bankKey, booksSettings, checkBalancedNow, dayText, dayValue, istDay, r2, type BooksSettings } from './books.service'
+import { keepRevision } from './revision.service'
 
 /**
  * Sales and Purchase documents into the books.
@@ -34,11 +37,27 @@ import { bankDatesOf, bankKey, booksSettings, dayText, dayValue, istDay, r2, typ
  * Posting never stops a document being saved for any other reason: if a rule
  * fails, the document saves without its voucher, the failure is logged, and
  * Accounts lists it as not yet in the books until it is posted again.
+ *
+ * Income and expense lines carry two tags, in the one set of books: the
+ * brand (profit centre) and the department (cost centre). Each comes from the
+ * document where it says — the order's brand, the indent's department, what
+ * was picked on a bill line — else from the ledger's own default, else (for
+ * the department) the standard one for sales and job work. A bank, party, tax
+ * or other balance-sheet line never carries either.
  */
 
 type Tx = Prisma.TransactionClient
 
-export type SourceType = 'SALES_INVOICE' | 'BROKERAGE' | 'SALES_RECEIPT' | 'CREDIT_NOTE' | 'PURCHASE_BILL' | 'SUPPLIER_PAYMENT' | 'PURCHASE_NOTE'
+export type SourceType =
+  | 'SALES_INVOICE'
+  | 'BROKERAGE'
+  | 'SALES_RECEIPT'
+  | 'CREDIT_NOTE'
+  | 'PURCHASE_BILL'
+  | 'SUPPLIER_PAYMENT'
+  | 'PURCHASE_NOTE'
+  | 'EXPENSE_ALLOCATION'
+  | 'EXPENSE_ALLOCATION_REVERSAL'
 
 /** What each source is called when Accounts names it. */
 export const SOURCE_LABEL: Record<SourceType, string> = {
@@ -49,6 +68,8 @@ export const SOURCE_LABEL: Record<SourceType, string> = {
   PURCHASE_BILL: 'Purchase bill',
   SUPPLIER_PAYMENT: 'Supplier payment',
   PURCHASE_NOTE: 'Purchase note',
+  EXPENSE_ALLOCATION: 'Expense allocation',
+  EXPENSE_ALLOCATION_REVERSAL: 'Expense allocation reversal',
 }
 
 interface PlanRef {
@@ -71,23 +92,49 @@ interface Plan {
   chequeDate?: string | null
   cancelled: boolean
   cancelReason?: string | null
-  lines: Array<{ ledgerId: string; amount: number; costCentreId: string | null; refs: PlanRef[] }>
+  lines: PlanLine[]
 }
 
+type PlanLine = { ledgerId: string; amount: number; costCentreId: string | null; departmentId: string | null; refs: PlanRef[] }
+
+/** A line's tags as its document gives them: a brand's profit centre, a department. */
+type Tags = { costCentreId?: string | null; departmentId?: string | null }
+
 /**
- * Lines added as signed amounts (debit positive) and merged by ledger and
- * brand, so a five-line invoice at one GST rate credits Sales once.
+ * Lines added as signed amounts (debit positive) and merged by ledger, brand
+ * and department, so a five-line invoice at one GST rate credits Sales once.
+ * The third argument is the brand's profit centre, or both tags.
  */
 class Lines {
-  private map = new Map<string, { ledgerId: string; amount: number; costCentreId: string | null; refs: PlanRef[] }>()
-  add(ledgerId: string, amount: number, costCentreId: string | null = null, refs: PlanRef[] = []) {
+  private map = new Map<string, PlanLine>()
+  add(ledgerId: string, amount: number, tags: string | null | Tags = null, refs: PlanRef[] = []) {
     const a = r2(amount)
     if (a === 0 && !refs.length) return
-    const key = `${ledgerId}|${costCentreId ?? ''}`
-    const have = this.map.get(key) ?? { ledgerId, amount: 0, costCentreId, refs: [] }
+    const t: Tags = typeof tags === 'object' && tags !== null ? tags : { costCentreId: tags }
+    const costCentreId = t.costCentreId ?? null
+    const departmentId = t.departmentId ?? null
+    const key = `${ledgerId}|${costCentreId ?? ''}|${departmentId ?? ''}`
+    const have = this.map.get(key) ?? { ledgerId, amount: 0, costCentreId, departmentId, refs: [] }
     have.amount = r2(have.amount + a)
     have.refs.push(...refs)
     this.map.set(key, have)
+  }
+  /**
+   * An amount spread over shares by their weight, each part carrying its
+   * share's tags; the last takes what rounding leaves, so the parts add up.
+   */
+  spread(ledgerId: string, amount: number, shares: Array<{ weight: number; tags: Tags }>) {
+    const total = shares.reduce((t, sh) => t + Math.max(0, sh.weight), 0)
+    const a = r2(amount)
+    if (a === 0) return
+    if (!(total > 0)) return this.add(ledgerId, a)
+    let left = a
+    const live = shares.filter((sh) => sh.weight > 0)
+    live.forEach((sh, i) => {
+      const part = i === live.length - 1 ? left : r2((a * sh.weight) / total)
+      left = r2(left - part)
+      this.add(ledgerId, part, sh.tags)
+    })
   }
   /** Out of balance by this much: debit positive. */
   difference() {
@@ -110,6 +157,59 @@ async function centreFor(tx: Tx, brandId: string | null | undefined): Promise<st
   const clash = await tx.costCentre.findFirst({ where: { name: { equals: brand.name, mode: 'insensitive' } }, select: { id: true } })
   const made = await tx.costCentre.create({ data: { name: clash ? `${brand.name} (brand)` : brand.name, brandId, isActive: brand.isActive }, select: { id: true } })
   return made.id
+}
+
+/**
+ * The standard department for a system ledger with no default of its own:
+ * sales, their charges, returns and brokerage sit with Sales & Marketing; job
+ * work with Production. Found by name among the departments (Masters →
+ * Departments → Cost centres adds them); when there is none, nothing.
+ */
+const STANDARD_DEPARTMENT: Array<[RegExp, string]> = [
+  [/^SALES_JOB_WORK$/, 'Production'],
+  [/^(SALES|SALES_OTHER_CHARGES|SALES_RETURNS|BROKERAGE)$|^SALES_CHARGE:/, 'Sales & Marketing'],
+]
+
+/** A department by its name, ignoring case: the standard ones the rules name. */
+export async function departmentNamed(tx: Tx, name: string): Promise<string | null> {
+  const d = await tx.department.findFirst({ where: { name: { equals: name, mode: 'insensitive' }, isActive: true }, select: { id: true } })
+  return d?.id ?? null
+}
+
+/**
+ * Every line's tags made final. Only income and expense lines carry them: a
+ * bank, party, tax or other balance-sheet line never does, whatever was
+ * passed. A line takes its document's tags; where the document says nothing,
+ * its ledger's defaults; for the department, then the standard one for sales
+ * and job work. Lines that end up alike are put back together.
+ */
+async function finishTags(tx: Tx, lines: PlanLine[]): Promise<PlanLine[]> {
+  if (!lines.length) return lines
+  const ledgers = await tx.ledger.findMany({
+    where: { id: { in: [...new Set(lines.map((l) => l.ledgerId))] } },
+    select: { id: true, systemKey: true, costCentreId: true, departmentId: true, group: { select: { nature: true } } },
+  })
+  const byId = new Map(ledgers.map((l) => [l.id, l]))
+  const named = new Map<string, string | null>()
+  const standard = async (key: string | null) => {
+    const hit = key ? STANDARD_DEPARTMENT.find(([re]) => re.test(key)) : undefined
+    if (!hit) return null
+    if (!named.has(hit[1])) named.set(hit[1], await departmentNamed(tx, hit[1]))
+    return named.get(hit[1]) ?? null
+  }
+  const out = new Map<string, PlanLine>()
+  for (const l of lines) {
+    const led = byId.get(l.ledgerId)
+    const pl = led?.group.nature === 'INCOME' || led?.group.nature === 'EXPENSE'
+    const costCentreId = pl ? (l.costCentreId ?? led?.costCentreId ?? null) : null
+    const departmentId = pl ? (l.departmentId ?? led?.departmentId ?? (await standard(led?.systemKey ?? null))) : null
+    const key = `${l.ledgerId}|${costCentreId ?? ''}|${departmentId ?? ''}`
+    const have = out.get(key) ?? { ledgerId: l.ledgerId, amount: 0, costCentreId, departmentId, refs: [] }
+    have.amount = r2(have.amount + l.amount)
+    have.refs.push(...l.refs)
+    out.set(key, have)
+  }
+  return [...out.values()].filter((l) => l.amount !== 0 || l.refs.length)
 }
 
 const party = (tx: Tx, type: LedgerParty, id: string) => partyLedgerId(tx, type, id)
@@ -141,11 +241,12 @@ type Category = { id: string; name: string; parentId: string | null; itemGroup?:
 /** Spending done to make the goods, filed above gross profit; the rest is overhead. */
 const DIRECT_WORDS = /job ?work|stitch|tailor|print|wash|embroider|dye|dyeing|fabricat|labou?r|wages|freight in|carriage in|cartage|packing charge/i
 
-async function purchaseLedgerFor(
+/** The ledger a bill line goes to, and whether it is an expense head rather than goods. */
+async function purchaseHeadFor(
   tx: Tx,
   cats: Map<string, Category>,
   line: { grnLineId: string | null; item: { id: string; name: string; categoryId: string } },
-): Promise<string> {
+): Promise<{ ledgerId: string; expense: boolean }> {
   // Up the tree from the item's own category to the top.
   const chain: Category[] = []
   for (let c = cats.get(line.item.categoryId); c && chain.length < 10; c = c.parentId ? cats.get(c.parentId) : undefined) chain.push(c)
@@ -153,14 +254,101 @@ async function purchaseLedgerFor(
   // A fixed asset bought is capital, not a purchase: its own ledger under Fixed Assets, by its sub-category.
   if (top?.itemGroup === 'FIXED_ASSETS') {
     const sub = chain.length > 1 ? chain[chain.length - 2] : top
-    return keyedLedgerId(tx, `FIXED_ASSET_CAT:${sub.id}`, { name: sub.id === top.id ? 'Fixed Assets' : sub.name, group: 'FIXED_ASSETS' })
+    return { ledgerId: await keyedLedgerId(tx, `FIXED_ASSET_CAT:${sub.id}`, { name: sub.id === top.id ? 'Fixed Assets' : sub.name, group: 'FIXED_ASSETS' }), expense: false }
   }
   const isExpense = !line.grnLineId && chain.some((c) => /expense/i.test(c.name))
   if (isExpense) {
-    return keyedLedgerId(tx, `EXPENSE:${line.item.id}`, { name: line.item.name, group: DIRECT_WORDS.test(line.item.name) ? 'DIRECT_EXPENSES' : 'INDIRECT_EXPENSES' })
+    return { ledgerId: await keyedLedgerId(tx, `EXPENSE:${line.item.id}`, { name: line.item.name, group: DIRECT_WORDS.test(line.item.name) ? 'DIRECT_EXPENSES' : 'INDIRECT_EXPENSES' }), expense: true }
   }
-  if (!top) return keyedLedgerId(tx, 'PURCHASE')
-  return keyedLedgerId(tx, `PURCHASE_CAT:${top.id}`, { name: `Purchase – ${top.name}`, group: 'PURCHASE_ACCOUNTS' })
+  if (!top) return { ledgerId: await keyedLedgerId(tx, 'PURCHASE'), expense: false }
+  return { ledgerId: await keyedLedgerId(tx, `PURCHASE_CAT:${top.id}`, { name: `Purchase – ${top.name}`, group: 'PURCHASE_ACCOUNTS' }), expense: false }
+}
+
+/**
+ * A bill's expense-head lines that no source gives a department: not picked
+ * on the line, no usual department on the expense head, none on its ledger.
+ * A new bill may not have any (the department is its cost centre); a legacy
+ * import may, marked as such.
+ */
+export async function expenseLinesWithoutDepartment(
+  tx: Tx,
+  lines: Array<{ itemId: string; grnLineId?: string | null; departmentId?: string | null }>,
+): Promise<Array<{ line: number; head: string }>> {
+  const ids = [...new Set(lines.map((l) => l.itemId))]
+  if (!ids.length) return []
+  const [items, cats, ledgers] = await Promise.all([
+    tx.item.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, categoryId: true, departmentId: true } }),
+    tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, itemGroup: true } }),
+    tx.ledger.findMany({ where: { systemKey: { in: ids.map((id) => `EXPENSE:${id}`) } }, select: { systemKey: true, departmentId: true } }),
+  ])
+  const byCat = new Map(cats.map((c) => [c.id, c]))
+  const out: Array<{ line: number; head: string }> = []
+  lines.forEach((l, i) => {
+    if (l.grnLineId || l.departmentId) return
+    const item = items.find((x) => x.id === l.itemId)
+    if (!item) return
+    const chain: Category[] = []
+    for (let c = byCat.get(item.categoryId); c && chain.length < 10; c = c.parentId ? byCat.get(c.parentId) : undefined) chain.push(c)
+    if (chain[chain.length - 1]?.itemGroup === 'FIXED_ASSETS' || !chain.some((c) => /expense/i.test(c.name))) return
+    const ledgerDept = ledgers.find((x) => x.systemKey === `EXPENSE:${item.id}`)?.departmentId
+    if (!item.departmentId && !ledgerDept) out.push({ line: i + 1, head: item.name })
+  })
+  return out
+}
+
+/** The order line a bill line goes back to, by itself or through its receipt. */
+const orderTrace = {
+  select: {
+    style: { select: { brandId: true } },
+    // The indent behind it: its department, and the brand of the MO it was raised for.
+    mrLine: { select: { mr: { select: { departmentId: true, mo: { select: { brandId: true } } } } } },
+  },
+} as const
+
+/**
+ * A bill's lines as they go into the books: each line's ledger, its value and
+ * its tags. The brand is what was picked on the line, else the brand of the
+ * MO its indent was raised for, else its order line's style's brand; none is
+ * central stock. The department is what was picked, else the indent's, else —
+ * for an expense head only — the head's own department.
+ */
+async function billLines(tx: Tx, billId: string) {
+  const lines = await tx.purchaseInvoiceLine.findMany({
+    where: { billId },
+    orderBy: { sortOrder: 'asc' },
+    select: {
+      taxableValue: true,
+      grnLineId: true,
+      costCentreId: true,
+      departmentId: true,
+      item: { select: { id: true, name: true, categoryId: true, departmentId: true } },
+      poLineId: true,
+      poLine: orderTrace,
+      grnLine: { select: { brandId: true, poLine: orderTrace } },
+    },
+  })
+  const cats = new Map((await tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, itemGroup: true } })).map((c) => [c.id, c]))
+  const out: Array<{ ledgerId: string; value: number; expense: boolean; tags: Tags }> = []
+  for (const line of lines) {
+    const head = await purchaseHeadFor(tx, cats, line)
+    const po = line.poLine ?? line.grnLine?.poLine ?? null
+    const indent = po?.mrLine?.mr ?? null
+    // The brand whose share its goods went into (multi-brand phase 5): the GRN
+    // line's; billed without a receipt, the same purchase rule a GRN follows
+    // (the PO's brand, else its indent's MO, else its style's own brand).
+    // Stock and purchases then agree by brand; anything else is central.
+    const brandId = line.grnLineId ? (line.grnLine?.brandId ?? null) : await purchaseShareOf(tx, line.poLineId ?? null)
+    out.push({
+      ledgerId: head.ledgerId,
+      value: n(line.taxableValue),
+      expense: head.expense,
+      tags: {
+        costCentreId: line.costCentreId ?? (await centreFor(tx, brandId)),
+        departmentId: line.departmentId ?? indent?.departmentId ?? (head.expense ? line.item.departmentId : null) ?? null,
+      },
+    })
+  }
+  return out
 }
 
 // ═══════════════════════════════════════════
@@ -177,22 +365,23 @@ async function planSalesInvoice(tx: Tx, id: string): Promise<Plan | null> {
     },
   })
   if (!inv) return null
-  const cc = await centreFor(tx, inv.so?.brandId)
+  // Job work is the mill's own, and its income Production's.
+  const tags: Tags = { costCentreId: await centreFor(tx, inv.so?.brandId), departmentId: inv.so?.isJobWork ? await departmentNamed(tx, 'Production') : null }
   const L = new Lines()
   const date = istDay(inv.invoiceDate)
   L.add(await party(tx, 'CUSTOMER', inv.customerId), n(inv.totalAmount), null, [
     { kind: 'NEW_REF', billNo: inv.invoiceNumber, billDate: date, dueDate: inv.dueDate ? istDay(inv.dueDate) : null, amount: n(inv.totalAmount) },
   ])
-  L.add(await keyedLedgerId(tx, inv.so?.isJobWork ? 'SALES_JOB_WORK' : 'SALES'), -n(inv.taxableAmount), cc)
+  L.add(await keyedLedgerId(tx, inv.so?.isJobWork ? 'SALES_JOB_WORK' : 'SALES'), -n(inv.taxableAmount), tags)
   for (const c of inv.charges) {
     // The mill's own trims billed on a job-work order are a sale of goods.
     const ledger = c.ownMaterial ? await keyedLedgerId(tx, 'SALES') : await chargeLedger(tx, 'SALES', c.chargeType)
     // Its value without GST: for a charge typed with GST included, the GST
     // inside it goes to the output GST ledgers with the rest, not here. One
     // saved before charges had a treatment had GST added on top: its amount.
-    L.add(ledger, -n(c.netAmount ?? c.amount), cc)
+    L.add(ledger, -n(c.netAmount ?? c.amount), tags)
   }
-  L.add(await keyedLedgerId(tx, 'SALES_OTHER_CHARGES'), -n(inv.otherCharges), cc)
+  L.add(await keyedLedgerId(tx, 'SALES_OTHER_CHARGES'), -n(inv.otherCharges), tags)
   L.add(await keyedLedgerId(tx, 'OUTPUT_CGST'), -n(inv.cgst))
   L.add(await keyedLedgerId(tx, 'OUTPUT_SGST'), -n(inv.sgst))
   L.add(await keyedLedgerId(tx, 'OUTPUT_IGST'), -n(inv.igst))
@@ -205,7 +394,7 @@ async function planSalesInvoice(tx: Tx, id: string): Promise<Plan | null> {
     narration: `Sales to ${inv.customer.name}${inv.so ? ` against ${inv.so.soNumber}` : ''}`,
     cancelled: inv.status === 'CANCELLED',
     cancelReason: inv.cancelReason,
-    lines: L.list(),
+    lines: await finishTags(tx, L.list()),
   }
 }
 
@@ -238,7 +427,7 @@ async function planBrokerage(tx: Tx, id: string): Promise<Plan | null> {
     narration: `Brokerage${inv.brokeragePercent ? ` at ${n(inv.brokeragePercent)}%` : ''} to ${inv.broker?.name ?? 'the broker'} on ${inv.invoiceNumber}`,
     cancelled: inv.status === 'CANCELLED',
     cancelReason: inv.cancelReason,
-    lines: L.list(),
+    lines: await finishTags(tx, L.list()),
   }
 }
 
@@ -281,7 +470,7 @@ async function planReceipt(tx: Tx, id: string): Promise<Plan | null> {
     chequeDate: r.chequeDate ? istDay(r.chequeDate) : null,
     cancelled: r.status === 'REVERSED',
     cancelReason: r.reversalReason,
-    lines: L.list(),
+    lines: await finishTags(tx, L.list()),
   }
 }
 
@@ -313,6 +502,7 @@ async function planCreditNote(tx: Tx, id: string): Promise<Plan | null> {
   }
   if (held > 0) refs.push({ kind: 'ADVANCE', billNo: note.noteNumber, billDate: date, dueDate: null, amount: -held })
   const L = new Lines()
+  // Every note is against an invoice: its order's brand.
   L.add(await keyedLedgerId(tx, 'SALES_RETURNS'), n(note.taxableAmount), await centreFor(tx, note.invoice?.so?.brandId))
   L.add(await keyedLedgerId(tx, 'OUTPUT_CGST'), n(note.cgst))
   L.add(await keyedLedgerId(tx, 'OUTPUT_SGST'), n(note.sgst))
@@ -326,7 +516,7 @@ async function planCreditNote(tx: Tx, id: string): Promise<Plan | null> {
     narration: `${note.type === 'RETURN' ? 'Goods returned by' : 'Credit allowed to'} ${note.customer.name}${note.invoice ? ` on ${note.invoice.invoiceNumber}` : ''}${note.reason ? ` — ${note.reason}` : ''}`,
     cancelled: note.status === 'CANCELLED',
     cancelReason: note.cancelReason,
-    lines: L.list(),
+    lines: await finishTags(tx, L.list()),
   }
 }
 
@@ -339,30 +529,19 @@ async function planPurchaseBill(tx: Tx, id: string): Promise<Plan | null> {
     include: {
       supplier: { select: { name: true } },
       tdsSectionRef: { select: { id: true, section: true } },
-      lines: {
-        orderBy: { sortOrder: 'asc' },
-        select: {
-          taxableValue: true,
-          grnLineId: true,
-          item: { select: { id: true, name: true, categoryId: true } },
-          poLine: { select: { style: { select: { brandId: true } } } },
-          grnLine: { select: { poLine: { select: { style: { select: { brandId: true } } } } } },
-        },
-      },
       charges: { include: { chargeType: { select: { id: true, name: true } } } },
     },
   })
   if (!b) return null
-  const cats = new Map((await tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, itemGroup: true } })).map((c) => [c.id, c]))
   const date = istDay(b.billDate)
   const total = n(b.totalAmount)
   const tds = n(b.tdsAmount)
   const L = new Lines()
-  for (const line of b.lines) {
-    const brandId = line.poLine?.style?.brandId ?? line.grnLine?.poLine?.style?.brandId
-    L.add(await purchaseLedgerFor(tx, cats, line), n(line.taxableValue), await centreFor(tx, brandId))
-  }
-  for (const c of b.charges) L.add(await chargeLedger(tx, 'PURCHASE', c.chargeType), n(c.amount))
+  const lines = await billLines(tx, b.id)
+  for (const line of lines) L.add(line.ledgerId, line.value, line.tags)
+  // Freight and the like are spread over the goods by value, each part with its line's tags.
+  const shares = lines.map((l) => ({ weight: l.value, tags: l.tags }))
+  for (const c of b.charges) L.spread(await chargeLedger(tx, 'PURCHASE', c.chargeType), n(c.amount), shares)
   L.add(await keyedLedgerId(tx, 'INPUT_CGST'), n(b.cgst))
   L.add(await keyedLedgerId(tx, 'INPUT_SGST'), n(b.sgst))
   L.add(await keyedLedgerId(tx, 'INPUT_IGST'), n(b.igst))
@@ -394,7 +573,7 @@ async function planPurchaseBill(tx: Tx, id: string): Promise<Plan | null> {
     date,
     narration: `Bill ${supplierBillNo(b)} of ${b.supplier.name}`,
     cancelled: b.status === 'CANCELLED',
-    lines: L.list(),
+    lines: await finishTags(tx, L.list()),
   }
 }
 
@@ -434,7 +613,7 @@ async function planSupplierPayment(tx: Tx, id: string): Promise<Plan | null> {
     chequeDate: p.chequeDate ? istDay(p.chequeDate) : null,
     cancelled: p.status === 'REVERSED',
     cancelReason: p.reversalReason,
-    lines: L.list(),
+    lines: await finishTags(tx, L.list()),
   }
 }
 
@@ -446,7 +625,7 @@ async function planPurchaseNote(tx: Tx, id: string): Promise<Plan | null> {
     where: { id },
     include: {
       supplier: { select: { name: true } },
-      bill: { select: { billNumber: true, supplierInvoiceNo: true, billDate: true, supplierInvoiceDate: true } },
+      bill: { select: { id: true, billNumber: true, supplierInvoiceNo: true, billDate: true, supplierInvoiceDate: true } },
     },
   })
   // Only a posted note moves money; one cancelled after posting takes it back.
@@ -462,7 +641,10 @@ async function planPurchaseNote(tx: Tx, id: string): Promise<Plan | null> {
     : { kind: 'ON_ACCOUNT', billNo: note.noteNumber, billDate: date, dueDate: null, amount: sign * total }
   const L = new Lines()
   L.add(await party(tx, 'SUPPLIER', note.supplierId), sign * total, null, [ref])
-  L.add(await keyedLedgerId(tx, 'PURCHASE_RETURNS'), -sign * r2(n(note.taxableAmount) + n(note.otherCharges) - n(note.discountAmount) + (counts ? 0 : gst)))
+  // Against a bill it takes the bill lines' brands and departments, spread as the bill's value was.
+  const returned = -sign * r2(n(note.taxableAmount) + n(note.otherCharges) - n(note.discountAmount) + (counts ? 0 : gst))
+  const billShares = note.bill ? (await billLines(tx, note.bill.id)).map((l) => ({ weight: l.value, tags: l.tags })) : []
+  L.spread(await keyedLedgerId(tx, 'PURCHASE_RETURNS'), returned, billShares)
   if (counts) {
     L.add(await keyedLedgerId(tx, 'INPUT_CGST'), -sign * n(note.cgst))
     L.add(await keyedLedgerId(tx, 'INPUT_SGST'), -sign * n(note.sgst))
@@ -478,8 +660,20 @@ async function planPurchaseNote(tx: Tx, id: string): Promise<Plan | null> {
     narration: `${note.effect === 'REDUCES_PAYABLE' ? 'Claim on' : 'Further charge from'} ${note.supplier.name}${note.bill ? ` on bill ${supplierBillNo(note.bill)}` : ''}${note.supplierDocNo ? ` (their ${note.supplierDocNo})` : ''}`,
     cancelled: note.status === 'CANCELLED',
     cancelReason: note.closedReason,
-    lines: L.list(),
+    lines: await finishTags(tx, L.list()),
   }
+}
+
+/**
+ * A month's shared expenses split between the brands, from its allocation
+ * run: each brand's share debited, the whole credited back with no brand, on
+ * the same ledger and department. The lines say exactly what they carry, so
+ * no default brand or department is filled in.
+ */
+async function planAllocation(tx: Tx, id: string, reversal: boolean): Promise<Plan | null> {
+  const j = await allocationJournal(tx, id, reversal)
+  if (!j) return null
+  return { kind: 'JOURNAL', voucherNo: j.voucherNo, date: j.date, narration: j.narration, cancelled: false, lines: j.lines.map((l) => ({ ...l, refs: [] })) }
 }
 
 const PLANNERS: Record<SourceType, (tx: Tx, id: string) => Promise<Plan | null>> = {
@@ -490,6 +684,8 @@ const PLANNERS: Record<SourceType, (tx: Tx, id: string) => Promise<Plan | null>>
   PURCHASE_BILL: planPurchaseBill,
   SUPPLIER_PAYMENT: planSupplierPayment,
   PURCHASE_NOTE: planPurchaseNote,
+  EXPENSE_ALLOCATION: (tx, id) => planAllocation(tx, id, false),
+  EXPENSE_ALLOCATION_REVERSAL: (tx, id) => planAllocation(tx, id, true),
 }
 
 // ═══════════════════════════════════════════
@@ -503,10 +699,10 @@ const lockedError = (s: BooksSettings, what: string, day: string) =>
     'PERIOD_LOCKED',
   )
 
-/** What a voucher says in money, line by line, to tell whether it changed. */
-const moneyPrint = (lines: Array<{ ledgerId: string; amount: number; costCentreId: string | null }>) =>
+/** What a voucher says in money, line by line, with its tags, to tell whether it changed. */
+const moneyPrint = (lines: Array<{ ledgerId: string; amount: number; costCentreId: string | null; departmentId: string | null }>) =>
   lines
-    .map((l) => `${l.ledgerId}|${l.costCentreId ?? ''}|${r2(l.amount).toFixed(2)}`)
+    .map((l) => `${l.ledgerId}|${l.costCentreId ?? ''}|${l.departmentId ?? ''}|${r2(l.amount).toFixed(2)}`)
     .sort()
     .join(';')
 
@@ -519,7 +715,12 @@ const billPrint = (lines: Array<{ ledgerId: string; refs: PlanRef[] }>) =>
 
 export type PostResult = 'created' | 'updated' | 'cancelled' | 'removed' | 'unchanged' | 'none'
 
-async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan: Plan | null, userId?: string | null): Promise<PostResult> {
+/**
+ * `via` names where a change came from, for the voucher's revisions: the
+ * document type when its document changed, "repost" when Accounts posted the
+ * books' documents again.
+ */
+async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan: Plan | null, userId?: string | null, via: string = sourceType): Promise<PostResult> {
   const s = await booksSettings(tx)
   const existing = await tx.voucher.findUnique({
     where: { sourceType_sourceId: { sourceType, sourceId } },
@@ -529,20 +730,34 @@ async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan:
   const what = `${SOURCE_LABEL[sourceType].toLowerCase()} ${plan?.voucherNo ?? existing?.voucherNo ?? ''}`.trim()
   const oldDay = existing ? istDay(existing.date) : null
 
-  // Not in the books: before they start, or nothing to post.
+  // Not in the books: before they start, or nothing to post. The voucher is
+  // kept, cancelled with the reason, never deleted (Phase 7): its number and
+  // lines stay readable, and it stands again if the document comes back in.
   if (!plan || !s.booksStart || plan.date < s.booksStart) {
     if (!existing) return 'none'
-    if (existing.status === 'POSTED' && locked(oldDay!)) throw lockedError(s, what, oldDay!)
-    await tx.voucher.delete({ where: { id: existing.id } })
+    if (existing.status === 'CANCELLED') return 'unchanged'
+    if (locked(oldDay!)) throw lockedError(s, what, oldDay!)
+    const why = !plan
+      ? 'Out of the books: nothing to post for its document any more'
+      : !s.booksStart
+        ? 'Out of the books: they have no start date'
+        : `Out of the books: dated before they start on ${dayText(s.booksStart)}`
+    await keepRevision(tx, existing.id, { action: 'REMOVED', reason: why, source: via, userId })
+    await tx.voucher.update({
+      where: { id: existing.id },
+      data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId ?? null, cancelReason: why, updatedById: userId ?? null },
+    })
     return 'removed'
   }
 
   if (plan.cancelled) {
     if (!existing || existing.status === 'CANCELLED') return existing ? 'unchanged' : 'none'
     if (locked(oldDay!)) throw lockedError(s, what, oldDay!)
+    const why = plan.cancelReason ?? 'Cancelled with its document'
+    await keepRevision(tx, existing.id, { action: 'CANCELLED', reason: why, source: via, userId })
     await tx.voucher.update({
       where: { id: existing.id },
-      data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId ?? null, cancelReason: plan.cancelReason ?? 'Cancelled with its document' },
+      data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId ?? null, cancelReason: why },
     })
     return 'cancelled'
   }
@@ -570,6 +785,7 @@ async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan:
       ledgerId: l.ledgerId,
       amount: r2(Number(l.debit) - Number(l.credit)),
       costCentreId: l.costCentreId,
+      departmentId: l.departmentId,
       refs: l.billRefs.map((r) => ({
         kind: r.kind,
         billNo: r.billNo,
@@ -589,7 +805,26 @@ async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan:
       existing.referenceNo === header.referenceNo &&
       existing.chequeNo === header.chequeNo &&
       (existing.chequeDate ? istDay(existing.chequeDate) : null) === (plan.chequeDate ?? null)
-    if (sameMoney && sameHeader && billPrint(had) === billPrint(plan.lines)) return 'unchanged'
+    const sameBills = billPrint(had) === billPrint(plan.lines)
+    if (sameMoney && sameHeader && sameBills) return 'unchanged'
+    // In a closed period the voucher keeps every word it was closed with
+    // (number, narration, cheque, mode): only which bills its amounts settle
+    // may change, and it changes nothing else.
+    if (locked(oldDay!)) {
+      if (sameBills) return 'unchanged'
+      await keepRevision(tx, existing.id, { action: 'BILLS_CHANGED', reason: 'Which bills it settles, in a closed period', source: via, userId })
+      await tx.voucher.update({ where: { id: existing.id }, data: { updatedById: userId ?? null } })
+      const banked = await bankDatesOf(tx, existing.id)
+      await tx.voucherLine.deleteMany({ where: { voucherId: existing.id } })
+      await writeLines(tx, existing.id, plan, banked)
+      return 'updated'
+    }
+    // What it said before is kept whole, as its next revision.
+    await keepRevision(tx, existing.id, {
+      action: existing.status === 'CANCELLED' ? 'REINSTATED' : sameMoney && sameHeader ? 'BILLS_CHANGED' : 'REWRITTEN',
+      source: via,
+      userId,
+    })
     await tx.voucher.update({
       where: { id: existing.id },
       data: { ...header, status: 'POSTED', cancelledAt: null, cancelledById: null, cancelReason: null, updatedById: userId ?? null },
@@ -618,6 +853,7 @@ async function writeLines(tx: Tx, voucherId: string, plan: Plan, banked = new Ma
         debit: l.amount > 0 ? l.amount : 0,
         credit: l.amount < 0 ? -l.amount : 0,
         costCentreId: l.costCentreId,
+        departmentId: l.departmentId,
         bankDate: banked.get(bankKey(l.ledgerId, l.amount)) ?? null,
         sortOrder: i,
         billRefs: {
@@ -635,15 +871,17 @@ async function writeLines(tx: Tx, voucherId: string, plan: Plan, banked = new Ma
       },
     })
   }
+  // The database's own balance check, run now so a refusal is not lost at commit.
+  await checkBalancedNow(tx)
 }
 
 /**
  * Writes, rewrites or cancels a document's voucher to match the document as
  * it stands. An invoice brings its brokerage journal with it.
  */
-export async function postDocument(tx: Tx, sourceType: SourceType, sourceId: string, userId?: string | null): Promise<PostResult> {
-  const result = await applyPlan(tx, sourceType, sourceId, await PLANNERS[sourceType](tx, sourceId), userId)
-  if (sourceType === 'SALES_INVOICE') await applyPlan(tx, 'BROKERAGE', sourceId, await planBrokerage(tx, sourceId), userId)
+export async function postDocument(tx: Tx, sourceType: SourceType, sourceId: string, userId?: string | null, via?: string): Promise<PostResult> {
+  const result = await applyPlan(tx, sourceType, sourceId, await PLANNERS[sourceType](tx, sourceId), userId, via ?? sourceType)
+  if (sourceType === 'SALES_INVOICE') await applyPlan(tx, 'BROKERAGE', sourceId, await planBrokerage(tx, sourceId), userId, via ?? sourceType)
   return result
 }
 
@@ -710,7 +948,7 @@ export async function pendingDocuments(db: PrismaClient | Tx): Promise<{ booksSt
     else if (d.live && v?.status === 'CANCELLED') pending.push({ ...base, reason: 'reopen' })
   }
 
-  const [invoices, receipts, notes, bills, payments, pnotes] = await Promise.all([
+  const [invoices, receipts, notes, bills, payments, pnotes, runs] = await Promise.all([
     db.salesInvoice.findMany({ where: { invoiceDate: { gte: from0 } }, select: { id: true, invoiceNumber: true, invoiceDate: true, totalAmount: true, status: true, customer: { select: { name: true } } } }),
     db.paymentReceipt.findMany({ where: { receiptDate: { gte: from0 } }, select: { id: true, receiptNumber: true, receiptDate: true, amount: true, status: true, customer: { select: { name: true } } } }),
     db.creditNote.findMany({ where: { noteDate: { gte: from0 }, status: { in: ['ISSUED', 'CANCELLED'] } }, select: { id: true, noteNumber: true, noteDate: true, totalAmount: true, status: true, customer: { select: { name: true } } } }),
@@ -720,6 +958,7 @@ export async function pendingDocuments(db: PrismaClient | Tx): Promise<{ booksSt
       where: { noteDate: { gte: from0 }, OR: [{ status: 'POSTED' }, { status: 'CANCELLED', postedAt: { not: null } }] },
       select: { id: true, noteNumber: true, noteDate: true, totalAmount: true, status: true, supplier: { select: { name: true } } },
     }),
+    db.allocationRun.findMany({ where: { status: { in: ['POSTED', 'REVERSED'] } }, select: { id: true, runNumber: true, period: true, status: true, lines: { select: { amount: true } } } }),
   ])
   for (const d of invoices) check('SALES_INVOICE', { id: d.id, number: d.invoiceNumber, date: d.invoiceDate, party: d.customer.name, amount: n(d.totalAmount), live: d.status !== 'CANCELLED' })
   for (const d of receipts) check('SALES_RECEIPT', { id: d.id, number: d.receiptNumber, date: d.receiptDate, party: d.customer.name, amount: n(d.amount), live: d.status === 'POSTED' })
@@ -727,10 +966,18 @@ export async function pendingDocuments(db: PrismaClient | Tx): Promise<{ booksSt
   for (const d of bills) check('PURCHASE_BILL', { id: d.id, number: d.billNumber, date: d.billDate, party: d.supplier.name, amount: n(d.totalAmount), live: d.status !== 'CANCELLED' })
   for (const d of payments) check('SUPPLIER_PAYMENT', { id: d.id, number: d.paymentNumber, date: d.paymentDate, party: d.supplier.name, amount: n(d.amount), live: d.status === 'POSTED' })
   for (const d of pnotes) check('PURCHASE_NOTE', { id: d.id, number: d.noteNumber, date: d.noteDate, party: d.supplier.name, amount: n(d.totalAmount), live: d.status === 'POSTED' })
+  // A posted allocation run has its journal; a reversed one its reversal too.
+  for (const r of runs) {
+    const day = runDay(r.period)
+    if (day < s.booksStart) continue
+    const amount = r2(r.lines.reduce((t, l) => t + n(l.amount), 0))
+    check('EXPENSE_ALLOCATION', { id: r.id, number: r.runNumber, date: dayValue(day), party: '', amount, live: true })
+    check('EXPENSE_ALLOCATION_REVERSAL', { id: r.id, number: `${r.runNumber}-R`, date: dayValue(day), party: '', amount, live: r.status === 'REVERSED' })
+  }
 
   // Vouchers of documents dated before the books now start.
   for (const v of vouchers) {
-    if (v.date < from && v.sourceType !== 'BROKERAGE') {
+    if (v.status === 'POSTED' && v.date < from && v.sourceType !== 'BROKERAGE') {
       pending.push({ sourceType: v.sourceType as SourceType, sourceId: v.sourceId!, number: v.voucherNo, date: istDay(v.date), party: '', amount: Number(v.amount), reason: 'before-start' })
     }
   }
@@ -772,11 +1019,11 @@ export async function postPending(db: PrismaClient, userId: string | null, all =
   }
   const results = { posted: 0, unchanged: 0, failed: [] as Array<{ sourceType: SourceType; number: string; reason: string }> }
   // Invoices before the receipts and notes that settle them, bills before payments.
-  const ORDER: SourceType[] = ['SALES_INVOICE', 'PURCHASE_BILL', 'CREDIT_NOTE', 'PURCHASE_NOTE', 'SALES_RECEIPT', 'SUPPLIER_PAYMENT', 'BROKERAGE']
+  const ORDER: SourceType[] = ['SALES_INVOICE', 'PURCHASE_BILL', 'CREDIT_NOTE', 'PURCHASE_NOTE', 'SALES_RECEIPT', 'SUPPLIER_PAYMENT', 'BROKERAGE', 'EXPENSE_ALLOCATION', 'EXPENSE_ALLOCATION_REVERSAL']
   work.sort((a, b) => ORDER.indexOf(a.sourceType) - ORDER.indexOf(b.sourceType))
   for (const w of work) {
     try {
-      const r = await db.$transaction((tx) => postDocument(tx, w.sourceType, w.sourceId, userId), { timeout: 30_000 })
+      const r = await db.$transaction((tx) => postDocument(tx, w.sourceType, w.sourceId, userId, 'repost'), { timeout: 30_000 })
       if (r === 'unchanged' || r === 'none') results.unchanged++
       else results.posted++
     } catch (err) {

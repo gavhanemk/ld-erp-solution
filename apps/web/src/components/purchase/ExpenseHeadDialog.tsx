@@ -51,6 +51,8 @@ export interface ExpenseHead {
   /** The TDS section a bill for this head usually falls under. */
   tdsSectionId?: string | null
   tdsSection?: { id: string; section: string; label: string } | null
+  /** The department that usually bears it: its bill lines' cost centre. */
+  departmentId?: string | null
 }
 
 /** A TDS section as the pickers list it. */
@@ -132,6 +134,8 @@ export function ExpenseHeadDialog({
   const [description, setDescription] = useState(head?.description ?? '')
   const [tdsSectionId, setTdsSectionId] = useState(head?.tdsSectionId ?? '')
   const [tdsSections, setTdsSections] = useState<TdsOption[]>([])
+  const [departmentId, setDepartmentId] = useState(head?.departmentId ?? '')
+  const [departments, setDepartments] = useState<Array<{ id: string; name: string }>>([])
   const [isActive, setIsActive] = useState(head?.isActive ?? true)
 
   const [uoms, setUoms] = useState<Uom[]>([])
@@ -146,6 +150,10 @@ export function ExpenseHeadDialog({
       .then((r) => setUoms(r.data))
       .catch(() => setError('Could not load the units. Close and try again.'))
     void loadTdsSections().then(setTdsSections)
+    api
+      .get<{ data: Array<{ id: string; name: string; isActive?: boolean }> }>('/masters/departments?limit=200&active=true&sort=name&order=asc')
+      .then((r) => setDepartments(r.data.filter((d) => d.isActive !== false)))
+      .catch(() => {})
   }, [])
 
   /** What "Not needed" saves as. */
@@ -179,6 +187,7 @@ export function ExpenseHeadDialog({
         categoryId: groupId || category.id,
         uomId: uomId || fallbackUnit?.id,
         tdsSectionId: tdsSectionId || null,
+        departmentId: departmentId || null,
       }
       if (head) {
         // Blank boxes are sent as null so clearing a code or note sticks.
@@ -217,6 +226,7 @@ export function ExpenseHeadDialog({
     sacCode,
     description,
     tdsSectionId,
+    departmentId,
     isActive,
     onCreated,
     onSaved,
@@ -374,7 +384,21 @@ export function ExpenseHeadDialog({
                 </SmartSelect>
                 <p className="form-help">Fills the TDS box on its bills.</p>
               </div>
-              <div className="sm:col-span-2">
+              <div>
+                <label className="form-label" htmlFor="eh-dept">
+                  Usual department
+                </label>
+                <SmartSelect id="eh-dept" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)} className="form-input">
+                  <option value="">None</option>
+                  {departments.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
+                  ))}
+                </SmartSelect>
+                <p className="form-help">Its cost centre on bills: Factory power → Production.</p>
+              </div>
+              <div>
                 <label className="form-label" htmlFor="eh-desc">
                   Note
                 </label>

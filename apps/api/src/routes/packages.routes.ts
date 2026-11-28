@@ -3,7 +3,27 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma, type Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
-import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
+import type { NextFunction, Response } from 'express'
+
+/**
+ * A guard for work that belongs to another screen as well as this one: allowed
+ * with the action on any of the screens named. Issuing a roll by scan is an
+ * issue against a requisition, so a store keeper who may issue requisitions
+ * (Material Requisitions: Edit) may issue by scan too, and one who may only
+ * label stock (Stickers & Scan: Edit) may not issue by it; the labels window
+ * after an issue, a transfer or a return is part of that document's work.
+ */
+const allowedOnAnyOf =
+  (screens: string[], action: string, what: string) => (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (screens.some((k) => userCan(req.user, k, action))) return next()
+    return res.status(403).json({
+      success: false,
+      message: `Your role does not allow you to ${what}. Ask an administrator to change it in Settings → People.`,
+      code: 'FORBIDDEN',
+      required: screens.map((k) => `${k}:${action}`).join(' or '),
+    })
+  }
 import { writeAuditLog } from '../lib/audit'
 import { createTransfer, issueRequisition } from './inventory.routes'
 import {
@@ -26,6 +46,7 @@ import {
   racksIn,
   replacementsOf,
   setRack,
+  sharePositions,
   stickerDefaultsFrom,
   suggestQtys,
   takeFromPackage,
@@ -158,6 +179,8 @@ const pkgInclude = {
   },
   warehouse: { select: { id: true, name: true } },
   ownerCustomer: { select: { id: true, name: true } },
+  // The share it is on (multi-brand phase 5): a brand's earmark, or central stock.
+  brand: { select: { id: true, name: true } },
 } satisfies Prisma.StockPackageInclude
 
 /** Everything the scan screen shows about one package, and what can be done with it. */
@@ -711,6 +734,8 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           designNo: r.item.designNo,
           color: r.item.color,
           styleId: r.item.styleId,
+          // The brand the roll is earmarked for, printed beside its design and colour; central stock prints none.
+          brand: r.brand?.name ?? null,
           category: r.item.category?.name ?? '',
           store: r.warehouse.name,
           lotNo: r.lotNo,
@@ -782,14 +807,18 @@ async function outwardSpots(doc: Awaited<ReturnType<typeof loadOutward>>) {
     doc.lines.map((l) => ({ itemId: l.itemId, warehouseId: l.warehouseId, ownership: l.ownership, ownerCustomerId: l.ownerCustomerId })),
   )
   for (const l of doc.lines) {
-    const key = [l.itemId, l.warehouseId, l.ownership, l.ownerCustomerId ?? ''].join('|')
-    if (seen.has(key)) continue
-    seen.add(key)
-    const spot = { itemId: l.itemId, warehouseId: l.warehouseId, ownership: l.ownership, ownerCustomerId: l.ownerCustomerId }
-    const pos = positionOf(spot)
-    // Packages claiming more than the store now holds: what went out came from them.
-    if (pos.loose >= -0.0005) continue
-    const over = round3(-pos.loose)
+    const place = [l.itemId, l.warehouseId, l.ownership, l.ownerCustomerId ?? ''].join('|')
+    if (seen.has(place)) continue
+    seen.add(place)
+    const whole = { itemId: l.itemId, warehouseId: l.warehouseId, ownership: l.ownership, ownerCustomerId: l.ownerCustomerId }
+    if (positionOf(whole).loose >= -0.0005 && !(await sharePositions(prisma, whole)).some((x) => x.loose < -0.0005)) continue
+    // Share by share: a brand's stickers answer for its own metres, central's for central's.
+    for (const share of await sharePositions(prisma, whole)) {
+    if (share.loose >= -0.0005) continue
+    const key = `${place}|${share.brandId ?? ''}`
+    const spot = { ...whole, brandId: share.brandId }
+    // Packages claiming more than the share now holds: what went out came from them.
+    const over = round3(-share.loose)
     // Held rolls (rejected at receipt) never leave on an outward like this: not suggested.
     const packages = await prisma.stockPackage.findMany({
       where: { ...spot, status: 'IN_STOCK', grade: { not: 'R' } },
@@ -814,12 +843,14 @@ async function outwardSpots(doc: Awaited<ReturnType<typeof loadOutward>>) {
       ownership: l.ownership,
       ownerCustomerId: l.ownerCustomerId,
       over,
+      brandId: share.brandId,
       packages: packages.map((p) => {
         const take = round3(Math.max(0, Math.min(Number(p.qty), left)))
         left = round3(left - take)
         return { id: p.id, code: p.code, qty: Number(p.qty), lotNo: p.lotNo, packType: p.packType, take }
       }),
     })
+    }
   }
   return spots
 }
@@ -862,7 +893,7 @@ router.post('/outward/plan', requirePermission(MODULE, 'view'), async (req, res)
  * one becomes a new roll in the other store. A package keeps its code for
  * what stays in it. Returns the new packages, to print.
  */
-router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+router.post('/outward/apply', allowedOnAnyOf(['inventory.stickers', 'inventory.requisitions', 'inventory.documents'], 'edit', 'say which stickers went out'), async (req: AuthRequest, res) => {
   const data = outwardApplySchema.parse(req.body)
   await assertLineQtyFitsUnits(prisma, 'package', data.takes.map((t) => ({ lineId: t.packageId, qty: t.qty, what: 'Taken' })))
   const doc = await loadOutward(data.type, data.id, data.q)
@@ -883,9 +914,11 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
       }
       for (const t of data.takes) {
         const pkg = await lockPackage(tx, t.packageId)
-        const key = [pkg.itemId, pkg.warehouseId, pkg.ownership, pkg.ownerCustomerId ?? ''].join('|')
+        const place = [pkg.itemId, pkg.warehouseId, pkg.ownership, pkg.ownerCustomerId ?? ''].join('|')
+        // Taken share by share: a roll answers only for its own share's metres.
+        const key = `${place}|${pkg.brandId ?? ''}`
         const unit = pkg.item.uom?.symbol ?? ''
-        if (!spots.has(key)) throw new AppError(`${pkg.code} is not stock that went out on ${doc.number}.`, 400, 'WRONG_PACKAGE')
+        if (!spots.has(place)) throw new AppError(`${pkg.code} is not stock that went out on ${doc.number}.`, 400, 'WRONG_PACKAGE')
         if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is no longer in stock.`, 400, 'NOT_IN_STOCK')
         if (pkg.grade === 'R') throw new AppError(`${pkg.code} is on hold (rejected at receipt), so it did not go out on ${doc.number}. Pick the roll that did.`, 409, 'HELD')
         if (t.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
@@ -896,17 +929,18 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
           // Locked first: two people bringing the same packages up to date at
           // once must not both take the same boxes off.
           await lockedBalanceOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId })
-          const pos = await positionOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId })
+          const pos = await positionOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId, brandId: pkg.brandId })
           taken.set(key, round3(Math.max(0, -pos.loose)))
         }
         const room = taken.get(key)!
         if (t.qty > room + 1e-6) {
-          throw new AppError(`Only ${room} ${unit} of ${pkg.item.name} went out without a scan, so ${t.qty} cannot come off ${pkg.code}.`, 400, 'OVER_OUTWARD')
+          throw new AppError(`Only ${room} ${unit} of ${pkg.item.name} went out without a scan${pkg.brandId ? ' from that brand’s stock' : ''}, so ${t.qty} cannot come off ${pkg.code}.`, 400, 'OVER_OUTWARD')
         }
         taken.set(key, round3(room - t.qty))
         // FIFO: a newer package taken while an older one stays on the rack
-        // needs the store manager's reason.
-        const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit, whole)
+        // needs the store manager's reason. Within its own share: an older roll
+        // of central stock or another brand did not go out for this share.
+        const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit, whole, [pkg.brandId ?? null])
 
         const ref = { referenceType: OUTWARD[data.type].ledger, referenceId: doc.id, referenceNumber: doc.number, userId: req.user?.id ?? null }
         if (!moves) {
@@ -1338,7 +1372,7 @@ router.post('/:id/rack', requirePermission(MODULE, 'edit'), async (req: AuthRequ
 })
 
 /** Issuing from a scanned package against a requisition. The rest stays in the package. */
-router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+router.post('/:id/issue', allowedOnAnyOf(['inventory.requisitions'], 'edit', 'issue material against a requisition'), async (req: AuthRequest, res) => {
   const data = issueSchema.parse(req.body)
   await assertLineQtyFitsUnits(prisma, 'package', [{ lineId: req.params.id, qty: data.qty, what: 'From the package' }])
   // Kept for the audit trail of a first issue; a repeat writes none.
@@ -1376,13 +1410,22 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
         throw new AppError("That requisition wants a different owner's stock than this package holds.", 400, 'WRONG_OWNER')
       }
 
+      // Whose roll it is (multi-brand phase 5): an MO's issue may take its own
+      // brand's rolls and central ones; another brand's earmark is not its to take.
+      const forMo = await tx.materialRequisition.findUnique({ where: { id: data.mrId }, select: { mo: { select: { brandId: true } } } })
+      const usable: Array<string | null> = line.ownership === 'OWNED' && forMo?.mo?.brandId ? [forMo.mo.brandId, null] : [null]
+      if (!usable.includes(pkg.brandId ?? null)) {
+        const whose = pkg.brandId ? (await tx.brand.findUnique({ where: { id: pkg.brandId }, select: { name: true } }))?.name : null
+        throw new AppError(`${pkg.code} is earmarked for ${whose ?? 'another brand'}: it is not this requisition's to issue. Scan another roll, or move it between the brands first (approved).`, 409, 'OTHER_BRANDS_STOCK')
+      }
+
       // FIFO: an older package of the same item in this store goes first,
       // unless the store manager lets this one go, with a reason.
-      const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit)
+      const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit, [], usable)
 
       // The issue itself, with every rule the Issue screen has.
       // The scanned package comes down below, by itself: no other sticker is touched.
-      const issued = await issueRequisition(tx, data.mrId, { lines: [{ lineId: data.lineId, issueQty: data.qty, warehouseId: pkg.warehouseId }] }, req.user, { stickers: 'caller' })
+      const issued = await issueRequisition(tx, data.mrId, { lines: [{ lineId: data.lineId, issueQty: data.qty, warehouseId: pkg.warehouseId }] }, req.user, { stickers: 'caller', fromShare: pkg.brandId ?? null })
 
       // Part of a packet: it keeps its code and its sticker, and only what it
       // holds goes down — 50, then 40, then 35. All of it: the packet is empty.
@@ -1456,9 +1499,9 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
       if (pkg.grade === 'R') throw new AppError(`${pkg.code} is on hold (rejected at receipt), so it stays where it is until it is released or sent back.`, 409, 'HELD')
       if (data.toWarehouseId === pkg.warehouseId) throw new AppError(`${pkg.code} is already in ${pkg.warehouse.name}.`, 400, 'SAME_STORE')
       if (data.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
-      // FIFO: an older package of the same item in this store goes first,
-      // unless the store manager lets this one go, with a reason.
-      const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit)
+      // FIFO: an older package of the same item in this store, of the same
+      // share, goes first, unless the store manager lets this one go, with a reason.
+      const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit, [], [pkg.brandId ?? null])
 
       const note = await createTransfer(
         tx,

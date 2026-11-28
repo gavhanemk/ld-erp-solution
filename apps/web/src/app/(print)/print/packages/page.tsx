@@ -40,6 +40,8 @@ interface Label extends ShadeFields {
   rack?: string | null
   /** Its item's own number of copies, when not its kind's usual. */
   copies?: number | null
+  /** The brand it is earmarked for (multi-brand phase 5); none for central stock. */
+  brand?: string | null
 }
 /** How a kind of package's sticker looks, from Stickers → Sticker settings. */
 interface Template {
@@ -135,7 +137,8 @@ function Sticker({
   const qrSize = codes === 'both' ? d.qrBoth : d.qr
   // A fabric's design and colour, a thread's colour: the store picks the roll
   // or box by them, and same-name fabrics differ only there (27 Nov 2026).
-  const shade = itemShade(p)
+  // …and the brand it is earmarked for, on the same line (multi-brand phase 5).
+  const shade = [itemShade(p), p.brand].filter(Boolean).join(' · ')
   // Its own line under the name, made room for in the same text area: the name
   // keeps to one line and the small lines sit closer. Stickers without one are
   // unchanged. The small sticker has no room for a line, so it rides on the last.

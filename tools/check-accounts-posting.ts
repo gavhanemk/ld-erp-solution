@@ -53,6 +53,10 @@ async function run(tx: Prisma.TransactionClient) {
   const company = await tx.company.findFirstOrThrow({ select: { id: true } })
   // Every document in the database falls inside the books.
   await tx.company.update({ where: { id: company.id }, data: { booksStartDate: dayValue('2024-04-01'), booksLockedUpTo: null } })
+  // This check starts from empty books inside a transaction it rolls back. The database refuses to
+  // delete vouchers (Phase 7) unless the session says so outright, which only these checks do.
+  await tx.$executeRawUnsafe(`SELECT set_config('ld_erp.allow_books_delete', 'on', true)`)
+  await tx.allocationRunSource.deleteMany({ where: { voucher: { sourceType: { not: null } } } })
   await tx.voucher.deleteMany({ where: { sourceType: { not: null } } })
 
   const docs: Array<[SourceType, string]> = [

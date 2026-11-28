@@ -880,6 +880,7 @@ export async function executeTool(
         const styles = await prisma.style.findMany({
           where: styleWhere,
           include: {
+            brand: { select: { name: true } },
             sizeGroup: { select: { name: true } },
             // Every approved BOM: there is one per colour, and only one per
             // colour can be approved, so each is a definite answer for its
@@ -901,7 +902,8 @@ export async function executeTool(
           styles: styles.map((s) => ({
             code: s.code,
             name: s.name,
-            brand: s.brandType,
+            // The brand by name: Stich Code, not the kind it is filed under.
+            brand: s.brand?.name ?? s.brandType,
             season: s.season,
             fabric: s.fabricType,
             fit: s.fit,

@@ -180,8 +180,8 @@ export async function qcRejectedByGrnLine(
     for (const l of d.lines) {
       if (!wanted.has(l.grnLineId) || !(l.rejectedQty > 0)) continue
       const prev = out.get(l.grnLineId)
-      // Held in the store: only what is still held is there to send back.
-      const qty = d.hold === 'SAME_STORE' ? heldOf(l) : l.rejectedQty
+      // Held in the store or a reject godown: only what is still held is there to send back.
+      const qty = d.hold === 'SAME_STORE' || d.rejectWarehouseId ? heldOf(l) : l.rejectedQty
       if (!(qty > 0)) continue
       out.set(l.grnLineId, {
         qty: (prev?.qty ?? 0) + qty,
@@ -253,8 +253,11 @@ export async function creditReturn(
   if (!line) return 0
   const qc = await liveQcOf(tx, line.grnId)
   const d = qc ? readQc(qc.checklistData) : null
-  if (!qc || !d || d.hold !== 'SAME_STORE') return 0
-  const l = d.lines.find((x) => x.grnLineId === a.grnLineId && x.warehouseId === a.warehouseId)
+  if (!qc || !d) return 0
+  // Held where they were received, or in the reject godown they were moved to.
+  const inGodown = !!d.rejectWarehouseId && a.warehouseId === d.rejectWarehouseId
+  if (d.hold !== 'SAME_STORE' && !inGodown) return 0
+  const l = d.lines.find((x) => x.grnLineId === a.grnLineId && (inGodown || x.warehouseId === a.warehouseId))
   if (!l) return 0
   const take = r3(Math.min(a.qty, heldOf(l)))
   if (!(take > 0)) return 0
@@ -276,7 +279,7 @@ export async function uncreditReturn(
   })
   for (const c of checks) {
     const d = readQc(c.checklistData)
-    if (!d || d.cancelled || d.hold !== 'SAME_STORE') continue
+    if (!d || d.cancelled || (d.hold !== 'SAME_STORE' && !d.rejectWarehouseId)) continue
     let changed = false
     for (const l of d.lines) {
       const sent = (l.events ?? []).filter((e) => e.kind === 'RETURNED' && e.ref === a.returnId).reduce((s, e) => s + e.qty, 0)

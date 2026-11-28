@@ -416,6 +416,29 @@ export function MasterFormDialog<T extends { id: string }>({
   // ready-made: they come from an array on one record, not from a list of rows.
   const [fieldOptions, setFieldOptions] = useState<Record<string, { value: string; label: string }[]>>({})
 
+  // A value the form opened with (a record's, or one given to start from) fills
+  // what it fills — as picking it would — once its list is in: an item opened
+  // under Finished Goods knows it is a finished good. Only an empty target.
+  useEffect(() => {
+    if (!open) return
+    setValues((v) => {
+      let next: Record<string, unknown> | null = null
+      for (const f of fields) {
+        if (!f.fills || !f.optionsFrom) continue
+        const picked = v[f.name]
+        const target = f.fills.field
+        if (typeof picked !== 'string' || !picked || (v[target] !== '' && v[target] != null)) continue
+        const { valueKey = 'id' } = f.optionsFrom
+        const row = remoteRows[f.name]?.find((r) => String(r[valueKey]) === picked)
+        const value = row ? f.fills.from(row) : undefined
+        if (value == null || value === '') continue
+        next = { ...(next ?? v), [target]: value }
+        filledBy.current[target] = value
+      }
+      return next ?? v
+    })
+  }, [open, remoteRows, fields])
+
   useEffect(() => {
     if (!open) return
 

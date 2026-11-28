@@ -246,15 +246,17 @@ async function syncPartyLedgers(tx: Tx, groups: Map<string, string>) {
 /** One cost centre per brand, so profit can be read brand by brand. */
 async function syncCostCentres(tx: Tx) {
   const [brands, centres] = await Promise.all([
-    tx.brand.findMany({ select: { id: true, name: true, isActive: true } }),
+    tx.brand.findMany({ select: { id: true, name: true, isActive: true, type: true, code: true } }),
     tx.costCentre.findMany({ select: { id: true, name: true, brandId: true, isActive: true } }),
   ])
   const taken = new Set(centres.map((c) => c.name.toLowerCase()))
   for (const b of brands) {
     const have = centres.find((c) => c.brandId === b.id)
     if (!have) {
+      // A profit centre is one of our own brands'; a customer's brand gets none.
+      if (b.type === 'CUSTOM') continue
       const name = freeName(b.name, null, taken)
-      await tx.costCentre.create({ data: { name, brandId: b.id, isActive: b.isActive } })
+      await tx.costCentre.create({ data: { name, code: b.code, brandId: b.id, isActive: b.isActive } })
       taken.add(name.toLowerCase())
     } else if (have.isActive !== b.isActive) {
       await tx.costCentre.update({ where: { id: have.id }, data: { isActive: b.isActive } })

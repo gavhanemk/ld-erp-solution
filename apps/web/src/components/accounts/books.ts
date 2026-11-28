@@ -24,6 +24,9 @@ export interface Ledger {
   pan: string | null
   gstin: string | null
   notes: string | null
+  /** An income or expense ledger's usual brand and department, filled into its lines. */
+  costCentre?: { id: string; name: string } | null
+  department?: { id: string; name: string } | null
   isActive: boolean
   balance?: number
 }
@@ -43,7 +46,8 @@ export interface CostCentre {
   id: string
   name: string
   isActive: boolean
-  brand: { id: string; name: string } | null
+  /** The brand it is the profit centre of; `type` CUSTOM for a customer's brand. */
+  brand: { id: string; name: string; type?: string } | null
 }
 
 export interface BooksSummary {
@@ -75,6 +79,8 @@ export const SOURCE_LABEL: Record<string, string> = {
   PURCHASE_BILL: 'Purchase bill',
   SUPPLIER_PAYMENT: 'Supplier payment',
   PURCHASE_NOTE: 'Purchase note',
+  EXPENSE_ALLOCATION: 'Expense allocation',
+  EXPENSE_ALLOCATION_REVERSAL: 'Expense allocation reversal',
 }
 
 /** Where a document that wrote a voucher is opened. */
@@ -92,6 +98,9 @@ export function sourceLink(sourceType: string, number: string): string {
       return `/purchase/bills?q=${q}`
     case 'SUPPLIER_PAYMENT':
       return '/purchase/payments'
+    case 'EXPENSE_ALLOCATION':
+    case 'EXPENSE_ALLOCATION_REVERSAL':
+      return `/accounts/allocation?q=${encodeURIComponent(number.replace(/-R$/, ''))}`
     default:
       return '/purchase/debit-notes'
   }

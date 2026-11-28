@@ -14,6 +14,9 @@ import {
   CheckCircle2,
   XCircle,
   Tags,
+  Truck,
+  PackageCheck,
+  Undo2,
 } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
@@ -23,6 +26,8 @@ import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { StickerNote, type StickerNews } from '@/components/inventory/StockInNext'
 import { StickersReady, printDocStickers } from '@/components/packages/StickersReady'
+import { TransitStepDialog, onTheWay, type TransitStep } from '@/components/inventory/TransitStepDialog'
+import { OutwardStickers } from '@/components/packages/OutwardStickers'
 import { itemShadeCols, type ShadeFields } from '@/lib/items'
 
 /**
@@ -55,6 +60,22 @@ const whoseLabel = (l: Line) =>
 interface TransferLine extends Line {
   qty: string | number
   unitRate: string | number | null
+  /** Sent in transit: what arrived good, damaged, went back, was lost. */
+  receivedQty?: string | number
+  damagedQty?: string | number
+  returnedQty?: string | number
+  lostQty?: string | number
+}
+
+type TransferStatus = 'DISPATCHED' | 'PARTLY_RECEIVED' | 'RECEIVED' | 'DISCREPANCY' | 'CANCELLED'
+
+/** An in-transit transfer's status, as a store keeper says it. */
+const TRANSIT_STATUS: Record<TransferStatus, { label: string; badge: string }> = {
+  DISPATCHED: { label: 'On the way', badge: 'badge-warning' },
+  PARTLY_RECEIVED: { label: 'Part received', badge: 'badge-warning' },
+  RECEIVED: { label: 'Received', badge: 'badge-success' },
+  DISCREPANCY: { label: 'Received, with differences', badge: 'badge-info' },
+  CANCELLED: { label: 'Cancelled', badge: 'badge-neutral' },
 }
 
 interface AdjustmentLine extends Line {
@@ -75,6 +96,9 @@ interface Transfer {
   cancelledAt: string | null
   cancelledBy: { id: string; name: string } | null
   cancelReason: string | null
+  mode?: 'DIRECT' | 'IN_TRANSIT'
+  status?: TransferStatus
+  transitWarehouse?: { id: string; name: string } | null
   lines: TransferLine[]
 }
 
@@ -111,6 +135,17 @@ const TRANSFER_COLS = [
   { label: 'Colour', width: '12%' },
   { label: 'Quantity', width: '14%', numeric: true },
   { label: 'Carried at', width: '14%', numeric: true },
+]
+/** Sent in transit: what was sent, and what became of it. */
+const TRANSIT_COLS = [
+  { label: 'Code', width: '11%' },
+  { label: 'Item', width: '27%' },
+  { label: 'Sent', width: '10%', numeric: true },
+  { label: 'Arrived', width: '10%', numeric: true },
+  { label: 'Damaged', width: '10%', numeric: true },
+  { label: 'Back / lost', width: '11%', numeric: true },
+  { label: 'On the way', width: '11%', numeric: true },
+  { label: 'Carried at', width: '10%', numeric: true },
 ]
 const ADJUSTMENT_COLS = [
   { label: 'Code', width: '12%' },
@@ -166,6 +201,26 @@ export default function StockDocumentsPage() {
   const [open, setOpen] = useState<string | null>(null)
   const [refusing, setRefusing] = useState<Adjustment | null>(null)
   const [approving, setApproving] = useState<Adjustment | null>(null)
+  // What approving a count would take out of each brand's earmark (shortages come from central first).
+  const [losses, setLosses] = useState<Array<{ lineId: string; brand: string; item: string; size: string | null; unit: string; qty: number; named: boolean }> | null>(null)
+  useEffect(() => {
+    setLosses(null)
+    if (!approving || approving.kind === 'STOCK_IN') return
+    let live = true
+    api
+      .get<{ data: NonNullable<typeof losses> }>(`/inventory/adjustments/${approving.id}/brand-losses`)
+      .then((r) => live && setLosses(r.data))
+      .catch(() => live && setLosses([]))
+    return () => {
+      live = false
+    }
+  }, [approving])
+  /** Only transfers with something still on the road. */
+  const [onlyOpen, setOnlyOpen] = useState(false)
+  /** A step on a transfer in transit: receive, send back, write off. */
+  const [stepping, setStepping] = useState<{ t: Transfer; step: TransitStep } | null>(null)
+  /** A transfer's labels window: which rolls went, and the labels for them. */
+  const [labelling, setLabelling] = useState<Transfer | null>(null)
   const me = currentUser() as { id?: string } | null
   const mayApprove = can('inventory', 'approve')
 
@@ -194,6 +249,7 @@ export default function StockDocumentsPage() {
     try {
       const qs = new URLSearchParams({ limit: '50' })
       if (debounced) qs.set('q', debounced)
+      if (kind === 'transfers' && onlyOpen) qs.set('open', '1')
 
       // Whichever tab is open, the Adjustments tab says how many are waiting.
       void api
@@ -226,7 +282,7 @@ export default function StockDocumentsPage() {
     } finally {
       if (current()) setLoading(false)
     }
-  }, [debounced, kind])
+  }, [debounced, kind, onlyOpen])
 
   useEffect(() => {
     void load()
@@ -234,7 +290,9 @@ export default function StockDocumentsPage() {
 
   const cancel = async (t: Transfer) => {
     const reason = prompt(
-      `Why is ${t.transferNumber} being cancelled?\n\nThe goods will be moved back to ${t.fromWarehouse.name}.`
+      t.mode === 'IN_TRANSIT'
+        ? `Why is ${t.transferNumber} being cancelled?\n\nThe goods come back off the road to ${t.fromWarehouse.name}.`
+        : `Why is ${t.transferNumber} being cancelled?\n\nThe goods will be moved back to ${t.fromWarehouse.name}.`
     )
     if (!reason || reason.trim().length < 5) return
 
@@ -353,6 +411,12 @@ export default function StockDocumentsPage() {
               data-hotkey="search"
             />
           </div>
+          {kind === 'transfers' && (
+            <label className="text-muted-foreground flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={onlyOpen} onChange={(e) => setOnlyOpen(e.target.checked)} />
+              <Truck size={13} /> On the way only
+            </label>
+          )}
           <span className="text-muted-foreground ml-auto text-xs">
             {total} {noun}
           </span>
@@ -391,8 +455,19 @@ export default function StockDocumentsPage() {
                     const actions: RowAction[] = [
                       { key: 'print', label: 'View / print', icon: <Printer size={14} />, href: `/print/stock-transfer/${t.id}`, newTab: true },
                     ]
-                    if (!t.cancelledAt && busy !== t.id)
-                      actions.push({ key: 'cancel', label: 'Cancel and move the goods back', icon: <Ban size={14} />, onClick: () => void cancel(t), danger: true })
+                    const onTheRoad = t.mode === 'IN_TRANSIT'
+                    const stillOpen = onTheRoad && (t.status === 'DISPATCHED' || t.status === 'PARTLY_RECEIVED')
+                    // Its labels window: any time for a direct one; on the road, until anything of it is done at the other end.
+                    if (!t.cancelledAt && (!onTheRoad || t.status === 'DISPATCHED'))
+                      actions.push({ key: 'stickers', label: 'Stickers for what went', icon: <Tags size={14} />, onClick: () => setLabelling(t) })
+                    if (stillOpen && busy !== t.id) {
+                      actions.push({ key: 'receive', label: `Receive what arrived at ${t.toWarehouse.name}`, icon: <PackageCheck size={14} />, onClick: () => setStepping({ t, step: 'receive' }) })
+                      actions.push({ key: 'send-back', label: `Send back what did not arrive`, icon: <Undo2 size={14} />, onClick: () => setStepping({ t, step: 'send-back' }) })
+                      if (mayApprove) actions.push({ key: 'write-off', label: 'Write off as lost on the way', icon: <XCircle size={14} />, onClick: () => setStepping({ t, step: 'write-off' }), danger: true })
+                    }
+                    // Direct: walked back. In transit: only while nothing of it has arrived.
+                    if (!t.cancelledAt && busy !== t.id && (!onTheRoad || t.status === 'DISPATCHED'))
+                      actions.push({ key: 'cancel', label: onTheRoad ? 'Cancel and bring the goods back' : 'Cancel and move the goods back', icon: <Ban size={14} />, onClick: () => void cancel(t), danger: true })
                     return (
                       <Fragment key={t.id}>
                         <tr data-row tabIndex={i === 0 ? 0 : -1}>
@@ -437,6 +512,11 @@ export default function StockDocumentsPage() {
                                   </div>
                                 )}
                               </>
+                            ) : onTheRoad && t.status ? (
+                              <>
+                                <span className={TRANSIT_STATUS[t.status].badge}>{TRANSIT_STATUS[t.status].label}</span>
+                                <div className="text-muted-foreground text-[10px]">in transit via {t.transitWarehouse?.name ?? 'transit'}</div>
+                              </>
                             ) : (
                               <span className="badge-success">Moved</span>
                             )}
@@ -461,7 +541,7 @@ export default function StockDocumentsPage() {
                                   <table className="subtable w-full table-fixed">
                                     <thead className="sticky top-0 z-10">
                                       <tr>
-                                        {TRANSFER_COLS.map((c) => (
+                                        {(onTheRoad ? TRANSIT_COLS : TRANSFER_COLS).map((c) => (
                                           <th key={c.label} style={{ width: c.width }} className={c.numeric ? 'text-right' : undefined}>
                                             {c.label}
                                           </th>
@@ -482,6 +562,20 @@ export default function StockDocumentsPage() {
                                           <td className="whitespace-nowrap text-right text-xs tabular-nums">
                                             {qty(l.qty)} {l.item.uom?.symbol ?? ''}
                                           </td>
+                                          {onTheRoad && (
+                                            <>
+                                              <td className="whitespace-nowrap text-right text-xs tabular-nums">{qty(l.receivedQty ?? 0)}</td>
+                                              <td className={`whitespace-nowrap text-right text-xs tabular-nums ${Number(l.damagedQty ?? 0) > 0 ? 'text-amber-500' : ''}`}>
+                                                {qty(l.damagedQty ?? 0)}
+                                              </td>
+                                              <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                                                {qty(l.returnedQty ?? 0)} / {qty(l.lostQty ?? 0)}
+                                              </td>
+                                              <td className="whitespace-nowrap text-right text-xs font-semibold tabular-nums">
+                                                {t.cancelledAt ? '—' : qty(onTheWay({ ...l, qty: l.qty }))}
+                                              </td>
+                                            </>
+                                          )}
                                           <td className="whitespace-nowrap text-right text-xs tabular-nums">
                                             {l.unitRate === null ? '—' : qty(l.unitRate)}
                                           </td>
@@ -693,6 +787,30 @@ export default function StockDocumentsPage() {
         )}
       </div>
 
+      {labelling && (
+        <OutwardStickers
+          source={{ type: 'TRANSFER', id: labelling.id }}
+          onClose={() => setLabelling(null)}
+          onDone={(m) => {
+            setLabelling(null)
+            setMessage(m)
+          }}
+        />
+      )}
+      {stepping && (
+        <TransitStepDialog
+          transfer={stepping.t}
+          step={stepping.step}
+          onClose={() => setStepping(null)}
+          onDone={(m) => {
+            setStepping(null)
+            setError(null)
+            setStickers(null)
+            setMessage(m)
+            void load()
+          }}
+        />
+      )}
       {stickersFor && (
         <StickersReady
           source={{ type: 'STOCK_IN', id: stickersFor.id }}
@@ -712,7 +830,30 @@ export default function StockDocumentsPage() {
               ? `${approving.lines.length} ${approving.lines.length === 1 ? 'item goes' : 'items go'} into stock in ${approving.warehouse.name} now, worth ${formatRupees(
                   approving.lines.reduce((s, l) => s + Number(l.difference) * Number(l.unitRate ?? 0), 0),
                 )}. This cannot be undone except by a stock count.`
-              : `The ${approving.lines.filter((l) => Number(l.difference) !== 0).length} counted difference(s) in ${approving.warehouse.name} go into stock now. This cannot be undone except by another count.`
+              : (
+                  <>
+                    {`The ${approving.lines.filter((l) => Number(l.difference) !== 0).length} counted difference(s) in ${approving.warehouse.name} go into stock now. This cannot be undone except by another count.`}
+                    {' '}
+                    {losses === null
+                      ? 'Checking whose stock the shortages come from…'
+                      : losses.length === 0
+                        ? 'Shortages come out of central stock; gains go to central stock.'
+                        : (
+                            <>
+                              {'Gains go to central stock. Shortages come out of central stock first, but these come out of a brand’s earmark: '}
+                              {losses.map((l, i) => (
+                                <span key={`${l.lineId}-${i}`} className="text-foreground font-medium">
+                                  {i > 0 ? '; ' : ''}
+                                  {l.brand} −{l.qty} {l.unit} {l.item}
+                                  {l.size ? ` size ${l.size}` : ''}
+                                  {l.named ? ' (its own, not found in the count)' : ''}
+                                </span>
+                              ))}
+                              .
+                            </>
+                          )}
+                  </>
+                )
           }
           confirmLabel={approving.kind === 'STOCK_IN' ? 'Approve and add to stock' : 'Approve and correct stock'}
           requireReason={false}

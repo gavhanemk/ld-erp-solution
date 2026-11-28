@@ -249,6 +249,19 @@ export interface Matrix {
 }
 
 /**
+ * A table of things by who holds them: each row an item, each column a
+ * share (central stock, each brand) and the total — the quantity in the
+ * item's own unit, and its value, so the screen can show either. Units are
+ * never added across rows, only across a row.
+ */
+export interface Crosstab {
+  title: string
+  rowLabel: string
+  columns: string[]
+  rows: Array<{ label: string; detail: string; code: string; unit: string; qty: Array<number | null>; value: Array<number | null> }>
+}
+
+/**
  * One line of the Needs Attention block.
  *
  * The difference between this and a KPI is what the reader is meant to do.
@@ -287,6 +300,7 @@ export interface ReportAnalysis {
   trend?: Trend
   panels: Panel[]
   matrix?: Matrix
+  crosstab?: Crosstab
   /** What the figures show. Written by the report, not inferred. */
   insights: string[]
   /**
@@ -459,6 +473,11 @@ export interface ReportDefinition {
   filters: ReportFilter[]
   /** The Pivot sheet, where the rows repeat a key worth grouping by. */
   pivot?: PivotSpec
+  /**
+   * False when the report's own tables say it better: no "Totals by …"
+   * tables on the Summary tab or sheet. The Pivot sheet stays.
+   */
+  grids?: false
   /** How the report prints as a register, where it differs from the default. */
   register?: RegisterOptions
   run: (ctx: ReportContext) => Promise<ReportResult>

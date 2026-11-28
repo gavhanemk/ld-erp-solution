@@ -57,6 +57,8 @@ export interface PermissionScreen {
   key: string
   label: string
   hint: string | null
+  /** Given only by ticking its own box: a module-wide grant and the bulk switches never include it. */
+  explicit?: boolean
   actions: { action: string; label: string; key: string }[]
 }
 

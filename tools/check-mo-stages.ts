@@ -31,8 +31,10 @@ const ROLLBACK = new Error('ROLLBACK')
 const stamp = Date.now().toString(36)
 
 async function main() {
+  const [{ current_database: dbName }] = await prisma.$queryRaw<{ current_database: string }[]>`select current_database()`
+  if (dbName !== 'lderp_demo') { console.error('Refusing to run: not lderp_demo.'); process.exitCode = 2; return }
   const cust = await prisma.customer.findFirst({ where: { isActive: true, isBlacklisted: false, OR: [{ shippingStateCode: { not: null } }, { billingStateCode: { not: null } }] }, select: { id: true } })
-  const brand = await prisma.brand.findFirst({ where: { isActive: true } })
+  const brand = await prisma.brand.findFirst({ where: { isActive: true, isDefault: true } })
   const fabric = await prisma.item.findUnique({ where: { code: 'FAB-COT-001' } })
   const trim = await prisma.item.findFirst({ where: { isActive: true, type: 'TRIM' }, orderBy: { code: 'asc' } })
   const fgTemplate = await prisma.item.findUnique({ where: { code: 'FG-SHRT-001' } })

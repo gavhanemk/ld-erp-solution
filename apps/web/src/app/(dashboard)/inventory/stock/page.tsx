@@ -43,6 +43,15 @@ interface ItemAbout extends ShadeFields {
   departmentName: string | null
 }
 
+/** Stores whose stock is counted but never free, and why. */
+const NOT_FREE_KIND: Record<string, string> = {
+  QC_HOLD: 'QC hold store',
+  REJECTED: 'Reject store',
+  SCRAP: 'Scrap store',
+  TRANSIT: 'In transit',
+  SAMPLE: 'Sample store',
+}
+
 interface StockRow extends ItemAbout {
   itemId: string
   itemCode: string
@@ -55,6 +64,16 @@ interface StockRow extends ItemAbout {
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
   ownerName: string | null
   qty: number
+  /** Of qty: good stock (grade A), B-grade, and held or rejected. */
+  good?: number
+  bGrade?: number
+  held?: number
+  /** Held for requisitions, of the good stock. */
+  reserved?: number
+  /** Free to take: good stock in a store that issues, less what is held. */
+  free?: number
+  /** What kind of store it is: a reject or QC hold store's stock is never free. */
+  storeKind?: string
   value: number
   avgRate: number
   /** The item needs reordering: our own stock, every store together, at or below its level. */
@@ -211,6 +230,11 @@ function StockScreen() {
         ownership: 'OWNED',
         ownerName: null,
         qty: 0,
+        good: 0,
+        bGrade: 0,
+        held: 0,
+        reserved: 0,
+        free: 0,
         value: 0,
         avgRate: 0,
         isLow: true,
@@ -321,6 +345,11 @@ function StockScreen() {
           Store: r.nowhere ? '' : r.warehouseName,
           Whose: r.ownership === 'OWNED' ? 'Our own' : `${r.ownerName ?? 'Customer'} (customer)`,
           'On Hand': r.qty,
+          Good: r.good ?? r.qty,
+          'B-grade': r.bGrade ?? 0,
+          'Rejected / Held': r.held ?? 0,
+          Reserved: r.reserved ?? 0,
+          Free: r.free ?? 0,
           Unit: r.uom,
           Rate: r.ownership === 'OWNED' && !r.nowhere ? Number(r.avgRate.toFixed(2)) : '',
           Value: r.ownership === 'OWNED' && !r.nowhere ? Number(r.value.toFixed(2)) : '',
@@ -329,7 +358,7 @@ function StockScreen() {
           'Last Moved': r.lastMovedAt ? r.lastMovedAt.slice(0, 10) : '',
         })),
       )
-      sheet['!cols'] = [12, 34, 12, 12, 14, 18, 18, 16, 24, 20, 10, 8, 10, 14, 12, 12, 12].map((wch) => ({ wch }))
+      sheet['!cols'] = [12, 34, 12, 12, 14, 18, 18, 16, 24, 20, 10, 10, 10, 12, 10, 10, 8, 10, 14, 12, 12, 12].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Stock')
       XLSX.writeFile(book, `stock-${new Date().toISOString().slice(0, 10)}.xlsx`)
@@ -539,6 +568,9 @@ function StockScreen() {
                   <th className="whitespace-nowrap">Department</th>
                   <th className="whitespace-nowrap">Store</th>
                   <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>On hand</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }} title="Good stock in a store that issues, less what is held for requisitions">
+                    Free
+                  </th>
                   <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Rate</th>
                   <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Value</th>
                 </tr>
@@ -590,6 +622,25 @@ function StockScreen() {
                             : ''}
                           reorder at {qtyFmt(r.reorderLevel)}
                         </div>
+                      )}
+                      {/* What of it is not good stock, so the on-hand figure is never read as free. */}
+                      {!r.nowhere && ((r.bGrade ?? 0) > 0 || (r.held ?? 0) > 0) && (
+                        <div className="text-[10px] text-muted-foreground">
+                          {[(r.bGrade ?? 0) > 0 ? `${qtyFmt(r.bGrade ?? 0)} B-grade` : '', (r.held ?? 0) > 0 ? `${qtyFmt(r.held ?? 0)} rejected / held` : '']
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </div>
+                      )}
+                    </td>
+                    <td className="text-right tabular-nums">
+                      {r.nowhere ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        <>
+                          <span className={(r.free ?? 0) < r.qty ? 'text-muted-foreground' : ''}>{qtyFmt(r.free ?? 0)}</span>
+                          {(r.reserved ?? 0) > 0 && <div className="text-[10px] text-muted-foreground">{qtyFmt(r.reserved ?? 0)} held</div>}
+                          {r.storeKind && NOT_FREE_KIND[r.storeKind] && <div className="text-[10px] text-muted-foreground">{NOT_FREE_KIND[r.storeKind]}</div>}
+                        </>
                       )}
                     </td>
                     <td className="text-right tabular-nums text-muted-foreground">

@@ -167,6 +167,9 @@ export const stockInSchema = z
     if (new Set(ids).size !== ids.length) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lines'], message: 'An item is on the list twice. Enter it once, with the total.' })
   })
 
+/** Which grade a line is: A good, B seconds, R held or rejected. Left out, good. */
+export const stockGrade = z.enum(['A', 'B', 'R'], { errorMap: () => ({ message: 'Pick the grade: good, B-grade or rejected' }) }).optional()
+
 export const adjustmentSchema = z.object({
   warehouseId: id('a warehouse'),
   adjustmentDate: z.coerce.date().optional(),
@@ -179,6 +182,7 @@ export const adjustmentSchema = z.object({
       z
         .object({
           itemId: id('an item'),
+          grade: stockGrade,
           countedQty: z
             .number({ invalid_type_error: 'Counted quantity has to be a number' })
             .min(0, 'A counted quantity cannot be negative')
@@ -200,10 +204,31 @@ export const rejectAdjustmentSchema = z.object({
 export const transferSchema = z.object({
   fromWarehouseId: id('the store it leaves'),
   toWarehouseId: id('the store it goes to'),
+  /**
+   * DIRECT (the default): out of one and into the other in one go.
+   * IN_TRANSIT: on the road through a transit store until the other store
+   * says what arrived.
+   */
+  mode: z.enum(['DIRECT', 'IN_TRANSIT']).optional(),
+  /** Which transit store, when there is more than one. */
+  transitWarehouseId: z.string().optional().nullable(),
   transferDate: z.coerce.date().optional(),
   notes: z.string().max(1000).optional().nullable(),
   lines: z
-    .array(z.object({ itemId: id('an item'), qty, ...stockOwnerFields }).refine(ownerNamed, ownerNamedMessage))
+    .array(
+      z
+        .object({
+          itemId: id('an item'),
+          qty,
+          ...stockOwnerFields,
+          grade: stockGrade,
+          /** Tagged garments: the tags of the pieces moving, scanned or picked. */
+          garmentCodes: z.array(z.string().trim().min(1)).max(5000).optional(),
+          /** The share moving: a brand's earmark, or central stock (left out). It arrives as the same share. */
+          brandId: z.string().trim().min(1).optional().nullable(),
+        })
+        .refine(ownerNamed, ownerNamedMessage),
+    )
     .min(1, 'Add at least one item'),
 })
 
@@ -333,6 +358,46 @@ export const issueRequisitionSchema = z.object({
  */
 export const cancelTransferSchema = z.object({
   reason: z.string().min(5, 'Say why the transfer is being cancelled — one line is enough').max(500),
+})
+
+/** A quantity on a receipt or a settlement: nought is allowed, for a line not touched this time. */
+const stepQty = z
+  .number({ invalid_type_error: 'Quantity has to be a number' })
+  .min(0, 'A quantity cannot be negative')
+  .max(9_999_999, 'That quantity looks like a typo')
+
+/** What arrived of a transfer on the road: good, and damaged (taken in as rejected). */
+/** Tags scanned or picked on a step: needed where the stock alone cannot say which pieces. */
+const stepTags = z.array(z.string().trim().min(1)).max(5000).optional()
+
+export const receiveTransferSchema = z.object({
+  receivedAt: z.coerce.date().optional(),
+  notes: z.string().max(1000).optional().nullable(),
+  lines: z
+    .array(
+      z.object({
+        lineId: id('a line'),
+        qty: stepQty.optional().nullable(),
+        damagedQty: stepQty.optional().nullable(),
+        garmentCodes: stepTags,
+        damagedGarmentCodes: stepTags,
+      }),
+    )
+    .min(1, 'Say what arrived'),
+})
+
+/** What did not arrive, sent back to the store it left. */
+export const sendBackTransferSchema = z.object({
+  date: z.coerce.date().optional(),
+  notes: z.string().max(1000).optional().nullable(),
+  lines: z.array(z.object({ lineId: id('a line'), qty: stepQty.optional().nullable(), garmentCodes: stepTags })).min(1, 'Say what goes back'),
+})
+
+/** What was lost on the way, written off by a store manager with a reason. */
+export const writeOffTransferSchema = z.object({
+  date: z.coerce.date().optional(),
+  reason: z.string().trim().min(5, 'Say what happened to it — one line is enough').max(500),
+  lines: z.array(z.object({ lineId: id('a line'), qty: stepQty.optional().nullable(), garmentCodes: stepTags })).min(1, 'Say what was lost'),
 })
 
 /**

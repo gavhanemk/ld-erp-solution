@@ -17,6 +17,7 @@ import { MoDetailsDialog } from './MoDetailsDialog'
 import { LinkMoDialog } from './LinkMoDialog'
 import { MoFlowStrip, currentMoTab, type MoFlowFacts, type MoTab } from './MoFlowStrip'
 import { MoProductionPanel } from './floor/MoProductionPanel'
+import { MoExtraMaterial } from './MoExtraMaterial'
 import { bundleShort, fabricName, PROGRESS, type Flow, type SizeChangeEntry } from './floor/types'
 import { itemShade, type ShadeFields } from '@/lib/items'
 import { FLOOR_NOTE, LIVE_MO, moStage } from './status'
@@ -1055,6 +1056,14 @@ export function ManufacturingOrderDetailDialog({
                       </div>
                     )}
                   </Section>
+
+                  <MoExtraMaterial
+                    moId={mo.id}
+                    moNumber={mo.moNumber}
+                    live={live}
+                    materials={[...new Map((plan?.rows ?? []).map((r) => [r.item.id, { id: r.item.id, code: r.item.code, name: r.item.name, unit: r.item.uom, shade: itemShade(r.item) }])).values()]}
+                    onChanged={() => void loadPlan(mo.id)}
+                  />
                 </div>
               )}
               {tab === 'stages' && (

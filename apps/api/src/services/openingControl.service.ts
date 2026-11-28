@@ -2,7 +2,7 @@ import type { Prisma, StockOwnership } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { lockedBalanceOf, recordMovement } from './stock.service'
+import { lockedBalanceOf, recordMovement, stockLockedUpTo } from './stock.service'
 import { withdrawStickers } from './stickers.service'
 
 /*
@@ -23,9 +23,10 @@ const round2 = (n: number) => Math.round(n * 100) / 100
 const round3 = (n: number) => Math.round(n * 1000) / 1000
 const IMPORT_REF = 'OPENING_IMPORT'
 
-type Key = { itemId: string; warehouseId: string; ownership: StockOwnership; ownerCustomerId: string | null; sizeId: string | null; grade: string }
-const keyOf = (r: Key): Key => ({ itemId: r.itemId, warehouseId: r.warehouseId, ownership: r.ownership, ownerCustomerId: r.ownerCustomerId, sizeId: r.sizeId, grade: r.grade })
-const keyText = (k: Key) => [k.itemId, k.warehouseId, k.ownership, k.ownerCustomerId ?? '', k.sizeId ?? '', k.grade].join('|')
+/** A balance's share (multi-brand phase 5): each share keeps its own average, so each is priced on its own. */
+type Key = { itemId: string; warehouseId: string; ownership: StockOwnership; ownerCustomerId: string | null; sizeId: string | null; grade: string; brandId: string | null }
+const keyOf = (r: Key): Key => ({ itemId: r.itemId, warehouseId: r.warehouseId, ownership: r.ownership, ownerCustomerId: r.ownerCustomerId, sizeId: r.sizeId, grade: r.grade, brandId: r.brandId ?? null })
+const keyText = (k: Key) => [k.itemId, k.warehouseId, k.ownership, k.ownerCustomerId ?? '', k.sizeId ?? '', k.grade, k.brandId ?? ''].join('|')
 
 /**
  * Every issue from this stock priced again, in the order the movements were
@@ -41,16 +42,39 @@ async function repriceFrom(tx: Prisma.TransactionClient, first: Key): Promise<nu
   const queue = [first]
   const seen = new Set<string>()
   let changed = 0
+  // Goods on the road leave a transit store at what their own transfer put
+  // them in at, never at the store's blended average (stock.service `atRate`).
+  const kinds = new Map<string, string>()
+  const kindOf = async (warehouseId: string) => {
+    if (!kinds.has(warehouseId)) {
+      const w = await tx.warehouse.findUnique({ where: { id: warehouseId }, select: { kind: true } })
+      kinds.set(warehouseId, w?.kind ?? 'GENERAL')
+    }
+    return kinds.get(warehouseId)!
+  }
+  // A closed period's stock is what its books closed on: never priced again.
+  const lock = await stockLockedUpTo(tx)
+  const closed = (d: Date) => lock !== null && new Date(d.getTime() + 330 * 60_000).toISOString().slice(0, 10) <= lock
+  const refuseClosed = () => {
+    throw new AppError(
+      `Pricing this opening stock would change stock already moved in the closed period, up to ${lock}. Reopen the period in Accounts first.`,
+      409,
+      'PERIOD_LOCKED',
+    )
+  }
   while (queue.length && seen.size < 50) {
     const key = queue.shift()!
     if (seen.has(keyText(key))) continue
     seen.add(keyText(key))
     await lockedBalanceOf(tx, key)
     const rows = await tx.stockLedger.findMany({
-      where: { itemId: key.itemId, warehouseId: key.warehouseId, ownership: key.ownership, ownerCustomerId: key.ownerCustomerId, sizeId: key.sizeId, grade: key.grade },
+      where: { itemId: key.itemId, warehouseId: key.warehouseId, ownership: key.ownership, ownerCustomerId: key.ownerCustomerId, sizeId: key.sizeId, grade: key.grade, brandId: key.brandId },
       orderBy: [{ transactionDate: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-      select: { id: true, inQty: true, outQty: true, unitRate: true, transactionType: true, referenceType: true, referenceId: true },
+      select: { id: true, inQty: true, outQty: true, unitRate: true, transactionType: true, referenceType: true, referenceId: true, transactionDate: true },
     })
+    const transit = (await kindOf(key.warehouseId)) === 'TRANSIT'
+    /** In a transit store: the rate each transfer's goods came in at. */
+    const cameInAt = new Map<string, number>()
     let qty = 0
     let value = 0
     for (const r of rows) {
@@ -59,23 +83,58 @@ async function repriceFrom(tx: Prisma.TransactionClient, first: Key): Promise<nu
       if (inQ > 0) {
         qty = round3(qty + inQ)
         value += inQ * Number(r.unitRate ?? 0)
+        if (transit && r.referenceId) cameInAt.set(r.referenceId, Number(r.unitRate ?? 0))
       }
       if (!(outQ > 0)) continue
-      const rate = qty > 0.0005 ? round2(value / qty) : Number(r.unitRate ?? 0)
+      const own = transit && r.referenceId ? cameInAt.get(r.referenceId) : undefined
+      const rate = own !== undefined ? own : qty > 0.0005 ? round2(value / qty) : Number(r.unitRate ?? 0)
       if (Math.abs(rate - Number(r.unitRate ?? 0)) > 0.004) {
+        if (closed(r.transactionDate)) refuseClosed()
         await tx.stockLedger.update({ where: { id: r.id }, data: { unitRate: rate } })
         changed++
         if (r.transactionType === 'TRANSFER') {
           // The same transfer's arrival in the other store: the same price, and that store priced again.
+          // Out of a transit store, goods that arrived damaged came in as R: any grade.
+          // Each share moves as itself: the arrival is on the same share.
           const halves = await tx.stockLedger.findMany({
-            where: { referenceType: r.referenceType, referenceId: r.referenceId, itemId: key.itemId, sizeId: key.sizeId, grade: key.grade, inQty: { gt: 0 }, NOT: { warehouseId: key.warehouseId } },
-            select: { id: true, unitRate: true, itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, sizeId: true, grade: true },
+            where: { referenceType: r.referenceType, referenceId: r.referenceId, itemId: key.itemId, sizeId: key.sizeId, brandId: key.brandId, ...(transit ? {} : { grade: key.grade }), inQty: { gt: 0 }, NOT: { warehouseId: key.warehouseId } },
+            select: { id: true, unitRate: true, itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, sizeId: true, grade: true, transactionDate: true, brandId: true },
           })
           for (const h of halves) {
             if (Math.abs(Number(h.unitRate ?? 0) - rate) <= 0.004) continue
+            if (closed(h.transactionDate)) refuseClosed()
             await tx.stockLedger.update({ where: { id: h.id }, data: { unitRate: rate } })
             changed++
             queue.push(keyOf(h))
+            // Goods put on the road: their transfer's line says what they travel at.
+            if (r.referenceType === 'STOCK_TRANSFER' && r.referenceId && (await kindOf(h.warehouseId)) === 'TRANSIT') {
+              await tx.stockTransferLine.updateMany({
+                where: { transferId: r.referenceId, itemId: h.itemId, sizeId: h.sizeId, grade: h.grade, ownership: h.ownership, ownerCustomerId: h.ownerCustomerId },
+                data: { unitRate: rate },
+              })
+            }
+          }
+        }
+        if (r.transactionType === 'REALLOCATION') {
+          // Stock earmarked, moved or released from this share: its other half,
+          // in the same store on the receiving share, at the same price, and
+          // that share priced again in turn.
+          const halves = (
+            await tx.stockLedger.findMany({
+              where: { referenceType: r.referenceType, referenceId: r.referenceId, itemId: key.itemId, warehouseId: key.warehouseId, sizeId: key.sizeId, grade: key.grade, inQty: { gt: 0 } },
+              select: { id: true, unitRate: true, itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, sizeId: true, grade: true, transactionDate: true, brandId: true },
+            })
+          ).filter((h) => (h.brandId ?? null) !== key.brandId)
+          for (const h of halves) {
+            if (Math.abs(Number(h.unitRate ?? 0) - rate) <= 0.004) continue
+            if (closed(h.transactionDate)) refuseClosed()
+            await tx.stockLedger.update({ where: { id: h.id }, data: { unitRate: rate } })
+            changed++
+            queue.push(keyOf(h))
+            await tx.stockReallocationLine.updateMany({
+              where: { reallocationId: r.referenceId ?? '', itemId: h.itemId, sizeId: h.sizeId },
+              data: { unitRate: rate },
+            })
           }
         }
       }
@@ -88,7 +147,7 @@ async function repriceFrom(tx: Prisma.TransactionClient, first: Key): Promise<nu
 
 /** The movement an opening line posted: kept on the line, or found by the note it was written with. */
 async function openingMovementOf(tx: Prisma.TransactionClient, line: { id: string; ledgerId: string | null; openingStockId: string; itemId: string; warehouseId: string; sizeId: string | null; grade: string; rowNo: number }, number: string) {
-  const select = { id: true, itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, sizeId: true, grade: true, unitRate: true } as const
+  const select = { id: true, itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, sizeId: true, grade: true, unitRate: true, brandId: true } as const
   if (line.ledgerId) {
     const row = await tx.stockLedger.findUnique({ where: { id: line.ledgerId }, select })
     if (row) return row
@@ -227,6 +286,8 @@ export async function approveChange(id: string, user: { id: string; isAdmin: boo
               throw new AppError(`Row ${c.row} is on stickers now: take them off first (Change → packaging pending), then approve.`, 400, 'ON_STICKERS')
             }
             await recordMovement(tx, {
+              // On the share the line came in on (multi-brand phase 5).
+              brandId: line.brandId,
               itemId: line.itemId,
               warehouseId: line.warehouseId,
               transactionType: 'OPENING',
@@ -264,6 +325,7 @@ export async function approveChange(id: string, user: { id: string; isAdmin: boo
           if (!(Number(line.qty) > 0)) continue
           try {
             await recordMovement(tx, {
+              brandId: line.brandId,
               itemId: line.itemId,
               warehouseId: line.warehouseId,
               transactionType: 'OPENING',
@@ -280,7 +342,7 @@ export async function approveChange(id: string, user: { id: string; isAdmin: boo
               stickers: 'caller',
             })
           } catch (err) {
-            if (err instanceof AppError && ['INSUFFICIENT_STOCK', 'RESERVED_STOCK', 'PACKED_IN_CARTONS'].includes(err.code ?? '')) {
+            if (err instanceof AppError && ['INSUFFICIENT_STOCK', 'RESERVED_STOCK', 'PACKED_IN_CARTONS', 'STOCK_EARMARKED'].includes(err.code ?? '')) {
               throw new AppError(`Row ${line.rowNo}: ${err.message} Some of it has been used since, so the entry cannot be taken back whole. Correct its lines instead.`, 400, 'USED')
             }
             throw err

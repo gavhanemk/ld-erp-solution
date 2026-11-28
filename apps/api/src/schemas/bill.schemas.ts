@@ -75,6 +75,13 @@ export const billLineSchema = z.object({
    * debit note to the supplier for the difference.
    */
   rateAction: z.enum(['ACCEPT', 'DEBIT_NOTE']).optional().nullable(),
+  /**
+   * Picked on the line, mostly for an expense: the brand's profit centre it
+   * is for (empty: shared, or the order's) and the department that bears it
+   * (empty: the expense head's default, or the indent's).
+   */
+  costCentreId: z.string().optional().nullable(),
+  departmentId: z.string().optional().nullable(),
 })
 
 /**
@@ -152,6 +159,12 @@ const billBase = z.object({
    */
   rateVarianceReason: z.string().max(300).optional().nullable(),
   lines: z.array(billLineSchema).min(1, 'A bill needs at least one line'),
+  /**
+   * A bill brought in from the old books as it was: its expense lines may
+   * lack the department every new bill needs. Only someone who approves in
+   * Accounts may, and says why; the bill is marked as a legacy import.
+   */
+  legacyImport: z.object({ reason: z.string().trim().min(5, 'Say why this bill comes in without departments') }).optional().nullable(),
   charges: z.array(billChargeSchema).optional(),
 })
 

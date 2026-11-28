@@ -1,6 +1,7 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { newRequestId } from '@/lib/utils'
 import { createPortal } from 'react-dom'
 import { AlertCircle, BookOpenCheck, CalendarDays, FileText, Hash, Info, ListOrdered, Loader2, PenLine, Plus, Save, Trash2, Wand2, X } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
@@ -41,6 +42,8 @@ interface Line {
   debit: string
   credit: string
   costCentreId: string
+  /** The department (cost centre) of an income or expense line. */
+  departmentId: string
   bills: BillRow[]
 }
 
@@ -58,6 +61,7 @@ interface VoucherDetail {
     side: 'DR' | 'CR'
     amount: number
     costCentre: { id: string } | null
+    department?: { id: string } | null
     ledger: { id: string }
     bills: Array<{ kind: BillKind; billNo: string; dueDate: string | null; amount: number }>
   }>
@@ -68,7 +72,7 @@ const key = () => `k${++seq}`
 const num = (s: string) => (s.trim() === '' ? 0 : Number(s) || 0)
 const sideOf = (l: Line): 'DR' | 'CR' => (num(l.debit) > 0 ? 'DR' : num(l.credit) > 0 ? 'CR' : l.side)
 const amountOf = (l: Line) => num(l.debit) || num(l.credit)
-const blankLine = (side: 'DR' | 'CR', ledgerId = ''): Line => ({ key: key(), ledgerId, side, debit: '', credit: '', costCentreId: '', bills: [] })
+const blankLine = (side: 'DR' | 'CR', ledgerId = ''): Line => ({ key: key(), ledgerId, side, debit: '', credit: '', costCentreId: '', departmentId: '', bills: [] })
 const IS_CHEQUE = new Set(['CHEQUE', 'PDC'])
 
 /**
@@ -102,8 +106,9 @@ const FIRST_SIDE: Record<ManualKind, ['DR' | 'CR', 'DR' | 'CR']> = {
  * payment is typed once. A party kept bill by bill opens a row under its line
  * for the bills it raises or settles: "Settle oldest first" takes the open
  * bills in date order until the money runs out, and whatever is not placed
- * goes on account. Income and expense lines carry a brand, so profit can be
- * read brand by brand.
+ * goes on account. Income and expense lines carry a brand and a department,
+ * filled from the ledger's usual ones, so profit can be read brand by brand
+ * and spending department by department.
  *
  * F4, F5, F6 and F7 switch a new voucher between Contra, Payment, Receipt and
  * Journal, as they do in Tally. Opened with `voucherId`, it alters that
@@ -130,6 +135,7 @@ export function VoucherDialog({
 
   const [ledgers, setLedgers] = useState<Ledger[]>([])
   const [centres, setCentres] = useState<CostCentre[]>([])
+  const [departments, setDepartments] = useState<Array<{ id: string; name: string }>>([])
   const [bills, setBills] = useState<Record<string, OpenBill[]>>({})
   const [loading, setLoading] = useState(false)
 
@@ -141,11 +147,19 @@ export function VoucherDialog({
   const [chequeNo, setChequeNo] = useState('')
   const [chequeDate, setChequeDate] = useState('')
   const [narration, setNarration] = useState('')
+  // Why a saved voucher is being altered: kept on the revision that holds what it said before.
+  const [alterReason, setAlterReason] = useState('')
   const [lines, setLines] = useState<Line[]>([])
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
+  // One id from opening the form to its save: a double click or a retry
+  // reaches the server as the same request and saves one voucher.
+  const requestId = useRef(newRequestId())
+  useEffect(() => {
+    if (open) requestId.current = newRequestId()
+  }, [open])
 
   useEscape(() => {
     if (!saving) onClose()
@@ -187,13 +201,15 @@ export function VoucherDialog({
     setLoading(true)
     ;(async () => {
       try {
-        const [l, c] = await Promise.all([
+        const [l, c, d] = await Promise.all([
           api.get<{ data: Ledger[] }>('/accounts/ledgers?active=1&balances=1'),
           api.get<{ data: CostCentre[] }>('/accounts/cost-centres'),
+          api.get<{ data: Array<{ id: string; name: string; isActive?: boolean }> }>('/masters/departments?limit=200&active=true&sort=name&order=asc'),
         ])
         if (gone) return
         setLedgers(l.data)
         setCentres(c.data.filter((x) => x.isActive))
+        setDepartments(d.data.filter((x) => x.isActive !== false))
         if (voucherId) {
           const v = (await api.get<{ data: VoucherDetail }>(`/accounts/vouchers/${voucherId}`)).data
           if (gone) return
@@ -213,6 +229,7 @@ export function VoucherDialog({
               debit: x.side === 'DR' ? String(x.amount) : '',
               credit: x.side === 'CR' ? String(x.amount) : '',
               costCentreId: x.costCentre?.id ?? '',
+              departmentId: x.department?.id ?? '',
               bills: x.bills.map((b) => ({ key: key(), kind: b.kind, billNo: b.billNo, dueDate: b.dueDate ?? '', amount: String(b.amount) })),
             })),
           )
@@ -228,6 +245,7 @@ export function VoucherDialog({
           setChequeNo('')
           setChequeDate('')
           setNarration('')
+          setAlterReason('')
           setBills({})
         }
       } catch (err) {
@@ -320,10 +338,26 @@ export function VoucherDialog({
       return [...ls, line]
     })
 
+  /**
+   * An expense line needs its department (the server fills the ledger's usual
+   * one, and refuses when there is none). Stock purchases and round off do not.
+   */
+  const needsDept = (l: Line) => {
+    const led = byId.get(l.ledgerId)
+    if (!led || led.nature !== 'EXPENSE' || l.departmentId || led.department?.id) return false
+    return led.group.systemKey !== 'PURCHASE_ACCOUNTS' && led.systemKey !== 'ROUND_OFF'
+  }
+
   const setLedger = (l: Line, ledgerId: string) => {
     const led = byId.get(ledgerId)
     const pl = led && (led.nature === 'INCOME' || led.nature === 'EXPENSE')
-    update(l.key, { ledgerId, bills: [], costCentreId: pl ? l.costCentreId : '' })
+    // An income or expense line keeps what was picked, else takes the ledger's usual brand and department.
+    update(l.key, {
+      ledgerId,
+      bills: [],
+      costCentreId: pl ? l.costCentreId || led?.costCentre?.id || '' : '',
+      departmentId: pl ? l.departmentId || led?.department?.id || '' : '',
+    })
     void loadBills(ledgerId)
   }
 
@@ -357,6 +391,7 @@ export function VoucherDialog({
     for (const [i, l] of used.entries()) {
       if (!l.ledgerId) return `Line ${i + 1} has no ledger`
       if (amountOf(l) <= 0) return `Line ${i + 1} has no amount`
+      if (needsDept(l)) return `Pick the department on line ${i + 1}: every expense says which department bears it`
       if (placed(l) > amountOf(l) + 0.005) return `The bills on line ${i + 1} add up to more than the line`
       for (const b of l.bills) {
         if ((b.kind === 'AGAINST_REF' || b.kind === 'NEW_REF') && !b.billNo.trim()) return `Say which bill on line ${i + 1}`
@@ -364,8 +399,10 @@ export function VoucherDialog({
       }
     }
     if (totals.diff !== 0) return `Debits and credits differ by ₹${inr(totals.diff)}`
+    if (altering && alterReason.trim().length < 5) return 'Say why the voucher is being altered (a few words, kept with the change)'
     return null
-  }, [loading, lines, totals.diff])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, lines, totals.diff, ledgers, altering, alterReason])
 
   const save = async () => {
     if (problem) {
@@ -394,14 +431,15 @@ export function VoucherDialog({
           side: sideOf(l),
           amount,
           costCentreId: l.costCentreId || null,
+          departmentId: l.departmentId || null,
           bills: refs.map((b) => ({ kind: b.kind, billNo: b.billNo.trim() || null, dueDate: b.kind === 'NEW_REF' && b.dueDate ? b.dueDate : null, amount: num(b.amount) })),
         }
       }),
     }
     try {
       const res = voucherId
-        ? await api.patch<{ data: { id: string; voucherNo: string }; message: string }>(`/accounts/vouchers/${voucherId}`, body)
-        : await api.post<{ data: { id: string; voucherNo: string }; message: string }>('/accounts/vouchers', body)
+        ? await api.patch<{ data: { id: string; voucherNo: string }; message: string }>(`/accounts/vouchers/${voucherId}`, { ...body, alterReason: alterReason.trim() })
+        : await api.post<{ data: { id: string; voucherNo: string }; message: string }>('/accounts/vouchers', { ...body, requestId: requestId.current })
       onSaved(res.message, res.data.id)
       onClose()
     } catch (err) {
@@ -598,12 +636,13 @@ export function VoucherDialog({
                 }
               >
                 <div className="overflow-x-auto">
-                  <table className="data-table table-totals w-full min-w-[760px]">
+                  <table className="data-table table-totals w-full min-w-[920px]">
                     <thead>
                       <tr>
                         <th className="w-10">#</th>
                         <th>Ledger</th>
-                        <th className="w-48">Brand</th>
+                        <th className="w-44">Brand</th>
+                        <th className="w-44">Department</th>
                         <th className="w-40 text-right">Debit ₹</th>
                         <th className="w-40 text-right">Credit ₹</th>
                         <th className="w-10" />
@@ -638,9 +677,24 @@ export function VoucherDialog({
                                 {pl ? (
                                   <SmartSelect className="form-input" value={l.costCentreId} onChange={(e) => update(l.key, { costCentreId: e.target.value })} aria-label={`Brand on line ${i + 1}`}>
                                     <option value="">Not split</option>
-                                    {centres.map((c) => (
+                                    {/* Our own brands' profit centres; a customer's brand only where a line already has it. */}
+                                    {centres.filter((c) => c.brand?.type !== 'CUSTOM' || c.id === l.costCentreId).map((c) => (
                                       <option key={c.id} value={c.id}>
                                         {c.name}
+                                      </option>
+                                    ))}
+                                  </SmartSelect>
+                                ) : (
+                                  <span className="text-muted-foreground text-xs">—</span>
+                                )}
+                              </td>
+                              <td>
+                                {pl ? (
+                                  <SmartSelect className={`form-input ${needsDept(l) ? 'border-amber-500/70' : ''}`} value={l.departmentId} onChange={(e) => update(l.key, { departmentId: e.target.value })} aria-label={`Department on line ${i + 1}`} aria-invalid={needsDept(l)}>
+                                    <option value="">No department</option>
+                                    {departments.map((d) => (
+                                      <option key={d.id} value={d.id}>
+                                        {d.name}
                                       </option>
                                     ))}
                                   </SmartSelect>
@@ -686,7 +740,7 @@ export function VoucherDialog({
                             {led?.billWise && (
                               <tr data-grid-row="sizes">
                                 <td />
-                                <td colSpan={5} className="pt-0">
+                                <td colSpan={6} className="pt-0">
                                   <div className="border-border bg-secondary/40 rounded-lg border p-2">
                                     <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                                       <p className="text-muted-foreground text-xs">
@@ -773,7 +827,7 @@ export function VoucherDialog({
                     </tbody>
                     <tfoot>
                       <tr>
-                        <td colSpan={3}>
+                        <td colSpan={4}>
                           <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={addLine} data-grid-add aria-keyshortcuts="Alt+A">
                             <Plus size={14} /> Add line
                           </button>
@@ -796,9 +850,22 @@ export function VoucherDialog({
                   onChange={(e) => setNarration(e.target.value)}
                   aria-label="Narration"
                 />
+                {altering && (
+                  <label className="mt-3 block">
+                    <span className="form-label">Why is it being altered?</span>
+                    <input
+                      className="form-input h-9"
+                      maxLength={500}
+                      value={alterReason}
+                      placeholder="Wrong ledger picked; amount as per the bill"
+                      onChange={(e) => setAlterReason(e.target.value)}
+                      aria-label="Why it is being altered"
+                    />
+                  </label>
+                )}
                 <p className="text-muted-foreground mt-1.5 flex items-start gap-1.5 text-xs">
                   <Info size={13} className="mt-px shrink-0" />
-                  A voucher is never deleted. Once saved it can be altered — the change is kept in its history — or cancelled with a reason.
+                  A voucher is never deleted. Once saved it can be altered with a reason — what it said before is kept as a revision — reversed on an open day, or cancelled with a reason.
                 </p>
               </Section>
             </>

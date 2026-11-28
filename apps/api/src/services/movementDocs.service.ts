@@ -70,8 +70,11 @@ export const MOVEMENT_DOC_JOIN = Prisma.sql`
     UNION ALL
     SELECT t."transferNumber", 'store', ow.id, ow.name
       FROM ld_erp.stock_transfers t
-      JOIN ld_erp.warehouses ow ON ow.id = CASE WHEN t."fromWarehouseId" = s."warehouseId" THEN t."toWarehouseId" ELSE t."fromWarehouseId" END
-      WHERE s."referenceType" IN ('STOCK_TRANSFER', 'STOCK_TRANSFER_CANCELLED') AND t.id = s."referenceId"
+      JOIN ld_erp.warehouses ow ON ow.id = CASE
+        WHEN t."fromWarehouseId" = s."warehouseId" THEN t."toWarehouseId"
+        WHEN t."transitWarehouseId" = s."warehouseId" AND s."referenceType" = 'STOCK_TRANSFER_RECEIVED' THEN t."toWarehouseId"
+        ELSE t."fromWarehouseId" END
+      WHERE s."referenceType" IN ('STOCK_TRANSFER', 'STOCK_TRANSFER_CANCELLED', 'STOCK_TRANSFER_RECEIVED', 'STOCK_TRANSFER_RETURNED', 'STOCK_TRANSFER_LOST') AND t.id = s."referenceId"
     UNION ALL
     SELECT f."fgrNumber", 'production', mo.id, COALESCE(mo."moNumber", 'Production')
       FROM ld_erp.finished_goods_receipts f LEFT JOIN ld_erp.manufacturing_orders mo ON mo.id = f."moId"
@@ -109,6 +112,11 @@ export const MOVEMENT_DOC_JOIN = Prisma.sql`
     SELECT os.number, NULL, NULL, NULL
       FROM ld_erp.opening_stocks os
       WHERE s."referenceType" = 'OPENING_IMPORT' AND os.id = s."referenceId"
+    UNION ALL
+    -- Brand stock (multi-brand phase 5): an earmark, a move between brands, a release, an MO's automatic move.
+    SELECT ra.number, NULL, NULL, NULL
+      FROM ld_erp.stock_reallocations ra
+      WHERE s."referenceType" = 'STOCK_REALLOCATION' AND ra.id = s."referenceId"
     LIMIT 1
   ) p ON TRUE`
 
@@ -139,6 +147,9 @@ export const DOCUMENT_LABEL: Record<string, string> = {
   STOCK_COUNT: 'Stock count',
   STOCK_TRANSFER: 'Store transfer',
   STOCK_TRANSFER_CANCELLED: 'Store transfer cancelled',
+  STOCK_TRANSFER_RECEIVED: 'Store transfer received',
+  STOCK_TRANSFER_RETURNED: 'Store transfer sent back',
+  STOCK_TRANSFER_LOST: 'Lost on the way',
   MATERIAL_REQUISITION: 'Issued to production',
   MR_RETURN: 'Back from the floor',
   MR_RETURN_CANCELLED: 'Floor return cancelled',
@@ -151,6 +162,7 @@ export const DOCUMENT_LABEL: Record<string, string> = {
   CREDIT_NOTE: 'Returned by customer',
   CREDIT_NOTE_CANCEL: 'Customer return cancelled',
   SAMPLING: 'Sampling',
+  STOCK_REALLOCATION: 'Brand stock: earmark, move or release',
 }
 
 export const documentLabel = (t: string | null) =>

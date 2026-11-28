@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { AlertCircle, ChevronDown, ChevronRight, Loader2, Package, RefreshCw, Save, TrendingUp, Undo2 } from 'lucide-react'
+import { AlertCircle, ChevronDown, ChevronRight, Loader2, Package, RefreshCw, Save, Undo2 } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { downloadRows, type ExportColumn, type ExportFormat } from '@/lib/export'
@@ -16,12 +16,14 @@ interface Line {
   group: string
   amount: number
   centres: Record<string, number>
+  departments?: Record<string, number>
 }
 interface Block {
   key: BlockKey
   title: string
   total: number
   centres: Record<string, number>
+  departments?: Record<string, number>
   lines: Line[]
 }
 interface Stock {
@@ -39,8 +41,25 @@ interface Pl {
   grossProfit: number
   netProfit: number
   columns: Array<{ id: string; name: string }>
-  brand: Array<{ id: string; name: string; stockChange: number; grossProfit: number; netProfit: number }>
+  /** By brand: each brand's own stock and what moved between the shares (multi-brand phase 6). */
+  brand: Array<{
+    id: string
+    name: string
+    openingStock?: number
+    closingStock?: number
+    transfersIn?: number
+    transfersOut?: number
+    stockChange: number
+    grossProfit: number
+    netProfit: number
+  }>
+  /** By department (cost centre): its columns and each one's figures. */
+  deptColumns?: Array<{ id: string; name: string; parent: string | null }>
+  department?: Array<{ id: string; name: string; stockChange: number; grossProfit: number; netProfit: number }>
 }
+
+/** Whose profit and loss is shown: the company's, one brand's (profit centre) or one department's (cost centre). */
+type Mode = 'company' | 'brand' | 'department'
 
 const SOURCE: Record<Stock['source'], string> = {
   books: 'brought in with the opening balances',
@@ -48,25 +67,47 @@ const SOURCE: Record<Stock['source'], string> = {
   inventory: 'from inventory',
 }
 
-/** A figure, with a minus for one that runs the other way. */
-const money = (n: number) => (n < 0 ? `− ${inr(n)}` : inr(n))
+/** A figure, with a minus for one that runs the other way; blank for none. */
+const money = (n: number | null | undefined) => (n === null || n === undefined ? '' : n < 0 ? `− ${inr(n)}` : inr(n))
+const r2 = (n: number) => Math.round(n * 100) / 100
+
+/** One row of one side of an account: a head with its figure, a ledger under it, a result, or room. */
+interface Row {
+  key: string
+  label: string
+  /** A ledger's figure, in the inner column. */
+  sub?: number
+  /** A head's or a result's figure, in the outer column. */
+  amount?: number
+  kind: 'head' | 'ledger' | 'result' | 'blank'
+  /** The block it opens, for a head that has ledgers. */
+  block?: BlockKey
+  ledgerCount?: number
+  href?: string
+  note?: string
+}
 
 /**
- * Profit and loss, the way an Indian set of accounts lays it out: the
- * trading account (sales, purchases, direct costs and the change in stock)
- * down to gross profit, then other income and overheads down to net profit.
+ * Profit and loss the way SAB and Tally lay it out: two sides, To on the
+ * left and By on the right. The Trading Account carries opening stock,
+ * purchases and direct expenses against sales, direct incomes and closing
+ * stock down to gross profit; the Profit & Loss Account carries indirect
+ * expenses against gross profit and indirect incomes down to net profit.
+ * Each side of each account totals the same.
  *
- * Each heading opens to its ledgers, and a ledger opens its entries. "By
- * brand" splits every figure across LD Cotton Mills, VHAGAR and what no brand
- * carries. Closing stock comes from inventory unless the accountant values
- * the day themselves — a year-end count, work in progress taken in.
+ * It is the company's, or one brand's (its sales, purchases and expenses,
+ * and its own earmarked stock, with what moved between it and other shares),
+ * or one department's. A head opens to its ledgers; a ledger opens its
+ * statement. Closing stock comes from inventory unless the accountant values
+ * the day themselves.
  */
 export default function ProfitLossPage() {
   const [summary, setSummary] = useState<BooksSummary | null>(null)
   const [from, setFrom] = useState('')
   const [to, setTo] = useState(todayIst())
   const [pl, setPl] = useState<Pl | null>(null)
-  const [byBrand, setByBrand] = useState(false)
+  const [mode, setMode] = useState<Mode>('company')
+  const [who, setWho] = useState<string | null>(null)
   const [open, setOpen] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -101,6 +142,16 @@ export default function ProfitLossPage() {
     void load()
   }, [load])
 
+  // The brands or departments to pick from; the first is picked when the mode changes.
+  const choices: Array<{ id: string; name: string }> = mode === 'brand' ? (pl?.columns ?? []) : mode === 'department' ? (pl?.deptColumns ?? []) : []
+  useEffect(() => {
+    if (mode === 'company') {
+      setWho(null)
+      return
+    }
+    if (!choices.some((c) => c.id === who)) setWho(choices[0]?.id ?? null)
+  }, [mode, choices, who])
+
   const toggle = (k: string) =>
     setOpen((s) => {
       const n = new Set(s)
@@ -124,131 +175,250 @@ export default function ProfitLossPage() {
     }
   }
 
-  const block = (k: BlockKey) => pl?.blocks.find((b) => b.key === k)
-  const cols = pl?.columns ?? []
-  const brandOf = (id: string) => pl?.brand.find((b) => b.id === id)
+  const scoped = mode !== 'company' && who !== null
+  const whoName = choices.find((c) => c.id === who)?.name ?? ''
 
-  /** One figure, or a row of them by brand. */
-  const figures = (total: number, centres?: Record<string, number>, bold = false, negate = false) => {
-    const cls = `text-right tabular-nums ${bold ? 'font-semibold' : ''}`
-    const v = (n: number) => money(negate ? -n : n)
-    if (!byBrand) return <td className={cls}>{v(total)}</td>
+  /** A head's or a ledger's figure for the company, the brand or the department shown. */
+  const fig = (x: { centres: Record<string, number>; departments?: Record<string, number> }, whole: number) =>
+    !scoped ? whole : mode === 'brand' ? (x.centres[who!] ?? 0) : (x.departments?.[who!] ?? 0)
+  const block = (k: BlockKey) => pl?.blocks.find((b) => b.key === k)
+  const share = mode === 'brand' && scoped ? pl?.brand.find((b) => b.id === who) : undefined
+  const stockOf = (which: 'openingStock' | 'closingStock') => {
+    if (!pl) return 0
+    if (!scoped) return pl[which].value
+    // Each brand's own share of stock; stock carries no department, so it sits with "No department".
+    if (mode === 'brand') return share?.[which] ?? (who === '' ? pl[which].value : 0)
+    return who === '' ? pl[which].value : 0
+  }
+  const movedIn = share?.transfersIn ?? 0
+  const movedOut = share?.transfersOut ?? 0
+
+  /** A head of an account, with its ledgers under it when opened. */
+  const head = (k: BlockKey, label: string): Row[] => {
+    const b = block(k)
+    const rows: Row[] = [{ key: k, label, amount: b ? fig(b, b.total) : 0, kind: 'head', block: b?.lines.length ? k : undefined, ledgerCount: b?.lines.length ?? 0 }]
+    if (b && open.has(k))
+      for (const l of b.lines) {
+        const v = fig(l, l.amount)
+        if (scoped && !v) continue
+        rows.push({ key: `${k}:${l.id}`, label: l.name, sub: v, kind: 'ledger', href: `/accounts/ledger?id=${l.id}&from=${pl!.period.from}&to=${pl!.period.to}`, note: l.group })
+      }
+    return rows
+  }
+  const sumOf = (rows: Row[]) => r2(rows.reduce((t, r) => t + (r.kind === 'ledger' ? 0 : (r.amount ?? 0)), 0))
+
+  // The Trading Account: what was spent on the goods against what they brought in, down to gross profit.
+  const opening = stockOf('openingStock')
+  const closing = stockOf('closingStock')
+  const tradingDr: Row[] = [
+    { key: 'opening', label: 'To Opening Stock', amount: opening, kind: 'head', note: pl ? `on ${day(pl.openingStock.day)}` : undefined },
+    ...(movedIn ? [{ key: 'in', label: 'To Stock moved in', amount: movedIn, kind: 'head' as const, note: 'from central stock or another brand' }] : []),
+    ...head('PURCHASE_ACCOUNTS', 'To Purchase Accounts'),
+    ...head('DIRECT_EXPENSES', 'To Direct Expenses'),
+  ]
+  const tradingCr: Row[] = [
+    ...head('SALES_ACCOUNTS', 'By Sales Accounts'),
+    ...head('DIRECT_INCOMES', 'By Direct Incomes'),
+    { key: 'closing', label: 'By Closing Stock', amount: closing, kind: 'head', note: pl ? `on ${day(pl.closingStock.day)}` : undefined },
+    ...(movedOut ? [{ key: 'out', label: 'By Stock moved out', amount: movedOut, kind: 'head' as const, note: 'to central stock or another brand' }] : []),
+  ]
+  const gross = r2(sumOf(tradingCr) - sumOf(tradingDr))
+  if (gross >= 0) tradingDr.push({ key: 'gp', label: 'To Gross Profit c/o', amount: gross, kind: 'result' })
+  else tradingCr.push({ key: 'gl', label: 'By Gross Loss c/o', amount: -gross, kind: 'result' })
+
+  // The Profit & Loss Account: gross profit and other income against overheads, down to net profit.
+  const plDr: Row[] = [...(gross < 0 ? [{ key: 'glb', label: 'To Gross Loss b/f', amount: -gross, kind: 'result' as const }] : []), ...head('INDIRECT_EXPENSES', 'To Indirect Expenses')]
+  const plCr: Row[] = [...(gross >= 0 ? [{ key: 'gpb', label: 'By Gross Profit b/f', amount: gross, kind: 'result' as const }] : []), ...head('INDIRECT_INCOMES', 'By Indirect Incomes')]
+  const net = r2(sumOf(plCr) - sumOf(plDr))
+  if (net >= 0) plDr.push({ key: 'np', label: 'To Net Profit', amount: net, kind: 'result' })
+  else plCr.push({ key: 'nl', label: 'By Net Loss', amount: -net, kind: 'result' })
+  const tradingTotal = sumOf(tradingDr)
+  const plTotal = sumOf(plDr)
+
+  const cell = (r: Row | undefined) => {
+    if (!r || r.kind === 'blank')
+      return (
+        <>
+          <td />
+          <td />
+          <td className="border-border border-r" />
+        </>
+      )
+    const isOpen = r.block ? open.has(r.block) : false
     return (
       <>
-        {cols.map((c) => (
-          <td key={c.id || 'none'} className={cls}>
-            {centres && centres[c.id] ? v(centres[c.id]) : ''}
-          </td>
-        ))}
-        <td className={cls}>{v(total)}</td>
+        <td className={r.kind === 'ledger' ? 'pl-8' : ''}>
+          {r.kind === 'ledger' ? (
+            <>
+              <Link href={r.href!} className="text-primary hover:underline">
+                {r.label}
+              </Link>
+              {r.note && <span className="text-muted-foreground ml-2 text-[11px]">{r.note}</span>}
+            </>
+          ) : r.block ? (
+            <button type="button" className="flex items-center gap-1.5 text-left" onClick={() => toggle(r.block!)} aria-expanded={isOpen}>
+              {isOpen ? <ChevronDown size={14} className="text-muted-foreground" /> : <ChevronRight size={14} className="text-muted-foreground" />}
+              <span className="text-foreground font-medium">{r.label}</span>
+              <span className="text-muted-foreground hidden text-[11px] sm:inline">
+                {r.ledgerCount} {r.ledgerCount === 1 ? 'ledger' : 'ledgers'}
+              </span>
+            </button>
+          ) : (
+            <span className={`block pl-5 ${r.kind === 'result' ? 'text-foreground font-semibold' : 'text-foreground font-medium'}`}>
+              {r.label}
+              {r.note && <span className="text-muted-foreground block text-[11px] font-normal">{r.note}</span>}
+            </span>
+          )}
+        </td>
+        <td className="text-muted-foreground w-28 text-right tabular-nums">{r.kind === 'ledger' ? money(r.sub) : ''}</td>
+        <td className={`border-border w-32 border-r text-right tabular-nums ${r.kind === 'result' ? 'font-semibold' : ''}`}>{r.kind === 'ledger' ? '' : money(r.amount)}</td>
       </>
     )
   }
 
-  const blockRows = (k: BlockKey, label: string, negate = false) => {
-    const b = block(k)
-    if (!b || (!b.lines.length && b.total === 0)) return null
-    const isOpen = open.has(k)
-    return (
-      <Fragment key={k}>
-        <tr data-row tabIndex={-1} className="cursor-pointer" onClick={() => toggle(k)}>
-          <td>
-            <span className="flex items-center gap-1.5">
-              {isOpen ? <ChevronDown size={14} className="text-muted-foreground" /> : <ChevronRight size={14} className="text-muted-foreground" />}
-              <span className="text-foreground font-medium">{label}</span>
-              <span className="text-muted-foreground text-[11px]">{b.lines.length} {b.lines.length === 1 ? 'ledger' : 'ledgers'}</span>
-            </span>
-          </td>
-          {figures(b.total, b.centres, false, negate)}
+  /** One side of an account on its own, for a phone: its rows, then its total. */
+  const side = (label: string, rows: Row[], total: number) => (
+    <table className="data-table w-full table-fixed text-[13px]">
+      <colgroup>
+        <col />
+        <col className="w-20" />
+        <col className="w-28" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>{label}</th>
+          <th className="text-right">₹</th>
+          <th className="text-right">Amount ₹</th>
         </tr>
-        {isOpen &&
-          b.lines.map((l) => (
-            <tr key={l.id}>
-              <td className="pl-10">
-                <Link href={`/accounts/ledger?id=${l.id}&from=${pl!.period.from}&to=${pl!.period.to}`} className="text-primary hover:underline">
-                  {l.name}
-                </Link>
-                <span className="text-muted-foreground ml-2 text-[11px]">{l.group}</span>
-              </td>
-              {figures(l.amount, l.centres, false, negate)}
-            </tr>
-          ))}
-      </Fragment>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.key}>{cell(r)}</tr>
+        ))}
+      </tbody>
+      <tfoot>
+        <tr className="bg-secondary/40">
+          <td className="text-foreground px-4 py-2.5 font-semibold">Total</td>
+          <td />
+          <td className="px-4 py-2.5 text-right font-semibold tabular-nums">{money(total)}</td>
+        </tr>
+      </tfoot>
+    </table>
+  )
+
+  /**
+   * One account. On a wide screen its two sides stand side by side, padded so
+   * the totals meet on one line, as SAB prints it; on a phone the Dr side
+   * comes first and the Cr side under it, each with its total, so nothing
+   * scrolls sideways.
+   */
+  const account = (title: string, dr: Row[], cr: Row[], total: number) => {
+    const n = Math.max(dr.length, cr.length)
+    return (
+      <div className="glass-card overflow-hidden p-0">
+        <div className="border-border border-b px-4 py-2.5">
+          <h2 className="text-foreground text-sm font-semibold">
+            {title}
+            {scoped && <span className="text-primary"> — {whoName}</span>}
+          </h2>
+          {pl && (
+            <p className="text-muted-foreground text-[11px]">
+              {day(pl.period.from)} to {day(pl.period.to)}
+            </p>
+          )}
+        </div>
+        <div className="divide-border divide-y lg:hidden">
+          {side('Dr · To', dr, total)}
+          {side('Cr · By', cr, total)}
+        </div>
+        <div className="hidden overflow-x-auto lg:block">
+          <table className="data-table w-full table-fixed">
+            <colgroup>
+              <col />
+              <col className="w-28" />
+              <col className="w-32" />
+              <col />
+              <col className="w-28" />
+              <col className="w-32" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Dr · Particulars</th>
+                <th className="text-right">₹</th>
+                <th className="border-border border-r text-right">Amount ₹</th>
+                <th>Cr · Particulars</th>
+                <th className="text-right">₹</th>
+                <th className="text-right">Amount ₹</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({ length: n }, (_, i) => (
+                <tr key={i}>
+                  {cell(dr[i])}
+                  <Fragment>{cell(cr[i])}</Fragment>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="bg-secondary/40">
+                <td className="text-foreground px-4 py-2.5 font-semibold">Total</td>
+                <td />
+                <td className="border-border border-r px-4 py-2.5 text-right font-semibold tabular-nums">{money(total)}</td>
+                <td className="text-foreground px-4 py-2.5 font-semibold">Total</td>
+                <td />
+                <td className="px-4 py-2.5 text-right font-semibold tabular-nums">{money(total)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
     )
   }
 
-  const stockRow = (label: string, st: Stock, negate: boolean) => (
-    <tr>
-      <td>
-        <span className="text-foreground pl-5 font-medium">{label}</span>
-        <span className="text-muted-foreground ml-2 text-[11px]">
-          on {day(st.day)}, {SOURCE[st.source]}
-        </span>
-      </td>
-      {byBrand ? (
-        <>
-          {cols.map((c) => (
-            <td key={c.id || 'none'} className="text-right tabular-nums">
-              {c.id === '' ? money(negate ? -st.value : st.value) : ''}
-            </td>
-          ))}
-          <td className="text-right tabular-nums">{money(negate ? -st.value : st.value)}</td>
-        </>
-      ) : (
-        <td className="text-right tabular-nums">{money(negate ? -st.value : st.value)}</td>
-      )}
-    </tr>
-  )
-
-  const resultRow = (label: string, value: number, key: 'grossProfit' | 'netProfit') => (
-    <tr className="bg-secondary/40">
-      <td className="text-foreground font-semibold">{value >= 0 ? label : label.replace('profit', 'loss')}</td>
-      {byBrand ? (
-        <>
-          {cols.map((c) => (
-            <td key={c.id || 'none'} className="text-right font-semibold tabular-nums">
-              {money(brandOf(c.id)?.[key] ?? 0)}
-            </td>
-          ))}
-          <td className="text-right font-semibold tabular-nums">{money(value)}</td>
-        </>
-      ) : (
-        <td className={`text-right font-semibold tabular-nums ${value < 0 ? 'text-destructive' : ''}`}>{money(value)}</td>
-      )}
-    </tr>
-  )
-
   const exportIt = async (format: ExportFormat) => {
     if (!pl) return
-    type Row = { section: string; particulars: string; amount: number } & Record<string, unknown>
-    const rows: Row[] = []
-    const add = (section: string, particulars: string, amount: number, centres?: Record<string, number>) =>
-      rows.push({ section, particulars, amount, ...Object.fromEntries(cols.map((c) => [`c:${c.id}`, centres?.[c.id] ?? null])) })
-    for (const b of pl.blocks) {
-      add(b.title, `${b.title} — total`, b.total, b.centres)
-      for (const l of b.lines) add(b.title, l.name, l.amount, l.centres)
+    type X = { account: string; drLabel: string; drSub: number | null; drAmount: number | null; crLabel: string; crSub: number | null; crAmount: number | null }
+    const rows: X[] = []
+    const add = (name: string, dr: Row[], cr: Row[], total: number) => {
+      for (let i = 0; i < Math.max(dr.length, cr.length); i++) {
+        const a = dr[i]
+        const b = cr[i]
+        rows.push({
+          account: i === 0 ? name : '',
+          drLabel: a?.label ?? '',
+          drSub: a?.kind === 'ledger' ? (a.sub ?? null) : null,
+          drAmount: a && a.kind !== 'ledger' ? (a.amount ?? null) : null,
+          crLabel: b?.label ?? '',
+          crSub: b?.kind === 'ledger' ? (b.sub ?? null) : null,
+          crAmount: b && b.kind !== 'ledger' ? (b.amount ?? null) : null,
+        })
+      }
+      rows.push({ account: '', drLabel: 'Total', drSub: null, drAmount: total, crLabel: 'Total', crSub: null, crAmount: total })
     }
-    add('Stock', 'Opening stock', pl.openingStock.value)
-    add('Stock', 'Closing stock', pl.closingStock.value)
-    add('Result', 'Gross profit', pl.grossProfit, Object.fromEntries(pl.brand.map((b) => [b.id, b.grossProfit])))
-    add('Result', 'Net profit', pl.netProfit, Object.fromEntries(pl.brand.map((b) => [b.id, b.netProfit])))
-    const columns: ExportColumn<Row>[] = [
-      { header: 'Section', value: (r) => r.section },
-      { header: 'Particulars', value: (r) => r.particulars },
-      ...(byBrand ? cols.map((c) => ({ header: c.name, value: (r: Row) => r[`c:${c.id}`] as number | null })) : []),
-      { header: 'Amount', value: (r) => r.amount },
+    add('Trading Account', tradingDr, tradingCr, tradingTotal)
+    add('Profit & Loss Account', plDr, plCr, plTotal)
+    const columns: ExportColumn<X>[] = [
+      { header: 'Account', value: (r) => r.account },
+      { header: 'Dr Particulars', value: (r) => r.drLabel },
+      { header: 'Dr ₹', value: (r) => r.drSub },
+      { header: 'Dr Amount ₹', value: (r) => r.drAmount },
+      { header: 'Cr Particulars', value: (r) => r.crLabel },
+      { header: 'Cr ₹', value: (r) => r.crSub },
+      { header: 'Cr Amount ₹', value: (r) => r.crAmount },
     ]
-    await downloadRows({ rows, columns, name: `profit-and-loss-${pl.period.from}-to-${pl.period.to}`, sheet: 'Profit and Loss', format })
+    const whose = scoped ? `-${whoName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : ''
+    await downloadRows({ rows, columns, name: `profit-and-loss${whose}-${pl.period.from}-to-${pl.period.to}`, sheet: 'Profit and Loss', format })
   }
 
   const may = can('accounts', 'edit')
+  const tab = (active: boolean) => (active ? 'bg-primary text-primary-foreground rounded-lg px-3 py-1 text-xs font-semibold' : 'text-muted-foreground rounded-lg px-3 py-1 text-xs')
 
   return (
     <div className="space-y-5">
       <div className="page-header gap-3">
         <div className="min-w-0">
           <h1 className="page-title text-xl sm:text-2xl">Profit &amp; Loss</h1>
-          <p className="page-subtitle hidden sm:block">Trading account to gross profit, then overheads to net profit</p>
+          <p className="page-subtitle hidden sm:block">Trading Account to gross profit, then the Profit &amp; Loss Account to net profit</p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading} aria-label="Refresh">
@@ -258,14 +428,35 @@ export default function ProfitLossPage() {
         </div>
       </div>
 
-      <div className="glass-card flex flex-wrap items-center gap-2 p-3">
-        <input type="date" className="form-input h-9 w-[150px]" value={from} max={to} onChange={(e) => setFrom(e.target.value)} aria-label="From" />
-        <span className="text-muted-foreground text-xs">to</span>
-        <input type="date" className="form-input h-9 w-[150px]" value={to} min={from} max={todayIst()} onChange={(e) => setTo(e.target.value || todayIst())} aria-label="To" />
-        <label className="text-muted-foreground ml-auto flex items-center gap-1.5 text-sm">
-          <input type="checkbox" checked={byBrand} onChange={(e) => setByBrand(e.target.checked)} />
-          By brand
-        </label>
+      <div className="glass-card space-y-2 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <input type="date" className="form-input h-9 w-[150px]" value={from} max={to} onChange={(e) => setFrom(e.target.value)} aria-label="From" />
+          <span className="text-muted-foreground text-xs">to</span>
+          <input type="date" className="form-input h-9 w-[150px]" value={to} min={from} max={todayIst()} onChange={(e) => setTo(e.target.value || todayIst())} aria-label="To" />
+          <div className="border-border bg-secondary ml-auto flex gap-1 rounded-lg border p-1" role="radiogroup" aria-label="Whose profit and loss">
+            {(
+              [
+                ['company', 'Company'],
+                ['brand', 'Brand-wise'],
+                ['department', 'Department-wise'],
+              ] as const
+            ).map(([k, label]) => (
+              <button key={k} type="button" role="radio" aria-checked={mode === k} className={tab(mode === k)} onClick={() => setMode(k)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {mode !== 'company' && choices.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1" role="radiogroup" aria-label={mode === 'brand' ? 'Brand' : 'Department'}>
+            <span className="text-muted-foreground mr-1 text-xs font-medium">{mode === 'brand' ? 'Brand' : 'Department'}</span>
+            {choices.map((c) => (
+              <button key={c.id || 'none'} type="button" role="radio" aria-checked={who === c.id} className={`btn-ghost h-8 px-2 text-xs ${who === c.id ? 'bg-primary/10 text-primary font-semibold' : ''}`} onClick={() => setWho(c.id)}>
+                {c.name}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {error && (
@@ -290,28 +481,35 @@ export default function ProfitLossPage() {
           )}
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
             <div className="glass-card p-3">
-              <p className="text-muted-foreground text-[11px]">Gross {pl.grossProfit >= 0 ? 'profit' : 'loss'}</p>
-              <p className={`mt-0.5 text-lg font-semibold tabular-nums ${pl.grossProfit < 0 ? 'text-destructive' : 'text-foreground'}`}>₹{inr(pl.grossProfit)}</p>
+              <p className="text-muted-foreground text-[11px]">
+                Gross {gross >= 0 ? 'profit' : 'loss'}
+                {scoped ? ` · ${whoName}` : ''}
+              </p>
+              <p className={`mt-0.5 text-lg font-semibold tabular-nums ${gross < 0 ? 'text-destructive' : 'text-foreground'}`}>₹{inr(Math.abs(gross))}</p>
             </div>
             <div className="glass-card p-3">
-              <p className="text-muted-foreground text-[11px]">Net {pl.netProfit >= 0 ? 'profit' : 'loss'}</p>
-              <p className={`mt-0.5 text-lg font-semibold tabular-nums ${pl.netProfit < 0 ? 'text-destructive' : 'text-foreground'}`}>₹{inr(pl.netProfit)}</p>
+              <p className="text-muted-foreground text-[11px]">
+                Net {net >= 0 ? 'profit' : 'loss'}
+                {scoped ? ` · ${whoName}` : ''}
+              </p>
+              <p className={`mt-0.5 text-lg font-semibold tabular-nums ${net < 0 ? 'text-destructive' : 'text-foreground'}`}>₹{inr(Math.abs(net))}</p>
             </div>
             <div className="glass-card p-3">
               <p className="text-muted-foreground flex items-center gap-1 text-[11px]">
                 <Package size={12} /> Closing stock on {day(pl.closingStock.day)}
+                {scoped ? ` · ${whoName}` : ''}
               </p>
               <div className="flex items-baseline justify-between gap-2">
-                <p className="text-foreground mt-0.5 text-lg font-semibold tabular-nums">₹{inr(pl.closingStock.value)}</p>
-                {may && pl.closingStock.source !== 'books' && !stockForm && (
+                <p className="text-foreground mt-0.5 text-lg font-semibold tabular-nums">₹{inr(closing)}</p>
+                {may && !scoped && pl.closingStock.source !== 'books' && !stockForm && (
                   <button type="button" className="btn-ghost h-7 px-2 text-xs" onClick={() => setStockForm({ value: String(pl.closingStock.value), notes: pl.closingStock.set?.notes ?? '' })}>
                     Value it
                   </button>
                 )}
               </div>
               <p className="text-muted-foreground text-[11px]">
-                {SOURCE[pl.closingStock.source]}
-                {pl.closingStock.source === 'set' && pl.closingStock.inventory !== null && ` — inventory says ₹${inr(pl.closingStock.inventory)}`}
+                {scoped && mode === 'brand' ? 'its own earmarked stock, at its own average' : SOURCE[pl.closingStock.source]}
+                {!scoped && pl.closingStock.source === 'set' && pl.closingStock.inventory !== null && ` — inventory says ₹${inr(pl.closingStock.inventory)}`}
               </p>
             </div>
           </div>
@@ -346,48 +544,21 @@ export default function ProfitLossPage() {
             </div>
           )}
 
-          <div className="glass-card overflow-hidden p-0">
-            <div className="overflow-x-auto">
-              <table className={`data-table table-totals w-full ${byBrand ? 'min-w-[900px]' : ''}`}>
-                <thead>
-                  <tr>
-                    <th>
-                      <span className="flex items-center gap-1.5">
-                        <TrendingUp size={14} /> {day(pl.period.from)} to {day(pl.period.to)}
-                      </span>
-                    </th>
-                    {byBrand && cols.map((c) => <th key={c.id || 'none'} className="w-36 text-right">{c.name}</th>)}
-                    <th className="w-40 text-right">{byBrand ? 'Total ₹' : 'Amount ₹'}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td colSpan={byBrand ? cols.length + 2 : 2} className="text-muted-foreground text-xs font-semibold uppercase tracking-wider">
-                      Trading account
-                    </td>
-                  </tr>
-                  {blockRows('SALES_ACCOUNTS', 'Sales')}
-                  {blockRows('DIRECT_INCOMES', 'Direct income')}
-                  {stockRow('Add closing stock', pl.closingStock, false)}
-                  {stockRow('Less opening stock', pl.openingStock, false)}
-                  {blockRows('PURCHASE_ACCOUNTS', 'Less purchases')}
-                  {blockRows('DIRECT_EXPENSES', 'Less direct expenses')}
-                  {resultRow('Gross profit', pl.grossProfit, 'grossProfit')}
-                  <tr>
-                    <td colSpan={byBrand ? cols.length + 2 : 2} className="text-muted-foreground text-xs font-semibold uppercase tracking-wider">
-                      Profit and loss account
-                    </td>
-                  </tr>
-                  {blockRows('INDIRECT_INCOMES', 'Add other income')}
-                  {blockRows('INDIRECT_EXPENSES', 'Less indirect expenses')}
-                </tbody>
-                <tfoot>{resultRow('Net profit', pl.netProfit, 'netProfit')}</tfoot>
-              </table>
-            </div>
-          </div>
-          {byBrand && (
+          {account('Trading Account', tradingDr, tradingCr, tradingTotal)}
+          {account('Profit & Loss Account', plDr, plCr, plTotal)}
+
+          {mode === 'brand' && (
             <p className="text-muted-foreground text-xs">
-              Sales carry the brand of their order; purchases and expenses the brand of the style they were for, or the one chosen on a voucher. Stock is valued for the mill as a whole, so its change, and anything no brand carries, sits under &quot;Not split&quot;.
+              A brand&apos;s sales carry the brand of their order; its purchases the brand of the order they were bought for; its expenses the brand picked on the bill or voucher, else the ledger&apos;s usual one. Its opening and closing stock are its own earmarked stock, at its own average. Stock it took from central stock or another brand is &quot;Stock moved in&quot;, and stock it gave up is &quot;Stock moved out&quot;, at the value it moved at, so moving stock never makes a profit or a loss. &quot;Not split&quot; is central stock and whatever no brand carries, such as shared expenses not yet allocated. The brands and Not split add up to the company.
+            </p>
+          )}
+          {mode === 'department' && (
+            <p className="text-muted-foreground text-xs">
+              Each line sits with its department (cost centre): sales with Sales &amp; Marketing, job work with Production, purchases with the department whose indent they were for, expenses with the department picked or the expense head&apos;s usual one. Stock, and anything no department carries, sits under &quot;No department&quot; —{' '}
+              <Link href="/reports/unallocated-entries" className="text-primary hover:underline">
+                see Unallocated Entries
+              </Link>
+              .
             </p>
           )}
         </>

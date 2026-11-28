@@ -61,6 +61,7 @@ export function summaryGrids(
   spec: RegisterSpec,
   grand: RegisterTotal
 ): SummaryGrid[] {
+  if (def.grids === false) return []
   const byKey = new Map(columns.map((c) => [c.key, c]))
 
   // What to group by: the report's own choice, in its order. A report that

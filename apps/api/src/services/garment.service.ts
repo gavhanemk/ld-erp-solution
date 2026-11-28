@@ -68,6 +68,7 @@ export async function generateGarments(
       fgrNumber: true,
       warehouseId: true,
       soId: true,
+      brandId: true,
       so: { select: { isJobWork: true, customerId: true } },
       lines: {
         where: {
@@ -172,6 +173,8 @@ export async function generateGarments(
       warehouseId: r.warehouseId,
       ownership,
       ownerCustomerId: ownership === 'CUSTOMER_OWNED' ? (r.so?.customerId ?? null) : null,
+      // On the share its receipt brought the pieces in on (multi-brand phase 5).
+      brandId: ownership === 'OWNED' ? (r.brandId ?? null) : null,
       soId: r.soId,
       createdById: userId,
     }

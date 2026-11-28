@@ -36,7 +36,7 @@ async function main() {
         if (none) check(`${none.style.code} has no routing: shown with none, so the list offers "Make routing"`, none.routings.length === 0)
 
         const user = await tx.user.findFirstOrThrow({ select: { id: true } })
-        const brand = await tx.brand.findFirstOrThrow({ select: { id: true } })
+        const brand = await tx.brand.findFirstOrThrow({ where: { isDefault: true }, select: { id: true } })
         const so = await tx.salesOrder.findFirst({ select: { id: true, soNumber: true } })
         const stamp = Date.now()
         const mo = await tx.manufacturingOrder.create({

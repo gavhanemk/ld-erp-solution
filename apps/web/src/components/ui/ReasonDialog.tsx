@@ -26,6 +26,7 @@ export function ReasonDialog({
   busy = false,
   requireReason = true,
   initialReason = '',
+  children,
   onConfirm,
   onCancel,
 }: {
@@ -43,6 +44,8 @@ export function ReasonDialog({
   requireReason?: boolean
   /** A reason to start from, for the person to keep or change. */
   initialReason?: string
+  /** Fields the action needs besides the reason, shown above it (a date). */
+  children?: React.ReactNode
   onConfirm: (reason: string) => void
   onCancel: () => void
 }) {
@@ -76,6 +79,8 @@ export function ReasonDialog({
             <p className="text-muted-foreground mt-1 text-sm">{description}</p>
           </div>
         </div>
+
+        {children && <div className="mt-4">{children}</div>}
 
         {requireReason && (
           <label className="mt-4 block">

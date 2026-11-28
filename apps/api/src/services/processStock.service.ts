@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { balanceOf, lockedBalanceOf, transferStock } from './stock.service'
+import { balanceOf, lockedBalanceOf, transferStock, sharesOf } from './stock.service'
 import { processLadder } from './processFloor.service'
 
 /*
@@ -168,6 +168,14 @@ async function availableOf(
   return Math.min(forOrder, all.qty)
 }
 
+/** The own brand of an order named on a move: an MO's, else a sales order's; none is central. */
+async function brandOfOrderNo(tx: Prisma.TransactionClient, orderNo: string): Promise<string | null> {
+  const mo = await tx.manufacturingOrder.findFirst({ where: { moNumber: { equals: orderNo, mode: 'insensitive' } }, select: { brand: { select: { id: true, type: true } } } })
+  const so = mo ? null : await tx.salesOrder.findFirst({ where: { soNumber: { equals: orderNo, mode: 'insensitive' } }, select: { brand: { select: { id: true, type: true } } } })
+  const b = mo?.brand ?? so?.brand ?? null
+  return b && b.type !== 'CUSTOM' ? b.id : null
+}
+
 export interface MoveInput {
   itemId: string
   fromWarehouseId: string
@@ -239,24 +247,45 @@ export async function moveStock(tx: Prisma.TransactionClient, input: MoveInput, 
     include: { lines: true },
   })
 
+  // Multi-brand phase 5: pieces move as themselves, share by share — the
+  // order's brand first when an order is named, then central, then any other
+  // brand's earmark — each staying on its own share, at its own average.
+  const preferred = orderNo ? await brandOfOrderNo(tx, orderNo) : null
   for (const line of transfer.lines) {
-    const carried = await balanceOf(tx, { itemId: input.itemId, warehouseId: from.id, ownership: 'OWNED', sizeId: line.sizeId, grade: 'A' })
-    await transferStock(tx, {
-      itemId: input.itemId,
-      fromWarehouseId: from.id,
-      toWarehouseId: to.id,
-      qty: Number(line.qty),
-      referenceType: 'STOCK_TRANSFER',
-      referenceId: transfer.id,
-      sizeId: line.sizeId,
-      grade: 'A',
-      batchNumber: line.lotNo,
-      orderNo,
-      transactionDate: when,
-      notes: [`${transferNumber}: ${from.name} → ${to.name}`, orderNo, line.bundleNo ? `bundle ${line.bundleNo}` : null].filter(Boolean).join(' · '),
-      stickers: 'caller',
-    })
-    await tx.stockTransferLine.update({ where: { id: line.id }, data: { unitRate: carried.avgRate } })
+    const shares = (await sharesOf(tx, { itemId: input.itemId, warehouseId: from.id, ownership: 'OWNED', sizeId: line.sizeId, grade: 'A' }))
+      .filter((x) => x.qty > 0.0005)
+      .sort((a, b) => Number(b.brandId === preferred) - Number(a.brandId === preferred) || Number(b.brandId === null) - Number(a.brandId === null))
+    let left = round3(Number(line.qty))
+    let first = true
+    for (const sh of shares) {
+      if (left <= 0.0005) break
+      const q = round3(Math.min(left, sh.qty))
+      const carried = await balanceOf(tx, { itemId: input.itemId, warehouseId: from.id, ownership: 'OWNED', sizeId: line.sizeId, grade: 'A', brandId: sh.brandId })
+      await transferStock(tx, {
+        brandId: sh.brandId,
+        itemId: input.itemId,
+        fromWarehouseId: from.id,
+        toWarehouseId: to.id,
+        qty: q,
+        referenceType: 'STOCK_TRANSFER',
+        referenceId: transfer.id,
+        sizeId: line.sizeId,
+        grade: 'A',
+        batchNumber: line.lotNo,
+        orderNo,
+        transactionDate: when,
+        notes: [`${transferNumber}: ${from.name} → ${to.name}`, orderNo, line.bundleNo ? `bundle ${line.bundleNo}` : null].filter(Boolean).join(' · '),
+        stickers: 'caller',
+      })
+      if (first) await tx.stockTransferLine.update({ where: { id: line.id }, data: { qty: q, unitRate: carried.avgRate, brandId: sh.brandId } })
+      else
+        await tx.stockTransferLine.create({
+          data: { transferId: transfer.id, itemId: input.itemId, qty: q, sizeId: line.sizeId, orderNo: line.orderNo, lotNo: line.lotNo, bundleNo: line.bundleNo, unitRate: carried.avgRate, brandId: sh.brandId },
+        })
+      first = false
+      left = round3(left - q)
+    }
+    if (left > 0.0005) throw new AppError(`${from.name} is short of ${item.code} by ${left}.`, 400, 'INSUFFICIENT_STOCK')
   }
 
   return { id: transfer.id, transferNumber, from: from.name, to: to.name, pieces: round3(lines.reduce((s, l) => s + l.qty, 0)) }

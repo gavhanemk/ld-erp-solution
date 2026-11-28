@@ -80,6 +80,8 @@ interface StyleOption {
   name: string
   /** Whose style it is: LD Cotton Mills or VHAGAR. */
   brandType?: string | null
+  /** The brand it is made under: Stich Code apart from LD Cotton Mills. */
+  brandId?: string | null
   sizeGroupId: string | null
   colors: string[] | null
   fabricType: string | null
@@ -471,26 +473,26 @@ export function SalesOrderDialog({
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
   const styleById = useMemo(() => new Map(styles.map((s) => [s.id, s])), [styles])
   const groupById = useMemo(() => new Map(sizeGroups.map((g) => [g.id, g])), [sizeGroups])
-  /** Whose style each garment on the order is (LD Cotton Mills or VHAGAR), for the brand it is suggested under. */
-  const lineBrandTypes = useMemo(
+  /** The brand each garment's style is made under, for the brand the order is suggested under. */
+  const lineBrandIds = useMemo(
     () =>
       lines
         .filter((l) => l.itemId || l.styleCode.trim())
         .map((l) => {
           const typed = l.styleCode.trim().toLowerCase()
           const style = styleById.get(l.styleId) ?? (typed ? styles.find((x) => x.code.toLowerCase() === typed) : undefined) ?? styleById.get(itemById.get(l.itemId)?.styleId ?? '')
-          return style?.brandType ?? null
+          return style?.brandId ?? null
         }),
     [lines, styleById, styles, itemById]
   )
-  // Until someone picks a brand, it follows the garments: VHAGAR styles, VHAGAR.
+  // Until someone picks a brand, it follows the garments: Stich Code styles, Stich Code.
   useEffect(() => {
     if (brandPicked || !brands.length) return
-    const next = suggestedBrand(brands, lineBrandTypes, isJobWork)
+    const next = suggestedBrand(brands, lineBrandIds, isJobWork)
     if (next && next !== brandId) setBrandId(next)
-  }, [brandPicked, brands, lineBrandTypes, isJobWork, brandId])
+  }, [brandPicked, brands, lineBrandIds, isJobWork, brandId])
   const brand = brands.find((b) => b.id === brandId)
-  const otherBrand = otherBrandLines(brand, lineBrandTypes)
+  const otherBrand = otherBrandLines(brand, lineBrandIds, brands)
   const sizesOfGroup = useMemo(
     () => new Map(sizeGroups.map((g) => [g.id, [...g.sizes].sort((a, b) => a.sequence - b.sequence)])),
     [sizeGroups]
@@ -1668,7 +1670,8 @@ export function SalesOrderDialog({
                     help={
                       otherBrand > 0 ? (
                         <span className="warn-text">
-                          {otherBrand} {otherBrand === 1 ? 'garment is' : 'garments are'} another brand&apos;s style
+                          {otherBrand} {otherBrand === 1 ? 'garment is' : 'garments are'} another brand&apos;s style. One order carries one brand: put{' '}
+                          {otherBrand === 1 ? 'it' : 'them'} on an order of their own.
                         </span>
                       ) : brandPicked ? undefined : (
                         'Follows the styles until you pick one'
@@ -1686,7 +1689,7 @@ export function SalesOrderDialog({
                     >
                       {!brandId && <option value="">Choose the brand</option>}
                       {brands.map((b) => (
-                        <option key={b.id} value={b.id} data-sub={b.type === 'VHAGAR' ? 'VHAGAR' : 'LD Cotton Mills'}>
+                        <option key={b.id} value={b.id} data-sub={b.isDefault ? 'B2B and job work' : (b.code ?? undefined)}>
                           {b.name}
                         </option>
                       ))}

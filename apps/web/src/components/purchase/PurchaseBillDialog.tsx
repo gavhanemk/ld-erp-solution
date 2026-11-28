@@ -100,6 +100,12 @@ export interface BillLine {
   poLineId?: string | null
   /** That order's number, for the hint under the line. */
   poNumber?: string
+  /**
+   * An expense line's brand (profit centre; empty is shared) and department
+   * (cost centre), filled from the expense head's usual department.
+   */
+  costCentreId?: string | null
+  departmentId?: string | null
 }
 
 export interface BillCharge {
@@ -257,6 +263,8 @@ interface Option extends Partial<ChargeMasterConfig>, ShadeFields {
   hsnCode?: string | null
   standardRate?: string | number | null
   taxRate?: { rate: string | number } | null
+  /** An expense head's usual department: its lines' cost centre. */
+  departmentId?: string | null
   uom?: { symbol: string } | null
   defaultGstRate?: string | number | null
   applyOnPurchase?: boolean
@@ -662,6 +670,8 @@ export function PurchaseBillDialog({
             gstRate: String(l.gstRate ?? ''),
             acceptedQty: l.grnLine ? num(l.grnLine.acceptedQty) : undefined,
             grnNumber: l.grnLine?.grn?.grnNumber,
+            costCentreId: l.costCentreId ?? null,
+            departmentId: l.departmentId ?? null,
           }))
         : [freshLine()]
     )
@@ -774,6 +784,25 @@ export function PurchaseBillDialog({
       cancelled = true
     }
   }, [open])
+
+  // Brands and departments, for an expense line's two tags. Only an expense bill asks.
+  const [tagBrands, setTagBrands] = useState<Array<{ id: string; name: string }>>([])
+  const [tagDepartments, setTagDepartments] = useState<Array<{ id: string; name: string }>>([])
+  useEffect(() => {
+    if (!open || !expenseMode) return
+    let cancelled = false
+    void Promise.all([
+      api.get<{ data: Array<{ id: string; name: string; isActive: boolean; brand?: { type?: string } | null }> }>('/accounts/cost-centres').catch(() => ({ data: [] })),
+      api.get<{ data: Array<{ id: string; name: string; isActive?: boolean }> }>('/masters/departments?limit=200&active=true&sort=name&order=asc').catch(() => ({ data: [] })),
+    ]).then(([c, d]) => {
+      if (cancelled) return
+      setTagBrands(c.data.filter((x) => x.isActive && x.brand?.type !== 'CUSTOM'))
+      setTagDepartments(d.data.filter((x) => x.isActive !== false))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [open, expenseMode])
 
   // Categories, for telling expense heads from stock items. Only an expense
   // bill needs them.
@@ -1804,6 +1833,8 @@ export function PurchaseBillDialog({
       unitPrice:
         lines[index].unitPrice || (item?.standardRate != null ? String(item.standardRate) : ''),
       gstRate: lines[index].gstRate || (item?.taxRate ? String(item.taxRate.rate) : ''),
+      // An expense head's usual department, unless one was picked already.
+      departmentId: lines[index].departmentId || item?.departmentId || null,
     })
   }
 
@@ -1990,6 +2021,8 @@ export function PurchaseBillDialog({
         discount: num(l.discount),
         gstRate: num(l.gstRate),
         rateAction: l.rateAction ?? null,
+        costCentreId: l.costCentreId || null,
+        departmentId: l.departmentId || null,
       })),
       rateVarianceReason: rateVarianceReason.trim() || null,
       // The figure before GST, and where its GST comes from — an HSN / SAC
@@ -2055,6 +2088,50 @@ export function PurchaseBillDialog({
    * — and the grey prompts under the two bill fields sit several screens above
    * wherever a person is standing when they reach for Book bill.
    */
+  /**
+   * An expense line's brand (empty: shared, allocated later) and department
+   * (its cost centre, from the head's usual one). `focusId` goes on the
+   * department box the "still to fill in" notice scrolls to.
+   */
+  const lineTags = (line: BillLine, i: number, size: 'h-7' | 'h-9', focusId?: string) => {
+    if (!expenseMode || !isExpenseHead(itemById.get(line.itemId)) || (!tagBrands.length && !tagDepartments.length)) return null
+    const noDept = !line.departmentId && tagDepartments.length > 0
+    return (
+      <div className="mt-1 grid grid-cols-2 gap-1">
+        <SmartSelect
+          className={`form-input ${size} text-xs`}
+          value={line.costCentreId ?? ''}
+          onChange={(e) => setLine(i, { costCentreId: e.target.value || null })}
+          aria-label={`Line ${i + 1} brand`}
+          title="Whose expense it is. Shared: split between the brands later."
+        >
+          <option value="">Brand: shared</option>
+          {tagBrands.map((b) => (
+            <option key={b.id} value={b.id}>
+              {b.name}
+            </option>
+          ))}
+        </SmartSelect>
+        <SmartSelect
+          id={focusId}
+          className={`form-input ${size} text-xs ${noDept ? 'border-amber-500/70' : ''}`}
+          value={line.departmentId ?? ''}
+          onChange={(e) => setLine(i, { departmentId: e.target.value || null })}
+          aria-label={`Line ${i + 1} department`}
+          aria-invalid={noDept}
+          title="The department that bears it: its cost centre."
+        >
+          <option value="">Department…</option>
+          {tagDepartments.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </SmartSelect>
+      </div>
+    )
+  }
+
   const missing: Array<{ what: string; focus?: string }> = []
   if (!supplierId) missing.push({ what: 'the supplier', focus: 'bill-supplier' })
   // The supplier's invoice is on the desk when a bill is booked, so its
@@ -2070,6 +2147,9 @@ export function PurchaseBillDialog({
   if (badQty >= 0) missing.push({ what: `a whole number on line ${badQty + 1} (${itemById.get(lines[badQty].itemId)?.name ?? 'its item'} is counted whole)` })
   if (expenseMode && tdsChoice && !tdsAuto && tdsTyped.trim() === '')
     missing.push({ what: 'the TDS amount', focus: 'bill-tds-amount' })
+  // Every expense says which department bears it: its cost centre.
+  const noDept = expenseMode && tagDepartments.length ? lines.findIndex((l) => l.itemId && isExpenseHead(itemById.get(l.itemId)) && !l.departmentId) : -1
+  if (noDept >= 0) missing.push({ what: `the department on line ${noDept + 1}`, focus: `bill-line-dept-${noDept}` })
   if (payNow && expenseMode && !isEdit) missing.push(...cashPaymentMissing(payment))
   if (undecidedRates.length > 0) {
     const n = undecidedRates.length
@@ -2980,6 +3060,7 @@ export function PurchaseBillDialog({
                                     {line.pendingQty != null ? ` · ${line.pendingQty} left to bill` : ''}
                                   </p>
                                 )}
+                                {lineTags(line, i, 'h-7', `bill-line-dept-${i}`)}
                               </>
                             ) : line.grnNumber ? (
                               <>
@@ -3153,13 +3234,16 @@ export function PurchaseBillDialog({
                           {expenseMode ? 'Description' : 'Against receipt'}
                         </p>
                         {expenseMode ? (
-                          <input
-                            className="form-input h-9 w-full"
-                            value={line.description ?? ''}
-                            onChange={(e) => setLine(i, { description: e.target.value })}
-                            placeholder="e.g. Sept 2026, meter 40231"
-                            aria-label={`Line ${i + 1} description`}
-                          />
+                          <>
+                            <input
+                              className="form-input h-9 w-full"
+                              value={line.description ?? ''}
+                              onChange={(e) => setLine(i, { description: e.target.value })}
+                              placeholder="e.g. Sept 2026, meter 40231"
+                              aria-label={`Line ${i + 1} description`}
+                            />
+                            {lineTags(line, i, 'h-9')}
+                          </>
                         ) : line.grnNumber ? (
                           <>
                             <span className="badge-info">{line.grnNumber}</span>

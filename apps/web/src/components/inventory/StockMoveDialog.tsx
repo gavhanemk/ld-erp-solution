@@ -1,8 +1,9 @@
 'use client'
 
 import { useQtyRules } from '@/lib/qtyRules'
+import { newRequestId } from '@/lib/utils'
 import { QtyProblem } from '@/components/ui/QtyProblem'
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Loader2,
   Plus,
@@ -13,6 +14,8 @@ import {
   ClipboardCheck,
   ArrowRightLeft,
   Warehouse,
+  Truck,
+  Tags,
 } from 'lucide-react'
 import { api, apiErrorMessage, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
@@ -70,17 +73,35 @@ interface WarehouseOption {
   id: string
   code: string
   name: string
+  /** TRANSIT: where goods wait on the road. Never picked as a store here. */
+  kind?: string
 }
+
+/** How a transfer travels: straight there, or on the road until the other store receives it. */
+type Goes = 'DIRECT' | 'IN_TRANSIT'
 
 interface Line {
   itemId: string
   qty: string
   rate: string
-  /** Whose stock and which size: "OWNED||" for our own, unsized. */
+  /** Whose stock, which size and which grade: "OWNED||" for our own, unsized, good. */
   whose: string
+  /** Garment tags moving with the pieces, scanned or picked: one per piece. */
+  tags: string[]
 }
 
-/** One balance a store holds: an item, whose it is, its size. */
+/** One balance's garment tags in the store: what is held, how much of it is tagged, the tags free to move. */
+interface TagInfo {
+  held: number
+  tagged: number
+  untagged: number
+  codes: string[]
+}
+
+/** A scanner types a code and Enter; typed by hand they may be spaced or comma separated. */
+const splitCodes = (text: string) => [...new Set(text.split(/[\s,;]+/).map((c) => c.trim().toUpperCase()).filter(Boolean))]
+
+/** One balance a store holds: an item, whose it is, its size and its grade. */
 interface Held {
   itemId: string
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
@@ -88,21 +109,35 @@ interface Held {
   ownerName: string | null
   sizeId: string | null
   sizeCode: string | null
+  /** A good, B seconds, R held or rejected. */
+  grade?: string
+  /** On a move: a brand's earmark, or central stock (null). */
+  brandId?: string | null
+  brandName?: string | null
   qty: number
 }
 
+/** How a grade reads beside its balance: nothing for good stock. */
+const GRADE_WORDS: Record<string, string> = { B: 'B-grade', R: 'rejected' }
+
 const OURS = 'OWNED||'
-const heldKey = (h: Pick<Held, 'ownership' | 'ownerCustomerId' | 'sizeId'>) => `${h.ownership}|${h.ownerCustomerId ?? ''}|${h.sizeId ?? ''}`
+// Good stock keeps the key it always had; another grade adds itself on the end.
+// A brand's earmark (on a move) adds itself after a #.
+const heldKey = (h: Pick<Held, 'ownership' | 'ownerCustomerId' | 'sizeId' | 'grade' | 'brandId'>) =>
+  `${h.ownership}|${h.ownerCustomerId ?? ''}|${h.sizeId ?? ''}${h.grade && h.grade !== 'A' ? `|${h.grade}` : ''}${h.brandId ? `#${h.brandId}` : ''}`
 const parseWhose = (k: string) => {
-  const [ownership, ownerCustomerId, sizeId] = k.split('|')
+  const [base, brandId] = k.split('#')
+  const [ownership, ownerCustomerId, sizeId, grade] = base.split('|')
   return {
     ownership: (ownership || 'OWNED') as 'OWNED' | 'CUSTOMER_OWNED',
     ownerCustomerId: ownerCustomerId || null,
     sizeId: sizeId || null,
+    grade: (grade || 'A') as 'A' | 'B' | 'R',
+    ...(brandId ? { brandId } : {}),
   }
 }
 
-const emptyLine = (): Line => ({ itemId: '', qty: '', rate: '', whose: OURS })
+const emptyLine = (): Line => ({ itemId: '', qty: '', rate: '', whose: OURS, tags: [] })
 
 const COPY: Record<
   MoveMode,
@@ -132,7 +167,7 @@ const COPY: Record<
   transfer: {
     title: 'Move stock',
     blurb:
-      'Between two of our own stores. What it is worth and whose it is travel with it — a customer\'s cloth stays theirs.',
+      'Between two of our own stores. What it is worth and whose it is travel with it — a customer\'s cloth stays theirs. Send it in transit when the other store should confirm what arrives.',
     qtyLabel: 'Quantity',
     action: 'Move it',
   },
@@ -156,6 +191,8 @@ export function StockMoveDialog({
 
   const [warehouseId, setWarehouseId] = useState('')
   const [toWarehouseId, setToWarehouseId] = useState('')
+  const [goes, setGoes] = useState<Goes>('DIRECT')
+  const [transitId, setTransitId] = useState('')
   const [reason, setReason] = useState('')
   const [source, setSource] = useState('')
   const [notes, setNotes] = useState('')
@@ -166,6 +203,14 @@ export function StockMoveDialog({
   const [error, setError] = useState<string | null>(null)
   // What the chosen store holds, by item, owner and size.
   const [held, setHeld] = useState<Held[]>([])
+  // One id for this form until it saves: a double click or a retry reaches
+  // the server as the same request and saves the document once.
+  const requestId = useRef(newRequestId())
+  // Each balance's garment tags in the store a move leaves, by store, item and whose.
+  const [tagInfo, setTagInfo] = useState<Record<string, TagInfo>>({})
+  const [scanText, setScanText] = useState<Record<number, string>>({})
+  const [picking, setPicking] = useState<number | null>(null)
+  const tagKey = (l: Line) => `${warehouseId}|${l.itemId}|${l.whose}`
 
   useEffect(() => {
     if (mode === 'opening' || mode === 'stockin' || !warehouseId) {
@@ -174,7 +219,7 @@ export function StockMoveDialog({
     }
     let cancelled = false
     api
-      .get<{ data: Held[] }>(`/inventory/held?warehouseId=${warehouseId}`)
+      .get<{ data: Held[] }>(`/inventory/held?warehouseId=${warehouseId}&grades=all${mode === 'transfer' ? '&shares=1' : ''}`)
       .then((res) => {
         if (cancelled) return
         setHeld(res.data)
@@ -210,8 +255,12 @@ export function StockMoveDialog({
         setItems(i)
         setWarehouses(w.data)
         // One store is the overwhelmingly common case, so choosing it for them
-        // removes a click without ever choosing wrongly.
-        if (w.data.length === 1) setWarehouseId(w.data[0].id)
+        // removes a click without ever choosing wrongly. A transit store is
+        // never one of them: goods wait there only on their own transfer.
+        const real = w.data.filter((x) => x.kind !== 'TRANSIT')
+        if (real.length === 1) setWarehouseId(real[0].id)
+        const via = w.data.filter((x) => x.kind === 'TRANSIT')
+        if (via.length === 1) setTransitId(via[0].id)
       } catch {
         if (!cancelled) setError('Could not load items and stores.')
       } finally {
@@ -224,6 +273,46 @@ export function StockMoveDialog({
   }, [])
 
   const itemsById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
+
+  // A move of tagged garments names its tags: what the store holds tagged, for each line's stock.
+  useEffect(() => {
+    if (mode !== 'transfer' || !warehouseId) return
+    const wanted = lines.filter((l) => l.itemId && !(tagKey(l) in tagInfo))
+    if (!wanted.length) return
+    let cancelled = false
+    void Promise.all(
+      wanted.map(async (l) => {
+        const w = parseWhose(l.whose)
+        const qs = new URLSearchParams({ warehouseId, itemId: l.itemId, grade: w.grade, ownership: w.ownership })
+        // The share moving: its own pieces' tags only.
+        qs.set('share', 'brandId' in w && w.brandId ? w.brandId : 'central')
+        if (w.sizeId) qs.set('sizeId', w.sizeId)
+        if (w.ownerCustomerId) qs.set('ownerCustomerId', w.ownerCustomerId)
+        try {
+          const r = await api.get<{ data: TagInfo }>(`/inventory/tags?${qs}`)
+          return [tagKey(l), r.data] as const
+        } catch {
+          return [tagKey(l), { held: 0, tagged: 0, untagged: 0, codes: [] }] as const
+        }
+      }),
+    ).then((got) => {
+      if (!cancelled) setTagInfo((t) => ({ ...t, ...Object.fromEntries(got) }))
+    })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, warehouseId, lines])
+
+  /** How many of a line's pieces must be named by tag: beyond what the store holds untagged. */
+  const tagsNeeded = (l: Line) => {
+    const info = tagInfo[tagKey(l)]
+    if (!info || !info.tagged) return 0
+    return Math.max(0, Math.round(Number(l.qty) || 0) - info.untagged)
+  }
+  const stores = useMemo(() => warehouses.filter((w) => w.kind !== 'TRANSIT'), [warehouses])
+  const transitStores = useMemo(() => warehouses.filter((w) => w.kind === 'TRANSIT'), [warehouses])
+  const onTheRoad = mode === 'transfer' && goes === 'IN_TRANSIT'
 
   const setLine = (index: number, patch: Partial<Line>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
@@ -245,6 +334,10 @@ export function StockMoveDialog({
     if (mode === 'transfer' && warehouseId === toWarehouseId) {
       return setError('The two stores are the same, so nothing would move.')
     }
+    if (onTheRoad && !transitStores.length) {
+      return setError('There is no transit store yet. Add one in Masters → Warehouses with the kind "In transit", or send it straight there.')
+    }
+    if (onTheRoad && !transitId) return setError('Choose the transit store it goes through.')
     if (mode === 'stockin' && !source) return setError('Say where it came from.')
     if (mode === 'stockin' && source === 'OTHER' && notes.trim().length < 5) {
       return setError('Say where it came from in the note, in a few words.')
@@ -253,6 +346,13 @@ export function StockMoveDialog({
       return setError('Say why the figure is being changed — one line is enough.')
     }
     if (filled.length === 0) return setError('Add at least one item with a quantity.')
+    if (mode === 'transfer') {
+      const short = filled.findIndex((l) => l.tags.length < tagsNeeded(l))
+      if (short >= 0) {
+        const l = filled[short]
+        return setError(`${itemsById.get(l.itemId)?.name ?? 'A line'}: name ${tagsNeeded(l) - l.tags.length} more of its pieces by their tags — scan them or pick them from the store.`)
+      }
+    }
     // 2.5 cartons (or 0.6 counted): said under its box, and again here.
     const half = filled.find((l) => qtyRules.placesProblem(l.qty, itemsById.get(l.itemId)))
     if (half) return setError(`${itemsById.get(half.itemId)?.name ?? 'An item'}: ${qtyRules.placesProblem(half.qty, itemsById.get(half.itemId))}`)
@@ -304,6 +404,7 @@ export function StockMoveDialog({
         })
       } else if (mode === 'stockin') {
         res = await api.post('/inventory/stock-in', {
+          requestId: requestId.current,
           warehouseId,
           source,
           notes: notes || null,
@@ -311,6 +412,7 @@ export function StockMoveDialog({
         })
       } else if (mode === 'count') {
         res = await api.post('/inventory/adjustments', {
+          requestId: requestId.current,
           warehouseId,
           reason: reason.trim(),
           lines: filled.map((l) => ({
@@ -323,13 +425,17 @@ export function StockMoveDialog({
         })
       } else {
         res = await api.post('/inventory/transfers', {
+          requestId: requestId.current,
           fromWarehouseId: warehouseId,
           toWarehouseId,
+          mode: goes,
+          transitWarehouseId: onTheRoad ? transitId : null,
           notes: notes || null,
-          lines: filled.map((l) => ({ itemId: l.itemId, qty: Number(l.qty), ...parseWhose(l.whose) })),
+          lines: filled.map((l) => ({ itemId: l.itemId, qty: Number(l.qty), ...parseWhose(l.whose), ...(l.tags.length ? { garmentCodes: l.tags } : {}) })),
         })
       }
 
+      requestId.current = newRequestId()
       onSaved(res.message ?? 'Saved.', res.data)
     } catch (err) {
       setError(apiErrorMessage(err))
@@ -342,8 +448,8 @@ export function StockMoveDialog({
 
   const primary = (
     <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving}>
-      {saving ? <Loader2 size={15} className="animate-spin" /> : <Icon size={15} />}
-      {copy.action}
+      {saving ? <Loader2 size={15} className="animate-spin" /> : onTheRoad ? <Truck size={15} /> : <Icon size={15} />}
+      {onTheRoad ? 'Send it' : copy.action}
     </button>
   )
 
@@ -377,7 +483,7 @@ export function StockMoveDialog({
               autoFocus
             >
               <option value="">{loadingLists ? 'Loading...' : 'Choose a store...'}</option>
-              {warehouses.map((w) => (
+              {stores.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name}
                 </option>
@@ -397,7 +503,7 @@ export function StockMoveDialog({
                 disabled={loadingLists}
               >
                 <option value="">{loadingLists ? 'Loading...' : 'Choose a store...'}</option>
-                {warehouses
+                {stores
                   .filter((w) => w.id !== warehouseId)
                   .map((w) => (
                     <option key={w.id} value={w.id}>
@@ -406,6 +512,64 @@ export function StockMoveDialog({
                   ))}
               </SmartSelect>
             </label>
+          )}
+
+          {mode === 'transfer' && (
+            <div className="block min-w-0 sm:col-span-2">
+              <span className="form-label">How it goes</span>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="border-border bg-secondary flex gap-1 rounded-lg border p-1" role="radiogroup" aria-label="How it goes">
+                  {(
+                    [
+                      ['DIRECT', 'Straight there'],
+                      ['IN_TRANSIT', 'In transit'],
+                    ] as const
+                  ).map(([k, label]) => (
+                    <button
+                      key={k}
+                      type="button"
+                      role="radio"
+                      aria-checked={goes === k}
+                      className={
+                        goes === k
+                          ? 'bg-primary text-primary-foreground rounded-lg px-3 py-1 text-xs font-semibold'
+                          : 'text-muted-foreground rounded-lg px-3 py-1 text-xs'
+                      }
+                      onClick={() => setGoes(k)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {onTheRoad &&
+                  (transitStores.length === 0 ? (
+                    <span className="text-xs text-amber-500">
+                      No transit store yet: add one in Masters → Warehouses with the kind “In transit”.
+                    </span>
+                  ) : transitStores.length === 1 ? (
+                    <span className="text-muted-foreground text-xs">Through {transitStores[0].name}</span>
+                  ) : (
+                    <SmartSelect
+                      className="form-input h-9 max-w-xs"
+                      value={transitId}
+                      onChange={(e) => setTransitId(e.target.value)}
+                      aria-label="Transit store it goes through"
+                    >
+                      <option value="">Goes through...</option>
+                      {transitStores.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.name}
+                        </option>
+                      ))}
+                    </SmartSelect>
+                  ))}
+              </div>
+              <p className="text-muted-foreground mt-1 text-[11px]">
+                {onTheRoad
+                  ? 'It leaves now and waits in transit, still whoever’s it was and at what it left at. The other store receives what arrives — all, part, or damaged — from Stock Documents → Transfers.'
+                  : 'Out of one store and into the other in one go.'}
+              </p>
+            </div>
           )}
 
           {mode === 'count' && (
@@ -486,8 +650,11 @@ export function StockMoveDialog({
                 const choices = held.filter((h) => h.itemId === line.itemId)
                 const ours = choices.find((h) => heldKey(h) === OURS)
                 const customers = parseWhose(line.whose).ownership === 'CUSTOMER_OWNED'
+                const info = mode === 'transfer' && line.itemId ? tagInfo[tagKey(line)] : undefined
+                const need = tagsNeeded(line)
                 return (
-                  <tr key={i} data-grid-row>
+                  <Fragment key={i}>
+                  <tr data-grid-row>
                     <td className="text-muted-foreground px-3 py-2 text-xs">{i + 1}</td>
                     <td className="px-3 py-2">
                       <SmartSelect
@@ -498,6 +665,7 @@ export function StockMoveDialog({
                           const offered = held.filter((h) => h.itemId === e.target.value)
                           setLine(i, {
                             itemId: e.target.value,
+                            tags: [],
                             // Held only as one customer's, or one size: start on that.
                             whose: offered.length === 1 ? heldKey(offered[0]) : OURS,
                             // The item's standard rate is a starting point for
@@ -529,7 +697,7 @@ export function StockMoveDialog({
                         <SmartSelect
                           className="form-input h-9"
                           value={line.whose}
-                          onChange={(e) => setLine(i, { whose: e.target.value })}
+                          onChange={(e) => setLine(i, { whose: e.target.value, tags: [] })}
                           disabled={!line.itemId}
                           aria-label={`Whose stock on line ${i + 1}`}
                         >
@@ -541,7 +709,9 @@ export function StockMoveDialog({
                           {choices.map((h) => (
                             <option key={heldKey(h)} value={heldKey(h)}>
                               {h.ownership === 'CUSTOMER_OWNED' ? `${h.ownerName ?? 'Customer'}'s` : 'Ours'}
-                              {h.sizeCode ? ` · size ${h.sizeCode}` : ''} · {h.qty.toLocaleString('en-IN')} {item?.uom?.symbol ?? ''}
+                              {h.brandId ? ` · ${h.brandName ?? 'a brand'}’s earmark` : choices.some((x) => x.brandId) && h.ownership === 'OWNED' ? ' · central' : ''}
+                              {h.sizeCode ? ` · size ${h.sizeCode}` : ''}
+                              {h.grade && GRADE_WORDS[h.grade] ? ` · ${GRADE_WORDS[h.grade]}` : ''} · {h.qty.toLocaleString('en-IN')} {item?.uom?.symbol ?? ''}
                             </option>
                           ))}
                         </SmartSelect>
@@ -603,6 +773,69 @@ export function StockMoveDialog({
                       </div>
                     </td>
                   </tr>
+                  {info && info.tagged > 0 && (
+                    <tr data-grid-row="tags">
+                      <td />
+                      <td colSpan={mode === 'transfer' ? 4 : 5} className="pb-2 pt-0">
+                        <div className={`rounded-lg border p-2 ${line.tags.length < need ? 'border-amber-500/60' : 'border-border'} bg-secondary/40`}>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-foreground flex items-center gap-1.5 text-xs font-medium">
+                              <Tags size={13} /> Garment tags
+                              <span className="text-muted-foreground font-normal">
+                                · {info.tagged} of the {info.held} here are tagged
+                                {need > 0 ? ` — name at least ${need} of the pieces moving` : ' — untagged pieces can move without one'}
+                              </span>
+                            </span>
+                            <span className={`text-xs tabular-nums ${line.tags.length < need ? 'text-amber-500' : 'text-muted-foreground'}`}>
+                              {line.tags.length} named
+                            </span>
+                          </div>
+                          <div className="mt-1.5 flex flex-wrap items-start gap-2">
+                            <textarea
+                              className="form-input min-h-[38px] flex-1 font-mono text-xs"
+                              placeholder="Scan the tags here, one after another"
+                              value={scanText[i] ?? ''}
+                              onChange={(e) => setScanText((t) => ({ ...t, [i]: e.target.value }))}
+                              onBlur={() => {
+                                const codes = splitCodes(scanText[i] ?? '')
+                                if (!codes.length) return
+                                setLine(i, { tags: [...new Set([...line.tags, ...codes])] })
+                                setScanText((t) => ({ ...t, [i]: '' }))
+                              }}
+                              aria-label={`Scan tags on line ${i + 1}`}
+                            />
+                            <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setPicking(picking === i ? null : i)}>
+                              {picking === i ? 'Done picking' : 'Pick from the store'}
+                            </button>
+                            {line.tags.length > 0 && (
+                              <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setLine(i, { tags: [] })}>
+                                Clear
+                              </button>
+                            )}
+                          </div>
+                          {line.tags.length > 0 && (
+                            <p className="text-muted-foreground mt-1 break-all font-mono text-[10px]">{line.tags.join(' · ')}</p>
+                          )}
+                          {picking === i && (
+                            <div className="border-border mt-1.5 grid max-h-40 grid-cols-2 gap-x-3 overflow-y-auto rounded border p-1.5 sm:grid-cols-4">
+                              {info.codes.length === 0 && <span className="text-muted-foreground text-xs">No tag here can move now.</span>}
+                              {info.codes.map((c) => (
+                                <label key={c} className="flex items-center gap-1.5 font-mono text-[11px]">
+                                  <input
+                                    type="checkbox"
+                                    checked={line.tags.includes(c)}
+                                    onChange={(e) => setLine(i, { tags: e.target.checked ? [...line.tags, c] : line.tags.filter((x) => x !== c) })}
+                                  />
+                                  {c}
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 )
               })}
             </tbody>

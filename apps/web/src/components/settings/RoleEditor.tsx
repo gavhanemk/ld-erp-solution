@@ -169,10 +169,12 @@ export function RoleEditor({
   // The columns this module uses, in the catalogue's order.
   const columns = active ? actions.filter((a) => active.screens.some((s) => s.actions.some((x) => x.action === a.action))) : []
   const columnKeys = (action: string) =>
-    active ? active.screens.flatMap((s) => s.actions.filter((a) => a.action === action).map((a) => a.key)) : []
+    active ? active.screens.filter((s) => !s.explicit).flatMap((s) => s.actions.filter((a) => a.action === action).map((a) => a.key)) : []
   const ActiveIcon = active ? (MODULE_ICON[active.module] ?? ShieldCheck) : ShieldCheck
   const activeKeys = active ? keysOf(active) : []
   const activeOn = activeKeys.filter(isOn).length
+  // What "Allow all" switches: every box but a right given only on purpose.
+  const bulkKeys = active ? active.screens.filter((s) => !s.explicit).flatMap((s) => s.actions.map((a) => a.key)) : []
 
   return (
     <FormFrame
@@ -343,7 +345,7 @@ export function RoleEditor({
               </div>
               {!readOnly && (
                 <div className="flex items-center gap-1.5">
-                  <button type="button" className="btn-secondary h-8 text-xs" onClick={() => set(activeKeys, true)}>
+                  <button type="button" className="btn-secondary h-8 text-xs" onClick={() => set(bulkKeys, true)}>
                     <Check size={13} /> Allow all
                   </button>
                   <button type="button" className="btn-ghost h-8 text-xs" onClick={() => set(activeKeys, false)}>

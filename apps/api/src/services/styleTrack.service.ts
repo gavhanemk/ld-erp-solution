@@ -177,14 +177,15 @@ async function floorOf(db: Db, styleIds: string[]) {
  * One step of the routing across the style's orders: done when every order
  * is done there, not started when none has begun, in progress otherwise. An
  * order whose route has no such step does not count; one not yet staged has
- * not started it.
+ * not started it, unless it is finished: an order finished without the floor
+ * recording its stages (its goods received straight in) is done at every step.
  */
 function stepAcross(key: string, floor: StyleFloor | undefined): { state: StepState; completed: number } {
   const states: StepState[] = []
   let completed = 0
   for (const l of floor?.lines ?? []) {
     if (!l.staged) {
-      states.push('NOT_STARTED')
+      states.push(l.finished ? 'DONE' : 'NOT_STARTED')
       continue
     }
     const here = l.steps.get(key)
@@ -193,8 +194,12 @@ function stepAcross(key: string, floor: StyleFloor | undefined): { state: StepSt
     states.push(l.finished && here.state !== 'SKIPPED' ? 'DONE' : here.state)
   }
   const live = states.filter((s) => s !== 'SKIPPED')
+  // A step none of the style's counted orders carries (the routing gained it
+  // after they were staged, or they took another route) is left out on all of
+  // them: with orders being counted it reads as left out, not as not started,
+  // or a style whose every order is finished would still look in progress.
   const state: StepState = !states.length
-    ? 'NOT_STARTED'
+    ? (floor?.lines.length ? 'SKIPPED' : 'NOT_STARTED')
     : !live.length
       ? 'SKIPPED'
       : live.every((s) => s === 'DONE')

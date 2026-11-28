@@ -1,4 +1,6 @@
-// No database access. Run: pnpm --filter api exec tsx ../../tools/check-requisition-search.ts
+// No database access. It reads the web app's own code, which uses the web's "@/" paths (#87), so it
+// runs with the web tsconfig. From apps/api: npx tsx --tsconfig ../web/tsconfig.json ../../tools/check-requisition-search.ts
+// tsx-tsconfig: ../web/tsconfig.json
 import assert from 'node:assert/strict'
 import { indexRequisitions, searchRequisitions } from '../apps/web/src/lib/requisitionSearch'
 

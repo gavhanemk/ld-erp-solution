@@ -71,13 +71,18 @@ export function forgetAccess(userId?: string) {
  */
 export function grantsAllow(grants: readonly string[], key: string, action: string): boolean {
   const mod = moduleOf(key)
+  // A right granted only by name: the module's grant never stands in for it.
+  if (EXPLICIT.has(key)) return grants.includes(`${key}:${action}`)
   if (grants.includes(`${key}:${action}`) || grants.includes(`${mod}:${action}`) || grants.includes(`${mod}:*`)) return true
   if (key === mod) {
     const suffix = `:${action}`
-    return grants.some((g) => g.startsWith(`${mod}.`) && g.endsWith(suffix))
+    return grants.some((g) => g.startsWith(`${mod}.`) && g.endsWith(suffix) && !EXPLICIT.has(g.split(':')[0]))
   }
   return false
 }
+
+/** The screens granted only by name (accessCatalog `explicit`). */
+const EXPLICIT = new Set([...SCREENS.values()].filter((sc) => sc.explicit).map((sc) => sc.key))
 
 /** The same, for a permission written whole: "purchase:create". */
 export const grantsAllowKey = (grants: readonly string[], permission: string) => {
@@ -90,7 +95,8 @@ export function expandGrants(grants: readonly string[]): string[] {
   const out = new Set<string>()
   for (const g of grants) {
     const [key, action] = g.split(':')
-    const screens = [...SCREENS.values()].filter((sc) => moduleOf(sc.key) === key && sc.key !== key)
+    // A right granted only by name is never spelt out from a module-wide grant.
+    const screens = [...SCREENS.values()].filter((sc) => moduleOf(sc.key) === key && sc.key !== key && !sc.explicit)
     if (key.includes('.') || !screens.length) {
       out.add(g)
       continue

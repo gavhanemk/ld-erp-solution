@@ -25,7 +25,9 @@ import { findHsn, gstRateFor, loadHsnIndex } from '../apps/api/src/lib/hsn'
 import { chargesStillToBill, createInvoice, invoiceSchema, loadBillable } from '../apps/api/src/routes/invoice.routes'
 import { gstr1 } from '../apps/api/src/services/accounts/gst.service'
 import { postDocument } from '../apps/api/src/services/accounts/posting.service'
-import { chargeRowOf } from '../apps/api/src/services/salesCharges'
+import { chargeRowOf, overridesMade } from '../apps/api/src/services/salesCharges'
+import { expandGrants, grantsAllow } from '../apps/api/src/lib/access'
+import { chargeSnapshot } from '../packages/shared/src/index'
 
 let pass = 0
 let fail = 0
@@ -49,6 +51,7 @@ function refuseUnlessLocal() {
 
 async function main() {
   refuseUnlessLocal()
+  const chargesBefore = await prisma.salesQuotationCharge.count()
   await prisma
     .$transaction(
       async (tx) => {
@@ -75,6 +78,7 @@ async function main() {
           { treatment: transport.taxTreatment, follows: transport.followsGoodsRate },
         )
 
+        const overrider = await tx.user.findFirstOrThrow({ select: { id: true, name: true } })
         const order = (charges: unknown[], extra: Record<string, unknown> = {}) =>
           prepareOrder(
             tx,
@@ -85,8 +89,13 @@ async function main() {
               charges,
               ...extra,
             }),
-            { piecesOnly: true },
+            // As a person with the "Override Sales Charge GST" right (28 Nov 2026), who is recorded on it.
+            { piecesOnly: true, canOverride: true, by: { id: overrider.id } },
           )
+
+        // A row's GST changed on the form (Advanced Tax Settings, #71): an override with its reason.
+        const ON_TOP = { mode: 'INHERIT' as const, treatment: 'EXCLUSIVE' as const, gstRate: 0, taxCategory: 'TAXABLE' as const, reason: 'check: GST added on top' }
+        const NO_GST = { mode: 'NONE' as const, treatment: 'NON_TAXABLE' as const, gstRate: 0, taxCategory: 'NON_GST' as const, reason: 'check: no GST on it' }
 
         // ── The business's case: ₹1,200 of transport, GST included (the charge type's own setting) ──
         const a = await order([{ chargeTypeId: transport.id, amount: 1200 }])
@@ -97,11 +106,11 @@ async function main() {
         check('order: CGST = SGST = ₹7,588.57 (₹7,560 on the shirts + ₹28.57 inside the transport), goods taxable ₹3,02,400', N(a.header.cgst) === 7588.57 && N(a.header.sgst) === 7588.57 && N(a.header.taxableAmount) === 302400 && N(a.header.roundOff) === 0, a.header)
 
         // ── GST added on top, as before ──
-        const b = await order([{ chargeTypeId: transport.id, amount: 1200, taxTreatment: 'EXCLUSIVE' }])
+        const b = await order([{ chargeTypeId: transport.id, amount: 1200, taxOverride: ON_TOP }])
         check('order: GST added on top when the row says so: ₹3,18,780, ₹60 on the transport', N(b.header.totalAmount) === 318780 && N(b.charges[0].cgst) + N(b.charges[0].sgst) === 60 && N(b.charges[0].netAmount) === 1200, b.charges[0])
 
         // ── No GST ──
-        const c = await order([{ chargeTypeId: transport.id, amount: 1200, taxTreatment: 'NON_TAXABLE' }])
+        const c = await order([{ chargeTypeId: transport.id, amount: 1200, taxOverride: NO_GST }])
         check('order: no GST: ₹3,18,720, CGST = SGST = ₹7,560 (none on the charge)', N(c.header.totalAmount) === 318720 && N(c.header.cgst) === 7560 && N(c.charges[0].cgst) === 0 && N(c.charges[0].netAmount) === 1200 && c.charges[0].taxTreatment === 'NON_TAXABLE', c.charges[0])
 
         // ── Across states ──
@@ -112,7 +121,7 @@ async function main() {
         const e = await order(
           [
             { chargeTypeId: transport.id, amount: 1200 },
-            { chargeTypeId: packing.id, amount: 500, taxTreatment: 'EXCLUSIVE' },
+            { chargeTypeId: packing.id, amount: 500, taxOverride: ON_TOP },
           ],
           { discountAmount: 2400 },
         )
@@ -134,15 +143,17 @@ async function main() {
             lines: [{ itemId: item.id, qty: 800, unitPrice: 378 }],
             charges: [
               { chargeTypeId: transport.id, amount: 1200 },
-              { chargeTypeId: packing.id, amount: 300, taxTreatment: 'NON_TAXABLE' },
+              { chargeTypeId: packing.id, amount: 300, taxOverride: NO_GST },
             ],
           }),
           (await tx.user.findFirstOrThrow({ select: { id: true } })).id,
+          true,
         )
         const qBack = await tx.salesQuotation.findUniqueOrThrow({ where: { id: q.id }, include: { charges: { orderBy: { sortOrder: 'asc' } } } })
         check('quotation: saved with its charges, each with its treatment, value and GST', qBack.charges.length === 2 && qBack.charges[0].taxTreatment === 'INCLUSIVE' && N(qBack.charges[0].netAmount) === 1142.86 && qBack.charges[1].taxTreatment === 'NON_TAXABLE' && N(qBack.charges[1].netAmount) === 300, qBack.charges)
         check('quotation: total ₹3,19,020 = ₹3,02,400 + ₹15,120 + ₹1,200 incl. + ₹300 no GST', N(qBack.totalAmount) === 319020 && N(qBack.cgst) === 7588.57, { total: qBack.totalAmount, cgst: qBack.cgst })
-        const fromQuote = await order(qBack.charges.map((ch) => ({ chargeTypeId: ch.chargeTypeId, amount: N(ch.amount), taxTreatment: ch.taxTreatment })))
+        // Made from the quotation: each charge points at the quotation's own row, and keeps it.
+        const fromQuote = await order(qBack.charges.map((ch) => ({ chargeTypeId: ch.chargeTypeId, amount: N(ch.amount), sourceChargeId: ch.id })), { quotationId: q.id })
         check('order from the quotation: its charges carried as they were, the same total to the rupee', N(fromQuote.header.totalAmount) === N(qBack.totalAmount) && fromQuote.charges.map((x) => x.taxTreatment).join() === 'INCLUSIVE,NON_TAXABLE', { order: fromQuote.header.totalAmount, quote: qBack.totalAmount })
 
         // ── The invoice: the order billed whole, into the books and GSTR-1 ──
@@ -150,9 +161,11 @@ async function main() {
         const userId = (await tx.user.findFirstOrThrow({ select: { id: true } })).id
         const co = await tx.company.findFirstOrThrow({ select: { id: true } })
         await tx.company.update({ where: { id: co.id }, data: { booksStartDate: new Date(Date.now() - 3 * 86_400_000), booksLockedUpTo: null } })
+        // The packing charge's master as it stands before the order below overrides its GST.
+        const packingBefore = await tx.chargeType.findUniqueOrThrow({ where: { id: packing.id } })
         const io = await order([
           { chargeTypeId: transport.id, amount: 1200 },
-          { chargeTypeId: packing.id, amount: 300, taxTreatment: 'NON_TAXABLE' },
+          { chargeTypeId: packing.id, amount: 300, taxOverride: NO_GST },
         ])
         const it = await tx.item.findUniqueOrThrow({ where: { id: item.id }, select: { name: true, uomId: true } })
         const stamp = Date.now()
@@ -175,6 +188,37 @@ async function main() {
         const ip1 = inv.charges.find((x) => x.chargeTypeId === packing.id)
         check('invoice: total ₹3,19,020, CGST = SGST = ₹7,588.57, goods taxable ₹3,02,400 — the same as the order', N(inv.totalAmount) === 319020 && N(inv.totalAmount) === N(so.totalAmount) && N(inv.cgst) === 7588.57 && N(inv.sgst) === 7588.57 && N(inv.taxableAmount) === 302400, { total: inv.totalAmount, cgst: inv.cgst, taxable: inv.taxableAmount })
         check('invoice: transport ₹1,200 kept as typed, value ₹1,142.86, GST included; packing ₹300, no GST', it1?.taxTreatment === 'INCLUSIVE' && N(it1?.amount) === 1200 && N(it1?.netAmount) === 1142.86 && N(it1?.cgst) === 28.57 && ip1?.taxTreatment === 'NON_TAXABLE' && N(ip1?.netAmount) === 300 && N(ip1?.cgst) + N(ip1?.sgst) + N(ip1?.igst) === 0, inv.charges)
+
+
+        // ── The "Override Sales Charge GST" right (28 Nov 2026) ──
+        const packOrder = io.charges.find((x) => x.chargeTypeId === packing.id)
+        const rec = chargeSnapshot(packOrder?.taxSnapshot)?.overrides?.[0]
+        check(
+          'override: kept on the order\'s charge with who, when, why, and the setting before and after',
+          !!rec && rec.by === overrider.id && rec.byName === overrider.name && rec.reason === 'check: no GST on it' && !!rec.at && rec.from.gstApplicable === true && rec.to.gstApplicable === false && rec.to.treatment === 'NON_TAXABLE',
+          rec,
+        )
+        check('override: one audit entry for it, none for the transport (not changed)', overridesMade(io.charges as never).length === 1 && overridesMade(io.charges as never)[0].chargeTypeId === packing.id, overridesMade(io.charges as never))
+        const packingAfter = await tx.chargeType.findUniqueOrThrow({ where: { id: packing.id } })
+        check('override: the charge master is not changed', JSON.stringify({ ...packingAfter, updatedAt: null }) === JSON.stringify({ ...packingBefore, updatedAt: null }), { before: packingBefore.taxTreatment, after: packingAfter.taxTreatment })
+        check(
+          'override: carried onto the invoice as the order approved it, by someone without the right, with its record',
+          ip1?.taxTreatment === 'NON_TAXABLE' && chargeSnapshot(ip1?.taxSnapshot)?.overrides?.length === 1 && overridesMade(inv.charges as never, io.charges as never).length === 0,
+          ip1?.taxSnapshot,
+        )
+        let refused = ''
+        try {
+          await prepareOrder(
+            tx,
+            createSalesOrderSchema.parse({ customerId: customer.id, placeOfSupplyCode: home, lines: [{ itemId: item.id, totalQty: 800, unitPrice: 378 }], charges: [{ chargeTypeId: packing.id, amount: 300, taxOverride: NO_GST }] }),
+            { piecesOnly: true, canOverride: false },
+          )
+        } catch (e) {
+          refused = `${(e as { code?: string }).code}: ${(e as Error).message}`
+        }
+        check('override without the right: refused, naming the right to ask for', refused.startsWith('CHARGE_TAX_FORBIDDEN') && refused.includes('Override Sales Charge GST'), refused)
+        check('the right is given only by name: Sales-wide edit does not include it, nor Masters edit', !grantsAllow(['sales:edit', 'sales:*', 'masters:edit'], 'sales.charge-gst', 'edit') && grantsAllow(['sales.charge-gst:edit'], 'sales.charge-gst', 'edit'))
+        check('…a role saved with Sales-wide edit is not given it, and it alone does not open the rest of Sales', !expandGrants(['sales:edit']).includes('sales.charge-gst:edit') && !grantsAllow(['sales.charge-gst:edit'], 'sales', 'edit'))
 
         const v = await tx.voucher.findUnique({
           where: { sourceType_sourceId: { sourceType: 'SALES_INVOICE', sourceId: inv.id } },
@@ -238,7 +282,8 @@ async function main() {
     .catch((e) => {
       if (e !== ROLLBACK) throw e
     })
-  const left = await prisma.salesQuotationCharge.count()
+  // Against what there was before: the database may hold quotations of its own.
+  const left = (await prisma.salesQuotationCharge.count()) - chargesBefore
   const transport = await prisma.chargeType.findFirst({ where: { name: 'Transport Charges' }, select: { taxTreatment: true } })
   check('nothing kept: no quotation charge saved, Transport Charges back to GST-inclusive', left === 0 && transport?.taxTreatment === 'INCLUSIVE', { left, transport })
   console.log(`\n${pass} passed, ${fail} failed`)

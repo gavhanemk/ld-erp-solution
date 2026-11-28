@@ -34,6 +34,8 @@ export interface DirectStyle {
   code: string
   name: string
   brandType: string
+  /** The brand it is made under, by the brand itself. */
+  brandId?: string | null
   colors: string[]
 }
 

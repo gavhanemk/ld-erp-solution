@@ -294,7 +294,8 @@ export const createItemSchema = z
     code: code.optional(),
     name,
     description: optionalText,
-    type: ItemTypeEnum,
+    // Left out, it comes from the category (Masters → Items asks only for that).
+    type: ItemTypeEnum.optional(),
     categoryId: z.string().min(1, 'Choose a category from the list'),
     uomId: z.string().min(1, 'Choose a unit — pieces, metres, kilograms and so on'),
     // The department that normally uses it. Optional; null clears it.
@@ -353,12 +354,13 @@ export const createItemSchema = z
         path: ['styleId'],
       })
     }
-    // A colour on anything else is a fabric's (lib/fabric), checked against
-    // its category when it is saved, where the category can be looked up.
-    if (v.type !== 'FINISHED_GOOD' && v.styleId) {
+    // With no type sent it comes from the category, and the save checks the
+    // style against that. A colour on anything else is a fabric's or thread's
+    // (lib/fabric), checked against its category when it is saved.
+    if (v.type && v.type !== 'FINISHED_GOOD' && v.styleId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'A style only applies to finished goods — clear it, or change the item type',
+        message: 'A style only applies to finished goods — clear it, or file the item under Finished Goods',
         path: ['styleId'],
       })
     }
@@ -590,6 +592,19 @@ export const createWarehouseSchema = z.object({
       })
       .optional()
   ),
+  /*
+   * What kind of place it is, so its stock can be told apart: raw material,
+   * finished goods, held for QC, rejected, scrap… A process floor is always
+   * work in progress, and a sample store sample.
+   */
+  kind: z.preprocess(
+    (v) => (v === '' || v === null ? undefined : v),
+    z
+      .enum(['GENERAL', 'RAW_MATERIAL', 'WIP', 'FINISHED_GOODS', 'QC_HOLD', 'REJECTED', 'SCRAP', 'JOB_WORK', 'TRANSIT', 'SAMPLE'], {
+        errorMap: () => ({ message: 'Pick what kind of store it is' }),
+      })
+      .optional()
+  ),
 })
 export const updateWarehouseSchema = createWarehouseSchema.partial()
 
@@ -624,6 +639,8 @@ export const createDepartmentSchema = z.object({
   code: code.optional(),
   name,
   isActive,
+  /** The department it rolls up into as a cost centre: Line QC into Quality Control. Blank at the top. */
+  parentId: z.preprocess((v) => (v === '' ? null : v), z.string().optional().nullable()),
 })
 export const updateDepartmentSchema = createDepartmentSchema.partial()
 
@@ -795,10 +812,24 @@ export const updateItemCategorySchema = createItemCategorySchema.partial()
 export const createBrandSchema = z.object({
   companyId: z.string().min(1, 'Company is required'),
   name,
+  /** Short and unique (LD, ST, VH); made from the name when left out. New style codes start with it. */
+  code: z
+    .string()
+    .trim()
+    .transform((v) => v.toUpperCase())
+    .refine((v) => v === '' || /^[A-Z0-9]{1,8}$/.test(v), 'A brand code is up to 8 letters or digits')
+    .optional()
+    .nullable(),
   type: BrandTypeEnum,
   description: optionalText,
   logoUrl: z.string().url().optional().nullable(),
   isActive,
+  /** The own brand B2B and job work are booked under. Only one. */
+  isDefault: z.boolean().optional(),
+  /** Where its finished goods come in by default. */
+  defaultWarehouseId: z.string().optional().nullable(),
+  /** The name its profit centre goes by in Accounts ("LD Cotton Mills — B2B & Job Work"). Not a brand column. */
+  profitCentreName: z.string().trim().max(60).optional().nullable(),
 })
 export const updateBrandSchema = createBrandSchema.partial()
 

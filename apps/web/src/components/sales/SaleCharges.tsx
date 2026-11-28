@@ -1,6 +1,7 @@
 'use client'
 
 import { ChargeTaxDetails, taxOverridePayload } from '../purchase/ChargeTaxDetails'
+import { can } from '@/lib/api'
 import { chargeConfigOf, savedChargeConfig, type ChargeMasterConfig, type ChargeTaxSnapshot } from '@ld-erp/shared'
 
 import { Plus, Trash2 } from 'lucide-react'
@@ -85,7 +86,10 @@ export function chargesToSave(rows: SaleChargeDraft[], typeById: Map<string, Sal
   return chargesToPrice(rows, typeById).map(c => {
     const row = rows.find(r => r.key === c.key)!
     return { chargeTypeId: row.chargeTypeId, amount: c.amount, amountMode: row.amountMode ?? 'FIXED',
-      sourceChargeId: row.sourceChargeId, taxOverride: taxOverridePayload(row.taxOverride) }
+      sourceChargeId: row.sourceChargeId, taxOverride: taxOverridePayload(row.taxOverride),
+      // A row not taken from the saved document (added, or picked again) is priced here from today's
+      // master: the server prices it the same way, never from a saved row of that type (25 Nov rule).
+      fresh: row.sourceChargeId ? undefined : true }
   })
 }
 
@@ -184,7 +188,7 @@ export function SaleCharges({
                 <div className="flex justify-end gap-1" role="group" aria-label={`${label} ${i + 1} amount type`}>
                   {(['FIXED', 'PERCENT'] as const).map(mode => <button type="button" key={mode} disabled={disabled} aria-pressed={(c.amountMode ?? 'FIXED') === mode} className="btn-ghost px-2 text-xs" onClick={() => set(c.key, { amountMode: mode })}>{mode === 'FIXED' ? '₹' : '%'}</button>)}
                 </div>
-                <ChargeTaxDetails config={config} priced={p ? { ...p, amount: p.net } : undefined}
+                <ChargeTaxDetails mayOverride={can('sales.charge-gst', 'edit')} requireReason config={config} priced={p ? { ...p, amount: p.net } : undefined}
                   onOverride={disabled ? undefined : value => set(c.key, { taxOverride: value })} />
               </div>
             )}

@@ -31,6 +31,7 @@ import purchaseDashboardRoutes from './routes/purchase-dashboard.routes'
 import purchaseTdsRoutes from './routes/purchase-tds.routes'
 import reportsRoutes from './routes/reports.routes'
 import inventoryRoutes from './routes/inventory.routes'
+import brandStockRoutes from './routes/brandStock.routes'
 import statementRoutes from './routes/statements.routes'
 import packageRoutes from './routes/packages.routes'
 import retailRoutes from './routes/retail.routes'
@@ -42,6 +43,7 @@ import stockCountRoutes from './routes/stockCount.routes'
 import finishedGoodsRoutes from './routes/finishedGoods.routes'
 import productionRoutes from './routes/production.routes'
 import accountsRoutes from './routes/accounts.routes'
+import allocationRoutes from './routes/allocation.routes'
 import hrRoutes from './routes/hr.routes'
 import samplingRoutes from './routes/sampling.routes'
 import approvalRoutes from './routes/approvals.routes'
@@ -320,6 +322,7 @@ app.use('/api/purchase', authMiddleware, purchaseRoutes)
 app.use('/api/reports', authMiddleware, reportsRoutes)
 // Statements for a customer or a job worker, ahead of the inventory router.
 app.use('/api/inventory/statements', authMiddleware, statementRoutes)
+app.use('/api/inventory/reallocations', authMiddleware, brandStockRoutes)
 app.use('/api/inventory', authMiddleware, inventoryRoutes)
 // Labelled packages of stock with QR stickers: scan, issue, move, split.
 app.use('/api/packages', authMiddleware, packageRoutes)
@@ -336,6 +339,7 @@ app.use('/api/stock-counts', authMiddleware, stockCountRoutes)
 // under Inventory's permissions, kept out of inventory.routes.ts.
 app.use('/api/finished-goods', authMiddleware, finishedGoodsRoutes)
 app.use('/api/production', authMiddleware, productionRoutes)
+app.use('/api/accounts/allocation', authMiddleware, allocationRoutes)
 app.use('/api/accounts', authMiddleware, accountsRoutes)
 app.use('/api/hr', authMiddleware, hrRoutes)
 app.use('/api/sampling', authMiddleware, samplingRoutes)

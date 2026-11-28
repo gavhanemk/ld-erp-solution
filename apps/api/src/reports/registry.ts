@@ -11,6 +11,7 @@ import { tdsRegister } from './definitions/tds-register'
 import { SALES_REPORTS } from './definitions/sales'
 import { stockSummary } from './definitions/stock-summary'
 import { fabricStock } from './definitions/fabric-stock'
+import { inventoryMatrix } from './definitions/inventory-matrix'
 import { stockMovement } from './definitions/stock-movement'
 import { itemStockLedger } from './definitions/item-stock-ledger'
 import { reorderStatus } from './definitions/reorder-status'
@@ -23,6 +24,9 @@ import { itc04Sent } from './definitions/itc04-sent'
 import { itc04Received } from './definitions/itc04-received'
 import { customerMaterialStock } from './definitions/customer-material-stock'
 import { stockCountVariance } from './definitions/stock-count-variance'
+import { stockReconciliation } from './definitions/stock-reconciliation'
+import { wipReconciliation } from './definitions/wip-reconciliation'
+import { costCentreExpenses, expenseAllocationRegister, unallocatedEntries } from './definitions/accounts-dimensions'
 import { packetBalances } from './definitions/packet-balances'
 import { fifoExceptions } from './definitions/fifo-exceptions'
 
@@ -50,6 +54,7 @@ export const REPORTS: ReportDefinition[] = [
   tdsRegister,
   // Inventory
   stockSummary,
+  inventoryMatrix,
   fabricStock,
   stockMovement,
   itemStockLedger,
@@ -63,6 +68,11 @@ export const REPORTS: ReportDefinition[] = [
   itc04Received,
   customerMaterialStock,
   stockCountVariance,
+  stockReconciliation,
+  wipReconciliation,
+  unallocatedEntries,
+  costCentreExpenses,
+  expenseAllocationRegister,
   packetBalances,
   fifoExceptions,
   ...SALES_REPORTS,

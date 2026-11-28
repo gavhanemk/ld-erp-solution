@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { recordMovement } from './stock.service'
+import { ownShare } from './brandStock.service'
 import { lockMo, postEvent, reverseEvent } from './wip.service'
 import { nextChallanNo } from './challanNo'
 import { syncProgress } from './floor.service'
@@ -809,8 +810,11 @@ export async function createCutting(
       rate = qty > 0 && pieces > 0 ? round2(((value / qty) * data.fabricUsed) / pieces) : 0
     }
     const parts = Object.keys(breakup).length ? Object.entries(breakup).map(([sizeId, qty]) => ({ sizeId, qty })) : [{ sizeId: null as string | null, qty: pieces }]
+    // Multi-brand phase 5: our own panels are the MO's brand's, like the fabric they were cut from.
+    const panelShare = theirs ? null : await ownShare(tx, (await tx.manufacturingOrder.findUnique({ where: { id: moId }, select: { brandId: true } }))?.brandId)
     for (const p of parts) {
       await recordMovement(tx, {
+        brandId: panelShare,
         itemId: data.panelItemId!,
         warehouseId: data.panelWarehouseId!,
         sizeId: p.sizeId,
@@ -853,6 +857,7 @@ export async function cancelCutting(tx: Db, id: string, reason: string, userId: 
   const ins = await tx.stockLedger.findMany({ where: { referenceType: 'CUTTING', referenceId: id, inQty: { gt: 0 } } })
   for (const row of ins) {
     await recordMovement(tx, {
+      brandId: row.brandId,
       itemId: row.itemId,
       warehouseId: row.warehouseId,
       sizeId: row.sizeId,

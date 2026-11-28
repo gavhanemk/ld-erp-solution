@@ -149,7 +149,31 @@ export interface ChargeTaxSnapshot {
   inputAmount: number
   basis: 'GOODS_AFTER_DISCOUNT'
   overrideReason?: string
+  /**
+   * Every change of this document's charge GST from what it would otherwise
+   * be, oldest first: who, when, why, and the setting before and after. The
+   * charge master is never changed by it.
+   */
+  overrides?: ChargeTaxOverrideRecord[]
   parts?: SaleChargePart[]
+}
+/** A charge's GST as an override found it and left it. */
+export interface ChargeTaxSetting {
+  gstApplicable: boolean
+  treatment: ChargeTaxTreatment
+  followsGoodsRate: boolean
+  ownRate: number
+  hsnCode: string | null
+  taxCategory: ChargeTaxCategory
+}
+/** One override of a document's charge GST. */
+export interface ChargeTaxOverrideRecord {
+  at: string
+  by: string | null
+  byName: string | null
+  reason: string
+  from: ChargeTaxSetting
+  to: ChargeTaxSetting
 }
 /** Read only a version we understand; old records are deliberately not inferred. */
 export function chargeSnapshot(value: unknown): ChargeTaxSnapshot | null {
@@ -589,8 +613,11 @@ export function priceSaleCharge(c: SaleChargeInput, goods: SaleGoods[], intra: b
   const basis = goods.reduce((sum, g) => sum + Math.max(0, g.taxable), 0)
   const amount = r2(Math.max(0, Number(c.amount) || 0) * (c.amountMode === 'PERCENT' ? basis / 100 : 1))
   const ownRate = Number(c.ownRate) || 0
-  if (c.gstApplicable === false || c.treatment === 'NON_TAXABLE' || (c.taxCategory && !['TAXABLE', 'UNSPECIFIED'].includes(c.taxCategory)) || amount === 0) {
-    return { key: c.key, treatment: c.treatment, amount, net: amount, gstRate: 0, cgst: 0, sgst: 0, igst: 0, tax: 0, payable: amount, parts: [], rateText: '' }
+  // No GST on it (switched off, no-GST, or a category GST does not apply to): saved and printed as
+  // no GST, never as "GST included at 0%", and kept out of the HSN table's taxable rows.
+  const noGst = c.gstApplicable === false || c.treatment === 'NON_TAXABLE' || (!!c.taxCategory && !['TAXABLE', 'UNSPECIFIED'].includes(c.taxCategory))
+  if (noGst || amount === 0) {
+    return { key: c.key, treatment: noGst ? 'NON_TAXABLE' : c.treatment, amount, net: amount, gstRate: 0, cgst: 0, sgst: 0, igst: 0, tax: 0, payable: amount, parts: [], rateText: '' }
   }
   const shares = c.followsGoodsRate ? shareSaleCharge(amount, goods, ownRate) : [{ amount, gstRate: ownRate }]
   const parts = shares.map((p) => (c.treatment === 'INCLUSIVE' ? includedIn(p.amount, p.gstRate, intra) : addedOn(p.amount, p.gstRate, intra)))

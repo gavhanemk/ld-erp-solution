@@ -46,6 +46,8 @@ const daysAgo = (today: string, n: number) => new Date(new Date(`${today}T00:00:
 type Dash = Exclude<Awaited<ReturnType<typeof accountsDashboard>>, { booksStart: null }> & { money: { cash: number } }
 
 async function main() {
+  const [{ current_database: dbName }] = await prisma.$queryRaw<{ current_database: string }[]>`select current_database()`
+  if (dbName !== 'lderp_demo') { console.error('Refusing to run: not lderp_demo.'); process.exitCode = 2; return }
   await ensureChart(true)
   try {
     await prisma.$transaction(
@@ -84,6 +86,10 @@ async function run(tx: Prisma.TransactionClient) {
 
   // ── The books, with every document in them ───────────────────
   await tx.company.update({ where: { id: company.id }, data: { booksStartDate: dayValue('2024-04-01') } })
+  // This check starts from empty books inside a transaction it rolls back. The database refuses to
+  // delete vouchers (Phase 7) unless the session says so outright, which only these checks do.
+  await tx.$executeRawUnsafe(`SELECT set_config('ld_erp.allow_books_delete', 'on', true)`)
+  await tx.allocationRunSource.deleteMany({ where: { voucher: { sourceType: { not: null } } } })
   await tx.voucher.deleteMany({ where: { sourceType: { not: null } } })
   const docs: Array<[SourceType, string]> = [
     ...(await tx.salesInvoice.findMany({ select: { id: true } })).map((d) => ['SALES_INVOICE', d.id] as [SourceType, string]),
@@ -167,6 +173,9 @@ async function run(tx: Prisma.TransactionClient) {
   // A bank payment 40 days old, never matched to the statement.
   const bankLedger = await tx.ledger.findFirstOrThrow({ where: { partyType: 'BANK', isActive: true }, select: { id: true } })
   const charges = await tx.ledger.findFirstOrThrow({ where: { systemKey: 'BANK_CHARGES' }, select: { id: true } })
+  // Bank charges are an expense: they take the ledger's usual department (phase 3).
+  const usualDept = await tx.department.findFirstOrThrow({ where: { isActive: true }, select: { id: true } })
+  await tx.ledger.update({ where: { id: charges.id }, data: { departmentId: usualDept.id } })
   const user = await tx.user.findFirstOrThrow({ where: { status: 'ACTIVE' }, select: { id: true } })
   const old = await writeVoucher(
     tx,

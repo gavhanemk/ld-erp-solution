@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
 import { accessFor, grantsAllow, isAdminRole } from '../lib/access'
 import { SCREENS, SUPER_ROLE, moduleOf, screenForPath } from '../lib/accessCatalog'
+import { runAs } from '../lib/requestContext'
 
 export interface AuthRequest extends Request {
   user?: {
@@ -64,7 +65,8 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
       permissions: access.grants,
       superAdmin: access.superAdmin,
     }
-    next()
+    // The rest of the request runs as this user, so the stock writer can say who moved stock.
+    runAs(req.user.id ?? null, () => next())
   } catch (err) {
     next(err)
   }
@@ -97,6 +99,13 @@ export function userCan(user: AuthRequest['user'], key: string, action: string):
   if (user.superAdmin || user.role === SUPER_ROLE) return true
   return grantsAllow(user.permissions ?? [], key, action)
 }
+
+/**
+ * The dedicated right to change an extra charge's GST on a sales document
+ * (Settings → People: "Override Sales Charge GST"). Granted only by name;
+ * Masters edit rights have nothing to do with it.
+ */
+export const mayOverrideSaleChargeGst = (user: AuthRequest['user']) => userCan(user, 'sales.charge-gst', 'edit')
 
 const ACTION_WORDS: Record<string, string> = {
   view: 'open',

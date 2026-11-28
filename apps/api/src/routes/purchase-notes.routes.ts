@@ -1121,7 +1121,7 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
         billId: true,
         returnId: true,
         purchaseReturn: { select: { returnNumber: true } },
-        lines: { select: { itemId: true, qty: true, unitPrice: true } },
+        lines: { select: { itemId: true, qty: true, unitPrice: true, grnLineId: true, billLineId: true } },
       },
     })
     if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
