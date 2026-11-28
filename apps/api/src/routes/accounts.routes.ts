@@ -24,6 +24,7 @@ import {
 } from '../services/accounts/books.service'
 import { cancelVoucher, moneyGroupIds, reverseVoucher, voucherSchema, writeVoucher } from '../services/accounts/voucher.service'
 import { checkDatesChange, datesChangeOf, periodEvents, recordDatesChange, refuseClosedRegroup, REOPEN_RIGHT, tellAdminsReopened } from '../services/accounts/period.service'
+import { describeChange, type VoucherSnap } from '../services/accounts/revision.service'
 import { pendingDocuments, postPending, SOURCE_LABEL } from '../services/accounts/posting.service'
 import { outstanding } from '../services/accounts/outstanding.service'
 import { bankReco, setBankDates } from '../services/accounts/bankReco.service'
@@ -844,7 +845,7 @@ router.get('/vouchers/:id', requirePermission(MODULE, 'view'), async (req, res) 
     prisma.voucherRevision.findMany({
       where: { voucherId: req.params.id },
       orderBy: { revision: 'asc' },
-      select: { revision: true, action: true, reason: true, source: true, changedByName: true, changedAt: true, periodEventId: true },
+      select: { revision: true, action: true, reason: true, source: true, changedByName: true, changedAt: true, periodEventId: true, snapshot: true },
     }),
     prisma.voucher.findUnique({
       where: { id: req.params.id },
@@ -857,12 +858,31 @@ router.get('/vouchers/:id', requirePermission(MODULE, 'view'), async (req, res) 
   // Since revisions are kept, a change writes one and an audit entry just after; only the older entries add to them.
   const firstKept = revisions[0]?.changedAt
   const history = firstKept ? audit.filter((h) => h.action === 'CREATE' || h.createdAt < firstKept) : audit
+  // What each change did: the voucher before it against the voucher before the next one, or as it stands now.
+  const now = revisions.length
+    ? await prisma.voucher.findUnique({ where: { id: req.params.id }, include: { lines: { orderBy: { sortOrder: 'asc' }, include: { billRefs: true } } } })
+    : null
+  const snaps = [...revisions.map((r) => r.snapshot as unknown as VoucherSnap), ...(now ? [now as unknown as VoucherSnap] : [])]
+  const idsOf = (pick: (l: VoucherSnap['lines'][number]) => string | null) => [...new Set(snaps.flatMap((s) => s.lines.map(pick)).filter((x): x is string => !!x))]
+  const [ledgerNames, brandNames, deptNames] = revisions.length
+    ? await Promise.all([
+        prisma.ledger.findMany({ where: { id: { in: idsOf((l) => l.ledgerId) } }, select: { id: true, name: true } }),
+        prisma.costCentre.findMany({ where: { id: { in: idsOf((l) => l.costCentreId) } }, select: { id: true, name: true } }),
+        prisma.department.findMany({ where: { id: { in: idsOf((l) => l.departmentId) } }, select: { id: true, name: true } }),
+      ])
+    : [[], [], []]
+  const named = (rows: Array<{ id: string; name: string }>, id: string | null, none: string) => (id ? (rows.find((r) => r.id === id)?.name ?? '(no longer in the chart)') : none)
+  const names = {
+    ledger: (id: string) => named(ledgerNames, id, ''),
+    brand: (id: string | null) => named(brandNames, id, 'Not split'),
+    department: (id: string | null) => named(deptNames, id, 'none'),
+  }
   res.json({
     success: true,
     data: {
       ...shapeVoucher(v, money),
       history,
-      revisions,
+      revisions: revisions.map(({ snapshot: _kept, ...r }, i) => ({ ...r, changes: describeChange(snaps[i], snaps[i + 1], names) })),
       reversalOf: links?.reversalOf ? { ...links.reversalOf, date: istDay(links.reversalOf.date) } : null,
       reversals: (links?.reversals ?? []).map((r) => ({ ...r, date: istDay(r.date) })),
     },

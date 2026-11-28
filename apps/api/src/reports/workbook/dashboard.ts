@@ -724,6 +724,36 @@ export function buildDashboard(
     row += 1
   }
 
+  // ── Each item by who holds it: its quantity in its own unit, then its value ──
+  if (analysis.crosstab && analysis.crosstab.rows.length) {
+    const x = analysis.crosstab
+    sectionRule(ws, row, x.title)
+    row += 1
+    const heads = [x.rowLabel, 'Unit', ...x.columns, 'Value ₹']
+    heads.forEach((h, i) => {
+      const cell = ws.getCell(row, 1 + i)
+      cell.value = h
+      cell.font = { name: 'Calibri', size: 9, bold: true, color: { argb: INK.muted } }
+      cell.alignment = { horizontal: i < 2 ? 'left' : 'right' }
+    })
+    row += 1
+    for (const r of x.rows) {
+      ws.getCell(row, 1).value = r.detail ? `${r.label} (${r.detail})` : r.label
+      ws.getCell(row, 2).value = r.unit
+      const figures: Array<[number | null, string]> = [...r.qty.map((v) => [v, FMT.qty] as [number | null, string]), [r.value[r.value.length - 1] ?? null, FMT.moneyWhole]]
+      figures.forEach(([v, fmt], i) => {
+        const cell = ws.getCell(row, 3 + i)
+        // A dash, not a nought: none of it is held there.
+        cell.value = v == null ? '—' : v
+        if (v != null) cell.numFmt = fmt
+        cell.alignment = { horizontal: 'right' }
+      })
+      for (let c = 1; c <= heads.length; c++) ws.getCell(row, c).font = { name: 'Calibri', size: 10, color: { argb: INK.body } }
+      row += 1
+    }
+    row += 1
+  }
+
   // ── Words ─────────────────────────────────────────────────────────────
   const words = (heading: string, lines: string[], colour: string) => {
     if (!lines.length) return

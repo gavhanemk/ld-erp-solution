@@ -57,6 +57,8 @@ interface Detail {
     changedByName: string | null
     changedAt: string
     periodEventId: string | null
+    /** What the change did, in words: "Amount ₹500.00 → ₹750.00". Empty when no figure changed. */
+    changes: string[]
   }>
   /** The voucher this reversing entry undoes. */
   reversalOf: { id: string; voucherNo: string; date: string } | null
@@ -118,6 +120,9 @@ export function VoucherView({
   onOpenLedger?: (ledgerId: string) => void
 }) {
   const [v, setV] = useState<Detail | null>(null)
+  // A voucher and its reversing entry open each other: the one shown, starting with the one asked for.
+  const [shownId, setShownId] = useState<string | null>(voucherId)
+  useEffect(() => setShownId(voucherId), [voucherId])
   const [error, setError] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [reversing, setReversing] = useState(false)
@@ -132,15 +137,15 @@ export function VoucherView({
   }, !!voucherId)
 
   useEffect(() => {
-    if (!voucherId) return
+    if (!shownId) return
     setV(null)
     setError(null)
     setAsItWas(null)
     api
-      .get<{ data: Detail }>(`/accounts/vouchers/${voucherId}`)
+      .get<{ data: Detail }>(`/accounts/vouchers/${shownId}`)
       .then((r) => setV(r.data))
       .catch((err) => setError(apiErrorMessage(err, 'Could not load the voucher.')))
-  }, [voucherId])
+  }, [shownId])
 
   if (!voucherId || !mounted) return null
   const typedHere = v && !v.sourceType
@@ -203,6 +208,8 @@ export function VoucherView({
                 <span className="font-mono">{v?.voucherNo ?? 'Voucher'}</span>
                 {v && <span className={KIND_BADGE[v.kind]}>{v.kindLabel}</span>}
                 {v?.status === 'CANCELLED' && <span className="badge-danger">Cancelled</span>}
+                {reversedBy && <span className="badge-warning">Reversed</span>}
+                {v?.reversalOf && <span className="badge-neutral">Reversing entry</span>}
               </h2>
               {v && (
                 <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
@@ -269,19 +276,30 @@ export function VoucherView({
                 </p>
               )}
               {reversedBy && (
-                <div className="border-border bg-muted/30 rounded-lg border p-3 text-sm">
+                <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-sm">
                   <p className="text-foreground font-medium">
-                    Undone by the reversing entry <span className="font-mono">{reversedBy.voucherNo}</span> of {day(reversedBy.date)}
+                    Reversed on {day(reversedBy.date)} by{' '}
+                    <button type="button" className="text-primary font-mono hover:underline" onClick={() => setShownId(reversedBy.id)}>
+                      {reversedBy.voucherNo}
+                    </button>
                   </p>
-                  <p className="text-muted-foreground mt-0.5">This voucher stays as it was, in its own period. Cancel the reversing entry if it was a mistake.</p>
+                  <p className="text-muted-foreground mt-1">
+                    {reversedBy.voucherNo} has the same ledgers with every debit and credit swapped, so the two together come to nothing in the books. This voucher is not changed or deleted: it stays in its own period as the record of what was first entered. If the reversal was a mistake, cancel {reversedBy.voucherNo} and this voucher counts again.
+                  </p>
                 </div>
               )}
               {v.reversalOf && (
                 <div className="border-border bg-muted/30 rounded-lg border p-3 text-sm">
                   <p className="text-foreground font-medium">
-                    Reverses <span className="font-mono">{v.reversalOf.voucherNo}</span> of {day(v.reversalOf.date)}, line for line
+                    This entry reverses{' '}
+                    <button type="button" className="text-primary font-mono hover:underline" onClick={() => setShownId(v.reversalOf!.id)}>
+                      {v.reversalOf.voucherNo}
+                    </button>{' '}
+                    of {day(v.reversalOf.date)}
                   </p>
-                  <p className="text-muted-foreground mt-0.5">It is not altered; cancelled, it puts {v.reversalOf.voucherNo} back in force.</p>
+                  <p className="text-muted-foreground mt-1">
+                    Every debit of {v.reversalOf.voucherNo} is a credit here and every credit a debit, so the two together come to nothing. Cancel this entry if {v.reversalOf.voucherNo} should count again.
+                  </p>
                 </div>
               )}
               {v.status === 'CANCELLED' && (
@@ -349,68 +367,103 @@ export function VoucherView({
               )}
               <div>
                 <p className="form-label flex items-center gap-1.5">
-                  <History size={13} /> History
+                  <History size={13} /> What happened to this voucher
                 </p>
-                <ul className="text-muted-foreground space-y-1 text-xs">
-                  <li>
-                    Entered by {v.createdBy?.name ?? 'the system'} on {when(v.createdAt)}
+                <p className="text-muted-foreground mb-2 text-xs">
+                  Nothing in the books is ever overwritten. Each change below is kept with who made it, when and why, and the voucher as it was before can be opened again.
+                </p>
+                <ol className="border-border divide-border divide-y rounded-lg border text-xs">
+                  <li className="flex flex-col gap-1 px-3 py-2 sm:flex-row sm:gap-3">
+                    <span className="text-muted-foreground shrink-0 tabular-nums sm:w-36">{when(v.createdAt)}</span>
+                    <p className="text-foreground min-w-0 flex-1">
+                      <span className="font-semibold">Entered</span>
+                      <span className="text-muted-foreground"> by {v.createdBy?.name ?? 'the system'}</span>
+                    </p>
                   </li>
                   {v.history
                     .filter((h) => h.action !== 'CREATE')
                     .map((h) => (
-                      <li key={h.id}>
-                        {h.after?.status === 'CANCELLED' ? 'Cancelled' : 'Altered'} by {h.user.name} on {when(h.createdAt)}
-                        {h.after?.reason ? ` — ${h.after.reason}` : ''}
-                        {h.before?.amount !== undefined && h.after?.amount !== undefined && h.before.amount !== h.after.amount
-                          ? ` — ₹${inr(h.before.amount)} → ₹${inr(h.after.amount)}`
-                          : ''}
+                      <li key={h.id} className="flex flex-col gap-1 px-3 py-2 sm:flex-row sm:gap-3">
+                        <span className="text-muted-foreground shrink-0 tabular-nums sm:w-36">{when(h.createdAt)}</span>
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <p className="text-foreground">
+                            <span className="font-semibold">{h.after?.status === 'CANCELLED' ? 'Cancelled' : 'Altered'}</span>
+                            <span className="text-muted-foreground"> by {h.user.name}</span>
+                          </p>
+                          {h.after?.reason && <p className="text-muted-foreground">Why: “{h.after.reason}”</p>}
+                          {h.before?.amount !== undefined && h.after?.amount !== undefined && h.before.amount !== h.after.amount && (
+                            <p className="text-foreground">
+                              Amount ₹{inr(h.before.amount)} → ₹{inr(h.after.amount)}
+                            </p>
+                          )}
+                        </div>
                       </li>
                     ))}
                   {v.revisions.map((r) => (
-                    <li key={r.revision}>
-                      <span className="text-foreground font-mono">Rev {r.revision}</span> · {REVISION_LABEL[r.action]} by {r.changedByName ?? 'the system'} on {when(r.changedAt)}
-                      {sourceWords(r.source) && ` (${sourceWords(r.source)})`}
-                      {r.reason ? ` — ${r.reason}` : ''}
-                      {r.periodEventId && ' · while a closed period stood reopened'}{' '}
-                      <button type="button" className="text-primary hover:underline" onClick={() => void showRevision(r.revision)}>
-                        {asItWas?.revision === r.revision ? 'Hide' : 'See it as it was'}
-                      </button>
-                      {asItWas?.revision === r.revision && (
-                        <div className="border-border mt-1.5 mb-2 rounded-lg border p-2">
-                          <p className="text-muted-foreground mb-1">
-                            Before this change: {day(asItWas.voucher.date)} · ₹{inr(asItWas.voucher.amount)}
-                            {asItWas.voucher.status === 'CANCELLED' ? ` · cancelled${asItWas.voucher.cancelReason ? ` (${asItWas.voucher.cancelReason})` : ''}` : ''}
-                            {asItWas.voucher.narration ? ` · ${asItWas.voucher.narration}` : ''}
-                          </p>
-                          <table className="data-table w-full text-xs">
-                            <thead>
-                              <tr>
-                                <th>Ledger</th>
-                                <th>Brand / department</th>
-                                <th className="text-right">Debit ₹</th>
-                                <th className="text-right">Credit ₹</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {asItWas.voucher.lines.map((l, i) => (
-                                <tr key={i}>
-                                  <td>
-                                    {l.ledger}
-                                    {l.bills.length > 0 && <span className="text-muted-foreground"> · {l.bills.map((b) => `${BILL_KIND_LABEL[b.kind]} ${b.billNo} ₹${inr(b.amount)}`).join(', ')}</span>}
-                                    {l.bankDate && <span className="text-muted-foreground"> · in the bank {day(l.bankDate)}</span>}
-                                  </td>
-                                  <td className="text-muted-foreground">{[l.costCentre, l.department].filter(Boolean).join(' / ')}</td>
-                                  <td className="text-right tabular-nums">{amountOrBlank(l.debit)}</td>
-                                  <td className="text-right tabular-nums">{amountOrBlank(l.credit)}</td>
+                    <li key={r.revision} className="flex flex-col gap-1 px-3 py-2 sm:flex-row sm:gap-3">
+                      <span className="text-muted-foreground shrink-0 tabular-nums sm:w-36">{when(r.changedAt)}</span>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <p className="text-foreground">
+                          <span className="font-semibold">{REVISION_LABEL[r.action]}</span>
+                          <span className="text-muted-foreground">
+                            {' '}
+                            by {r.changedByName ?? 'the system'}
+                            {sourceWords(r.source) && `, ${sourceWords(r.source)}`}
+                          </span>
+                          {r.periodEventId && <span className="badge-warning ml-2">while a closed period was reopened</span>}
+                        </p>
+                        {r.reason && <p className="text-muted-foreground">Why: “{r.reason}”</p>}
+                        {r.changes.length > 0 ? (
+                          <ul className="text-foreground list-disc space-y-0.5 pl-4">
+                            {r.changes.map((c, i) => (
+                              <li key={i} className="tabular-nums">
+                                {c}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="text-muted-foreground">{r.action === 'REVERSED' ? 'The voucher itself did not change: the reversing entry undoes it.' : 'No figure on the voucher changed.'}</p>
+                        )}
+                        <button type="button" className="text-primary hover:underline" onClick={() => void showRevision(r.revision)}>
+                          {asItWas?.revision === r.revision ? 'Hide the earlier version' : 'Show the voucher as it was before this'}
+                        </button>
+                        {asItWas?.revision === r.revision && (
+                          <div className="border-border bg-muted/20 mt-1 rounded-lg border p-2">
+                            <p className="text-muted-foreground mb-1">
+                              Before this change: {day(asItWas.voucher.date)} · ₹{inr(asItWas.voucher.amount)}
+                              {asItWas.voucher.status === 'CANCELLED' ? ` · cancelled${asItWas.voucher.cancelReason ? ` (${asItWas.voucher.cancelReason})` : ''}` : ''}
+                              {asItWas.voucher.narration ? ` · ${asItWas.voucher.narration}` : ''}
+                            </p>
+                            <table className="data-table w-full text-xs">
+                              <thead>
+                                <tr>
+                                  <th>Ledger</th>
+                                  <th>Brand / department</th>
+                                  <th className="text-right">Debit ₹</th>
+                                  <th className="text-right">Credit ₹</th>
                                 </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
+                              </thead>
+                              <tbody>
+                                {asItWas.voucher.lines.map((l, i) => (
+                                  <tr key={i}>
+                                    <td>
+                                      {l.ledger}
+                                      {l.bills.length > 0 && <span className="text-muted-foreground"> · {l.bills.map((b) => `${BILL_KIND_LABEL[b.kind]} ${b.billNo} ₹${inr(b.amount)}`).join(', ')}</span>}
+                                      {l.bankDate && <span className="text-muted-foreground"> · in the bank {day(l.bankDate)}</span>}
+                                    </td>
+                                    <td className="text-muted-foreground">{[l.costCentre, l.department].filter(Boolean).join(' / ')}</td>
+                                    <td className="text-right tabular-nums">{amountOrBlank(l.debit)}</td>
+                                    <td className="text-right tabular-nums">{amountOrBlank(l.credit)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
                     </li>
                   ))}
-                </ul>
+                </ol>
               </div>
             </>
           )}

@@ -82,6 +82,8 @@ export const inventoryMatrix: ReportDefinition = {
     by: 'value',
     limit: 12,
   },
+  // Its own tables (stock value by brand; each item by brand) say it better than totals by item.
+  grids: false,
   pivot: {
     rows: ['item', 'designNo', 'colour'],
     values: ['value', 'freeValue'],
@@ -280,8 +282,10 @@ export const inventoryMatrix: ReportDefinition = {
     for (const r of all) shareNames.set(r.brandId ?? '', r.share)
     for (const i of issued) if (!shareNames.has(i.brandId ?? '')) shareNames.set(i.brandId ?? '', i.brandId ? ((await tx.brand.findUnique({ where: { id: i.brandId }, select: { name: true } }))?.name ?? 'A brand') : 'Central')
     const shareKeys = [...shareNames.keys()].sort((a, b) => Number(a !== '') - Number(b !== '') || shareNames.get(a)!.localeCompare(shareNames.get(b)!))
+    // As a column heading: central stock said in full, each brand by its name.
+    const shareColumns = shareKeys.map((k) => (k === '' ? 'Central stock' : shareNames.get(k)!))
     const sum = (rs: typeof all, f: (r: (typeof all)[number]) => number) => round2(rs.reduce((t, r) => t + f(r), 0))
-    const columns = ['Physical', ...BUCKETS.map((b) => BUCKET_LABEL[b]), 'Reserved', 'Free', 'Issued to open MOs']
+    const measures = ['Physical stock (all of it)', ...BUCKETS.map((b) => BUCKET_LABEL[b]), 'Reserved for requisitions', 'Free to use', 'Issued to open MOs']
     const valuesFor = (rs: typeof all, issuedValue: number) => [
       sum(rs, (r) => r.value),
       ...BUCKETS.map((b) => sum(rs, (r) => r.bucketValue[b])),
@@ -290,10 +294,42 @@ export const inventoryMatrix: ReportDefinition = {
       round2(issuedValue),
     ]
     const issuedOf = (k: string) => issued.filter((i) => (i.brandId ?? '') === k).reduce((t, i) => t + Number(i.value), 0)
-    const matrixRows = [
-      { label: 'Company', values: valuesFor(all, issued.reduce((t, i) => t + Number(i.value), 0)) },
-      ...shareKeys.map((k) => ({ label: shareNames.get(k)!, values: valuesFor(all.filter((r) => (r.brandId ?? '') === k), issuedOf(k)) })),
-    ].map((r) => ({ label: r.label, values: r.values.map((v) => (Math.abs(v) < 0.005 ? null : v)) }))
+    // Brands across, kinds of stock down: each column one share, the last the company.
+    const byShareValues = [...shareKeys.map((k) => valuesFor(all.filter((r) => (r.brandId ?? '') === k), issuedOf(k))), valuesFor(all, issued.reduce((t, i) => t + Number(i.value), 0))]
+    const matrixRows = measures.map((label, mi) => ({ label, values: byShareValues.map((vs) => (Math.abs(vs[mi]) < 0.005 ? null : vs[mi])) }))
+
+    // Item by item, the same shares across: how much of each item is central stock and how much each brand's.
+    const byItem = new Map<string, { label: string; detail: string; code: string; unit: string; cells: Map<string, { qty: number; value: number }>; value: number }>()
+    for (const r of all) {
+      const e = byItem.get(r.itemCode) ?? {
+        label: r.item,
+        detail: [r.designNo ? `Design No: ${r.designNo}` : '', r.colour ? `Colour: ${r.colour}` : ''].filter(Boolean).join(' · '),
+        code: r.itemCode,
+        unit: r.uom,
+        cells: new Map<string, { qty: number; value: number }>(),
+        value: 0,
+      }
+      const c = e.cells.get(r.brandId ?? '') ?? { qty: 0, value: 0 }
+      c.qty += r.physical
+      c.value += r.value
+      e.cells.set(r.brandId ?? '', c)
+      e.value += r.value
+      byItem.set(r.itemCode, e)
+    }
+    const shown = (n: number, places: number) => (Math.abs(n) < 0.0005 ? null : Math.round(n * 10 ** places) / 10 ** places)
+    const crosstabRows = [...byItem.values()]
+      .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label))
+      .map((e) => {
+        const cells = shareKeys.map((k) => e.cells.get(k))
+        return {
+          label: e.label,
+          detail: e.detail,
+          code: e.code,
+          unit: e.unit,
+          qty: [...cells.map((c) => shown(c?.qty ?? 0, 3)), shown(cells.reduce((t, c) => t + (c?.qty ?? 0), 0), 3)],
+          value: [...cells.map((c) => shown(c?.value ?? 0, 2)), shown(e.value, 2)],
+        }
+      })
 
     const value = sum(all, (r) => r.value)
     const central = sum(all.filter((r) => r.brandId === null), (r) => r.value)
@@ -327,9 +363,10 @@ export const inventoryMatrix: ReportDefinition = {
         exceptions: negative.length
           ? [{ label: 'Shares below nothing', value: negative.length, format: 'integer', basis: 'run Stock Reconciliation', tone: 'bad' }]
           : [],
-        matrix: matrixRows.length > 1
-          ? { title: 'Stock value — the company and each share', rowLabel: 'Share', columns, rows: matrixRows, format: 'money' }
+        matrix: all.length
+          ? { title: 'Stock value by brand, ₹', rowLabel: 'Stock', columns: [...shareColumns, 'Company'], rows: matrixRows, format: 'money' }
           : undefined,
+        crosstab: crosstabRows.length ? { title: 'Each item by brand', rowLabel: 'Item', columns: [...shareColumns, 'Total'], rows: crosstabRows } : undefined,
         panels: (
           [
             { title: 'Stock value by share', question: 'composition', format: 'money', points: topWithRest(byShare, 6) },

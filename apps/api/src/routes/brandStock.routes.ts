@@ -47,6 +47,7 @@ const include = {
   toBrand: { select: { id: true, name: true } },
   mo: { select: { id: true, moNumber: true } },
   mr: { select: { id: true, mrNumber: true } },
+  dc: { select: { id: true, dcNumber: true } },
   requestedBy: { select: { id: true, name: true } },
   approvedBy: { select: { name: true } },
   rejectedBy: { select: { name: true } },
@@ -62,7 +63,8 @@ const include = {
 type Doc = Prisma.StockReallocationGetPayload<{ include: typeof include }>
 const shape = (d: Doc) => ({
   ...d,
-  kindWords: KIND_WORDS[d.kind],
+  // An automatic one is made by an MO's issue or by a challan going out: say which.
+  kindWords: d.kind === 'AUTO' && d.dc ? 'Automatic for a challan' : KIND_WORDS[d.kind],
   from: d.fromBrand?.name ?? 'Central stock',
   to: d.toBrand?.name ?? 'Central stock',
   value: Math.round(d.lines.reduce((t, l) => t + Number(l.qty) * Number(l.unitRate ?? 0), 0) * 100) / 100,
@@ -70,17 +72,37 @@ const shape = (d: Doc) => ({
 
 /**
  * GET /api/inventory/reallocations?status=&kind=&warehouseId=&brandId=&q=&page=&limit=
+ *
+ * status=CLOSED is refused, withdrawn or reversed; kind=MANUAL is what people
+ * raised (earmarks, moves, releases), leaving out the automatic ones. q finds
+ * the number, the reason, the MO, the challan or an item on it.
  */
 router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25))
   const q = String(req.query.q ?? '').trim()
+  const status = String(req.query.status ?? '')
+  const kind = String(req.query.kind ?? '')
   const where: Prisma.StockReallocationWhereInput = {
-    ...(req.query.status ? { status: String(req.query.status) as never } : {}),
-    ...(req.query.kind ? { kind: String(req.query.kind) as never } : {}),
+    ...(status === 'CLOSED' ? { status: { in: ['REJECTED', 'CANCELLED', 'REVERSED'] } } : status ? { status: status as never } : {}),
+    ...(kind === 'MANUAL' ? { kind: { in: ['EARMARK', 'MOVE', 'RELEASE'] } } : kind ? { kind: kind as never } : {}),
     ...(req.query.warehouseId ? { warehouseId: String(req.query.warehouseId) } : {}),
     ...(req.query.brandId ? { OR: [{ fromBrandId: String(req.query.brandId) }, { toBrandId: String(req.query.brandId) }] } : {}),
-    ...(q ? { AND: [{ OR: [{ number: { contains: q, mode: 'insensitive' } }, { reason: { contains: q, mode: 'insensitive' } }, { mo: { moNumber: { contains: q, mode: 'insensitive' } } }] }] } : {}),
+    ...(q
+      ? {
+          AND: [
+            {
+              OR: [
+                { number: { contains: q, mode: 'insensitive' } },
+                { reason: { contains: q, mode: 'insensitive' } },
+                { mo: { moNumber: { contains: q, mode: 'insensitive' } } },
+                { dc: { dcNumber: { contains: q, mode: 'insensitive' } } },
+                { lines: { some: { item: { OR: [{ name: { contains: q, mode: 'insensitive' } }, { code: { contains: q, mode: 'insensitive' } }] } } } },
+              ],
+            },
+          ],
+        }
+      : {}),
   }
   const [rows, total, pending] = await Promise.all([
     prisma.stockReallocation.findMany({ where, include, orderBy: [{ createdAt: 'desc' }], skip: (page - 1) * limit, take: limit }),

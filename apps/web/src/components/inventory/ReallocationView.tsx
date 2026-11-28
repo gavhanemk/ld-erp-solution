@@ -26,6 +26,10 @@ export interface Reallocation {
   warehouse: { id: string; name: string }
   mo: { id: string; moNumber: string } | null
   mr: { id: string; mrNumber: string } | null
+  /** The challan an automatic one was made for, when a dispatch made it. */
+  dc: { id: string; dcNumber: string } | null
+  fromBrand: { id: string; name: string } | null
+  toBrand: { id: string; name: string } | null
   requestedBy: { id: string; name: string }
   approvedBy: { name: string } | null
   rejectedBy: { name: string } | null
@@ -176,6 +180,7 @@ export function ReallocationView({ id, onClose, onChanged }: { id: string; onClo
               <p className="text-muted-foreground sm:text-right">
                 {doc.mo ? `For ${doc.mo.moNumber}` : ''}
                 {doc.mr ? ` · ${doc.mr.mrNumber}` : ''}
+                {doc.dc ? `For challan ${doc.dc.dcNumber}` : ''}
               </p>
             </div>
             <p className="text-sm">
