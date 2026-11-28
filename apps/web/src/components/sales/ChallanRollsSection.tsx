@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { CheckCircle2, Info, ScanBarcode, Trash2 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
@@ -8,11 +8,13 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 
 /**
- * Rolls & bales, on a job-work challan (the user's decision of 28 Nov 2026):
- * the customer's rolls the pieces were made from, each with the pieces made
- * from it, their grade and the bale they are packed in — what the old ERP's
- * job challan listed barcode by barcode. A roll is scanned (its barcode
- * typed) or picked; its metres and design come from the customer's receipt.
+ * Fabric rolls used, on a job-work challan (the user's decision of 28 Nov
+ * 2026): the customer's fabric rolls the garments were cut from, each with the
+ * pieces cut from it, their grade and the bale they are packed in — what the
+ * old ERP's job challan listed barcode by barcode. A roll is scanned (its
+ * barcode typed) or picked; its metres and design come from the customer's
+ * receipt. The rolls sit under the garment they were cut into, named as in
+ * "Pieces to send" above, so the two read as one: fabric in, garments out.
  */
 
 export interface ChallanRollDraft {
@@ -46,17 +48,14 @@ export function ChallanRollsSection({
   orderLines,
   rows,
   onChange,
-  piecesSent,
 }: {
   soId: string
   /** The challan being changed: its own pieces do not count as sent before. */
   challanId: string | null
-  /** The order's garments, for a roll's "which garment" when there are several. */
-  orderLines: Array<{ soLineId: string; label: string }>
+  /** The order's garments, as "Pieces to send" names them, with their pieces on the challan now. */
+  orderLines: Array<{ soLineId: string; label: string; pieces: { A: number; B: number } }>
   rows: ChallanRollDraft[]
   onChange: (rows: ChallanRollDraft[]) => void
-  /** Pieces on the challan now: fresh and B-grade. */
-  piecesSent: { A: number; B: number }
 }) {
   const [rolls, setRolls] = useState<RollOption[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -134,16 +133,29 @@ export function ChallanRollsSection({
     return { A, B, meters, bales: bales.size, rolls: counted.size }
   }, [rows, rollOf])
 
-  const offA = Math.round((totals.A - piecesSent.A) * 100) / 100
-  const offB = Math.round((totals.B - piecesSent.B) * 100) / 100
   const notOn = (rolls ?? []).filter((r) => !rows.some((x) => x.rollId === r.id))
 
+  // The rolls under the garment they were cut into, in the order's order; a
+  // roll whose garment is not chosen yet (several garments) comes last.
+  const groups = useMemo(() => {
+    const at = rows.map((r, i) => ({ r, i }))
+    const out = orderLines.map((line) => {
+      const mine = at.filter((x) => x.r.soLineId === line.soLineId || (!multiLine && !x.r.soLineId))
+      const sum = (g: 'A' | 'B') => Math.round(mine.filter((x) => x.r.grade === g).reduce((t, x) => t + (Number(x.r.pieces) || 0), 0) * 100) / 100
+      return { key: line.soLineId, label: line.label, pieces: line.pieces, rows: mine, A: sum('A'), B: sum('B') }
+    })
+    const unset = multiLine ? at.filter((x) => !x.r.soLineId) : []
+    if (unset.length) out.push({ key: '', label: '', pieces: { A: 0, B: 0 }, rows: unset, A: 0, B: 0 })
+    return out.filter((g) => g.rows.length > 0)
+  }, [rows, orderLines, multiLine])
+  const cols = multiLine ? 9 : 8
+
   return (
-    <Section icon={ScanBarcode} title="Rolls & bales">
+    <Section icon={ScanBarcode} title="Fabric rolls used">
       <p className="text-muted-foreground mb-3 text-xs">
-        The customer&apos;s rolls these pieces were made from, as the job challan lists them: scan a roll&apos;s barcode (or
-        pick it), then enter the pieces made from it. Its metres and design come from their receipt. The bale number is kept
-        for each roll you add next.
+        Which of the customer&apos;s fabric rolls the garments above were cut from; the challan prints them. Scan or pick a
+        roll, then enter the pieces cut from it. Its metres and design come from the customer&apos;s receipt; the bale no.
+        stays for the next roll you add.
       </p>
 
       {error && <p className="text-destructive mb-2 text-sm">{error}</p>}
@@ -171,7 +183,7 @@ export function ChallanRollsSection({
                   scanIn()
                 }
               }}
-              placeholder="Scan a roll barcode, Enter"
+              placeholder="Scan a fabric roll barcode, Enter"
               aria-label="Scan or type a roll's barcode, then press Enter"
             />
           </div>
@@ -223,16 +235,46 @@ export function ChallanRollsSection({
                 <th className="w-8 px-3 py-2 font-medium">#</th>
                 <th className="px-2 py-2 font-medium">Barcode</th>
                 <th className="px-2 py-2 font-medium">Design · Lot</th>
-                <th className="px-2 py-2 text-right font-medium">Metres</th>
+                <th className="px-2 py-2 text-right font-medium">Fabric (m)</th>
                 {multiLine && <th className="px-2 py-2 font-medium">Garment</th>}
                 <th className="w-28 px-2 py-2 font-medium">Grade</th>
                 <th className="w-28 px-2 py-2 font-medium">Bale</th>
-                <th className="w-28 px-2 py-2 text-right font-medium">Pieces</th>
+                <th className="w-32 px-2 py-2 text-right font-medium">Pcs cut from it</th>
                 <th className="w-10" />
               </tr>
             </thead>
             <tbody className="divide-border/60 divide-y">
-              {rows.map((r, i) => {
+              {groups.map((g) => {
+                const want = g.pieces.A + g.pieces.B
+                const match = g.key !== '' && g.A === g.pieces.A && g.B === g.pieces.B
+                return (
+                  <Fragment key={g.key || 'unset'}>
+                    {/* The garment these rolls were cut into, named as in "Pieces to send". */}
+                    <tr className="bg-secondary/30">
+                      <td colSpan={cols} className="px-3 py-1.5 text-xs">
+                        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5">
+                          {g.key ? (
+                            <span className="text-muted-foreground">
+                              Cut into <span className="text-foreground font-medium">{g.label}</span>
+                            </span>
+                          ) : (
+                            <span className="warn-text">Garment not chosen yet: pick it on each roll below.</span>
+                          )}
+                          {g.key &&
+                            (match ? (
+                              <span className="flex items-center gap-1.5 text-emerald-500">
+                                <CheckCircle2 size={13} /> {fmt(want)} pcs on this challan, all from these rolls
+                              </span>
+                            ) : (
+                              <span className="warn-text">
+                                From these rolls {fmt(g.A + g.B)} pcs · on this challan {fmt(want)} pcs
+                                {g.B || g.pieces.B ? ` (B-grade ${fmt(g.B)} vs ${fmt(g.pieces.B)})` : ''}
+                              </span>
+                            ))}
+                        </div>
+                      </td>
+                    </tr>
+                    {g.rows.map(({ r, i }) => {
                 const roll = rollOf.get(r.rollId)
                 return (
                   <tr key={`${r.rollId}-${i}`}>
@@ -286,6 +328,9 @@ export function ChallanRollsSection({
                     </td>
                   </tr>
                 )
+                    })}
+                  </Fragment>
+                )
               })}
             </tbody>
           </table>
@@ -295,18 +340,9 @@ export function ChallanRollsSection({
       {rows.length > 0 && (
         <div className="mt-2.5 flex flex-wrap items-center gap-x-5 gap-y-1 text-xs">
           <span className="text-muted-foreground">
-            {totals.rolls} {totals.rolls === 1 ? 'roll' : 'rolls'} · {totals.bales} {totals.bales === 1 ? 'bale' : 'bales'} · {fmt(totals.meters, 3)} m
+            {totals.rolls} fabric {totals.rolls === 1 ? 'roll' : 'rolls'} · {fmt(totals.meters, 3)} m · {totals.bales}{' '}
+            {totals.bales === 1 ? 'bale' : 'bales'} · {fmt(totals.A + totals.B)} pcs cut from them
           </span>
-          {offA === 0 && offB === 0 ? (
-            <span className="flex items-center gap-1.5 text-emerald-500">
-              <CheckCircle2 size={13} /> The rolls account for all {fmt(totals.A + totals.B)} pcs being sent.
-            </span>
-          ) : (
-            <span className="warn-text">
-              Pieces from the rolls: {fmt(totals.A)} fresh{totals.B || piecesSent.B ? `, ${fmt(totals.B)} B-grade` : ''}; on the challan:{' '}
-              {fmt(piecesSent.A)} fresh{totals.B || piecesSent.B ? `, ${fmt(piecesSent.B)} B-grade` : ''}.
-            </span>
-          )}
         </div>
       )}
     </Section>

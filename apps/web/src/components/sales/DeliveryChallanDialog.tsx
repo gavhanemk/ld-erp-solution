@@ -396,7 +396,6 @@ export function DeliveryChallanDialog({
   // Job work: each roll named needs its pieces, and its garment when the order has several.
   const jobWork = Boolean(prep?.order.isJobWork)
   const badRoll = jobWork ? rolls.findIndex((r) => !(Number(r.pieces) > 0) || ((prep?.lines.length ?? 0) > 1 && !r.soLineId)) : -1
-  const piecesSent = { A: rows.reduce((t, r) => t + r.nowA, 0), B: rows.reduce((t, r) => t + r.nowB, 0) }
 
   const blocker = !prep
     ? null
@@ -791,7 +790,9 @@ export function DeliveryChallanDialog({
                         </p>
                       ) : null}
                       {lineShort && (
-                        <p className="text-destructive mt-1.5 text-xs">Not enough loose in this store. It can be saved as a draft, but not dispatched yet.</p>
+                        <p className="text-destructive mt-1.5 text-xs">
+                          Not enough {l.sealed ? 'loose ' : ''}in this store. It can be saved as a draft, but not dispatched yet.
+                        </p>
                       )}
                     </div>
                   ))}
@@ -802,13 +803,17 @@ export function DeliveryChallanDialog({
                 <ChallanRollsSection
                   soId={o.id}
                   challanId={saved?.id ?? null}
-                  orderLines={(prep?.lines ?? []).map((l) => ({
-                    soLineId: l.soLineId,
-                    label: `${l.item.code} — ${l.item.name}${l.color || l.item.color ? ` · ${l.color || l.item.color}` : ''}`,
-                  }))}
+                  orderLines={rows.map(({ l, nowA, nowB }) => {
+                    // Named as "Pieces to send" names it; the colour once, when the name already carries it.
+                    const colour = l.color || l.item.color
+                    return {
+                      soLineId: l.soLineId,
+                      label: `${l.item.code} — ${l.item.name}${colour && !l.item.name.includes(colour) ? ` · ${colour}` : ''}`,
+                      pieces: { A: nowA, B: nowB },
+                    }
+                  })}
                   rows={rolls}
                   onChange={setRolls}
-                  piecesSent={piecesSent}
                 />
               )}
 
