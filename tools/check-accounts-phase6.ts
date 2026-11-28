@@ -46,6 +46,8 @@ const daysAgo = (today: string, n: number) => new Date(new Date(`${today}T00:00:
 type Dash = Exclude<Awaited<ReturnType<typeof accountsDashboard>>, { booksStart: null }> & { money: { cash: number } }
 
 async function main() {
+  const [{ current_database: dbName }] = await prisma.$queryRaw<{ current_database: string }[]>`select current_database()`
+  if (dbName !== 'lderp_demo') { console.error('Refusing to run: not lderp_demo.'); process.exitCode = 2; return }
   await ensureChart(true)
   try {
     await prisma.$transaction(

@@ -9,6 +9,8 @@ export const CHECKS_CUSTOMER = 'ZZTEST Checks Customer'
 
 /** The checks' own customer (no credit limit), made once through the masters API. */
 export async function checksCustomer(prisma: typeof Prisma, call: Call): Promise<{ id: string }> {
+  const [{ current_database: dbName }] = await prisma.$queryRaw<{ current_database: string }[]>`select current_database()`
+  if (dbName !== 'lderp_demo') throw new Error('Refusing to run: not lderp_demo.')
   const have = await prisma.customer.findFirst({ where: { name: CHECKS_CUSTOMER }, select: { id: true, isActive: true, isBlacklisted: true } })
   if (have) {
     if (!have.isActive || have.isBlacklisted) await call('PATCH', `/masters/customers/${have.id}`, { isActive: true, isBlacklisted: false })

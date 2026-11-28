@@ -27,6 +27,8 @@ const ROLLBACK = new Error('ROLLBACK')
 const stepSelect = { id: true, sequence: true, operationId: true, kind: true, isQcStep: true, skippedAt: true, name: true, execution: true } as const
 
 async function main() {
+  const [{ current_database: dbName }] = await prisma.$queryRaw<{ current_database: string }[]>`select current_database()`
+  if (dbName !== 'lderp_demo') { console.error('Refusing to run: not lderp_demo.'); process.exitCode = 2; return }
   const style = await prisma.style.findUnique({ where: { code: 'LD-SH-2601' }, select: { id: true, code: true } })
   if (!style) throw new Error('Needs the demo style LD-SH-2601')
   const runsBefore = await prisma.styleStepRun.count()
