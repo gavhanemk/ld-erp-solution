@@ -225,7 +225,7 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
       day0,
       day1,
     ),
-    tx.costCentre.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true, brandId: true, brand: { select: { type: true } } } }),
+    tx.costCentre.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true, brandId: true, isActive: true, brand: { select: { type: true, isActive: true } } } }),
     tx.department.findMany({ select: { id: true, name: true, parent: { select: { name: true } } } }),
   ])
   const splitOf = (rows: Array<{ ledgerId: string; amount: number }>, key: (r: never) => string) => {
@@ -289,13 +289,18 @@ export async function profitAndLoss(tx: Tx, asked: { from: string; to: string },
    * with the opening balances, or a value the accountant set), stays with
    * what no brand carries. The columns always add up to the company.
    *
-   * A column for each of our own brands' profit centres; a customer's brand
-   * only when something was booked to it in the period, so nothing is hidden.
+   * A column for each of our own brands in use. A brand switched off, and a
+   * customer's brand, shows only when something was booked to it, or its
+   * stock stood or moved, in the period: so nothing is hidden, and a brand
+   * long retired does not sit there empty.
    */
-  const booked = new Set(centreRows.filter((r) => r.amount !== 0).map((r) => r.costCentreId))
-  const shown = centres.filter((c) => c.brand?.type !== 'CUSTOM' || booked.has(c.id))
-  const columns = [...shown.map((c) => ({ id: c.id, name: c.name })), { id: '', name: 'Not split' }]
   const [openShares, closeShares, moved] = await Promise.all([inventoryValueByShare(tx, dayBefore(from)), inventoryValueByShare(tx, to), shareTransfers(tx, from, to)])
+  const booked = new Set(centreRows.filter((r) => r.amount !== 0).map((r) => r.costCentreId))
+  const stirred = (brandId: string | null) =>
+    !!brandId && ((openShares.get(brandId) ?? 0) !== 0 || (closeShares.get(brandId) ?? 0) !== 0 || !!moved.get(brandId)?.in || !!moved.get(brandId)?.out)
+  const inUse = (c: (typeof centres)[number]) => c.brand?.type !== 'CUSTOM' && c.isActive !== false && c.brand?.isActive !== false
+  const shown = centres.filter((c) => booked.has(c.id) || inUse(c) || stirred(c.brandId))
+  const columns = [...shown.map((c) => ({ id: c.id, name: c.name })), { id: '', name: 'Not split' }]
   // A brand's share is shown under its profit centre; one with none (yet) stays with Not split.
   const brandOfCentre = new Map(shown.filter((c) => c.brandId).map((c) => [c.id, c.brandId!]))
   const placed = new Set(brandOfCentre.values())
