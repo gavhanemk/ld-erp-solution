@@ -259,7 +259,7 @@ export default function ProfitLossPage() {
             <button type="button" className="flex items-center gap-1.5 text-left" onClick={() => toggle(r.block!)} aria-expanded={isOpen}>
               {isOpen ? <ChevronDown size={14} className="text-muted-foreground" /> : <ChevronRight size={14} className="text-muted-foreground" />}
               <span className="text-foreground font-medium">{r.label}</span>
-              <span className="text-muted-foreground text-[11px]">
+              <span className="text-muted-foreground hidden text-[11px] sm:inline">
                 {r.ledgerCount} {r.ledgerCount === 1 ? 'ledger' : 'ledgers'}
               </span>
             </button>
@@ -276,7 +276,42 @@ export default function ProfitLossPage() {
     )
   }
 
-  /** One account: its two sides side by side, padded so the totals meet on one line. */
+  /** One side of an account on its own, for a phone: its rows, then its total. */
+  const side = (label: string, rows: Row[], total: number) => (
+    <table className="data-table w-full table-fixed text-[13px]">
+      <colgroup>
+        <col />
+        <col className="w-20" />
+        <col className="w-28" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>{label}</th>
+          <th className="text-right">₹</th>
+          <th className="text-right">Amount ₹</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.key}>{cell(r)}</tr>
+        ))}
+      </tbody>
+      <tfoot>
+        <tr className="bg-secondary/40">
+          <td className="text-foreground px-4 py-2.5 font-semibold">Total</td>
+          <td />
+          <td className="px-4 py-2.5 text-right font-semibold tabular-nums">{money(total)}</td>
+        </tr>
+      </tfoot>
+    </table>
+  )
+
+  /**
+   * One account. On a wide screen its two sides stand side by side, padded so
+   * the totals meet on one line, as SAB prints it; on a phone the Dr side
+   * comes first and the Cr side under it, each with its total, so nothing
+   * scrolls sideways.
+   */
   const account = (title: string, dr: Row[], cr: Row[], total: number) => {
     const n = Math.max(dr.length, cr.length)
     return (
@@ -292,8 +327,12 @@ export default function ProfitLossPage() {
             </p>
           )}
         </div>
-        <div className="overflow-x-auto">
-          <table className="data-table w-full min-w-[960px] table-fixed">
+        <div className="divide-border divide-y lg:hidden">
+          {side('Dr · To', dr, total)}
+          {side('Cr · By', cr, total)}
+        </div>
+        <div className="hidden overflow-x-auto lg:block">
+          <table className="data-table w-full table-fixed">
             <colgroup>
               <col />
               <col className="w-28" />

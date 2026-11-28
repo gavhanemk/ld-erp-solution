@@ -70,14 +70,15 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
    * PDF prints, on the tab beside it. `tab=report` in the address opens on
    * the detailed one, which is where the way back from the printed page goes.
    */
+  // The full report first (the owner, 28 Nov 2026); `tab=summary` opens on the figures-only summary.
   const [view, setView] = useState<'summary' | 'report'>(() =>
-    search.get('tab') === 'report' ? 'report' : 'summary'
+    search.get('tab') === 'summary' ? 'summary' : 'report'
   )
 
   /** The address for these filters and this tab, so a refresh lands where it was. */
   const keepAddress = (asked: Record<string, string>, tab: 'summary' | 'report') => {
     const q = new URLSearchParams(asked)
-    if (tab === 'report') q.set('tab', 'report')
+    if (tab === 'summary') q.set('tab', 'summary')
     const qs = q.toString()
     window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`)
   }
@@ -261,8 +262,8 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
             <div className="border-border bg-secondary inline-flex rounded-lg border p-1" role="tablist">
               {(
                 [
+                  { key: 'report', label: 'Full Report', icon: FileText },
                   { key: 'summary', label: 'Summary', icon: LayoutDashboard },
-                  { key: 'report', label: 'Detailed Report', icon: FileText },
                 ] as const
               ).map((t) => (
                 <button
