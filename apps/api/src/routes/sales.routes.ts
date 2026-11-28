@@ -53,8 +53,8 @@ const ORDER_STATUSES: SalesOrderStatus[] = [
   'CANCELLED',
 ]
 
-/** Job work is billed as a service: SAC 9988, at 5% unless the HSN master says otherwise. */
-export const JOB_WORK_SAC = '9988'
+/** Job work is billed as a service: SAC 998822 (as the old ERP printed it; the user's decision of 28 Nov 2026), at 5% unless the HSN master says otherwise. */
+export const JOB_WORK_SAC = '998822'
 export const JOB_WORK_DEFAULT_GST = 5
 
 /**
@@ -84,7 +84,7 @@ const salesOrderLineSchema = z.object({
   /**
    * On a job-work order: the SAC/HSN the job charge is billed under and its
    * GST rate. Job work is a service, so the garment's own HSN does not apply;
-   * empty means SAC 9988, at the HSN master's rate for it (5% if it has none).
+   * empty means SAC 998822, at the HSN master's rate for it (5% if it has none).
    */
   jobHsnCode: z.string().trim().max(20).optional().nullable(),
   jobGstRate: z.number().min(0).max(28).optional().nullable(),

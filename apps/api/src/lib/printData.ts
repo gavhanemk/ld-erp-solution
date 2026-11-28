@@ -1,5 +1,6 @@
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
+import { fromGstin } from './gstStates'
 
 /**
  * The letterhead and wording a printed document needs.
@@ -13,6 +14,7 @@ export interface PrintHeader {
   company: {
     name: string
     legalName: string | null
+    manufacturerOf: string | null
     address: string | null
     city: string | null
     state: string | null
@@ -47,20 +49,41 @@ export interface PrintHeader {
   }
 }
 
+/**
+ * Terms a document starts with until its template in Settings → Documents is
+ * saved with its own: shown there to edit, and printed meanwhile. The tax
+ * invoice's are the commercial terms of the mill's old invoice (28 Nov 2026).
+ */
+export const DEFAULT_TERMS: Record<string, string> = {
+  INV: [
+    'Interest will be charged @ 18% p.a. after the due date.',
+    'All payments should be made by A/c payee cheque or draft only. Do not give cash to anyone or deposit cash in our bank account.',
+    'Any claim for rate or quality should be notified within 24 hours of delivery.',
+    'Our responsibility ceases once the goods are handed over to the carriers.',
+    'Any deduction like brokerage, commission or cash discount will be on the basic amount.',
+    'If any dispute arises regarding this transaction, it shall be referred to the Fabric Suppliers Association, Mumbai, for decision under its arbitration rules, and the award made thereunder shall be binding on both parties.',
+    'Subject to Mumbai jurisdiction.',
+  ].join('\n'),
+}
+
 const DEFAULT_TITLES: Record<string, string> = {
   INV: 'TAX INVOICE',
   RCPT: 'PAYMENT RECEIPT',
   QT: 'QUOTATION',
   CN: 'CREDIT NOTE',
-  // What the buyer receives back for their PO: our word that we will make
-  // and deliver this. Not a bill, and the heading must not read like one.
-  SO: 'ORDER CONFIRMATION',
+  // What the buyer receives back for their PO. "SALES ORDER", as the mill's
+  // old system printed it (the user, 28 Nov 2026) — it was ORDER CONFIRMATION.
+  SO: 'SALES ORDER',
   PO: 'PURCHASE ORDER',
   // Not an order, and the heading is the first thing that says so. A supplier
   // holding a sheet headed PURCHASE ORDER will treat it as one.
   ENQ: 'PURCHASE REQUISITION',
+  // Goods going to the customer, job-work orders included: one title for all.
   DC: 'DELIVERY CHALLAN',
-  JW: 'DELIVERY CHALLAN (JOB WORK)',
+  // Our goods going out to a job worker (section 143, rule 55): a different
+  // document from the delivery challan, and named so it is never taken for
+  // one (the user, 28 Nov 2026). Tally calls it "Job Work Out".
+  JW: 'JOB WORK CHALLAN',
   // Samples going to the buyer: not stock and not a sale, so not the sales challan.
   SDC: 'SAMPLE DELIVERY CHALLAN',
   // What a sample cost: the buyer's statement, and our own sheet line by line.
@@ -117,6 +140,8 @@ export async function getPrintHeader(docType: string): Promise<PrintHeader> {
     company: {
       name: company.name,
       legalName: company.legalName,
+      // "Manufacturer of: ..." under the name on the tax invoice (28 Nov 2026).
+      manufacturerOf: company.manufacturerOf,
       address: company.address,
       city: company.city,
       state: company.state,
@@ -124,7 +149,9 @@ export async function getPrintHeader(docType: string): Promise<PrintHeader> {
       pincode: company.pincode,
       address2: company.address2,
       gstin: company.gstin,
-      pan: company.pan,
+      // A PAN never entered is still the one inside the GSTIN (characters 3–12),
+      // so the header prints it rather than a dash (28 Nov 2026).
+      pan: company.pan || (company.gstin && company.gstin.length >= 12 ? fromGstin(company.gstin)?.pan : null) || null,
       phone: company.phone,
       email: company.email,
       website: company.website,
@@ -141,8 +168,13 @@ export async function getPrintHeader(docType: string): Promise<PrintHeader> {
     // one, and the wording can be tuned afterwards.
     template: {
       docType,
-      title: template?.title ?? DEFAULT_TITLES[docType] ?? docType,
-      termsText: template?.termsText ?? null,
+      // A sales order template saved with the old default heading takes the new one.
+      title:
+        (docType === 'SO' && template?.title?.trim().toUpperCase() === 'ORDER CONFIRMATION' ? null : template?.title) ??
+        DEFAULT_TITLES[docType] ??
+        docType,
+      // Saved empty counts as not set: the default terms print until real ones are saved.
+      termsText: template?.termsText?.trim() ? template.termsText : (DEFAULT_TERMS[docType] ?? null),
       declaration: template?.declaration ?? null,
       footerNote: template?.footerNote ?? null,
       showHsn: template?.showHsn ?? true,

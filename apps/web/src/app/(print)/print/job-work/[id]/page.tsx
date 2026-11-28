@@ -5,21 +5,22 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import {
   StoreSheet,
-  Fact,
-  Eyebrow,
+  Dash,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
   qty,
   money,
   longDate,
+  shortDate,
   CODE,
-  GREY,
   INK,
   MUTED,
-  NAVY,
   NUM,
-  RULE,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
-import { SubLine } from '@/components/print/doc'
+import { Box, SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { itemShade, type ShadeFields } from '@/lib/items'
 
@@ -90,19 +91,25 @@ const yearOn = (d: string) => {
 }
 
 /**
- * The delivery challan that goes with our goods to a job worker.
+ * The job work challan that goes with our goods to a job worker — "Job Work
+ * Out", a different document from the delivery challan to a customer, and
+ * titled so it is never taken for one (28 Nov 2026).
  *
  * Under rule 55 of the CGST Rules it names both parties with their GSTIN, and
- * each item with HSN, quantity and value. The goods are still ours, so no tax
- * is charged; the declaration says why, and by when they must come back.
+ * each item with HSN, quantity and value. The goods are not sold, so no tax
+ * is charged; it says whose goods they are, the process, when they are due
+ * back, and the date by which section 143 needs them back.
  */
 export default function PrintJobWorkChallan() {
   const { id } = useParams<{ id: string }>()
   const [data, setData] = useState<Payload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [copy, setCopy] = useState(COPIES[0])
+  // When it was printed; read in the browser.
+  const [printedAt, setPrintedAt] = useState('')
 
   useEffect(() => {
+    setPrintedAt(new Date().toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }))
     api
       .get<{ data: Payload }>(`/inventory/job-work/${id}/print`)
       .then((res) => setData(res.data))
@@ -120,6 +127,15 @@ export default function PrintJobWorkChallan() {
   const interState = Boolean(company.stateCode && w.stateCode && company.stateCode !== w.stateCode)
   const workerAddress = [w.address, w.city, w.state, w.pincode].filter(Boolean).join(', ')
 
+  // Whose goods these are: ours, or a customer's held by us for their job work.
+  const owners = [...new Set(challan.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomer?.name ?? 'our customer'))]
+  const ours = challan.lines.some((l) => l.ownership !== 'CUSTOMER_OWNED')
+  const returnBy = yearOn(challan.challanDate)
+  // Each unit on its own, never added together: "2 mtr · 80 pcs".
+  const byUnit = new Map<string, number>()
+  for (const l of challan.lines) byUnit.set(l.item.uom?.symbol ?? '', (byUnit.get(l.item.uom?.symbol ?? '') ?? 0) + Number(l.qty))
+  const quantities = [...byUnit.entries()].map(([u, n]) => `${qty(n)}${u ? ` ${u}` : ''}`).join(' · ')
+
   const rows = challan.lines.map((l, i) => ({
     key: l.id,
     cells: {
@@ -128,17 +144,21 @@ export default function PrintJobWorkChallan() {
       desc: (
         <>
           <div style={{ fontWeight: 600 }}>{l.item.name}</div>
-          {itemShade(l.item) && <SubLine>{itemShade(l.item)}</SubLine>}
+          {(itemShade(l.item) || l.size?.code) && <SubLine>{[itemShade(l.item), l.size?.code && `Size ${l.size.code}`].filter(Boolean).join(' · ')}</SubLine>}
         </>
       ),
-      hsn: <span style={{ fontSize: '9px', color: GREY }}>{l.hsnCode ?? l.item.hsnCode ?? '—'}</span>,
-      uom: <span style={{ fontSize: '9px', color: GREY }}>{l.item.uom?.symbol ?? ''}</span>,
+      hsn: <span style={{ fontSize: '9px', ...NUM }}>{l.hsnCode ?? l.item.hsnCode ?? <Dash />}</span>,
+      uom: <span style={{ fontSize: '9px' }}>{l.item.uom?.symbol ?? ''}</span>,
       qty: <strong>{qty(l.qty)}</strong>,
-      rate: l.unitRate === null ? '—' : money(l.unitRate),
-      value: value(l) === null ? '—' : money(value(l)!),
+      // A customer's material carries no value of ours: a dash, not ₹0.00.
+      rate: l.unitRate === null || (l.ownership === 'CUSTOMER_OWNED' && !Number(l.unitRate)) ? <Dash /> : money(l.unitRate),
+      value: value(l) === null || (l.ownership === 'CUSTOMER_OWNED' && !value(l)) ? <Dash /> : money(value(l)!),
     },
   }))
 
+  // Laid out like the purchase order (27 Nov 2026): the job worker in the
+  // "To," block with the challan's facts beside it, then the store the goods
+  // left from.
   return (
     <StoreSheet
       company={company}
@@ -148,7 +168,7 @@ export default function PrintJobWorkChallan() {
       dateLabel="Challan date"
       date={longDate(challan.challanDate) ?? ''}
       backHref="/inventory/job-work"
-      backLabel="Job work"
+      backLabel="Job work out"
       banner={
         challan.cancelledAt
           ? `CANCELLED on ${longDate(challan.cancelledAt)}${challan.cancelledBy ? ` by ${challan.cancelledBy.name}` : ''}${challan.cancelReason ? ` — ${challan.cancelReason}` : ''}. The goods did not go out on this challan.`
@@ -164,83 +184,85 @@ export default function PrintJobWorkChallan() {
           </SmartSelect>
         </label>
       }
-      panels={[
+      party={{
+        heading: 'To, the job worker (consignee)',
+        name: w.name,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={workerAddress || null} />
+            <PartyLine label="GST No" value={w.gstin ?? 'Unregistered'} mono={Boolean(w.gstin)} />
+            <PartyLine label="Contact No" value={w.phone} mono />
+            <PartyLine
+              label="Place of supply"
+              value={
+                w.state
+                  ? `${w.state}${w.stateCode ? ` (${w.stateCode})` : ''}${interState ? ', inter-state' : ''}`
+                  : null
+              }
+            />
+          </>
+        ),
+        meta: [
+          ['Challan No', challan.challanNumber, true],
+          ['Challan Date', shortDate(challan.challanDate), true],
+          ['Process', challan.process],
+          ['Due back', shortDate(challan.expectedBackOn), true],
+          // Section 143: inputs not back within a year count as supplied.
+          ['Return by (GST)', shortDate(returnBy.toISOString()), true],
+          ['Vehicle No', challan.vehicleNo, true],
+          ['Transporter', challan.transporter],
+          ['LR No', challan.lrNumber, true],
+          ['Sent by', challan.sentBy?.name ?? null],
+        ],
+      }}
+      bands={[
         {
-          title: 'Job worker (consignee)',
+          icon: 'truck',
+          label: 'Sent from',
           body: (
             <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{w.name}</div>
-              {workerAddress && (
-                <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{workerAddress}</div>
-              )}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={w.gstin ?? 'Unregistered'} mono />
-                <Fact label="State" value={w.state ? `${w.state}${w.stateCode ? ` (${w.stateCode})` : ''}` : null} />
-                <Fact label="Phone" value={w.phone} />
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{challan.fromWarehouse.name}</div>
+              {challan.fromWarehouse.address && <div style={{ marginTop: '1px' }}>{challan.fromWarehouse.address}</div>}
+            </>
+          ),
+        },
+        {
+          label: 'Goods of',
+          body: (
+            <>
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>
+                {[...owners, ...(ours ? [company.name ?? ''] : [])].filter(Boolean).join(' · ')}
               </div>
-            </>
-          ),
-        },
-        {
-          title: 'Dispatch',
-          body: (
-            <>
-              <Fact label="From store" value={challan.fromWarehouse.name} />
-              <Fact label="Vehicle No" value={challan.vehicleNo} mono />
-              <Fact label="Transporter" value={challan.transporter} />
-              <Fact label="LR No" value={challan.lrNumber} mono />
-              <Fact label="Place of supply" value={w.state ? `${w.state}${interState ? ' (inter-state)' : ''}` : null} />
-            </>
-          ),
-        },
-        {
-          title: 'The job',
-          body: (
-            <>
-              <Fact label="Challan No" value={challan.challanNumber} mono />
-              <Fact label="Process" value={challan.process} />
-              <Fact label="Due back" value={longDate(challan.expectedBackOn)} />
-              <Fact label="Sent by" value={challan.sentBy?.name ?? null} />
-              <Fact label="Items" value={String(challan.lines.length)} />
+              <div style={{ marginTop: '1px' }}>
+                {owners.length
+                  ? `Their material, held by ${company.name} for job work${ours ? `; the rest is ${company.name}'s own` : ''}. Sent for processing, not sold.`
+                  : 'Our own goods, sent for processing, not sold.'}
+              </div>
             </>
           ),
         },
       ]}
       columns={COLS}
       rows={rows}
-      minRows={6}
       after={
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: '7px', marginTop: '8px' }}>
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-              <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-              <div style={{ fontSize: '10px', color: challan.notes ? GREY : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
-                {challan.notes ?? 'None.'}
-              </div>
-            </div>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '7px 11px',
-                borderTop: '1.5pt solid #000',
-                color: '#fff',
-              }}
-            >
-              <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>
-                Value of goods
-              </span>
-              <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(total)}</span>
-            </div>
-          </div>
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-            <Eyebrow style={{ color: GREY }}>Declaration</Eyebrow>
-            <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>
-              {template.declaration ??
-                `Goods sent for job work (${challan.process}) under section 143 of the CGST Act, 2017, and rule 55 of the CGST Rules, 2017. This is not a supply and no GST is charged. The goods remain the property of ${challan.lines.some((l) => l.ownership === 'CUSTOMER_OWNED') ? [...new Set(challan.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomer?.name ?? 'our customer'))].join(', ') + ', held by ' + company.name + ' for job work,' : company.name} and are to be returned, as processed goods or as they are, by ${longDate(yearOn(challan.challanDate))} — one year from this challan.`}
-            </div>
-          </div>
+          <WordsAndTotals
+            left={<Note title="Note">{challan.notes || <Dash />}</Note>}
+            totals={
+              <TotalsBox
+                rows={[
+                  { label: 'Items', value: String(challan.lines.length) },
+                  { label: 'Quantity', value: quantities || <Dash /> },
+                ]}
+                totalLabel="Value of goods"
+                total={total > 0 ? `₹ ${money(total)}` : owners.length && !ours ? "Customer's goods" : `₹ ${money(total)}`}
+              />
+            }
+          />
+          <Box title="Declaration" style={{ marginTop: '7px' }}>
+            {template.declaration ??
+              `Goods sent for job work (${challan.process}) under section 143 of the CGST Act, 2017, and rule 55 of the CGST Rules, 2017. This is not a supply and no GST is charged. The goods remain the property of ${challan.lines.some((l) => l.ownership === 'CUSTOMER_OWNED') ? [...new Set(challan.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomer?.name ?? 'our customer'))].join(', ') + ', held by ' + company.name + ' for job work,' : company.name} and are to be returned, as processed goods or as they are, by ${longDate(yearOn(challan.challanDate))} — one year from this challan.`}
+          </Box>
         </>
       }
       signatures={[
@@ -248,7 +270,7 @@ export default function PrintJobWorkChallan() {
         { role: 'Transporter', who: challan.transporter },
         { role: 'Received by job worker', who: null },
       ]}
-      footerNote={template.footerNote ?? 'Delivery challan for job work. Not a tax invoice.'}
+      footerNote={`${template.footerNote ?? 'Job work challan — goods sent for processing under section 143. Not a tax invoice; no GST charged.'}${printedAt ? ` · Printed ${printedAt}` : ''}`}
     />
   )
 }

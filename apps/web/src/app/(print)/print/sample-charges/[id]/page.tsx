@@ -3,12 +3,26 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
-import { StoreSheet, Fact, Eyebrow, money, longDate, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
+import {
+  StoreSheet,
+  Note,
+  PartyLine,
+  Terms,
+  TotalsBox,
+  WordsAndTotals,
+  money,
+  longDate,
+  shortDate,
+  INK,
+  NUM,
+  type SheetColumn,
+} from '@/components/print/StoreSheet'
+import { HAIR, SubLine } from '@/components/print/doc'
 import type { SampleCostSheet } from '@ld-erp/shared'
 
 interface Payload {
   company: Record<string, string | null>
-  template: { title: string; footerNote: string | null; declaration: string | null }
+  template: { title: string; footerNote: string | null; declaration: string | null; termsText?: string | null }
   sheet: SampleCostSheet
   finalised: { at: string; by: string | null } | null
   request: {
@@ -17,7 +31,19 @@ interface Payload {
     buyerRef: string | null
     buyerStyleRef: string | null
     season: string | null
-    customer: { name: string } | null
+    /** With the buyer's address and phone, as the request carries them. */
+    customer: {
+      name: string
+      phone?: string | null
+      billingAddress?: string | null
+      billingCity?: string | null
+      billingState?: string | null
+      billingPincode?: string | null
+      shippingAddress?: string | null
+      shippingCity?: string | null
+      shippingState?: string | null
+      shippingPincode?: string | null
+    } | null
     cancelledAt: string | null
   }
 }
@@ -51,23 +77,26 @@ export default function PrintSampleCharges() {
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not open the statement.'))
   }, [id])
   if (error) return <p style={{ padding: 48, color: INK }}>{error}</p>
-  if (!data) return <p style={{ padding: 48, color: MUTED }}>Opening the statement…</p>
+  if (!data) return <p style={{ padding: 48, color: INK }}>Opening the statement…</p>
 
   const { company, template, sheet, finalised, request } = data
+  const buyer = request.customer
+  // Where the buyer is billed, else where their samples went.
+  const buyerAddress =
+    [buyer?.billingAddress, buyer?.billingCity, buyer?.billingState, buyer?.billingPincode].filter(Boolean).join(', ') ||
+    [buyer?.shippingAddress, buyer?.shippingCity, buyer?.shippingState, buyer?.shippingPincode].filter(Boolean).join(', ')
   const requestMisc = sheet.requestCharges.reduce((t, c) => t + c.amount, 0)
   const rows = [
     ...sheet.rounds.map((r) => ({
       key: r.roundId,
       cells: {
         round: (
-          <div>
-            <div style={{ fontWeight: 600 }}>
+          <>
+            <div style={{ fontWeight: 700 }}>
               Round {r.revision} · {r.milestone || 'Sample'}
             </div>
-            <div style={{ fontSize: '9px', color: GREY }}>
-              {r.colours.map((c) => `${c.colour} ${c.pieces}`).join(' · ') || 'Nothing finished'}
-            </div>
-          </div>
+            <SubLine>{r.colours.map((c) => `${c.colour} ${c.pieces}`).join(' · ') || 'Nothing finished'}</SubLine>
+          </>
         ),
         pieces: r.pieces,
         material: money(r.material),
@@ -81,7 +110,7 @@ export default function PrintSampleCharges() {
           {
             key: 'request',
             cells: {
-              round: <div style={{ fontWeight: 600 }}>For the request as a whole</div>,
+              round: <div style={{ fontWeight: 700 }}>For the request as a whole</div>,
               pieces: '',
               material: '',
               labour: '',
@@ -92,6 +121,8 @@ export default function PrintSampleCharges() {
         ]
       : []),
   ]
+  // Laid out like the purchase order (27 Nov 2026): the buyer in the "To,"
+  // block with the statement's facts beside it, the rounds, then the totals.
   return (
     <StoreSheet
       company={company}
@@ -102,80 +133,60 @@ export default function PrintSampleCharges() {
       backHref="/sampling"
       backLabel="Sampling"
       banner={finalised ? null : 'PROVISIONAL — these charges are not finalised and may still change.'}
-      panels={[
-        {
-          title: 'To',
-          body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>
-                {request.customer?.name ?? 'Internal development'}
-              </div>
-              <Fact label="Your style" value={request.buyerStyleRef} />
-              <Fact label="Your ref." value={request.buyerRef} />
-            </>
-          ),
-        },
-        {
-          title: 'The samples',
-          body: (
-            <>
-              <Fact label="Request" value={request.number} mono />
-              <Fact label="Style" value={sheet.style ? `${sheet.style.code} · ${sheet.style.name}` : null} />
-              <Fact label="Season" value={request.season} />
-            </>
-          ),
-        },
-        {
-          title: 'In all',
-          body: (
-            <>
-              <Fact label="Pieces made" value={String(sheet.pieces)} />
-              <Fact label="A piece" value={sheet.perPiece === null ? null : `₹${money(sheet.perPiece)}`} />
-              <Fact label="Total" value={`₹${money(sheet.total)}`} />
-            </>
-          ),
-        },
-      ]}
+      party={{
+        heading: 'To,',
+        name: buyer?.name ?? 'Internal development',
+        lines: buyer ? (
+          <>
+            <PartyLine label="Address-" value={buyerAddress || null} />
+            <PartyLine label="Contact No" value={buyer.phone} mono />
+          </>
+        ) : null,
+        meta: [
+          ['Sample No', request.number, true],
+          ['Date', shortDate(finalised?.at ?? sheet.computedAt), true],
+          ['Your style', request.buyerStyleRef],
+          ['Your ref.', request.buyerRef],
+          ['Style', sheet.style ? `${sheet.style.code} · ${sheet.style.name}` : null],
+          ['Season', request.season],
+        ],
+      }}
       columns={COLS}
       rows={rows}
-      minRows={3}
       after={
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 260px', gap: '7px', marginTop: '8px' }}>
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-              <Eyebrow style={{ color: GREY }}>About these charges</Eyebrow>
-              <div style={{ fontSize: '10px', color: GREY, marginTop: '3px', lineHeight: 1.55 }}>
-                What making the samples cost: material used, labour and outside work, and other charges such as
-                testing, patterns and couriers. Material you supplied is not charged.
-              </div>
-            </div>
-            <div style={{ border: `1px solid ${RULE}` }}>
-              {[
-                ['Material', sheet.material],
-                ['Labour', sheet.labour],
-                ['Other charges', sheet.misc],
-              ].map(([label, v]) => (
-                <div key={String(label)} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 10px', fontSize: '10px', color: INK }}>
-                  <span>{label}</span>
-                  <span style={NUM}>₹{money(Number(v))}</span>
-                </div>
-              ))}
-              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 11px', borderTop: '1.5pt solid #000', color: '#fff' }}>
-                <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>Total</span>
-                <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(sheet.total)}</span>
-              </div>
-            </div>
-          </div>
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-            <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-            <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>
-              {NOT_AN_INVOICE}
-              {request.cancelledAt && (
-                <> The request was cancelled on {longDate(request.cancelledAt)}: these are the samples made until then.</>
-              )}
-              {template.declaration && <div style={{ marginTop: '3px' }}>{template.declaration}</div>}
-            </div>
-          </div>
+          <WordsAndTotals
+            left={
+              <>
+                <Note title="About these charges">
+                  What making the samples cost: material used, labour and outside work, and other charges such as
+                  testing, patterns and couriers. Material you supplied is not charged.
+                </Note>
+                <Note title="Note">
+                  {NOT_AN_INVOICE}
+                  {request.cancelledAt && (
+                    <> The request was cancelled on {longDate(request.cancelledAt)}: these are the samples made until then.</>
+                  )}
+                </Note>
+              </>
+            }
+            totals={
+              <>
+                <TotalsBox
+                  style={{ flex: 1 }}
+                  rows={[
+                    { label: 'Material', value: money(sheet.material) },
+                    { label: 'Labour', value: money(sheet.labour) },
+                    { label: 'Other charges', value: money(sheet.misc) },
+                  ]}
+                  total={`₹ ${money(sheet.total)}`}
+                />
+                <PerPiece pieces={sheet.pieces} perPiece={sheet.perPiece} />
+              </>
+            }
+          />
+          <Terms text={template.termsText} />
+          {template.declaration && <div style={{ fontSize: '9.5px', marginTop: '7px' }}>{template.declaration}</div>}
         </>
       }
       signatures={[
@@ -184,5 +195,26 @@ export default function PrintSampleCharges() {
       ]}
       footerNote={template.footerNote ? `${template.footerNote} · Not a tax invoice.` : 'Statement of sample charges. Not a tax invoice.'}
     />
+  )
+}
+
+/** What a piece came to, under the total: worked out from it, not added to it. */
+function PerPiece({ pieces, perPiece }: { pieces: number; perPiece: number | null }) {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1fr) 8px minmax(92px, auto)',
+        alignItems: 'baseline',
+        gap: '6px',
+        padding: '3.5px 9px',
+        fontSize: '10px',
+        borderTop: HAIR,
+      }}
+    >
+      <span>A piece ({pieces} made)</span>
+      <span>:</span>
+      <span style={{ textAlign: 'right', fontWeight: 600, ...NUM }}>{perPiece === null ? '—' : `₹ ${money(perPiece)}`}</span>
+    </div>
   )
 }

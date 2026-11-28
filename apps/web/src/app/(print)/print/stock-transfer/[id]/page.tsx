@@ -5,19 +5,20 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import {
   StoreSheet,
-  Fact,
-  Eyebrow,
+  Dash,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
   qty,
   money,
   longDate,
+  shortDate,
   CODE,
-  GREY,
   INK,
   MUTED,
-  NAVY,
-  NUM,
-  RULE,
   type SheetColumn,
+  type TotalLine,
 } from '@/components/print/StoreSheet'
 import { SubLine } from '@/components/print/doc'
 import { itemShade, type ShadeFields } from '@/lib/items'
@@ -84,15 +85,11 @@ const COLS: SheetColumn[] = [
   { key: 'value', head: 'Value (₹)', width: '12%', align: 'right' },
 ]
 
-function StoreBox({ store }: { store: Store }) {
-  return (
-    <>
-      <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{store.name}</div>
-      {store.address && (
-        <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{store.address}</div>
-      )}
-    </>
-  )
+/** A figure per unit — metres and pieces are never added together: "20 mtr · 12 pcs". */
+function perUnit<T>(lines: T[], unitOf: (l: T) => string, figure: (l: T) => number): string {
+  const sums = new Map<string, number>()
+  for (const l of lines) sums.set(unitOf(l), (sums.get(unitOf(l)) ?? 0) + figure(l))
+  return [...sums.entries()].map(([unit, n]) => `${qty(n)} ${unit}`.trim()).join(' · ') || '0'
 }
 
 /**
@@ -101,6 +98,9 @@ function StoreBox({ store }: { store: Store }) {
  * Quantity and the value the stock was carried at when it moved, which is on
  * the line so the note prints the same figure next year. Signed out by whoever
  * sent it, and in by whoever received it at the other end.
+ *
+ * Laid out like the purchase order (27 Nov 2026): the receiving store in the
+ * "To," block with the note's facts beside it, the store it left in a band.
  */
 export default function PrintStockTransfer() {
   const { id } = useParams<{ id: string }>()
@@ -150,13 +150,18 @@ export default function PrintStockTransfer() {
           {itemShade(l.item) && <SubLine>{itemShade(l.item)}</SubLine>}
         </>
       ),
-      hsn: <span style={{ fontSize: '9px', color: GREY }}>{l.item.hsnCode ?? '—'}</span>,
-      uom: <span style={{ fontSize: '9px', color: GREY }}>{l.item.uom.symbol}</span>,
+      hsn: l.item.hsnCode ?? '—',
+      uom: l.item.uom.symbol,
       qty: <strong>{qty(l.qty)}</strong>,
       rate: l.unitRate === null ? '—' : money(l.unitRate),
       value: value(l) === null ? '—' : money(value(l)!),
     },
   }))
+
+  const totals: TotalLine[] = [
+    { label: 'Lines', value: transfer.lines.length },
+    { label: 'Quantity', value: perUnit(transfer.lines, (l) => l.item.uom.symbol, (l) => Number(l.qty)) },
+  ]
 
   return (
     <StoreSheet
@@ -172,58 +177,43 @@ export default function PrintStockTransfer() {
           ? `CANCELLED on ${longDate(transfer.cancelledAt)}${transfer.cancelledBy ? ` by ${transfer.cancelledBy.name}` : ''}${transfer.cancelReason ? ` — ${transfer.cancelReason}` : ''}. The goods were walked back; nothing on this note moved.`
           : null
       }
-      panels={[
-        { title: 'From', body: <StoreBox store={transfer.fromWarehouse} /> },
-        { title: 'To', body: <StoreBox store={transfer.toWarehouse} /> },
+      party={{
+        name: transfer.toWarehouse.name,
+        lines: <PartyLine label="Address-" value={transfer.toWarehouse.address} />,
+        meta: [
+          ['Note No', transfer.transferNumber, true],
+          ['Date', shortDate(transfer.transferDate), true],
+          ['Sent by', transfer.movedBy?.name ?? null],
+          // Sent through a transit store: how the goods go, and where they stand.
+          onTheRoad && ['Goes', `In transit, through ${transfer.transitWarehouse?.name ?? 'transit'}`],
+          onTheRoad && !!transfer.status && ['Status', STATUS_WORDS[transfer.status!] ?? transfer.status],
+        ],
+      }}
+      bands={[
         {
-          title: 'The movement',
+          label: 'From store',
           body: (
             <>
-              <Fact label="Note No" value={transfer.transferNumber} mono />
-              <Fact label="Date" value={longDate(transfer.transferDate)} />
-              <Fact label="Sent by" value={transfer.movedBy?.name ?? null} />
-              <Fact label="Lines" value={String(transfer.lines.length)} />
-              {onTheRoad && <Fact label="Goes" value={`In transit, through ${transfer.transitWarehouse?.name ?? 'transit'}`} />}
-              {onTheRoad && transfer.status && <Fact label="Status" value={STATUS_WORDS[transfer.status] ?? transfer.status} />}
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{transfer.fromWarehouse.name}</div>
+              {transfer.fromWarehouse.address && <div style={{ marginTop: '1px' }}>{transfer.fromWarehouse.address}</div>}
             </>
           ),
         },
       ]}
       columns={COLS}
       rows={rows}
-      minRows={6}
       after={
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: '7px', marginTop: '8px' }}>
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-            <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-            <div style={{ fontSize: '10px', color: transfer.notes ? GREY : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
-              {transfer.notes ?? 'None.'}
-            </div>
-            {onTheRoad && (
-              <>
-                <Eyebrow style={{ color: GREY, marginTop: '6px' }}>On arrival</Eyebrow>
-                <div style={{ fontSize: '10px', color: steps.length ? GREY : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
-                  {steps.length ? steps.map((x) => <div key={x.key}>{x.text}</div>) : 'Nothing received yet.'}
-                </div>
-              </>
-            )}
-          </div>
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              padding: '7px 11px',
-              borderTop: '1.5pt solid #000',
-              color: '#fff',
-            }}
-          >
-            <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>
-              Value moved
-            </span>
-            <span style={{ fontSize: '13px', fontWeight: 700, ...NUM }}>₹{money(total)}</span>
-          </div>
-        </div>
+        <WordsAndTotals
+          words={null}
+          left={
+            <>
+              <Note title="Note">{transfer.notes || <Dash />}</Note>
+              {/* Goods on the road: what became of them at the other end, step by step. */}
+              {onTheRoad && <Note title="On arrival">{steps.length ? steps.map((x) => <div key={x.key}>{x.text}</div>) : 'Nothing received yet.'}</Note>}
+            </>
+          }
+          totals={<TotalsBox rows={totals} totalLabel="Value moved" total={`₹ ${money(total)}`} />}
+        />
       }
       signatures={[
         { role: 'Sent by', who: transfer.movedBy?.name },
