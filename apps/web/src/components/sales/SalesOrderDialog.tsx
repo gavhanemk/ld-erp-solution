@@ -588,7 +588,17 @@ export function SalesOrderDialog({
                     discountAmount: string | number
                     terms: string | null
                     notes: string | null
-                    lines: Array<{ itemId: string; styleCode: string | null; color: string | null; description: string | null; qty: string | number; unitPrice: string | number; discount: string | number }>
+                    lines: Array<{
+                      itemId: string
+                      styleCode: string | null
+                      color: string | null
+                      description: string | null
+                      qty: string | number
+                      unitPrice: string | number
+                      discount: string | number
+                      /** Size by size, when the quotation was split; none when it was priced by the piece only. */
+                      sizes?: Array<{ sizeId: string; qty: string | number }>
+                    }>
                     charges?: Array<{ chargeTypeId: string; amount: string | number; taxTreatment?: 'INCLUSIVE' | 'EXCLUSIVE' | 'NON_TAXABLE' }>
                   }
                 }>(`/sales/quotations/${fromQuoteId}`)
@@ -681,8 +691,10 @@ export function SalesOrderDialog({
           setAddressTouched(true)
           setBillingTouched(true)
         } else if (quote) {
-          // Won from a quotation: its customer, terms, garments and rates. The
-          // sizes are still to split, since a quotation is priced by the piece.
+          // Won from a quotation: its customer, terms, garments, rates and, on
+          // a line quoted size by size, its sizes. A line quoted by the piece
+          // only (and every line of a quotation saved before sizes) still has
+          // its pieces to split, when its garment is made in sizes.
           setFromQuote({ id: quote.id, quoteNumber: quote.quoteNumber })
           const cust = customerList.find((x) => x.id === quote.customerId)
           setCustomerId(quote.customerId)
@@ -709,13 +721,18 @@ export function SalesOrderDialog({
             quote.lines.map((l) => {
               const item = itemMap.get(l.itemId)
               const styleRun = item?.styleId ? styleMap.get(item.styleId)?.sizeGroupId : null
+              const sizes = l.sizes ?? []
               return {
                 ...blankLine(),
                 ...filingOf(item, cat.rows),
                 styleId: item?.styleId ?? '',
                 styleCode: l.styleCode ?? '',
                 itemId: l.itemId,
-                qty: styleRun ? '' : String(Number(l.qty)),
+                // The quotation's split, size for size (the same size ids). A
+                // garment with no run of its own takes the run its sizes came from.
+                sizeGroupId: !styleRun && sizes.length ? (groupOfSize.get(sizes[0].sizeId) ?? '') : '',
+                sizes: Object.fromEntries(sizes.map((s) => [s.sizeId, String(Number(s.qty))])),
+                qty: styleRun || sizes.length ? '' : String(Number(l.qty)),
                 unitPrice: String(Number(l.unitPrice)),
                 discount: Number(l.discount) > 0 ? String(Number(l.discount)) : '',
                 color: item?.color ? '' : (l.color ?? ''),
@@ -1573,7 +1590,10 @@ export function SalesOrderDialog({
                   : saved
                     ? `${saved.soNumber} — a draft can be changed until it is confirmed`
                     : fromQuote
-                      ? `New order from quotation ${fromQuote.quoteNumber} — split the pieces by size, then save`
+                      ? // The sizes come over from a quotation split size by size; only a line quoted by the piece is left to split.
+                        `New order from quotation ${fromQuote.quoteNumber} — ${
+                          totals.lines.some((p) => p.line.itemId && p.run && p.qty <= 0) ? 'split the pieces by size' : 'check the sizes and figures'
+                        }, then save`
                       : 'New order from a customer'}
               </p>
             </div>

@@ -1311,7 +1311,7 @@ router.patch('/preferences', requirePermission(SETTINGS, 'edit'), async (req: Au
 
 /** Every document type we can print, in the order it appears on the tab. */
 const DOC_TYPES = [
-  { docType: 'SO', label: 'Sales Order', defaultTitle: 'ORDER CONFIRMATION' },
+  { docType: 'SO', label: 'Sales Order', defaultTitle: 'SALES ORDER' },
   { docType: 'INV', label: 'Sales Invoice', defaultTitle: 'TAX INVOICE' },
   { docType: 'PO', label: 'Purchase Order', defaultTitle: 'PURCHASE ORDER' },
   { docType: 'DC', label: 'Delivery Challan', defaultTitle: 'DELIVERY CHALLAN' },
@@ -1397,7 +1397,8 @@ router.get('/documents', requirePermission(SETTINGS, 'view'), async (_req, res) 
         return {
           docType: t.docType,
           label: t.label,
-          title: row?.title ?? t.defaultTitle,
+          // The old sales order default heading reads as the new one (28 Nov 2026).
+          title: (t.docType === 'SO' && row?.title?.trim().toUpperCase() === 'ORDER CONFIRMATION' ? null : row?.title) ?? t.defaultTitle,
           termsText: row?.termsText ?? null,
           declaration: row?.declaration ?? null,
           footerNote: row?.footerNote ?? null,

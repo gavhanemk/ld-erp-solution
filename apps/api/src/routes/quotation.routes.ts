@@ -48,6 +48,15 @@ const lineSchema = z.object({
   /** On a job-work quotation: the SAC and GST rate of the job charge (SAC 9988 when empty). */
   jobHsnCode: z.string().trim().max(20).optional().nullable(),
   jobGstRate: z.number().min(0).max(28).optional().nullable(),
+  /**
+   * The pieces size by size, as on a sales order (28 Nov 2026): the buyer
+   * sees the size-wise quantity, and the order won from it opens with the
+   * same split. They must add up to `qty`; a size left at nothing is not kept.
+   */
+  sizes: z
+    .array(z.object({ sizeId: z.string().min(1), qty: z.number().min(0, 'A size cannot have fewer than no pieces') }))
+    .max(60)
+    .optional(),
 })
 
 export const quoteSchema = z
@@ -79,6 +88,18 @@ export const quoteSchema = z
     if (new Set(ids).size !== ids.length) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['charges'], message: 'The same charge appears twice. Put it on one row.' })
     }
+    // The sizes add up to the line's pieces, each size once: the order's own check (checkSizeRuns).
+    d.lines.forEach((line, i) => {
+      if (!line.sizes?.length) return
+      const sum = Math.round(line.sizes.reduce((s, x) => s + x.qty, 0) * 100) / 100
+      if (Math.abs(sum - line.qty) > 0.001) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lines', i, 'sizes'], message: `Line ${i + 1}: the sizes add up to ${sum}, but the line total is ${line.qty}` })
+      }
+      const sizeIds = line.sizes.map((s) => s.sizeId)
+      if (new Set(sizeIds).size !== sizeIds.length) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lines', i, 'sizes'], message: `Line ${i + 1}: the same size appears twice` })
+      }
+    })
   })
 
 type QuoteInput = z.infer<typeof quoteSchema>
@@ -150,6 +171,10 @@ async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput, opts: 
         discount: l.discount,
         jobHsnCode: l.jobHsnCode ?? null,
         jobGstRate: l.jobGstRate ?? null,
+        // Checked as an order's are: sizes that exist, from the garment's own
+        // size run (or one run, for a garment with none). Not required: a
+        // quotation may still be priced by the piece only (piecesOnly).
+        sizes: l.sizes,
       })),
     }),
     { piecesOnly: true, ...opts },
@@ -188,6 +213,8 @@ async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput, opts: 
       amount: Number(lines[i].amount),
       bomCost: costs[i]?.cost ?? null,
       sortOrder: i,
+      // A size at nothing is a box left empty, not a size quoted.
+      sizes: l.sizes?.some((s) => s.qty > 0) ? { create: l.sizes.filter((s) => s.qty > 0).map((s) => ({ sizeId: s.sizeId, qty: s.qty })) } : undefined,
     })),
     charges,
   }
@@ -199,7 +226,14 @@ const quoteInclude = {
   createdBy: { select: { id: true, name: true } },
   lines: {
     orderBy: { sortOrder: 'asc' },
-    include: { item: { select: { id: true, code: true, name: true, color: true, hsnCode: true, uom: { select: { symbol: true } } } } },
+    include: {
+      item: { select: { id: true, code: true, name: true, color: true, hsnCode: true, uom: { select: { symbol: true } } } },
+      // Size by size, in the run's order: the same shape as a sales order line's sizes.
+      sizes: {
+        include: { size: { select: { id: true, code: true, label: true, sequence: true, sizeGroupId: true } } },
+        orderBy: { size: { sequence: 'asc' } },
+      },
+    },
   },
   charges: { include: { chargeType: { select: { id: true, name: true } } }, orderBy: { sortOrder: 'asc' } },
   orders: { select: { id: true, soNumber: true, status: true } },
@@ -222,9 +256,10 @@ router.get('/bom-price', requirePermission(MODULE, 'view'), async (req, res) => 
  * GET /api/sales/quotations/styles
  *
  * What a quotation line starts from: every active style with its colours,
- * its BOMs' cost and selling price (approved or draft, the form picks the
- * same way pickBom does), and the finished-goods items linked to it, so
- * picking a style and colour fills in the rate and the item to bill.
+ * its size run, its BOMs' cost and selling price (approved or draft, the form
+ * picks the same way pickBom does), and the finished-goods items linked to
+ * it, so picking a style and colour fills in the rate, the item to bill and
+ * the sizes to quote.
  */
 router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
   const styles = await prisma.style.findMany({
@@ -237,6 +272,8 @@ router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
       brandType: true,
       category: true,
       colors: true,
+      // Its own size run: a line of this style is quoted size by size in it.
+      sizeGroupId: true,
       items: { where: { isActive: true, type: 'FINISHED_GOOD' }, select: { id: true, color: true } },
       boms: QUOTE_BOM,
     },
@@ -250,6 +287,7 @@ router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
       name: st.name,
       brandType: st.brandType,
       category: st.category,
+      sizeGroupId: st.sizeGroupId,
       colors: [...new Set([...st.colors, ...st.items.map((i) => i.color).filter((c): c is string => !!c)])],
       items: st.items,
       boms: st.boms.map((b) => ({

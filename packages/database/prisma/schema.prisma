@@ -5640,6 +5640,7 @@ model Size {
   sequence    Int       @default(0)
 
   soLineSizes  SalesOrderLineSize[]
+  quoteLineSizes SalesQuotationLineSize[]
   moLineSizes  MOLineSize[]
   bomLineSizes BOMLineSize[]
   baseSizeBoms BOM[]
@@ -6056,9 +6057,28 @@ model SalesQuotationLine {
   bomCost     Decimal?       @db.Decimal(10, 2)
   sortOrder   Int            @default(0)
 
+  /// Pieces size by size (28 Nov 2026), as on a sales order; `qty` is their
+  /// total. Empty on a line quoted by the piece only.
+  sizes       SalesQuotationLineSize[]
+
   @@index([quoteId])
   @@map("sales_quotation_lines")
 }
+/// A quotation line's pieces for one size (28 Nov 2026): the buyer sees the
+/// size-wise quantity on the quotation, and an order won from it opens with the
+/// same split.
+model SalesQuotationLineSize {
+  id     String             @id @default(cuid())
+  lineId String
+  line   SalesQuotationLine @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  sizeId String
+  size   Size               @relation(fields: [sizeId], references: [id])
+  qty    Decimal            @db.Decimal(10, 2)
+
+  @@unique([lineId, sizeId])
+  @@map("sales_quotation_line_sizes")
+}
+
 
 /// A charge on a quotation (transport, packing), priced exactly as it will
 /// be on the order the quotation becomes, and carried onto that order.

@@ -52,9 +52,9 @@ const DEFAULT_TITLES: Record<string, string> = {
   RCPT: 'PAYMENT RECEIPT',
   QT: 'QUOTATION',
   CN: 'CREDIT NOTE',
-  // What the buyer receives back for their PO: our word that we will make
-  // and deliver this. Not a bill, and the heading must not read like one.
-  SO: 'ORDER CONFIRMATION',
+  // What the buyer receives back for their PO. "SALES ORDER", as the mill's
+  // old system printed it (the user, 28 Nov 2026) — it was ORDER CONFIRMATION.
+  SO: 'SALES ORDER',
   PO: 'PURCHASE ORDER',
   // Not an order, and the heading is the first thing that says so. A supplier
   // holding a sheet headed PURCHASE ORDER will treat it as one.
@@ -141,7 +141,11 @@ export async function getPrintHeader(docType: string): Promise<PrintHeader> {
     // one, and the wording can be tuned afterwards.
     template: {
       docType,
-      title: template?.title ?? DEFAULT_TITLES[docType] ?? docType,
+      // A sales order template saved with the old default heading takes the new one.
+      title:
+        (docType === 'SO' && template?.title?.trim().toUpperCase() === 'ORDER CONFIRMATION' ? null : template?.title) ??
+        DEFAULT_TITLES[docType] ??
+        docType,
       termsText: template?.termsText ?? null,
       declaration: template?.declaration ?? null,
       footerNote: template?.footerNote ?? null,
