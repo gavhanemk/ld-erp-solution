@@ -910,6 +910,9 @@ model Company {
   /// decided by comparing this against the customer's, so it cannot be free text.
   stateCode      String?
   pan            String?
+  /// "Manufacturer of: Fancy Fabrics" under the name on the tax invoice, as the
+  /// old ERP printed it (28 Nov 2026).
+  manufacturerOf String?
   /// Needed on every TDS challan and to issue Form 16A to contractors.
   tan            String?
   /// Udyam registration. Drives the 45-day payment rule for MSME suppliers.
@@ -2117,6 +2120,20 @@ model SalesInvoice {
   lrNumber          String?
   eWayBillNumber    String?
   eWayBillDate      DateTime?
+  /// The lorry receipt's date, beside its number (28 Nov 2026).
+  lrDate            DateTime?
+  /// The consignee (ship to), kept apart from the buyer billed: a group mill's
+  /// other unit can take the goods under its own GSTIN. Filled from the
+  /// customer's shipping details; null on invoices from before 28 Nov 2026.
+  shipToName        String?
+  shipToGstin       String?
+  shipToState       String?
+  shipToStateCode   String?
+  /// Packages the goods went in, as the old invoice listed them. Cartons start
+  /// from the challan's count.
+  bales             Int?
+  rolls             Int?
+  cartons           Int?
   /// Added after tax and carrying none of its own, as on the order.
   otherCharges      Decimal          @default(0) @db.Decimal(12, 2)
   terms             String?
@@ -5706,6 +5723,9 @@ model SalesInvoiceLine {
   /// corrected later and an issued invoice must never change.
   hsnCode      String?
   qty          Decimal      @db.Decimal(10, 3)
+  /// Pieces (rolls, bundles) in the quantity, when it is in metres or kilos:
+  /// 238.17 mtr in 11 pcs. Null where the quantity is itself in pieces.
+  pcs          Decimal?     @db.Decimal(10, 2)
   unitPrice    Decimal      @db.Decimal(10, 2)
   discount     Decimal      @default(0) @db.Decimal(5, 2)
   taxableValue Decimal      @default(0) @db.Decimal(12, 2)

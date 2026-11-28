@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { DEFAULT_TERMS } from '../lib/printData'
 import { Router } from 'express'
 import { z } from 'zod'
 import bcrypt from 'bcryptjs'
@@ -1399,7 +1400,8 @@ router.get('/documents', requirePermission(SETTINGS, 'view'), async (_req, res) 
           label: t.label,
           // The old sales order default heading reads as the new one (28 Nov 2026).
           title: (t.docType === 'SO' && row?.title?.trim().toUpperCase() === 'ORDER CONFIRMATION' ? null : row?.title) ?? t.defaultTitle,
-          termsText: row?.termsText ?? null,
+          // Until saved: the document's default terms, to edit (the tax invoice's, 28 Nov 2026).
+          termsText: row?.termsText?.trim() ? row.termsText : (DEFAULT_TERMS[t.docType] ?? null),
           declaration: row?.declaration ?? null,
           footerNote: row?.footerNote ?? null,
           showHsn: row?.showHsn ?? true,

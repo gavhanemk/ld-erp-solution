@@ -655,8 +655,8 @@ export function Signatures({
   signatureUrl,
 }: {
   company?: string | null
-  /** A role, or a role with the name the system knows ("Received by — Ramesh"). */
-  roles: Array<string | { role: string; who?: string | null; sub?: string | null }>
+  /** A role, or a role with the name the system knows ("Received by — Ramesh"); `image` prints above that block. */
+  roles: Array<string | { role: string; who?: string | null; sub?: string | null; image?: string | null }>
   /** Printed above the first role. */
   signatureUrl?: string | null
 }) {
@@ -666,13 +666,14 @@ export function Signatures({
         const role = typeof r === 'string' ? r : r.role
         const who = typeof r === 'string' ? null : r.who
         const sub = typeof r === 'string' ? (company ? `For ${company}` : null) : r.sub === undefined ? (company ? `For ${company}` : null) : r.sub
+        const image = (i === 0 && signatureUrl) || (typeof r === 'string' ? null : r.image)
         return (
           <div key={`${role}-${i}`} style={{ flex: 1, minWidth: 0 }}>
             <div style={{ height: '34px', display: 'flex', alignItems: 'flex-end' }}>
-              {i === 0 && signatureUrl ? (
+              {image ? (
                 // A data URL, so next/image would add nothing.
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={signatureUrl} alt="" style={{ height: '30px', width: 'auto', objectFit: 'contain', filter: 'grayscale(1)' }} />
+                <img src={image} alt="" style={{ height: '30px', width: 'auto', objectFit: 'contain', filter: 'grayscale(1)' }} />
               ) : (
                 <span style={{ fontSize: '10px', fontWeight: 600 }}>{who ?? ''}</span>
               )}
@@ -795,6 +796,8 @@ export function DocumentSheet({
   fileName,
   options,
   footerNote,
+  tagline,
+  extraContact,
   children,
 }: {
   company: CompanyInfo
@@ -819,6 +822,10 @@ export function DocumentSheet({
   options?: React.ReactNode
   /** A line at the very end — "Subject to Thane jurisdiction". */
   footerNote?: string | null
+  /** Under the company's name: "Manufacturer of: Fancy Fabrics" (the tax invoice). */
+  tagline?: string | null
+  /** More rows under the letterhead's contact column: [label, value] — "State", "Maharashtra, code 27". */
+  extraContact?: Array<[string, string | null | undefined]>
   children: React.ReactNode
 }) {
   const name = company.name ?? ''
@@ -858,6 +865,7 @@ export function DocumentSheet({
             <div style={{ fontSize: '22px', fontWeight: 800, letterSpacing: '-.01em', textTransform: 'uppercase', lineHeight: 1.05 }}>
               {name}
             </div>
+            {tagline && <div style={{ fontSize: '10px', fontWeight: 700, marginTop: '3px' }}>{tagline}</div>}
             {address && <div style={{ fontSize: '9.5px', lineHeight: 1.5, marginTop: '4px', maxWidth: '92%' }}>{address}</div>}
             {company.address2 && (
               <div style={{ fontSize: '9.5px', lineHeight: 1.5, maxWidth: '92%' }}>
@@ -874,6 +882,14 @@ export function DocumentSheet({
                   <span style={{ fontSize: '9.5px', fontWeight: 600, ...(mono && value ? NUM : {}) }}>{value || <Dash />}</span>
                 </div>
               ))}
+            {(extraContact ?? []).map(([label, value]) => (
+              <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '6px', lineHeight: 1.5 }}>
+                <span style={{ width: '10px', flexShrink: 0 }} />
+                <span style={{ fontSize: '9px', width: '50px', flexShrink: 0 }}>{label}</span>
+                <span style={{ fontSize: '9px', flexShrink: 0 }}>:</span>
+                <span style={{ fontSize: '9.5px', fontWeight: 600 }}>{value || <Dash />}</span>
+              </div>
+            ))}
           </div>
         </div>
         <div style={{ borderTop: HEAVY, marginTop: '6px' }} />

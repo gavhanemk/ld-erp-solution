@@ -13,6 +13,7 @@ export interface PrintHeader {
   company: {
     name: string
     legalName: string | null
+    manufacturerOf: string | null
     address: string | null
     city: string | null
     state: string | null
@@ -45,6 +46,23 @@ export interface PrintHeader {
     showSignature: boolean
     copies: string[]
   }
+}
+
+/**
+ * Terms a document starts with until its template in Settings → Documents is
+ * saved with its own: shown there to edit, and printed meanwhile. The tax
+ * invoice's are the commercial terms of the mill's old invoice (28 Nov 2026).
+ */
+export const DEFAULT_TERMS: Record<string, string> = {
+  INV: [
+    'Interest will be charged @ 18% p.a. after the due date.',
+    'All payments should be made by A/c payee cheque or draft only. Do not give cash to anyone or deposit cash in our bank account.',
+    'Any claim for rate or quality should be notified within 24 hours of delivery.',
+    'Our responsibility ceases once the goods are handed over to the carriers.',
+    'Any deduction like brokerage, commission or cash discount will be on the basic amount.',
+    'If any dispute arises regarding this transaction, it shall be referred to the Fabric Suppliers Association, Mumbai, for decision under its arbitration rules, and the award made thereunder shall be binding on both parties.',
+    'Subject to Mumbai jurisdiction.',
+  ].join('\n'),
 }
 
 const DEFAULT_TITLES: Record<string, string> = {
@@ -117,6 +135,8 @@ export async function getPrintHeader(docType: string): Promise<PrintHeader> {
     company: {
       name: company.name,
       legalName: company.legalName,
+      // "Manufacturer of: ..." under the name on the tax invoice (28 Nov 2026).
+      manufacturerOf: company.manufacturerOf,
       address: company.address,
       city: company.city,
       state: company.state,
@@ -146,7 +166,8 @@ export async function getPrintHeader(docType: string): Promise<PrintHeader> {
         (docType === 'SO' && template?.title?.trim().toUpperCase() === 'ORDER CONFIRMATION' ? null : template?.title) ??
         DEFAULT_TITLES[docType] ??
         docType,
-      termsText: template?.termsText ?? null,
+      // Saved empty counts as not set: the default terms print until real ones are saved.
+      termsText: template?.termsText?.trim() ? template.termsText : (DEFAULT_TERMS[docType] ?? null),
       declaration: template?.declaration ?? null,
       footerNote: template?.footerNote ?? null,
       showHsn: template?.showHsn ?? true,

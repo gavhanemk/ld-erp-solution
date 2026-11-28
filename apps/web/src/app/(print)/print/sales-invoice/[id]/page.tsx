@@ -62,6 +62,16 @@ interface Payload {
     lrNumber: string | null
     eWayBillNumber: string | null
     eWayBillDate: string | null
+    /** Added 28 Nov 2026, as the old ERP's invoice carried them; null on earlier invoices. */
+    lrDate?: string | null
+    shipToName?: string | null
+    shipToGstin?: string | null
+    shipToState?: string | null
+    shipToStateCode?: string | null
+    bales?: number | null
+    rolls?: number | null
+    cartons?: number | null
+    broker?: { name: string } | null
     subtotal: string
     discountAmount: string
     taxableAmount: string
@@ -84,6 +94,9 @@ interface Payload {
       billingState: string | null
       billingStateCode: string | null
       billingPincode: string | null
+      shippingGstin?: string | null
+      shippingState?: string | null
+      shippingStateCode?: string | null
     }
     so: { soNumber: string; orderDate: string; customerPORef: string | null; customerPODate: string | null; isJobWork: boolean } | null
     dc: {
@@ -98,6 +111,8 @@ interface Payload {
       description: string | null
       hsnCode: string | null
       qty: string
+      /** Pieces (rolls) in a quantity in metres or kilos. */
+      pcs?: string | null
       unitPrice: string
       discount: string
       taxableValue: string
@@ -116,6 +131,12 @@ interface Payload {
 }
 
 const COPIES = ['Original for recipient', 'Duplicate for transporter', 'Triplicate for supplier']
+/** A unit that is itself a count of pieces: its quantity is the pieces. */
+const countsPieces = (symbol: string | null | undefined) =>
+  /^(pcs?|nos?|pieces?|units?|set|sets|pair|pairs)$/i.test((symbol ?? '').trim())
+/** A measured quantity (metres, kilos) to two places: 264.10, not 264.1. */
+const measured = (v: string | number) =>
+  Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 3 })
 const DECLARATION =
   'We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct.'
 
@@ -149,17 +170,24 @@ export default function PrintSalesInvoice() {
   const sizesOf = (soLineId: string | null) =>
     [...(inv.dc?.lines.find((l) => l.soLineId === soLineId)?.sizes ?? [])].sort((a, b) => a.size.sequence - b.size.sequence)
 
+  // As the old ERP printed it (28 Nov 2026): the challan each line went on, and
+  // pieces beside a quantity in metres or kilos (238.17 mtr in 11 pcs). The
+  // PCS column only when a line has them; the description takes its room.
+  const anyPcs = inv.lines.some((l) => l.pcs != null && !countsPieces(l.item.uom?.symbol))
+  const descWidth = 19 + (anyPcs ? 0 : 6) + (showHsn ? 0 : 6)
   const columns: SheetColumn[] = [
     { key: 'sn', head: 'S.N', width: '4%', align: 'center' },
-    { key: 'item', head: 'Description of goods', width: showHsn ? '31%' : '38%' },
-    ...(showHsn ? [{ key: 'hsn', head: 'HSN', width: '7%', align: 'center' as const }] : []),
-    { key: 'qty', head: 'Qty', width: '7%', align: 'right' },
+    { key: 'ch', head: 'CH No.', width: '9%' },
+    { key: 'item', head: 'Description of goods', width: `${descWidth}%` },
+    ...(showHsn ? [{ key: 'hsn', head: 'HSN', width: '6%', align: 'center' as const }] : []),
+    ...(anyPcs ? [{ key: 'pcs', head: 'PCS', width: '6%', align: 'right' as const }] : []),
+    { key: 'qty', head: 'Quantity', width: '9%', align: 'right' },
     { key: 'rate', head: inv.so?.isJobWork ? 'Job charge' : 'Rate', width: '8%', align: 'right' },
     { key: 'disc', head: 'Disc', width: '5%', align: 'right' },
-    { key: 'taxable', head: 'Taxable value', width: '11%', align: 'right' },
-    { key: 'gst', head: 'GST', width: '6%', align: 'right' },
+    { key: 'taxable', head: 'Taxable value', width: '10%', align: 'right' },
+    { key: 'gst', head: 'GST', width: '5%', align: 'right' },
     { key: 'tax', head: 'Tax', width: '9%', align: 'right' },
-    { key: 'amount', head: 'Amount (₹)', width: '12%', align: 'right' },
+    { key: 'amount', head: 'Amount (₹)', width: '10%', align: 'right' },
   ]
 
   const rows = inv.lines.map((l, i) => {
@@ -171,6 +199,8 @@ export default function PrintSalesInvoice() {
       key: l.id,
       cells: {
         sn: i + 1,
+        ch: <span style={{ fontSize: '8.5px', ...CODE }}>{inv.dc?.dcNumber ?? '—'}</span>,
+        pcs: l.pcs != null ? <strong>{qty(l.pcs)}</strong> : '—',
         item: (
           <>
             <div style={{ fontWeight: 600 }}>
@@ -193,7 +223,7 @@ export default function PrintSalesInvoice() {
         hsn: <span style={{ fontSize: '9px', color: GREY }}>{l.hsnCode ?? '—'}</span>,
         qty: (
           <strong>
-            {qty(l.qty)}
+            {countsPieces(l.item.uom?.symbol) || !l.item.uom?.symbol ? qty(l.qty) : measured(l.qty)}
             {l.item.uom?.symbol ? <span style={{ fontWeight: 400, color: GREY }}> {l.item.uom.symbol}</span> : null}
           </strong>
         ),
@@ -207,7 +237,26 @@ export default function PrintSalesInvoice() {
     }
   })
 
-  const pieces = inv.lines.reduce((s, l) => s + Number(l.qty), 0)
+  // Pieces: a line in pieces counts its quantity; one in metres or kilos its PCS.
+  const pieces = inv.lines.reduce(
+    (s, l) => s + (l.pcs != null ? Number(l.pcs) : countsPieces(l.item.uom?.symbol) ? Number(l.qty) : 0),
+    0,
+  )
+  // Quantity in each unit that is not pieces — never added across units.
+  const byUnit = new Map<string, number>()
+  for (const l of inv.lines) {
+    const unit = l.item.uom?.symbol ?? ''
+    if (!countsPieces(unit) && unit) byUnit.set(unit, (byUnit.get(unit) ?? 0) + Number(l.qty))
+  }
+  const cartons = inv.cartons ?? inv.dc?.cartons ?? null
+  const packages: Array<[string, number]> = (
+    [
+      ['Bales', inv.bales ?? 0],
+      ['Rolls', inv.rolls ?? 0],
+      ['Cartons', cartons ?? 0],
+    ] as Array<[string, number]>
+  ).filter(([, n]) => n > 0)
+  const totalPackages = packages.reduce((n, [, v]) => n + v, 0)
   const banner =
     inv.status === 'CANCELLED'
       ? `CANCELLED on ${longDate(inv.cancelledAt)}${inv.cancelledBy ? ` by ${inv.cancelledBy.name}` : ''}${
@@ -230,13 +279,14 @@ export default function PrintSalesInvoice() {
         ? ([['IGST', money(inv.igst)]] as Array<[string, string]>)
         : []),
     ...(Number(inv.otherCharges) > 0 ? ([['Other charges', money(inv.otherCharges)]] as Array<[string, string]>) : []),
-    ...(Math.abs(Number(inv.roundOff)) >= 0.005 ? ([['Rounding', money(inv.roundOff)]] as Array<[string, string]>) : []),
+    // Always, with its sign, as the old invoice printed it.
+    ['Round off', `${Number(inv.roundOff) > 0 ? '+' : Number(inv.roundOff) < 0 ? '−' : ''}${money(Math.abs(Number(inv.roundOff)))}`],
   ]
 
   const bank = [company.bankName, company.bankBranch].filter(Boolean).join(', ')
   const termsText = inv.terms || template.termsText
   const totals: TotalLine[] = [
-    { label: `Pieces${inv.dc?.cartons ? ` · ${inv.dc.cartons} cartons` : ''}`, value: qty(pieces) },
+    { label: 'Total pieces', value: qty(pieces) },
     ...totalRows.map(([label, value]) => ({ label, value })),
   ]
 
@@ -255,6 +305,10 @@ export default function PrintSalesInvoice() {
         ]),
     { key: 'tax', head: 'Total tax (₹)', weight: 16, align: 'right' },
   ]
+  const hsnTotal = data.hsnSummary.reduce(
+    (t, r) => ({ taxable: t.taxable + r.taxable, cgst: t.cgst + r.cgst, sgst: t.sgst + r.sgst, igst: t.igst + r.igst }),
+    { taxable: 0, cgst: 0, sgst: 0, igst: 0 },
+  )
   const hsnRows: DocRow[] = data.hsnSummary.map((r, i) => ({
     key: `${r.hsn}-${r.rate}-${i}`,
     cells: {
@@ -267,6 +321,29 @@ export default function PrintSalesInvoice() {
       tax: money(r.cgst + r.sgst + r.igst),
     },
   }))
+  if (data.hsnSummary.length > 1) {
+    hsnRows.push({
+      key: 'total',
+      total: true,
+      cells: {
+        hsn: 'Total',
+        taxable: money(hsnTotal.taxable),
+        rate: '',
+        igst: money(hsnTotal.igst),
+        cgst: money(hsnTotal.cgst),
+        sgst: money(hsnTotal.sgst),
+        tax: money(hsnTotal.cgst + hsnTotal.sgst + hsnTotal.igst),
+      },
+    })
+  }
+
+  // The consignee, kept apart from the buyer: the invoice's own, else (on an
+  // invoice from before 28 Nov 2026) the customer's shipping details.
+  const shipName = inv.shipToName || c.name
+  const shipGstin = inv.shipToGstin || c.shippingGstin || c.gstin
+  const shipState = inv.shipToState || c.shippingState || c.billingState
+  const shipCode = inv.shipToStateCode || c.shippingStateCode || c.billingStateCode
+  const companyState = [company.state, company.stateCode ? `code ${company.stateCode}` : null].filter(Boolean).join(', ')
 
   // Laid out like the purchase order (27 Nov 2026): the buyer in the "Bill to"
   // block with the invoice's facts beside it, then where the goods went.
@@ -281,6 +358,8 @@ export default function PrintSalesInvoice() {
       backLabel="Invoices"
       banner={banner}
       copyLabel={copy}
+      tagline={company.manufacturerOf ? `Manufacturer of: ${company.manufacturerOf}` : null}
+      extraContact={[['State', companyState || null]]}
       options={
         <label>
           Copy
@@ -303,6 +382,7 @@ export default function PrintSalesInvoice() {
               value={c.billingState ? `${c.billingState}${c.billingStateCode ? ` (${c.billingStateCode})` : ''}` : null}
             />
             <PartyLine label="Contact No" value={c.phone} mono />
+            <PartyLine label="Agent" value={inv.broker?.name ?? 'Self'} />
             <PartyLine
               label="Place of supply"
               value={
@@ -323,14 +403,16 @@ export default function PrintSalesInvoice() {
             `${inv.so.customerPORef}${inv.so.customerPODate ? `, ${shortDate(inv.so.customerPODate)}` : ''}`,
           ],
           !!inv.dc && ['Challan', `${inv.dc.dcNumber}, ${shortDate(inv.dc.dcDate)}`, true],
-          !!inv.eWayBillNumber && [
+          // Dispatch details always, blank where not known, as the old invoice had them.
+          [
             'E-way bill',
-            `${inv.eWayBillNumber}${inv.eWayBillDate ? `, ${shortDate(inv.eWayBillDate)}` : ''}`,
+            inv.eWayBillNumber ? `${inv.eWayBillNumber}${inv.eWayBillDate ? `, ${shortDate(inv.eWayBillDate)}` : ''}` : null,
             true,
           ],
-          !!inv.transporter && ['Transporter', inv.transporter],
-          !!inv.vehicleNumber && ['Vehicle', inv.vehicleNumber, true],
-          !!inv.lrNumber && ['LR No', inv.lrNumber, true],
+          ['Transporter', inv.transporter],
+          ['Vehicle', inv.vehicleNumber, true],
+          ['LR No', inv.lrNumber, true],
+          ['LR Date', inv.lrDate ? shortDate(inv.lrDate) : null, true],
           !!data.brand?.name && ['Brand', data.brand.name],
           ['Reverse charge', 'No'],
         ],
@@ -341,8 +423,18 @@ export default function PrintSalesInvoice() {
           label: 'Ship to',
           body: (
             <>
-              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{c.name}</div>
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{shipName}</div>
               <div style={{ marginTop: '1px' }}>{inv.shippingAddress || billing || '—'}</div>
+              <div style={{ marginTop: '1px' }}>
+                <strong>GST No</strong> <span style={CODE}>{shipGstin || 'Unregistered'}</span>
+                {shipState && (
+                  <>
+                    {'   '}
+                    <strong>State</strong> {shipState}
+                    {shipCode ? ` (${shipCode})` : ''}
+                  </>
+                )}
+              </div>
             </>
           ),
         },
@@ -364,6 +456,17 @@ export default function PrintSalesInvoice() {
                     <Fact label="UPI" value={company.upiId} mono labelWidth={52} />
                   </Note>
                 )}
+                {(totalPackages > 0 || byUnit.size > 0) && (
+                  <Note title="Packing">
+                    {packages.map(([label, n]) => (
+                      <Fact key={label} label={label} value={qty(n)} labelWidth={84} />
+                    ))}
+                    {packages.length > 0 && <Fact label="Total packages" value={qty(totalPackages)} labelWidth={84} />}
+                    {[...byUnit.entries()].map(([unit, n]) => (
+                      <Fact key={unit} label={`Quantity (${unit})`} value={measured(n)} labelWidth={84} />
+                    ))}
+                  </Note>
+                )}
                 <Note title="Special notes">{inv.notes || <Dash />}</Note>
               </>
             }
@@ -380,10 +483,17 @@ export default function PrintSalesInvoice() {
         </>
       }
       signatures={[
+        { role: 'Prepared by', who: inv.createdBy?.name },
+        { role: 'Checked by', who: null },
         { role: "Customer's seal and signature", who: null },
-        { role: `For ${company.name} — Authorised signatory`, who: inv.createdBy?.name },
+        {
+          role: 'Authorised signatory',
+          sub: `For ${company.name} · company stamp`,
+          who: null,
+          image: company.signatureUrl,
+        },
       ]}
-      footerNote={template.footerNote ?? 'Subject to local jurisdiction. This is a computer-generated invoice.'}
+      footerNote={template.footerNote ?? 'This is a computer-generated invoice.'}
     />
   )
 }

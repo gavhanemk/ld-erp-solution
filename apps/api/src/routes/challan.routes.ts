@@ -290,6 +290,7 @@ const challanInclude = {
   lines: {
     include: {
       item: { select: { id: true, code: true, name: true, color: true, hsnCode: true } },
+      uom: { select: { symbol: true } },
       soLine: { select: { id: true, unitPrice: true, gstRate: true, discount: true } },
       sizes: { include: { size: { select: { id: true, code: true, sequence: true } } } },
     },
@@ -592,8 +593,13 @@ export async function loadOpenOrder(tx: Prisma.TransactionClient, soId: string) 
   return order
 }
 
-const dispatchedMessage = (dcNumber: string, pieces: number) =>
-  `${dcNumber} dispatched: ${pieces.toLocaleString('en-IN')} pcs out of stock`
+/** "DC-… dispatched: 238.17 mtr · 20 pcs out of stock" — each unit on its own, never added together. */
+const dispatchedMessage = (dcNumber: string, lines: Array<{ qty: unknown; uom?: { symbol: string } | null }>) => {
+  const byUnit = new Map<string, number>()
+  for (const l of lines) byUnit.set(l.uom?.symbol ?? 'pcs', (byUnit.get(l.uom?.symbol ?? 'pcs') ?? 0) + Number(l.qty))
+  const text = [...byUnit.entries()].map(([unit, n]) => `${n.toLocaleString('en-IN')} ${unit}`).join(' · ')
+  return `${dcNumber} dispatched: ${text} out of stock`
+}
 
 // POST /api/sales/challans — a draft, or dispatched straight away.
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
@@ -608,10 +614,9 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
     { timeout: 30_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'DeliveryChallan', entityId: dc.id, after: dc })
-  const pieces = dc.lines.reduce((s, l) => s + Number(l.qty), 0)
   res.status(201).json({
     success: true,
-    message: data.dispatch ? dispatchedMessage(dc.dcNumber, pieces) : `${dc.dcNumber} saved as a draft`,
+    message: data.dispatch ? dispatchedMessage(dc.dcNumber, dc.lines) : `${dc.dcNumber} saved as a draft`,
     data: dc,
   })
 })
@@ -639,10 +644,9 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
     { timeout: 30_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'DeliveryChallan', entityId: after.id, before, after })
-  const pieces = after.lines.reduce((s, l) => s + Number(l.qty), 0)
   res.json({
     success: true,
-    message: data.dispatch ? dispatchedMessage(after.dcNumber, pieces) : `${after.dcNumber} saved`,
+    message: data.dispatch ? dispatchedMessage(after.dcNumber, after.lines) : `${after.dcNumber} saved`,
     data: after,
   })
 })
@@ -679,7 +683,7 @@ router.post('/:id/dispatch', requirePermission(MODULE, 'create'), async (req: Au
     { timeout: 30_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'DeliveryChallan', entityId: after.id, before, after })
-  res.json({ success: true, message: dispatchedMessage(after.dcNumber, after.lines.reduce((s, l) => s + Number(l.qty), 0)), data: after })
+  res.json({ success: true, message: dispatchedMessage(after.dcNumber, after.lines), data: after })
 })
 
 // POST /api/sales/challans/:id/delivered — the buyer has the goods.

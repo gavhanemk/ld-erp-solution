@@ -102,6 +102,28 @@ export const invoiceSchema = z
     lrNumber: z.string().max(60).optional().nullable(),
     eWayBillNumber: z.string().max(30).optional().nullable(),
     eWayBillDate: z.coerce.date().optional().nullable(),
+    // As the old ERP's invoice carried them (28 Nov 2026).
+    lrDate: z.coerce.date().optional().nullable(),
+    /** The consignee, apart from the buyer billed. Left out: the customer's shipping details. */
+    shipToName: z.string().trim().max(200).optional().nullable(),
+    shipToGstin: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .regex(/^$|^[0-9]{2}[A-Z0-9]{13}$/, 'A GSTIN is 15 characters, starting with the two-digit state code')
+      .optional()
+      .nullable(),
+    shipToState: z.string().trim().max(60).optional().nullable(),
+    shipToStateCode: z.string().trim().regex(/^$|^[0-9]{2}$/, 'A state code is two digits').optional().nullable(),
+    /** Packages the goods went in. Cartons left out: the challan's count. */
+    bales: z.number().int().min(0).max(100000).optional().nullable(),
+    rolls: z.number().int().min(0).max(100000).optional().nullable(),
+    cartons: z.number().int().min(0).max(100000).optional().nullable(),
+    /** Pieces (rolls) in a line counted in metres or kilos — by its order line and grade. */
+    linePcs: z
+      .array(z.object({ soLineId: z.string().min(1), grade: z.string().optional(), pcs: z.number().min(0).max(1000000) }))
+      .max(500)
+      .optional(),
     charges: z.array(chargeSchema).max(20).optional(),
     otherCharges: z.number().min(0).optional(),
     notes: z.string().max(1000).optional().nullable(),
@@ -132,7 +154,15 @@ const billableInclude = {
           billingAddress: true,
           billingCity: true,
           billingState: true,
+          billingStateCode: true,
           billingPincode: true,
+          // The consignee's details, unless the invoice says otherwise.
+          shippingAddress: true,
+          shippingCity: true,
+          shippingState: true,
+          shippingStateCode: true,
+          shippingPincode: true,
+          shippingGstin: true,
         },
       },
       charges: { include: { chargeType: { select: { id: true, name: true } } }, orderBy: { sortOrder: 'asc' } },
@@ -146,12 +176,49 @@ const billableInclude = {
   lines: {
     include: {
       item: { select: { id: true, code: true, name: true, color: true, hsnCode: true } },
+      uom: { select: { symbol: true } },
       soLine: true,
       sizes: { include: { size: { select: { code: true, sequence: true } } }, orderBy: { size: { sequence: 'asc' } } },
     },
   },
   invoices: { where: { status: { not: 'CANCELLED' } }, select: { id: true, invoiceNumber: true } },
+  fgCartons: { select: { id: true } },
 } satisfies Prisma.DeliveryChallanInclude
+
+/** A unit that is itself a count of pieces: no separate PCS on its line. */
+export const countsPieces = (symbol: string | null | undefined) => /^(pcs?|nos?|pieces?|units?|set|sets|pair|pairs)$/i.test((symbol ?? '').trim())
+
+/**
+ * The consignee an invoice starts from: the customer's shipping details, and
+ * where it has none of its own, the buyer itself — same GSTIN and state. A
+ * shipping address in another state with no GSTIN of its own keeps the GSTIN
+ * blank rather than borrow the buyer's, which would be wrong there.
+ */
+function consigneeOf(c: {
+  name: string
+  gstin: string | null
+  billingState: string | null
+  billingStateCode: string | null
+  shippingAddress: string | null
+  shippingCity: string | null
+  shippingState: string | null
+  shippingStateCode: string | null
+  shippingPincode: string | null
+  shippingGstin: string | null
+}) {
+  const elsewhere = Boolean(c.shippingStateCode && c.billingStateCode && c.shippingStateCode !== c.billingStateCode)
+  return {
+    name: c.name,
+    gstin: c.shippingGstin ?? (elsewhere ? null : c.gstin),
+    state: c.shippingState ?? c.billingState,
+    stateCode: c.shippingStateCode ?? c.billingStateCode,
+    address: joinAddress(c.shippingAddress, c.shippingCity, c.shippingState, c.shippingPincode) || null,
+  }
+}
+
+/** Cartons on the challan: the scanned finished-goods cartons, else the count typed on it. */
+const challanCartons = (dc: { cartons: number | null; fgCartons: Array<unknown> }) =>
+  dc.fgCartons.length || dc.cartons || null
 
 type Billable = Prisma.DeliveryChallanGetPayload<{ include: typeof billableInclude }>
 
@@ -402,10 +469,16 @@ router.get('/prepare', requirePermission(MODULE, 'create'), async (req, res) => 
       },
       isIntraState,
       placeOfSupplyProblem,
+      // Filled in on the form, and changeable there (28 Nov 2026).
+      consignee: consigneeOf(c),
+      packages: { cartons: challanCartons(dc) },
       lines: billLines(dc).map((b) => ({
         soLineId: b.soLine.id,
         grade: b.dcLine.grade,
         item: b.dcLine.item,
+        /** The unit it went in; one that is not a count of pieces asks for PCS. */
+        uom: b.dcLine.uom?.symbol ?? null,
+        needsPcs: Boolean(b.dcLine.uom?.symbol) && !countsPieces(b.dcLine.uom?.symbol),
         styleCode: b.soLine.styleCode,
         color: b.soLine.color,
         gender: b.soLine.gender,
@@ -603,6 +676,8 @@ const invoiceInclude = {
   charges: { include: { chargeType: { select: { id: true, name: true } } } },
   createdBy: { select: { id: true, name: true } },
   cancelledBy: { select: { id: true, name: true } },
+  /** The agent the sale came through ("Self" on paper when none). */
+  broker: { select: { id: true, name: true } },
   _count: { select: { payments: true, creditNotes: { where: { status: { not: 'CANCELLED' } } } } },
 } satisfies Prisma.SalesInvoiceInclude
 
@@ -692,6 +767,7 @@ export async function createInvoice(tx: Prisma.TransactionClient, data: InvoiceI
     )
   }
   const invoiceNumber = await nextDocumentNumber(tx, 'INV', invoiceDate)
+  const consignee = consigneeOf(order.customer)
   const created = await tx.salesInvoice.create({
     data: {
       invoiceNumber,
@@ -723,10 +799,24 @@ export async function createInvoice(tx: Prisma.TransactionClient, data: InvoiceI
       lrNumber: data.lrNumber ?? dc.lrNumber ?? null,
       eWayBillNumber: data.eWayBillNumber ?? dc.eWayBillNumber ?? null,
       eWayBillDate: data.eWayBillDate ?? null,
+      lrDate: data.lrDate ?? null,
+      // The consignee: what the form says, else the customer's shipping details.
+      shipToName: (data.shipToName ?? consignee.name) || null,
+      shipToGstin: (data.shipToGstin ?? consignee.gstin) || null,
+      shipToState: (data.shipToState ?? consignee.state) || null,
+      shipToStateCode: (data.shipToStateCode ?? consignee.stateCode) || null,
+      bales: data.bales ?? null,
+      rolls: data.rolls ?? null,
+      cartons: data.cartons !== undefined ? data.cartons : challanCartons(dc),
       notes: data.notes ?? null,
       terms: data.terms ?? order.terms ?? null,
       createdById: userId,
-      lines: { create: priced.lines },
+      lines: {
+        create: priced.lines.map((l) => {
+          const typed = data.linePcs?.find((x) => x.soLineId === l.soLineId && (x.grade ?? 'A') === l.grade)
+          return { ...l, pcs: typed ? typed.pcs : null }
+        }),
+      },
       charges: { create: priced.charges },
     },
   })
