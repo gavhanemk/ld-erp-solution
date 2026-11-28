@@ -547,6 +547,9 @@ enum TransactionType {
   /// A customer's own material arriving for us to work on. Held apart from
   /// PURCHASE because nothing was bought and nobody is owed.
   CUSTOMER_MATERIAL
+  /// Stock moved from one share of a balance to another in the same store:
+  /// earmarked for a brand, moved between brands, released to central.
+  REALLOCATION
 }
 
 enum VoucherType {
@@ -711,6 +714,10 @@ enum BOMCostBasis {
 // ═══════════════════════════════════════════
 
 model User {
+  reallocationsRaised   StockReallocation[] @relation("ReallocationBy")
+  reallocationsApproved StockReallocation[] @relation("ReallocationApprovedBy")
+  reallocationsRejected StockReallocation[] @relation("ReallocationRejectedBy")
+  reallocationsReversed StockReallocation[] @relation("ReallocationReversedBy")
   id           String     @id @default(cuid())
   openingStocks OpeningStock[] @relation("OpeningStockCreatedBy")
   openingStocksReversed OpeningStock[] @relation("OpeningStockReversedBy")
@@ -995,6 +1002,14 @@ model Brand {
   styles              Style[]
   costCentre          CostCentre?
   purchaseOrders      PurchaseOrder[]  @relation("PurchaseOrderBrand")
+  stockRows           StockLedger[]        @relation("StockLedgerBrand")
+  stockHolds          StockReservation[]   @relation("ReservationBrand")
+  stockPackages       StockPackage[]       @relation("PackageBrand")
+  garments            Garment[]            @relation("GarmentBrand")
+  transferLines       StockTransferLine[]  @relation("TransferLineBrand")
+  reallocationsFrom   StockReallocation[]  @relation("ReallocationFrom")
+  reallocationsTo     StockReallocation[]  @relation("ReallocationTo")
+  floorReturnLines    FloorReturnLine[]    @relation("FloorReturnLineBrand")
 
   @@map("brands")
 }
@@ -1244,6 +1259,7 @@ model ItemUnit {
 }
 
 model Item {
+  reallocationLines StockReallocationLine[] @relation("ReallocationLineItem")
   sampleMaterials SampleMaterial[]
   sampleCloseOuts SampleCloseOut[]
 
@@ -1762,6 +1778,7 @@ model Supplier {
 }
 
 model Warehouse {
+  reallocations     StockReallocation[] @relation("ReallocationStore")
   sampleMaterials SampleMaterial[]
   sampleCloseOutsFrom SampleCloseOut[] @relation("SampleCloseOutFrom")
   sampleCloseOutsTo   SampleCloseOut[] @relation("SampleCloseOutTo")
@@ -3349,7 +3366,14 @@ model StockLedger {
   /// the ERP), on work in progress and finished goods moved process to process.
   /// Not part of the balance: it splits a process's size-wise stock by order.
   orderNo         String?
+  /// Whose share of the balance this is: an own brand's, earmarked for it,
+  /// or blank for central stock, the company's for no brand. Part of the
+  /// balance, and each share keeps its own moving average (multi-brand
+  /// phase 5, decision 5).
+  brandId         String?
+  brand           Brand?          @relation("StockLedgerBrand", fields: [brandId], references: [id], onDelete: Restrict)
   @@index([itemId, warehouseId])
+  @@index([itemId, warehouseId, brandId])
   @@index([transactionDate])
   @@index([ownership, ownerCustomerId])
   @@index([itemId, warehouseId, sizeId])
@@ -3379,6 +3403,7 @@ enum RequisitionFulfilment {
 }
 
 model MaterialRequisition {
+  reallocations   StockReallocation[] @relation("ReallocationMR")
   id              String              @id @default(cuid())
   mrNumber        String              @unique
   moId            String?
@@ -3457,6 +3482,9 @@ model FloorReturnLine {
   itemId      String
   warehouseId String
   qty         Decimal                 @db.Decimal(10, 3)
+  /// The share it came back into: the brand it was issued for, or blank for central.
+  brandId     String?
+  brand       Brand?                  @relation("FloorReturnLineBrand", fields: [brandId], references: [id], onDelete: Restrict)
 
   @@index([returnId])
   @@index([mrLineId])
@@ -3740,6 +3768,9 @@ model StockTransferLine {
   returnedQty     Decimal        @default(0) @db.Decimal(10, 3)
   /// Written off as lost on the way, with a store manager's approval.
   lostQty         Decimal        @default(0) @db.Decimal(10, 3)
+  /// The share it moved: a brand's, or blank for central. It arrives as the same share.
+  brandId         String?
+  brand           Brand?         @relation("TransferLineBrand", fields: [brandId], references: [id], onDelete: Restrict)
   receiptLines    StockTransferReceiptLine[]
   @@map("stock_transfer_lines")
 }
@@ -4265,6 +4296,7 @@ model JobWorkReturnLine {
 // ═══════════════════════════════════════════
 
 model ManufacturingOrder {
+  reallocations    StockReallocation[] @relation("ReallocationMO")
   id               String      @id @default(cuid())
   moNumber         String      @unique
   soId             String?
@@ -5792,6 +5824,7 @@ model SizeGroup {
 }
 
 model Size {
+  reallocationLines StockReallocationLine[] @relation("ReallocationLineSize")
   id          String    @id @default(cuid())
   sizeGroupId String
   sizeGroup   SizeGroup @relation(fields: [sizeGroupId], references: [id], onDelete: Cascade)
@@ -6977,6 +7010,9 @@ model StockReservation {
   releasedById  String?
   releasedBy    User?                   @relation("ReservationReleasedBy", fields: [releasedById], references: [id])
   releaseReason String?
+  /// The share the hold is on: the order's brand, or blank for central stock.
+  brandId       String?
+  brand         Brand?                  @relation("ReservationBrand", fields: [brandId], references: [id], onDelete: Restrict)
 
   @@index([itemId, warehouseId, status])
   @@index([mrId])
@@ -7017,6 +7053,8 @@ enum PackageStatus {
 }
 
 enum PackageMoveType {
+  /// Its share changed: earmarked for a brand, moved between brands, released to central.
+  EARMARKED
   CREATED
   ISSUED
   TRANSFERRED
@@ -7103,6 +7141,11 @@ model StockPackage {
   /// Merged into another package: the one that now holds its contents.
   mergedIntoId    String?
   mergedInto      StockPackage?  @relation("PackageMerge", fields: [mergedIntoId], references: [id])
+  /// The share this sticker's metres are: a brand's, or blank for central.
+  /// Part of a roll earmarked for a brand rides on the roll as its own child
+  /// sticker (same lot), so stickers agree with the ledger share by share.
+  brandId         String?
+  brand           Brand?         @relation("PackageBrand", fields: [brandId], references: [id], onDelete: Restrict)
   mergedFrom      StockPackage[] @relation("PackageMerge")
   createdById     String?
   createdAt       DateTime       @default(now())
@@ -7188,6 +7231,8 @@ enum GarmentStatus {
 }
 
 enum GarmentEventType {
+  /// Its share changed: earmarked for a brand, moved between brands, released to central.
+  EARMARKED
   TAGGED
   PACKED
   UNPACKED
@@ -7247,6 +7292,9 @@ model Garment {
   /// How often its label has been printed. A reprint keeps the same code.
   printCount      Int                @default(0)
   lastPrintedAt   DateTime?
+  /// The share the piece is: the brand it was made for, or blank for central.
+  brandId         String?
+  brand           Brand?             @relation("GarmentBrand", fields: [brandId], references: [id], onDelete: Restrict)
   createdById     String?
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
@@ -7508,4 +7556,104 @@ model AllocationRunSource {
 
   @@index([runId])
   @@map("acc_allocation_run_sources")
+}
+
+/// What a stock reallocation does to whose share stock is.
+enum ReallocationKind {
+  /// Central stock earmarked for a brand.
+  EARMARK
+  /// One brand's stock handed to another.
+  MOVE
+  /// A brand's earmark given back to central stock.
+  RELEASE
+  /// Central stock moved to an MO's brand by the material issue itself (decision 7).
+  AUTO
+}
+
+enum ReallocationStatus {
+  /// Raised, waiting for someone other than its maker to approve it.
+  PENDING
+  /// Approved and in the stock ledger.
+  POSTED
+  REJECTED
+  /// Withdrawn by its maker before anyone approved it.
+  CANCELLED
+  /// Posted, then put back by an opposite movement (both kept).
+  REVERSED
+}
+
+/// Stock moved from one share of a store's balance to another: central
+/// stock earmarked for a brand, one brand's handed to another, or given back.
+/// Nothing moves physically. It posts as an out of one share and an in to
+/// the other on the stock ledger, at the giving share's average, so the
+/// company's stock and value never change. Raised by one person and approved
+/// by another; an Admin may approve their own only as an override with a
+/// reason, kept on the document and in the audit trail. An MO's material
+/// issue makes its own (AUTO), under decision 7's conditions.
+model StockReallocation {
+  id             String             @id @default(cuid())
+  number         String             @unique
+  kind           ReallocationKind
+  status         ReallocationStatus @default(PENDING)
+  warehouseId    String
+  warehouse      Warehouse          @relation("ReallocationStore", fields: [warehouseId], references: [id])
+  /// Blank is central stock.
+  fromBrandId    String?
+  fromBrand      Brand?             @relation("ReallocationFrom", fields: [fromBrandId], references: [id], onDelete: Restrict)
+  toBrandId      String?
+  toBrand        Brand?             @relation("ReallocationTo", fields: [toBrandId], references: [id], onDelete: Restrict)
+  /// The MO it is for, on an automatic one or when the maker names it.
+  moId           String?
+  mo             ManufacturingOrder? @relation("ReallocationMO", fields: [moId], references: [id])
+  mrId           String?
+  mr             MaterialRequisition? @relation("ReallocationMR", fields: [mrId], references: [id])
+  reason         String
+  requestedById  String
+  requestedBy    User               @relation("ReallocationBy", fields: [requestedById], references: [id])
+  requestedAt    DateTime           @default(now())
+  approvedById   String?
+  approvedBy     User?              @relation("ReallocationApprovedBy", fields: [approvedById], references: [id])
+  approvedAt     DateTime?
+  /// Approved by its own maker: only an Admin, only with a reason.
+  selfApproved   Boolean            @default(false)
+  overrideReason String?
+  rejectedById   String?
+  rejectedBy     User?              @relation("ReallocationRejectedBy", fields: [rejectedById], references: [id])
+  rejectedAt     DateTime?
+  rejectReason   String?
+  postedAt       DateTime?
+  reversedById   String?
+  reversedBy     User?              @relation("ReallocationReversedBy", fields: [reversedById], references: [id])
+  reversedAt     DateTime?
+  reverseReason  String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  lines StockReallocationLine[]
+
+  @@index([status])
+  @@index([moId])
+  @@index([mrId])
+  @@map("stock_reallocations")
+}
+
+/// One item's quantity moving share. Its rate is the giving share's average
+/// when it posted; the stickers and tags named move with it.
+model StockReallocationLine {
+  id             String            @id @default(cuid())
+  reallocationId String
+  reallocation   StockReallocation @relation(fields: [reallocationId], references: [id], onDelete: Cascade)
+  itemId         String
+  item           Item              @relation("ReallocationLineItem", fields: [itemId], references: [id])
+  sizeId         String?
+  size           Size?             @relation("ReallocationLineSize", fields: [sizeId], references: [id])
+  grade          String            @default("A")
+  qty            Decimal           @db.Decimal(10, 3)
+  unitRate       Decimal?          @db.Decimal(10, 2)
+  /// Stickers named, whole or part; a part rides on its roll as a child sticker.
+  packageCodes   String[]          @default([])
+  garmentCodes   String[]          @default([])
+
+  @@index([reallocationId])
+  @@map("stock_reallocation_lines")
 }

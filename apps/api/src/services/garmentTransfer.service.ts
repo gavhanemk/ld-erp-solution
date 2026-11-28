@@ -27,6 +27,8 @@ export interface TagKey {
   grade: string
   ownership: StockOwnership
   ownerCustomerId: string | null
+  /** One share only (a brand's, or null for central); left out, every share together. */
+  brandId?: string | null
 }
 
 const tagSelect = {
@@ -41,12 +43,20 @@ const tagSelect = {
   ownerCustomerId: true,
   dcId: true,
   adjustmentId: true,
+  brandId: true,
   item: { select: { name: true } },
   size: { select: { code: true } },
 } satisfies Prisma.GarmentSelect
 type Tag = Prisma.GarmentGetPayload<{ select: typeof tagSelect }>
 
-const keyWhere = (k: TagKey) => ({ itemId: k.itemId, sizeId: k.sizeId, grade: k.grade, ownership: k.ownership, ownerCustomerId: k.ownerCustomerId })
+const keyWhere = (k: TagKey) => ({
+  itemId: k.itemId,
+  sizeId: k.sizeId,
+  grade: k.grade,
+  ownership: k.ownership,
+  ownerCustomerId: k.ownerCustomerId,
+  ...(k.brandId !== undefined ? { brandId: k.brandId } : {}),
+})
 const what = (name: string, sizeCode: string | null) => `${name}${sizeCode ? ` size ${sizeCode}` : ''}`
 
 /** The tags named, normalised and locked; refused if any is unknown. */
@@ -66,6 +76,7 @@ function notThis(g: Tag, k: TagKey, warehouseId: string, storeName: string): str
   if (g.itemId !== k.itemId || (g.sizeId ?? null) !== (k.sizeId ?? null)) return `${g.code} is ${what(g.item.name, g.size?.code ?? null)}, not this line's item and size.`
   if (g.grade !== k.grade) return `${g.code} is grade ${g.grade}, not this line's grade ${k.grade}.`
   if (g.ownership !== k.ownership || (g.ownerCustomerId ?? null) !== (k.ownerCustomerId ?? null)) return `${g.code} belongs to someone else's stock.`
+  if (k.brandId !== undefined && (g.brandId ?? null) !== (k.brandId ?? null)) return `${g.code} is ${g.brandId ? 'earmarked for a brand' : 'central stock'}, not the share this line moves.`
   if (g.status === 'PACKED') return `${g.code} is sealed in a carton: open the carton first.`
   if (g.status !== 'IN_STOCK') return `${g.code} is not in stock (${g.status.toLowerCase()}).`
   if (g.dcId) return `${g.code} is held on a delivery challan.`
@@ -79,7 +90,7 @@ function notThis(g: Tag, k: TagKey, warehouseId: string, storeName: string): str
  */
 export async function tagPosition(tx: Tx, warehouseId: string, k: TagKey) {
   const [ledger, tagged] = await Promise.all([
-    balanceOf(tx, { itemId: k.itemId, warehouseId, sizeId: k.sizeId, grade: k.grade, ownership: k.ownership, ownerCustomerId: k.ownerCustomerId }),
+    balanceOf(tx, { itemId: k.itemId, warehouseId, sizeId: k.sizeId, grade: k.grade, ownership: k.ownership, ownerCustomerId: k.ownerCustomerId, brandId: k.brandId }),
     tx.garment.count({ where: { ...keyWhere(k), warehouseId, status: { in: ['IN_STOCK', 'PACKED'] } } }),
   ])
   const held = Math.round(ledger.qty)

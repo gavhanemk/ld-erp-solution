@@ -19,6 +19,7 @@ export const INVENTORY_SECTIONS: InventorySection[] = [
     tabs: [
       { label: 'Stock', href: '/inventory/stock' },
       { label: 'Stock Documents', href: '/inventory/documents' },
+      { label: 'Brand Stock', href: '/inventory/brand-stock' },
       { label: 'Stock Count', href: '/inventory/count' },
       { label: 'Opening Stock', href: '/inventory/opening-stock' },
     ],

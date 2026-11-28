@@ -112,6 +112,11 @@ export const MOVEMENT_DOC_JOIN = Prisma.sql`
     SELECT os.number, NULL, NULL, NULL
       FROM ld_erp.opening_stocks os
       WHERE s."referenceType" = 'OPENING_IMPORT' AND os.id = s."referenceId"
+    UNION ALL
+    -- Brand stock (multi-brand phase 5): an earmark, a move between brands, a release, an MO's automatic move.
+    SELECT ra.number, NULL, NULL, NULL
+      FROM ld_erp.stock_reallocations ra
+      WHERE s."referenceType" = 'STOCK_REALLOCATION' AND ra.id = s."referenceId"
     LIMIT 1
   ) p ON TRUE`
 
@@ -157,6 +162,7 @@ export const DOCUMENT_LABEL: Record<string, string> = {
   CREDIT_NOTE: 'Returned by customer',
   CREDIT_NOTE_CANCEL: 'Customer return cancelled',
   SAMPLING: 'Sampling',
+  STOCK_REALLOCATION: 'Brand stock: earmark, move or release',
 }
 
 export const documentLabel = (t: string | null) =>

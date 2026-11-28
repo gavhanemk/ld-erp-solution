@@ -171,6 +171,14 @@ export const ACCESS_CATALOG: AccessModule[] = [
         'Finished goods in, garment tags, garment in / out, cartons',
       ),
       s('inventory.trace', 'Track & Trace', LOOK, ['/inventory/trace'], ['/api/trace']),
+      s(
+        'inventory.brand-stock',
+        'Brand Stock',
+        DOC,
+        ['/inventory/brand-stock'],
+        ['/api/inventory/reallocations'],
+        'Central stock earmarked for brands: earmark, move between brands, release; approved by someone else',
+      ),
       s('inventory.job-work', 'Job Work', DOC, ['/inventory/job-work'], ['/api/inventory/job-work', '/api/inventory/floor-returns']),
       s(
         'inventory.customer-material',

@@ -82,6 +82,7 @@ import { assertGeneralStores } from '../lib/sampleStore'
 import { assertLineQtyFitsUnits, assertQtyFitsUnits, assertRequisitionFitsUnits } from '../services/unitQuantity.service'
 import { orderBrand } from '../lib/orderBrand'
 import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
+import { assertAutoAllowed, assertOwnBrand, autoForIssue, returnShares, shareFree, shareName } from '../services/brandStock.service'
 
 /**
  * An item's design no. and colour, flat on a row the screens read (27 Nov
@@ -132,19 +133,24 @@ router.get('/held', requirePermission(MODULE, 'view'), async (req, res) => {
   // Good stock only, unless asked for every grade (a count or a move can take
   // B-grade or rejected stock, each as itself).
   const allGrades = str(req.query.grades) === 'all'
+  // ?shares=1 (a move): each brand's earmark and central stock apart, as each
+  // moves as itself. Otherwise every share together, the stock on the rack.
+  const byShare = str(req.query.shares) === '1'
   const rows = await prisma.$queryRaw<
-    Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; ownerName: string | null; sizeId: string | null; sizeCode: string | null; sequence: number | null; grade: string; qty: number }>
+    Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; ownerName: string | null; sizeId: string | null; sizeCode: string | null; sequence: number | null; grade: string; brandId: string | null; brandName: string | null; qty: number }>
   >`
     SELECT s."itemId", s."ownership"::text AS "ownership", s."ownerCustomerId", c.name AS "ownerName",
            s."sizeId", z.code AS "sizeCode", z.sequence AS "sequence", s.grade,
+           CASE WHEN ${byShare} THEN s."brandId" END AS "brandId", CASE WHEN ${byShare} THEN b.name END AS "brandName",
            SUM(s."inQty" - s."outQty")::float8 AS "qty"
     FROM ld_erp.stock_ledger s
     LEFT JOIN ld_erp.customers c ON c.id = s."ownerCustomerId"
     LEFT JOIN ld_erp.sizes z ON z.id = s."sizeId"
+    LEFT JOIN ld_erp.brands b ON b.id = s."brandId"
     WHERE s."warehouseId" = ${warehouseId} AND (${allGrades} OR s."grade" = 'A')
-    GROUP BY s."itemId", s."ownership", s."ownerCustomerId", c.name, s."sizeId", z.code, z.sequence, s.grade
+    GROUP BY s."itemId", s."ownership", s."ownerCustomerId", c.name, s."sizeId", z.code, z.sequence, s.grade, 9, 10
     HAVING SUM(s."inQty" - s."outQty") > 0
-    ORDER BY s."itemId", s."ownership", c.name, z.sequence, s.grade`
+    ORDER BY s."itemId", s."ownership", c.name, z.sequence, s.grade, 10 NULLS FIRST`
   res.json({ success: true, data: rows.map((r) => ({ ...r, qty: Math.round(r.qty * 1000) / 1000 })) })
 })
 
@@ -1069,13 +1075,21 @@ export async function createTransfer(
 
   const whose: Array<Awaited<ReturnType<typeof whoseStock>>> = []
   for (const line of data.lines) whose.push(await whoseStock(tx, line))
+  // Each line moves one share (multi-brand phase 5): a brand's earmark, or central.
+  const shares: Array<string | null> = []
+  for (const [i, line] of data.lines.entries()) {
+    const b = line.brandId || null
+    if (b && whose[i].ownership !== 'OWNED') throw new AppError('A customer’s material is never a brand’s: only our own stock moves as a brand’s.', 400, 'CUSTOMER_STOCK_NO_BRAND')
+    if (b) await assertOwnBrand(tx, b)
+    shares.push(b)
+  }
 
   // Tagged garments: each balance's tags checked against the store before
   // anything moves — lines of the same item, size, grade and owner together.
   const byBalance = new Map<string, { key: TagKey; qty: number; codes: string[] }>()
   data.lines.forEach((l, i) => {
-    const key: TagKey = { itemId: l.itemId, sizeId: whose[i].sizeId ?? null, grade: l.grade ?? 'A', ownership: whose[i].ownership, ownerCustomerId: whose[i].ownerCustomerId ?? null }
-    const k = [key.itemId, key.sizeId ?? '', key.grade, key.ownership, key.ownerCustomerId ?? ''].join('|')
+    const key: TagKey = { itemId: l.itemId, sizeId: whose[i].sizeId ?? null, grade: l.grade ?? 'A', ownership: whose[i].ownership, ownerCustomerId: whose[i].ownerCustomerId ?? null, brandId: shares[i] }
+    const k = [key.itemId, key.sizeId ?? '', key.grade, key.ownership, key.ownerCustomerId ?? '', key.brandId ?? ''].join('|')
     const g = byBalance.get(k) ?? { key, qty: 0, codes: [] }
     g.qty += l.qty
     g.codes.push(...(l.garmentCodes ?? []))
@@ -1111,14 +1125,14 @@ export async function createTransfer(
       // Direct: there already. In transit: on the road until it is received.
       status: onTheRoad ? 'DISPATCHED' : 'RECEIVED',
       transitWarehouseId: via?.id ?? null,
-      lines: { create: data.lines.map((l, i) => ({ itemId: l.itemId, qty: l.qty, ...whose[i], grade: l.grade ?? 'A' })) },
+      lines: { create: data.lines.map((l, i) => ({ itemId: l.itemId, qty: l.qty, ...whose[i], grade: l.grade ?? 'A', brandId: shares[i] })) },
     },
     include: { lines: true },
   })
 
   for (const line of created.lines) {
-    // A grade moves as itself: rejects go to a reject store still rejected.
-    const key = { ownership: line.ownership, ownerCustomerId: line.ownerCustomerId, sizeId: line.sizeId, grade: line.grade }
+    // A grade moves as itself: rejects go to a reject store still rejected. So does a share.
+    const key = { ownership: line.ownership, ownerCustomerId: line.ownerCustomerId, sizeId: line.sizeId, grade: line.grade, brandId: line.brandId }
     const moved = await transferStock(tx, {
       itemId: line.itemId,
       fromWarehouseId: data.fromWarehouseId,
@@ -1250,6 +1264,8 @@ router.get('/tags', requirePermission(MODULE, 'view'), async (req, res) => {
     grade: str(req.query.grade) ?? 'A',
     ownership: (str(req.query.ownership) as TagKey['ownership']) ?? 'OWNED',
     ownerCustomerId: str(req.query.ownerCustomerId) ?? null,
+    // ?share=central or a brand's id: that share's pieces only. Left out, every share.
+    ...(str(req.query.share) ? { brandId: str(req.query.share) === 'central' ? null : str(req.query.share)! } : {}),
   }
   const [pos, free] = await Promise.all([
     tagPosition(prisma, warehouseId, key),
@@ -1328,7 +1344,7 @@ export async function cancelTransfer(tx: Prisma.TransactionClient, id: string, r
   const movedTags = await tx.garmentEvent.findMany({ where: { referenceId: before.id, type: 'TRANSFERRED' }, select: { garmentId: true }, distinct: ['garmentId'] })
   const backTags: Array<{ id: string }> = []
   for (const line of before.lines) {
-    const key: TagKey = { itemId: line.itemId, sizeId: line.sizeId, grade: line.grade, ownership: line.ownership, ownerCustomerId: line.ownerCustomerId }
+    const key: TagKey = { itemId: line.itemId, sizeId: line.sizeId, grade: line.grade, ownership: line.ownership, ownerCustomerId: line.ownerCustomerId, brandId: line.brandId }
     for (const g of await transferTagsIn(tx, before.id, before.toWarehouseId, key)) if (!backTags.some((b) => b.id === g.id)) backTags.push(g)
   }
   if (backTags.length < movedTags.length) {
@@ -1350,6 +1366,7 @@ export async function cancelTransfer(tx: Prisma.TransactionClient, id: string, r
       ownerCustomerId: line.ownerCustomerId,
       sizeId: line.sizeId,
       grade: line.grade,
+      brandId: line.brandId,
       referenceType: 'STOCK_TRANSFER_CANCELLED',
       referenceId: before.id,
       transactionDate: new Date(),
@@ -2515,7 +2532,15 @@ export async function issueRequisition(
   body: z.infer<typeof issueRequisitionSchema>,
   user: AuthRequest['user'],
   /** A scanned issue has taken its own package down; a typed one is put right in the labels window after. */
-  opts: { stickers?: 'window' | 'caller' } = {},
+  opts: {
+    stickers?: 'window' | 'caller'
+    /**
+     * A scanned roll's share (multi-brand phase 5): the brand's own roll issues
+     * from the brand's share; a central roll moves to the brand for this issue,
+     * under decision 7. Left out for a typed issue: own share first, then central.
+     */
+    fromShare?: string | null
+  } = {},
 ) {
   const when = body.issueDate ?? new Date()
 
@@ -2532,6 +2557,7 @@ export async function issueRequisition(
         include: { item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } },
       },
       department: true,
+      mo: { select: { id: true, moNumber: true, brandId: true, status: true, heldAt: true, holdReason: true } },
     },
   })
   if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
@@ -2634,6 +2660,12 @@ export async function issueRequisition(
   // A reject, QC hold, scrap or in-transit store's stock is counted, never issued.
   await assertStoresOffer(tx, [...storeNames.keys()], 'Move what can still be used to a store goods are issued from first.')
   const handedOver: string[] = []
+  // Multi-brand phase 5: an MO's material comes out of its brand's share —
+  // the brand's own earmark first, then free central stock moved to it by
+  // itself, only as decision 7 allows. A general requisition takes central.
+  const moBrand = mr.mo?.brandId ?? null
+  const autoMoved: string[] = []
+  const issuedThisCall = new Map<string, number>()
   // Settings → Preferences: stickered stock is handed over by scanning its
   // packages. A typed issue (this, unless the caller scanned) may then take
   // only what is not in a package.
@@ -2687,8 +2719,56 @@ export async function issueRequisition(
           unit,
         })
       }
+      // The share it comes from: the MO's brand for our own material, else central.
+      let share: string | null = null
+      if (moBrand && line.ownership === 'OWNED') {
+        share = moBrand
+        const sofar = issuedThisCall.get(line.itemId) ?? 0
+        let fromOwn: number
+        if (opts.fromShare !== undefined) {
+          if (opts.fromShare === moBrand) fromOwn = a.qty
+          else if (opts.fromShare === null) fromOwn = 0
+          else {
+            throw new AppError(
+              `That roll is earmarked for ${await shareName(tx, opts.fromShare)}, not ${await shareName(tx, moBrand)}: it is not this order's to issue. Scan another, or move it between the brands first (approved).`,
+              409,
+              'OTHER_BRANDS_STOCK',
+            )
+          }
+        } else {
+          const own = await shareFree(tx, { itemId: line.itemId, warehouseId: a.warehouseId, ownership: 'OWNED', brandId: moBrand }, [line.id])
+          fromOwn = round3(Math.min(a.qty, own.free))
+        }
+        const auto = round3(a.qty - fromOwn)
+        if (auto > 0.0005) {
+          await assertAutoAllowed(tx, {
+            mo: { ...mr.mo!, brandId: moBrand },
+            mrStatus: mr.status,
+            itemId: line.itemId,
+            itemName: nameWithShade(line.item),
+            unit,
+            autoQty: auto,
+            alreadyThisIssue: round3(sofar + fromOwn),
+          })
+          const made = await autoForIssue(tx, {
+            mo: { id: mr.mo!.id, moNumber: mr.mo!.moNumber, brandId: moBrand },
+            mr: { id: mr.id, mrNumber: mr.mrNumber },
+            itemId: line.itemId,
+            warehouseId: a.warehouseId,
+            qty: auto,
+            reservedFor: [line.id],
+            userId: user!.id,
+            transactionDate: when,
+            // A scanned central roll comes down with the issue; a typed one's rolls move with it, oldest first.
+            stickers: opts.stickers === 'caller' ? 'leave' : 'oldest',
+          })
+          autoMoved.push(`${qtyText(auto)} ${unit} ${nameWithShade(line.item)} on ${made.number}`.replace(/\s+/g, ' '))
+        }
+        issuedThisCall.set(line.itemId, round3(sofar + a.qty))
+      }
       // recordMovement refuses if that rack is short, and names the shortfall.
       await recordMovement(tx, {
+        brandId: share,
         itemId: line.itemId,
         warehouseId: a.warehouseId,
         transactionType: 'ISSUE',
@@ -2743,7 +2823,7 @@ export async function issueRequisition(
   })
   // Material handed to an order: its job cards learn the fabric's lot.
   if (after.mo?.id) await fillJobCardBlanks(tx, after.mo.id)
-  return { after, handedOver, stillOwed }
+  return { after, handedOver, stillOwed, autoMoved }
 }
 
 /**
@@ -5233,27 +5313,19 @@ export async function returnFromFloor(tx: Prisma.TransactionClient, mrId: string
   await tx.$queryRaw`SELECT id FROM ld_erp.material_requisitions WHERE id = ${mrId} FOR UPDATE`
   const mr = await tx.materialRequisition.findUnique({
     where: { id: mrId },
-    include: { lines: { include: { item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } } }, department: { select: { name: true } } },
+    include: {
+      lines: { include: { item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } } },
+      department: { select: { name: true } },
+      mo: { select: { brandId: true } },
+    },
   })
   if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
   const back: string[] = []
-  // A document of its own, so one return can be told from the next and cancelled alone.
-  const returnNumber = await nextDocumentNumber(tx, 'FR', new Date())
-  const doc = await tx.floorReturn.create({
-    data: {
-      returnNumber,
-      mrId: mr.id,
-      reason: data.reason ?? null,
-      createdById: userId,
-      lines: {
-        create: data.lines.map((r) => {
-          const line = mr.lines.find((l) => l.id === r.lineId)
-          if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}`, 400, 'BAD_LINE')
-          return { mrLineId: line.id, itemId: line.itemId, warehouseId: r.warehouseId, qty: r.qty }
-        }),
-      },
-    },
-  })
+  // Checked line by line first, then split by the share each part goes back
+  // to (multi-brand phase 5): the shares it was issued from, the MO's brand
+  // first, each at its own issue rate.
+  type Part = { lineId: string; itemId: string; warehouseId: string; ownership: (typeof mr.lines)[number]['ownership']; ownerCustomerId: string | null; brandId: string | null; qty: number; rate: number }
+  const parts: Part[] = []
   for (const r of data.lines) {
     const line = mr.lines.find((l) => l.id === r.lineId)
     if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}`, 400, 'BAD_LINE')
@@ -5269,30 +5341,66 @@ export async function returnFromFloor(tx: Prisma.TransactionClient, mrId: string
     }
     const wh = await tx.warehouse.findUnique({ where: { id: r.warehouseId }, select: { isActive: true, name: true } })
     if (!wh?.isActive) throw new AppError('That store is not in use', 400, 'BAD_WAREHOUSE')
-    // At the rate it went out at: what this requisition's issues of it were carried at.
-    const outs = await tx.stockLedger.findMany({
-      where: { referenceType: 'MATERIAL_REQUISITION', referenceId: mr.id, itemId: line.itemId, ownership: line.ownership, ownerCustomerId: line.ownerCustomerId, outQty: { gt: 0 } },
-      select: { outQty: true, unitRate: true },
-    })
-    const q = outs.reduce((s, o) => s + Number(o.outQty), 0)
-    const rate = line.ownership === 'CUSTOMER_OWNED' || q <= 0 ? 0 : outs.reduce((s, o) => s + Number(o.outQty) * Number(o.unitRate ?? 0), 0) / q
-    await recordMovement(tx, {
+    // At the rate it went out at: what this requisition's issues of it, share by share, were carried at.
+    const shares = await returnShares(tx, {
+      mrId: mr.id,
       itemId: line.itemId,
-      warehouseId: r.warehouseId,
       ownership: line.ownership,
       ownerCustomerId: line.ownerCustomerId,
+      qty: r.qty,
+      brandFirst: line.ownership === 'OWNED' ? (mr.mo?.brandId ?? null) : null,
+    })
+    for (const p of shares) {
+      parts.push({
+        lineId: line.id,
+        itemId: line.itemId,
+        warehouseId: r.warehouseId,
+        ownership: line.ownership,
+        ownerCustomerId: line.ownerCustomerId,
+        brandId: line.ownership === 'OWNED' ? p.brandId : null,
+        qty: p.qty,
+        rate: line.ownership === 'CUSTOMER_OWNED' ? 0 : p.rate,
+      })
+    }
+    back.push(`${round3(r.qty)} ${line.item.uom?.symbol ?? ''} ${nameWithShade(line.item)} into ${wh.name}`.replace(/\s+/g, ' '))
+  }
+  // A document of its own, so one return can be told from the next and cancelled alone.
+  const returnNumber = await nextDocumentNumber(tx, 'FR', new Date())
+  const doc = await tx.floorReturn.create({
+    data: {
+      returnNumber,
+      mrId: mr.id,
+      reason: data.reason ?? null,
+      createdById: userId,
+      lines: { create: parts.map((p) => ({ mrLineId: p.lineId, itemId: p.itemId, warehouseId: p.warehouseId, qty: p.qty, brandId: p.brandId })) },
+    },
+  })
+  for (const p of parts) {
+    await recordMovement(tx, {
+      itemId: p.itemId,
+      warehouseId: p.warehouseId,
+      ownership: p.ownership,
+      ownerCustomerId: p.ownerCustomerId,
+      brandId: p.brandId,
       transactionType: 'RETURN',
       direction: 'IN',
-      qty: r.qty,
-      unitRate: Math.round(rate * 100) / 100,
+      qty: p.qty,
+      unitRate: Math.round(p.rate * 100) / 100,
       referenceType: 'MR_RETURN',
       referenceId: mr.id,
       notes: `${returnNumber}: back from ${mr.department.name} on ${mr.mrNumber}${data.reason ? `: ${data.reason}` : ''}`,
     })
-    await tx.materialRequisitionLine.update({ where: { id: line.id }, data: { returnedQty: { increment: r.qty } } })
-    back.push(`${round3(r.qty)} ${line.item.uom?.symbol ?? ''} ${nameWithShade(line.item)} into ${wh.name}`.replace(/\s+/g, ' '))
   }
-  return { mrNumber: mr.mrNumber, back, returnNumber, returnId: doc.id }
+  for (const r of data.lines) {
+    await tx.materialRequisitionLine.update({ where: { id: r.lineId }, data: { returnedQty: { increment: r.qty } } })
+  }
+  return {
+    mrNumber: mr.mrNumber,
+    back,
+    returnNumber,
+    returnId: doc.id,
+    shares: parts.map((p) => ({ itemId: p.itemId, warehouseId: p.warehouseId, brandId: p.brandId, qty: p.qty })),
+  }
 }
 
 /**
@@ -5329,6 +5437,7 @@ export async function cancelFloorReturn(tx: Prisma.TransactionClient, id: string
       WHERE "itemId" = ${l.itemId} AND "warehouseId" = ${l.warehouseId}
         AND ownership = ${ownership}::ld_erp."StockOwnership"
         AND "ownerCustomerId" IS NOT DISTINCT FROM ${owner}::text
+        AND "brandId" IS NOT DISTINCT FROM ${l.brandId}::text
         AND "sizeId" IS NULL AND grade = 'A'`
     const used = round3(Math.min(qty, Math.max(0, Number(b.outs) - Number(b.before))))
     if (used > 0.0005) {
@@ -5349,6 +5458,7 @@ export async function cancelFloorReturn(tx: Prisma.TransactionClient, id: string
         ownership,
         ownerCustomerId: owner,
         status: 'IN_STOCK',
+        brandId: l.brandId,
         createdAt: { gte: fr.createdAt },
       },
       select: { id: true, qty: true, initialQty: true, warehouseId: true },
@@ -5387,6 +5497,7 @@ export async function cancelFloorReturn(tx: Prisma.TransactionClient, id: string
       referenceId: fr.mrId,
       notes: `${fr.returnNumber} cancelled: ${reason}`,
       earlierDate: 'move-up',
+      brandId: l.brandId,
     })
     await tx.materialRequisitionLine.update({ where: { id: l.mrLineId }, data: { returnedQty: { decrement: qty } } })
   }
@@ -5572,6 +5683,21 @@ router.post('/requisitions/:id/return', requirePermission(MODULE, 'create'), asy
     b.qty = round3(b.qty + Number(before._sum.initialQty ?? 0))
   }
   const made = await autoStickers({ sourceType: 'MR_RETURN', sourceId: req.params.id, lines: [...back.values()] }, req.user?.id ?? null)
+  // Stickers for what went back into a brand's share are that brand's: where every
+  // part of an item's return into a store went to one brand, its new stickers carry it.
+  if (made.ids.length) {
+    const byPlace = new Map<string, Set<string | null>>()
+    for (const p of result.shares) {
+      const k = `${p.itemId}|${p.warehouseId}`
+      byPlace.set(k, (byPlace.get(k) ?? new Set()).add(p.brandId))
+    }
+    const fresh = await prisma.stockPackage.findMany({ where: { id: { in: made.ids } }, select: { id: true, itemId: true, warehouseId: true } })
+    for (const pkg of fresh) {
+      const said = byPlace.get(`${pkg.itemId}|${pkg.warehouseId}`)
+      const only = said && said.size === 1 ? [...said][0] : null
+      if (only) await prisma.stockPackage.update({ where: { id: pkg.id }, data: { brandId: only } })
+    }
+  }
   res.json({ success: true, message: `${result.returnNumber}: back from the floor on ${result.mrNumber}: ${result.back.join(', ')}.${stickersNote(made.count)}`, data: result, made })
 })
 

@@ -224,6 +224,8 @@ export const transferSchema = z.object({
           grade: stockGrade,
           /** Tagged garments: the tags of the pieces moving, scanned or picked. */
           garmentCodes: z.array(z.string().trim().min(1)).max(5000).optional(),
+          /** The share moving: a brand's earmark, or central stock (left out). It arrives as the same share. */
+          brandId: z.string().trim().min(1).optional().nullable(),
         })
         .refine(ownerNamed, ownerNamedMessage),
     )

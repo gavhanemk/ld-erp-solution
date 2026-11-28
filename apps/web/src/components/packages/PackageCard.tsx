@@ -38,6 +38,7 @@ const MOVE_LABEL: Record<string, string> = {
   TRANSFERRED: 'Moved',
   SPLIT: 'Split',
   SPLIT_FROM: 'Cut from another package',
+  EARMARKED: 'Brand share changed',
   CORRECTED: 'Quantity corrected',
   VOIDED: 'Label withdrawn',
   RACKED: 'Rack',

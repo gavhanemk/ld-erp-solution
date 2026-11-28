@@ -138,6 +138,7 @@ const TAG_EVENT: Record<string, { phase: Phase; title: string }> = {
   DISPATCHED: { phase: 'despatch', title: 'Despatched' },
   RETURNED: { phase: 'return', title: 'Came back from the customer' },
   TRANSFERRED: { phase: 'store', title: 'Moved to another store' },
+  EARMARKED: { phase: 'store', title: 'Brand share changed: earmarked, moved between brands or released' },
   SCRAP_REQUESTED: { phase: 'return', title: 'Write-off asked for' },
   SCRAP_REFUSED: { phase: 'return', title: 'Write-off refused' },
   SCRAPPED: { phase: 'return', title: 'Written off' },

@@ -111,6 +111,7 @@ async function roadRate(tx: Prisma.TransactionClient, t: OpenTransfer, line: Lin
       ownerCustomerId: line.ownerCustomerId,
       sizeId: line.sizeId,
       grade: line.grade,
+      brandId: line.brandId,
       inQty: { gt: 0 },
     },
     orderBy: { createdAt: 'asc' },
@@ -191,6 +192,7 @@ async function stickersOnward(
       itemId: line.itemId,
       ownership: line.ownership as StockOwnership,
       ownerCustomerId: line.ownerCustomerId,
+      brandId: line.brandId,
     },
     orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
     select: { id: true },
@@ -261,7 +263,8 @@ async function settleStatus(tx: Prisma.TransactionClient, transferId: string) {
   return status
 }
 
-const keyOf = (l: Line) => ({ ownership: l.ownership, ownerCustomerId: l.ownerCustomerId, sizeId: l.sizeId, grade: l.grade })
+// The share travels with the goods: it waits on the road, and arrives, as itself.
+const keyOf = (l: Line) => ({ ownership: l.ownership, ownerCustomerId: l.ownerCustomerId, sizeId: l.sizeId, grade: l.grade, brandId: l.brandId })
 const tagKeyOf = (l: Line) => ({ itemId: l.itemId, ...keyOf(l) })
 
 /** The tags one step covers on each line, checked before any stock moves. */

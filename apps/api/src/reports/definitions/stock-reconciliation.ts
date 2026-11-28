@@ -49,6 +49,7 @@ export const stockReconciliation: ReportDefinition = {
     { key: 'item', label: 'Item', type: 'text', width: 30 },
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'whose', label: 'Whose', type: 'text', width: 16 },
+    { key: 'share', label: 'Share', type: 'text', width: 16 },
     { key: 'size', label: 'Size', type: 'text', width: 8 },
     { key: 'grade', label: 'Grade', type: 'text', width: 8 },
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
@@ -69,50 +70,54 @@ export const stockReconciliation: ReportDefinition = {
     const store = (params.warehouseId as string | undefined) || null
     const inStore = (col: string) => (store ? Prisma.sql`AND ${Prisma.raw(col)} = ${store}` : Prisma.empty)
 
-    type Found = { itemId: string; warehouseId: string; ownership: string; owner: string | null; sizeId: string | null; grade: string | null; ledger: number; claimed: number; value?: number }
+    // Share by share (multi-brand phase 5): a brand's earmark and central stock each answer for themselves.
+    type Found = { itemId: string; warehouseId: string; ownership: string; owner: string | null; sizeId: string | null; grade: string | null; brandId?: string | null; ledger: number; claimed: number; value?: number }
     const label = await tx.$queryRaw<Array<{ id: string; code: string; name: string; uom: string | null }>>`
       SELECT i.id, i.code, i.name, u.symbol AS uom FROM ld_erp.items i LEFT JOIN ld_erp.uom u ON u.id = i."uomId"`
     const itemOf = new Map(label.map((i) => [i.id, i]))
     const stores = new Map((await tx.warehouse.findMany({ select: { id: true, name: true } })).map((w) => [w.id, w.name]))
     const customers = new Map((await tx.customer.findMany({ select: { id: true, name: true } })).map((c) => [c.id, c.name]))
     const sizes = new Map((await tx.size.findMany({ select: { id: true, code: true } })).map((z) => [z.id, z.code]))
+    const brands = new Map((await tx.brand.findMany({ select: { id: true, name: true } })).map((b) => [b.id, b.name]))
 
     // Balances below nothing, and value left on balances of nothing.
     const balances = await tx.$queryRaw<Array<Found & { qty: number }>>`
-      SELECT s."itemId", s."warehouseId", s.ownership::text AS ownership, s."ownerCustomerId" AS owner, s."sizeId", s.grade,
+      SELECT s."itemId", s."warehouseId", s.ownership::text AS ownership, s."ownerCustomerId" AS owner, s."sizeId", s.grade, s."brandId",
              SUM(s."inQty" - s."outQty")::float8 AS qty,
              SUM((s."inQty" - s."outQty") * COALESCE(s."unitRate", 0))::float8 AS value
       FROM ld_erp.stock_ledger s
       WHERE TRUE ${inStore('s."warehouseId"')}
-      GROUP BY s."itemId", s."warehouseId", s.ownership, s."ownerCustomerId", s."sizeId", s.grade
+      GROUP BY s."itemId", s."warehouseId", s.ownership, s."ownerCustomerId", s."sizeId", s.grade, s."brandId"
       HAVING SUM(s."inQty" - s."outQty") < -0.0005
           OR (ABS(SUM(s."inQty" - s."outQty")) <= 0.0005 AND ABS(SUM((s."inQty" - s."outQty") * COALESCE(s."unitRate", 0))) >= 0.01)`
 
-    // Stickers on the rack, per item, store and owner (all grades: a roll's grade can change in place).
+    // Stickers on the rack, per item, store, owner and share (all grades: a roll's grade can change in place).
     const stickers = await tx.$queryRaw<Found[]>`
       WITH p AS (
-        SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId" AS owner, SUM(qty)::float8 AS claimed
+        SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId" AS owner, "brandId", SUM(qty)::float8 AS claimed
         FROM ld_erp.stock_packages WHERE status::text = 'IN_STOCK' ${inStore('"warehouseId"')}
-        GROUP BY 1, 2, 3, 4),
+        GROUP BY 1, 2, 3, 4, 5),
       l AS (
-        SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId" AS owner, SUM("inQty" - "outQty")::float8 AS ledger
-        FROM ld_erp.stock_ledger GROUP BY 1, 2, 3, 4)
-      SELECT p."itemId", p."warehouseId", p.ownership, p.owner, NULL::text AS "sizeId", NULL::text AS grade, COALESCE(l.ledger, 0) AS ledger, p.claimed
+        SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId" AS owner, "brandId", SUM("inQty" - "outQty")::float8 AS ledger
+        FROM ld_erp.stock_ledger GROUP BY 1, 2, 3, 4, 5)
+      SELECT p."itemId", p."warehouseId", p.ownership, p.owner, NULL::text AS "sizeId", NULL::text AS grade, p."brandId", COALESCE(l.ledger, 0) AS ledger, p.claimed
       FROM p LEFT JOIN l ON l."itemId" = p."itemId" AND l."warehouseId" = p."warehouseId" AND l.ownership = p.ownership AND l.owner IS NOT DISTINCT FROM p.owner
+        AND l."brandId" IS NOT DISTINCT FROM p."brandId"
       WHERE p.claimed > COALESCE(l.ledger, 0) + 0.0005`
 
     // Garment tags still in the store, per item, store, size, grade and owner.
     const tags = await tx.$queryRaw<Found[]>`
       WITH g AS (
-        SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId" AS owner, "sizeId", grade, COUNT(*)::float8 AS claimed
+        SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId" AS owner, "sizeId", grade, "brandId", COUNT(*)::float8 AS claimed
         FROM ld_erp.garments WHERE status::text IN ('IN_STOCK', 'PACKED') ${inStore('"warehouseId"')}
-        GROUP BY 1, 2, 3, 4, 5, 6),
+        GROUP BY 1, 2, 3, 4, 5, 6, 7),
       l AS (
-        SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId" AS owner, "sizeId", grade, SUM("inQty" - "outQty")::float8 AS ledger
-        FROM ld_erp.stock_ledger GROUP BY 1, 2, 3, 4, 5, 6)
-      SELECT g."itemId", g."warehouseId", g.ownership, g.owner, g."sizeId", g.grade, COALESCE(l.ledger, 0) AS ledger, g.claimed
+        SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId" AS owner, "sizeId", grade, "brandId", SUM("inQty" - "outQty")::float8 AS ledger
+        FROM ld_erp.stock_ledger GROUP BY 1, 2, 3, 4, 5, 6, 7)
+      SELECT g."itemId", g."warehouseId", g.ownership, g.owner, g."sizeId", g.grade, g."brandId", COALESCE(l.ledger, 0) AS ledger, g.claimed
       FROM g LEFT JOIN l ON l."itemId" = g."itemId" AND l."warehouseId" = g."warehouseId" AND l.ownership = g.ownership
         AND l.owner IS NOT DISTINCT FROM g.owner AND l."sizeId" IS NOT DISTINCT FROM g."sizeId" AND l.grade = g.grade
+        AND l."brandId" IS NOT DISTINCT FROM g."brandId"
       WHERE g.claimed > COALESCE(l.ledger, 0) + 0.0005`
 
     // Pieces sealed in cartons still in the store.
@@ -132,14 +137,14 @@ export const stockReconciliation: ReportDefinition = {
     // Holds for requisitions, against our good stock in the store.
     const holds = await tx.$queryRaw<Found[]>`
       WITH h AS (
-        SELECT "itemId", "warehouseId", SUM(qty)::float8 AS claimed
+        SELECT "itemId", "warehouseId", "brandId", SUM(qty)::float8 AS claimed
         FROM ld_erp.stock_reservations WHERE status::text = 'ACTIVE' ${inStore('"warehouseId"')}
-        GROUP BY 1, 2),
+        GROUP BY 1, 2, 3),
       l AS (
-        SELECT "itemId", "warehouseId", SUM("inQty" - "outQty")::float8 AS ledger
-        FROM ld_erp.stock_ledger WHERE ownership::text = 'OWNED' AND grade = 'A' AND "sizeId" IS NULL GROUP BY 1, 2)
-      SELECT h."itemId", h."warehouseId", 'OWNED' AS ownership, NULL::text AS owner, NULL::text AS "sizeId", 'A' AS grade, COALESCE(l.ledger, 0) AS ledger, h.claimed
-      FROM h LEFT JOIN l USING ("itemId", "warehouseId")
+        SELECT "itemId", "warehouseId", "brandId", SUM("inQty" - "outQty")::float8 AS ledger
+        FROM ld_erp.stock_ledger WHERE ownership::text = 'OWNED' AND grade = 'A' AND "sizeId" IS NULL GROUP BY 1, 2, 3)
+      SELECT h."itemId", h."warehouseId", 'OWNED' AS ownership, NULL::text AS owner, NULL::text AS "sizeId", 'A' AS grade, h."brandId", COALESCE(l.ledger, 0) AS ledger, h.claimed
+      FROM h LEFT JOIN l ON l."itemId" = h."itemId" AND l."warehouseId" = h."warehouseId" AND l."brandId" IS NOT DISTINCT FROM h."brandId"
       WHERE h.claimed > COALESCE(l.ledger, 0) + 0.0005`
 
     const ACTION: Record<string, string> = {
@@ -160,6 +165,7 @@ export const stockReconciliation: ReportDefinition = {
         item: item?.name ?? '',
         store: stores.get(f.warehouseId) ?? '',
         whose: f.ownership === 'OWNED' ? 'Ours' : (customers.get(f.owner ?? '') ?? 'Customer'),
+        share: f.brandId ? (brands.get(f.brandId) ?? 'A brand') : f.brandId === null ? 'Central' : '',
         size: f.sizeId ? (sizes.get(f.sizeId) ?? '') : '',
         grade: f.grade ?? '',
         uom: item?.uom ?? '',

@@ -111,6 +111,9 @@ interface Held {
   sizeCode: string | null
   /** A good, B seconds, R held or rejected. */
   grade?: string
+  /** On a move: a brand's earmark, or central stock (null). */
+  brandId?: string | null
+  brandName?: string | null
   qty: number
 }
 
@@ -119,15 +122,18 @@ const GRADE_WORDS: Record<string, string> = { B: 'B-grade', R: 'rejected' }
 
 const OURS = 'OWNED||'
 // Good stock keeps the key it always had; another grade adds itself on the end.
-const heldKey = (h: Pick<Held, 'ownership' | 'ownerCustomerId' | 'sizeId' | 'grade'>) =>
-  `${h.ownership}|${h.ownerCustomerId ?? ''}|${h.sizeId ?? ''}${h.grade && h.grade !== 'A' ? `|${h.grade}` : ''}`
+// A brand's earmark (on a move) adds itself after a #.
+const heldKey = (h: Pick<Held, 'ownership' | 'ownerCustomerId' | 'sizeId' | 'grade' | 'brandId'>) =>
+  `${h.ownership}|${h.ownerCustomerId ?? ''}|${h.sizeId ?? ''}${h.grade && h.grade !== 'A' ? `|${h.grade}` : ''}${h.brandId ? `#${h.brandId}` : ''}`
 const parseWhose = (k: string) => {
-  const [ownership, ownerCustomerId, sizeId, grade] = k.split('|')
+  const [base, brandId] = k.split('#')
+  const [ownership, ownerCustomerId, sizeId, grade] = base.split('|')
   return {
     ownership: (ownership || 'OWNED') as 'OWNED' | 'CUSTOMER_OWNED',
     ownerCustomerId: ownerCustomerId || null,
     sizeId: sizeId || null,
     grade: (grade || 'A') as 'A' | 'B' | 'R',
+    ...(brandId ? { brandId } : {}),
   }
 }
 
@@ -213,7 +219,7 @@ export function StockMoveDialog({
     }
     let cancelled = false
     api
-      .get<{ data: Held[] }>(`/inventory/held?warehouseId=${warehouseId}&grades=all`)
+      .get<{ data: Held[] }>(`/inventory/held?warehouseId=${warehouseId}&grades=all${mode === 'transfer' ? '&shares=1' : ''}`)
       .then((res) => {
         if (cancelled) return
         setHeld(res.data)
@@ -278,6 +284,8 @@ export function StockMoveDialog({
       wanted.map(async (l) => {
         const w = parseWhose(l.whose)
         const qs = new URLSearchParams({ warehouseId, itemId: l.itemId, grade: w.grade, ownership: w.ownership })
+        // The share moving: its own pieces' tags only.
+        qs.set('share', 'brandId' in w && w.brandId ? w.brandId : 'central')
         if (w.sizeId) qs.set('sizeId', w.sizeId)
         if (w.ownerCustomerId) qs.set('ownerCustomerId', w.ownerCustomerId)
         try {
@@ -701,6 +709,7 @@ export function StockMoveDialog({
                           {choices.map((h) => (
                             <option key={heldKey(h)} value={heldKey(h)}>
                               {h.ownership === 'CUSTOMER_OWNED' ? `${h.ownerName ?? 'Customer'}'s` : 'Ours'}
+                              {h.brandId ? ` · ${h.brandName ?? 'a brand'}’s earmark` : choices.some((x) => x.brandId) && h.ownership === 'OWNED' ? ' · central' : ''}
                               {h.sizeCode ? ` · size ${h.sizeCode}` : ''}
                               {h.grade && GRADE_WORDS[h.grade] ? ` · ${GRADE_WORDS[h.grade]}` : ''} · {h.qty.toLocaleString('en-IN')} {item?.uom?.symbol ?? ''}
                             </option>

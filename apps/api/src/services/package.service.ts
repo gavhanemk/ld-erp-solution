@@ -136,6 +136,36 @@ export interface StockSpot {
   warehouseId: string
   ownership: StockOwnership
   ownerCustomerId: string | null
+  /** One share only (a brand's, or null for central); left out, every share together. */
+  brandId?: string | null
+}
+
+/**
+ * Each share of an item's stock in a store, ledger against stickers: central
+ * stock and each brand's earmark, usable and held together as the sticker
+ * sync counts them. Stickers answer for their own share's metres only.
+ */
+export async function sharePositions(tx: Prisma.TransactionClient, spot: StockSpot) {
+  const [ledger, packed] = await Promise.all([
+    tx.$queryRaw<Array<{ brandId: string | null; qty: number }>>`
+      SELECT "brandId", COALESCE(SUM("inQty" - "outQty"), 0)::float8 AS qty
+      FROM ld_erp.stock_ledger
+      WHERE "itemId" = ${spot.itemId} AND "warehouseId" = ${spot.warehouseId}
+        AND ownership = ${spot.ownership}::ld_erp."StockOwnership" AND "ownerCustomerId" IS NOT DISTINCT FROM ${spot.ownerCustomerId}::text
+        AND "sizeId" IS NULL AND grade IN ('A', 'R')
+      GROUP BY "brandId"`,
+    tx.stockPackage.groupBy({
+      by: ['brandId'],
+      where: { itemId: spot.itemId, warehouseId: spot.warehouseId, ownership: spot.ownership, ownerCustomerId: spot.ownerCustomerId, status: 'IN_STOCK' },
+      _sum: { qty: true },
+    }),
+  ])
+  const shares = new Set<string | null>([...ledger.map((r) => r.brandId), ...packed.map((p) => p.brandId)])
+  return [...shares].map((brandId) => {
+    const inStore = round3(Number(ledger.find((r) => r.brandId === brandId)?.qty ?? 0))
+    const inPackages = round3(Number(packed.find((p) => p.brandId === brandId)?._sum.qty ?? 0))
+    return { brandId, inStore, inPackages, loose: round3(inStore - inPackages) }
+  })
 }
 
 /**
@@ -147,7 +177,8 @@ export interface StockSpot {
 export async function positionOf(tx: Prisma.TransactionClient, spot: StockSpot) {
   // Usable and held together, as `positionsOf` and the sticker sync count
   // them: a held roll is still a roll on the rack with its sticker.
-  const key = { itemId: spot.itemId, warehouseId: spot.warehouseId, ownership: spot.ownership, ownerCustomerId: spot.ownerCustomerId }
+  // One share when the spot names one (null is central); else every share together.
+  const key = { itemId: spot.itemId, warehouseId: spot.warehouseId, ownership: spot.ownership, ownerCustomerId: spot.ownerCustomerId, brandId: spot.brandId }
   const [ledger, held, packed] = await Promise.all([
     balanceOf(tx, key),
     balanceOf(tx, { ...key, grade: 'R' }),
@@ -158,6 +189,7 @@ export async function positionOf(tx: Prisma.TransactionClient, spot: StockSpot) 
         ownership: spot.ownership,
         ownerCustomerId: spot.ownerCustomerId,
         status: 'IN_STOCK',
+        ...(spot.brandId !== undefined ? { brandId: spot.brandId } : {}),
       },
       _sum: { qty: true },
       _count: true,
@@ -694,6 +726,8 @@ export async function olderPackage(
     sourceId: string | null
   },
   exclude: string[] = [],
+  /** Only stickers of these shares (a brand's id, null for central): what this issue may take. Left out, every share. */
+  shares?: Array<string | null>,
 ) {
   // A fixed asset is one particular machine, not stock used oldest first: no FIFO.
   const item = await tx.item.findUnique({ where: { id: pkg.itemId }, select: { type: true } })
@@ -710,6 +744,15 @@ export async function olderPackage(
       createdAt: { lt: pkg.createdAt },
       id: { notIn: [pkg.id, ...exclude] },
       ...(pkg.sourceId ? { NOT: { sourceId: pkg.sourceId } } : {}),
+      // Another brand's earmarked roll is not this issue's to take, so it is not first in line either.
+      ...(shares
+        ? {
+            OR: [
+              ...(shares.includes(null) ? [{ brandId: null }] : []),
+              ...(shares.some(Boolean) ? [{ brandId: { in: shares.filter((x): x is string => !!x) } }] : []),
+            ],
+          }
+        : {}),
     },
     orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
     select: { id: true, code: true, qty: true, rack: true, sourceRef: true, createdAt: true },
@@ -732,8 +775,9 @@ export async function checkFifo(
   reason: string | null | undefined,
   unit: string,
   exclude: string[] = [],
+  shares?: Array<string | null>,
 ): Promise<{ fifoSkippedId: string | null; fifoReason: string | null }> {
-  const older = await olderPackage(tx, pkg, exclude)
+  const older = await olderPackage(tx, pkg, exclude, shares)
   if (!older) return { fifoSkippedId: null, fifoReason: null }
   const when = older.createdAt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })
   const where =

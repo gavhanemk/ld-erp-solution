@@ -34,6 +34,13 @@ import { OFFERING_STORE_IDS, storeOffers } from './availability.service'
  * Valuation is weighted average, chosen once for the whole system. It is what a
  * Tally-trained accountant expects, it survives a part-received order, and it
  * does not need batches to be tracked before the mill is ready to track them.
+ *
+ * And from multi-brand phase 5, whose share: each balance is central stock
+ * (the company's, for no brand) and any brand's earmarked share of it. Each
+ * share keeps its own moving average (decision 5). A movement is on one share:
+ * central unless it names a brand, so nothing that does not ask for a brand
+ * can take stock earmarked for one. Read without a brand, a balance is every
+ * share together: the physical stock a count, a sticker or a screen means.
  */
 
 /** Quantities are stored to three decimals; fabric is issued in metres. */
@@ -55,6 +62,12 @@ export interface StockKey {
    * which are counted apart from good ones and never sent in their place.
    */
   grade?: 'A' | 'B' | string | null
+  /**
+   * Whose share: a brand's id, or null for central stock. On a movement, left
+   * out means central. On a read (balanceOf), left out means every share
+   * together, the physical stock; null means central only.
+   */
+  brandId?: string | null
 }
 
 export interface Movement extends StockKey {
@@ -208,6 +221,8 @@ export async function balanceOf(
   tx: Prisma.TransactionClient,
   key: StockKey,
 ): Promise<Balance> {
+  // A brand named (or null for central): that share. Left out: every share, the physical stock.
+  const everyShare = key.brandId === undefined
   const rows = await tx.$queryRaw<Array<{ qty: number | null; value: number | null }>>`
     SELECT
       COALESCE(SUM("inQty" - "outQty"), 0)::float8                        AS qty,
@@ -219,6 +234,7 @@ export async function balanceOf(
       AND "ownerCustomerId" IS NOT DISTINCT FROM ${key.ownerCustomerId ?? null}::text
       AND "sizeId" IS NOT DISTINCT FROM ${key.sizeId ?? null}::text
       AND "grade" = ${key.grade ?? 'A'}
+      AND (${everyShare}::boolean OR "brandId" IS NOT DISTINCT FROM ${key.brandId ?? null}::text)
   `
 
   const qty = round3(rows[0]?.qty ?? 0)
@@ -379,6 +395,12 @@ export async function recordMovement(
     )
   }
 
+  // The share it is on: the brand named, or central. A customer's material is never a brand's.
+  const share = m.brandId ?? null
+  if (share && (m.ownership ?? 'OWNED') !== 'OWNED') {
+    throw new AppError('A customer’s material is never a brand’s: only our own stock can be earmarked.', 400, 'CUSTOMER_STOCK_NO_BRAND')
+  }
+
   const store = await lockBalanceAndStore(tx, m)
   // A sample store holds what was bought for samples, apart from bulk stock:
   // only the documents lib/sampleStore names may move stock in or out of it.
@@ -398,7 +420,7 @@ export async function recordMovement(
   }
 
   const transactionDate = await settleDate(tx, m)
-  const before = await balanceOf(tx, m)
+  const before = await balanceOf(tx, { ...m, brandId: share })
   const qty = round3(m.qty)
 
   let unitRate: number
@@ -433,6 +455,23 @@ export async function recordMovement(
       const unit = item?.uom?.symbol ?? ''
       const what = `${m.grade === 'B' ? 'B-grade ' : ''}${item?.name ?? 'that item'}${size ? ` in size ${size.code}` : ''}`
 
+      // More on the rack than in this share: say whose the rest is, not just "short".
+      const whole = await balanceOf(tx, { ...m, brandId: undefined })
+      if (whole.qty >= qty - 1e-9) {
+        const shares = await sharesOf(tx, m)
+        const others = shares.filter((x) => x.brandId !== share && x.qty > 0)
+        const said = others.map((x) => `${x.qty} ${unit} ${x.brandId ? `earmarked for ${x.brand}` : 'central stock'}`).join(', ')
+        const mine = share ? `earmarked for ${shares.find((x) => x.brandId === share)?.brand ?? 'that brand'}` : 'central stock'
+        throw new AppError(
+          `Only ${before.qty} ${unit} of ${what} in ${warehouse?.name ?? 'that warehouse'} is ${mine}; the rest is ${said}. You are trying to take out ${qty}. ${share ? 'Earmark more for the brand first (Inventory → Brand Stock), or issue it through an authorised MO.' : 'Release or move the earmark first (Inventory → Brand Stock), or issue it for that brand’s order.'}`.replace(
+            /\s+/g,
+            ' ',
+          ),
+          400,
+          'STOCK_EARMARKED',
+        )
+      }
+
       throw new AppError(
         `Only ${before.qty} ${unit} of ${what} in ${warehouse?.name ?? 'that warehouse'}. You are trying to take out ${qty}.`.replace(
           /\s+/g,
@@ -454,6 +493,7 @@ export async function recordMovement(
         JOIN ld_erp.material_requisitions mr ON mr.id = r."mrId"
         LEFT JOIN ld_erp.customers c ON c.id = r."customerId"
         WHERE r.status::text = 'ACTIVE' AND r."itemId" = ${m.itemId} AND r."warehouseId" = ${m.warehouseId}
+          AND r."brandId" IS NOT DISTINCT FROM ${share}::text
           AND NOT (r."mrLineId" = ANY(${m.reservedFor ?? []}::text[]))`
       const held = round3(holds.reduce((t, h) => t + Number(h.qty), 0))
       const free = round3(Math.max(0, before.qty - held))
@@ -526,6 +566,7 @@ export async function recordMovement(
       ownerCustomerId: m.ownerCustomerId ?? null,
       sizeId: m.sizeId ?? null,
       grade: m.grade ?? 'A',
+      brandId: share,
       inQty: m.direction === 'IN' ? qty : 0,
       outQty: m.direction === 'OUT' ? qty : 0,
       // A snapshot for the ledger view to print, so a printed statement does
@@ -542,7 +583,32 @@ export async function recordMovement(
 
   if (m.direction === 'OUT' && (m.stickers ?? 'auto') === 'auto' && !m.sizeId) await keepStickersInStep(tx, m)
 
-  return { balance: await balanceOf(tx, m), unitRate, ledgerId: row.id }
+  return { balance: await balanceOf(tx, { ...m, brandId: share }), unitRate, ledgerId: row.id }
+}
+
+/**
+ * Every share of a balance with something in it: central stock and each
+ * brand's earmark, for saying whose stock is where.
+ */
+export async function sharesOf(
+  tx: Prisma.TransactionClient,
+  key: StockKey,
+): Promise<Array<{ brandId: string | null; brand: string; qty: number; value: number }>> {
+  const rows = await tx.$queryRaw<Array<{ brandId: string | null; brand: string | null; qty: number; value: number }>>`
+    SELECT s."brandId", b.name AS brand,
+           COALESCE(SUM(s."inQty" - s."outQty"), 0)::float8 AS qty,
+           COALESCE(SUM((s."inQty" - s."outQty") * COALESCE(s."unitRate", 0)), 0)::float8 AS value
+    FROM ld_erp.stock_ledger s
+    LEFT JOIN ld_erp.brands b ON b.id = s."brandId"
+    WHERE s."itemId" = ${key.itemId} AND s."warehouseId" = ${key.warehouseId}
+      AND s.ownership = ${key.ownership ?? 'OWNED'}::ld_erp."StockOwnership"
+      AND s."ownerCustomerId" IS NOT DISTINCT FROM ${key.ownerCustomerId ?? null}::text
+      AND s."sizeId" IS NOT DISTINCT FROM ${key.sizeId ?? null}::text
+      AND s.grade = ${key.grade ?? 'A'}
+    GROUP BY s."brandId", b.name`
+  return rows
+    .map((r) => ({ brandId: r.brandId, brand: r.brand ?? 'central stock', qty: round3(r.qty), value: round2(r.value) }))
+    .filter((r) => r.qty !== 0 || r.value !== 0)
 }
 
 /**
@@ -559,8 +625,10 @@ export async function recordMovement(
 async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
   const ownership = m.ownership ?? 'OWNED'
   const owner = m.ownerCustomerId ?? null
+  // Share by share: a brand's stickers answer for that brand's metres, central's for central's.
+  const share = m.brandId ?? null
   const packages = await tx.stockPackage.findMany({
-    where: { itemId: m.itemId, warehouseId: m.warehouseId, ownership, ownerCustomerId: owner, status: 'IN_STOCK' },
+    where: { itemId: m.itemId, warehouseId: m.warehouseId, ownership, ownerCustomerId: owner, status: 'IN_STOCK', brandId: share },
     orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
   })
   if (!packages.length) return
@@ -574,6 +642,7 @@ async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
     WHERE "itemId" = ${m.itemId} AND "warehouseId" = ${m.warehouseId}
       AND ownership = ${ownership}::ld_erp."StockOwnership"
       AND "ownerCustomerId" IS NOT DISTINCT FROM ${owner}::text
+      AND "brandId" IS NOT DISTINCT FROM ${share}::text
       AND "sizeId" IS NULL AND grade IN ('A', 'R')`
   let over = round3(packages.reduce((t, p) => t + Number(p.qty), 0) - Number(row?.qty ?? 0))
   for (const p of packages) {
@@ -741,6 +810,8 @@ export async function transferStock(
     atRate?: number
     /** The grade it arrives as, when not the one it left as: goods that came in damaged arrive as R. */
     toGrade?: string | null
+    /** The share it moves: a brand's, or central (left out). It arrives as the same share. */
+    brandId?: string | null
   },
 ): Promise<{ unitRate: number }> {
   if (args.fromWarehouseId === args.toWarehouseId) {
@@ -780,6 +851,7 @@ export async function transferStock(
     earlierDate: args.earlierDate,
     reservedFor: args.reservedFor,
     ignoreReservations: args.ignoreReservations,
+    brandId: args.brandId ?? null,
     ...(args.atRate !== undefined ? { atRate: args.atRate } : {}),
   })
 
@@ -805,6 +877,7 @@ export async function transferStock(
     transactionDate: args.transactionDate,
     notes: args.notes,
     earlierDate: args.earlierDate,
+    brandId: args.brandId ?? null,
   })
   return { unitRate: out.unitRate }
 }
