@@ -820,6 +820,21 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
       ...challanInclude,
       so: { select: { id: true, soNumber: true, orderDate: true, customerPORef: true, customerPODate: true, isJobWork: true, placeOfSupplyCode: true, customer: { select: printCustomerSelect } } },
       customer: { select: printCustomerSelect },
+      // Every detail of each garment, as the sales order prints it (28 Nov 2026).
+      lines: {
+        include: {
+          item: {
+            select: { id: true, code: true, name: true, color: true, hsnCode: true, uom: { select: { symbol: true } }, style: { select: { code: true, name: true } } },
+          },
+          soLine: {
+            select: {
+              id: true, unitPrice: true, gstRate: true, discount: true,
+              styleCode: true, color: true, gender: true, fabric: true, printName: true, description: true, hsnCode: true,
+            },
+          },
+          sizes: { include: { size: { select: { id: true, code: true, sequence: true } } }, orderBy: { size: { sequence: 'asc' } } },
+        },
+      },
     },
   })
   if (!dc) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')

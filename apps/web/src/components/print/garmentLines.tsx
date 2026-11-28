@@ -48,7 +48,13 @@ const titleCase = (v: string) => v.charAt(0).toUpperCase() + v.slice(1).toLowerC
 export function garmentTable(
   lines: GarmentLine[],
   /** `allColumns`: print colour, fabric, gender and print name even when empty — the sales order, as on the old sheet. */
-  opts: { showHsn?: boolean; rateHead?: string; allColumns?: boolean } = {},
+  opts: {
+    showHsn?: boolean
+    rateHead?: string
+    allColumns?: boolean
+    /** False for a delivery challan: goods only — no rate, GST or amount per line. */
+    money?: boolean
+  } = {},
 ): { columns: SheetColumn[]; rows: Array<{ key: string; cells: Record<string, React.ReactNode> }> } {
   const colour = (l: GarmentLine) => l.color || l.item.color || ''
   const has = {
@@ -63,7 +69,10 @@ export function garmentTable(
     ['gender', 6],
     ['print', 8],
   ]
-  const spare = optional.filter(([k]) => !has[k]).reduce((n, [, w]) => n + w, 0)
+  const withMoney = opts.money !== false
+  // Without the rate, GST and amount (22%), the description and sizes take the room.
+  const spare = optional.filter(([k]) => !has[k]).reduce((n, [, w]) => n + w, 0) + (withMoney ? 0 : 16)
+  const sizeWidth = withMoney ? 12 : 18
   const pct = (n: number) => `${n}%`
 
   const columns: SheetColumn[] = [
@@ -74,11 +83,15 @@ export function garmentTable(
     ...(has.fabric ? [{ key: 'fabric', head: 'Fabric', width: pct(8) }] : []),
     ...(has.gender ? [{ key: 'gender', head: 'Gender', width: pct(6) }] : []),
     ...(has.print ? [{ key: 'print', head: 'Print name', width: pct(8) }] : []),
-    { key: 'sizes', head: 'Size · Qty', width: pct(12) },
+    { key: 'sizes', head: 'Size · Qty', width: pct(sizeWidth) },
     { key: 'uom', head: 'UOM', width: pct(5), align: 'center' },
-    { key: 'rate', head: opts.rateHead ?? 'Rate', width: pct(8), align: 'right' },
-    { key: 'gst', head: 'GST', width: pct(5), align: 'right' },
-    { key: 'amount', head: 'Amount (₹)', width: pct(9), align: 'right' },
+    ...(withMoney
+      ? [
+          { key: 'rate', head: opts.rateHead ?? 'Rate', width: pct(8), align: 'right' as const },
+          { key: 'gst', head: 'GST', width: pct(5), align: 'right' as const },
+          { key: 'amount', head: 'Amount (₹)', width: pct(9), align: 'right' as const },
+        ]
+      : []),
   ]
 
   const rows = lines.map((l, i) => {

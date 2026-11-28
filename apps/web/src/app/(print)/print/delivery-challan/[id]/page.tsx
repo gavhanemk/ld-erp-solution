@@ -20,10 +20,10 @@ import {
   INK,
   MUTED,
   NUM,
-  type SheetColumn,
   type TotalLine,
 } from '@/components/print/StoreSheet'
-import { Box, DocTable, SubLine, type DocColumn } from '@/components/print/doc'
+import { Box, DocTable, type DocColumn } from '@/components/print/doc'
+import { garmentTable } from '@/components/print/garmentLines'
 
 interface Payload {
   /** The own brand the order is made under, carried from start to end. */
@@ -79,7 +79,24 @@ interface Payload {
       id: string
       qty: string
       overNote: string | null
-      item: { code: string; name: string; color: string | null; hsnCode: string | null }
+      item: {
+        code: string
+        name: string
+        color: string | null
+        hsnCode: string | null
+        uom?: { symbol: string } | null
+        style?: { code: string; name: string } | null
+      }
+      /** The order line it delivers: its colour, fabric, gender, print name. */
+      soLine?: {
+        styleCode: string | null
+        color: string | null
+        gender: string | null
+        fabric: string | null
+        printName: string | null
+        description: string | null
+        hsnCode: string | null
+      } | null
       sizes: Array<{ id: string; qty: string; size: { code: string; sequence: number } }>
     }>
     /** The cartons loaded on it, scanned or picked: its packing list. */
@@ -126,44 +143,28 @@ export default function PrintDeliveryChallan() {
   const billing = [c.billingAddress, c.billingCity, c.billingState, c.billingPincode].filter(Boolean).join(', ')
   const showHsn = template.showHsn !== false
 
-  const columns: SheetColumn[] = [
-    { key: 'sn', head: 'S.N', width: '5%', align: 'center' },
-    { key: 'item', head: 'Description', width: showHsn ? '37%' : '45%' },
-    { key: 'sizes', head: 'Size breakup (pcs)', width: '38%' },
-    ...(showHsn ? [{ key: 'hsn', head: 'HSN', width: '8%', align: 'center' as const }] : []),
-    { key: 'qty', head: 'Pieces', width: '12%', align: 'right' },
-  ]
-
-  const rows = dc.lines.map((l, i) => ({
-    key: l.id,
-    cells: {
-      sn: i + 1,
-      item: (
-        <>
-          <div style={{ fontWeight: 600 }}>
-            {l.item.name}
-            {l.item.color ? ` · ${l.item.color}` : ''}
-          </div>
-          <SubLine>
-            <span style={CODE}>{l.item.code}</span>
-            {l.overNote ? ` · ${l.overNote}` : ''}
-          </SubLine>
-        </>
-      ),
-      sizes: l.sizes.length ? (
-        <span style={{ fontSize: '9px', ...NUM }}>
-          {[...l.sizes]
-            .sort((a, b) => a.size.sequence - b.size.sequence)
-            .map((s) => `${s.size.code} ${qty(s.qty)}`)
-            .join(' · ')}
-        </span>
-      ) : (
-        <Dash />
-      ),
-      hsn: <span style={{ fontSize: '9px', ...NUM }}>{l.item.hsnCode ?? <Dash />}</span>,
-      qty: <strong>{qty(l.qty)}</strong>,
-    },
-  }))
+  // The goods as the sales order prints them (28 Nov 2026): code, description,
+  // colour, fabric, gender, print name and every size with its pieces. No
+  // prices per line — the consignment's value is printed once, below.
+  const { columns, rows } = garmentTable(
+    dc.lines.map((l) => ({
+      id: l.id,
+      item: l.item,
+      styleCode: l.soLine?.styleCode,
+      color: l.soLine?.color,
+      gender: l.soLine?.gender,
+      fabric: l.soLine?.fabric,
+      printName: l.soLine?.printName,
+      description: [l.soLine?.description, l.overNote].filter(Boolean).join(' · ') || null,
+      hsnCode: l.soLine?.hsnCode,
+      qty: l.qty,
+      unitPrice: 0,
+      gstRate: 0,
+      amount: 0,
+      sizes: l.sizes,
+    })),
+    { showHsn, allColumns: true, money: false },
+  )
 
   const pieces = dc.lines.reduce((s, l) => s + Number(l.qty), 0)
 
