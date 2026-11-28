@@ -17,6 +17,7 @@ Read them in this order. The first two are compulsory before you write any code.
 | 8 | [Inventory handover](08-inventory-handover.md) | Before you touch stock. What the single writer guarantees, what is built, what is left, and the traps. |
 | 9 | [Production handover](09-production-handover.md) | Before you touch production. The floor's ledger, the flow the mill asked for (MO → materials → stages → job cards → cutting sheet → transfers → stage sheets), what is left, and the traps. |
 | 10 | [Sampling handover](10-sampling-handover.md) | Before you touch sampling. Why it was rebuilt, the decisions it was built to, the flow from tech pack to handover, every action and rule, what it changed in Purchase, Inventory and Masters, how to run and test it, what is left. |
+| 11 | [Multi-brand go-live checklist](11-multibrand-go-live-checklist.md) | Before the multi-brand release goes live, and if it ever has to be rolled back. The eight migrations in order, the backup and its proven restore, masters, opening stock, re-posting, and the rollback build plain `main` cannot replace. |
 
 ## The short version
 
