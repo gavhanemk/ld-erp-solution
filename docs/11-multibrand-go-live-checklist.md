@@ -19,7 +19,7 @@ Final version, 28 Nov 2026, for branch `feat/multibrand-p5` (all eight phases do
   - the full regression: every `tools/check-*.ts`, plus the e2e sales walk;
   - the seven e2e API suites: `node e2e/api/run-all.mjs`;
   - the acceptance walk: `tools/uat-multibrand.ts`.
-- [ ] The two other branches, `feat/sales-print-sizes` and `feat/challan-job-format`, were tested together with this one (see "Tested together" below). Both then merged into `main` on 28 Nov 2026 (#89, #90), with their four migrations. This branch takes that `main` before its PR: the merge, resolved the way the test branch was, gives code byte-for-byte the same as the combination tested below. Before this branch's eight migrations go on live, `migrate status` must show #90's four already applied, or pending with them; `migrate deploy` applies whatever is pending in name order.
+- [ ] The two other branches, `feat/sales-print-sizes` and `feat/challan-job-format`, were tested together with this one (see "Tested together" below). Both then merged into `main` on 28 Nov 2026 (#89, #90), with their four migrations. This branch takes that `main` before its PR: the merge, resolved the way the test branch was, gives code byte-for-byte the same as the combination tested below. #90's four went on live on 28 Nov 2026 with the owner's OK, and live has been up to date since. So on the day, live `migrate status` must show exactly this branch's eight pending. Some are named earlier than migrations already applied; `migrate deploy` applies them all the same, as proven on the test copy.
 - [ ] Agree a quiet window. From the backup until the smoke test ends, nobody enters documents on live.
 
 **Results on 28 Nov 2026**
