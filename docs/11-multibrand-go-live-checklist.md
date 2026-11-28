@@ -39,7 +39,7 @@ Final version, 28 Nov 2026, for branch `feat/multibrand-p5` (all eight phases do
 | Branch | Its migrations | Where it overlaps this branch | Resolved |
 | --- | --- | --- | --- |
 | `feat/sales-print-sizes` | `20261129190500_quotation_line_sizes`, `20261129203000_invoice_old_erp_fields` | stock-transfer print; invoice dialog; quotation dialog | their layout and fields, plus this branch's in-transit lines ("Goes", status, "On arrival" note) and style groups |
-| `feat/challan-job-format` (up to 28ec3c49) | `20261130150000_job_challan_rolls` | challan routes, roll stickers, the access list | one conflict, in the access list: Brand Stock kept beside "Job Work Out". Its rules survive: rolls are replaced only when sent, `GET /rolls` is matched before `/:id`, and the job-work SAC is 998822. The Sales challan prints "DELIVERY CHALLAN" and the job-worker's "JOB WORK CHALLAN"; the challan window counts loose pieces only. |
+| `feat/challan-job-format` (up to e0b7b056) | `20261130150000_job_challan_rolls`, `20261130170000_dispatch_packing` | challan routes (dispatch redesigned), roll stickers, the access list | two conflicts, both import or list lines: Brand Stock kept beside "Job Work Out", and the brand-stock dispatch kept beside the new fabric trace. A challan still sends the order's brand share first and puts the moves back when cancelled. The Sales challan prints "DELIVERY CHALLAN" and the job-worker's "JOB WORK CHALLAN"; the challan window counts loose pieces and those on other drafts. |
 
 ## 2. Test data stays off live
 
@@ -80,7 +80,7 @@ Proven on the demo on 28 Nov 2026: 182 tables and 20,719 rows restored with no d
 
 ## 4. The migrations
 
-Every migration only adds. None drops or renames a table, column or row. This branch has eight. Each other branch's migrations are pending too, if it has merged and they are not yet on live:
+This branch's eight migrations only add: none drops or renames a table, column or row. Each other branch's migrations are pending too, if it has merged and they are not yet on live. One of those, the job-work challan's `20261130170000_dispatch_packing`, drops a table (see the note under the table):
 
 | # | Migration | From | What it adds |
 | --- | --- | --- | --- |
@@ -95,8 +95,11 @@ Every migration only adds. None drops or renames a table, column or row. This br
 | – | 20261129203000_invoice_old_erp_fields | sales print sizes | The old ERP's invoice fields |
 | 8 | 20261130100000_voucher_revisions_period_events | this branch | Voucher revisions, books-date events, reversal link; the database's no-delete rules |
 | – | 20261130150000_job_challan_rolls | job-work challan | Rolls on customer GRNs and challans |
+| – | 20261130170000_dispatch_packing | job-work challan | Bale numbers, packing list reference and gross weight on challans; **drops `delivery_challan_rolls`** |
 
-All eleven were applied together, in this order, on the test copy. `migrate deploy` applies older-named pending migrations without complaint.
+All twelve were applied together, in this order, on the test copy. `migrate deploy` applies older-named pending migrations without complaint.
+
+- [ ] **The one drop: owner's OK needed.** `20261130170000_dispatch_packing` drops `delivery_challan_rolls`, which `20261130150000` creates in the same release. On live it is therefore created and dropped empty, so no data is lost. It is still the release's only destructive statement, and destructive changes were deferred until separately approved. If the drop is not approved, the job-work challan branch must keep the table, or `20261130150000` must stop creating it before either reaches live.
 
 1. Read-only pre-checks on live:
    - `SELECT COUNT(*) FROM ld_erp.acc_allocation_run_sources s LEFT JOIN ld_erp.acc_vouchers v ON v.id = s."voucherId" WHERE v.id IS NULL` must be 0, because migration 8 adds that foreign key.
