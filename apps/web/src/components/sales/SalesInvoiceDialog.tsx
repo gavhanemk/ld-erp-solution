@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
+import { GST_STATES } from '@/lib/gstStates'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
@@ -64,10 +65,18 @@ interface Prepared {
     brokeragePercent: number | null
   }
   customer: { id: string; name: string; gstin: string | null; creditDays: number; billingAddress: string }
+  /** Who takes the goods, from the customer's shipping details: changed here when another party does. */
+  consignee?: { name: string; gstin: string | null; state: string | null; stateCode: string | null; address: string | null }
+  /** The cartons on the challan, or null. */
+  packages?: { cartons: number | null }
   isIntraState: boolean | null
   placeOfSupplyProblem: string | null
   lines: Array<{
     soLineId: string
+    /** The unit the challan line went in. */
+    uom?: string | null
+    /** The unit is not itself a count of pieces (mtr, kg), so the pieces are asked for beside it. */
+    needsPcs?: boolean
     item: { id: string; code: string; name: string; color: string | null; hsnCode: string | null } | null
     styleCode: string | null
     color: string | null
@@ -131,6 +140,19 @@ const inr = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2,
 const pcs = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 })
 /** The value above which goods need an e-way bill to travel. Shown, not enforced. */
 const EWAY_LIMIT = 50_000
+/** The states as the order's place-of-supply picker lists them: "27 · Maharashtra", by name. */
+const STATES = Object.entries(GST_STATES).sort((a, b) => a[1].localeCompare(b[1]))
+/** A state's code from its name, for one saved without its code. */
+const codeOfState = (name: string | null | undefined) => {
+  const n = (name ?? '').trim().toLowerCase()
+  return n ? (STATES.find(([, s]) => s.toLowerCase() === n)?.[0] ?? '') : ''
+}
+/** The same shape the server takes: two digits for the state, then 13 letters and digits. */
+const GSTIN_SHAPE = /^[0-9]{2}[A-Z0-9]{13}$/
+/** A line by its order line and grade, as the server matches the pieces typed for it. */
+const lineKey = (l: { soLineId: string; grade?: string }) => `${l.soLineId}|${l.grade ?? 'A'}`
+/** A whole-number box's figure, or null when left empty. */
+const wholeOrNull = (v: string) => (v.trim() === '' ? null : Math.max(0, Math.floor(Number(v) || 0)))
 
 function Field({
   label,
@@ -179,9 +201,10 @@ function TotalRow({ label, value, quiet = false }: { label: string; value: strin
  * what the order agreed — to bill at another rate, amend the order first.
  * The order's discount on the whole bill is shared out by this invoice's
  * share of the goods. What is typed is what an invoice carries beyond the
- * goods: its dates, the addresses, the transport and e-way bill, the charges
- * (offered as whatever of the order's no earlier invoice billed), other
- * charges, notes and terms.
+ * goods: its dates, the addresses, the consignee (who takes the goods, apart
+ * from the buyer billed), the transport and e-way bill, the packages, the
+ * pieces a line in metres or kilos went in, the charges (offered as whatever
+ * of the order's no earlier invoice billed), other charges, notes and terms.
  *
  * An invoice is final when saved — there is no draft. A wrong one is
  * cancelled from the list, with a reason, and the challan billed again.
@@ -212,6 +235,20 @@ export function SalesInvoiceDialog({
   const [lrNumber, setLrNumber] = useState('')
   const [eWayBillNumber, setEWayBillNumber] = useState('')
   const [eWayBillDate, setEWayBillDate] = useState('')
+  const [lrDate, setLrDate] = useState('')
+  // The consignee, kept apart from the buyer billed; the "Ship to" box is its address.
+  const [shipToName, setShipToName] = useState('')
+  const [shipToGstin, setShipToGstin] = useState('')
+  const [shipToState, setShipToState] = useState('')
+  const [shipToStateCode, setShipToStateCode] = useState('')
+  const [bales, setBales] = useState('')
+  const [rolls, setRolls] = useState('')
+  const [cartons, setCartons] = useState('')
+  /** Pieces typed beside a quantity in metres or kilos, by lineKey. */
+  const [linePcs, setLinePcs] = useState<Record<string, string>>({})
+  /** Save was pressed, or the GSTIN box was left: its problem shows from then on. */
+  const [gstinChecked, setGstinChecked] = useState(false)
+  const gstinRef = useRef<HTMLInputElement>(null)
   const [charges, setCharges] = useState<ChargeDraft[]>([])
   const [otherCharges, setOtherCharges] = useState('')
   const [notes, setNotes] = useState('')
@@ -256,12 +293,26 @@ export function SalesInvoiceDialog({
         setInvoiceDate(d.dateRange?.today ?? day(d.defaults.invoiceDate))
         setDueDate(day(d.defaults.dueDate))
         setBillingAddress(d.order.billingAddress || d.customer.billingAddress)
-        setShippingAddress(d.challan.deliveryAddress || d.order.deliveryAddress || '')
+        // The consignee's address: where the challan or order sent it, else the customer's shipping address.
+        setShippingAddress(d.challan.deliveryAddress || d.order.deliveryAddress || d.consignee?.address || '')
         setTransporter(d.challan.transporter ?? '')
         setVehicleNumber(d.challan.vehicleNumber ?? '')
         setLrNumber(d.challan.lrNumber ?? '')
         setEWayBillNumber(d.challan.eWayBillNumber ?? '')
         setEWayBillDate('')
+        setLrDate('')
+        // The consignee starts as the customer's shipping details; its state's name follows its code.
+        const c = d.consignee
+        const code = c?.stateCode || codeOfState(c?.state)
+        setShipToName(c?.name ?? d.customer.name)
+        setShipToGstin(c?.gstin ?? '')
+        setShipToStateCode(code)
+        setShipToState(code ? (GST_STATES[code] ?? c?.state ?? '') : (c?.state ?? ''))
+        setGstinChecked(false)
+        setBales('')
+        setRolls('')
+        setCartons(d.packages?.cartons != null ? String(d.packages.cartons) : '')
+        setLinePcs({})
         setCharges(
           d.charges.map((c) => ({
             key: `c${++chargeKey}`,
@@ -349,6 +400,12 @@ export function SalesInvoiceDialog({
     const other = round2(Number(otherCharges) || 0)
     const before = taxable + chargeTotal + cgst + sgst + igst + other
     const total = Math.round(before)
+    // What went, unit by unit and never added across units: "60 pcs · 238.17 mtr".
+    const byUnit = new Map<string, number>()
+    for (const l of prep.lines) {
+      const unit = l.needsPcs && l.uom ? l.uom : 'pcs'
+      byUnit.set(unit, round2((byUnit.get(unit) ?? 0) + l.qty))
+    }
     return {
       lines,
       subtotal,
@@ -362,7 +419,7 @@ export function SalesInvoiceDialog({
       other,
       roundOff: round2(total - before),
       total,
-      pieces: prep.lines.reduce((s, l) => s + l.qty, 0),
+      quantity: [...byUnit].map(([unit, qty]) => `${pcs(qty)} ${unit}`).join(' · '),
     }
   }, [prep, charges, chargeTypeById, otherCharges])
 
@@ -391,8 +448,28 @@ export function SalesInvoiceDialog({
                 ? 'Pick which charge the amount in the totals is for.'
                 : null
 
+  // The consignee's GSTIN, checked as the server will. Save stays pressable:
+  // pressing it shows the problem under the box and goes there.
+  const gstin = shipToGstin.trim().toUpperCase()
+  const stateWords = (code: string) => `${GST_STATES[code] ?? 'state'} (${code})`
+  const gstinProblem = !gstin
+    ? null
+    : !GSTIN_SHAPE.test(gstin)
+      ? `A GSTIN is 15 characters, starting with the state code${gstin.length !== 15 ? ` (${gstin.length} typed)` : ''}. Leave it empty if there is none.`
+      : shipToStateCode && gstin.slice(0, 2) !== shipToStateCode
+        ? `This GSTIN is from ${stateWords(gstin.slice(0, 2))}, not ${stateWords(shipToStateCode)}. Pick the state it is from.`
+        : null
+  const showGstinProblem = gstinChecked && !!gstinProblem
+  const totalPackages = (Number(bales) || 0) + (Number(rolls) || 0) + (Number(cartons) || 0)
+
   const save = async () => {
     if (!prep || !totals || blocker) return
+    if (gstinProblem) {
+      setGstinChecked(true)
+      gstinRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      gstinRef.current?.focus({ preventScroll: true })
+      return
+    }
     setSaving(true)
     setError(null)
     try {
@@ -407,6 +484,19 @@ export function SalesInvoiceDialog({
         lrNumber: lrNumber.trim() || null,
         eWayBillNumber: eWayBillNumber.trim() || null,
         eWayBillDate: eWayBillDate || null,
+        lrDate: lrDate || null,
+        // Sent as the form shows them, empty included: empty means none, where
+        // leaving a field out would bring back the customer's shipping details.
+        shipToName: shipToName.trim(),
+        shipToGstin: gstin,
+        shipToState: shipToState.trim(),
+        shipToStateCode,
+        bales: wholeOrNull(bales),
+        rolls: wholeOrNull(rolls),
+        cartons: wholeOrNull(cartons),
+        linePcs: prep.lines
+          .filter((l) => l.needsPcs && (linePcs[lineKey(l)] ?? '').trim() !== '')
+          .map((l) => ({ soLineId: l.soLineId, grade: l.grade ?? 'A', pcs: Number(linePcs[lineKey(l)]) || 0 })),
         charges: totals.chargeRows
           .filter((c) => c.type && c.value > 0)
           .map((c) => ({
@@ -433,6 +523,8 @@ export function SalesInvoiceDialog({
   if (!open || !mounted) return null
 
   const o = prep?.order
+  // The units other than pieces that lines went in ("mtr", "mtr or kg"): those lines ask for their pieces.
+  const inUnits = [...new Set((prep?.lines ?? []).filter((l) => l.needsPcs).map((l) => l.uom || 'another unit'))].join(' or ')
   const taxLabel = prep?.isIntraState ? 'CGST + SGST' : prep?.isIntraState === false ? 'IGST' : 'GST'
   const setCharge = (key: string, patch: Partial<ChargeDraft>) =>
     setCharges((cs) => cs.map((c) => (c.key === key ? { ...c, ...patch } : c)))
@@ -503,6 +595,63 @@ export function SalesInvoiceDialog({
                   <Field label="Ship to" icon={MapPin} htmlFor="inv-ship" className="sm:col-span-2 lg:col-span-5">
                     <input id="inv-ship" className="form-input pl-9" maxLength={500} value={shippingAddress} onChange={(e) => setShippingAddress(e.target.value)} />
                   </Field>
+
+                  {/* The consignee: who takes the goods, apart from the buyer billed. The box above is its address. */}
+                  <Field label="Consignee name" htmlFor="inv-ship-name" className="sm:col-span-2">
+                    <input id="inv-ship-name" className="form-input" maxLength={200} value={shipToName} onChange={(e) => setShipToName(e.target.value)} />
+                  </Field>
+                  <Field label="Consignee GSTIN" htmlFor="inv-ship-gstin">
+                    <input
+                      id="inv-ship-gstin"
+                      ref={gstinRef}
+                      className={`form-input font-mono uppercase ${showGstinProblem ? 'border-destructive/60' : ''}`}
+                      maxLength={15}
+                      placeholder="If registered"
+                      value={shipToGstin}
+                      aria-invalid={showGstinProblem || undefined}
+                      aria-describedby={showGstinProblem ? 'inv-ship-gstin-problem' : undefined}
+                      onBlur={() => setGstinChecked(true)}
+                      onChange={(e) => {
+                        const v = e.target.value.toUpperCase().replace(/\s/g, '')
+                        setShipToGstin(v)
+                        // A GSTIN starts with its state's code, so the state follows it.
+                        const code = v.slice(0, 2)
+                        if (/^\d{2}$/.test(code) && GST_STATES[code]) {
+                          setShipToStateCode(code)
+                          setShipToState(GST_STATES[code])
+                        }
+                      }}
+                    />
+                    {showGstinProblem && (
+                      <p id="inv-ship-gstin-problem" className="text-destructive mt-1 text-xs">
+                        {gstinProblem}
+                      </p>
+                    )}
+                  </Field>
+                  <Field label="Consignee state and code" htmlFor="inv-ship-state" className="sm:col-span-2">
+                    <SmartSelect
+                      id="inv-ship-state"
+                      className="form-input"
+                      value={shipToStateCode}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        setShipToStateCode(v)
+                        setShipToState(v ? (GST_STATES[v] ?? '') : '')
+                      }}
+                    >
+                      <option value="">{shipToState && !shipToStateCode ? shipToState : 'Pick the state'}</option>
+                      {STATES.map(([code, name]) => (
+                        <option key={code} value={code}>
+                          {code} · {name}
+                        </option>
+                      ))}
+                    </SmartSelect>
+                    {shipToStateCode && o.placeOfSupplyCode && shipToStateCode !== o.placeOfSupplyCode && (
+                      <p className="text-muted-foreground mt-1 text-xs">
+                        The tax still follows the order&apos;s place of supply, {o.placeOfSupplyCode} {o.placeOfSupplyState} ({taxLabel}).
+                      </p>
+                    )}
+                  </Field>
                 </div>
                 <div className="border-border bg-secondary/30 mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 rounded-lg border px-3 py-2 text-xs">
                   <span className="text-foreground font-medium">{prep.customer.name}</span>
@@ -530,8 +679,9 @@ export function SalesInvoiceDialog({
                 </div>
               </Section>
 
-              <Section icon={Truck} title="Transport and e-way bill">
-                <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
+              <Section icon={Truck} title="Transport, packages and e-way bill">
+                {/* In pairs at every width: LR no. beside its date, the e-way bill beside its date. */}
+                <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6">
                   <Field label="Transporter" htmlFor="inv-transporter">
                     <input id="inv-transporter" className="form-input" maxLength={120} value={transporter} onChange={(e) => setTransporter(e.target.value)} />
                   </Field>
@@ -540,6 +690,9 @@ export function SalesInvoiceDialog({
                   </Field>
                   <Field label="LR no." htmlFor="inv-lr">
                     <input id="inv-lr" className="form-input font-mono" maxLength={60} value={lrNumber} onChange={(e) => setLrNumber(e.target.value)} />
+                  </Field>
+                  <Field label="LR date" icon={CalendarDays} htmlFor="inv-lr-date">
+                    <input id="inv-lr-date" type="date" className="form-input pl-9" value={lrDate} onChange={(e) => setLrDate(e.target.value)} />
                   </Field>
                   <Field label="E-way bill no." htmlFor="inv-ewb">
                     <input id="inv-ewb" className="form-input font-mono" maxLength={30} value={eWayBillNumber} onChange={(e) => setEWayBillNumber(e.target.value)} />
@@ -554,15 +707,41 @@ export function SalesInvoiceDialog({
                     ? `Worth ${formatRupees(totals.total)}: above ₹50,000, so the goods need an e-way bill. Its number goes onto the challan too.`
                     : 'Under ₹50,000: no e-way bill needed.'}
                 </p>
+                {/* What the goods went in, as the old invoice listed it. Cartons start from the challan. */}
+                <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 lg:grid-cols-4 2xl:grid-cols-6">
+                  <Field label="Bales" htmlFor="inv-bales">
+                    <StepInput id="inv-bales" className="form-input text-right tabular-nums" max={100000} placeholder="0" value={bales} onValueChange={setBales} />
+                  </Field>
+                  <Field label="Rolls" htmlFor="inv-rolls">
+                    <StepInput id="inv-rolls" className="form-input text-right tabular-nums" max={100000} placeholder="0" value={rolls} onValueChange={setRolls} />
+                  </Field>
+                  <Field label="Cartons" htmlFor="inv-cartons">
+                    <StepInput
+                      id="inv-cartons"
+                      className="form-input text-right tabular-nums"
+                      max={100000}
+                      placeholder="0"
+                      value={cartons}
+                      onValueChange={setCartons}
+                      title={prep.packages?.cartons != null ? `${prep.packages.cartons} on ${prep.challan.dcNumber}` : undefined}
+                    />
+                  </Field>
+                  <Field label="Total packages">
+                    <div className="form-input text-muted-foreground text-right tabular-nums" aria-live="polite">
+                      {totalPackages > 0 ? pcs(totalPackages) : '—'}
+                    </div>
+                  </Field>
+                </div>
               </Section>
 
               <Section
                 icon={Package}
                 title="Items"
-                actions={<span className="text-muted-foreground text-xs tabular-nums">{pcs(totals.pieces)} pcs</span>}
+                actions={<span className="text-muted-foreground text-xs tabular-nums">{totals.quantity}</span>}
               >
                 <p className="text-muted-foreground mb-2 text-xs">
-                  The pieces the challan sent, at the order&apos;s rates. To bill at another rate, amend the order first.
+                  {inUnits ? 'What' : 'The pieces'} the challan sent, at the order&apos;s rates. To bill at another rate, amend the order first.
+                  {inUnits && ` Beside a quantity in ${inUnits}, type how many pieces it went in.`}
                 </p>
                 <div className="border-border overflow-x-auto rounded-lg border">
                   <table className="data-table w-full min-w-[920px]">
@@ -570,7 +749,7 @@ export function SalesInvoiceDialog({
                       <tr className="bg-secondary">
                         <th>Item</th>
                         <th>HSN</th>
-                        <th style={{ textAlign: 'right' }}>Pieces</th>
+                        <th style={{ textAlign: 'right' }}>{inUnits ? 'Quantity' : 'Pieces'}</th>
                         <th style={{ textAlign: 'right' }}>Rate</th>
                         <th style={{ textAlign: 'right' }}>Disc</th>
                         <th style={{ textAlign: 'right' }}>Taxable</th>
@@ -597,7 +776,25 @@ export function SalesInvoiceDialog({
                             )}
                           </td>
                           <td className="font-mono text-xs">{l.hsnCode ?? '—'}</td>
-                          <td className="text-right tabular-nums">{pcs(l.qty)}</td>
+                          <td className="text-right tabular-nums">
+                            {pcs(l.qty)}
+                            {l.needsPcs && l.uom && <span className="text-muted-foreground text-xs"> {l.uom}</span>}
+                            {/* A quantity in metres or kilos, and the pieces (rolls) it went in: 238.17 mtr in 11 pcs. */}
+                            {l.needsPcs && (
+                              <div className="text-muted-foreground mt-1 flex items-center justify-end gap-1 text-[11px]">
+                                in
+                                <StepInput
+                                  className="form-input h-7 w-16 px-2 text-right text-xs tabular-nums"
+                                  max={1000000}
+                                  placeholder="0"
+                                  value={linePcs[lineKey(l)] ?? ''}
+                                  onValueChange={(v) => setLinePcs((m) => ({ ...m, [lineKey(l)]: v }))}
+                                  aria-label={`Pieces in the ${pcs(l.qty)} ${l.uom ?? ''} of ${l.item?.name ?? 'this line'}`.replace(/\s+/g, ' ')}
+                                />
+                                pcs
+                              </div>
+                            )}
+                          </td>
                           <td className="text-right tabular-nums">{inr(l.unitPrice)}</td>
                           <td className="text-right text-xs tabular-nums">{l.discount > 0 ? `${l.discount}%` : '—'}</td>
                           <td className="text-right tabular-nums">{inr(l.value)}</td>
@@ -636,7 +833,7 @@ export function SalesInvoiceDialog({
 
                 <Section icon={Calculator} title="Totals">
                   <div className="space-y-1.5 text-sm">
-                    <TotalRow label={`Value of ${pcs(totals.pieces)} pcs`} value={inr(totals.subtotal)} />
+                    <TotalRow label={`Value of ${totals.quantity}`} value={inr(totals.subtotal)} />
                     {totals.discount > 0 && (
                       <TotalRow label="This invoice's share of the order discount" value={`− ${inr(totals.discount)}`} />
                     )}

@@ -5,19 +5,22 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import {
   StoreSheet,
-  Fact,
-  Eyebrow,
+  Dash,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
   qty,
   money,
   longDate,
-  GREY,
+  shortDate,
   INK,
   MUTED,
-  NAVY,
   NUM,
-  RULE,
   type SheetColumn,
+  type TotalLine,
 } from '@/components/print/StoreSheet'
+import { Box, SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
 interface Cell {
@@ -120,17 +123,17 @@ export default function PrintSampleJobWork() {
       cells: {
         sn: i + 1,
         desc: (
-          <div>
+          <>
             <div style={{ fontWeight: 600 }}>
               Sample garments{req.style ? ` · ${req.style.code} ${req.style.name}` : ''}
             </div>
-            <div style={{ fontSize: '9px', color: GREY }}>
+            <SubLine>
               {colour} · for {job.stage.name.toLowerCase()} · {req.number} round {job.round.revision}
-            </div>
-          </div>
+            </SubLine>
+          </>
         ),
         sizes: (
-          <span style={{ fontSize: '9px', color: GREY }}>
+          <span style={{ fontSize: '9px', ...NUM }}>
             {cells.map((c) => `${sizeOf(c.sizeId)?.code ?? '?'}:${c.qty}`).join('  ')}
           </span>
         ),
@@ -143,6 +146,13 @@ export default function PrintSampleJobWork() {
   // Accounted for: back accepted, or rejected (spoilt or not returned).
   const settled = job.returns.flatMap((r) => r.cells).reduce((s, c) => s + c.accepted + c.rejected, 0)
   const declared = job.declaredValue === null ? null : Number(job.declaredValue)
+  const totals: TotalLine[] = [
+    { label: 'Pieces', value: qty(total) },
+    ...(settled ? [{ label: 'Accounted for', value: qty(settled) }] : []),
+  ]
+
+  // Laid out like the purchase order (27 Nov 2026): the outside unit in the
+  // "To," block with the job's facts beside it.
   return (
     <StoreSheet
       company={company}
@@ -168,98 +178,72 @@ export default function PrintSampleJobWork() {
           </SmartSelect>
         </label>
       }
-      panels={[
-        {
-          title: 'Job worker (consignee)',
-          body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{v.name}</div>
-              <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>
-                {[v.address, v.city, v.state, v.pincode].filter(Boolean).join(', ')}
-              </div>
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={v.gstin ?? 'Unregistered'} mono />
-                <Fact label="State" value={v.state ? `${v.state}${v.stateCode ? ` (${v.stateCode})` : ''}` : null} />
-                <Fact label="Phone" value={v.phone} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'The job',
-          body: (
-            <>
-              <Fact label="Process" value={job.stage.name} />
-              <Fact label="Sample" value={`${req.number} · round ${job.round.revision}`} mono />
-              <Fact label="Buyer" value={req.customer?.name ?? null} />
-              <Fact label="Buyer style" value={req.buyerStyleRef} />
-              <Fact label="Due back" value={longDate(job.expectedBack)} />
-            </>
-          ),
-        },
-        {
-          title: 'Dispatch',
-          body: (
-            <>
-              <Fact label="Sent by" value={job.sentBy} />
-              <Fact label="Vehicle No" value={job.vehicleNo} mono />
-              <Fact label="Place of supply" value={v.state ? `${v.state}${interState ? ' (inter-state)' : ''}` : null} />
-              <Fact label="Pieces" value={`${qty(total)}${settled ? ` · ${qty(settled)} accounted for` : ''}`} />
-            </>
-          ),
-        },
-      ]}
+      party={{
+        heading: 'To, the job worker (consignee)',
+        name: v.name,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={[v.address, v.city, v.state, v.pincode].filter(Boolean).join(', ') || null} />
+            <PartyLine label="GST No" value={v.gstin ?? 'Unregistered'} mono={Boolean(v.gstin)} />
+            <PartyLine label="Contact No" value={v.phone} mono />
+            <PartyLine
+              label="Place of supply"
+              value={
+                v.state
+                  ? `${v.state}${v.stateCode ? ` (${v.stateCode})` : ''}${interState ? ', inter-state' : ''}`
+                  : null
+              }
+            />
+          </>
+        ),
+        meta: [
+          ['Challan No', job.number, true],
+          ['Challan Date', shortDate(job.sentOn), true],
+          ['Process', job.stage.name],
+          ['Sample', `${req.number} · round ${job.round.revision}`, true],
+          !!req.customer?.name && ['Buyer', req.customer?.name],
+          !!req.buyerStyleRef && ['Buyer style', req.buyerStyleRef],
+          ['Due back', shortDate(job.expectedBack), true],
+          ['Sent by', job.sentBy],
+          ['Vehicle No', job.vehicleNo, true],
+        ],
+      }}
       columns={COLS}
       rows={rows}
-      minRows={Math.max(0, 4 - rows.length)}
       after={
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: '7px', marginTop: '8px' }}>
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-              <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-              <div style={{ fontSize: '10px', color: job.notes ? GREY : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
-                {job.notes ?? 'None.'}
-              </div>
-              {job.returns.length > 0 && (
-                <div style={{ fontSize: '9px', color: GREY, marginTop: '5px', lineHeight: 1.55 }}>
-                  {job.returns.map((r) => {
-                    const ok = r.cells.reduce((s, c) => s + c.accepted, 0)
-                    const bad = r.cells.reduce((s, c) => s + c.rejected, 0)
-                    return (
-                      <div key={r.id}>
-                        Back {longDate(r.receivedOn)}: {ok} accepted{bad ? `, ${bad} rejected` : ''}
-                        {r.theirChallanNo ? ` · their challan ${r.theirChallanNo}` : ''} · {r.receivedBy}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '7px 11px',
-                borderTop: '1.5pt solid #000',
-                color: '#fff',
-              }}
-            >
-              <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>
-                Value of goods
-              </span>
-              <span style={{ fontSize: declared === null ? '10px' : '13px', fontWeight: 700, ...NUM }}>
-                {declared === null ? 'No commercial value' : `₹${money(declared)}`}
-              </span>
-            </div>
-          </div>
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-            <Eyebrow style={{ color: GREY }}>Declaration</Eyebrow>
-            <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>
-              {template.declaration ??
-                `Sample garments sent for job work (${job.stage.name.toLowerCase()}) under section 143 of the CGST Act, 2017, and rule 55 of the CGST Rules, 2017. They are samples, not for sale; this is not a supply and no GST is charged. They remain the property of ${company.name} and are to be returned after the work.`}
-            </div>
-          </div>
+          <WordsAndTotals
+            left={
+              <>
+                <Note title="Note">{job.notes || <Dash />}</Note>
+                {job.returns.length > 0 && (
+                  <Note title="Back from the job worker">
+                    {job.returns.map((r) => {
+                      const ok = r.cells.reduce((s, c) => s + c.accepted, 0)
+                      const bad = r.cells.reduce((s, c) => s + c.rejected, 0)
+                      return (
+                        <div key={r.id}>
+                          Back {longDate(r.receivedOn)}: {ok} accepted{bad ? `, ${bad} rejected` : ''}
+                          {r.theirChallanNo ? ` · their challan ${r.theirChallanNo}` : ''} · {r.receivedBy}
+                        </div>
+                      )
+                    })}
+                  </Note>
+                )}
+              </>
+            }
+            totals={
+              <TotalsBox
+                rows={totals}
+                totalLabel="Value of goods"
+                total={declared === null ? 'No commercial value' : `₹ ${money(declared)}`}
+              />
+            }
+          />
+          <Box title="Declaration" style={{ marginTop: '7px' }}>
+            {template.declaration ??
+              `Sample garments sent for job work (${job.stage.name.toLowerCase()}) under section 143 of the CGST Act, 2017, and rule 55 of the CGST Rules, 2017. They are samples, not for sale; this is not a supply and no GST is charged. They remain the property of ${company.name} and are to be returned after the work.`}
+          </Box>
         </>
       }
       signatures={[

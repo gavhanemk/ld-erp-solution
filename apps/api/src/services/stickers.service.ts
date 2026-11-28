@@ -48,6 +48,8 @@ export interface StickerGroup {
   qtys: number[]
   /** A note for each package, in the order of `qtys`: "short width". */
   notesEach?: Array<string | null>
+  /** The barcode each package already carries (a customer's roll), in the order of `qtys`. */
+  barcodesEach?: Array<string | null>
   lotNo?: string | null
   notes?: string | null
   grnLineId?: string | null
@@ -129,6 +131,7 @@ export async function labelGroup(
     packType: g.packType,
     qtys: g.qtys,
     notesEach: g.notesEach,
+    barcodesEach: g.barcodesEach,
     lotNo: g.lotNo,
     notes: g.notes,
     sourceType,
@@ -195,6 +198,8 @@ type Came = {
   packQtys?: number[]
   /** A note on each of those packages, in the same order. */
   packNotes?: string[]
+  /** The barcode each of those packages already carries (a customer's roll), in the same order. */
+  barcodesEach?: Array<string | null>
   /** 'R' for what came in held (rejected at a customer's receipt). */
   grade?: string
 }
@@ -246,7 +251,46 @@ async function whatCameIn(data: InwardQuery): Promise<Came[]> {
         grade: r.grade,
       })
   }
-  return [...byKey.values()]
+  const came = [...byKey.values()]
+  if (data.sourceType === 'CUSTOMER_GRN') await withCustomerRolls(data.sourceId, came)
+  return came
+}
+
+/**
+ * A customer's receipt with its rolls listed (28 Nov 2026): a sticker a roll,
+ * carrying the customer's own barcode and the roll's metres, with its design
+ * and lot as the note — so scanning their barcode finds the roll. A line with
+ * part of it rejected keeps the usual stickers: which rolls were rejected is
+ * not recorded, so its rolls cannot be told apart.
+ */
+async function withCustomerRolls(grnId: string, came: Came[]) {
+  const lines = await prisma.customerGRNLine.findMany({
+    where: { grnId, rolls: { some: {} } },
+    select: {
+      itemId: true,
+      rejectedQty: true,
+      rolls: { orderBy: { sortOrder: 'asc' }, select: { barcode: true, meters: true, designNo: true, lotNo: true } },
+    },
+  })
+  if (!lines.length) return
+  // Two packages cannot share a barcode: one already on a package stays off this one.
+  const taken = new Set(
+    (
+      await prisma.stockPackage.findMany({
+        where: { barcode: { in: lines.flatMap((l) => l.rolls.map((r) => r.barcode)) } },
+        select: { barcode: true },
+      })
+    ).map((p) => p.barcode),
+  )
+  for (const line of lines) {
+    if (Number(line.rejectedQty) > 0) continue
+    const c = came.find((x) => x.itemId === line.itemId && (x.grade ?? 'A') === 'A')
+    if (!c) continue
+    c.packType = 'ROLL'
+    c.packQtys = line.rolls.map((r) => Number(r.meters))
+    c.packNotes = line.rolls.map((r) => [r.designNo && `Design ${r.designNo}`, r.lotNo && `Lot ${r.lotNo}`].filter(Boolean).join(' · '))
+    c.barcodesEach = line.rolls.map((r) => (taken.has(r.barcode) ? null : r.barcode))
+  }
 }
 
 /**
@@ -342,6 +386,8 @@ export async function planStickers(data: InwardQuery) {
       qtys: packs ?? suggestQtys(max, d.perPack),
       /** Each package's note, when the receipt gave its sizes. */
       notesEach: packs ? (c.packNotes ?? []) : undefined,
+      /** Each package's own barcode, when the receipt listed the customer's rolls. */
+      barcodesEach: packs ? c.barcodesEach : undefined,
     })
   }
   return { sourceType: data.sourceType, sourceId: data.sourceId, sourceRef, targets, untracked }
@@ -378,8 +424,9 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
           const planned = round3(t.qtys.reduce((s, q) => s + q, 0))
           if (remaining < planned - 1e-9) {
             t.qtys = suggestQtys(remaining, t.perPack)
-            // Sizes worked out again no longer line up with the receipt's notes.
+            // Sizes worked out again no longer line up with the receipt's notes, nor its rolls.
             t.notesEach = undefined
+            t.barcodesEach = undefined
           }
           all.push(
             ...(await labelGroup(
@@ -392,6 +439,7 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
                 packType: t.packType,
                 qtys: t.qtys,
                 notesEach: t.notesEach,
+                barcodesEach: t.barcodesEach,
                 lotNo: t.lotNo,
                 grnLineId: t.grnLineId,
                 grade: t.grade,

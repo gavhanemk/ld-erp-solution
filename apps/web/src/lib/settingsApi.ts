@@ -10,6 +10,8 @@ export interface Company {
   id: string
   name: string
   legalName: string | null
+  /** "Manufacturer of: Fancy Fabrics", printed under the name on the tax invoice. */
+  manufacturerOf?: string | null
   address: string | null
   /** The head office (HO), when it is not the works. */
   address2?: string | null

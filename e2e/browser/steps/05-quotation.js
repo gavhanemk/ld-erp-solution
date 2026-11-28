@@ -16,7 +16,11 @@ else await h.type(colour, c.colour)
 await h.sleep(500)
 const item = d.locator('[aria-label="Row 1 item billed as"]')
 if (!(await item.innerText()).includes(c.itemName.split(' — ')[0])) await h.pick(item, c.colour, c.itemName)
-await h.type(d.locator('[aria-label="Row 1 pieces"]'), String(pcs))
+// A garment made in sizes is quoted size by size (the pieces are what they add
+// up to); one with no size run takes the pieces in one box.
+if (await d.locator(`[aria-label="Row 1, size ${c.sizes[0][0]}"]`).count()) {
+  for (const [size, q] of c.sizes) await h.type(d.locator(`[aria-label="Row 1, size ${size}"]:visible`), String(q))
+} else await h.type(d.locator('[aria-label="Row 1 pieces"]'), String(pcs))
 await h.beat(2500)
 await h.click('Save & mark sent', d)
 await h.sleep(2000)

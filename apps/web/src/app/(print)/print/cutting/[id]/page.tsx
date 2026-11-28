@@ -3,7 +3,23 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
-import { StoreSheet, Fact, Eyebrow, qty, longDate, CODE, GREY, INK, MUTED, NAVY, RULE, TINT, type SheetColumn } from '@/components/print/StoreSheet'
+import {
+  StoreSheet,
+  CODE,
+  Dash,
+  Eyebrow,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
+  qty,
+  longDate,
+  shortDate,
+  INK,
+  MUTED,
+  type SheetColumn,
+} from '@/components/print/StoreSheet'
+import { HAIR, LINE } from '@/components/print/doc'
 import { moCustomer } from '@/components/production/moCustomer'
 import { itemShadeCols, type ShadeFields } from '@/lib/items'
 
@@ -40,6 +56,21 @@ interface Payload {
   }
 }
 
+/** Facts run on across a band: a bold label, its value, then the next — wrapping, never squeezed. */
+function Facts({ items }: { items: Array<[string, React.ReactNode, boolean?] | null | false> }) {
+  const shown = items.filter(Boolean) as Array<[string, React.ReactNode, boolean?]>
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '18px', rowGap: '1px' }}>
+      {shown.map(([label, value, mono]) => (
+        <span key={label}>
+          <span style={{ fontWeight: 700 }}>{label}</span>
+          <span style={{ marginLeft: '5px', ...(mono && value ? CODE : {}) }}>{value || value === 0 ? value : <Dash />}</span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
 /**
  * The cutting document: what the cutting room was given and what it cut, for
  * one lay of one line of the order. Order, fabric and the lay above; the
@@ -47,6 +78,11 @@ interface Payload {
  * bundles tied from them below (any made from them later as another size at
  * stitching are named under the list, not as cut). Signed by whoever
  * prepared it, the cutting master, and whoever issued the fabric.
+ *
+ * Laid out like the purchase order (27 Nov 2026): the cutting master in the
+ * "To," block with the order's facts under the name and the cutting's number,
+ * date and references beside it; the fabric and the lay in bands; the fabric
+ * given, used and left over beside the pieces cut.
  */
 export default function PrintCutting() {
   const { id } = useParams<{ id: string }>()
@@ -72,21 +108,32 @@ export default function PrintCutting() {
   const cut = c.sizeBreakup ?? {}
   const bNo = (n: number) => `B${String(n).padStart(3, '0')}`
   const later = data.madeAsOtherSize ?? []
-  // The fabric's own design no. and colour, from its item. "Colour" and "Design no." above them are
-  // the garment's (the order line's colour and the style code) and stay as they always printed.
+  // The fabric's own design no. and colour, from its item. "Colour" and "Style" above them are
+  // the garment's (the order line's colour and the style code; "Style" was "Design no." before 27 Nov 2026).
   const fabricShade = itemShadeCols(c.fabricItem)
 
-  // Sizes run across the page, as on the floor's own sheet.
+  // Sizes run across the page, as on the floor's own sheet. Past ten, the
+  // label and total give up some room and the figures drop a point, so every
+  // size keeps a column of its own.
+  const many = sizes.length > 10
+  const labelW = sizes.length ? (many ? 14 : 22) : 60
+  const totalW = many ? 10 : 12
   const columns: SheetColumn[] = [
-    { key: 'what', head: 'Sizes', width: `${sizes.length ? 22 : 60}%` },
-    ...sizes.map((z) => ({ key: z.sizeId, head: z.size.code, width: `${Math.floor(66 / Math.max(1, sizes.length))}%`, align: 'center' as const })),
-    { key: 'total', head: 'Total', width: '12%', align: 'right' },
+    { key: 'what', head: 'Sizes', width: `${labelW}%` },
+    ...sizes.map((z) => ({
+      key: z.sizeId,
+      head: z.size.code,
+      width: `${((100 - labelW - totalW) / Math.max(1, sizes.length)).toFixed(3)}%`,
+      align: 'center' as const,
+    })),
+    { key: 'total', head: 'Total', width: `${totalW}%`, align: 'right' },
   ]
+  const fig = (v: React.ReactNode) => (many ? <span style={{ fontSize: '8.5px' }}>{v}</span> : v)
   const row = (key: string, label: string, get: (sizeId: string) => number | null, total: number | null, strong = false) => ({
     key,
     cells: {
       what: <span style={{ fontWeight: strong ? 700 : 500 }}>{label}</span>,
-      ...Object.fromEntries(sizes.map((z) => [z.sizeId, get(z.sizeId) ? (strong ? <strong>{qty(get(z.sizeId)!)}</strong> : qty(get(z.sizeId)!)) : ''])),
+      ...Object.fromEntries(sizes.map((z) => [z.sizeId, get(z.sizeId) ? fig(strong ? <strong>{qty(get(z.sizeId)!)}</strong> : qty(get(z.sizeId)!)) : ''])),
       total: total ? (strong ? <strong>{qty(total)}</strong> : qty(total)) : '',
     },
   })
@@ -108,81 +155,106 @@ export default function PrintCutting() {
       backHref="/production/orders"
       backLabel="Production"
       banner={c.status === 'CANCELLED' ? `CANCELLED${c.notes ? ` — ${c.notes}` : ''}.` : null}
-      panels={[
+      party={{
+        heading: 'To,',
+        // The cutting master the lay was given to ("Cut by").
+        name: c.cutterName || 'Cutting department',
+        lines: (
+          <>
+            <PartyLine label="Customer" value={moCustomer(c.mo)} />
+            <PartyLine label="Description" value={c.moLine?.style.name ?? null} />
+            <PartyLine label="Colour" value={c.moLine?.color ?? null} />
+            <PartyLine label="Style" value={c.moLine?.style.code ?? null} mono />
+            <PartyLine label="Brand" value={data.brand?.name ?? null} />
+          </>
+        ),
+        meta: [
+          ['Cutting No', c.cutOrderNumber, true],
+          ['Cut on', shortDate(c.cutDate), true],
+          ['Mfg. order', c.mo.moNumber, true],
+          ['Order no.', c.mo.so?.soNumber ?? null, true],
+          !!c.mo.so?.customerPORef && ['Buyer PO', c.mo.so.customerPORef],
+        ],
+      }}
+      bands={[
         {
-          title: 'Order',
+          label: 'Fabric',
           body: (
             <>
-              <Fact label="Mfg. order" value={c.mo.moNumber} mono />
-              <Fact label="Brand" value={data.brand?.name ?? null} />
-              <Fact label="Order no." value={c.mo.so ? `${c.mo.so.soNumber}${c.mo.so.customerPORef ? ` · PO ${c.mo.so.customerPORef}` : ''}` : null} />
-              <Fact label="Customer" value={moCustomer(c.mo)} />
-              <Fact label="Description" value={c.moLine?.style.name ?? null} />
-            </>
-          ),
-        },
-        {
-          title: 'Fabric',
-          body: (
-            <>
-              {/* A little wider than the kit's labels, for "Fabric design no." to sit clear of its colon. */}
-              <Fact label="Quality" value={c.fabricItem ? `${c.fabricItem.name}` : null} labelWidth={88} />
-              <Fact label="Colour" value={c.moLine?.color ?? null} labelWidth={88} />
-              <Fact label="Design no." value={c.moLine?.style.code ?? null} mono labelWidth={88} />
-              <Fact label="Lot / shade" value={c.lotNo} labelWidth={88} />
-              {fabricShade.designNo && <Fact label="Fabric design no." value={fabricShade.designNo} mono labelWidth={88} />}
-              {fabricShade.colour && <Fact label="Fabric colour" value={fabricShade.colour} labelWidth={88} />}
-            </>
-          ),
-        },
-        {
-          title: 'The lay',
-          body: (
-            <>
-              <Fact label="Fabric given" value={c.fabricIssued != null ? `${qty(c.fabricIssued)} ${uom}` : null} />
-              <Fact label="Metres used" value={`${qty(used)} ${uom}${Number(c.wastage ?? 0) ? ` + ${qty(c.wastage!)} waste` : ''}`} />
-              <Fact
-                label="Left over"
-                value={c.fabricIssued != null ? `${qty(Math.round((Number(c.fabricIssued) - used - Number(c.wastage ?? 0)) * 1000) / 1000)} ${uom}` : null}
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{c.fabricItem?.name || <Dash />}</div>
+              <Facts
+                items={[
+                  ['Lot / shade', c.lotNo],
+                  !!fabricShade.designNo && ['Fabric design no.', fabricShade.designNo, true],
+                  !!fabricShade.colour && ['Fabric colour', fabricShade.colour],
+                ]}
               />
-              <Fact label="Average" value={average ? `${qty(Math.round(average * 1000) / 1000)} ${uom} a piece` : null} />
-              <Fact label="Ratio" value={c.ratio} />
-              <Fact label="Layers" value={Number(c.noOfLayers) > 0 ? String(Number(c.noOfLayers)) : null} />
-              <Fact label="Cut by" value={c.cutterName} />
             </>
+          ),
+        },
+        {
+          label: 'The lay',
+          body: (
+            <Facts
+              items={[
+                ['Ratio', c.ratio],
+                ['Layers', Number(c.noOfLayers) > 0 ? String(Number(c.noOfLayers)) : null],
+              ]}
+            />
           ),
         },
       ]}
       columns={columns}
       rows={rows}
       after={
-        c.bundles.length ? (
-          <div style={{ border: `1px solid ${RULE}`, marginTop: '8px' }}>
-            <div style={{ background: TINT, borderBottom: `1px solid ${RULE}`, padding: '5px 10px', display: 'flex', justifyContent: 'space-between' }}>
-              <Eyebrow>
-                Bundles — {c.bundles.length}
-                {c.bundleSize ? ` of up to ${c.bundleSize}` : ''}
-              </Eyebrow>
-              <span style={{ fontSize: '9px', color: GREY }}>{data.waitingAtCutting ? `${qty(data.waitingAtCutting)} pieces still at cutting` : 'All sent on'}</span>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0', padding: '6px 10px' }}>
-              {c.bundles.map((b) => (
-                <div key={b.id} style={{ fontSize: '9.5px', color: INK, lineHeight: 1.7, ...CODE }}>
-                  <span style={{ color: NAVY, fontWeight: 700 }}>{bNo(b.bundleNo)}</span> {b.size ? `${b.size.code} · ` : ''}
-                  {b.qty} pcs
-                </div>
-              ))}
-            </div>
-            {later.length ? (
-              <div style={{ borderTop: `1px solid ${RULE}`, padding: '5px 10px', fontSize: '9px', color: GREY, lineHeight: 1.6 }}>
-                Later made as another size at {[...new Set(later.map((l) => l.step))].join(', ')}:{' '}
-                {later.map((l) => `${bNo(l.bundleNo)} (${l.size}, ${qty(l.qty)} pcs from ${bNo(l.fromBundleNo)})`).join(', ')}
+        <>
+          <WordsAndTotals
+            words={null}
+            left={<Note title="Notes">{c.notes || <Dash />}</Note>}
+            totals={
+              <TotalsBox
+                rows={[
+                  { label: 'Fabric given', value: c.fabricIssued != null ? `${qty(c.fabricIssued)} ${uom}` : <Dash /> },
+                  { label: 'Metres used', value: `${qty(used)} ${uom}${Number(c.wastage ?? 0) ? ` + ${qty(c.wastage!)} waste` : ''}` },
+                  {
+                    label: 'Left over',
+                    value: c.fabricIssued != null ? `${qty(Math.round((Number(c.fabricIssued) - used - Number(c.wastage ?? 0)) * 1000) / 1000)} ${uom}` : <Dash />,
+                  },
+                  { label: 'Average', value: average ? `${qty(Math.round(average * 1000) / 1000)} ${uom} a piece` : <Dash /> },
+                ]}
+                totalLabel="Pieces cut"
+                total={qty(c.actualPieces)}
+              />
+            }
+          />
+
+          {c.bundles.length ? (
+            // Not kept whole on one page: a long list of bundles runs on to the next.
+            <div style={{ border: LINE, marginTop: '7px' }}>
+              <div style={{ borderBottom: HAIR, padding: '4px 9px', display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'baseline' }}>
+                <Eyebrow>
+                  Bundles — {c.bundles.length}
+                  {c.bundleSize ? ` of up to ${c.bundleSize}` : ''}
+                </Eyebrow>
+                <span style={{ fontSize: '9px' }}>{data.waitingAtCutting ? `${qty(data.waitingAtCutting)} pieces still at cutting` : 'All sent on'}</span>
               </div>
-            ) : null}
-          </div>
-        ) : c.notes ? (
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '8px', fontSize: '10px', color: GREY }}>{c.notes}</div>
-        ) : null
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', columnGap: '10px', padding: '5px 9px' }}>
+                {c.bundles.map((b) => (
+                  <div key={b.id} style={{ fontSize: '9.5px', lineHeight: 1.7, breakInside: 'avoid', ...CODE }}>
+                    <span style={{ fontWeight: 700 }}>{bNo(b.bundleNo)}</span> {b.size ? `${b.size.code} · ` : ''}
+                    {b.qty} pcs
+                  </div>
+                ))}
+              </div>
+              {later.length ? (
+                <div style={{ borderTop: HAIR, padding: '4px 9px', fontSize: '9px', lineHeight: 1.6 }}>
+                  Later made as another size at {[...new Set(later.map((l) => l.step))].join(', ')}:{' '}
+                  {later.map((l) => `${bNo(l.bundleNo)} (${l.size}, ${qty(l.qty)} pcs from ${bNo(l.fromBundleNo)})`).join(', ')}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </>
       }
       signatures={[
         { role: 'Prepared by', who: c.createdBy?.name ?? null },

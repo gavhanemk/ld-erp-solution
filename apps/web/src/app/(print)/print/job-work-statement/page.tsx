@@ -3,9 +3,24 @@
 import { Suspense, useEffect, useState } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { api, ApiError, masterResource } from '@/lib/api'
-import { StoreSheet, Fact, Eyebrow, qty, money, longDate, CODE, GREY, INK, MUTED, NAVY, RED, RULE, type SheetColumn } from '@/components/print/StoreSheet'
-import { StatementTable, type StatementRow } from '@/components/print/StatementTable'
-import { SubLine } from '@/components/print/doc'
+import {
+  StoreSheet,
+  Eyebrow,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
+  qty,
+  money,
+  longDate,
+  shortDate,
+  CODE,
+  INK,
+  MUTED,
+  NUM,
+  type SheetColumn,
+} from '@/components/print/StoreSheet'
+import { HAIR, LINE, SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
 
@@ -75,22 +90,103 @@ interface Payload {
 
 const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
 const num = (v: number) => (Math.abs(v) < 0.0005 ? '—' : qty(v))
-const STATE: Record<Payload['challans'][number]['state'], { text: string; colour: string }> = {
-  OPEN: { text: 'With them', colour: NAVY },
-  OVERDUE: { text: 'Overdue', colour: RED },
-  SETTLED: { text: 'Settled', colour: GREY },
+
+/** A line of a grouped table, or a heading across it for the rows under it. */
+type GroupRow = { key: string; heading: React.ReactNode } | { key: string; cells: Record<string, React.ReactNode> }
+
+/**
+ * A titled table after the main one, ruled like the purchase order's lines —
+ * black on white, its heading repeated on every printed page, a row never
+ * split across two — with heading rows across it for what the rows under
+ * them belong to. (The kit's DocTable has no heading rows; this is it with
+ * them.)
+ */
+function GroupTable({ title, note, columns, rows }: { title: string; note?: string; columns: SheetColumn[]; rows: GroupRow[] }) {
+  const last = columns.length - 1
+  const th = (c: SheetColumn, i: number): React.CSSProperties => ({
+    padding: '4px 4px',
+    fontSize: '7.5px',
+    fontWeight: 700,
+    letterSpacing: '.04em',
+    textTransform: 'uppercase',
+    lineHeight: 1.25,
+    textAlign: c.align ?? 'left',
+    verticalAlign: 'bottom',
+    borderBottom: LINE,
+    borderRight: i === last ? undefined : HAIR,
+    overflowWrap: 'anywhere',
+  })
+  const td = (c: SheetColumn, i: number): React.CSSProperties => ({
+    padding: '4px 4px',
+    fontSize: '9.5px',
+    lineHeight: 1.4,
+    textAlign: c.align ?? 'left',
+    verticalAlign: 'top',
+    borderTop: HAIR,
+    borderRight: i === last ? undefined : HAIR,
+    overflowWrap: 'anywhere',
+    ...(c.align === 'right' ? NUM : {}),
+  })
+  return (
+    <div style={{ marginTop: '9px' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', breakAfter: 'avoid' }}>
+        <Eyebrow>{title}</Eyebrow>
+        {note && <span style={{ fontSize: '9px' }}>{note}</span>}
+      </div>
+      <table className="doc-lines" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', border: LINE, marginTop: '3px' }}>
+        <colgroup>
+          {columns.map((c) => (
+            <col key={c.key} style={{ width: c.width }} />
+          ))}
+        </colgroup>
+        <thead>
+          <tr>
+            {columns.map((c, i) => (
+              <th key={c.key} style={th(c, i)}>
+                {c.head}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) =>
+            'heading' in r ? (
+              <tr key={r.key} style={{ breakAfter: 'avoid' }}>
+                <td colSpan={columns.length} style={{ padding: '4px 4px', fontSize: '9.5px', fontWeight: 700, lineHeight: 1.4, borderTop: LINE }}>
+                  {r.heading}
+                </td>
+              </tr>
+            ) : (
+              <tr key={r.key}>
+                {columns.map((c, i) => (
+                  <td key={c.key} style={td(c, i)}>
+                    {r.cells[c.key] ?? ''}
+                  </td>
+                ))}
+              </tr>
+            ),
+          )}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+const STATE: Record<Payload['challans'][number]['state'], { text: string }> = {
+  OPEN: { text: 'With them' },
+  OVERDUE: { text: 'Overdue' },
+  SETTLED: { text: 'Settled' },
 }
 
 const COLS: SheetColumn[] = [
   { key: 'sn', head: 'S.N', width: '5%', align: 'center' },
-  { key: 'item', head: 'Item sent', width: '31%' },
+  { key: 'item', head: 'Item sent', width: '27%' },
   { key: 'uom', head: 'UOM', width: '6%', align: 'center' },
   { key: 'sent', head: 'Sent', width: '10%', align: 'right' },
   { key: 'accounted', head: 'Accounted for', width: '11%', align: 'right' },
   { key: 'wasted', head: 'Wasted', width: '9%', align: 'right' },
   { key: 'damaged', head: 'Damaged', width: '9%', align: 'right' },
   { key: 'pending', head: 'Still with them', width: '11%', align: 'right' },
-  { key: 'value', head: 'Value (₹)', width: '8%', align: 'right' },
+  { key: 'value', head: 'Value (₹)', width: '12%', align: 'right' },
 ]
 
 /**
@@ -240,10 +336,10 @@ function Statement() {
         <>
           <div style={{ fontWeight: 600 }}>{i.item}</div>
           {itemShade(i) && <SubLine>{itemShade(i)}</SubLine>}
-          <div style={{ ...CODE, fontSize: '8.5px', color: GREY }}>{i.code}</div>
+          <SubLine style={CODE}>{i.code}</SubLine>
         </>
       ),
-      uom: <span style={{ fontSize: '9px', color: GREY }}>{i.uom}</span>,
+      uom: i.uom,
       sent: num(i.sent),
       accounted: num(i.accounted),
       wasted: num(i.wasted),
@@ -253,18 +349,20 @@ function Statement() {
     },
   }))
 
-  const challanRows: StatementRow[] = challans.flatMap((c) => [
+  const challanRows: GroupRow[] = challans.flatMap((c) => [
     {
       key: `h-${c.id}`,
       heading: (
-        <>
-          <span style={CODE}>{c.challanNumber}</span> · {longDate(c.challanDate)} · {c.process}
-          {c.order || c.mo ? <span style={{ fontWeight: 400, color: GREY }}> · for {[c.order, c.mo].filter(Boolean).join(' / ')}</span> : null}
-          <span style={{ float: 'right', color: STATE[c.state].colour }}>
-            {STATE[c.state].text}
-            {c.expectedBackOn && c.state !== 'SETTLED' ? ` · due ${longDate(c.expectedBackOn)}` : ''}
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
+          <span style={{ minWidth: 0 }}>
+            <span style={CODE}>{c.challanNumber}</span> · {shortDate(c.challanDate)} · {c.process}
+            {c.order || c.mo ? <span style={{ fontWeight: 400 }}> · for {[c.order, c.mo].filter(Boolean).join(' / ')}</span> : null}
           </span>
-        </>
+          <span style={{ flexShrink: 0, ...NUM }}>
+            {STATE[c.state].text}
+            {c.expectedBackOn && c.state !== 'SETTLED' ? ` · due ${shortDate(c.expectedBackOn)}` : ''}
+          </span>
+        </div>
       ),
     },
     ...c.lines.flatMap((l) => {
@@ -275,15 +373,15 @@ function Statement() {
             {l.size ? ` · ${l.size}` : ''}
           </div>
           {itemShade(l) && <SubLine>{itemShade(l)}</SubLine>}
-          {l.customer && <div style={{ color: GREY, fontSize: '8.5px', fontWeight: 700 }}>CUSTOMER MATERIAL · {l.customer}</div>}
+          {l.customer && <SubLine style={{ fontWeight: 700 }}>CUSTOMER MATERIAL · {l.customer}</SubLine>}
         </>
       )
-      const sentRow: StatementRow = {
+      const sentRow: GroupRow = {
         key: `${l.id}-sent`,
-        cells: { what: name, doc: <span style={{ color: GREY }}>Sent</span>, qty: `${qty(l.sent)} ${l.uom}`, left: `${qty(l.sent)}` },
+        cells: { what: name, doc: 'Sent', qty: `${qty(l.sent)} ${l.uom}`, left: `${qty(l.sent)}` },
       }
       let left = l.sent
-      const backRows: StatementRow[] = l.returns.map((r, n) => {
+      const backRows: GroupRow[] = l.returns.map((r, n) => {
         left = Math.max(0, Math.round((left - r.accounted) * 1000) / 1000)
         const extra = [r.wasted ? `wasted ${qty(r.wasted)}` : '', r.damaged ? `damaged ${qty(r.damaged)}` : ''].filter(Boolean).join(', ')
         return {
@@ -292,14 +390,14 @@ function Statement() {
             doc: (
               <>
                 <span style={CODE}>{r.returnNumber}</span>
-                <div style={{ color: GREY, fontSize: '8.5px' }}>
-                  {longDate(r.returnDate)}
+                <SubLine>
+                  {shortDate(r.returnDate)}
                   {r.theirChallanNo ? ` · their ${r.theirChallanNo}` : ''}
-                </div>
+                </SubLine>
               </>
             ),
             what: (
-              <span style={{ color: GREY }}>
+              <span>
                 Back: {qty(r.received)} {r.receivedUom} {r.receivedCode !== l.code ? `as ${r.receivedItem}${r.receivedShade ? ` (${r.receivedShade})` : ''}` : ''} into {r.store}
                 {extra ? ` · ${extra}` : ''}
               </span>
@@ -313,6 +411,13 @@ function Statement() {
     }),
   ])
 
+  const note =
+    template.declaration ??
+    `Material sent to ${w.name} for job work under section 143 of the CGST Act, 2017, and what has been accounted for against it, from ${company.name}'s records. "Still with them" is to be returned or accounted for. Please tell us of any difference within seven days.`
+
+  // Laid out like the purchase order (27 Nov 2026): the job worker in the "To,"
+  // block with the statement's facts beside it, what they hold item by item,
+  // the value with them beside the note, then challan by challan.
   return (
     <StoreSheet
       company={company}
@@ -323,52 +428,45 @@ function Statement() {
       backHref="/inventory/job-work"
       backLabel="Job work"
       options={options}
-      panels={[
-        {
-          title: 'Job worker',
-          body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{w.name}</div>
-              {address && <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{address}</div>}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={w.gstin ?? 'Unregistered'} mono />
-                <Fact label="Phone" value={w.phone} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'This statement',
-          body: (
-            <>
-              <Fact label="From" value={period.from ? longDate(period.from) : 'The start'} />
-              <Fact label="To" value={longDate(period.to)} />
-              <Fact label="Printed on" value={longDate(new Date())} />
-              <Fact label="Showing" value={data.openOnly ? 'Open challans' : 'Every challan'} />
-            </>
-          ),
-        },
-        {
-          title: 'In short',
-          body: (
-            <>
-              <Fact label="Challans" value={String(totals.challans)} />
-              <Fact label="Still open" value={String(totals.open)} />
-              <Fact label="Overdue" value={String(totals.overdue)} />
-              <Fact label="Value with them" value={`₹${money(totals.pendingValue)}`} />
-            </>
-          ),
-        },
-      ]}
+      party={{
+        name: w.name,
+        code: w.code,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={address || null} />
+            <PartyLine label="GST No" value={w.gstin ?? 'Unregistered'} mono={Boolean(w.gstin)} />
+            <PartyLine label="Contact No" value={w.phone} mono />
+          </>
+        ),
+        meta: [
+          ['Date', shortDate(new Date()), true],
+          ['Period', `${period.from ? shortDate(period.from) : 'From the start'} – ${shortDate(period.to)}`, true],
+          ['Showing', data.openOnly ? 'Open challans' : 'Every challan'],
+        ],
+      }}
       columns={COLS}
       rows={rows}
       after={
         <>
           {challans.length === 0 && (
-            <p style={{ fontSize: '10.5px', color: GREY, padding: '10px 0' }}>No job-work challans to {w.name} in this period.</p>
+            <p style={{ fontSize: '10px', margin: 0, padding: '8px 0 0' }}>No job-work challans to {w.name} in this period.</p>
           )}
+          <WordsAndTotals
+            left={<Note title="Note">{note}</Note>}
+            totals={
+              <TotalsBox
+                rows={[
+                  { label: 'Challans', value: totals.challans },
+                  { label: 'Still open', value: totals.open },
+                  { label: 'Overdue', value: totals.overdue },
+                ]}
+                totalLabel="Value with them"
+                total={`₹ ${money(totals.pendingValue)}`}
+              />
+            }
+          />
           {challans.length > 0 && (
-            <StatementTable
+            <GroupTable
               title="Challan by challan"
               note="what was sent, and each return against it"
               columns={[
@@ -380,13 +478,6 @@ function Statement() {
               rows={challanRows}
             />
           )}
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '10px' }}>
-            <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-            <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>
-              {template.declaration ??
-                `Material sent to ${w.name} for job work under section 143 of the CGST Act, 2017, and what has been accounted for against it, from ${company.name}'s records. "Still with them" is to be returned or accounted for. Please tell us of any difference within seven days.`}
-            </div>
-          </div>
         </>
       }
       signatures={[
