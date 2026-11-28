@@ -1,9 +1,9 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Loader2, AlertCircle, Plus, Trash2, Copy, PackageOpen, FileText, Truck, Boxes, Save, Send } from 'lucide-react'
-import { api, ApiError, masterResource } from '@/lib/api'
+import { X, Loader2, AlertCircle, Plus, Trash2, Copy, PackageOpen, FileText, Truck, Boxes, Save, Send, ScanBarcode } from 'lucide-react'
+import { api, ApiError, apiErrorMessage, masterResource } from '@/lib/api'
 import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
@@ -11,6 +11,7 @@ import { StepInput } from '@/components/ui/StepInput'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import type { InwardRef } from '@/components/packages/InwardStickers'
+import { CustomerRollsEditor, isFilled, rollsTotal, type RollDraft } from './CustomerRollsEditor'
 
 /**
  * Booking in a customer's own material.
@@ -54,6 +55,9 @@ interface Line {
   challanQty: string
   receivedQty: string
   markings: string
+  /** The customer's rolls on this line, roll by roll, when they carry barcodes. */
+  rolls: RollDraft[]
+  rollsOpen: boolean
 }
 
 const emptyLine = (): Line => ({
@@ -63,6 +67,8 @@ const emptyLine = (): Line => ({
   challanQty: '',
   receivedQty: '',
   markings: '',
+  rolls: [],
+  rollsOpen: false,
 })
 
 /** A saved receipt, as GET /inventory/customer-grn/:id gives it, for opening it again. */
@@ -86,7 +92,13 @@ interface Saved {
   notes: string | null
   inspectionNotes: string | null
   submittedBy?: { name: string } | null
-  lines: Array<{ itemId: string; challanQty: string | number; receivedQty: string | number; markings: string | null }>
+  lines: Array<{
+    itemId: string
+    challanQty: string | number
+    receivedQty: string | number
+    markings: string | null
+    rolls?: Array<{ barcode: string; meters: string | number; designNo: string | null; lotNo: string | null }>
+  }>
 }
 
 /** A date as the date box wants it, on India's calendar. */
@@ -223,6 +235,13 @@ export function CustomerMaterialDialog({
               challanQty: String(Number(l.challanQty)),
               receivedQty: String(Number(l.receivedQty)),
               markings: l.markings ?? '',
+              rolls: (l.rolls ?? []).map((r) => ({
+                barcode: r.barcode,
+                meters: String(Number(r.meters)),
+                designNo: r.designNo ?? '',
+                lotNo: r.lotNo ?? '',
+              })),
+              rollsOpen: false,
             }
           }),
         )
@@ -237,9 +256,9 @@ export function CustomerMaterialDialog({
 
   const setLine = (index: number, patch: Partial<Line>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
-  /** A copy of a line, put just under it. */
+  /** A copy of a line, put just under it — without its rolls: a roll comes in once. */
   const copyLine = (index: number) =>
-    setLines((prev) => (prev[index] ? [...prev.slice(0, index + 1), { ...prev[index] }, ...prev.slice(index + 1)] : prev))
+    setLines((prev) => (prev[index] ? [...prev.slice(0, index + 1), { ...prev[index], rolls: [], rollsOpen: false }, ...prev.slice(index + 1)] : prev))
 
   const theirOrders = orders.filter((o) => o.customerId === customerId)
   const filled = lines.filter((l) => l.itemId && num(l.receivedQty) > 0)
@@ -282,6 +301,20 @@ export function CustomerMaterialDialog({
     // is asked for rather than copied from what was measured.
     const noChallan = filled.find((l) => !(num(l.challanQty) > 0))
     if (noChallan) return setError(`Line ${lines.indexOf(noChallan) + 1}: enter the quantity on their challan, so a shortage shows.`)
+    // Rolls, where listed: each with its barcode and metres, adding up to what arrived.
+    for (const l of filled) {
+      const rolls = l.rolls.filter(isFilled)
+      const n = lines.indexOf(l) + 1
+      const bad = rolls.findIndex((r) => !r.barcode.trim() || !(Number(r.meters) > 0))
+      if (bad >= 0) {
+        setLine(n - 1, { rollsOpen: true })
+        return setError(`Line ${n}, roll ${bad + 1}: enter its barcode and metres, or remove it.`)
+      }
+      if (rolls.length && Math.abs(rollsTotal(rolls) - num(l.receivedQty)) > 0.0005) {
+        setLine(n - 1, { rollsOpen: true })
+        return setError(`Line ${n}: the rolls add up to ${rollsTotal(rolls)}, but ${num(l.receivedQty)} is entered as received. Make the two agree.`)
+      }
+    }
 
     setSaving(action)
     try {
@@ -304,6 +337,12 @@ export function CustomerMaterialDialog({
             challanQty: num(l.challanQty),
             receivedQty: num(l.receivedQty),
             markings: l.markings || null,
+            rolls: l.rolls.filter(isFilled).map((r) => ({
+              barcode: r.barcode.trim(),
+              meters: Number(r.meters),
+              designNo: r.designNo.trim() || null,
+              lotNo: r.lotNo.trim() || null,
+            })),
           })),
           action,
         }
@@ -313,7 +352,7 @@ export function CustomerMaterialDialog({
       // Stickers are made only when it is approved into stock, after QC.
       onSaved(res.message ?? `${res.data.grnNumber} saved.`)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
+      setError(apiErrorMessage(err, 'Could not save. Try again.'))
     } finally {
       setSaving(null)
     }
@@ -597,8 +636,10 @@ export function CustomerMaterialDialog({
                         )}
                       </div>
                     )
+                    const rollCount = line.rolls.filter(isFilled).length
                     return (
-                      <tr key={i} data-grid-row className="align-top">
+                      <Fragment key={i}>
+                      <tr data-grid-row className="align-top">
                         <td className="text-muted-foreground pt-4 text-xs tabular-nums">{i + 1}</td>
                         {/* Category and sub-category narrow the item list, as on the old form. */}
                         <td className="min-w-[300px]">
@@ -688,6 +729,19 @@ export function CustomerMaterialDialog({
                             placeholder="e.g. Lot 7, navy"
                             aria-label={`Markings or remarks on line ${i + 1}`}
                           />
+                          {/* Their rolls, roll by roll, when each carries a barcode. */}
+                          <button
+                            type="button"
+                            className={`mt-1.5 inline-flex items-center gap-1.5 text-xs ${rollCount ? 'text-primary font-medium' : 'text-muted-foreground hover:text-primary'}`}
+                            onClick={() => setLine(i, { rollsOpen: !line.rollsOpen })}
+                            aria-expanded={line.rollsOpen}
+                            title="Each roll's barcode, metres, design and lot, for the job challan"
+                          >
+                            <ScanBarcode size={13} />
+                            {rollCount
+                              ? `${rollCount} ${rollCount === 1 ? 'roll' : 'rolls'} · ${fmt(rollsTotal(line.rolls.filter(isFilled)))} ${uom}`
+                              : 'Rolls with barcodes'}
+                          </button>
                         </td>
                         <td className="text-right">
                           <div className="flex items-center justify-end">
@@ -719,6 +773,22 @@ export function CustomerMaterialDialog({
                           </div>
                         </td>
                       </tr>
+                      {line.rollsOpen && (
+                        <tr>
+                          <td />
+                          <td colSpan={6} className="pb-3">
+                            <CustomerRollsEditor
+                              rolls={line.rolls}
+                              onChange={(rolls) => setLine(i, { rolls })}
+                              received={num(line.receivedQty)}
+                              unit={uom}
+                              lineNo={i + 1}
+                              onUseTotal={(total) => setLine(i, { receivedQty: String(total) })}
+                            />
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     )
                   })}
                 </tbody>

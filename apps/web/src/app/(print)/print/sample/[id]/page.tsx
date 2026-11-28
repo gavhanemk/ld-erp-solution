@@ -7,15 +7,12 @@ import {
   StoreSheet,
   Eyebrow,
   Fact,
-  Panel,
+  PartyLine,
   longDate,
+  shortDate,
   money,
   qty,
-  GREY,
   INK,
-  MUTED,
-  RULE,
-  TINT,
 } from '@/components/print/StoreSheet'
 import {
   SAMPLE_ATTACHMENT_KINDS,
@@ -48,7 +45,7 @@ import {
   rateFigure,
 } from '@/components/sampling/specRules'
 import type { Lookups, SampleRequest, SampleRound } from '@/components/sampling/types'
-import { SubLine } from '@/components/print/doc'
+import { Box, DocTable, HAIR, LINE, SubLine, type DocColumn, type DocRow } from '@/components/print/doc'
 import { itemShade } from '@/lib/items'
 
 /** A file as the printed record has it: what it is and when it came, never where it is kept. */
@@ -84,8 +81,8 @@ export default function PrintSample() {
       active = false
     }
   }, [id])
-  if (error) return <p className="bg-white p-8 text-red-700">{error}</p>
-  if (!data) return <p className="bg-white p-8 text-slate-800">Opening sample record…</p>
+  if (error) return <p style={{ padding: 48, color: INK }}>{error}</p>
+  if (!data) return <p style={{ padding: 48, color: INK }}>Opening sample record…</p>
   const { request, lookups } = data
   const size = (id: string) => lookups.sizes.find((s) => s.id === id)?.code ?? id
   const rows: Array<{ key: string; cells: Record<string, React.ReactNode> }> = []
@@ -253,6 +250,21 @@ export default function PrintSample() {
       SAMPLE_ATTACHMENT_KINDS.indexOf(a.kind) - SAMPLE_ATTACHMENT_KINDS.indexOf(b.kind) ||
       a.createdAt.localeCompare(b.createdAt)
   )
+  const buyer = request.customer
+  // Where the buyer is billed, else where their samples go.
+  const buyerAddress =
+    [buyer?.billingAddress, buyer?.billingCity, buyer?.billingState, buyer?.billingPincode].filter(Boolean).join(', ') ||
+    [buyer?.shippingAddress, buyer?.shippingCity, buyer?.shippingState, buyer?.shippingPincode].filter(Boolean).join(', ')
+  // The style's facts, those it has, on one line under its name.
+  const styleFacts: Array<[string, string | null | undefined]> = [
+    ['Stage', style ? STYLE_STAGE_LABEL[style.stage] : null],
+    ['Garment', style?.category || request.garmentCategory],
+    ['Season', style?.season || request.season],
+    ['Size run', style?.sizeGroupId ? sizeRun(style.sizeGroupId) : null],
+    ['Colours', style?.colors.join(', ')],
+  ]
+  // Laid out like the purchase order (27 Nov 2026): the buyer it is for in the
+  // "For," block with the request's facts beside it, then the style and the brief.
   return (
     <StoreSheet
       company={data.company ?? { name: 'Sampling record' }}
@@ -263,43 +275,48 @@ export default function PrintSample() {
       backHref="/sampling"
       backLabel="Sampling"
       banner={request.cancelledAt ? `CANCELLED · ${request.cancelReason}` : null}
-      // Three panels, so each stays wide enough to read: who asked and who
-      // answers for it, the style and its tech-pack details, and the brief.
-      panels={[
+      party={{
+        heading: 'For,',
+        name: buyer?.name ?? 'Internal development',
+        lines: (
+          <>
+            {buyer && <PartyLine label="Address-" value={buyerAddress || null} />}
+            {buyer && <PartyLine label="Contact No" value={buyer.phone} mono />}
+            <PartyLine label="Title" value={request.title} />
+          </>
+        ),
+        meta: [
+          ['Sample No', request.number, true],
+          ['Requested', shortDate(request.createdAt), true],
+          ['Required by', request.requiredAt ? shortDate(request.requiredAt) : null, true],
+          ['Buyer ref', request.buyerRef],
+          ['Buyer style', request.buyerStyleRef],
+          ['Brand', request.brand.name],
+          ['Owner', request.owner],
+          ['Version', request.version],
+        ],
+      }}
+      bands={[
         {
-          title: 'Request',
+          label: 'Style & tech pack',
           body: (
             <>
-              <Fact label="Title" value={request.title} />
-              <Fact label="Buyer" value={request.customer?.name ?? 'Internal development'} />
-              <Fact label="Brand" value={request.brand.name} />
-              <Fact label="Buyer ref" value={request.buyerRef} />
-              <Fact label="Owner" value={request.owner} />
-              <Fact label="Required by" value={longDate(request.requiredAt)} />
-              <Fact label="Version" value={request.version} />
+              <div style={{ fontSize: '10.5px', fontWeight: 800 }}>
+                {style ? `${style.code} · ${style.name}` : 'Style not set'}
+              </div>
+              <div style={{ marginTop: '1px' }}>
+                {styleFacts.map(([label, value]) => (
+                  <span key={label} style={{ marginRight: '14px' }}>
+                    <span style={{ fontWeight: 700 }}>{label}</span> {value || '—'}
+                  </span>
+                ))}
+              </div>
             </>
           ),
         },
         {
-          title: 'Style & tech pack',
-          body: (
-            <>
-              <Fact label="Buyer style" value={request.buyerStyleRef} />
-              <Fact label="Style" value={style ? `${style.code} · ${style.name}` : 'Not set'} />
-              <Fact label="Stage" value={style ? STYLE_STAGE_LABEL[style.stage] : null} />
-              <Fact label="Garment" value={style?.category || request.garmentCategory} />
-              <Fact label="Season" value={style?.season || request.season} />
-              <Fact
-                label="Size run"
-                value={style?.sizeGroupId ? sizeRun(style.sizeGroupId) : null}
-              />
-              <Fact label="Colours" value={style?.colors.join(', ')} />
-            </>
-          ),
-        },
-        {
-          title: 'Brief',
-          body: <div style={{ whiteSpace: 'pre-wrap', fontSize: 10 }}>{request.brief}</div>,
+          label: 'Brief',
+          body: <div style={{ whiteSpace: 'pre-wrap' }}>{request.brief || '—'}</div>,
         },
       ]}
       columns={[
@@ -312,19 +329,15 @@ export default function PrintSample() {
         ...r,
         cells: {
           ...r.cells,
-          detail: (
-            <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-              {r.cells.detail}
-            </span>
-          ),
+          detail: <span style={{ whiteSpace: 'pre-wrap' }}>{r.cells.detail}</span>,
         },
       }))}
       after={
-        <div style={{ marginTop: '8px' }}>
+        <>
           {[...request.rounds].reverse().map((round) => (
             <SpecBlock key={round.id} round={round} lookups={lookups} />
           ))}
-          <Panel title="Tech pack files">
+          <Box title="Tech pack files" style={{ marginTop: '7px' }}>
             {files.length ? (
               files.map((f) => (
                 <Fact
@@ -334,10 +347,10 @@ export default function PrintSample() {
                 />
               ))
             ) : (
-              <div style={{ fontSize: 10 }}>No files attached.</div>
+              <div>No files attached.</div>
             )}
-          </Panel>
-        </div>
+          </Box>
+        </>
       }
       signatures={[
         { role: 'Sampling owner', who: request.owner },
@@ -351,22 +364,13 @@ export default function PrintSample() {
 
 /** A figure as typed: no trailing zeros, up to four places (a quantity per piece). */
 const figure = (v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 4 })
-const CELL: React.CSSProperties = {
-  border: `1px solid ${RULE}`,
-  padding: '3px 5px',
-  fontSize: '9px',
-  color: INK,
-  verticalAlign: 'top',
-  overflowWrap: 'anywhere',
-}
-interface PrintColumn {
-  key: string
-  head: string
-  align?: 'left' | 'right'
-  width?: string
-}
+type PrintColumn = DocColumn & { head: string }
 
-/** One titled table of a round's specification, ruled like the job card's process table. */
+/**
+ * One titled table of a round's specification, drawn like the lines: the
+ * heading repeats on a new page and a row never splits. The foot is the
+ * totals row, ruled above and in bold.
+ */
 function PrintTable({
   title,
   columns,
@@ -381,66 +385,18 @@ function PrintTable({
   foot?: Record<string, React.ReactNode>
   empty: string
 }) {
+  const lines: DocRow[] = [
+    ...rows.map((cells, i) => ({ key: String(i), cells })),
+    ...(foot ? [{ key: 'foot', cells: foot, total: true }] : []),
+  ]
+  // Kept whole on one page when it fits, and never a title left at a page's foot.
   return (
-    <div>
-      <Eyebrow style={{ color: GREY, marginBottom: '3px' }}>{title}</Eyebrow>
+    <div style={{ marginTop: '7px', breakInside: 'avoid' }}>
+      <Eyebrow style={{ breakAfter: 'avoid' }}>{title}</Eyebrow>
       {rows.length ? (
-        <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
-          <colgroup>
-            {columns.map((c) => (
-              <col key={c.key} style={c.width ? { width: c.width } : undefined} />
-            ))}
-          </colgroup>
-          <thead>
-            <tr>
-              {columns.map((c) => (
-                <th
-                  key={c.key}
-                  style={{ ...CELL, textAlign: c.align ?? 'left', fontWeight: 600, color: GREY }}
-                >
-                  {c.head}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <tr key={i}>
-                {columns.map((c) => (
-                  <td
-                    key={c.key}
-                    style={{
-                      ...CELL,
-                      textAlign: c.align ?? 'left',
-                      fontVariantNumeric: c.align === 'right' ? 'tabular-nums' : undefined,
-                    }}
-                  >
-                    {r[c.key] ?? ''}
-                  </td>
-                ))}
-              </tr>
-            ))}
-            {foot && (
-              <tr>
-                {columns.map((c) => (
-                  <td
-                    key={c.key}
-                    style={{
-                      ...CELL,
-                      textAlign: c.align ?? 'left',
-                      fontWeight: 700,
-                      fontVariantNumeric: 'tabular-nums',
-                    }}
-                  >
-                    {foot[c.key] ?? ''}
-                  </td>
-                ))}
-              </tr>
-            )}
-          </tbody>
-        </table>
+        <DocTable columns={columns} rows={lines} fontSize={9} style={{ marginTop: '3px' }} />
       ) : (
-        <div style={{ fontSize: '9.5px', color: MUTED }}>{empty}</div>
+        <div style={{ fontSize: '9.5px', marginTop: '2px' }}>{empty}</div>
       )}
     </div>
   )
@@ -462,25 +418,26 @@ function SpecBlock({ round, lookups }: { round: SampleRound; lookups: Lookups })
   const sizeColumns = (ids: string[]): PrintColumn[] =>
     ids.map((id) => ({ key: `size:${id}`, head: size(id), align: 'right' }))
   return (
-    <div style={{ border: `1px solid ${RULE}`, marginBottom: '8px' }}>
+    <div style={{ border: LINE, marginTop: '7px' }}>
       <div
         style={{
-          background: TINT,
-          borderBottom: `1px solid ${RULE}`,
-          padding: '5px 10px',
+          borderBottom: HAIR,
+          padding: '4px 9px',
+          breakAfter: 'avoid',
           display: 'flex',
           justifyContent: 'space-between',
+          alignItems: 'baseline',
           gap: '10px',
         }}
       >
         <Eyebrow>
           Round {round.revision} specification · {s.milestone || 'Milestone not named'}
         </Eyebrow>
-        <span style={{ fontSize: '9px', color: GREY }}>
+        <span style={{ fontSize: '9px', textAlign: 'right' }}>
           {SAMPLE_STATE_LABEL[round.state]} · {colourSummary(s)}
         </span>
       </div>
-      <div style={{ padding: '6px 10px', display: 'grid', gap: '8px' }}>
+      <div style={{ padding: '0 9px 8px' }}>
         <PrintTable
           title="Colours and pieces"
           columns={[
@@ -549,9 +506,7 @@ function SpecBlock({ round, lookups }: { round: SampleRound; lookups: Lookups })
                 <>
                   {qty(lineRequiredQty(l, s))} {it.uom}
                   {l.requiredOverride && (
-                    <div style={{ color: MUTED, fontSize: '8px', textAlign: 'left' }}>
-                      Typed by hand{l.overrideReason ? `: ${l.overrideReason}` : ''}
-                    </div>
+                    <SubLine>Typed by hand{l.overrideReason ? `: ${l.overrideReason}` : ''}</SubLine>
                   )}
                 </>
               ),
@@ -564,7 +519,8 @@ function SpecBlock({ round, lookups }: { round: SampleRound; lookups: Lookups })
           foot={
             s.materials.length
               ? {
-                  part: MATERIAL_COST_LABEL,
+                  // In the wider Material column, so the label reads on one or two lines.
+                  material: MATERIAL_COST_LABEL,
                   source: cost.unrated ? `${plural(cost.unrated, 'line')} with no rate` : '',
                   rate: money(cost.total),
                 }

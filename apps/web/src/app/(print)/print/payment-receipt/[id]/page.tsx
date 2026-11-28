@@ -4,7 +4,21 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { modeLabel } from '@/components/sales/status'
-import { StoreSheet, Fact, Eyebrow, money, longDate, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
+import {
+  StoreSheet,
+  Dash,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
+  money,
+  longDate,
+  shortDate,
+  INK,
+  MUTED,
+  type SheetColumn,
+  type TotalLine,
+} from '@/components/print/StoreSheet'
 
 interface Payload {
   company: Record<string, string | null>
@@ -80,23 +94,47 @@ export default function PrintPaymentReceipt() {
     { key: 'received', head: 'Received (₹)', width: '16%', align: 'right' },
     { key: 'tds', head: 'TDS (₹)', width: '14%', align: 'right' },
   ]
-  const rows = r.allocations.map((a, i) => ({
-    key: a.id,
-    cells: {
-      sn: i + 1,
-      invoice: <strong>{a.invoice.invoiceNumber}</strong>,
-      date: longDate(a.invoice.invoiceDate),
-      total: money(a.invoice.totalAmount),
-      received: money(a.amount),
-      tds: Number(a.tdsAmount) > 0 ? money(a.tdsAmount) : '—',
-    },
-  }))
+  const rows = r.allocations.length
+    ? r.allocations.map((a, i) => ({
+        key: a.id,
+        cells: {
+          sn: i + 1,
+          invoice: <strong>{a.invoice.invoiceNumber}</strong>,
+          date: shortDate(a.invoice.invoiceDate),
+          total: money(a.invoice.totalAmount),
+          received: money(a.amount),
+          tds: Number(a.tdsAmount) > 0 ? money(a.tdsAmount) : '—',
+        },
+      }))
+    : // Nothing settled yet: say so in the table rather than leave it empty.
+      [
+        {
+          key: 'advance',
+          cells: {
+            sn: '—',
+            invoice: 'Received in advance, held on account against future invoices.',
+            date: <Dash />,
+            total: <Dash />,
+            received: <Dash />,
+            tds: <Dash />,
+          },
+        },
+      ]
 
   const banner =
     r.status === 'REVERSED'
       ? `REVERSED on ${longDate(r.reversedAt)}${r.reversedBy ? ` by ${r.reversedBy.name}` : ''}${r.reversalReason ? ` — ${r.reversalReason}` : ''}. This receipt settles nothing.`
       : null
 
+  const settled = r.allocations.reduce((s, a) => s + Number(a.amount), 0)
+  const totals: TotalLine[] = [
+    ...(r.allocations.length ? [{ label: 'Against invoices', value: money(settled) }] : []),
+    ...(Number(r.onAccount) > 0 && r.status !== 'REVERSED' ? [{ label: 'On account', value: money(r.onAccount) }] : []),
+    ...(Number(r.tdsAmount) > 0 ? [{ label: 'TDS deducted (not in the amount)', value: money(r.tdsAmount) }] : []),
+  ]
+
+  // Laid out like the purchase order (27 Nov 2026): who paid in the
+  // "Received from" block with the receipt's facts and how it was paid beside it.
   return (
     <StoreSheet
       company={company}
@@ -107,65 +145,40 @@ export default function PrintPaymentReceipt() {
       backHref="/sales/payments?tab=receipts"
       backLabel="Payments received"
       banner={banner}
-      panels={[
-        {
-          title: 'Received from',
-          body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{c.name}</div>
-              {address && <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{address}</div>}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={c.gstin ?? 'Unregistered'} mono />
-                <Fact label="Phone" value={c.phone} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'Paid by',
-          body: (
-            <>
-              <Fact label="Mode" value={modeLabel(r.mode)} />
-              <Fact label="Cheque" value={isCheque && r.chequeNo ? `${r.chequeNo}${r.chequeDate ? `, ${longDate(r.chequeDate)}` : ''}` : null} mono />
-              <Fact label={isCheque ? 'Drawn on' : 'Reference'} value={r.referenceNo} mono={!isCheque} />
-              <Fact label="Into" value={r.bankAccount ? `${r.bankAccount.accountName}` : r.mode === 'CASH' ? 'Cash' : null} />
-            </>
-          ),
-        },
-        {
-          title: 'Amount',
-          body: (
-            <>
-              <div style={{ fontSize: '16px', fontWeight: 700, color: NAVY, ...NUM }}>₹{money(r.amount)}</div>
-              <div style={{ fontSize: '9.5px', color: GREY, marginTop: '3px', lineHeight: 1.5 }}>{data.amountInWords}</div>
-              {Number(r.tdsAmount) > 0 && <Fact label="TDS deducted" value={`₹${money(r.tdsAmount)}`} />}
-              {Number(r.onAccount) > 0 && r.status !== 'REVERSED' && <Fact label="On account" value={`₹${money(r.onAccount)}`} />}
-            </>
-          ),
-        },
-      ]}
+      party={{
+        heading: 'Received from,',
+        name: c.name,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={address || null} />
+            <PartyLine label="GST No" value={c.gstin ?? 'Unregistered'} mono={Boolean(c.gstin)} />
+            <PartyLine label="Contact No" value={c.phone} mono />
+          </>
+        ),
+        meta: [
+          ['Receipt No', r.receiptNumber, true],
+          ['Receipt Date', shortDate(r.receiptDate), true],
+          ['Mode', modeLabel(r.mode)],
+          isCheque && !!r.chequeNo && ['Cheque', `${r.chequeNo}${r.chequeDate ? `, ${shortDate(r.chequeDate)}` : ''}`, true],
+          !!r.referenceNo && [isCheque ? 'Drawn on' : 'Reference', r.referenceNo, !isCheque],
+          ['Into', r.bankAccount ? r.bankAccount.accountName : r.mode === 'CASH' ? 'Cash' : null],
+        ],
+      }}
       columns={columns}
       rows={rows}
-      minRows={3}
       after={
-        <>
-          {r.allocations.length === 0 && (
-            <div style={{ fontSize: '10px', color: GREY, marginTop: '6px' }}>Received in advance, held on account against future invoices.</div>
-          )}
-          {isCheque && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '8px' }}>
-              <div style={{ fontSize: '10px', color: INK }}>
-                {r.isChequeCleared ? 'The cheque has been credited.' : 'Subject to realisation of the cheque.'}
-              </div>
-            </div>
-          )}
-          {r.notes && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '8px' }}>
-              <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-              <div style={{ fontSize: '10px', color: GREY, marginTop: '3px', lineHeight: 1.55 }}>{r.notes}</div>
-            </div>
-          )}
-        </>
+        <WordsAndTotals
+          words={data.amountInWords}
+          left={
+            <>
+              {isCheque && (
+                <Note title="Cheque">{r.isChequeCleared ? 'The cheque has been credited.' : 'Subject to realisation of the cheque.'}</Note>
+              )}
+              <Note title="Special notes">{r.notes || <Dash />}</Note>
+            </>
+          }
+          totals={<TotalsBox rows={totals} totalLabel="Amount received" total={`₹ ${money(r.amount)}`} />}
+        />
       }
       signatures={[{ role: `For ${company.name} — Authorised signatory`, who: r.createdBy?.name }]}
       footerNote={template.footerNote ?? 'Thank you for your payment.'}

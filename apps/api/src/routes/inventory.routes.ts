@@ -3541,7 +3541,7 @@ const customerGrnInclude = {
   postedBy: { select: { id: true, name: true } },
   correctionOf: { select: { id: true, grnNumber: true } },
   corrections: { select: { id: true, grnNumber: true, status: true } },
-  lines: { include: { item: itemLineSelect } },
+  lines: { include: { item: itemLineSelect, rolls: { orderBy: { sortOrder: 'asc' as const } } } },
 }
 
 const jobWorkInclude = {
@@ -3592,6 +3592,7 @@ export async function createCustomerGrn(
 ) {
   const when = data.receiptDate ?? new Date()
   const { customer } = await checkCustomerGrnParties(tx, data)
+  await checkRollBarcodes(tx, data, null)
 
   const grnNumber = await nextDocumentNumber(tx, 'CGRN', when)
   const now = new Date()
@@ -3650,6 +3651,41 @@ function customerGrnLine(l: ReturnType<typeof createCustomerGrnSchema.parse>['li
     rejectReason: (l.rejectedQty ?? 0) > 0 ? l.rejectReason?.trim() || null : null,
     batchNumber: l.batchNumber ?? null,
     markings: l.markings ?? null,
+    rolls: l.rolls?.length
+      ? {
+          create: l.rolls.map((r, i) => ({
+            barcode: r.barcode.trim(),
+            meters: r.meters,
+            designNo: r.designNo?.trim() || null,
+            lotNo: r.lotNo?.trim() || null,
+            sortOrder: i,
+          })),
+        }
+      : undefined,
+  }
+}
+
+/**
+ * A roll's barcode is the customer's own and names one roll: the same
+ * barcode already on another of their receipts (not cancelled) is the same
+ * roll entered twice, and refused, so a challan can never count it twice.
+ */
+async function checkRollBarcodes(
+  tx: Prisma.TransactionClient,
+  data: { customerId: string; lines: Array<{ rolls?: Array<{ barcode: string }> }> },
+  exceptGrnId: string | null,
+) {
+  const barcodes = data.lines.flatMap((l) => (l.rolls ?? []).map((r) => r.barcode.trim()))
+  if (!barcodes.length) return
+  const clash = await tx.customerGRNRoll.findFirst({
+    where: {
+      barcode: { in: barcodes, mode: 'insensitive' },
+      line: { grn: { customerId: data.customerId, status: { not: 'CANCELLED' }, ...(exceptGrnId ? { id: { not: exceptGrnId } } : {}) } },
+    },
+    select: { barcode: true, line: { select: { grn: { select: { grnNumber: true } } } } },
+  })
+  if (clash) {
+    throw new AppError(`Roll ${clash.barcode} is already on ${clash.line.grn.grnNumber}. A roll comes in once; check the barcode.`, 400, 'ROLL_TWICE')
   }
 }
 
@@ -3841,6 +3877,7 @@ router.patch('/customer-grn/:id', requirePermission(MODULE, 'create'), async (re
       throw new AppError(`${was.grnNumber} is waiting for QC; only whoever entered it, or an approver, can change what was received now.`, 403, 'NOT_YOURS')
     }
     await checkCustomerGrnParties(tx, data)
+    await checkRollBarcodes(tx, data, was.id)
     await tx.customerGRNLine.deleteMany({ where: { grnId: was.id } })
     await tx.customerGRN.update({
       where: { id: was.id },
@@ -4410,6 +4447,8 @@ router.post('/customer-grn/:id/correct', requirePermission(MODULE, 'edit'), asyn
   const { was, copy } = await prisma.$transaction(
     async (tx) => {
       const was = await cancelCustomerGrn(tx, req.params.id, `Corrected: ${reason}`, userId)
+      // The rolls come across too: the copy is the same receipt put right.
+      const rollsOf = await tx.customerGRNRoll.findMany({ where: { lineId: { in: was.lines.map((l) => l.id) } }, orderBy: { sortOrder: 'asc' } })
       const draft = createCustomerGrnSchema.parse({
         customerId: was.customerId,
         soId: was.soId,
@@ -4433,6 +4472,9 @@ router.post('/customer-grn/:id/correct', requirePermission(MODULE, 'edit'), asyn
           rejectReason: l.rejectReason,
           batchNumber: l.batchNumber,
           markings: l.markings,
+          rolls: rollsOf
+            .filter((r) => r.lineId === l.id)
+            .map((r) => ({ barcode: r.barcode, meters: Number(r.meters), designNo: r.designNo, lotNo: r.lotNo })),
         })),
       })
       const copy = await createCustomerGrn(tx, draft, userId, 'DRAFT', { correctionOfId: was.id })

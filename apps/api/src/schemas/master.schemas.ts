@@ -836,6 +836,8 @@ export const updateBrandSchema = createBrandSchema.partial()
 export const updateCompanySchema = z.object({
   name: name.optional(),
   legalName: z.string().max(200).optional().nullable(),
+  /** "Manufacturer of: Fancy Fabrics" under the name on the tax invoice (28 Nov 2026). */
+  manufacturerOf: z.string().trim().max(120).optional().nullable(),
   address: optionalText,
   /** The head office, when it is not the works. */
   address2: optionalText,

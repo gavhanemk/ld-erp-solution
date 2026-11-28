@@ -448,13 +448,50 @@ export const createCustomerGrnSchema = z
           rejectReason: z.string().max(200).optional().nullable(),
           batchNumber: z.string().max(50).optional().nullable(),
           markings: z.string().max(200).optional().nullable(),
+          /**
+           * Roll by roll, where the customer's rolls carry barcodes of their
+           * own: each roll's barcode, metres, design and lot. Optional; when
+           * given, the rolls add up to what was received on the line, and each
+           * gets a sticker of its own with its barcode on approval.
+           */
+          rolls: z
+            .array(
+              z.object({
+                barcode: z.string().trim().min(1, 'Enter the roll’s barcode').max(60, 'That barcode is too long'),
+                meters: z.coerce.number().positive('A roll has some metres').max(99999),
+                designNo: z.string().trim().max(60).optional().nullable(),
+                lotNo: z.string().trim().max(50).optional().nullable(),
+              }),
+            )
+            .max(500, 'At most 500 rolls on one line')
+            .optional()
+            .default([]),
         })
       )
       .min(1, 'Add at least one item'),
   })
   .superRefine((data, ctx) => {
     const seen = new Set<string>()
+    // A barcode is one roll: never twice on one receipt.
+    const barcodes = new Map<string, number>()
     data.lines.forEach((line, i) => {
+      if (line.rolls.length) {
+        const total = Math.round(line.rolls.reduce((s, r) => s + r.meters, 0) * 1000) / 1000
+        if (Math.abs(total - line.receivedQty) > 0.0005) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['lines', i, 'rolls'],
+            message: `The rolls on line ${i + 1} add up to ${total}, but ${line.receivedQty} was received. Make the two agree.`,
+          })
+        }
+        line.rolls.forEach((r, j) => {
+          const key = r.barcode.trim().toUpperCase()
+          if (barcodes.has(key)) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lines', i, 'rolls', j, 'barcode'], message: `Roll ${r.barcode} is entered twice.` })
+          }
+          barcodes.set(key, i)
+        })
+      }
       if (seen.has(line.itemId)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

@@ -196,7 +196,7 @@ export const ACCESS_CATALOG: AccessModule[] = [
         ['/api/inventory/reallocations'],
         'Central stock earmarked for brands: earmark, move between brands, release; approved by someone else',
       ),
-      s('inventory.job-work', 'Job Work', DOC, ['/inventory/job-work'], ['/api/inventory/job-work', '/api/inventory/floor-returns']),
+      s('inventory.job-work', 'Job Work Out', DOC, ['/inventory/job-work'], ['/api/inventory/job-work', '/api/inventory/floor-returns'], 'Goods sent to job workers on a Job Work Challan'),
       s(
         'inventory.customer-material',
         'Customer Material',

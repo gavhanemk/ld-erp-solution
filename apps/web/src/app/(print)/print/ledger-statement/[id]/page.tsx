@@ -3,7 +3,21 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
-import { StoreSheet, Fact, Eyebrow, money, longDate, GREY, INK, MUTED, NAVY, NUM, RULE, type SheetColumn } from '@/components/print/StoreSheet'
+import { Box, DocTable, SubLine } from '@/components/print/doc'
+import {
+  StoreSheet,
+  Eyebrow,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
+  money,
+  longDate,
+  shortDate,
+  INK,
+  MUTED,
+  type SheetColumn,
+} from '@/components/print/StoreSheet'
 
 interface Payload {
   company: Record<string, string | null>
@@ -31,6 +45,10 @@ const side = (n: number) => (Math.round(n * 100) === 0 ? '0.00' : `${money(Math.
  * With ?confirm=1 it is a confirmation of accounts: the same statement with a
  * request to sign and send back the balance as they see it — what auditors
  * ask for at the year end.
+ *
+ * Laid out like the purchase order (27 Nov 2026): the party in the "To,"
+ * block with the period beside it, the entries with their running balance,
+ * then the closing balance in words beside the opening, debits and credits.
  */
 export default function PrintLedgerStatement() {
   const { id } = useParams<{ id: string }>()
@@ -54,34 +72,35 @@ export default function PrintLedgerStatement() {
   if (!data) return <p style={{ padding: 48, color: MUTED }}>Opening the statement…</p>
 
   const { company, party, statement: st } = data
+  // Sized so a balance like "1,25,00,000.00 Dr" stays on one line.
   const columns: SheetColumn[] = [
-    { key: 'date', head: 'Date', width: '12%' },
-    { key: 'particulars', head: 'Particulars', width: '38%' },
+    { key: 'date', head: 'Date', width: '10%' },
+    { key: 'particulars', head: 'Particulars', width: '37%' },
     { key: 'voucher', head: 'Voucher', width: '14%' },
-    { key: 'debit', head: 'Debit (₹)', width: '12%', align: 'right' },
-    { key: 'credit', head: 'Credit (₹)', width: '12%', align: 'right' },
-    { key: 'balance', head: 'Balance', width: '12%', align: 'right' },
+    { key: 'debit', head: 'Debit (₹)', width: '12.5%', align: 'right' },
+    { key: 'credit', head: 'Credit (₹)', width: '12.5%', align: 'right' },
+    { key: 'balance', head: 'Balance (₹)', width: '14%', align: 'right' },
   ]
   const rows = [
     {
       key: 'opening',
-      cells: { date: longDate(st.period.from), particulars: <em>Opening balance</em>, voucher: '', debit: '', credit: '', balance: side(st.opening) },
+      cells: { date: shortDate(st.period.from), particulars: 'Opening balance', voucher: '', debit: '', credit: '', balance: side(st.opening) },
       muted: true,
     },
     ...st.rows.map((r) => ({
       key: r.lineId,
       cells: {
-        date: longDate(r.date),
+        date: shortDate(r.date),
         particulars: (
           <>
-            {r.particulars}
-            {(r.narration || r.chequeNo) && <div style={{ fontSize: '9px', color: GREY }}>{[r.narration, r.chequeNo ? `Chq ${r.chequeNo}` : null].filter(Boolean).join(' · ')}</div>}
+            <div style={{ fontWeight: 600 }}>{r.particulars}</div>
+            {(r.narration || r.chequeNo) && <SubLine>{[r.narration, r.chequeNo ? `Chq ${r.chequeNo}` : null].filter(Boolean).join(' · ')}</SubLine>}
           </>
         ),
         voucher: (
           <>
             {r.voucherNo}
-            <div style={{ fontSize: '9px', color: GREY }}>{r.kindLabel}</div>
+            <SubLine>{r.kindLabel}</SubLine>
           </>
         ),
         debit: r.debit ? money(r.debit) : '',
@@ -89,13 +108,10 @@ export default function PrintLedgerStatement() {
         balance: side(r.balance),
       },
     })),
-    {
-      key: 'total',
-      cells: { date: '', particulars: <strong>Total, and closing balance</strong>, voucher: '', debit: <strong>{money(st.totals.dr)}</strong>, credit: <strong>{money(st.totals.cr)}</strong>, balance: <strong>{side(st.closing)}</strong> },
-    },
   ]
   // Which way the balance runs, as a party would say it.
   const owes = st.closing > 0 ? `due from you to ${company.name}` : st.closing < 0 ? `due to you from ${company.name}` : 'nil'
+  const period = `${shortDate(st.period.from)} – ${shortDate(st.period.to)}`
 
   return (
     <StoreSheet
@@ -106,84 +122,88 @@ export default function PrintLedgerStatement() {
       date={`${longDate(st.period.from)} to ${longDate(st.period.to)}`}
       backHref={`/accounts/ledger?id=${id}&from=${st.period.from}&to=${st.period.to}`}
       backLabel="Ledger"
-      panels={[
-        {
-          title: 'Account of',
-          body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{party.name}</div>
-              {party.address && <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px' }}>{party.address}</div>}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="GSTIN" value={party.gstin} mono />
-                <Fact label="PAN" value={party.pan} mono />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'Summary',
-          body: (
-            <>
-              <Fact label="Opening" value={side(st.opening)} />
-              <Fact label="Debits" value={money(st.totals.dr)} />
-              <Fact label="Credits" value={money(st.totals.cr)} />
-              <Fact label="Closing" value={side(st.closing)} />
-            </>
-          ),
-        },
-        {
-          title: `Balance on ${longDate(st.period.to)}`,
-          body: (
-            <>
-              <div style={{ fontSize: '16px', fontWeight: 700, color: NAVY, ...NUM }}>₹{money(Math.abs(st.closing))}</div>
-              <div style={{ fontSize: '9.5px', color: GREY, marginTop: '3px', lineHeight: 1.5 }}>
-                {data.closingInWords}, {owes}.
-              </div>
-            </>
-          ),
-        },
-      ]}
+      party={{
+        name: party.name,
+        code: party.code,
+        lines: (
+          <>
+            <PartyLine label="Address-" value={party.address || null} />
+            <PartyLine label="GST No" value={party.gstin} mono />
+            <PartyLine label="PAN No" value={party.pan} mono />
+            <PartyLine label="Contact No" value={party.phone} mono />
+            {party.email && <PartyLine label="Email" value={party.email} />}
+          </>
+        ),
+        meta: [
+          ['Statement', confirm ? 'Confirmation of accounts' : 'Statement of account'],
+          ['As on', shortDate(st.period.to), true],
+          ['Period', period, true],
+          ['Opening', side(st.opening), true],
+          ['Closing', side(st.closing), true],
+        ],
+      }}
       columns={columns}
       rows={rows}
-      minRows={4}
       after={
         <>
+          <WordsAndTotals
+            words={data.closingInWords}
+            left={
+              <Note title={`Balance on ${longDate(st.period.to)}`}>
+                ₹{money(Math.abs(st.closing))} — {owes}.
+              </Note>
+            }
+            totals={
+              <TotalsBox
+                rows={[
+                  { label: 'Opening balance', value: side(st.opening) },
+                  { label: 'Debits', value: money(st.totals.dr) },
+                  { label: 'Credits', value: money(st.totals.cr) },
+                ]}
+                totalLabel="Closing balance"
+                total={`₹ ${side(st.closing)}`}
+              />
+            }
+          />
           {data.openBills.length > 0 && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '8px' }}>
-              <Eyebrow style={{ color: GREY }}>Bills open on {longDate(st.period.to)}</Eyebrow>
-              <table style={{ width: '100%', fontSize: '10px', color: INK, marginTop: '4px', borderCollapse: 'collapse' }}>
-                <tbody>
-                  {data.openBills.map((b) => (
-                    <tr key={b.billNo}>
-                      <td style={{ padding: '2px 0' }}>{b.kind === 'unsplit' ? 'Opening balance, not split into bills' : b.billNo}</td>
-                      <td style={{ padding: '2px 0', color: GREY }}>{b.kind === 'unsplit' ? '' : longDate(b.billDate)}</td>
-                      <td style={{ padding: '2px 0', color: GREY }}>{b.dueDate ? `due ${longDate(b.dueDate)}` : ''}</td>
-                      <td style={{ padding: '2px 0', color: GREY }}>{b.kind === 'bill' && b.days > 0 ? `${b.days} days past due` : ''}</td>
-                      <td style={{ padding: '2px 0', textAlign: 'right', ...NUM }}>
-                        {money(Math.abs(b.amount))}
-                        {b.amount < 0 ? ' advance' : ''}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div style={{ marginTop: '9px' }}>
+              <Eyebrow style={{ breakAfter: 'avoid' }}>Bills open on {longDate(st.period.to)}</Eyebrow>
+              <DocTable
+                style={{ marginTop: '3px' }}
+                columns={[
+                  { key: 'bill', head: 'Bill', width: '34%' },
+                  { key: 'date', head: 'Bill date', width: '14%' },
+                  { key: 'due', head: 'Due on', width: '14%' },
+                  { key: 'late', head: 'Overdue by', width: '18%' },
+                  { key: 'amount', head: 'Amount (₹)', width: '20%', align: 'right' },
+                ]}
+                rows={data.openBills.map((b, i) => ({
+                  key: `${b.billNo}-${i}`,
+                  cells: {
+                    bill: b.kind === 'unsplit' ? 'Opening balance, not split into bills' : b.billNo,
+                    date: b.kind === 'unsplit' ? '' : shortDate(b.billDate),
+                    due: b.dueDate ? shortDate(b.dueDate) : '',
+                    late: b.kind === 'bill' && b.days > 0 ? `${b.days} days` : '',
+                    amount: `${money(Math.abs(b.amount))}${b.amount < 0 ? ' advance' : ''}`,
+                  },
+                }))}
+              />
             </div>
           )}
           {confirm && (
-            <div style={{ border: `1px solid ${RULE}`, padding: '9px 12px', marginTop: '8px', fontSize: '10.5px', color: INK, lineHeight: 1.6 }}>
-              <Eyebrow>Please confirm</Eyebrow>
-              <div style={{ marginTop: '4px' }}>
+            <Box title="Please confirm" style={{ marginTop: '9px' }}>
+              <div style={{ fontSize: '10px', lineHeight: 1.6 }}>
                 In our books your account stands at <strong>₹{money(Math.abs(st.closing))}</strong> ({data.closingInWords}) {owes}, as on {longDate(st.period.to)}.
                 Please check it against your own books and sign and return a copy of this statement as your confirmation. If your books show a different
                 balance, tell us the difference and the entries behind it within 15 days; if we hear nothing, we will take the balance as agreed.
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: '24px', marginTop: '28px' }}>
-                <div style={{ flex: 1, borderTop: `1px solid ${RULE}`, paddingTop: '4px', fontSize: '9.5px', color: GREY }}>
+                <div style={{ flex: 1, borderTop: '1pt solid #000', paddingTop: '3px', fontSize: '9.5px', fontWeight: 700 }}>
                   Confirmed for {party.name} — signature, stamp and date
                 </div>
-                <div style={{ flex: 1, borderTop: `1px solid ${RULE}`, paddingTop: '4px', fontSize: '9.5px', color: GREY }}>Balance as per your books, if different</div>
+                <div style={{ flex: 1, borderTop: '1pt solid #000', paddingTop: '3px', fontSize: '9.5px', fontWeight: 700 }}>Balance as per your books, if different</div>
               </div>
-            </div>
+            </Box>
           )}
         </>
       }

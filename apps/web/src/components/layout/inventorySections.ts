@@ -50,7 +50,9 @@ export const INVENTORY_SECTIONS: InventorySection[] = [
   {
     label: 'Job Work & Customer Goods',
     tabs: [
-      { label: 'Job Work', href: '/inventory/job-work' },
+      // "Job Work Out": our goods sent to job workers, on a Job Work Challan — never
+      // the Sales delivery challan, which sends goods to a customer (28 Nov 2026).
+      { label: 'Job Work Out', href: '/inventory/job-work' },
       { label: 'Customer Material', href: '/inventory/customer-material' },
     ],
   },

@@ -5,19 +5,21 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import {
   StoreSheet,
-  Fact,
-  Eyebrow,
+  Dash,
+  Note,
+  PartyLine,
+  TotalsBox,
+  WordsAndTotals,
   qty,
   money,
   longDate,
-  GREY,
+  shortDate,
   INK,
   MUTED,
-  NAVY,
   NUM,
-  RULE,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
+import { Box, SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SAMPLE_DISPATCH_MODE_LABEL, type SampleDispatchMode } from '@ld-erp/shared'
 
@@ -90,6 +92,7 @@ export default function PrintSampleDispatch() {
 
   const { company, template, dispatch: d, sizes } = data
   const req = d.round.request
+  const buyer = req.customer
   const sizeOf = (sid: string) => sizes.find((z) => z.id === sid)
   const colours = [...new Set(d.cells.map((c) => c.colour))]
   const rows = colours.map((colour, i) => {
@@ -101,17 +104,17 @@ export default function PrintSampleDispatch() {
       cells: {
         sn: i + 1,
         desc: (
-          <div>
+          <>
             <div style={{ fontWeight: 600 }}>
               Sample garments{req.style ? ` · ${req.style.code} ${req.style.name}` : ''}
             </div>
-            <div style={{ fontSize: '9px', color: GREY }}>
+            <SubLine>
               {colour} · {d.round.milestone || 'Sample'} · {req.number} round {d.round.revision}
-            </div>
-          </div>
+            </SubLine>
+          </>
         ),
         sizes: (
-          <span style={{ fontSize: '9px', color: GREY }}>
+          <span style={{ fontSize: '9px', ...NUM }}>
             {cells.map((c) => `${sizeOf(c.sizeId)?.code ?? '?'}:${c.qty}`).join('  ')}
           </span>
         ),
@@ -121,6 +124,16 @@ export default function PrintSampleDispatch() {
   })
   const total = d.cells.reduce((s, c) => s + c.qty, 0)
   const declared = d.declaredValue === null ? null : Number(d.declaredValue)
+  const recipientBody = (
+    <>
+      <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>{d.recipient}</div>
+      <div style={{ marginTop: '1px', whiteSpace: 'pre-wrap' }}>{d.address || <Dash />}</div>
+    </>
+  )
+
+  // Laid out like the purchase order (27 Nov 2026): the buyer in the "To,"
+  // block with the challan's facts and how it went beside it, then who
+  // receives the samples and where.
   return (
     <StoreSheet
       company={company}
@@ -146,86 +159,49 @@ export default function PrintSampleDispatch() {
           </SmartSelect>
         </label>
       }
-      panels={[
-        {
-          title: 'Deliver to',
-          body: (
-            <>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>{d.recipient}</div>
-              {d.address && (
-                <div style={{ fontSize: '10px', color: GREY, lineHeight: 1.55, marginTop: '3px', whiteSpace: 'pre-wrap' }}>
-                  {d.address}
-                </div>
-              )}
-              <div style={{ marginTop: '4px' }}>
-                <Fact label="Buyer" value={req.customer?.name ?? null} />
-                <Fact label="GSTIN" value={req.customer?.gstin ?? null} mono />
-                <Fact label="Phone" value={req.customer?.phone ?? null} />
-              </div>
-            </>
-          ),
-        },
-        {
-          title: 'The samples',
-          body: (
-            <>
-              <Fact label="Sample" value={`${req.number} · round ${d.round.revision}`} mono />
-              <Fact label="Buyer style" value={req.buyerStyleRef} />
-              <Fact label="Buyer ref." value={req.buyerRef} />
-              <Fact label="Season" value={req.season} />
-              <Fact label="To come back" value={d.returnable ? (longDate(d.expectedBack) ?? 'Yes') : 'No'} />
-            </>
-          ),
-        },
-        {
-          title: 'Dispatch',
-          body: (
-            <>
-              <Fact label="How" value={SAMPLE_DISPATCH_MODE_LABEL[d.mode]} />
-              <Fact label={d.mode === 'COURIER' ? 'Courier' : 'Carried by'} value={d.courier} />
-              <Fact label={d.mode === 'COURIER' ? 'AWB / docket' : 'Reference'} value={d.awb} mono />
-              <Fact label="Pieces" value={qty(total)} />
-            </>
-          ),
-        },
-      ]}
+      party={{
+        // The buyer the samples are for; with no buyer on the request, the recipient.
+        name: buyer?.name ?? d.recipient,
+        lines: buyer ? (
+          <>
+            <PartyLine label="GST No" value={buyer.gstin} mono />
+            <PartyLine label="Contact No" value={buyer.phone} mono />
+          </>
+        ) : (
+          <PartyLine label="Address-" value={d.address} />
+        ),
+        meta: [
+          ['Challan No', d.number, true],
+          ['Challan Date', shortDate(d.sentOn), true],
+          ['Sample', `${req.number} · round ${d.round.revision}`, true],
+          !!req.buyerStyleRef && ['Buyer style', req.buyerStyleRef],
+          !!req.buyerRef && ['Buyer ref.', req.buyerRef],
+          !!req.season && ['Season', req.season],
+          ['To come back', d.returnable ? (shortDate(d.expectedBack) ?? 'Yes') : 'No', d.returnable && Boolean(d.expectedBack)],
+          ['How', SAMPLE_DISPATCH_MODE_LABEL[d.mode]],
+          [d.mode === 'COURIER' ? 'Courier' : 'Carried by', d.courier],
+          [d.mode === 'COURIER' ? 'AWB / docket' : 'Reference', d.awb, true],
+        ],
+      }}
+      bands={[buyer && { icon: 'truck', label: 'Deliver to', body: recipientBody }]}
       columns={COLS}
       rows={rows}
-      minRows={Math.max(0, 4 - rows.length)}
       after={
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 250px', gap: '7px', marginTop: '8px' }}>
-            <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
-              <Eyebrow style={{ color: GREY }}>Note</Eyebrow>
-              <div style={{ fontSize: '10px', color: d.notes ? GREY : MUTED, marginTop: '3px', lineHeight: 1.55 }}>
-                {d.notes ?? 'None.'}
-              </div>
-            </div>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '7px 11px',
-                borderTop: '1.5pt solid #000',
-                color: '#fff',
-              }}
-            >
-              <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase' }}>
-                Value
-              </span>
-              <span style={{ fontSize: declared === null ? '10px' : '13px', fontWeight: 700, ...NUM }}>
-                {declared === null ? 'No commercial value' : `₹${money(declared)}`}
-              </span>
-            </div>
-          </div>
-          <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
-            <Eyebrow style={{ color: GREY }}>Declaration</Eyebrow>
-            <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>
-              {template.declaration ??
-                `Samples sent for the buyer's approval only. They are not for sale and are not a supply; no GST is charged and this is not a tax invoice.${d.returnable ? ' The samples are to be returned to us.' : ''}`}
-            </div>
-          </div>
+          <WordsAndTotals
+            left={<Note title="Note">{d.notes || <Dash />}</Note>}
+            totals={
+              <TotalsBox
+                rows={[{ label: 'Pieces', value: qty(total) }]}
+                totalLabel="Value"
+                total={declared === null ? 'No commercial value' : `₹ ${money(declared)}`}
+              />
+            }
+          />
+          <Box title="Declaration" style={{ marginTop: '7px' }}>
+            {template.declaration ??
+              `Samples sent for the buyer's approval only. They are not for sale and are not a supply; no GST is charged and this is not a tax invoice.${d.returnable ? ' The samples are to be returned to us.' : ''}`}
+          </Box>
         </>
       }
       signatures={[

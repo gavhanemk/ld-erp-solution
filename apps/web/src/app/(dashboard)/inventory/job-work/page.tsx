@@ -860,7 +860,10 @@ function JobWorkScreen() {
       {/* The title, the two tabs beside it, and the buttons on the right: one line. */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-4">
-          <h1 className="page-title">Job Work</h1>
+          <div>
+            <h1 className="page-title">Job Work Out</h1>
+            <p className="text-muted-foreground text-xs">Goods sent to job workers on a Job Work Challan, and taken back</p>
+          </div>
           <div className="flex rounded-lg border border-border bg-secondary p-1" role="tablist">
             {([
               { key: 'challans', label: 'Challans', icon: List },
