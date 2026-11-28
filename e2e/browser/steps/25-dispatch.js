@@ -6,14 +6,18 @@ await page.locator('tbody tr').filter({ hasText: S.so }).first().locator('[aria-
 await page.getByRole('menuitem', { name: 'Dispatch' }).click()
 await page.waitForLoadState('networkidle'); await h.sleep(1500)
 const d = h.dlg()
-await h.click('Fill what can go', d)
+await h.click('Fill available', d)
 await h.type(d.getByLabel('Cartons'), '2')
 await h.type(d.getByLabel('Transporter'), 'Konkan Roadways Cargo')
 await h.type(d.getByLabel('Vehicle no.'), 'GJ05 CX 9012')
 await h.type(d.getByLabel('LR no.'), 'LR/' + S.so.slice(-4))
 await h.beat(2500)
 const popup = ctx.waitForEvent('page', { timeout: 6000 }).catch(() => null)
-await d.getByRole('button', { name: 'Dispatch & invoice' }).first().click()
+// Confirm dispatch posts the goods issue; the window then offers the print and the invoice (28 Nov 2026).
+await d.getByRole('button', { name: 'Confirm dispatch' }).first().click()
+await d.getByRole('button', { name: 'Create invoice' }).waitFor({ timeout: 30000 })
+await h.beat(1500)
+await d.getByRole('button', { name: 'Create invoice' }).click()
 await h.sleep(3000)
 const p = await popup; if (p) { await h.beat(3000); await p.close().catch(() => {}) }
 const so = (await h.api('GET', '/sales/orders?q=' + S.so)).data?.data?.[0]
