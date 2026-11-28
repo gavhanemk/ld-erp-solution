@@ -11,7 +11,7 @@ import ExcelJS from 'exceljs'
 import { prisma } from '../packages/database/src/index'
 
 const API = (process.env.E2E_API || 'http://localhost:5101/api').replace(/\/+$/, '')
-const RM = ['Material Category', 'Item Code', 'Item Name', 'Lot / Batch / Roll Number', 'Bundle / Barcode Number', 'UOM', 'Opening Quantity', 'Unit Rate', 'Location', 'Package Type', 'Package Count', 'Qty per Package', 'Package Quantities', 'Package References', 'Stock Status', 'Remarks', 'HSN Code', 'GST %']
+const RM = ['Material Category', 'Item Code', 'Item Name', 'Lot / Batch / Roll Number', 'Bundle / Barcode Number', 'UOM', 'Opening Quantity', 'Unit Rate', 'Location', 'Package Type', 'Package Count', 'Qty per Package', 'Package Quantities', 'Package References', 'Stock Status', 'Remarks', 'HSN Code', 'GST %', 'Design No.', 'Colour']
 
 let pass = 0, fail = 0
 const check = (name: string, ok: boolean, extra?: unknown) => {

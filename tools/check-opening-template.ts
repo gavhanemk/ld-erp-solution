@@ -13,7 +13,7 @@ import { prisma } from '../packages/database/src/index'
 const API = (process.env.E2E_API || 'http://localhost:5101/api').replace(/\/+$/, '')
 const ALL_HEADS = [
   'Opening Date', 'Process', 'Department / Location', 'Order No.', 'Style / Article No.', 'Item Code', 'Item Description', 'Item Category', 'Fabric / Material',
-  'Colour', 'Size', 'Lot / Batch / Roll No.', 'Bundle / Barcode No.', 'UOM', 'Opening Qty', 'Unit Rate', 'Opening Value', 'Stock Status', 'Remarks', 'HSN Code', 'GST %',
+  'Colour', 'Size', 'Lot / Batch / Roll No.', 'Bundle / Barcode No.', 'UOM', 'Opening Qty', 'Unit Rate', 'Opening Value', 'Stock Status', 'Remarks', 'HSN Code', 'GST %', 'Design No.',
 ]
 const REQUIRED = { ALL: ['Opening Date', 'Item Description', 'Opening Qty'], FG: ['Style / Article No.', 'Colour', 'Size', 'Opening Quantity'], RM: ['Item Name', 'Opening Quantity'] }
 const SHEET = { ALL: 'Opening Stock', FG: 'Finished Goods', SFG: 'Semi Finished Goods', RM: 'Raw Materials' } as const
@@ -77,7 +77,7 @@ async function main() {
     check(`${kind} template: the example in grey italics`, ws.getRow(2).font?.italic === true)
   }
   const allWs = (await template('ALL')).getWorksheet(SHEET.ALL)!
-  check('19-column template: the same 19 columns, then HSN Code and GST %', JSON.stringify(((allWs.getRow(1).values as unknown[]) ?? []).slice(1).map((v) => plain(String(v)))) === JSON.stringify(ALL_HEADS))
+  check('19-column template: the same 19 columns, then HSN Code, GST % and a fabric’s Design No.', JSON.stringify(((allWs.getRow(1).values as unknown[]) ?? []).slice(1).map((v) => plain(String(v)))) === JSON.stringify(ALL_HEADS))
   const notes = Object.fromEntries(ALL_HEADS.map((h, i) => [h, String((allWs.getCell(1, i + 1).note as unknown as { texts?: Array<{ text: string }> })?.texts?.map((t) => t.text).join('') ?? allWs.getCell(1, i + 1).note ?? '')]))
   for (const h of ['Process', 'Department / Location', 'Order No.', 'Style / Article No.', 'Item Code', 'UOM', 'Unit Rate', 'Stock Status']) {
     check(`19-column template: ${h} says it is optional`, /^Optional/.test(notes[h]), notes[h])
@@ -142,7 +142,9 @@ async function main() {
   // 4. The good rows brought in: the items made with their own codes, the stock in.
   const goodSheet = await sheet('ALL', [
     { ...base, 'Item Description': poplin, 'Item Category': 'Fabric', 'Fabric / Material': 'Cotton Poplin', Colour: 'White', 'Opening Qty': 50 },
-    { ...base, 'Item Description': poplin, 'Lot / Batch / Roll No.': 'L2', 'Opening Qty': 30 },
+    // A new fabric is one item per name, design and colour, keyed from each row's own category:
+    // the second roll of it names its category and colour too.
+    { ...base, 'Item Description': poplin, 'Item Category': 'Fabric', Colour: 'White', 'Lot / Batch / Roll No.': 'L2', 'Opening Qty': 30 },
     { ...base, Process: 'Finished Goods', 'Style / Article No.': 'ZZTEST-SH-01', Colour: newColour, Size: size.code, 'Opening Qty': 4, 'Unit Rate': 300 },
   ], `zz-optional-go-${stamp}`)
   const goodCheck = await call('POST', '/inventory/opening-stock/import', goodSheet)
@@ -167,7 +169,7 @@ async function main() {
 
   // 5. The item made, named again: found by its name, not made twice.
   const again = await call('POST', '/inventory/opening-stock/import', await sheet('ALL', [
-    { ...base, 'Item Description': poplin, 'Lot / Batch / Roll No.': 'L3', 'Opening Qty': 12 },
+    { ...base, 'Item Description': poplin, Colour: 'White', 'Lot / Batch / Roll No.': 'L3', 'Opening Qty': 12 },
   ], `zz-optional-again-${stamp}`))
   check('named again: found by its name, nothing new to make', problemsOf(again, 3) === '' && !rowOf(again, 3)?.newItem && rowOf(again, 3)?.item?.code === newPoplin?.code, rowOf(again, 3))
 
