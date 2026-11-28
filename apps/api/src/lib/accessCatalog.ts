@@ -171,7 +171,7 @@ export const ACCESS_CATALOG: AccessModule[] = [
         'Finished goods in, garment tags, garment in / out, cartons',
       ),
       s('inventory.trace', 'Track & Trace', LOOK, ['/inventory/trace'], ['/api/trace']),
-      s('inventory.job-work', 'Job Work', DOC, ['/inventory/job-work'], ['/api/inventory/job-work', '/api/inventory/floor-returns']),
+      s('inventory.job-work', 'Job Work Out', DOC, ['/inventory/job-work'], ['/api/inventory/job-work', '/api/inventory/floor-returns'], 'Goods sent to job workers on a Job Work Challan'),
       s(
         'inventory.customer-material',
         'Customer Material',

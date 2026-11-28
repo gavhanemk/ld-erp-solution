@@ -78,9 +78,12 @@ const DEFAULT_TITLES: Record<string, string> = {
   // Not an order, and the heading is the first thing that says so. A supplier
   // holding a sheet headed PURCHASE ORDER will treat it as one.
   ENQ: 'PURCHASE REQUISITION',
+  // Goods going to the customer, job-work orders included: one title for all.
   DC: 'DELIVERY CHALLAN',
-  // One title for every challan (the user, 28 Nov 2026): job work shows in what it carries.
-  JW: 'DELIVERY CHALLAN',
+  // Our goods going out to a job worker (section 143, rule 55): a different
+  // document from the delivery challan, and named so it is never taken for
+  // one (the user, 28 Nov 2026). Tally calls it "Job Work Out".
+  JW: 'JOB WORK CHALLAN',
   // Samples going to the buyer: not stock and not a sale, so not the sales challan.
   SDC: 'SAMPLE DELIVERY CHALLAN',
   // What a sample cost: the buyer's statement, and our own sheet line by line.

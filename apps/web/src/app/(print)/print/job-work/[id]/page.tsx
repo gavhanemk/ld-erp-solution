@@ -91,19 +91,25 @@ const yearOn = (d: string) => {
 }
 
 /**
- * The delivery challan that goes with our goods to a job worker.
+ * The job work challan that goes with our goods to a job worker — "Job Work
+ * Out", a different document from the delivery challan to a customer, and
+ * titled so it is never taken for one (28 Nov 2026).
  *
  * Under rule 55 of the CGST Rules it names both parties with their GSTIN, and
- * each item with HSN, quantity and value. The goods are still ours, so no tax
- * is charged; the declaration says why, and by when they must come back.
+ * each item with HSN, quantity and value. The goods are not sold, so no tax
+ * is charged; it says whose goods they are, the process, when they are due
+ * back, and the date by which section 143 needs them back.
  */
 export default function PrintJobWorkChallan() {
   const { id } = useParams<{ id: string }>()
   const [data, setData] = useState<Payload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [copy, setCopy] = useState(COPIES[0])
+  // When it was printed; read in the browser.
+  const [printedAt, setPrintedAt] = useState('')
 
   useEffect(() => {
+    setPrintedAt(new Date().toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }))
     api
       .get<{ data: Payload }>(`/inventory/job-work/${id}/print`)
       .then((res) => setData(res.data))
@@ -121,6 +127,15 @@ export default function PrintJobWorkChallan() {
   const interState = Boolean(company.stateCode && w.stateCode && company.stateCode !== w.stateCode)
   const workerAddress = [w.address, w.city, w.state, w.pincode].filter(Boolean).join(', ')
 
+  // Whose goods these are: ours, or a customer's held by us for their job work.
+  const owners = [...new Set(challan.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomer?.name ?? 'our customer'))]
+  const ours = challan.lines.some((l) => l.ownership !== 'CUSTOMER_OWNED')
+  const returnBy = yearOn(challan.challanDate)
+  // Each unit on its own, never added together: "2 mtr · 80 pcs".
+  const byUnit = new Map<string, number>()
+  for (const l of challan.lines) byUnit.set(l.item.uom?.symbol ?? '', (byUnit.get(l.item.uom?.symbol ?? '') ?? 0) + Number(l.qty))
+  const quantities = [...byUnit.entries()].map(([u, n]) => `${qty(n)}${u ? ` ${u}` : ''}`).join(' · ')
+
   const rows = challan.lines.map((l, i) => ({
     key: l.id,
     cells: {
@@ -129,14 +144,15 @@ export default function PrintJobWorkChallan() {
       desc: (
         <>
           <div style={{ fontWeight: 600 }}>{l.item.name}</div>
-          {itemShade(l.item) && <SubLine>{itemShade(l.item)}</SubLine>}
+          {(itemShade(l.item) || l.size?.code) && <SubLine>{[itemShade(l.item), l.size?.code && `Size ${l.size.code}`].filter(Boolean).join(' · ')}</SubLine>}
         </>
       ),
       hsn: <span style={{ fontSize: '9px', ...NUM }}>{l.hsnCode ?? l.item.hsnCode ?? <Dash />}</span>,
       uom: <span style={{ fontSize: '9px' }}>{l.item.uom?.symbol ?? ''}</span>,
       qty: <strong>{qty(l.qty)}</strong>,
-      rate: l.unitRate === null ? <Dash /> : money(l.unitRate),
-      value: value(l) === null ? <Dash /> : money(value(l)!),
+      // A customer's material carries no value of ours: a dash, not ₹0.00.
+      rate: l.unitRate === null || (l.ownership === 'CUSTOMER_OWNED' && !Number(l.unitRate)) ? <Dash /> : money(l.unitRate),
+      value: value(l) === null || (l.ownership === 'CUSTOMER_OWNED' && !value(l)) ? <Dash /> : money(value(l)!),
     },
   }))
 
@@ -152,7 +168,7 @@ export default function PrintJobWorkChallan() {
       dateLabel="Challan date"
       date={longDate(challan.challanDate) ?? ''}
       backHref="/inventory/job-work"
-      backLabel="Job work"
+      backLabel="Job work out"
       banner={
         challan.cancelledAt
           ? `CANCELLED on ${longDate(challan.cancelledAt)}${challan.cancelledBy ? ` by ${challan.cancelledBy.name}` : ''}${challan.cancelReason ? ` — ${challan.cancelReason}` : ''}. The goods did not go out on this challan.`
@@ -191,6 +207,8 @@ export default function PrintJobWorkChallan() {
           ['Challan Date', shortDate(challan.challanDate), true],
           ['Process', challan.process],
           ['Due back', shortDate(challan.expectedBackOn), true],
+          // Section 143: inputs not back within a year count as supplied.
+          ['Return by (GST)', shortDate(returnBy.toISOString()), true],
           ['Vehicle No', challan.vehicleNo, true],
           ['Transporter', challan.transporter],
           ['LR No', challan.lrNumber, true],
@@ -208,6 +226,21 @@ export default function PrintJobWorkChallan() {
             </>
           ),
         },
+        {
+          label: 'Goods of',
+          body: (
+            <>
+              <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase' }}>
+                {[...owners, ...(ours ? [company.name ?? ''] : [])].filter(Boolean).join(' · ')}
+              </div>
+              <div style={{ marginTop: '1px' }}>
+                {owners.length
+                  ? `Their material, held by ${company.name} for job work${ours ? `; the rest is ${company.name}'s own` : ''}. Sent for processing, not sold.`
+                  : 'Our own goods, sent for processing, not sold.'}
+              </div>
+            </>
+          ),
+        },
       ]}
       columns={COLS}
       rows={rows}
@@ -217,9 +250,12 @@ export default function PrintJobWorkChallan() {
             left={<Note title="Note">{challan.notes || <Dash />}</Note>}
             totals={
               <TotalsBox
-                rows={[{ label: 'Items', value: String(challan.lines.length) }]}
+                rows={[
+                  { label: 'Items', value: String(challan.lines.length) },
+                  { label: 'Quantity', value: quantities || <Dash /> },
+                ]}
                 totalLabel="Value of goods"
-                total={`₹ ${money(total)}`}
+                total={total > 0 ? `₹ ${money(total)}` : owners.length && !ours ? "Customer's goods" : `₹ ${money(total)}`}
               />
             }
           />
@@ -234,7 +270,7 @@ export default function PrintJobWorkChallan() {
         { role: 'Transporter', who: challan.transporter },
         { role: 'Received by job worker', who: null },
       ]}
-      footerNote={template.footerNote ?? 'Delivery challan for job work. Not a tax invoice.'}
+      footerNote={`${template.footerNote ?? 'Job work challan — goods sent for processing under section 143. Not a tax invoice; no GST charged.'}${printedAt ? ` · Printed ${printedAt}` : ''}`}
     />
   )
 }

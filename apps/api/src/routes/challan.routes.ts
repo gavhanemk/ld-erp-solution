@@ -1000,6 +1000,7 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
   if (!dc) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
   // One title for every delivery challan, "DELIVERY CHALLAN" (the user's decision of
   // 28 Nov 2026): job work is said on its Type line and by what it carries, not the title.
+  // The JW template is the job work challan to job workers, a different document.
   const header = await getPrintHeader('DC')
 
   const value = round2(
