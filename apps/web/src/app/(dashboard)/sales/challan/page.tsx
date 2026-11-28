@@ -73,9 +73,17 @@ interface ChallanRow {
   /** The live invoice billing it, if any. */
   invoices: Array<{ id: string; invoiceNumber: string }>
   pieces: number
+  /** A draft whose store holds every piece on it, loose: it can be dispatched as it stands. */
+  ready?: boolean | null
 }
 
 type Tab = 'waiting' | 'challans'
+
+/** Its status, with a draft that can go as it stands shown as Ready to dispatch (28 Nov 2026). */
+const statusOf = (c: { status: string; ready?: boolean | null }) =>
+  c.status === 'DRAFT' && c.ready ? { label: 'Ready to dispatch', cls: 'badge-success' } : challanStatus(c.status)
+/** Billing is its own status, apart from the goods': a dispatched challan is billed or not yet. */
+const notBilled = (c: { status: string; invoices?: Array<unknown> }) => (c.status === 'DISPATCHED' || c.status === 'DELIVERED') && !c.invoices?.length
 
 const pcs = (n: number | string) => Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 })
 const DAY = 86_400_000
@@ -319,7 +327,8 @@ export default function DeliveryChallanPage() {
   const EXPORT_COLUMNS: ExportColumn<ChallanRow>[] = [
     { header: 'Challan No.', value: (c) => c.dcNumber },
     { header: 'Date', value: (c) => asDate(c.dcDate) },
-    { header: 'Status', value: (c) => challanStatus(c.status).label },
+    { header: 'Status', value: (c) => statusOf(c).label },
+    { header: 'Billing', value: (c) => (c.invoices?.[0] ? `Billed ${c.invoices[0].invoiceNumber}` : notBilled(c) ? 'Not billed' : '') },
     { header: 'Order', value: (c) => c.so.soNumber },
     { header: 'Brand', value: (c) => c.so.brand?.name ?? '' },
     { header: 'Buyer PO', value: (c) => c.so.customerPORef ?? '' },
@@ -654,7 +663,7 @@ export default function DeliveryChallanPage() {
           <div className="list-scope">
             <div className="list-cards divide-border divide-y">
               {rows.map((c) => {
-                const s = challanStatus(c.status)
+                const s = statusOf(c)
                 const actions = rowActions(c)
                 return (
                   <div key={c.id} className="p-3">
@@ -663,6 +672,7 @@ export default function DeliveryChallanPage() {
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-foreground font-mono text-xs font-semibold">{c.dcNumber}</span>
                           <span className={s.cls}>{s.label}</span>
+                          {notBilled(c) && <span className="text-muted-foreground text-[11px]">Not billed</span>}
                           <BrandTag brand={c.so.brand} />
                         </div>
                         <p className="text-foreground mt-1 font-medium leading-snug">{customerName(c)}</p>
@@ -709,7 +719,7 @@ export default function DeliveryChallanPage() {
                 </thead>
                 <tbody>
                   {rows.map((c, i) => {
-                    const s = challanStatus(c.status)
+                    const s = statusOf(c)
                     const actions = rowActions(c)
                     return (
                       <tr key={c.id} data-row tabIndex={i === 0 ? 0 : -1}>
@@ -765,9 +775,10 @@ export default function DeliveryChallanPage() {
                               rel="noreferrer"
                               className="text-primary mt-0.5 block font-mono text-[11px] hover:underline"
                             >
-                              {c.invoices[0].invoiceNumber}
+                              Billed · {c.invoices[0].invoiceNumber}
                             </a>
                           )}
+                          {notBilled(c) && <div className="text-muted-foreground mt-0.5 text-[11px]">Not billed</div>}
                         </td>
                         <td className="whitespace-nowrap text-right">
                           <div className="flex justify-end">
@@ -800,6 +811,7 @@ export default function DeliveryChallanPage() {
         soId={form.soId}
         challanId={form.challanId}
         onClose={() => setForm({ open: false, soId: null, challanId: null })}
+        onOpenDraft={(id) => setForm({ open: true, soId: null, challanId: id })}
         onSaved={(msg) => {
           setTab('challans')
           done(msg)

@@ -2037,8 +2037,6 @@ model SalesOrderLine {
   sizes SalesOrderLineSize[]
   /// What has been sent against this line, challan by challan.
   challanLines DeliveryChallanLine[]
-  /// The customer's rolls its pieces were made from, challan by challan (job work).
-  challanRolls DeliveryChallanRoll[]
   /// What has been billed against this line, invoice by invoice.
   invoiceLines SalesInvoiceLine[]
   /// What has been planned for the factory against this line.
@@ -2202,9 +2200,13 @@ model DeliveryChallan {
   /// The invoice billing these goods (and any cancelled before it).
   invoices SalesInvoice[]
 
-  /// On a job-work challan: which of the customer's rolls the pieces were made
-  /// from, how many pieces of each, packed in which bale.
-  rolls DeliveryChallanRoll[]
+  /// Packing (28 Nov 2026): the bale or package numbers ("1, 2"), the packing
+  /// list's reference and the gross weight in kg. Which of a job-work
+  /// customer's rolls the pieces were made from is not typed here: it is read
+  /// from production (services/fabricTrace.service).
+  baleNumbers    String?
+  packingListRef String?
+  grossWeight    Decimal? @db.Decimal(10, 2)
 
   @@index([soId])
   @@index([customerId])
@@ -3960,35 +3962,9 @@ model CustomerGRNRoll {
   lotNo     String?
   sortOrder Int             @default(0)
 
-  /// The challans whose pieces were made from it.
-  challanRolls DeliveryChallanRoll[]
-
   @@index([lineId])
   @@index([barcode])
   @@map("customer_grn_rolls")
-}
-
-/// A customer's roll on a job-work delivery challan: how many pieces made
-/// from it go on this challan, of which grade, packed in which bale. The
-/// barcode, metres and design print from the roll itself.
-model DeliveryChallanRoll {
-  id        String          @id @default(cuid())
-  dcId      String
-  dc        DeliveryChallan @relation(fields: [dcId], references: [id], onDelete: Cascade)
-  rollId    String
-  roll      CustomerGRNRoll @relation(fields: [rollId], references: [id])
-  /// The order line (garment) the pieces are; empty when the order has one line.
-  soLineId  String?
-  soLine    SalesOrderLine? @relation(fields: [soLineId], references: [id])
-  baleNo    String?
-  pieces    Decimal         @db.Decimal(10, 2)
-  /// "A" (fresh) or "B" (B-grade), as on the challan's lines.
-  grade     String          @default("A")
-  sortOrder Int             @default(0)
-
-  @@index([dcId])
-  @@index([rollId])
-  @@map("delivery_challan_rolls")
 }
 
 /// A customer's own material going back to them unworked: what was left over

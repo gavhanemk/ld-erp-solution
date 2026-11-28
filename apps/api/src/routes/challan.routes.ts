@@ -16,6 +16,7 @@ import { afterChallanCancelled, afterChallanDispatched } from '../services/garme
 import { cartonsAfterCancel, cartonsAfterDispatch, cartonsOnChallan } from '../services/fgCartonHooks.service'
 import { netSizeChanges } from '../services/sizeChanges.service'
 import { orderBrand } from '../lib/orderBrand'
+import { fabricTrace } from '../services/fabricTrace.service'
 
 /**
  * Delivery challans: the goods leaving for the buyer against a sales order.
@@ -66,29 +67,16 @@ const challanSchema = z.object({
   lrNumber: z.string().max(60).optional().nullable(),
   eWayBillNumber: z.string().max(30).optional().nullable(),
   cartons: z.number().int().min(0).optional().nullable(),
+  /** Bale or package numbers, as written on them: "1, 2" or "B-14 to B-16". */
+  baleNumbers: z.string().trim().max(200).optional().nullable(),
+  packingListRef: z.string().trim().max(60).optional().nullable(),
+  /** Gross weight, kg. */
+  grossWeight: z.number().min(0).max(99_999_999).optional().nullable(),
   packingNote: z.string().max(500).optional().nullable(),
   notes: z.string().max(1000).optional().nullable(),
   /** Dispatch on saving, rather than keep it as a draft. */
   dispatch: z.boolean().optional(),
   lines: z.array(lineSchema).min(1, 'Put at least one item on the challan'),
-  /**
-   * On a job-work challan, the customer's rolls the pieces were made from:
-   * pieces from each roll, their grade, and the bale they are packed in (the
-   * user's decision of 28 Nov 2026). Left out, the rolls already on the
-   * challan stay as they are; an empty list clears them.
-   */
-  rolls: z
-    .array(
-      z.object({
-        rollId: z.string().min(1),
-        soLineId: z.string().min(1).optional().nullable(),
-        baleNo: z.string().trim().max(30).optional().nullable(),
-        pieces: z.number().positive('Enter the pieces made from each roll'),
-        grade: z.enum(['A', 'B']).optional(),
-      }),
-    )
-    .max(1000)
-    .optional(),
 })
 
 const reasonSchema = z.object({ reason: z.string().trim().min(5, 'Say why, in a few words').max(500) })
@@ -182,13 +170,54 @@ async function sealedInCartons(itemIds: string[], warehouseId: string) {
 }
 
 /**
- * GET /api/sales/challans/prepare?soId=&warehouseId=
+ * Pieces already on draft challans leaving this store, by garment, size and
+ * grade, with the drafts' numbers — the same owner's stock only (our own, or
+ * this job-work customer's). A draft moves no stock, but two drafts must not
+ * promise the same pieces; dispatching checks the stock again either way.
+ */
+async function heldOnDrafts(itemIds: string[], warehouseId: string, owner: ReturnType<typeof ownerFor>, exceptDcId: string) {
+  const lines = await prisma.deliveryChallanLine.findMany({
+    where: {
+      itemId: { in: itemIds },
+      dc: {
+        status: 'DRAFT',
+        warehouseId,
+        id: { not: exceptDcId },
+        so: owner.ownership === 'OWNED' ? { isJobWork: false } : { isJobWork: true, customerId: owner.ownerCustomerId ?? '' },
+      },
+    },
+    select: { itemId: true, grade: true, qty: true, dc: { select: { dcNumber: true } }, sizes: { select: { sizeId: true, qty: true } } },
+  })
+  const held = new Map<string, { qty: number; on: string[] }>()
+  const add = (key: string, qty: number, dcNumber: string) => {
+    const hit = held.get(key) ?? { qty: 0, on: [] }
+    hit.qty += qty
+    if (!hit.on.includes(dcNumber)) hit.on.push(dcNumber)
+    held.set(key, hit)
+  }
+  for (const l of lines) {
+    if (!l.itemId) continue
+    if (l.sizes.length) for (const s of l.sizes) add(`${l.itemId}|${s.sizeId ?? ''}|${l.grade}`, Number(s.qty), l.dc.dcNumber)
+    else add(`${l.itemId}||${l.grade}`, Number(l.qty), l.dc.dcNumber)
+  }
+  return (itemId: string, sizeId: string | null, grade: 'A' | 'B') => held.get(`${itemId}|${sizeId ?? ''}|${grade}`) ?? { qty: 0, on: [] }
+}
+
+/**
+ * GET /api/sales/challans/prepare?soId=&warehouseId=&dcId=
  *
  * Everything the challan form needs for one order: its lines, each size's
  * ordered, sent and pending pieces (never below nothing; `over` is what was
  * sent beyond the size's order, after a size jump), and what is loose in the
  * chosen store — pieces sealed in a carton are `sealed`, with the cartons'
- * codes, and are not counted in `inStock`.
+ * codes, and are not counted in `inStock`; nor are pieces already on another
+ * draft challan from that store (`held`, with the drafts' numbers), so two
+ * drafts never promise the same pieces. With `dcId`, that draft's own pieces
+ * are not counted against it.
+ *
+ * Also: the order's other open drafts (open one instead of starting another),
+ * the cartons already packed for it, and on a job-work order the fabric each
+ * garment was made from, read from production (services/fabricTrace).
  * Stock is read here, under the sales permission, so a sales coordinator does
  * not need Inventory rights to see what can be sent.
  */
@@ -201,6 +230,7 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
   const owner = ownerFor(order)
   const { stores, id: fallback } = await defaultStore(order.lines.map((l) => l.itemId), owner)
   const warehouseId = text(req.query.warehouseId) ?? fallback
+  const dcId = text(req.query.dcId) ?? ''
 
   // What size changes at stitching added to each size of each line: "Fill what can go" makes up a
   // line's total only from those, never from other stock of a size the buyer did not ask for.
@@ -212,6 +242,10 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
     warehouseId && owner.ownership === 'OWNED'
       ? await sealedInCartons(order.lines.map((l) => l.itemId), warehouseId)
       : () => ({ qty: 0, codes: [] as string[] })
+  const held = warehouseId ? await heldOnDrafts(order.lines.map((l) => l.itemId), warehouseId, owner, dcId) : () => ({ qty: 0, on: [] as string[] })
+
+  // Job work: which of the customer's rolls each garment was made from, from production.
+  const traces = order.isJobWork ? await fabricTrace(prisma, order.lines.map((l) => l.id)) : null
 
   const lines = await Promise.all(
     order.lines.map(async (l) => {
@@ -222,6 +256,8 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
             l.sizes.map(async (s) => {
               const a = sealed(l.itemId, s.sizeId, 'A')
               const b = sealed(l.itemId, s.sizeId, 'B')
+              const ha = held(l.itemId, s.sizeId, 'A')
+              const hb = held(l.itemId, s.sizeId, 'B')
               const inA = warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId, owner) : 0
               const inB = warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId, owner, 'B') : 0
               return {
@@ -233,11 +269,13 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
                 pending: Math.max(0, round2(Number(s.qty) - Number(s.deliveredQty))),
                 over: Math.max(0, round2(Number(s.deliveredQty) - Number(s.qty))),
                 gained: gainedOf(l.id, s.sizeId),
-                inStock: Math.max(0, round2(inA - a.qty)),
-                inStockB: Math.max(0, round2(inB - b.qty)),
+                inStock: Math.max(0, round2(inA - a.qty - ha.qty)),
+                inStockB: Math.max(0, round2(inB - b.qty - hb.qty)),
                 sealed: a.qty,
                 sealedB: b.qty,
                 cartons: [...new Set([...a.codes, ...b.codes])],
+                held: round2(ha.qty + hb.qty),
+                heldOn: [...new Set([...ha.on, ...hb.on])],
               }
             })
           )
@@ -252,15 +290,38 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
         ordered,
         sent,
         pending: Math.max(0, ordered - sent),
-        inStock: sizes ? sizes.reduce((s, z) => s + z.inStock, 0) : warehouseId ? await onHand(prisma, l.itemId, warehouseId, null, owner) : 0,
-        inStockB: sizes ? sizes.reduce((s, z) => s + z.inStockB, 0) : warehouseId ? await onHand(prisma, l.itemId, warehouseId, null, owner, 'B') : 0,
+        inStock: sizes
+          ? sizes.reduce((s, z) => s + z.inStock, 0)
+          : warehouseId
+            ? Math.max(0, round2((await onHand(prisma, l.itemId, warehouseId, null, owner)) - held(l.itemId, null, 'A').qty))
+            : 0,
+        inStockB: sizes
+          ? sizes.reduce((s, z) => s + z.inStockB, 0)
+          : warehouseId
+            ? Math.max(0, round2((await onHand(prisma, l.itemId, warehouseId, null, owner, 'B')) - held(l.itemId, null, 'B').qty))
+            : 0,
+        held: sizes ? round2(sizes.reduce((s, z) => s + z.held, 0)) : round2(held(l.itemId, null, 'A').qty + held(l.itemId, null, 'B').qty),
+        heldOn: sizes ? [...new Set(sizes.flatMap((z) => z.heldOn))] : [...new Set([...held(l.itemId, null, 'A').on, ...held(l.itemId, null, 'B').on])],
         sealed: sizes ? sizes.reduce((s, z) => s + z.sealed + z.sealedB, 0) : 0,
         cartons: sizes ? [...new Set(sizes.flatMap((z) => z.cartons))].sort() : [],
         bGradeRate: l.bGradeRate != null ? Number(l.bGradeRate) : null,
         sizes,
+        trace: traces?.get(l.id) ?? null,
       }
     })
   )
+  const [otherDrafts, packedCartons] = await Promise.all([
+    prisma.deliveryChallan.findMany({
+      where: { soId: order.id, status: 'DRAFT', id: { not: dcId } },
+      select: { id: true, dcNumber: true, dcDate: true },
+      orderBy: { createdAt: 'asc' },
+    }),
+    prisma.fgCarton.findMany({
+      where: { soId: order.id, status: 'PACKED' },
+      select: { code: true, dc: { select: { dcNumber: true } }, lines: { select: { qty: true } } },
+      orderBy: { code: 'asc' },
+    }),
+  ])
 
   res.json({
     success: true,
@@ -280,6 +341,8 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
       stores,
       warehouseId,
       lines,
+      otherDrafts,
+      packedCartons: packedCartons.map((c) => ({ code: c.code, pieces: c.lines.reduce((s, x) => s + x.qty, 0), onChallan: c.dc?.dcNumber ?? null })),
     },
   })
 })
@@ -337,55 +400,6 @@ router.get('/waiting', requirePermission(MODULE, 'view'), async (req, res) => {
   })
 })
 
-/**
- * GET /api/sales/challans/rolls?soId=&dcId=
- *
- * The customer's rolls a job-work challan can name: every roll on their
- * receipts approved into stock, for this order or for none, with its barcode,
- * metres, design and lot, the receipt it came on, and the pieces already sent
- * from it on other challans (`dcId`, the challan being changed, is left out).
- */
-router.get('/rolls', requirePermission(MODULE, 'view'), async (req, res) => {
-  const soId = text(req.query.soId)
-  if (!soId) throw new AppError('Say which order', 400, 'NO_ORDER')
-  const dcId = text(req.query.dcId)
-  const order = await prisma.salesOrder.findUnique({ where: { id: soId }, select: { id: true, customerId: true, isJobWork: true } })
-  if (!order) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
-  if (!order.isJobWork) return res.json({ success: true, data: [] })
-  const rolls = await prisma.customerGRNRoll.findMany({
-    where: { line: { grn: { customerId: order.customerId, status: 'POSTED', OR: [{ soId: order.id }, { soId: null }] } } },
-    orderBy: [{ line: { grn: { receiptDate: 'asc' } } }, { sortOrder: 'asc' }],
-    select: {
-      id: true,
-      barcode: true,
-      meters: true,
-      designNo: true,
-      lotNo: true,
-      line: { select: { item: { select: { code: true, name: true } }, grn: { select: { grnNumber: true, receiptDate: true, challanNumber: true } } } },
-      challanRolls: {
-        where: { dc: { status: { not: 'CANCELLED' } }, ...(dcId ? { dcId: { not: dcId } } : {}) },
-        select: { pieces: true, dc: { select: { dcNumber: true } } },
-      },
-    },
-  })
-  res.json({
-    success: true,
-    data: rolls.map((r) => ({
-      id: r.id,
-      barcode: r.barcode,
-      meters: Number(r.meters),
-      designNo: r.designNo,
-      lotNo: r.lotNo,
-      item: r.line.item,
-      grnNumber: r.line.grn.grnNumber,
-      receiptDate: r.line.grn.receiptDate,
-      partyChallan: r.line.grn.challanNumber,
-      sentPieces: round2(r.challanRolls.reduce((s, c) => s + Number(c.pieces), 0)),
-      sentOn: [...new Set(r.challanRolls.map((c) => c.dc.dcNumber))],
-    })),
-  })
-})
-
 const challanCustomerSelect = { id: true, name: true, gstin: true, billingCity: true, shippingCity: true } as const
 const challanInclude = {
   so: { select: { id: true, soNumber: true, status: true, isJobWork: true, customerPORef: true, brand: { select: { name: true, type: true } }, customer: { select: challanCustomerSelect } } },
@@ -402,28 +416,6 @@ const challanInclude = {
       sizes: { include: { size: { select: { id: true, code: true, sequence: true } } } },
     },
   },
-  /** On a job-work challan: the customer's rolls its pieces were made from. */
-  rolls: {
-    orderBy: { sortOrder: 'asc' as const },
-    select: {
-      id: true,
-      rollId: true,
-      soLineId: true,
-      baleNo: true,
-      pieces: true,
-      grade: true,
-      roll: {
-        select: {
-          id: true,
-          barcode: true,
-          meters: true,
-          designNo: true,
-          lotNo: true,
-          line: { select: { grnId: true, item: { select: { code: true, name: true } } } },
-        },
-      },
-    },
-  },
   /** The invoice billing it, if any: a challan is billed once. */
   invoices: { where: { status: { not: 'CANCELLED' } }, select: { id: true, invoiceNumber: true } },
   /** The cartons loaded on it, for its packing list. */
@@ -438,6 +430,35 @@ const challanInclude = {
     orderBy: { code: 'asc' as const },
   },
 } satisfies Prisma.DeliveryChallanInclude
+
+/**
+ * Whether a draft can be dispatched as it stands: every piece on it is in its
+ * store, loose (not sealed in a carton), for the order's owner. Shown on the
+ * list as "Ready to dispatch"; dispatching checks the stock again.
+ */
+async function draftReady(dc: {
+  warehouseId: string | null
+  customerId: string | null
+  so: { isJobWork: boolean }
+  lines: Array<{ itemId: string | null; grade: string; qty: unknown; sizes: Array<{ sizeId: string | null; qty: unknown }> }>
+}) {
+  if (!dc.warehouseId || !dc.lines.length) return false
+  const owner = ownerFor({ isJobWork: dc.so.isJobWork, customerId: dc.customerId ?? '' })
+  const itemIds = dc.lines.map((l) => l.itemId).filter((x): x is string => !!x)
+  const sealed = owner.ownership === 'OWNED' ? await sealedInCartons(itemIds, dc.warehouseId) : () => ({ qty: 0, codes: [] as string[] })
+  for (const l of dc.lines) {
+    if (!l.itemId) continue
+    const grade = l.grade === 'B' ? 'B' : 'A'
+    const parts = l.sizes.length ? l.sizes.map((s) => ({ sizeId: s.sizeId, qty: Number(s.qty) })) : [{ sizeId: null, qty: Number(l.qty) }]
+    for (const p of parts) {
+      if (p.qty <= 0) continue
+      const have = await onHand(prisma, l.itemId, dc.warehouseId, p.sizeId, owner, grade)
+      const loose = have - (p.sizeId ? sealed(l.itemId, p.sizeId, grade).qty : 0)
+      if (loose + 1e-9 < p.qty) return false
+    }
+  }
+  return true
+}
 
 /** GET /api/sales/challans — filters: q, status, customerId, soId, from, to, page, limit. */
 router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -487,9 +508,17 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     }),
     prisma.deliveryChallan.count({ where }),
   ])
+  // A draft is ready to dispatch when its store holds every piece on it, loose (28 Nov 2026).
+  const ready = new Map<string, boolean>()
+  for (const r of rows) if (r.status === 'DRAFT') ready.set(r.id, await draftReady(r))
   // Legacy challans predate the direct customer link. Resolve from the order on
   // read, retaining any explicitly recorded customer and leaving history intact.
-  const data = rows.map((r) => ({ ...r, customer: r.customer ?? r.so.customer, pieces: r.lines.reduce((s, l) => s + Number(l.qty), 0) }))
+  const data = rows.map((r) => ({
+    ...r,
+    customer: r.customer ?? r.so.customer,
+    pieces: r.lines.reduce((s, l) => s + Number(l.qty), 0),
+    ready: r.status === 'DRAFT' ? (ready.get(r.id) ?? false) : null,
+  }))
   res.json({ success: true, data, pagination: { page, limit, total, pages: Math.ceil(total / limit) } })
 })
 
@@ -682,6 +711,9 @@ export async function writeChallan(
     lrNumber: data.lrNumber ?? null,
     eWayBillNumber: data.eWayBillNumber ?? null,
     cartons: data.cartons ?? null,
+    baleNumbers: data.baleNumbers?.trim() || null,
+    packingListRef: data.packingListRef?.trim() || null,
+    grossWeight: data.grossWeight ?? null,
     packingNote: data.packingNote ?? null,
     notes: data.notes ?? null,
   }
@@ -696,8 +728,6 @@ export async function writeChallan(
     sizes: l.sizes.length ? { create: l.sizes.map((s) => ({ sizeId: s.sizeId, qty: s.qty })) } : undefined,
   }))
 
-  const rolls = await shapeRolls(tx, order, data)
-
   let dc
   if (existing) {
     await tx.deliveryChallanLine.deleteMany({ where: { dcId: existing.id } })
@@ -706,59 +736,7 @@ export async function writeChallan(
     const dcNumber = await nextDocumentNumber(tx, 'DC', header.dcDate)
     dc = await tx.deliveryChallan.create({ data: { ...header, dcNumber, createdById: userId, lines: { create: lines } } })
   }
-  // Rolls are replaced only when given: a carton or garment scan rewriting the lines leaves them be.
-  if (rolls !== undefined) {
-    await tx.deliveryChallanRoll.deleteMany({ where: { dcId: dc.id } })
-    if (rolls.length) await tx.deliveryChallanRoll.createMany({ data: rolls.map((r) => ({ ...r, dcId: dc.id })) })
-  }
   return dc
-}
-
-/**
- * The customer's rolls on a job-work challan, checked: each is one of this
- * customer's rolls, on a receipt approved into stock and not for another of
- * their orders, against a garment on this order (the only one, when the order
- * has one line). How many pieces come from each roll is the packer's to say;
- * the challan form shows when they do not add up to the pieces being sent.
- */
-async function shapeRolls(tx: Prisma.TransactionClient, order: OrderForDispatch, data: ChallanInput) {
-  if (data.rolls === undefined) return undefined
-  if (!data.rolls.length) return []
-  if (!order.isJobWork) {
-    throw new AppError(`${order.soNumber} is not job work, so no customer's rolls go on its challan.`, 400, 'NOT_JOB_WORK')
-  }
-  const found = await tx.customerGRNRoll.findMany({
-    where: { id: { in: [...new Set(data.rolls.map((r) => r.rollId))] } },
-    select: { id: true, barcode: true, line: { select: { grn: { select: { customerId: true, soId: true, status: true, grnNumber: true } } } } },
-  })
-  const rollOf = new Map(found.map((r) => [r.id, r]))
-  const lineIds = new Set(order.lines.map((l) => l.id))
-  const seen = new Set<string>()
-  return data.rolls.map((input, i) => {
-    const roll = rollOf.get(input.rollId)
-    if (!roll) throw new AppError(`Roll ${i + 1} on the challan no longer exists. Pick it again.`, 400, 'BAD_ROLL')
-    const grn = roll.line.grn
-    if (grn.customerId !== order.customerId) {
-      throw new AppError(`Roll ${roll.barcode} is another customer's material.`, 400, 'BAD_ROLL')
-    }
-    if (grn.status !== 'POSTED') {
-      throw new AppError(`Roll ${roll.barcode} is on ${grn.grnNumber}, which is not approved into stock.`, 400, 'BAD_ROLL')
-    }
-    if (grn.soId && grn.soId !== order.id) {
-      throw new AppError(`Roll ${roll.barcode} came in on ${grn.grnNumber} for another order.`, 400, 'BAD_ROLL')
-    }
-    const soLineId = input.soLineId ?? (order.lines.length === 1 ? order.lines[0].id : null)
-    if (soLineId && !lineIds.has(soLineId)) {
-      throw new AppError(`Roll ${roll.barcode}: that garment is not on ${order.soNumber}.`, 400, 'BAD_LINE')
-    }
-    const grade = input.grade ?? 'A'
-    const key = `${input.rollId}|${soLineId ?? ''}|${grade}`
-    if (seen.has(key)) {
-      throw new AppError(`Roll ${roll.barcode} is on the challan twice for the same garment and grade. Put its pieces on one row.`, 400, 'ROLL_TWICE')
-    }
-    seen.add(key)
-    return { rollId: input.rollId, soLineId, baleNo: input.baleNo?.trim() || null, pieces: input.pieces, grade, sortOrder: i }
-  })
 }
 
 export async function loadOpenOrder(tx: Prisma.TransactionClient, soId: string) {
@@ -1064,39 +1042,45 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
       value,
       gst,
       valueInWords: amountInWords(round2(value + gst)),
-      reconciliation: await rollReconciliation(dc.rolls),
+      ...(await printTrace(dc.so.isJobWork, dc.lines.map((l) => l.soLineId).filter((x): x is string => !!x))),
     },
   })
 })
 
 /**
- * The old job challan's reconciliation strip, one row per customer receipt
- * the challan's rolls came on: what came in on it (date, lot, their challan
- * number, rolls and metres) beside the pieces packed from it on this challan.
- * Metres per piece and the shortage are left out until the business confirms
- * how they are worked out (its decision of 28 Nov 2026).
+ * A job-work challan's fabric, for its print: each garment's rolls from
+ * production (services/fabricTrace) and the old job challan's reconciliation
+ * strip — one row per customer receipt those rolls came on, with what came in
+ * on it (date, lots, their challan number, rolls and metres). The pieces
+ * packed are the challan's own. Metres per piece and the shortage are left
+ * out until the business confirms how they are worked out (28 Nov 2026).
  */
-async function rollReconciliation(rolls: Array<{ pieces: unknown; roll: { lotNo: string | null; line: { grnId: string } } }>) {
-  if (!rolls.length) return []
-  const grnIds = [...new Set(rolls.map((r) => r.roll.line.grnId))]
-  const grns = await prisma.customerGRN.findMany({
-    where: { id: { in: grnIds } },
-    select: { id: true, grnNumber: true, receiptDate: true, challanNumber: true, lines: { select: { rolls: { select: { meters: true } } } } },
-    orderBy: { receiptDate: 'asc' },
-  })
-  return grns.map((g) => {
-    const mine = rolls.filter((r) => r.roll.line.grnId === g.id)
-    const received = g.lines.flatMap((l) => l.rolls)
-    return {
-      grnNumber: g.grnNumber,
-      receiptDate: g.receiptDate,
-      partyChallan: g.challanNumber,
-      lots: [...new Set(mine.map((r) => r.roll.lotNo).filter((x): x is string => !!x))],
-      receivedRolls: received.length,
-      receivedMeters: Math.round(received.reduce((s, r) => s + Number(r.meters), 0) * 1000) / 1000,
-      packedPieces: round2(mine.reduce((s, r) => s + Number(r.pieces), 0)),
-    }
-  })
+async function printTrace(isJobWork: boolean, soLineIds: string[]) {
+  if (!isJobWork || !soLineIds.length) return { trace: {}, reconciliation: [] }
+  const traces = await fabricTrace(prisma, [...new Set(soLineIds)])
+  const rolls = [...traces.values()].flatMap((t) => t.rolls)
+  const grnIds = [...new Set(rolls.map((r) => r.grnId).filter((x): x is string => !!x))]
+  const grns = grnIds.length
+    ? await prisma.customerGRN.findMany({
+        where: { id: { in: grnIds } },
+        select: { id: true, grnNumber: true, receiptDate: true, challanNumber: true, lines: { select: { rolls: { select: { meters: true } } } } },
+        orderBy: { receiptDate: 'asc' },
+      })
+    : []
+  return {
+    trace: Object.fromEntries(traces),
+    reconciliation: grns.map((g) => {
+      const received = g.lines.flatMap((l) => l.rolls)
+      return {
+        grnNumber: g.grnNumber,
+        receiptDate: g.receiptDate,
+        partyChallan: g.challanNumber,
+        lots: [...new Set(rolls.filter((r) => r.grnId === g.id).map((r) => r.lotNo).filter((x): x is string => !!x))],
+        receivedRolls: received.length,
+        receivedMeters: Math.round(received.reduce((s, r) => s + Number(r.meters), 0) * 1000) / 1000,
+      }
+    }),
+  }
 }
 
 export default router

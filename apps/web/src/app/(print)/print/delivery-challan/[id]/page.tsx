@@ -41,7 +41,7 @@ interface Payload {
   value: number
   gst: number
   valueInWords: string
-  /** Job work: one row per customer receipt the challan's rolls came on. */
+  /** Job work: one row per customer receipt the garments' rolls came on. */
   reconciliation?: Array<{
     grnNumber: string
     receiptDate: string
@@ -49,8 +49,15 @@ interface Payload {
     lots: string[]
     receivedRolls: number
     receivedMeters: number
-    packedPieces: number
   }>
+  /** Job work: each order line's fabric, read from production (the roll stickers issued to its MO). */
+  trace?: Record<
+    string,
+    {
+      rolls: Array<{ barcode: string; designNo: string | null; lotNo: string | null; received: number; issued: number }>
+      gaps: Array<{ text: string }>
+    }
+  >
   challan: {
     dcNumber: string
     dcDate: string
@@ -61,6 +68,9 @@ interface Payload {
     lrNumber: string | null
     eWayBillNumber: string | null
     cartons: number | null
+    baleNumbers?: string | null
+    packingListRef?: string | null
+    grossWeight?: string | number | null
     packingNote: string | null
     notes: string | null
     dispatchedAt: string | null
@@ -119,22 +129,6 @@ interface Payload {
       } | null
       sizes: Array<{ id: string; qty: string; size: { code: string; sequence: number } }>
     }>
-    /** Job work: the customer's rolls the pieces were made from. */
-    rolls?: Array<{
-      id: string
-      soLineId: string | null
-      baleNo: string | null
-      pieces: string | number
-      grade: string
-      roll: {
-        id: string
-        barcode: string
-        meters: string | number
-        designNo: string | null
-        lotNo: string | null
-        line: { item: { code: string; name: string } }
-      }
-    }>
     /** The cartons loaded on it, scanned or picked: its packing list. */
     fgCartons?: Array<{
       code: string
@@ -153,19 +147,22 @@ const CARTON_COLUMNS: DocColumn[] = [
 
 /**
  * The job challan's goods, roll by roll, as the old ERP printed them: the
- * garment, the job charge's SAC, the roll's design, the grade, the customer's
- * barcode, the bale, the roll's metres and the pieces made from it.
+ * garment, the job charge's SAC, its grade and pieces, run down beside the
+ * customer's rolls it was cut from — each roll's design, lot, barcode and the
+ * metres issued from it to production. The rolls come from production, not
+ * from the dispatch screen (28 Nov 2026); cutting does not record the pieces
+ * per roll, so the pieces are the garment's.
  */
 const ROLL_COLUMNS: SheetColumn[] = [
   { key: 'sn', head: 'S.N', width: '4%', align: 'center' },
   { key: 'garment', head: 'Merchant name', width: '24%' },
   { key: 'hsn', head: 'HSN / SAC', width: '9%' },
-  { key: 'design', head: 'Design', width: '11%' },
-  { key: 'grade', head: 'Grade', width: '8%' },
-  { key: 'barcode', head: 'Barcode', width: '14%' },
-  { key: 'bale', head: 'Bale', width: '8%' },
-  { key: 'mtrs', head: 'Mtrs', width: '11%', align: 'right' },
-  { key: 'pcs', head: 'Pcs', width: '11%', align: 'right' },
+  { key: 'grade', head: 'Grade', width: '10%' },
+  { key: 'design', head: 'Design', width: '9%' },
+  { key: 'lot', head: 'Lot', width: '7%' },
+  { key: 'barcode', head: 'Barcode', width: '15%' },
+  { key: 'mtrs', head: 'Mtrs', width: '10%', align: 'right' },
+  { key: 'pcs', head: 'Pcs', width: '12%', align: 'right' },
 ]
 
 /**
@@ -204,7 +201,7 @@ const SUMMARY_GROUPS: Array<{ title: string; columns: Array<{ key: string; head:
 ]
 
 /** The production summary table: grouped headings over the three parts, then a row per receipt. */
-function ProductionSummary({ rows }: { rows: Array<{ key: string; cells: Record<string, React.ReactNode> }> }) {
+function ProductionSummary({ rows }: { rows: Array<{ key: string; cells: Record<string, React.ReactNode>; spans?: Record<string, number>; covered?: string[] }> }) {
   const cols = SUMMARY_GROUPS.flatMap((g, gi) => g.columns.map((c, ci) => ({ ...c, groupEnd: ci === g.columns.length - 1 && gi < SUMMARY_GROUPS.length - 1 })))
   const head: React.CSSProperties = {
     padding: '4px 6px',
@@ -248,9 +245,11 @@ function ProductionSummary({ rows }: { rows: Array<{ key: string; cells: Record<
       <tbody>
         {rows.map((r) => (
           <tr key={r.key}>
-            {cols.map((c, i) => (
+            {cols.map((c, i) =>
+              r.covered?.includes(c.key) ? null : (
               <td
                 key={c.key}
+                rowSpan={r.spans?.[c.key]}
                 style={{
                   padding: '6px 6px',
                   fontSize: '10px',
@@ -266,7 +265,8 @@ function ProductionSummary({ rows }: { rows: Array<{ key: string; cells: Record<
               >
                 {r.cells[c.key] ?? ''}
               </td>
-            ))}
+              )
+            )}
           </tr>
         ))}
       </tbody>
@@ -274,8 +274,6 @@ function ProductionSummary({ rows }: { rows: Array<{ key: string; cells: Record<
   )
 }
 
-/** A grade as the job challan prints it. */
-const gradeLabel = (g?: string | null) => (g === 'B' ? 'B-grade' : 'Fresh Pc')
 const metres = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 /**
@@ -286,10 +284,11 @@ const metres = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits:
  * as the e-way bill and the transporter need it. It is not a tax invoice and
  * says so. A draft or a cancelled challan prints with a band across the top.
  *
- * A job-work challan whose rolls are named prints the old ERP's job challan
- * (28 Nov 2026): roll by roll — barcode, bale, metres, pieces — with a total
- * for each garment, the bales in the header, and what came in on each receipt
- * beside what was packed from it.
+ * A job-work challan whose garments production traced to the customer's rolls
+ * prints the old ERP's job challan (28 Nov 2026): roll by roll — design, lot,
+ * barcode, metres — beside each garment and its pieces, with a total for each
+ * garment, the bales in the header, and what came in on each receipt beside
+ * what was packed.
  */
 export default function PrintDeliveryChallan() {
   const { id } = useParams<{ id: string }>()
@@ -314,8 +313,9 @@ export default function PrintDeliveryChallan() {
   const billing = [c.billingAddress, c.billingCity, c.billingState, c.billingPincode].filter(Boolean).join(', ')
   const shipping = [c.shippingAddress, c.shippingCity, c.shippingState, c.shippingPincode].filter(Boolean).join(', ')
   const showHsn = template.showHsn !== false
-  const rolls = dc.so.isJobWork ? (dc.rolls ?? []) : []
-  const byRolls = rolls.length > 0
+  const trace = dc.so.isJobWork ? (data.trace ?? {}) : {}
+  const byRolls = Object.values(trace).some((t) => t.rolls.length > 0)
+
 
   // The goods as the sales order prints them (28 Nov 2026): code, description,
   // colour, fabric, gender, print name and every size with its pieces. No
@@ -342,70 +342,74 @@ export default function PrintDeliveryChallan() {
   )
 
   // ── The job challan, roll by roll ──────────────────────────────────────
-  const lineFor = (soLineId: string | null) => dc.lines.find((l) => l.soLineId === soLineId || l.soLine?.id === soLineId) ?? dc.lines[0]
-  const groups: Array<{ key: string; rows: typeof rolls }> = []
-  for (const r of rolls) {
-    const key = r.soLineId ?? ''
-    const g = groups.find((x) => x.key === key)
-    if (g) g.rows.push(r)
-    else groups.push({ key, rows: [r] })
-  }
-  /** Each roll's metres once, however many rows (grades) it is on. */
-  const metresOf = (rs: typeof rolls) => {
-    const seen = new Map<string, number>()
-    for (const r of rs) seen.set(r.roll.id, Number(r.roll.meters))
-    return [...seen.values()].reduce((s, m) => s + m, 0)
+  // One group per garment (fresh and B-grade together), its rolls from production.
+  const garmentGroups: Array<{ soLineId: string; lines: typeof dc.lines }> = []
+  for (const l of dc.lines) {
+    const key = l.soLineId ?? l.soLine?.id ?? l.id
+    const g = garmentGroups.find((x) => x.soLineId === key)
+    if (g) g.lines.push(l)
+    else garmentGroups.push({ soLineId: key, lines: [l] })
   }
   let sn = 0
-  const rollRows = groups.flatMap((g) => {
-    const line = lineFor(g.key || null)
-    const garment = line ? (
+  const rollRows = garmentGroups.flatMap((g) => {
+    const line = g.lines[0]
+    const rolls = trace[g.soLineId]?.rolls ?? []
+    const fresh = g.lines.filter((l) => l.grade !== 'B').reduce((s, l) => s + Number(l.qty), 0)
+    const bGrade = g.lines.filter((l) => l.grade === 'B').reduce((s, l) => s + Number(l.qty), 0)
+    const pcsAll = fresh + bGrade
+    const garment = (
       <>
         <strong>{line.item.name}</strong>
         <div style={{ ...CODE, color: MUTED }}>{[line.soLine?.styleCode ?? line.item.style?.code, line.item.code].filter(Boolean).join(' · ')}</div>
       </>
-    ) : (
-      <Dash />
     )
-    const hsn = line?.soLine?.hsnCode ?? line?.item.hsnCode ?? null
-    // The garment and its SAC once, run down beside all its rolls (one merged cell each).
-    const body = g.rows.map((r, j) => ({
-      key: r.id,
-      ...(j === 0 ? { spans: { garment: g.rows.length, hsn: g.rows.length } } : { covered: ['garment', 'hsn'] }),
+    const hsn = line.soLine?.hsnCode ?? line.item.hsnCode ?? null
+    const grade = bGrade && fresh ? `Fresh ${qty(fresh)} · B ${qty(bGrade)}` : bGrade ? 'B-grade' : 'Fresh Pc'
+    const n = Math.max(1, rolls.length)
+    // The garment, its SAC, grade and pieces once, run down beside all its rolls.
+    const merged = ['garment', 'hsn', 'grade', 'pcs']
+    const body = (rolls.length ? rolls : [null]).map((r, j) => ({
+      key: `${g.soLineId}-${r?.barcode ?? 'none'}`,
+      ...(j === 0 ? { spans: Object.fromEntries(merged.map((k) => [k, n])) } : { covered: merged }),
       cells: {
         sn: ++sn,
         garment: j === 0 ? garment : '',
         hsn: j > 0 ? '' : hsn ? <span style={CODE}>{hsn}</span> : <Dash />,
-        design: r.roll.designNo ?? <Dash />,
-        grade: gradeLabel(r.grade),
-        barcode: <span style={CODE}>{r.roll.barcode}</span>,
-        bale: r.baleNo ?? <Dash />,
-        mtrs: <span style={NUM}>{metres(Number(r.roll.meters))}</span>,
-        pcs: <span style={NUM}>{qty(Number(r.pieces))}</span>,
+        grade: j === 0 ? grade : '',
+        design: r?.designNo ?? <Dash />,
+        lot: r?.lotNo ?? <Dash />,
+        barcode: r ? <span style={CODE}>{r.barcode}</span> : <Dash />,
+        mtrs: r ? <span style={NUM}>{metres(r.issued)}</span> : <Dash />,
+        pcs: j === 0 ? <span style={NUM}>{qty(pcsAll)}</span> : '',
       },
     }))
+    if (!rolls.length) return body
     const total = {
-      key: `${g.key}-total`,
+      key: `${g.soLineId}-total`,
       total: true,
       shade: true,
       cells: {
         sn: '',
         garment: 'Total',
         hsn: '',
-        design: '',
         grade: '',
-        barcode: `${new Set(g.rows.map((r) => r.roll.id)).size} rolls`,
-        bale: '',
-        mtrs: <span style={NUM}>{metres(metresOf(g.rows))}</span>,
-        pcs: <span style={NUM}>{qty(g.rows.reduce((s, r) => s + Number(r.pieces), 0))}</span>,
+        design: '',
+        lot: '',
+        barcode: `${rolls.length} ${rolls.length === 1 ? 'roll' : 'rolls'}`,
+        mtrs: <span style={NUM}>{metres(rolls.reduce((s, r) => s + r.issued, 0))}</span>,
+        pcs: <span style={NUM}>{qty(pcsAll)}</span>,
       },
     }
     return [...body, total]
   })
 
-  const bales = [...new Set(rolls.map((r) => r.baleNo?.trim()).filter((b): b is string => !!b))]
-  const rollMetres = metresOf(rolls)
+  const bales = (dc.baleNumbers ?? '')
+    .split(/[,;]/)
+    .map((b) => b.trim())
+    .filter(Boolean)
+  const rollMetres = Object.values(trace).reduce((s, t) => s + t.rolls.reduce((x, r) => x + r.issued, 0), 0)
   const pieces = dc.lines.reduce((s, l) => s + Number(l.qty), 0)
+  const grossWeight = dc.grossWeight != null && Number(dc.grossWeight) > 0 ? Number(dc.grossWeight) : null
 
   // Carton by carton: what is in each, by style, item and size.
   const cartonRows = (dc.fgCartons ?? []).flatMap((carton) => {
@@ -433,8 +437,12 @@ export default function PrintDeliveryChallan() {
   })
 
   // What came in on each receipt beside what was packed from it on this challan.
-  const reconRows = (data.reconciliation ?? []).map((r) => ({
+  const recon = data.reconciliation ?? []
+  const packed = ['pckDate', 'chl', 'pckPcs', 'pcsMtr', 'shMtr', 'shPct']
+  const reconRows = recon.map((r, i) => ({
     key: r.grnNumber,
+    // What this challan packed is one figure, run down beside every receipt its fabric came on.
+    ...(i === 0 ? { spans: Object.fromEntries(packed.map((k) => [k, recon.length])) } : { covered: packed }),
     cells: {
       recDate: shortDate(r.receiptDate),
       lot: r.lots.join(', ') || <Dash />,
@@ -443,7 +451,7 @@ export default function PrintDeliveryChallan() {
       recMtr: <span style={NUM}>{metres(r.receivedMeters)}</span>,
       pckDate: shortDate(dc.dcDate),
       chl: <span style={CODE}>{dc.dcNumber}</span>,
-      pckPcs: <span style={NUM}>{qty(r.packedPieces)}</span>,
+      pckPcs: <span style={NUM}>{qty(pieces)}</span>,
       // Left blank until the business confirms how they are worked out (28 Nov 2026).
       pcsMtr: '',
       shMtr: '',
@@ -462,12 +470,9 @@ export default function PrintDeliveryChallan() {
 
   const totals: TotalLine[] = [
     { label: 'Pieces', value: qty(pieces) },
-    ...(byRolls
-      ? [
-          { label: 'Metres', value: metres(rollMetres) },
-          { label: 'Bales', value: bales.length ? String(bales.length) : <Dash /> },
-        ]
-      : []),
+    ...(byRolls ? [{ label: 'Metres', value: metres(rollMetres) }] : []),
+    ...(bales.length ? [{ label: 'Bales', value: String(bales.length) }] : []),
+    ...(grossWeight ? [{ label: 'Gross weight', value: `${grossWeight.toLocaleString('en-IN', { maximumFractionDigits: 2 })} kg` }] : []),
     { label: 'Cartons', value: dc.cartons != null ? String(dc.cartons) : <Dash /> },
     { label: 'Value', value: money(data.value) },
     { label: 'GST', value: money(data.gst) },
@@ -515,7 +520,8 @@ export default function PrintDeliveryChallan() {
           !!data.brand?.name && ['Brand', data.brand?.name],
           dc.so.isJobWork && ['Type', 'Job work (your fabric)'],
           !!dc.so.broker?.name && ['Broker', dc.so.broker?.name],
-          byRolls && ['Bale No', bales.length ? `${bales.join(', ')} (${bales.length})` : null],
+          bales.length > 0 && ['Bale No', `${bales.join(', ')} (${bales.length})`],
+          !!dc.packingListRef && ['Packing list', dc.packingListRef, true],
           ['From store', dc.warehouse?.name ?? null],
         ],
       }}
