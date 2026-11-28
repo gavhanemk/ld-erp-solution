@@ -768,6 +768,8 @@ model User {
   vouchersCreated        Voucher[]                 @relation("VoucherCreatedBy")
   vouchersUpdated        Voucher[]                 @relation("VoucherUpdatedBy")
   vouchersCancelled      Voucher[]                 @relation("VoucherCancelledBy")
+  voucherRevisions       VoucherRevision[]         @relation("VoucherRevisionBy")
+  periodEvents           PeriodEvent[]             @relation("PeriodEventBy")
   stockValuesSet         StockValue[]              @relation("StockValueSetBy")
   mosClosed              ManufacturingOrder[]      @relation("MOClosedBy")
   quotesCreated          SalesQuotation[]          @relation("QuoteCreatedBy")
@@ -5270,8 +5272,10 @@ model CostCentre {
 /// A voucher typed in Accounts has no source. One written for a sales
 /// invoice, a receipt or a purchase bill names its document, takes that
 /// document's number, and is rewritten whenever the document changes. Nothing
-/// is ever deleted: a voucher is cancelled, keeping its number and its lines,
-/// and stops counting.
+/// is ever deleted (the database refuses it): a voucher is cancelled, keeping
+/// its number and its lines, and stops counting; or a reversing entry undoes it
+/// on an open day. Every change keeps the voucher as it stood before, as a
+/// numbered revision (Phase 7, 30 Nov 2026).
 model Voucher {
   id            String        @id @default(cuid())
   kind          VoucherKind
@@ -5301,16 +5305,100 @@ model Voucher {
   /// expense lines now need: allowed only by someone who approves in
   /// Accounts, with a reason, and listed among the unallocated entries.
   legacyImport  Boolean       @default(false)
+  /// How many times it has changed since it was written: its last revision's number.
+  revision      Int           @default(0)
+  /// For a reversing entry: the voucher it undoes, which stays as it was.
+  reversalOfId  String?
+  reversalOf    Voucher?      @relation("VoucherReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversals     Voucher[]     @relation("VoucherReversal")
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
-  lines VoucherLine[]
+  lines             VoucherLine[]
+  revisions         VoucherRevision[]
+  allocationSources AllocationRunSource[]
 
   @@unique([kind, voucherNo])
   @@unique([sourceType, sourceId])
   @@index([date])
   @@index([financialYear, kind])
+  @@index([reversalOfId])
   @@map("acc_vouchers")
+}
+
+/// What happened to a voucher.
+enum VoucherRevisionAction {
+  /// A voucher typed in Accounts, altered there.
+  ALTERED
+  /// Rewritten to match its document: the document changed, or the books were posted again.
+  REWRITTEN
+  /// Only which bills its amounts settle changed: allowed in a closed period.
+  BILLS_CHANGED
+  CANCELLED
+  /// A cancelled voucher standing again, with its document.
+  REINSTATED
+  /// Taken out of the books (dated before they now start, or nothing left to post): kept, cancelled.
+  REMOVED
+  /// Bank statement dates set or cleared on reconciliation.
+  BANK_DATES
+  /// A reversing entry was posted against it; the voucher itself is unchanged.
+  REVERSED
+}
+
+/// One change to a voucher, holding the voucher exactly as it stood before it:
+/// its header, lines, bills and bank dates. Written in the same transaction as
+/// the change, and never altered or deleted after (the database refuses both).
+model VoucherRevision {
+  id            String                @id @default(cuid())
+  voucherId     String
+  voucher       Voucher               @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  /// 1 for the first change, then 2, 3…
+  revision      Int
+  action        VoucherRevisionAction
+  /// The voucher before the change, as stored.
+  snapshot      Json
+  reason        String?
+  /// Where the change came from: "accounts" (typed there), the document type (SALES_INVOICE…), "repost", "bank-reco".
+  source        String
+  changedById   String?
+  changedBy     User?                 @relation("VoucherRevisionBy", fields: [changedById], references: [id], onDelete: Restrict)
+  /// The name as it was on the day, kept if the user is renamed later.
+  changedByName String?
+  /// Set when the change fell in a closed period that stood reopened.
+  periodEventId String?
+  periodEvent   PeriodEvent?          @relation(fields: [periodEventId], references: [id], onDelete: Restrict)
+  changedAt     DateTime              @default(now())
+
+  @@unique([voucherId, revision])
+  @@index([changedAt])
+  @@map("acc_voucher_revisions")
+}
+
+/// Closing the books, reopening them, and moving the day they start.
+enum PeriodEventKind {
+  CLOSED
+  REOPENED
+  START_SET
+}
+
+/// One change to the books' dates, with who made it and why. A reopening
+/// needs a reason and its own right; revisions made while it stands name it.
+model PeriodEvent {
+  id        String            @id @default(cuid())
+  kind      PeriodEventKind
+  /// The closing date (or the start) before and after; empty means none.
+  fromDate  DateTime?
+  toDate    DateTime?
+  reason    String?
+  userId    String?
+  user      User?             @relation("PeriodEventBy", fields: [userId], references: [id], onDelete: Restrict)
+  userName  String?
+  at        DateTime          @default(now())
+
+  revisions VoucherRevision[]
+
+  @@index([at])
+  @@map("acc_period_events")
 }
 
 /// One ledger debited or credited by a voucher. Exactly one of debit and
@@ -7581,6 +7669,7 @@ model AllocationRunSource {
   runId        String
   run          AllocationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
   voucherId    String
+  voucher      Voucher       @relation(fields: [voucherId], references: [id], onDelete: Restrict)
   ledgerId     String
   departmentId String?
   amount       Decimal       @db.Decimal(14, 2)

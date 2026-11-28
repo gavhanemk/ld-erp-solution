@@ -71,6 +71,18 @@ router.patch('/company', requirePermission(SETTINGS, 'edit'), async (req: AuthRe
   const before = await prisma.company.findFirst()
   if (!before) throw new AppError('Company profile not set up yet', 404, 'NOT_FOUND')
 
+  const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null)
+  if (data.booksStartDate !== undefined && day(data.booksStartDate) !== day(before.booksStartDate)) {
+    throw new AppError(
+      'The day the books start is set in Accounts → Chart of Accounts, where it is checked against the vouchers already in the books and kept with a reason.',
+      409,
+      'BOOKS_START_IN_ACCOUNTS',
+    )
+  }
+  if (data.fyStartMonth !== undefined && data.fyStartMonth !== before.fyStartMonth && (await prisma.voucher.count()) > 0) {
+    throw new AppError('The month the financial year starts in is fixed once the books have vouchers: moving it would restate every year already in them.', 409, 'FY_START_FIXED')
+  }
+
   const after = await prisma.company.update({ where: { id: before.id }, data })
 
   await writeAuditLog(req, {
@@ -485,6 +497,7 @@ const ACTION_LABELS: Record<string, string> = {
  */
 const ACTION_LABEL_OVERRIDES: Record<string, string> = {
   'sales.charge-gst:edit': 'Allow',
+  'accounts.books-reopen:approve': 'Allow',
   'ai:create': 'May change records',
   'ai:edit': 'May change records',
   'ai:delete': 'May change records',

@@ -218,7 +218,7 @@ export function masterResource<T>(resource: string) {
  * remove a button somebody needs and give them nothing to go on.
  */
 /** The access catalogue's rights given only by name (apps/api/src/lib/accessCatalog.ts `explicit`). */
-const EXPLICIT_RIGHTS = new Set(['sales.charge-gst'])
+const EXPLICIT_RIGHTS = new Set(['sales.charge-gst', 'accounts.books-reopen'])
 
 export const can = (module: string, action: string): boolean => {
   const user = currentUser() as { role?: string; superAdmin?: boolean; permissions?: string[] } | null

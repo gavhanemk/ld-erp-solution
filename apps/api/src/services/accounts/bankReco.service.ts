@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import { AppError } from '../../middleware/errorHandler'
-import { booksSettings, dayValue, fyStartOf, istDay, KIND_LABEL, ledgerFigures, r2, todayIst } from './books.service'
+import { booksSettings, dayValue, fyStartOf, istDay, KIND_LABEL, ledgerFigures, r2, todayIst, dayText } from './books.service'
+import { keepRevision } from './revision.service'
 import { moneyGroupIds } from './voucher.service'
 
 /**
@@ -100,14 +101,18 @@ export async function bankReco(tx: Tx, ledgerId: string, asOn: string) {
 
 /**
  * Sets, or clears, the bank date on bank lines. A line cannot be in the bank
- * before its voucher was written, nor after today.
+ * before its voucher was written, nor after today. A closed period's
+ * reconciliation stays as it was filed: no bank date on or before the closing
+ * day is set or cleared (a cheque written then and cleared after still takes
+ * its date). Each voucher touched keeps a revision first.
  */
-export async function setBankDates(tx: Tx, entries: Array<{ lineId: string; bankDate: string | null }>) {
+export async function setBankDates(tx: Tx, entries: Array<{ lineId: string; bankDate: string | null }>, userId?: string | null) {
   const lines = await tx.voucherLine.findMany({
     where: { id: { in: entries.map((e) => e.lineId) } },
-    select: { id: true, ledger: { select: { name: true, bankAccountId: true } }, voucher: { select: { voucherNo: true, date: true, status: true } } },
+    select: { id: true, voucherId: true, bankDate: true, ledger: { select: { name: true, bankAccountId: true } }, voucher: { select: { voucherNo: true, date: true, status: true } } },
   })
   const byId = new Map(lines.map((l) => [l.id, l]))
+  const s = await booksSettings(tx)
   const today = todayIst()
   for (const e of entries) {
     const l = byId.get(e.lineId)
@@ -119,8 +124,24 @@ export async function setBankDates(tx: Tx, entries: Array<{ lineId: string; bank
       if (e.bankDate < written) throw new AppError(`${l.voucher.voucherNo} is dated ${written}; the bank cannot show it before that.`, 400, 'BEFORE_VOUCHER')
       if (e.bankDate > today) throw new AppError(`A bank date cannot be after today (${l.voucher.voucherNo}).`, 400, 'FUTURE_DATE')
     }
+    const was = l.bankDate ? istDay(l.bankDate) : null
+    if (s.lockedUpTo && was !== e.bankDate && ((was && was <= s.lockedUpTo) || (e.bankDate && e.bankDate <= s.lockedUpTo))) {
+      throw new AppError(
+        `The books are closed up to ${dayText(s.lockedUpTo)}, so the bank date of ${l.voucher.voucherNo} on ${l.ledger.name} (${was ? dayText(was) : 'none'}) cannot ${e.bankDate ? `become ${dayText(e.bankDate)}` : 'be cleared'}.`,
+        409,
+        'PERIOD_LOCKED',
+      )
+    }
   }
-  for (const e of entries) {
+  const changed = entries.filter((e) => {
+    const l = byId.get(e.lineId)!
+    return (l.bankDate ? istDay(l.bankDate) : null) !== e.bankDate
+  })
+  // Each voucher's dates as they stood, once, before any of them change.
+  for (const voucherId of new Set(changed.map((e) => byId.get(e.lineId)!.voucherId))) {
+    await keepRevision(tx, voucherId, { action: 'BANK_DATES', source: 'bank-reco', userId })
+  }
+  for (const e of changed) {
     await tx.voucherLine.update({ where: { id: e.lineId }, data: { bankDate: e.bankDate ? dayValue(e.bankDate) : null } })
   }
   return entries.length

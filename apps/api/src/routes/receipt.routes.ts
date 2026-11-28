@@ -493,6 +493,7 @@ export async function allocateReceipt(
   tx: Prisma.TransactionClient,
   id: string,
   allocations: Array<{ invoiceId: string; amount: number; tdsAmount?: number }>,
+  userId?: string | null,
 ) {
   const receipt = await tx.paymentReceipt.findUnique({
     where: { id },
@@ -524,7 +525,7 @@ export async function allocateReceipt(
     data: { onAccount: round2(Number(receipt.onAccount) - applied.cash), tdsAmount: round2(Number(receipt.tdsAmount) + applied.tds) },
   })
   // The money moves from on account to the invoices it now settles.
-  await postWithin(tx, 'SALES_RECEIPT', receipt.id)
+  await postWithin(tx, 'SALES_RECEIPT', receipt.id, userId)
   return tx.paymentReceipt.findUniqueOrThrow({ where: { id: receipt.id }, include: receiptInclude })
 }
 
@@ -532,7 +533,7 @@ export async function allocateReceipt(
 router.post('/:id/allocate', async (req: AuthRequest, res) => {
   must(req, 'create', 'apply receipts')
   const { allocations } = z.object({ allocations: allocationList }).parse(req.body)
-  const after = await prisma.$transaction((tx) => allocateReceipt(tx, req.params.id, allocations ?? []), { timeout: 30_000 })
+  const after = await prisma.$transaction((tx) => allocateReceipt(tx, req.params.id, allocations ?? [], req.user!.id), { timeout: 30_000 })
   await writeAuditLog(req, { module: 'sales', action: 'UPDATE', entityType: 'PaymentReceipt', entityId: after.id, after })
   res.json({
     success: true,

@@ -2,13 +2,13 @@
 
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Ban, BookOpenCheck, History, Pencil, Printer, X } from 'lucide-react'
+import { AlertCircle, Ban, BookOpenCheck, History, Pencil, Printer, Undo2, X } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { modeLabel } from '@/components/sales/status'
 import Link from 'next/link'
-import { BILL_KIND_LABEL, KIND_BADGE, SOURCE_LABEL, amountOrBlank, day, inr, sourceLink, type BillKind, type ManualKind, type VoucherKind } from './books'
+import { BILL_KIND_LABEL, KIND_BADGE, SOURCE_LABEL, amountOrBlank, day, inr, sourceLink, todayIst, type BillKind, type ManualKind, type VoucherKind } from './books'
 
 interface Detail {
   id: string
@@ -48,6 +48,51 @@ interface Detail {
     after: { status?: string; reason?: string; amount?: number } | null
     user: { name: string }
   }>
+  /** Every change since revisions were kept: each holds the voucher as it stood before it. */
+  revisions: Array<{
+    revision: number
+    action: RevisionAction
+    reason: string | null
+    source: string
+    changedByName: string | null
+    changedAt: string
+    periodEventId: string | null
+  }>
+  /** The voucher this reversing entry undoes. */
+  reversalOf: { id: string; voucherNo: string; date: string } | null
+  /** The reversing entries made against it (a cancelled one no longer undoes it). */
+  reversals: Array<{ id: string; voucherNo: string; date: string; status: 'POSTED' | 'CANCELLED' }>
+}
+
+type RevisionAction = 'ALTERED' | 'REWRITTEN' | 'BILLS_CHANGED' | 'CANCELLED' | 'REINSTATED' | 'REMOVED' | 'BANK_DATES' | 'REVERSED'
+
+const REVISION_LABEL: Record<RevisionAction, string> = {
+  ALTERED: 'Altered',
+  REWRITTEN: 'Rewritten with its document',
+  BILLS_CHANGED: 'The bills it settles changed',
+  CANCELLED: 'Cancelled',
+  REINSTATED: 'Stood again with its document',
+  REMOVED: 'Taken out of the books',
+  BANK_DATES: 'Bank dates set',
+  REVERSED: 'Reversed',
+}
+
+/** Where a change came from, in words; nothing for a voucher typed in Accounts. */
+const sourceWords = (source: string) =>
+  source === 'accounts' ? '' : source === 'repost' ? 'posted again from the Day Book' : source === 'bank-reco' ? 'bank reconciliation' : (SOURCE_LABEL[source] ?? source).toLowerCase()
+
+/** A voucher as it stood before one change. */
+interface AsItWas {
+  revision: number
+  voucher: {
+    voucherNo: string
+    date: string
+    narration: string | null
+    amount: number
+    status: 'POSTED' | 'CANCELLED'
+    cancelReason: string | null
+    lines: Array<{ ledger: string | null; debit: number; credit: number; costCentre: string | null; department: string | null; bankDate: string | null; bills: Array<{ kind: BillKind; billNo: string; amount: number }> }>
+  }
 }
 
 const when = (iso: string) =>
@@ -75,18 +120,22 @@ export function VoucherView({
   const [v, setV] = useState<Detail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState(false)
+  const [reversing, setReversing] = useState(false)
+  const [reverseOn, setReverseOn] = useState(todayIst())
+  const [asItWas, setAsItWas] = useState<AsItWas | null>(null)
   const [busy, setBusy] = useState(false)
   const [mounted, setMounted] = useState(false)
   useEffect(() => setMounted(true), [])
 
   useEscape(() => {
-    if (!cancelling) onClose()
+    if (!cancelling && !reversing) onClose()
   }, !!voucherId)
 
   useEffect(() => {
     if (!voucherId) return
     setV(null)
     setError(null)
+    setAsItWas(null)
     api
       .get<{ data: Detail }>(`/accounts/vouchers/${voucherId}`)
       .then((r) => setV(r.data))
@@ -96,6 +145,34 @@ export function VoucherView({
   if (!voucherId || !mounted) return null
   const typedHere = v && !v.sourceType
   const live = v?.status === 'POSTED'
+  // Undone by a reversing entry that stands: it stays as it was until that is cancelled.
+  const reversedBy = v?.reversals.find((r) => r.status === 'POSTED') ?? null
+
+  const showRevision = async (n: number) => {
+    if (!v) return
+    if (asItWas?.revision === n) return setAsItWas(null)
+    try {
+      setAsItWas((await api.get<{ data: AsItWas }>(`/accounts/vouchers/${v.id}/revisions/${n}`)).data)
+    } catch (err) {
+      setError(apiErrorMessage(err, 'Could not load that revision.'))
+    }
+  }
+
+  const reverse = async (reason: string) => {
+    if (!v) return
+    setBusy(true)
+    try {
+      const res = await api.post<{ message: string }>(`/accounts/vouchers/${v.id}/reverse`, { date: reverseOn, reason })
+      setReversing(false)
+      onChanged(res.message)
+      onClose()
+    } catch (err) {
+      setError(apiErrorMessage(err, 'Could not reverse the voucher.'))
+      setReversing(false)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const cancel = async (reason: string) => {
     if (!v) return
@@ -143,12 +220,25 @@ export function VoucherView({
                 <Printer size={15} /> Print
               </a>
             )}
-            {typedHere && live && can('accounts', 'edit') && (
+            {typedHere && live && !reversedBy && !v.reversalOf && can('accounts', 'edit') && (
               <button type="button" className="btn-secondary" onClick={() => onAlter(v.id, v.kind as ManualKind)}>
                 <Pencil size={15} /> Alter
               </button>
             )}
-            {typedHere && live && can('accounts', 'delete') && (
+            {typedHere && live && !reversedBy && !v.reversalOf && can('accounts', 'delete') && (
+              <button
+                type="button"
+                className="btn-secondary"
+                title="Undo it with a reversing entry on an open day; the voucher itself stays as it is. The way to correct a closed month."
+                onClick={() => {
+                  setReverseOn(todayIst())
+                  setReversing(true)
+                }}
+              >
+                <Undo2 size={15} /> Reverse
+              </button>
+            )}
+            {typedHere && live && !reversedBy && can('accounts', 'delete') && (
               <button type="button" className="btn-danger" onClick={() => setCancelling(true)}>
                 <Ban size={15} /> Cancel
               </button>
@@ -177,6 +267,22 @@ export function VoucherView({
                   </Link>
                   . It changes, or is cancelled, only with that document.
                 </p>
+              )}
+              {reversedBy && (
+                <div className="border-border bg-muted/30 rounded-lg border p-3 text-sm">
+                  <p className="text-foreground font-medium">
+                    Undone by the reversing entry <span className="font-mono">{reversedBy.voucherNo}</span> of {day(reversedBy.date)}
+                  </p>
+                  <p className="text-muted-foreground mt-0.5">This voucher stays as it was, in its own period. Cancel the reversing entry if it was a mistake.</p>
+                </div>
+              )}
+              {v.reversalOf && (
+                <div className="border-border bg-muted/30 rounded-lg border p-3 text-sm">
+                  <p className="text-foreground font-medium">
+                    Reverses <span className="font-mono">{v.reversalOf.voucherNo}</span> of {day(v.reversalOf.date)}, line for line
+                  </p>
+                  <p className="text-muted-foreground mt-0.5">It is not altered; cancelled, it puts {v.reversalOf.voucherNo} back in force.</p>
+                </div>
               )}
               {v.status === 'CANCELLED' && (
                 <div className="border-destructive/40 bg-destructive/5 rounded-lg border p-3 text-sm">
@@ -260,12 +366,72 @@ export function VoucherView({
                           : ''}
                       </li>
                     ))}
+                  {v.revisions.map((r) => (
+                    <li key={r.revision}>
+                      <span className="text-foreground font-mono">Rev {r.revision}</span> · {REVISION_LABEL[r.action]} by {r.changedByName ?? 'the system'} on {when(r.changedAt)}
+                      {sourceWords(r.source) && ` (${sourceWords(r.source)})`}
+                      {r.reason ? ` — ${r.reason}` : ''}
+                      {r.periodEventId && ' · while a closed period stood reopened'}{' '}
+                      <button type="button" className="text-primary hover:underline" onClick={() => void showRevision(r.revision)}>
+                        {asItWas?.revision === r.revision ? 'Hide' : 'See it as it was'}
+                      </button>
+                      {asItWas?.revision === r.revision && (
+                        <div className="border-border mt-1.5 mb-2 rounded-lg border p-2">
+                          <p className="text-muted-foreground mb-1">
+                            Before this change: {day(asItWas.voucher.date)} · ₹{inr(asItWas.voucher.amount)}
+                            {asItWas.voucher.status === 'CANCELLED' ? ` · cancelled${asItWas.voucher.cancelReason ? ` (${asItWas.voucher.cancelReason})` : ''}` : ''}
+                            {asItWas.voucher.narration ? ` · ${asItWas.voucher.narration}` : ''}
+                          </p>
+                          <table className="data-table w-full text-xs">
+                            <thead>
+                              <tr>
+                                <th>Ledger</th>
+                                <th>Brand / department</th>
+                                <th className="text-right">Debit ₹</th>
+                                <th className="text-right">Credit ₹</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {asItWas.voucher.lines.map((l, i) => (
+                                <tr key={i}>
+                                  <td>
+                                    {l.ledger}
+                                    {l.bills.length > 0 && <span className="text-muted-foreground"> · {l.bills.map((b) => `${BILL_KIND_LABEL[b.kind]} ${b.billNo} ₹${inr(b.amount)}`).join(', ')}</span>}
+                                    {l.bankDate && <span className="text-muted-foreground"> · in the bank {day(l.bankDate)}</span>}
+                                  </td>
+                                  <td className="text-muted-foreground">{[l.costCentre, l.department].filter(Boolean).join(' / ')}</td>
+                                  <td className="text-right tabular-nums">{amountOrBlank(l.debit)}</td>
+                                  <td className="text-right tabular-nums">{amountOrBlank(l.credit)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </li>
+                  ))}
                 </ul>
               </div>
             </>
           )}
         </div>
       </div>
+      {reversing && v && (
+        <ReasonDialog
+          title={`Reverse ${v.voucherNo}?`}
+          description={`A ${v.kind === 'PAYMENT' ? 'receipt' : v.kind === 'RECEIPT' ? 'payment' : v.kindLabel.toLowerCase()} is entered on the day below with the same ledgers, debits and credits swapped, and each bill put back as it was. ${v.voucherNo} itself stays exactly as it is, in its own period.`}
+          confirmLabel="Reverse it"
+          minLength={5}
+          busy={busy}
+          onConfirm={(reason) => void reverse(reason)}
+          onCancel={() => setReversing(false)}
+        >
+          <label className="block">
+            <span className="form-label">Reversing entry dated</span>
+            <input type="date" className="form-input h-10" value={reverseOn} min={v.date} max={todayIst()} onChange={(e) => setReverseOn(e.target.value)} />
+          </label>
+        </ReasonDialog>
+      )}
       {cancelling && v && (
         <ReasonDialog
           title={`Cancel ${v.voucherNo}?`}

@@ -6,6 +6,7 @@ import { logger } from '../../utils/logger'
 import { keyedLedgerId, partyLedgerId } from './chart.service'
 import { allocationJournal, runDay } from './allocation.service'
 import { bankDatesOf, bankKey, booksSettings, checkBalancedNow, dayText, dayValue, istDay, r2, type BooksSettings } from './books.service'
+import { keepRevision } from './revision.service'
 
 /**
  * Sales and Purchase documents into the books.
@@ -714,7 +715,12 @@ const billPrint = (lines: Array<{ ledgerId: string; refs: PlanRef[] }>) =>
 
 export type PostResult = 'created' | 'updated' | 'cancelled' | 'removed' | 'unchanged' | 'none'
 
-async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan: Plan | null, userId?: string | null): Promise<PostResult> {
+/**
+ * `via` names where a change came from, for the voucher's revisions: the
+ * document type when its document changed, "repost" when Accounts posted the
+ * books' documents again.
+ */
+async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan: Plan | null, userId?: string | null, via: string = sourceType): Promise<PostResult> {
   const s = await booksSettings(tx)
   const existing = await tx.voucher.findUnique({
     where: { sourceType_sourceId: { sourceType, sourceId } },
@@ -724,20 +730,34 @@ async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan:
   const what = `${SOURCE_LABEL[sourceType].toLowerCase()} ${plan?.voucherNo ?? existing?.voucherNo ?? ''}`.trim()
   const oldDay = existing ? istDay(existing.date) : null
 
-  // Not in the books: before they start, or nothing to post.
+  // Not in the books: before they start, or nothing to post. The voucher is
+  // kept, cancelled with the reason, never deleted (Phase 7): its number and
+  // lines stay readable, and it stands again if the document comes back in.
   if (!plan || !s.booksStart || plan.date < s.booksStart) {
     if (!existing) return 'none'
-    if (existing.status === 'POSTED' && locked(oldDay!)) throw lockedError(s, what, oldDay!)
-    await tx.voucher.delete({ where: { id: existing.id } })
+    if (existing.status === 'CANCELLED') return 'unchanged'
+    if (locked(oldDay!)) throw lockedError(s, what, oldDay!)
+    const why = !plan
+      ? 'Out of the books: nothing to post for its document any more'
+      : !s.booksStart
+        ? 'Out of the books: they have no start date'
+        : `Out of the books: dated before they start on ${dayText(s.booksStart)}`
+    await keepRevision(tx, existing.id, { action: 'REMOVED', reason: why, source: via, userId })
+    await tx.voucher.update({
+      where: { id: existing.id },
+      data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId ?? null, cancelReason: why, updatedById: userId ?? null },
+    })
     return 'removed'
   }
 
   if (plan.cancelled) {
     if (!existing || existing.status === 'CANCELLED') return existing ? 'unchanged' : 'none'
     if (locked(oldDay!)) throw lockedError(s, what, oldDay!)
+    const why = plan.cancelReason ?? 'Cancelled with its document'
+    await keepRevision(tx, existing.id, { action: 'CANCELLED', reason: why, source: via, userId })
     await tx.voucher.update({
       where: { id: existing.id },
-      data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId ?? null, cancelReason: plan.cancelReason ?? 'Cancelled with its document' },
+      data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId ?? null, cancelReason: why },
     })
     return 'cancelled'
   }
@@ -785,7 +805,26 @@ async function applyPlan(tx: Tx, sourceType: SourceType, sourceId: string, plan:
       existing.referenceNo === header.referenceNo &&
       existing.chequeNo === header.chequeNo &&
       (existing.chequeDate ? istDay(existing.chequeDate) : null) === (plan.chequeDate ?? null)
-    if (sameMoney && sameHeader && billPrint(had) === billPrint(plan.lines)) return 'unchanged'
+    const sameBills = billPrint(had) === billPrint(plan.lines)
+    if (sameMoney && sameHeader && sameBills) return 'unchanged'
+    // In a closed period the voucher keeps every word it was closed with
+    // (number, narration, cheque, mode): only which bills its amounts settle
+    // may change, and it changes nothing else.
+    if (locked(oldDay!)) {
+      if (sameBills) return 'unchanged'
+      await keepRevision(tx, existing.id, { action: 'BILLS_CHANGED', reason: 'Which bills it settles, in a closed period', source: via, userId })
+      await tx.voucher.update({ where: { id: existing.id }, data: { updatedById: userId ?? null } })
+      const banked = await bankDatesOf(tx, existing.id)
+      await tx.voucherLine.deleteMany({ where: { voucherId: existing.id } })
+      await writeLines(tx, existing.id, plan, banked)
+      return 'updated'
+    }
+    // What it said before is kept whole, as its next revision.
+    await keepRevision(tx, existing.id, {
+      action: existing.status === 'CANCELLED' ? 'REINSTATED' : sameMoney && sameHeader ? 'BILLS_CHANGED' : 'REWRITTEN',
+      source: via,
+      userId,
+    })
     await tx.voucher.update({
       where: { id: existing.id },
       data: { ...header, status: 'POSTED', cancelledAt: null, cancelledById: null, cancelReason: null, updatedById: userId ?? null },
@@ -840,9 +879,9 @@ async function writeLines(tx: Tx, voucherId: string, plan: Plan, banked = new Ma
  * Writes, rewrites or cancels a document's voucher to match the document as
  * it stands. An invoice brings its brokerage journal with it.
  */
-export async function postDocument(tx: Tx, sourceType: SourceType, sourceId: string, userId?: string | null): Promise<PostResult> {
-  const result = await applyPlan(tx, sourceType, sourceId, await PLANNERS[sourceType](tx, sourceId), userId)
-  if (sourceType === 'SALES_INVOICE') await applyPlan(tx, 'BROKERAGE', sourceId, await planBrokerage(tx, sourceId), userId)
+export async function postDocument(tx: Tx, sourceType: SourceType, sourceId: string, userId?: string | null, via?: string): Promise<PostResult> {
+  const result = await applyPlan(tx, sourceType, sourceId, await PLANNERS[sourceType](tx, sourceId), userId, via ?? sourceType)
+  if (sourceType === 'SALES_INVOICE') await applyPlan(tx, 'BROKERAGE', sourceId, await planBrokerage(tx, sourceId), userId, via ?? sourceType)
   return result
 }
 
@@ -938,7 +977,7 @@ export async function pendingDocuments(db: PrismaClient | Tx): Promise<{ booksSt
 
   // Vouchers of documents dated before the books now start.
   for (const v of vouchers) {
-    if (v.date < from && v.sourceType !== 'BROKERAGE') {
+    if (v.status === 'POSTED' && v.date < from && v.sourceType !== 'BROKERAGE') {
       pending.push({ sourceType: v.sourceType as SourceType, sourceId: v.sourceId!, number: v.voucherNo, date: istDay(v.date), party: '', amount: Number(v.amount), reason: 'before-start' })
     }
   }
@@ -984,7 +1023,7 @@ export async function postPending(db: PrismaClient, userId: string | null, all =
   work.sort((a, b) => ORDER.indexOf(a.sourceType) - ORDER.indexOf(b.sourceType))
   for (const w of work) {
     try {
-      const r = await db.$transaction((tx) => postDocument(tx, w.sourceType, w.sourceId, userId), { timeout: 30_000 })
+      const r = await db.$transaction((tx) => postDocument(tx, w.sourceType, w.sourceId, userId, 'repost'), { timeout: 30_000 })
       if (r === 'unchanged' || r === 'none') results.unchanged++
       else results.posted++
     } catch (err) {

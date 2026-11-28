@@ -147,6 +147,8 @@ export function VoucherDialog({
   const [chequeNo, setChequeNo] = useState('')
   const [chequeDate, setChequeDate] = useState('')
   const [narration, setNarration] = useState('')
+  // Why a saved voucher is being altered: kept on the revision that holds what it said before.
+  const [alterReason, setAlterReason] = useState('')
   const [lines, setLines] = useState<Line[]>([])
 
   const [saving, setSaving] = useState(false)
@@ -243,6 +245,7 @@ export function VoucherDialog({
           setChequeNo('')
           setChequeDate('')
           setNarration('')
+          setAlterReason('')
           setBills({})
         }
       } catch (err) {
@@ -396,9 +399,10 @@ export function VoucherDialog({
       }
     }
     if (totals.diff !== 0) return `Debits and credits differ by ₹${inr(totals.diff)}`
+    if (altering && alterReason.trim().length < 5) return 'Say why the voucher is being altered (a few words, kept with the change)'
     return null
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, lines, totals.diff, ledgers])
+  }, [loading, lines, totals.diff, ledgers, altering, alterReason])
 
   const save = async () => {
     if (problem) {
@@ -434,7 +438,7 @@ export function VoucherDialog({
     }
     try {
       const res = voucherId
-        ? await api.patch<{ data: { id: string; voucherNo: string }; message: string }>(`/accounts/vouchers/${voucherId}`, body)
+        ? await api.patch<{ data: { id: string; voucherNo: string }; message: string }>(`/accounts/vouchers/${voucherId}`, { ...body, alterReason: alterReason.trim() })
         : await api.post<{ data: { id: string; voucherNo: string }; message: string }>('/accounts/vouchers', { ...body, requestId: requestId.current })
       onSaved(res.message, res.data.id)
       onClose()
@@ -846,9 +850,22 @@ export function VoucherDialog({
                   onChange={(e) => setNarration(e.target.value)}
                   aria-label="Narration"
                 />
+                {altering && (
+                  <label className="mt-3 block">
+                    <span className="form-label">Why is it being altered?</span>
+                    <input
+                      className="form-input h-9"
+                      maxLength={500}
+                      value={alterReason}
+                      placeholder="Wrong ledger picked; amount as per the bill"
+                      onChange={(e) => setAlterReason(e.target.value)}
+                      aria-label="Why it is being altered"
+                    />
+                  </label>
+                )}
                 <p className="text-muted-foreground mt-1.5 flex items-start gap-1.5 text-xs">
                   <Info size={13} className="mt-px shrink-0" />
-                  A voucher is never deleted. Once saved it can be altered — the change is kept in its history — or cancelled with a reason.
+                  A voucher is never deleted. Once saved it can be altered with a reason — what it said before is kept as a revision — reversed on an open day, or cancelled with a reason.
                 </p>
               </Section>
             </>

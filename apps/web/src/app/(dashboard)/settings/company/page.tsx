@@ -245,7 +245,6 @@ function CompanyProfile() {
     }
     payload.name = (values.name ?? '').trim()
     payload.fyStartMonth = Number(values.fyStartMonth) || 4
-    payload.booksStartDate = (values.booksStartDate ?? '').trim() || null
 
     try {
       const res = await settingsApi.company.update(payload as Partial<Company>)
@@ -457,7 +456,7 @@ function CompanyProfile() {
           >
             {text('currentFY', { mono: true, placeholder: '2425', digits: true, maxLength: 4 })}
           </Field>
-          <Field label="Year starts in" htmlFor="fyStartMonth" error={errors.fyStartMonth}>
+          <Field label="Year starts in" htmlFor="fyStartMonth" error={errors.fyStartMonth} help="Fixed once the books have vouchers: moving it would restate every year already in them.">
             <SmartSelect
               id="fyStartMonth"
               className="form-input"
@@ -475,14 +474,16 @@ function CompanyProfile() {
             label="Books start from"
             htmlFor="booksStartDate"
             error={errors.booksStartDate}
-            help="Nothing can be dated before this. Set it to the day you start using the ERP."
+            help="Nothing can be dated before this. It is set in Accounts → Chart of Accounts, where it is checked against the vouchers already in the books and kept with a reason."
           >
             <input
               id="booksStartDate"
               type="date"
               className="form-input"
               value={(values.booksStartDate ?? '').slice(0, 10)}
-              onChange={(e) => set('booksStartDate', e.target.value)}
+              readOnly
+              aria-readonly="true"
+              title="Set in Accounts → Chart of Accounts"
             />
           </Field>
         </FieldGrid>

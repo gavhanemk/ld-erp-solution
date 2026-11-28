@@ -259,6 +259,17 @@ export const ACCESS_CATALOG: AccessModule[] = [
         ['/api/accounts/groups', '/api/accounts/cost-centres', '/api/accounts/opening', '/api/accounts/stock-value', '/api/accounts/settings'],
         'Groups, ledgers to start from, opening balances, stock value',
       ),
+      {
+        ...s(
+          'accounts.books-reopen',
+          'Reopen closed periods',
+          ['approve'],
+          [],
+          [],
+          'Move the books’ closing date back, or clear it, with a reason kept and every administrator told. Given only by ticking it here: an Accounts-wide grant does not include it.',
+        ),
+        explicit: true,
+      },
       s('accounts.outstanding', 'Outstanding', READ, ['/accounts/outstanding'], ['/api/accounts/outstanding']),
       s('accounts.gst', 'GST Returns', READ, ['/accounts/gst'], ['/api/accounts/gst']),
       s('accounts.tds', 'TDS', READ, ['/accounts/tds'], ['/api/accounts/tds']),

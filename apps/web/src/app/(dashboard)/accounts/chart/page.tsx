@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, CalendarCheck, FileSpreadsheet, FolderTree, Info, Loader2, Lock, Pencil, Plus, ReceiptText, RefreshCw, Scale, Search, Trash2, Wallet, X } from 'lucide-react'
+import { AlertCircle, CalendarCheck, FileSpreadsheet, FolderTree, History, Info, Loader2, Lock, Pencil, Plus, ReceiptText, RefreshCw, Scale, Search, Trash2, Wallet, X } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -475,22 +475,71 @@ function OpeningPosition({ onChanged }: { onChanged: (message: string) => void }
   )
 }
 
-/** The day the books start, and the day they are closed up to. */
+/** A change to the books' dates, as Accounts keeps it. */
+interface PeriodEvent {
+  id: string
+  kind: 'CLOSED' | 'REOPENED' | 'START_SET'
+  fromDate: string | null
+  toDate: string | null
+  reason: string | null
+  userName: string | null
+  at: string
+  /** Vouchers changed in the reopened stretch while it stood. */
+  voucherChanges: number
+}
+
+const eventWords = (e: PeriodEvent) =>
+  e.kind === 'CLOSED'
+    ? `Closed up to ${day(e.toDate!)}${e.fromDate ? ` (was ${day(e.fromDate)})` : ''}`
+    : e.kind === 'REOPENED'
+      ? `Reopened from ${day(e.fromDate!)}: ${e.toDate ? `closed only up to ${day(e.toDate)}` : 'every day open'}`
+      : e.fromDate
+        ? `Start moved from ${day(e.fromDate)} to ${day(e.toDate!)}`
+        : `The books set to start on ${day(e.toDate!)}`
+
+const eventWhen = (iso: string) =>
+  new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })
+
+/**
+ * The day the books start, the day they are closed up to, and every change to
+ * either, with who and why. Reopening a closed period needs its own right and
+ * a reason; so does moving the start once it is set.
+ */
 function BooksSettings({ summary, onSaved }: { summary: BooksSummary; onSaved: (message: string) => void }) {
   const [start, setStart] = useState(summary.booksStart ?? '')
   const [locked, setLocked] = useState(summary.lockedUpTo ?? '')
+  const [reason, setReason] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [events, setEvents] = useState<PeriodEvent[] | null>(null)
   const may = can('accounts', 'approve')
+  const mayReopen = can('accounts.books-reopen', 'approve')
+  // A reopening: the closing date moved back, or cleared.
+  const reopening = !!summary.lockedUpTo && (!locked || locked < summary.lockedUpTo)
+  const startMoves = !!summary.booksStart && !!start && start !== summary.booksStart
+  const needsReason = reopening || startMoves
+
+  useEffect(() => {
+    api
+      .get<{ data: PeriodEvent[] }>('/accounts/settings/events')
+      .then((r) => setEvents(r.data))
+      .catch(() => setEvents([]))
+  }, [summary])
 
   const save = async () => {
+    // Kept enabled: what is missing is said here.
+    if (!start) return setError('Set the day the books start first.')
+    if (reopening && !mayReopen) return setError('Reopening a closed period needs the “Reopen closed periods” right (Settings → People). Closing the books further does not.')
+    if (needsReason && reason.trim().length < 5) return setError(reopening ? 'Say why the closed period is being reopened.' : 'Say why the day the books start is moving.')
     setSaving(true)
     setError(null)
     try {
       const res = await api.patch<{ posting: { posted: number; failed: unknown[] } | null }>('/accounts/settings', {
         ...(start ? { booksStart: start } : {}),
         lockedUpTo: locked || null,
+        ...(needsReason ? { reason: reason.trim() } : {}),
       })
+      setReason('')
       const p = res.posting
       onSaved(
         p
@@ -535,6 +584,27 @@ function BooksSettings({ summary, onSaved }: { summary: BooksSummary; onSaved: (
         </div>
         {summary.lockedUpTo && <p className="text-muted-foreground text-xs">Closed now up to {day(summary.lockedUpTo)}.</p>}
       </div>
+      {needsReason && may && (
+        <div className="glass-card space-y-2 p-5 lg:col-span-2">
+          <label className="block">
+            <span className="form-label">{reopening ? 'Why is the closed period being reopened?' : 'Why is the day the books start moving?'}</span>
+            <input
+              className="form-input h-9"
+              maxLength={500}
+              value={reason}
+              placeholder={reopening ? 'October purchase bill came in late; GSTR-3B not yet filed' : 'Old books carried until the October audit closed'}
+              onChange={(e) => setReason(e.target.value)}
+              aria-label="Reason"
+            />
+          </label>
+          {reopening && (
+            <p className="text-muted-foreground text-xs">
+              Kept with the reopening, and every administrator is told. Vouchers changed while it stands say so in their history.
+              {!mayReopen && ' Reopening needs the “Reopen closed periods” right (Settings → People).'}
+            </p>
+          )}
+        </div>
+      )}
       {error && (
         <div className="border-destructive/40 bg-destructive/5 flex items-start gap-3 rounded-lg border p-3 lg:col-span-2">
           <AlertCircle size={16} className="text-destructive mt-0.5 shrink-0" />
@@ -543,12 +613,28 @@ function BooksSettings({ summary, onSaved }: { summary: BooksSummary; onSaved: (
       )}
       {may ? (
         <div className="lg:col-span-2">
-          <button className="btn-primary" onClick={() => void save()} disabled={saving || !start}>
+          <button className="btn-primary" onClick={() => void save()} disabled={saving}>
             {saving ? <Loader2 size={15} className="animate-spin" /> : <CalendarCheck size={15} />} Save the dates
           </button>
         </div>
       ) : (
         <p className="text-muted-foreground text-xs lg:col-span-2">Only someone who can approve in Accounts sets these dates.</p>
+      )}
+      {events && events.length > 0 && (
+        <div className="glass-card space-y-2 p-5 lg:col-span-2">
+          <h2 className="text-foreground flex items-center gap-2 text-sm font-semibold">
+            <History size={15} /> The books&apos; dates, as they were changed
+          </h2>
+          <ul className="text-muted-foreground space-y-1 text-xs">
+            {events.map((e) => (
+              <li key={e.id}>
+                <span className="text-foreground">{eventWords(e)}</span> by {e.userName ?? 'someone'} on {eventWhen(e.at)}
+                {e.reason ? ` — ${e.reason}` : ''}
+                {e.kind === 'REOPENED' && e.voucherChanges > 0 ? ` · ${e.voucherChanges} voucher change${e.voucherChanges === 1 ? '' : 's'} while it stood` : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   )

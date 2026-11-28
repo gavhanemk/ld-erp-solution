@@ -4,6 +4,7 @@ import { AppError } from '../../middleware/errorHandler'
 import { financialYearOf, nextDocumentNumber } from '../../lib/docNumber'
 import { VOUCHER_SERIES } from './chart.service'
 import { bankDatesOf, bankKey, booksSettings, checkBalancedNow, dayText, dayValue, istDay, openBills, r2, todayIst, type BooksSettings } from './books.service'
+import { keepRevision } from './revision.service'
 
 /**
  * Vouchers typed in Accounts: Payment, Receipt, Contra and Journal.
@@ -22,8 +23,10 @@ import { bankDatesOf, bankKey, booksSettings, checkBalancedNow, dayText, dayValu
  *     nothing dated after today;
  *   - a brand (cost centre) goes on income and expense lines only.
  *
- * Nothing is deleted. A voucher is altered — the audit trail keeps what it
- * said before — or cancelled with a reason, keeping its number.
+ * Nothing is deleted (the database refuses it). A voucher is altered with a
+ * reason — what it said before is kept whole as its revision — cancelled with
+ * a reason, keeping its number, or undone by a reversing entry on an open day,
+ * which is how a closed period is corrected.
  */
 
 type Tx = Prisma.TransactionClient
@@ -122,7 +125,7 @@ export async function moneyGroupIds(tx: Tx): Promise<Set<string>> {
 /** The checks on the day: after the books start, outside a closed period, not in the future. */
 export function checkDay(day: string, s: BooksSettings, what = 'A voucher') {
   if (!s.booksStart) {
-    throw new AppError('Set the day the books start (Settings → Company) before entering vouchers.', 409, 'BOOKS_NOT_STARTED')
+    throw new AppError('Set the day the books start (Accounts → Chart of Accounts) before entering vouchers.', 409, 'BOOKS_NOT_STARTED')
   }
   if (day < s.booksStart) {
     throw new AppError(`${what} cannot be dated before the books start on ${dayText(s.booksStart)}.`, 400, 'BEFORE_BOOKS')
@@ -143,6 +146,26 @@ interface Existing {
   date: Date
   /** Brought in from the old books: its expense lines keep their exemption. */
   legacyImport?: boolean
+  /** Why it is being altered: kept on its revision. */
+  reason?: string | null
+}
+
+/**
+ * A voucher a standing reversing entry has undone stays as it was; a reversing
+ * entry itself mirrors its voucher line for line, so it is never altered.
+ */
+async function refuseReversed(tx: Tx, id: string, doing: 'altered' | 'cancelled') {
+  const v = await tx.voucher.findUnique({
+    where: { id },
+    select: { voucherNo: true, reversalOf: { select: { voucherNo: true } }, reversals: { where: { status: 'POSTED' }, select: { voucherNo: true } } },
+  })
+  if (!v) return
+  if (v.reversals.length) {
+    throw new AppError(`${v.voucherNo} was undone by the reversing entry ${v.reversals[0].voucherNo}. Cancel that first if ${v.voucherNo} must be ${doing}.`, 409, 'REVERSED')
+  }
+  if (doing === 'altered' && v.reversalOf) {
+    throw new AppError(`${v.voucherNo} reverses ${v.reversalOf.voucherNo} line for line, so it is not altered. Cancel it, and reverse ${v.reversalOf.voucherNo} again if needed.`, 409, 'IS_REVERSAL')
+  }
 }
 
 /**
@@ -157,6 +180,7 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
     if (existing.kind !== input.kind) {
       throw new AppError('A voucher keeps its type. Cancel it and enter the other type instead.', 400, 'KIND_FIXED')
     }
+    await refuseReversed(tx, existing.id, 'altered')
   }
   const date = dayValue(input.date)
   const financialYear = financialYearOf(date, s.fyStartMonth)
@@ -327,6 +351,8 @@ export async function writeVoucher(tx: Tx, input: VoucherInput, userId: string, 
   let id: string
   let banked = new Map<string, Date>()
   if (existing) {
+    // What it said before is kept whole, as its next revision.
+    await keepRevision(tx, existing.id, { action: 'ALTERED', reason: existing.reason, source: 'accounts', userId })
     banked = await bankDatesOf(tx, existing.id)
     await tx.voucherLine.deleteMany({ where: { voucherId: existing.id } })
     await tx.voucher.update({ where: { id: existing.id }, data: { ...header, updatedById: userId } })
@@ -383,16 +409,109 @@ export async function cancelVoucher(tx: Tx, id: string, reason: string, userId: 
   if (s.lockedUpTo && istDay(v.date) <= s.lockedUpTo) {
     throw new AppError(`The books are closed up to ${dayText(s.lockedUpTo)}; ${v.voucherNo} cannot be cancelled.`, 409, 'PERIOD_LOCKED')
   }
-  const raised = v.lines.flatMap((l) => l.billRefs).filter((r) => r.kind !== 'AGAINST_REF')
-  for (const r of raised) {
-    const settled = await tx.billRef.findFirst({
-      where: { ledgerId: r.ledgerId, billNo: r.billNo, kind: 'AGAINST_REF', line: { voucher: { status: 'POSTED', id: { not: v.id } } } },
-      select: { line: { select: { voucher: { select: { voucherNo: true } } } } },
-    })
-    if (settled) {
-      throw new AppError(`Bill ${r.billNo} raised by ${v.voucherNo} has been settled by ${settled.line?.voucher.voucherNo}. Cancel that first.`, 409, 'BILL_SETTLED')
-    }
-  }
+  await refuseReversed(tx, v.id, 'cancelled')
+  await refuseSettledBills(tx, v, 'Cancel')
+  await keepRevision(tx, id, { action: 'CANCELLED', reason, source: 'accounts', userId })
   await tx.voucher.update({ where: { id }, data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId, cancelReason: reason } })
   return v.voucherNo
+}
+
+/**
+ * A bill this voucher raised that another voucher has settled since would be
+ * left settled against nothing. A settlement since reversed no longer counts:
+ * what matters is what is still settled, net.
+ */
+async function refuseSettledBills(tx: Tx, v: { id: string; voucherNo: string; lines: Array<{ billRefs: Array<{ ledgerId: string; billNo: string; kind: BillRefKind }> }> }, undo: 'Cancel' | 'Reverse') {
+  const raised = v.lines.flatMap((l) => l.billRefs).filter((r) => r.kind !== 'AGAINST_REF')
+  for (const r of raised) {
+    const settled = await tx.billRef.findMany({
+      where: { ledgerId: r.ledgerId, billNo: r.billNo, kind: 'AGAINST_REF', line: { voucher: { status: 'POSTED', id: { not: v.id } } } },
+      select: { amount: true, line: { select: { voucher: { select: { voucherNo: true, reversalOfId: true } } } } },
+    })
+    if (r2(settled.reduce((t, x) => t + Number(x.amount), 0)) === 0) continue
+    const by = settled.find((x) => !x.line?.voucher.reversalOfId)?.line?.voucher.voucherNo ?? settled[0]?.line?.voucher.voucherNo
+    throw new AppError(`Bill ${r.billNo} raised by ${v.voucherNo} has been settled by ${by}. ${undo === 'Cancel' ? 'Cancel' : 'Reverse or cancel'} that first.`, 409, 'BILL_SETTLED')
+  }
+}
+
+/** A reversing entry is the other side of the same money: a payment comes back in, a receipt goes back out. */
+const REVERSE_KIND: Record<ManualKind, ManualKind> = { PAYMENT: 'RECEIPT', RECEIPT: 'PAYMENT', CONTRA: 'CONTRA', JOURNAL: 'JOURNAL' }
+
+/**
+ * Undoes a voucher typed here with a reversing entry on an open day: the same
+ * ledgers, brands and departments, debits and credits swapped, and each bill it
+ * raised or settled put back as it was. The voucher itself stays exactly as it
+ * was, in its own period, and names the entry that undid it — so a closed
+ * period is corrected without being changed.
+ */
+export async function reverseVoucher(tx: Tx, id: string, input: { date: string; reason: string }, userId: string) {
+  const v = await tx.voucher.findUnique({
+    where: { id },
+    include: { lines: { orderBy: { sortOrder: 'asc' }, include: { billRefs: true } }, reversals: { where: { status: 'POSTED' }, select: { voucherNo: true } } },
+  })
+  if (!v) throw new AppError('Voucher not found', 404, 'NOT_FOUND')
+  if (v.status === 'CANCELLED') throw new AppError(`${v.voucherNo} is cancelled: there is nothing to reverse.`, 409, 'CANCELLED')
+  if (v.sourceType) {
+    throw new AppError(`${v.voucherNo} was written by its document. Correct it with a credit or debit note, or by cancelling the document.`, 409, 'FROM_DOCUMENT')
+  }
+  if (v.reversalOfId) throw new AppError(`${v.voucherNo} is itself a reversing entry. Cancel it instead if it was a mistake.`, 409, 'IS_REVERSAL')
+  if (v.reversals.length) throw new AppError(`${v.voucherNo} has already been reversed by ${v.reversals[0].voucherNo}.`, 409, 'ALREADY_REVERSED')
+  if (!(MANUAL_KINDS as readonly string[]).includes(v.kind)) throw new AppError(`${v.voucherNo} cannot be reversed here.`, 409, 'NOT_MANUAL')
+  const s = await booksSettings(tx)
+  checkDay(input.date, s, 'The reversing entry')
+  if (input.date < istDay(v.date)) {
+    throw new AppError(`A reversing entry cannot be dated before the voucher it undoes (${dayText(istDay(v.date))}).`, 400, 'BEFORE_ORIGINAL')
+  }
+  await refuseSettledBills(tx, v, 'Reverse')
+
+  const kind = REVERSE_KIND[v.kind as ManualKind]
+  const date = dayValue(input.date)
+  const voucherNo = await nextDocumentNumber(tx, VOUCHER_SERIES[kind], date)
+  const reason = input.reason.trim()
+  const made = await tx.voucher.create({
+    data: {
+      kind,
+      voucherNo,
+      date,
+      financialYear: financialYearOf(date, s.fyStartMonth),
+      narration: `Reversal of ${v.voucherNo}: ${reason}`.slice(0, 1000),
+      amount: v.amount,
+      mode: v.mode,
+      referenceNo: v.voucherNo,
+      createdById: userId,
+      // The lines are the voucher's own: an old-books voucher's reversal keeps its exemption.
+      legacyImport: v.legacyImport,
+      reversalOfId: v.id,
+    },
+    select: { id: true },
+  })
+  for (const [i, l] of v.lines.entries()) {
+    await tx.voucherLine.create({
+      data: {
+        voucherId: made.id,
+        ledgerId: l.ledgerId,
+        debit: l.credit,
+        credit: l.debit,
+        costCentreId: l.costCentreId,
+        departmentId: l.departmentId,
+        narration: l.narration,
+        sortOrder: i,
+        billRefs: {
+          // Each bill back as it was: a bill it raised is settled again, a settlement taken back.
+          create: l.billRefs.map((r) => ({
+            ledgerId: r.ledgerId,
+            kind: r.kind === 'NEW_REF' ? ('AGAINST_REF' as const) : r.kind,
+            billNo: r.billNo,
+            billDate: r.billDate,
+            dueDate: r.dueDate,
+            amount: r2(-Number(r.amount)),
+          })),
+        },
+      },
+    })
+  }
+  await checkBalancedNow(tx)
+  // The voucher itself does not change; its history says what undid it.
+  await keepRevision(tx, v.id, { action: 'REVERSED', reason: `${reason} (reversed by ${voucherNo} dated ${dayText(input.date)})`, source: 'accounts', userId })
+  return { id: made.id, voucherNo, original: v.voucherNo }
 }
