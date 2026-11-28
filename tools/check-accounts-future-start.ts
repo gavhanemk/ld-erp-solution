@@ -59,6 +59,8 @@ async function run(tx: Prisma.TransactionClient) {
   // This check starts from empty books inside a transaction it rolls back. The database refuses to
   // delete vouchers (Phase 7) unless the session says so outright, which only these checks do.
   await tx.$executeRawUnsafe(`SELECT set_config('ld_erp.allow_books_delete', 'on', true)`)
+  await tx.allocationRunSource.deleteMany({})
+  await tx.voucher.updateMany({ where: { reversalOfId: { not: null } }, data: { reversalOfId: null } })
   await tx.voucher.deleteMany({})
   await tx.company.update({ where: { id: company.id }, data: { booksStartDate: dayValue(nextFirst), booksLockedUpTo: null } })
   const s = await booksSettings(tx)

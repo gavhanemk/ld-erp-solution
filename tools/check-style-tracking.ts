@@ -47,14 +47,15 @@ async function main() {
         })
         const perLine = await Promise.all(
           lines.map(async (l) => {
-            if (!l.mo.steps.length) return null
+            // Not staged: a finished order is done at every step, one not finished has not started (stepAcross).
+            if (!l.mo.steps.length) return l.mo.status === 'COMPLETED' ? ('DONE' as const) : null
             const figs = new Map((await stepFigures(tx, l.mo.id, l.mo.steps, l.totalQty, l.id)).map((f) => [f.stepId, f]))
             return new Map(withOccurrence([...l.mo.steps].sort((a, b) => a.sequence - b.sequence)).map((s) => [runKey(s.operationId, s.occurrence), { state: l.mo.status === 'COMPLETED' ? 'DONE' : figs.get(s.id)!.state, completed: figs.get(s.id)!.completed }]))
           }),
         )
         const expected = d.steps.map((s) => {
-          const states = perLine.map((m) => (m ? m.get(s.key)?.state : 'NOT_STARTED')).filter(Boolean) as string[]
-          const completed = perLine.reduce((n, m) => n + (m?.get(s.key)?.completed ?? 0), 0)
+          const states = perLine.map((m) => (m === 'DONE' ? 'DONE' : m ? m.get(s.key)?.state : 'NOT_STARTED')).filter(Boolean) as string[]
+          const completed = perLine.reduce((n, m) => n + (m && m !== 'DONE' ? (m.get(s.key)?.completed ?? 0) : 0), 0)
           const live = states.filter((x) => x !== 'SKIPPED')
           // A step on none of the counted orders is left out on all of them (styleTrack.service stepAcross).
           const state = !states.length ? (perLine.length ? 'SKIPPED' : 'NOT_STARTED') : !live.length ? 'SKIPPED' : live.every((x) => x === 'DONE') ? 'DONE' : live.every((x) => x === 'NOT_STARTED') ? 'NOT_STARTED' : 'IN_PROGRESS'
