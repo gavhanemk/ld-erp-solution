@@ -159,12 +159,36 @@ async function defaultStore(itemIds: string[], owner: ReturnType<typeof ownerFor
 }
 
 /**
+ * Pieces of these garments sealed in finished-goods cartons in one store, by
+ * garment, size and grade, with the cartons' codes. They leave only with their
+ * carton (Finished Goods → Cartons → Dispatch) or once it is opened — the
+ * stock check refuses them on a typed challan — so the form counts them apart
+ * from the loose pieces rather than offering what cannot go.
+ */
+async function sealedInCartons(itemIds: string[], warehouseId: string) {
+  const lines = await prisma.fgCartonLine.findMany({
+    where: { itemId: { in: itemIds }, carton: { status: 'PACKED', warehouseId } },
+    select: { itemId: true, sizeId: true, grade: true, qty: true, carton: { select: { code: true } } },
+  })
+  const held = new Map<string, { qty: number; codes: string[] }>()
+  for (const l of lines) {
+    const key = `${l.itemId}|${l.sizeId}|${l.grade}`
+    const hit = held.get(key) ?? { qty: 0, codes: [] }
+    hit.qty += l.qty
+    if (!hit.codes.includes(l.carton.code)) hit.codes.push(l.carton.code)
+    held.set(key, hit)
+  }
+  return (itemId: string, sizeId: string, grade: 'A' | 'B') => held.get(`${itemId}|${sizeId}|${grade}`) ?? { qty: 0, codes: [] }
+}
+
+/**
  * GET /api/sales/challans/prepare?soId=&warehouseId=
  *
  * Everything the challan form needs for one order: its lines, each size's
  * ordered, sent and pending pieces (never below nothing; `over` is what was
- * sent beyond the size's order, after a size jump), and what is packed in the
- * chosen store.
+ * sent beyond the size's order, after a size jump), and what is loose in the
+ * chosen store — pieces sealed in a carton are `sealed`, with the cartons'
+ * codes, and are not counted in `inStock`.
  * Stock is read here, under the sales permission, so a sales coordinator does
  * not need Inventory rights to see what can be sent.
  */
@@ -183,6 +207,11 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
   const moLines = await prisma.mOLine.findMany({ where: { soLineId: { in: order.lines.map((l) => l.id) } }, select: { id: true, soLineId: true } })
   const net = moLines.length ? await netSizeChanges(prisma, { moLineId: { in: moLines.map((m) => m.id) } }) : () => 0
   const gainedOf = (soLineId: string, sizeId: string) => Math.max(0, moLines.filter((m) => m.soLineId === soLineId).reduce((t, m) => t + net(m.id, sizeId), 0))
+  // Only our own pieces are held by a carton, as in the stock check.
+  const sealed =
+    warehouseId && owner.ownership === 'OWNED'
+      ? await sealedInCartons(order.lines.map((l) => l.itemId), warehouseId)
+      : () => ({ qty: 0, codes: [] as string[] })
 
   const lines = await Promise.all(
     order.lines.map(async (l) => {
@@ -190,18 +219,27 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
       const sent = Number(l.deliveredQty)
       const sizes = l.sizes.length
         ? await Promise.all(
-            l.sizes.map(async (s) => ({
-              sizeId: s.sizeId,
-              code: s.size.code,
-              sequence: s.size.sequence,
-              ordered: Number(s.qty),
-              sent: Number(s.deliveredQty),
-              pending: Math.max(0, round2(Number(s.qty) - Number(s.deliveredQty))),
-              over: Math.max(0, round2(Number(s.deliveredQty) - Number(s.qty))),
-              gained: gainedOf(l.id, s.sizeId),
-              inStock: warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId, owner) : 0,
-              inStockB: warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId, owner, 'B') : 0,
-            }))
+            l.sizes.map(async (s) => {
+              const a = sealed(l.itemId, s.sizeId, 'A')
+              const b = sealed(l.itemId, s.sizeId, 'B')
+              const inA = warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId, owner) : 0
+              const inB = warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId, owner, 'B') : 0
+              return {
+                sizeId: s.sizeId,
+                code: s.size.code,
+                sequence: s.size.sequence,
+                ordered: Number(s.qty),
+                sent: Number(s.deliveredQty),
+                pending: Math.max(0, round2(Number(s.qty) - Number(s.deliveredQty))),
+                over: Math.max(0, round2(Number(s.deliveredQty) - Number(s.qty))),
+                gained: gainedOf(l.id, s.sizeId),
+                inStock: Math.max(0, round2(inA - a.qty)),
+                inStockB: Math.max(0, round2(inB - b.qty)),
+                sealed: a.qty,
+                sealedB: b.qty,
+                cartons: [...new Set([...a.codes, ...b.codes])],
+              }
+            })
           )
         : null
       return {
@@ -216,6 +254,8 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
         pending: Math.max(0, ordered - sent),
         inStock: sizes ? sizes.reduce((s, z) => s + z.inStock, 0) : warehouseId ? await onHand(prisma, l.itemId, warehouseId, null, owner) : 0,
         inStockB: sizes ? sizes.reduce((s, z) => s + z.inStockB, 0) : warehouseId ? await onHand(prisma, l.itemId, warehouseId, null, owner, 'B') : 0,
+        sealed: sizes ? sizes.reduce((s, z) => s + z.sealed + z.sealedB, 0) : 0,
+        cartons: sizes ? [...new Set(sizes.flatMap((z) => z.cartons))].sort() : [],
         bGradeRate: l.bGradeRate != null ? Number(l.bGradeRate) : null,
         sizes,
       }

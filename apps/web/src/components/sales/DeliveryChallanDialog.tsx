@@ -39,9 +39,13 @@ interface PrepSize {
   over?: number
   /** Pieces size changes at stitching made in this size beyond its plan: the most it may go over its order by. */
   gained?: number
+  /** Loose in the store: what can go on this challan. */
   inStock: number
-  /** B-grade pieces of this size in the store. */
+  /** B-grade pieces of this size loose in the store. */
   inStockB: number
+  /** Pieces sealed in a carton: they go with their carton, or once it is opened. */
+  sealed?: number
+  sealedB?: number
 }
 
 interface PrepLine {
@@ -56,6 +60,9 @@ interface PrepLine {
   pending: number
   inStock: number
   inStockB: number
+  /** Pieces of the garment sealed in cartons in this store, and which cartons. */
+  sealed?: number
+  cartons?: string[]
   /** What a B-grade piece bills at; empty means the line's own rate. */
   bGradeRate: number | null
   sizes: PrepSize[] | null
@@ -581,7 +588,7 @@ export function DeliveryChallanDialog({
                 }
               >
                 <p className="text-muted-foreground mb-2 text-xs">
-                  For each size: what the order still wants, what is packed in this store, and what goes now. &quot;Fill what
+                  For each size: what the order still wants, what is loose in this store, and what goes now. &quot;Fill what
                   can go&quot; fills each size up to what it still wants, then makes up the line&apos;s total from pieces made as
                   another size at stitching. Sizes can differ from the order as long as the line&apos;s total does not go over.
                 </p>
@@ -647,6 +654,8 @@ export function DeliveryChallanDialog({
                                 sizes.map((s) => (
                                   <td key={s.sizeId} className={`text-center text-xs tabular-nums ${s.inStock < s.pending ? 'warn-text' : ''}`}>
                                     {pcs(s.inStock)}
+                                    {/* Sealed pieces, small and apart: they cannot go on this challan. */}
+                                    {s.sealed ? <span className="text-muted-foreground block text-[10px] leading-tight whitespace-nowrap">+{pcs(s.sealed)} sealed</span> : null}
                                   </td>
                                 ))
                               ) : (
@@ -668,7 +677,7 @@ export function DeliveryChallanDialog({
                                       aria-label={`${l.item.code} size ${s.code}, send now`}
                                       title={
                                         s.short
-                                          ? `Only ${pcs(s.inStock)} in this store`
+                                          ? `Only ${pcs(s.inStock)} loose in this store${s.sealed ? `; ${pcs(s.sealed)} more are sealed in a carton` : ''}`
                                           : s.vsOrder > 0 && s.now > 0
                                             ? `${pcs(s.vsOrder)} more than ordered`
                                             : undefined
@@ -698,6 +707,7 @@ export function DeliveryChallanDialog({
                                     sizes.map((s) => (
                                       <td key={s.sizeId} className="text-center text-xs tabular-nums">
                                         {pcs(s.inStockB)}
+                                        {s.sealedB ? <span className="text-muted-foreground block text-[10px] leading-tight whitespace-nowrap">+{pcs(s.sealedB)} sealed</span> : null}
                                       </td>
                                     ))
                                   ) : (
@@ -771,8 +781,17 @@ export function DeliveryChallanDialog({
                           />
                         </div>
                       )}
+                      {/* One plain line: which cartons hold pieces, and the two ways to send them. */}
+                      {l.sealed && l.cartons?.length ? (
+                        <p className="text-muted-foreground mt-2 text-xs">
+                          {pcs(l.sealed)} pcs are sealed in {l.cartons.length === 1 ? 'carton' : 'cartons'}{' '}
+                          <span className="text-foreground font-mono">{l.cartons.join(', ')}</span> and are not counted above. To send
+                          them, dispatch the {l.cartons.length === 1 ? 'carton' : 'cartons'} from Finished Goods → Cartons, or open{' '}
+                          {l.cartons.length === 1 ? 'it' : 'one'} there first.
+                        </p>
+                      ) : null}
                       {lineShort && (
-                        <p className="text-destructive mt-1.5 text-xs">Not enough in this store. It can be saved as a draft, but not dispatched yet.</p>
+                        <p className="text-destructive mt-1.5 text-xs">Not enough loose in this store. It can be saved as a draft, but not dispatched yet.</p>
                       )}
                     </div>
                   ))}
