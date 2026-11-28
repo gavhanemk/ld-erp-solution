@@ -1316,7 +1316,8 @@ const DOC_TYPES = [
   { docType: 'INV', label: 'Sales Invoice', defaultTitle: 'TAX INVOICE' },
   { docType: 'PO', label: 'Purchase Order', defaultTitle: 'PURCHASE ORDER' },
   { docType: 'DC', label: 'Delivery Challan', defaultTitle: 'DELIVERY CHALLAN' },
-  { docType: 'JW', label: 'Job Work Challan', defaultTitle: 'DELIVERY CHALLAN (JOB WORK)' },
+  // Titled like every other challan (28 Nov 2026); "job work" is never in the title.
+  { docType: 'JW', label: 'Job Work Challan', defaultTitle: 'DELIVERY CHALLAN' },
   { docType: 'RCPT', label: 'Payment Receipt', defaultTitle: 'PAYMENT RECEIPT' },
   { docType: 'QT', label: 'Quotation', defaultTitle: 'QUOTATION' },
   { docType: 'CN', label: 'Credit Note', defaultTitle: 'CREDIT NOTE' },

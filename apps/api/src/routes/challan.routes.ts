@@ -998,7 +998,9 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
     },
   })
   if (!dc) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
-  const header = await getPrintHeader(dc.so.isJobWork ? 'JW' : 'DC')
+  // One title for every delivery challan, "DELIVERY CHALLAN" (the user's decision of
+  // 28 Nov 2026): job work is said on its Type line and by what it carries, not the title.
+  const header = await getPrintHeader('DC')
 
   const value = round2(
     dc.lines.reduce((s, l) => {

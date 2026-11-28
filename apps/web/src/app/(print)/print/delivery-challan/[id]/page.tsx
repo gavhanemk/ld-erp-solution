@@ -23,7 +23,7 @@ import {
   type SheetColumn,
   type TotalLine,
 } from '@/components/print/StoreSheet'
-import { Box, DocTable, type DocColumn } from '@/components/print/doc'
+import { Box, DocTable, HAIR, LINE, type DocColumn } from '@/components/print/doc'
 import { garmentTable } from '@/components/print/garmentLines'
 
 interface Payload {
@@ -168,20 +168,109 @@ const ROLL_COLUMNS: SheetColumn[] = [
   { key: 'pcs', head: 'Pcs', width: '11%', align: 'right' },
 ]
 
-/** What came in on each receipt beside what was packed from it: the old job challan's strip. */
-const RECON_COLUMNS: DocColumn[] = [
-  { key: 'recDate', head: 'Rec. date', width: '9%' },
-  { key: 'lot', head: 'Lot no', width: '9%' },
-  { key: 'party', head: 'Party chl. no', width: '11%' },
-  { key: 'recPcs', head: 'Rec. pcs', width: '7%', align: 'right' },
-  { key: 'recMtr', head: 'Rec. mtr', width: '9%', align: 'right' },
-  { key: 'pckDate', head: 'Pck. date', width: '9%' },
-  { key: 'chl', head: 'Chl. no', width: '14%' },
-  { key: 'pckPcs', head: 'Pck. pcs', width: '8%', align: 'right' },
-  { key: 'pcsMtr', head: 'Pcs.mtr', width: '8%', align: 'right' },
-  { key: 'shMtr', head: 'Sh. mtr', width: '8%', align: 'right' },
-  { key: 'shPct', head: 'Sh. %', width: '8%', align: 'right' },
+/**
+ * The production summary: what came in on each receipt, what was packed from
+ * it on this challan, and the shortage, as three groups of columns under one
+ * heading each (the user's layout of 28 Nov 2026).
+ */
+const SUMMARY_GROUPS: Array<{ title: string; columns: Array<{ key: string; head: string; width: number; right?: boolean }> }> = [
+  {
+    title: 'Material received',
+    columns: [
+      { key: 'recDate', head: 'Received date', width: 9 },
+      { key: 'lot', head: 'Lot no.', width: 9 },
+      { key: 'party', head: 'Party challan no.', width: 12 },
+      { key: 'recPcs', head: 'Received pcs', width: 8, right: true },
+      { key: 'recMtr', head: 'Received mtr', width: 9, right: true },
+    ],
+  },
+  {
+    title: 'Material packed',
+    columns: [
+      { key: 'pckDate', head: 'Packing date', width: 9 },
+      { key: 'chl', head: 'Challan no.', width: 12 },
+      { key: 'pckPcs', head: 'Packed pcs', width: 8, right: true },
+      { key: 'pcsMtr', head: 'Pcs.mtr', width: 8, right: true },
+    ],
+  },
+  {
+    title: 'Shortage',
+    columns: [
+      { key: 'shMtr', head: 'Sh.mtr', width: 8, right: true },
+      { key: 'shPct', head: 'Sh (%)', width: 8, right: true },
+    ],
+  },
 ]
+
+/** The production summary table: grouped headings over the three parts, then a row per receipt. */
+function ProductionSummary({ rows }: { rows: Array<{ key: string; cells: Record<string, React.ReactNode> }> }) {
+  const cols = SUMMARY_GROUPS.flatMap((g, gi) => g.columns.map((c, ci) => ({ ...c, groupEnd: ci === g.columns.length - 1 && gi < SUMMARY_GROUPS.length - 1 })))
+  const head: React.CSSProperties = {
+    padding: '3px 4px',
+    fontSize: '7.5px',
+    fontWeight: 700,
+    letterSpacing: '.04em',
+    textTransform: 'uppercase',
+    lineHeight: 1.25,
+    verticalAlign: 'bottom',
+  }
+  return (
+    <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', border: LINE, marginTop: '3px', color: INK }}>
+      <colgroup>
+        {cols.map((c) => (
+          <col key={c.key} style={{ width: `${c.width}%` }} />
+        ))}
+      </colgroup>
+      <thead>
+        <tr>
+          {SUMMARY_GROUPS.map((g, gi) => (
+            <th
+              key={g.title}
+              colSpan={g.columns.length}
+              style={{ ...head, textAlign: 'center', borderBottom: HAIR, borderRight: gi < SUMMARY_GROUPS.length - 1 ? LINE : undefined }}
+            >
+              {g.title}
+            </th>
+          ))}
+        </tr>
+        <tr>
+          {cols.map((c, i) => (
+            <th
+              key={c.key}
+              style={{ ...head, textAlign: c.right ? 'right' : 'left', borderBottom: LINE, borderRight: i === cols.length - 1 ? undefined : c.groupEnd ? LINE : HAIR }}
+            >
+              {c.head}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.key}>
+            {cols.map((c, i) => (
+              <td
+                key={c.key}
+                style={{
+                  padding: '4px 4px',
+                  fontSize: '9px',
+                  lineHeight: 1.35,
+                  verticalAlign: 'top',
+                  textAlign: c.right ? 'right' : 'left',
+                  borderTop: HAIR,
+                  borderRight: i === cols.length - 1 ? undefined : c.groupEnd ? LINE : HAIR,
+                  overflowWrap: 'anywhere',
+                  ...(c.right ? NUM : {}),
+                }}
+              >
+                {r.cells[c.key] ?? ''}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
 
 /** A grade as the job challan prints it. */
 const gradeLabel = (g?: string | null) => (g === 'B' ? 'B-grade' : 'Fresh Pc')
@@ -445,12 +534,6 @@ export default function PrintDeliveryChallan() {
       rows={byRolls ? rollRows : garments.rows}
       after={
         <>
-          {byRolls && reconRows.length > 0 && (
-            <>
-              <Eyebrow style={{ marginTop: '9px' }}>Material received and packed</Eyebrow>
-              <DocTable columns={RECON_COLUMNS} rows={reconRows} fontSize={9} style={{ marginTop: '3px' }} />
-            </>
-          )}
           {cartonRows.length > 0 && (
             <>
               <Eyebrow style={{ marginTop: '9px' }}>
@@ -469,6 +552,13 @@ export default function PrintDeliveryChallan() {
             }
             totals={<TotalsBox rows={totals} totalLabel="Consignment value" total={`₹ ${money(data.value + data.gst)}`} />}
           />
+          {/* After the consignment, before the signatures: job work with its rolls named only. */}
+          {byRolls && reconRows.length > 0 && (
+            <div style={{ breakInside: 'avoid' }}>
+              <Eyebrow style={{ marginTop: '9px' }}>Production summary (received vs packed)</Eyebrow>
+              <ProductionSummary rows={reconRows} />
+            </div>
+          )}
           <Terms text={template.termsText} title="Terms" />
           {template.declaration && (
             <Box title="Declaration" style={{ marginTop: '7px' }}>

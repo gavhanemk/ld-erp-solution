@@ -79,7 +79,8 @@ const DEFAULT_TITLES: Record<string, string> = {
   // holding a sheet headed PURCHASE ORDER will treat it as one.
   ENQ: 'PURCHASE REQUISITION',
   DC: 'DELIVERY CHALLAN',
-  JW: 'DELIVERY CHALLAN (JOB WORK)',
+  // One title for every challan (the user, 28 Nov 2026): job work shows in what it carries.
+  JW: 'DELIVERY CHALLAN',
   // Samples going to the buyer: not stock and not a sale, so not the sales challan.
   SDC: 'SAMPLE DELIVERY CHALLAN',
   // What a sample cost: the buyer's statement, and our own sheet line by line.
