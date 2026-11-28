@@ -9,8 +9,8 @@
  */
 import { priceSale, type ChargeTaxTreatment, type PricedSaleCharge, type SaleLineInput } from '@ld-erp/shared'
 
-/** Job work is a service: SAC 9988, at 5% unless typed otherwise or set in the HSN master. */
-export const JOB_WORK_SAC = '9988'
+/** Job work is a service: SAC 998822, at 5% unless typed otherwise or set in the HSN master. */
+export const JOB_WORK_SAC = '998822'
 export const JOB_WORK_GST = 5
 
 /** The rate a job charge's SAC carries in the HSN master — the code, else its longest listed heading. */

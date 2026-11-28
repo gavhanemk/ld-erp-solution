@@ -234,7 +234,7 @@ function CompanyProfile() {
     // sending "" would fail the GSTIN and email formats.
     const payload: Record<string, unknown> = {}
     const editable = [
-      'name', 'legalName', 'gstin', 'stateCode', 'pan', 'tan', 'msmeNumber',
+      'name', 'legalName', 'manufacturerOf', 'gstin', 'stateCode', 'pan', 'tan', 'msmeNumber',
       'phone', 'email', 'website',
       'address', 'address2', 'city', 'state', 'pincode', 'currentFY',
       'gs1Prefix', 'countryOfOrigin', 'customerCare',
@@ -312,6 +312,14 @@ function CompanyProfile() {
           </Field>
           <Field label="Legal name" htmlFor="legalName" error={errors.legalName} help="As registered, if different from the trading name">
             {text('legalName')}
+          </Field>
+          <Field
+            label="Manufacturer of"
+            htmlFor="manufacturerOf"
+            error={errors.manufacturerOf}
+            help="Optional. Printed under the name on the tax invoice, as “Manufacturer of: Fancy Fabrics”"
+          >
+            {text('manufacturerOf', { placeholder: 'Fancy Fabrics', maxLength: 120 })}
           </Field>
           <Field label="Website" htmlFor="website" error={errors.website}>
             {text('website', { placeholder: 'https://ldcottonmills.com' })}

@@ -910,6 +910,9 @@ model Company {
   /// decided by comparing this against the customer's, so it cannot be free text.
   stateCode      String?
   pan            String?
+  /// "Manufacturer of: Fancy Fabrics" under the name on the tax invoice, as the
+  /// old ERP printed it (28 Nov 2026).
+  manufacturerOf String?
   /// Needed on every TDS challan and to issue Form 16A to contractors.
   tan            String?
   /// Udyam registration. Drives the 45-day payment rule for MSME suppliers.
@@ -2117,6 +2120,20 @@ model SalesInvoice {
   lrNumber          String?
   eWayBillNumber    String?
   eWayBillDate      DateTime?
+  /// The lorry receipt's date, beside its number (28 Nov 2026).
+  lrDate            DateTime?
+  /// The consignee (ship to), kept apart from the buyer billed: a group mill's
+  /// other unit can take the goods under its own GSTIN. Filled from the
+  /// customer's shipping details; null on invoices from before 28 Nov 2026.
+  shipToName        String?
+  shipToGstin       String?
+  shipToState       String?
+  shipToStateCode   String?
+  /// Packages the goods went in, as the old invoice listed them. Cartons start
+  /// from the challan's count.
+  bales             Int?
+  rolls             Int?
+  cartons           Int?
   /// Added after tax and carrying none of its own, as on the order.
   otherCharges      Decimal          @default(0) @db.Decimal(12, 2)
   terms             String?
@@ -2182,6 +2199,14 @@ model DeliveryChallan {
   lines DeliveryChallanLine[]
   /// The invoice billing these goods (and any cancelled before it).
   invoices SalesInvoice[]
+
+  /// Packing (28 Nov 2026): the bale or package numbers ("1, 2"), the packing
+  /// list's reference and the gross weight in kg. Which of a job-work
+  /// customer's rolls the pieces were made from is not typed here: it is read
+  /// from production (services/fabricTrace.service).
+  baleNumbers    String?
+  packingListRef String?
+  grossWeight    Decimal? @db.Decimal(10, 2)
 
   @@index([soId])
   @@index([customerId])
@@ -3915,8 +3940,31 @@ model CustomerGRNLine {
   /// Lot, shade, or whatever the customer wrote on the roll. Free text, because
   /// every customer marks their material differently.
   markings    String?
+  /// Roll by roll, where the customer's rolls carry barcodes of their own.
+  rolls       CustomerGRNRoll[]
 
   @@map("customer_grn_lines")
+}
+
+/// One roll of a customer's fabric as it came in: the barcode they put on it,
+/// its metres, and the design and lot written on it. Recorded on the receipt
+/// (the user's decision of 28 Nov 2026) so the job-work challan can say which
+/// roll each lot of pieces was made from, as the old ERP's job challan did.
+/// The rolls of a line add up to what was received on it.
+model CustomerGRNRoll {
+  id        String          @id @default(cuid())
+  lineId    String
+  line      CustomerGRNLine @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  /// The customer's own barcode on the roll (C73142477).
+  barcode   String
+  meters    Decimal         @db.Decimal(10, 3)
+  designNo  String?
+  lotNo     String?
+  sortOrder Int             @default(0)
+
+  @@index([lineId])
+  @@index([barcode])
+  @@map("customer_grn_rolls")
 }
 
 /// A customer's own material going back to them unworked: what was left over
@@ -5640,6 +5688,7 @@ model Size {
   sequence    Int       @default(0)
 
   soLineSizes  SalesOrderLineSize[]
+  quoteLineSizes SalesQuotationLineSize[]
   moLineSizes  MOLineSize[]
   bomLineSizes BOMLineSize[]
   baseSizeBoms BOM[]
@@ -5705,6 +5754,9 @@ model SalesInvoiceLine {
   /// corrected later and an issued invoice must never change.
   hsnCode      String?
   qty          Decimal      @db.Decimal(10, 3)
+  /// Pieces (rolls, bundles) in the quantity, when it is in metres or kilos:
+  /// 238.17 mtr in 11 pcs. Null where the quantity is itself in pieces.
+  pcs          Decimal?     @db.Decimal(10, 2)
   unitPrice    Decimal      @db.Decimal(10, 2)
   discount     Decimal      @default(0) @db.Decimal(5, 2)
   taxableValue Decimal      @default(0) @db.Decimal(12, 2)
@@ -6056,9 +6108,28 @@ model SalesQuotationLine {
   bomCost     Decimal?       @db.Decimal(10, 2)
   sortOrder   Int            @default(0)
 
+  /// Pieces size by size (28 Nov 2026), as on a sales order; `qty` is their
+  /// total. Empty on a line quoted by the piece only.
+  sizes       SalesQuotationLineSize[]
+
   @@index([quoteId])
   @@map("sales_quotation_lines")
 }
+/// A quotation line's pieces for one size (28 Nov 2026): the buyer sees the
+/// size-wise quantity on the quotation, and an order won from it opens with the
+/// same split.
+model SalesQuotationLineSize {
+  id     String             @id @default(cuid())
+  lineId String
+  line   SalesQuotationLine @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  sizeId String
+  size   Size               @relation(fields: [sizeId], references: [id])
+  qty    Decimal            @db.Decimal(10, 2)
+
+  @@unique([lineId, sizeId])
+  @@map("sales_quotation_line_sizes")
+}
+
 
 /// A charge on a quotation (transport, packing), priced exactly as it will
 /// be on the order the quotation becomes, and carried onto that order.

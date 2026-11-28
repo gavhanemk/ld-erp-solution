@@ -18,15 +18,11 @@ import {
   money,
   longDate,
   shortDate,
-  CODE,
-  GREY,
   INK,
   MUTED,
-  NUM,
-  type SheetColumn,
   type TotalLine,
 } from '@/components/print/StoreSheet'
-import { lineDetails } from '@/components/sales/OrderLinesView'
+import { garmentTable } from '@/components/print/garmentLines'
 
 interface Payload {
   company: Record<string, string | null>
@@ -111,7 +107,7 @@ interface Payload {
         uom: { symbol: string } | null
         style: { code: string; name: string } | null
       }
-      sizes: Array<{ id: string; qty: string; size: { code: string } }>
+      sizes: Array<{ id: string; qty: string; size: { code: string; sequence?: number | null } }>
     }>
   }
 }
@@ -148,55 +144,12 @@ export default function PrintSalesOrder() {
   const termsText = order.terms || template.termsText
   const showHsn = template.showHsn !== false
 
-  const columns: SheetColumn[] = [
-    { key: 'sn', head: 'S.N', width: '4%', align: 'center' },
-    { key: 'item', head: 'Style / Description', width: showHsn ? '28%' : '34%' },
-    { key: 'sizes', head: 'Size breakup (pcs)', width: '24%' },
-    ...(showHsn ? [{ key: 'hsn', head: 'HSN', width: '7%', align: 'center' as const }] : []),
-    { key: 'qty', head: 'Pieces', width: '8%', align: 'right' },
-    { key: 'rate', head: order.isJobWork ? 'Job charge' : 'Rate', width: '9%', align: 'right' },
-    { key: 'disc', head: 'Disc', width: '5%', align: 'right' },
-    { key: 'gst', head: 'GST', width: '5%', align: 'right' },
-    { key: 'amount', head: 'Amount (₹)', width: '10%', align: 'right' },
-  ]
-
-  const rows = order.lines.map((l, i) => {
-    const colour = l.color || l.item.color
-    const style = l.styleCode || l.item.style?.code
-    return {
-      key: l.id,
-      cells: {
-        sn: i + 1,
-        item: (
-          <>
-            <div style={{ fontWeight: 600 }}>
-              {l.item.name}
-              {colour ? ` · ${colour}` : ''}
-            </div>
-            <div style={{ fontSize: '8.5px', color: GREY, marginTop: '1px' }}>
-              <span style={CODE}>{l.item.code}</span>
-              {style ? ` · Style ${style}` : ''}
-            </div>
-            {lineDetails(l) && <div style={{ fontSize: '8.5px', color: GREY, marginTop: '1px' }}>{lineDetails(l)}</div>}
-            {l.description && <div style={{ fontSize: '8.5px', color: INK, marginTop: '1px' }}>{l.description}</div>}
-          </>
-        ),
-        sizes: l.sizes.length ? (
-          <span style={{ fontSize: '9px', ...NUM }}>
-            {l.sizes.map((s) => `${s.size.code} ${qty(s.qty)}`).join(' · ')}
-          </span>
-        ) : (
-          <span style={{ color: MUTED }}>—</span>
-        ),
-        hsn: <span style={{ fontSize: '9px', color: GREY }}>{l.hsnCode ?? l.item.hsnCode ?? '—'}</span>,
-        qty: <strong>{qty(l.totalQty)}</strong>,
-        rate: money(l.unitPrice),
-        disc: Number(l.discount) > 0 ? `${Number(l.discount)}%` : '—',
-        gst: l.taxExempt ? 'Nil' : `${Number(l.gstRate)}%`,
-        amount: money(l.amount),
-      },
-    }
-  })
+  // The lines as the old ERP printed them: code, description, colour, fabric,
+  // gender, print name, then every size with its pieces (28 Nov 2026).
+  const { columns, rows } = garmentTable(
+    order.lines.map((l) => ({ ...l, qty: l.totalQty })),
+    { showHsn, rateHead: order.isJobWork ? 'Job charge' : 'Rate', allColumns: true },
+  )
 
   const pieces = order.lines.reduce((s, l) => s + Number(l.totalQty), 0)
 
@@ -335,7 +288,7 @@ export default function PrintSalesOrder() {
         { role: `For ${company.name}`, who: order.approvedBy?.name ?? order.createdBy?.name },
         { role: 'Accepted by the buyer', who: null },
       ]}
-      footerNote={template.footerNote ?? 'Order confirmation against your purchase order. Not a tax invoice.'}
+      footerNote={template.footerNote ?? 'Sales order against your purchase order. Not a tax invoice.'}
     />
   )
 }

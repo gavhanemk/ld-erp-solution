@@ -1,5 +1,6 @@
 'use client'
 
+import { Fragment } from 'react'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { SecondAddress } from '@/components/print/SecondAddress'
 
@@ -357,6 +358,12 @@ export interface DocRow {
   muted?: boolean
   /** A sub-total or total row inside the table: bold, ruled above. */
   total?: boolean
+  /** A light grey ground, for a total row that should stand out (the delivery challan's). */
+  shade?: boolean
+  /** Cells that run down over the rows below: { garment: 3 } spans this and the next two. */
+  spans?: Record<string, number>
+  /** Cells covered by a span from a row above, so not drawn here. */
+  covered?: string[]
 }
 
 /**
@@ -374,6 +381,10 @@ export function DocTable({
   minRows = 0,
   fontSize = 9.5,
   style,
+  dense = false,
+  fill = 0,
+  pageFills,
+  tableRef,
 }: {
   columns: DocColumn[]
   rows: DocRow[]
@@ -381,6 +392,17 @@ export function DocTable({
   minRows?: number
   fontSize?: number
   style?: React.CSSProperties
+  /** Tight cells (3 px), for the compact tax invoice. */
+  dense?: boolean
+  /** Height (px) of one empty last row whose column rules run on down — the tax invoice's table taking up the page. */
+  fill?: number
+  /**
+   * Where a page breaks inside the table, the room left at its foot: [after
+   * row index, px]. Printed only — the table's rules run to the foot of every
+   * page and the next page starts after it.
+   */
+  pageFills?: Array<[number, number]>
+  tableRef?: React.Ref<HTMLTableElement>
 }) {
   const totalWeight = columns.reduce((s, c) => s + (c.width ? 0 : (c.weight ?? 10)), 0)
   const fixedPct = columns.reduce((s, c) => s + (c.width ? parseFloat(c.width) : 0), 0)
@@ -390,11 +412,11 @@ export function DocTable({
   const last = columns.length - 1
 
   const th = (c: DocColumn, i: number): React.CSSProperties => ({
-    padding: '4px 4px',
-    fontSize: '7.5px',
+    padding: dense ? '4px 4px' : '4px 4px',
+    fontSize: dense ? '9.5px' : '7.5px',
     fontWeight: 700,
-    letterSpacing: '.04em',
-    textTransform: 'uppercase',
+    letterSpacing: dense ? 0 : '.04em',
+    textTransform: dense ? 'none' : 'uppercase',
     lineHeight: 1.25,
     textAlign: c.align ?? 'left',
     verticalAlign: 'bottom',
@@ -403,21 +425,25 @@ export function DocTable({
     overflowWrap: 'anywhere',
   })
   const td = (c: DocColumn, i: number, r?: DocRow): React.CSSProperties => ({
-    padding: '4px 4px',
+    padding: dense ? '3px 4px' : '4px 4px',
     fontSize: `${fontSize}px`,
-    lineHeight: 1.4,
+    lineHeight: dense ? 1.3 : 1.4,
     textAlign: c.align ?? 'left',
     verticalAlign: 'top',
-    borderTop: r?.total ? LINE : HAIR,
+    ...(dense && !r?.total ? { borderBottom: HAIR } : { borderTop: r?.total ? LINE : HAIR }),
     borderRight: i === last ? undefined : HAIR,
-    overflowWrap: 'anywhere',
+    overflowWrap: dense && c.align === 'right' ? 'normal' : 'anywhere',
     fontWeight: r?.total ? 700 : undefined,
     fontStyle: r?.muted ? 'italic' : undefined,
     ...(c.align === 'right' ? NUM : {}),
   })
 
   return (
-    <table className="doc-lines" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', border: LINE, marginTop: '7px', ...style }}>
+    <table
+      ref={tableRef}
+      className="doc-lines"
+      style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', border: LINE, marginTop: '7px', ...style }}
+    >
       <colgroup>
         {columns.map((c) => (
           <col key={c.key} style={{ width: widthOf(c) }} />
@@ -433,14 +459,30 @@ export function DocTable({
         </tr>
       </thead>
       <tbody>
-        {rows.map((r) => (
-          <tr key={r.key}>
-            {columns.map((c, i) => (
-              <td key={c.key} style={td(c, i, r)}>
-                {r.cells[c.key] ?? ''}
-              </td>
-            ))}
-          </tr>
+        {rows.map((r, n) => (
+          <Fragment key={r.key}>
+            <tr>
+              {columns.map((c, i) =>
+                r.covered?.includes(c.key) ? null : (
+                  <td key={c.key} rowSpan={r.spans?.[c.key]} className={r.shade ? 'doc-shade' : undefined} style={td(c, i, r)}>
+                    {r.cells[c.key] ?? ''}
+                  </td>
+                ),
+              )}
+            </tr>
+            {pageFills
+              ?.filter(([after]) => after === n)
+              .map(([, height]) => (
+                <tr key="page-fill" className="doc-page-fill" data-fill="" style={{ breakAfter: 'page', pageBreakAfter: 'always' }}>
+                  {columns.map((c, i) => (
+                    <td
+                      key={c.key}
+                      style={{ height: `${Math.max(0, height)}px`, padding: 0, borderRight: i === last ? undefined : HAIR, borderBottom: LINE }}
+                    />
+                  ))}
+                </tr>
+              ))}
+          </Fragment>
         ))}
         {Array.from({ length: blanks }).map((_, b) => (
           <tr key={`blank-${b}`}>
@@ -449,6 +491,13 @@ export function DocTable({
             ))}
           </tr>
         ))}
+        {fill > 0 && (
+          <tr data-fill="" style={{ breakBefore: 'avoid' }}>
+            {columns.map((c, i) => (
+              <td key={c.key} style={{ height: `${fill}px`, padding: 0, borderRight: i === last ? undefined : HAIR }} />
+            ))}
+          </tr>
+        )}
       </tbody>
     </table>
   )
@@ -606,7 +655,16 @@ export function TaxByRate({
 }
 
 /** Numbered terms in two columns that finish at about the same depth. */
-export function Terms({ text, title = 'Terms & Conditions' }: { text: string | null | undefined; title?: string }) {
+export function Terms({
+  text,
+  title = 'Terms & Conditions',
+  dense = false,
+}: {
+  text: string | null | undefined
+  title?: string
+  /** Smaller type and tighter lines, for the compact tax invoice. */
+  dense?: boolean
+}) {
   const lines = (text ?? '')
     .split(/\r?\n/)
     .map((l) => l.replace(/^\s*\d+[.)]\s*/, '').trim())
@@ -622,7 +680,45 @@ export function Terms({ text, title = 'Terms & Conditions' }: { text: string | n
       break
     }
   }
+  if (dense && lines.length > 1) {
+    // About 80 characters to a printed line in half the width: split where the
+    // taller column is shortest, so one long term doesn't leave a column empty.
+    const tall = lines.map((t) => Math.max(1, Math.ceil(t.length / 80)))
+    const all = tall.reduce((n, h) => n + h, 0)
+    let best = Infinity
+    let left = 0
+    for (let i = 1; i < lines.length; i++) {
+      left += tall[i - 1]
+      if (Math.max(left, all - left) < best) {
+        best = Math.max(left, all - left)
+        half = i
+      }
+    }
+  }
   const cols = lines.length > 1 ? [lines.slice(0, half), lines.slice(half)] : [lines]
+  if (dense) {
+    return (
+      <div style={{ border: LINE, marginTop: '5px', padding: '3px 8px 2px', breakInside: 'avoid' }}>
+        <Eyebrow>{title}</Eyebrow>
+        <div style={{ display: 'flex', gap: '16px', marginTop: '2px' }}>
+          {cols.map((part, col) =>
+            part.length ? (
+              <div key={col} style={{ flex: 1, minWidth: 0 }}>
+                {part.map((t, i) => (
+                  <div key={i} style={{ display: 'flex', gap: '5px', fontSize: '8.5px', lineHeight: 1.35, marginBottom: '1px' }}>
+                    <span style={{ width: '11px', flexShrink: 0, textAlign: 'right', fontWeight: 700, ...NUM }}>
+                      {(col === 0 ? 0 : half) + i + 1}.
+                    </span>
+                    <span style={{ minWidth: 0 }}>{t}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null,
+          )}
+        </div>
+      </div>
+    )
+  }
   return (
     <Box title={title} style={{ marginTop: '7px' }} bodyStyle={{ padding: '4px 9px' }}>
       <div style={{ display: 'flex', gap: '18px' }}>
@@ -653,26 +749,45 @@ export function Signatures({
   company,
   roles,
   signatureUrl,
+  dense = false,
 }: {
+  /** Shorter, and straight after what comes before rather than at the foot of the page. */
+  dense?: boolean
   company?: string | null
-  /** A role, or a role with the name the system knows ("Received by — Ramesh"). */
-  roles: Array<string | { role: string; who?: string | null; sub?: string | null }>
+  /** A role, or a role with the name the system knows ("Received by — Ramesh"); `image` prints above that block. */
+  roles: Array<string | { role: string; who?: string | null; sub?: string | null; image?: string | null; space?: number }>
   /** Printed above the first role. */
   signatureUrl?: string | null
 }) {
   return (
-    <div className="doc-push" style={{ display: 'flex', gap: '22px', paddingTop: '14px', breakInside: 'avoid' }}>
+    <div
+      className={dense ? undefined : 'doc-push'}
+      style={{
+        display: 'flex',
+        gap: dense ? '16px' : '22px',
+        paddingTop: dense ? '6px' : '14px',
+        alignItems: dense ? 'flex-start' : 'flex-end',
+        breakInside: 'avoid',
+      }}
+    >
       {roles.map((r, i) => {
         const role = typeof r === 'string' ? r : r.role
         const who = typeof r === 'string' ? null : r.who
         const sub = typeof r === 'string' ? (company ? `For ${company}` : null) : r.sub === undefined ? (company ? `For ${company}` : null) : r.sub
+        const image = (i === 0 && signatureUrl) || (typeof r === 'string' ? null : r.image)
         return (
           <div key={`${role}-${i}`} style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ height: '34px', display: 'flex', alignItems: 'flex-end' }}>
-              {i === 0 && signatureUrl ? (
+            <div
+              style={{
+                height: `${(typeof r === 'string' ? undefined : r.space) ?? (dense ? 28 : 34)}px`,
+                display: 'flex',
+                alignItems: 'flex-end',
+              }}
+            >
+              {image ? (
                 // A data URL, so next/image would add nothing.
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={signatureUrl} alt="" style={{ height: '30px', width: 'auto', objectFit: 'contain', filter: 'grayscale(1)' }} />
+                <img src={image} alt="" style={{ height: '30px', width: 'auto', objectFit: 'contain', filter: 'grayscale(1)' }} />
               ) : (
                 <span style={{ fontSize: '10px', fontWeight: 600 }}>{who ?? ''}</span>
               )}
@@ -693,10 +808,10 @@ export function Signatures({
 /** A CSS string literal, safe for `content:`. */
 const cssString = (s: string) => JSON.stringify(s.replace(/[\r\n]+/g, ' '))
 
-const sheetCss = (footerLeft: string) => `
+const sheetCss = (footerLeft: string, pageMargin = '10mm 11mm 14mm 11mm') => `
 @page {
   size: A4;
-  margin: 10mm 11mm 14mm 11mm;
+  margin: ${pageMargin};
   @bottom-left {
     content: ${cssString(footerLeft.toUpperCase())};
     font: 600 7pt/1.3 "Helvetica Neue", Arial, sans-serif;
@@ -706,6 +821,11 @@ const sheetCss = (footerLeft: string) => `
     vertical-align: top;
     padding-top: 2mm;
   }
+  /* The browser's own header — date, time, page name — has no place on our
+     paper: these boxes take the top margin, so it is not drawn there. */
+  @top-left { content: "\\00a0"; }
+  @top-center { content: "\\00a0"; }
+  @top-right { content: "\\00a0"; }
   @bottom-right {
     content: "Page " counter(page) " of " counter(pages);
     font: 600 7pt/1.3 "Helvetica Neue", Arial, sans-serif;
@@ -753,9 +873,16 @@ const sheetCss = (footerLeft: string) => `
   box-shadow: none !important; text-shadow: none !important; opacity: 1 !important;
 }
 .doc-sheet svg *:not(img) { stroke: #000 !important; }
+/* The one grey allowed: a total row asked to stand out (DocRow.shade), a light
+   tint that prints on any black-and-white printer. */
+.doc-sheet td.doc-shade {
+  background-color: #ececec !important;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
 .doc-sheet .doc-push { margin-top: auto; }
 .doc-sheet table.doc-lines thead { display: table-header-group; }
 .doc-sheet table.doc-lines tr { break-inside: avoid; page-break-inside: avoid; }
+.doc-sheet table.doc-lines tr.doc-page-fill { display: none; }
 .doc-screen-foot {
   display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; padding-top: 4px;
   border-top: 0.75pt solid #000; font: 600 7pt/1.3 "Helvetica Neue", Arial, sans-serif;
@@ -771,6 +898,7 @@ const sheetCss = (footerLeft: string) => `
     min-height: 272mm;
   }
   .doc-screen-foot { display: none !important; }
+  .doc-sheet table.doc-lines tr.doc-page-fill { display: table-row; }
 }
 `
 
@@ -795,6 +923,10 @@ export function DocumentSheet({
   fileName,
   options,
   footerNote,
+  tagline,
+  extraContact,
+  pageMargin,
+  bare = false,
   children,
 }: {
   company: CompanyInfo
@@ -819,6 +951,14 @@ export function DocumentSheet({
   options?: React.ReactNode
   /** A line at the very end — "Subject to Thane jurisdiction". */
   footerNote?: string | null
+  /** The printed page's margins, when a document needs tighter ones (the compact tax invoice). */
+  pageMargin?: string
+  /** No letterhead or title row: the document draws its own header (the compact tax invoice). */
+  bare?: boolean
+  /** Under the company's name: "Manufacturer of: Fancy Fabrics" (the tax invoice). */
+  tagline?: string | null
+  /** More rows under the letterhead's contact column: [label, value] — "State", "Maharashtra, code 27". */
+  extraContact?: Array<[string, string | null | undefined]>
   children: React.ReactNode
 }) {
   const name = company.name ?? ''
@@ -838,11 +978,13 @@ export function DocumentSheet({
 
   return (
     <>
-      <style dangerouslySetInnerHTML={{ __html: sheetCss(footerLeft) }} />
+      <style dangerouslySetInnerHTML={{ __html: sheetCss(footerLeft, pageMargin) }} />
       <PrintToolbar backHref={backHref} backLabel={backLabel} copies={copies} fileName={fileName ?? number} />
       {options && <div className="no-print doc-options">{options}</div>}
 
-      <div className="doc-sheet">
+      <div className="doc-sheet" style={bare ? { padding: pageMargin ?? '8mm 8mm 6mm' } : undefined}>
+        {!bare && (
+        <>
         {/* ── Letterhead ── */}
         <div style={{ display: 'flex', gap: '14px', alignItems: 'flex-start' }}>
           {company.logoUrl && (
@@ -858,6 +1000,7 @@ export function DocumentSheet({
             <div style={{ fontSize: '22px', fontWeight: 800, letterSpacing: '-.01em', textTransform: 'uppercase', lineHeight: 1.05 }}>
               {name}
             </div>
+            {tagline && <div style={{ fontSize: '10px', fontWeight: 700, marginTop: '3px' }}>{tagline}</div>}
             {address && <div style={{ fontSize: '9.5px', lineHeight: 1.5, marginTop: '4px', maxWidth: '92%' }}>{address}</div>}
             {company.address2 && (
               <div style={{ fontSize: '9.5px', lineHeight: 1.5, maxWidth: '92%' }}>
@@ -874,6 +1017,14 @@ export function DocumentSheet({
                   <span style={{ fontSize: '9.5px', fontWeight: 600, ...(mono && value ? NUM : {}) }}>{value || <Dash />}</span>
                 </div>
               ))}
+            {(extraContact ?? []).map(([label, value]) => (
+              <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '6px', lineHeight: 1.5 }}>
+                <span style={{ width: '10px', flexShrink: 0 }} />
+                <span style={{ fontSize: '9px', width: '50px', flexShrink: 0 }}>{label}</span>
+                <span style={{ fontSize: '9px', flexShrink: 0 }}>:</span>
+                <span style={{ fontSize: '9.5px', fontWeight: 600 }}>{value || <Dash />}</span>
+              </div>
+            ))}
           </div>
         </div>
         <div style={{ borderTop: HEAVY, marginTop: '6px' }} />
@@ -916,6 +1067,8 @@ export function DocumentSheet({
             ))}
           </div>
         </div>
+        </>
+        )}
 
         {banner && <Banner>{banner}</Banner>}
 

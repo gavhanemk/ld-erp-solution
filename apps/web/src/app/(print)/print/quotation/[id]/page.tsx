@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import type { ChargeTaxTreatment } from '@ld-erp/shared'
 import { saleChargeRow } from '@/components/print/saleChargeRow'
+import { garmentTable } from '@/components/print/garmentLines'
 import {
   StoreSheet,
   Dash,
@@ -14,15 +15,12 @@ import {
   Terms,
   TotalsBox,
   WordsAndTotals,
-  qty,
   money,
+  qty,
   longDate,
   shortDate,
-  CODE,
-  GREY,
   INK,
   MUTED,
-  type SheetColumn,
   type TotalLine,
 } from '@/components/print/StoreSheet'
 
@@ -65,7 +63,16 @@ interface Payload {
       gstRate: string
       hsnCode: string | null
       amount: string
-      item: { code: string; name: string; color: string | null; hsnCode: string | null }
+      item: {
+        code: string
+        name: string
+        color: string | null
+        hsnCode: string | null
+        uom?: { symbol: string } | null
+        style?: { code: string; name: string } | null
+      }
+      /** Pieces size by size, when the quotation was split by size (28 Nov 2026). */
+      sizes?: Array<{ qty: string; size: { code: string; sequence?: number | null } }>
     }>
     /** Transport, packing: the order made from this quotation carries them as they are. */
     charges?: Array<{
@@ -104,41 +111,9 @@ export default function PrintQuotation() {
   const c = q.customer
   const address = [c.billingAddress, c.billingCity, c.billingState, c.billingPincode].filter(Boolean).join(', ')
   const showHsn = template.showHsn !== false
-  const columns: SheetColumn[] = [
-    { key: 'sn', head: 'S.N', width: '5%', align: 'center' },
-    { key: 'item', head: 'Style / Description', width: showHsn ? '37%' : '45%' },
-    ...(showHsn ? [{ key: 'hsn', head: 'HSN', width: '8%', align: 'center' as const }] : []),
-    { key: 'qty', head: 'Pieces', width: '10%', align: 'right' },
-    { key: 'rate', head: q.isJobWork ? 'Job charge' : 'Rate', width: '11%', align: 'right' },
-    { key: 'disc', head: 'Disc', width: '7%', align: 'right' },
-    { key: 'gst', head: 'GST', width: '7%', align: 'right' },
-    { key: 'amount', head: 'Amount (₹)', width: '15%', align: 'right' },
-  ]
-  const rows = q.lines.map((l, i) => ({
-    key: l.id,
-    cells: {
-      sn: i + 1,
-      item: (
-        <>
-          <div style={{ fontWeight: 600 }}>
-            {l.item.name}
-            {l.color || l.item.color ? ` · ${l.color || l.item.color}` : ''}
-          </div>
-          <div style={{ fontSize: '8.5px', color: GREY, marginTop: '1px' }}>
-            <span style={CODE}>{l.item.code}</span>
-            {l.styleCode ? ` · Style ${l.styleCode}` : ''}
-          </div>
-          {l.description && <div style={{ fontSize: '8.5px', color: INK, marginTop: '1px' }}>{l.description}</div>}
-        </>
-      ),
-      hsn: <span style={{ fontSize: '9px', color: GREY }}>{l.hsnCode ?? l.item.hsnCode ?? '—'}</span>,
-      qty: <strong>{qty(l.qty)}</strong>,
-      rate: money(l.unitPrice),
-      disc: Number(l.discount) > 0 ? `${Number(l.discount)}%` : '—',
-      gst: `${Number(l.gstRate)}%`,
-      amount: money(l.amount),
-    },
-  }))
+  // The lines as the old ERP printed them, with every size and its pieces
+  // when the quotation was split by size (28 Nov 2026).
+  const { columns, rows } = garmentTable(q.lines, { showHsn, rateHead: q.isJobWork ? 'Job charge' : 'Rate' })
   const totals: Array<[string, string]> = [
     ['Value', money(q.subtotal)],
     ...(Number(q.discountAmount) > 0 ? ([['Discount', `− ${money(q.discountAmount)}`]] as Array<[string, string]>) : []),
@@ -180,7 +155,8 @@ export default function PrintQuotation() {
     .sort((a, b) => a[0] - b[0])
     .map(([rate, r]) => ({ gstRate: rate, taxable: r.taxable, cgst: r.tax / 2, sgst: r.tax / 2, igst: r.tax }))
 
-  const totalLines: TotalLine[] = totals.map(([label, value]) => ({ label, value }))
+  const pieces = q.lines.reduce((n, l) => n + Number(l.qty), 0)
+  const totalLines: TotalLine[] = [{ label: 'Pieces', value: qty(pieces) }, ...totals.map(([label, value]) => ({ label, value }))]
 
   // Laid out like the purchase order (27 Nov 2026): the buyer in the "To,"
   // block with the quotation's facts beside it.

@@ -113,6 +113,8 @@ export function StoreSheet({
   footerNote,
   options,
   copyLabel,
+  tagline,
+  extraContact,
 }: {
   company: Record<string, string | null>
   title: string
@@ -130,17 +132,34 @@ export function StoreSheet({
   /** The older row of titled boxes, for facts that are not about a party. */
   panels?: Array<{ title: string; body: React.ReactNode }>
   columns: SheetColumn[]
-  rows: Array<{ key: string; cells: Record<string, React.ReactNode>; muted?: boolean }>
+  /**
+   * `total`: a sub-total or total row, bold and ruled above (the job challan's
+   * per-garment totals), `shade` greyed; `spans`/`covered`: a cell run down
+   * over the rows below it (the garment over its rolls).
+   */
+  rows: Array<{
+    key: string
+    cells: Record<string, React.ReactNode>
+    muted?: boolean
+    total?: boolean
+    shade?: boolean
+    spans?: Record<string, number>
+    covered?: string[]
+  }>
   /** Ruled empty rows — only for a sheet meant to be written on (a count sheet). */
   minRows?: number
   /** Anything between the table and the signatures. */
   after?: React.ReactNode
-  signatures: Array<{ role: string; who?: string | null }>
+  /** `sub` under the role ("For LD Cotton Mills"); `image` above it (a signature or stamp). */
+  signatures: Array<{ role: string; who?: string | null; sub?: string | null; image?: string | null }>
   footerNote: string
   /** Screen-only controls above the sheet, never printed. */
   options?: React.ReactNode
   /** Which copy this is — "Original for the job worker" — printed over the number. */
   copyLabel?: string | null
+  /** Letterhead extras, for the tax invoice: a line under the name, more contact rows. */
+  tagline?: string | null
+  extraContact?: Array<[string, string | null | undefined]>
 }) {
   const cols: DocColumn[] = columns.map((c) => ({ key: c.key, head: c.head, width: c.width, align: c.align }))
   const shownBands = (bands ?? []).filter(Boolean) as SheetBand[]
@@ -158,6 +177,8 @@ export function StoreSheet({
       backLabel={backLabel}
       options={options}
       footerNote={footerNote}
+      tagline={tagline}
+      extraContact={extraContact}
     >
       {party && (
         <PartyBlock heading={party.heading} name={party.name} code={party.code} meta={party.meta}>
@@ -192,7 +213,7 @@ export function StoreSheet({
 
       {after}
 
-      <Signatures roles={signatures.map((s) => ({ role: s.role, who: s.who ?? null, sub: null }))} />
+      <Signatures roles={signatures.map((s) => ({ role: s.role, who: s.who ?? null, sub: s.sub ?? null, image: s.image ?? null }))} />
     </DocumentSheet>
   )
 }
