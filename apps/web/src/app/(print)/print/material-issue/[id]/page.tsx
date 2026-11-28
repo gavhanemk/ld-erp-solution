@@ -17,6 +17,8 @@ import {
   RULE,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
+import { SubLine } from '@/components/print/doc'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 interface Person {
   name: string
@@ -51,7 +53,7 @@ interface Payload {
       purpose: string | null
       fulfilment?: 'FROM_STOCK' | 'PURCHASE'
       purchaseQty?: string | number | null
-      item: { code: string; name: string; uom: { symbol: string } }
+      item: ShadeFields & { code: string; name: string; uom: { symbol: string } }
       warehouse: { name: string }
       ownership?: 'OWNED' | 'CUSTOMER_OWNED'
       ownerCustomer?: { name: string } | null
@@ -60,7 +62,7 @@ interface Payload {
   handovers: Array<{
     transactionDate: string
     outQty: string
-    item: { code: string; name: string; uom: { symbol: string } }
+    item: ShadeFields & { code: string; name: string; uom: { symbol: string } }
     warehouse: { name: string }
   }>
 }
@@ -141,6 +143,8 @@ export default function PrintMaterialIssue() {
         desc: (
           <>
             <div style={{ fontWeight: 600 }}>{l.item.name}</div>
+            {/* A fabric's design and colour: the roll handed over is the one asked for. */}
+            {itemShade(l.item) && <SubLine>{itemShade(l.item)}</SubLine>}
             {l.ownership === 'CUSTOMER_OWNED' && (
               <div style={{ fontSize: '8.5px', fontWeight: 700, color: NAVY, marginTop: '1px' }}>
                 {l.ownerCustomer?.name ?? 'Customer'}&apos;s material — not ours
@@ -217,6 +221,7 @@ export default function PrintMaterialIssue() {
                 <div key={i} style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.45 }}>
                   <span style={{ color: GREY }}>{longDate(h.transactionDate)} · </span>
                   {qty(h.outQty)} {h.item.uom.symbol} {h.item.name}
+                  {itemShade(h.item) ? ` (${itemShade(h.item)})` : ''}
                 </div>
               ))
             )}

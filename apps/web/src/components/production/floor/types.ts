@@ -1,5 +1,7 @@
 /** The production picture of one order, as GET /production/orders/:id/flow returns it. */
 
+import { itemShade, type ShadeFields } from '@/lib/items'
+
 export type Bucket = 'TRANSIT' | 'WIP' | 'DONE' | 'REWORK' | 'DAMAGED' | 'REJECTED' | 'SHORT' | 'B_GRADE' | 'SCRAPPED' | 'PACKED' | 'PACKED_B'
 
 export interface StepFigures {
@@ -223,7 +225,8 @@ export interface JobCardCutting {
   plannedBreakup: Record<string, number> | null
   sizeBreakup: Record<string, number> | null
   notes: string | null
-  fabricItem: { id: string; code: string; name: string; uom: { symbol: string } | null } | null
+  /** With its design and colour (a fabric item is one of each). */
+  fabricItem: ({ id: string; code: string; name: string; uom: { symbol: string } | null } & ShadeFields) | null
   createdBy: { name: string } | null
   _count: { bundles: number }
 }
@@ -270,9 +273,26 @@ export interface JobCardHeader {
  * cutting contractors, used and wasted as each lay came back cut, and what is
  * left over with them. Worked out by the server from the lays.
  */
-export interface FabricRecord {
+export interface FabricRecord extends FabricFigures {
   /** m, kg… or '' when the fabric has no unit. */
   unit: string
+  /**
+   * The same figures fabric by fabric (27 Nov 2026): two designs cut on one
+   * job card are two lines, not one "950 m given".
+   */
+  items?: FabricRecordItem[]
+}
+
+/** One fabric's share of the record, named as the Items master has it. */
+export interface FabricRecordItem extends FabricFigures, ShadeFields {
+  /** Null for lays issued without a fabric picked. */
+  itemId: string | null
+  code: string
+  name: string
+}
+
+/** The figures of the record, for a unit or for one fabric in it. */
+export interface FabricFigures {
   given: number
   /** Of what was given, on lays still with their contractors. */
   withCutters: number
@@ -442,7 +462,7 @@ export const whoHas = (list: Array<{ name: string; qty: number }>, unit: string)
  * A job card's fabric in one line, as the floor reads it:
  * "950 m given · 900 m used · 30 m waste · 20 m left over with Suresh".
  */
-export function fabricLine(r: FabricRecord) {
+export function fabricLine(r: FabricFigures & { unit: string }) {
   return [
     r.given ? `${fabricQty(r.given, r.unit)} given` : null,
     r.withCutters ? `${fabricQty(r.withCutters, r.unit)} with cutters` : null,
@@ -453,4 +473,32 @@ export function fabricLine(r: FabricRecord) {
   ]
     .filter(Boolean)
     .join(' · ')
+}
+
+/** A fabric by name with its design and colour: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+export function fabricName(f: { name: string } & ShadeFields) {
+  const shade = itemShade(f)
+  return shade ? `${f.name} (${shade})` : f.name
+}
+
+/**
+ * A job card's fabric record as the lines a screen shows: fabric by fabric,
+ * each named with its design and colour, and — where a unit has more than one
+ * fabric — the unit's total after them, the one line it showed before.
+ * `fabric` is '' on the total, or for lays issued without a fabric picked.
+ */
+export function fabricRecordLines(list: FabricRecord[]): Array<{ key: string; fabric: string; total: boolean; text: string; warn: boolean }> {
+  const warn = (x: FabricFigures) => !!(x.leftOver || x.overUsed || x.notRecorded)
+  return list.flatMap((r) => {
+    const items = r.items ?? []
+    if (!items.length) return [{ key: r.unit, fabric: '', total: false, text: fabricLine(r), warn: warn(r) }]
+    const each = items.map((i) => ({
+      key: `${r.unit}|${i.itemId ?? ''}`,
+      fabric: i.name ? fabricName(i) : '',
+      total: false,
+      text: fabricLine({ ...i, unit: r.unit }),
+      warn: warn(i),
+    }))
+    return items.length > 1 ? [...each, { key: `${r.unit}|all`, fabric: '', total: true, text: fabricLine(r), warn: warn(r) }] : each
+  })
 }

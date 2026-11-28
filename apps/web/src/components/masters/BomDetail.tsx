@@ -4,6 +4,7 @@ import { Fragment, useMemo } from 'react'
 import { Archive, CheckCircle2, Equal, PencilLine, Plus } from 'lucide-react'
 import { can } from '@/lib/api'
 import { cn, formatDate, formatRupees } from '@/lib/utils'
+import { itemShade } from '@/lib/items'
 import type { Bom } from '@/components/masters/BomFormDialog'
 
 /*
@@ -107,6 +108,12 @@ export function BomDetail({ bom }: { bom: Bom }) {
             <div className="space-y-0.5">
               <p className="text-sm font-semibold text-foreground">{note.title}</p>
               {bom.copiedFrom && <p className="text-xs text-muted-foreground">Copied from {bom.copiedFrom.style.code} / {bom.copiedFrom.color || 'No colour'} / v{bom.copiedFrom.version}</p>}
+              {/* A BOM's brand is its style's; it has none of its own. */}
+              {bom.style?.brand && (
+                <p className="text-xs text-muted-foreground">
+                  Brand: <span className="text-foreground">{bom.style.brand.name}</span>, from the style
+                </p>
+              )}
               <p className="text-xs text-muted-foreground">{note.body}</p>
               {bom.approvedBy && (
                 <p className="text-xs text-muted-foreground">
@@ -285,6 +292,12 @@ export function BomDetail({ bom }: { bom: Bom }) {
                                 {line.componentItem?.name}
                               </span>
                             </div>
+                            {/* A fabric's design and colour: same-name fabrics differ by them. */}
+                            {itemShade(line.componentItem) && (
+                              <div className="truncate text-xs text-muted-foreground" title={itemShade(line.componentItem)}>
+                                {itemShade(line.componentItem)}
+                              </div>
+                            )}
                           </td>
                           <td className={cn(td, 'truncate text-xs text-muted-foreground')}>
                             {line.component || '—'}

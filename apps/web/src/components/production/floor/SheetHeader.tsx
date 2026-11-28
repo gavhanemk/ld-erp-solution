@@ -21,7 +21,7 @@ export function SheetHeader({ d, step }: { d: JobCardDetail; step?: FlowStep }) 
     ['Description', c.description ?? '—'],
     ['Fabric quality', c.fabricQuality ?? '—'],
     ['Colour', d.line?.color || '—'],
-    ['Design no.', c.designNo ?? '—'],
+    ['Print / design', c.designNo ?? '—'],
     ['Lot no.', lot ? <span key="lot" title={lot.fromLays ? 'As written on the lays issued for cutting' : undefined}>{lot.lot}</span> : '—'],
     ['Metres', c.meters != null ? c.meters.toLocaleString('en-IN', { maximumFractionDigits: 3 }) : '—'],
     ['Average', c.average != null ? `${c.average.toLocaleString('en-IN', { maximumFractionDigits: 4 })} m/pc` : '—'],
@@ -44,7 +44,10 @@ export function SheetHeader({ d, step }: { d: JobCardDetail; step?: FlowStep }) 
         {facts.map(([label, value]) => (
           <div key={label} className="min-w-0">
             <dt className="text-muted-foreground text-[11px]">{label}</dt>
-            <dd className="text-foreground truncate font-medium">{value}</dd>
+            {/* Cut short to fit, in full on hover: a fabric quality now carries its design and colour. */}
+            <dd className="text-foreground truncate font-medium" title={typeof value === 'string' ? value : undefined}>
+              {value}
+            </dd>
           </div>
         ))}
       </dl>

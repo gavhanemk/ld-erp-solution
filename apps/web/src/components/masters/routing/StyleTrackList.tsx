@@ -144,7 +144,7 @@ export function StyleTrackList({ reloadKey, onError }: { reloadKey: number; onEr
                         <>
                           <span className="text-foreground/80">{r.routing.name}</span>
                           <span>
-                            {r.routing.fabric ? `· ${r.routing.fabric} ` : ''}· v{r.routing.version} · {r.routing.steps} {r.routing.steps === 1 ? 'step' : 'steps'}
+                            {r.routing.fabric ? `· ${r.routing.fabric}${r.routing.fabricShade ? ` · ${r.routing.fabricShade}` : ''} ` : ''}· v{r.routing.version} · {r.routing.steps} {r.routing.steps === 1 ? 'step' : 'steps'}
                             {r.routing.applies === 'CATEGORY' ? ' · shared by its category' : r.routing.applies === 'ANY' ? ' · shared by any style' : ''}
                           </span>
                         </>

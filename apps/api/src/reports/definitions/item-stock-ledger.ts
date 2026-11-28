@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { dateRangeFilters, itemFilter, periodLabel, round2 } from './shared'
+import { ITEM_SHADE } from '../../lib/fabric'
+import { dateRangeFilters, itemFilter, periodLabel, round2, rowItemLabel, shadeColumns, shadeOf } from './shared'
 import {
   BUCKET_LABEL,
   BUCKET_TONE,
@@ -41,6 +42,7 @@ export const itemStockLedger: ReportDefinition = {
     { key: 'date', label: 'Date', type: 'date', width: 14 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'owner', label: 'Owner', type: 'text', width: 18 },
     { key: 'movement', label: 'Movement', type: 'text', width: 20 },
@@ -112,7 +114,7 @@ export const itemStockLedger: ReportDefinition = {
         unitRate: true,
         transactionDate: true,
         notes: true,
-        item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+        item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
         warehouse: { select: { name: true } },
         ownerCustomer: { select: { name: true } },
       },
@@ -134,6 +136,7 @@ export const itemStockLedger: ReportDefinition = {
         date: e.transactionDate,
         itemCode: e.item.code,
         item: e.item.name,
+        ...shadeOf(e.item),
         store: e.warehouse.name,
         owner: e.ownership === 'OWNED' ? 'Ours' : (e.ownerCustomer?.name ?? 'Customer'),
         movement: e.referenceType?.endsWith('CANCELLED') ? `${BUCKET_LABEL[b]} (cancelled)` : BUCKET_LABEL[b],
@@ -161,7 +164,7 @@ export const itemStockLedger: ReportDefinition = {
       const last = new Map<string, number>()
       for (const r of rows) last.set(r.store, r.balance)
       insights.push(
-        `${single.item} ends the period with ${[...last].map(([s, q]) => `${q.toLocaleString('en-IN')} ${single.uom} in ${s}`).join(', ')}.`,
+        `${rowItemLabel(single)} ends the period with ${[...last].map(([s, q]) => `${q.toLocaleString('en-IN')} ${single.uom} in ${s}`).join(', ')}.`,
       )
       const inQ = rows.reduce((s, r) => s + r.inQty, 0)
       const outQ = rows.reduce((s, r) => s + r.outQty, 0)

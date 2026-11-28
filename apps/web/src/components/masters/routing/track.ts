@@ -27,7 +27,18 @@ export interface Overall {
 
 export interface StyleRow {
   style: { id: string; code: string; name: string; category: string | null; colors: string[]; isActive: boolean }
-  routing: { id: string; code: string; name: string; version: number; applies: Applies; steps: number; alternatives: number; fabric: string | null } | null
+  routing: {
+    id: string
+    code: string
+    name: string
+    version: number
+    applies: Applies
+    steps: number
+    alternatives: number
+    fabric: string | null
+    /** The fabric's "Design No: 1164 · Colour: Navy": which of several same-name fabrics. '' when it has neither. */
+    fabricShade?: string
+  } | null
   overall: Overall
 }
 

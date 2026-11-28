@@ -7,6 +7,7 @@ import type {
   PurchaseNoteReason,
 } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { recordMovement } from './stock.service'
 import { assertSampleStoreLines } from './sampleSourcing.service'
 
@@ -299,7 +300,24 @@ export const LIVE_STATUSES = ['DRAFT', 'SUBMITTED', 'APPROVED', 'POSTED'] as con
 
 // ── What is still adjustable ────────────────────────────────────────────────
 
-export interface AdjustableLine {
+/**
+ * The item's Design No. and Colour, so same-name fabrics on one bill or
+ * receipt can be told apart (Masters → Items). `styleId` marks a finished
+ * good, whose colour is already in its name.
+ */
+interface LineShade {
+  designNo: string | null
+  color: string | null
+  styleId: string | null
+}
+
+/** "Cotton Twill (Design No: 1164 · Colour: Navy)" — an item named in a message. */
+export const lineItemName = (l: { itemName: string } & LineShade) => {
+  const shade = itemShadeText(l)
+  return shade ? `${l.itemName} (${shade})` : l.itemName
+}
+
+export interface AdjustableLine extends LineShade {
   billLineId: string
   itemId: string
   itemCode: string
@@ -403,7 +421,7 @@ export async function adjustableOn(
               warehouseId: true,
             },
           },
-          item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+          item: { select: { code: true, name: true, uom: { select: { symbol: true } }, ...ITEM_SHADE } },
         },
       },
     },
@@ -500,6 +518,9 @@ export async function adjustableOn(
       itemId: l.itemId,
       itemCode: l.item.code,
       itemName: l.item.name,
+      designNo: l.item.designNo,
+      color: l.item.color,
+      styleId: l.item.styleId,
       uom: l.item.uom?.symbol ?? null,
       description: l.description,
       hsnCode: l.hsnCode,
@@ -540,7 +561,7 @@ export async function adjustableOn(
  * every line is returned regardless; the caller filters, the same way the
  * bill picker does.
  */
-export interface AdjustableGrnLine {
+export interface AdjustableGrnLine extends LineShade {
   grnLineId: string
   itemId: string
   itemCode: string
@@ -594,6 +615,7 @@ export async function adjustableOnGrn(
               hsnCode: true,
               uom: { select: { symbol: true } },
               taxRate: { select: { rate: true } },
+              ...ITEM_SHADE,
             },
           },
         },
@@ -633,6 +655,9 @@ export async function adjustableOnGrn(
       itemId: l.itemId,
       itemCode: l.item.code,
       itemName: l.item.name,
+      designNo: l.item.designNo,
+      color: l.item.color,
+      styleId: l.item.styleId,
       uom: l.item.uom?.symbol ?? null,
       hsnCode: l.item.hsnCode,
       gstRate: Number(l.poLine?.gstRate ?? l.item.taxRate?.rate ?? 0),
@@ -920,7 +945,7 @@ export async function moveNoteStock(
   if (mode === 'POST') {
     const traced = await tx.purchaseNoteLine.findMany({
       where: { noteId: note.id },
-      select: { grnLineId: true, billLineId: true, item: { select: { name: true } } },
+      select: { grnLineId: true, billLineId: true, item: { select: { name: true, ...ITEM_SHADE } } },
     })
     await assertSampleStoreLines(
       tx,
@@ -928,7 +953,7 @@ export async function moveNoteStock(
         warehouseId: note.warehouseId,
         grnLineId: l.grnLineId,
         billLineId: l.billLineId,
-        itemName: l.item.name,
+        itemName: lineItemName({ itemName: l.item.name, ...l.item }),
       })),
     )
   }

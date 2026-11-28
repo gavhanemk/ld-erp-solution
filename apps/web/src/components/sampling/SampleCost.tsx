@@ -10,6 +10,7 @@ import {
   type SampleCostSheet,
 } from '@ld-erp/shared'
 import { api, apiErrorMessage } from '@/lib/api'
+import { itemShade } from '@/lib/items'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
@@ -327,6 +328,8 @@ export function CostSheetView({ sheet }: { sheet: SampleCostSheet }) {
                   <tr key={`${m.materialId ?? 'left'}-${i}`}>
                     <td>
                       <span className="font-medium">{m.item.name}</span>
+                      {/* The material's own design and colour (a sheet finalised before 27 Nov 2026 has none). */}
+                      {itemShade(m.item) && <span className="text-muted-foreground block text-xs">{itemShade(m.item)}</span>}
                       <span className="text-muted-foreground block text-xs">
                         {[m.component, m.colour, SAMPLE_RATE_BASIS_LABEL[m.basis]].filter(Boolean).join(' · ')}
                       </span>
@@ -408,7 +411,7 @@ export function CostSheetView({ sheet }: { sheet: SampleCostSheet }) {
         {sheet.notCosted.length > 0 && (
           <p className="text-muted-foreground text-xs">
             Still in the sample store, not costed until closed out as used:{' '}
-            {sheet.notCosted.map((n) => `${n.qty} ${n.unit} of ${n.item}`).join(', ')}.
+            {sheet.notCosted.map((n) => `${n.qty} ${n.unit} of ${n.item}${itemShade(n) ? ` (${itemShade(n)})` : ''}`).join(', ')}.
           </p>
         )}
       </div>

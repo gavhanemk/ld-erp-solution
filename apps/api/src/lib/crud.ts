@@ -41,6 +41,8 @@ export interface CrudOptions {
    * in one dropdown. The clash is reported under that field on the form.
    */
   uniqueFields?: string[]
+  /** More conditions a clash on a unique field must also meet, worked out from the record. */
+  uniqueScope?: (data: Record<string, unknown>, before?: Record<string, unknown>) => Record<string, unknown> | undefined
   /**
    * A facet worked out by a rule of its own rather than a plain group-by:
    * given the where clause (every other filter applied), how many records
@@ -160,6 +162,8 @@ export async function assertUniqueFields(
   data: Record<string, unknown>,
   exceptId?: string,
   before?: Record<string, unknown>,
+  /** More conditions a clash must also meet — a fabric's name is unique per design and colour. */
+  scope?: Record<string, unknown>,
 ) {
   // Reached by name, as the factory reaches every delegate; see crudRouter.
   const delegate = (prisma as unknown as Record<string, any>)[model]
@@ -174,6 +178,7 @@ export async function assertUniqueFields(
     const clash = await delegate.findFirst({
       where: {
         [field]: { equals: value.trim(), mode: 'insensitive' },
+        ...(scope ?? {}),
         ...(exceptId ? { NOT: { id: exceptId } } : {}),
       },
     })
@@ -237,6 +242,7 @@ export function crudRouter(options: CrudOptions): Router {
     facets = [],
     customFacets = {},
     uniqueFields = [],
+    uniqueScope,
     permanentDelete,
     exportSheet,
     afterRead,
@@ -254,7 +260,7 @@ export function crudRouter(options: CrudOptions): Router {
     data: Record<string, unknown>,
     exceptId?: string,
     before?: Record<string, unknown>,
-  ) => assertUniqueFields(model, uniqueFields, data, exceptId, before)
+  ) => assertUniqueFields(model, uniqueFields, data, exceptId, before, uniqueScope?.(data, before))
 
   /**
    * The where clause for a list request: active flag, search, and every
@@ -395,8 +401,10 @@ export function crudRouter(options: CrudOptions): Router {
     }
 
     const parsed = createSchema.parse(body) as Record<string, unknown>
-    await assertUnique(parsed)
+    if (!uniqueScope) await assertUnique(parsed)
     const { data, onSaveError } = beforeSave ? await beforeSave(parsed) : { data: parsed, onSaveError: undefined }
+    // A scoped name (an item's, by its design and colour) needs what beforeSave worked out, such as the type.
+    if (uniqueScope) await assertUnique(data)
 
     // The form no longer asks for a code, so one is made up here. Two people
     // saving at the same instant can both read the same highest number; the
@@ -433,10 +441,11 @@ export function crudRouter(options: CrudOptions): Router {
     const before = await delegate().findUnique({ where: { id: req.params.id } })
     if (!before) throw new AppError(`${entityType} not found`, 404, 'NOT_FOUND')
     if (beforeDeactivate && parsed.isActive === false && before.isActive !== false) await beforeDeactivate(before)
-    await assertUnique(parsed, req.params.id, before)
+    if (!uniqueScope) await assertUnique(parsed, req.params.id, before)
     const { data, onSaveError } = beforeSave
       ? await beforeSave(parsed, before)
       : { data: parsed, onSaveError: undefined }
+    if (uniqueScope) await assertUnique(data, req.params.id, before)
 
     let updated
     try {

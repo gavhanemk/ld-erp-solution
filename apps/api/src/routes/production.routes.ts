@@ -8,6 +8,7 @@ import { requirePermission, userCan, type AuthRequest } from '../middleware/auth
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { assertStylesInProduction } from '../lib/styleStage'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
 import { ensureJobCards, jobCardSchema, updateJobCard } from '../services/jobCard.service'
@@ -321,7 +322,7 @@ const moInclude = {
       bundleSize: true,
       sizeBreakup: true,
       moLine: { select: { color: true, style: { select: { code: true } } } },
-      fabricItem: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+      fabricItem: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
       panelItem: { select: { code: true } },
       _count: { select: { bundles: true } },
     },
@@ -766,7 +767,9 @@ router.get('/orders/:id/details', requirePermission(MODULE, 'view'), async (req,
             line: line ? { toMake: line.totalQty, cut: line.cut } : null,
           }
         }),
-      fabrics: prep.fabrics.filter((f) => f.issued > 0).map((f) => ({ itemId: f.itemId, code: f.code, name: f.name, uom: f.uom })),
+      fabrics: prep.fabrics
+        .filter((f) => f.issued > 0)
+        .map((f) => ({ itemId: f.itemId, code: f.code, name: f.name, designNo: f.designNo, color: f.color, styleId: f.styleId, uom: f.uom })),
     },
   })
 })
@@ -1380,10 +1383,13 @@ export async function raiseRequisitions(tx: Prisma.TransactionClient, moId: stri
     }
     const left = Math.round(rows.reduce((s, r) => s + r.toRequest, 0) * 1000) / 1000
     if (qty > left + 1e-9) {
+      // Named with its design and colour: two fabrics of one name can be on the same plan.
+      const shade = itemShadeText(rows[0].item)
+      const what = `${rows[0].item.name}${shade ? ` (${shade})` : ''}`
       throw new AppError(
         left > 0
-          ? `${rows[0].item.name}: only ${left} ${rows[0].item.uom ?? ''} is still to ask for on ${mo.moNumber}, and this asks for ${qty}.`
-          : `${rows[0].item.name} has already been asked for in full on ${mo.moNumber}.`,
+          ? `${what}: only ${left} ${rows[0].item.uom ?? ''} is still to ask for on ${mo.moNumber}, and this asks for ${qty}.`
+          : `${what} has already been asked for in full on ${mo.moNumber}.`,
         409,
         'MORE_THAN_PLANNED',
       )
@@ -1515,7 +1521,7 @@ router.get('/cutting', requirePermission(MODULE, 'view'), async (req, res) => {
       include: {
         mo: { select: { id: true, moNumber: true, so: { select: { soNumber: true, customer: { select: { name: true } } } } } },
         moLine: { select: { color: true, style: { select: { code: true } } } },
-        fabricItem: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+        fabricItem: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
         createdBy: { select: { name: true } },
         _count: { select: { bundles: true } },
       },

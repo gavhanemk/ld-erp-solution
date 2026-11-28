@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 import { ITEM_TYPE_LABEL as TYPE_LABEL, itemFormFields } from '@/components/masters/itemFormFields'
+import { itemShade } from '@/lib/items'
 import { isProcessDepartment } from '@/components/masters/processDepartments'
 
 /*
@@ -55,6 +56,8 @@ interface Item {
   hsn: { code: string } | null
   styleId: string | null
   color: string | null
+  /** A fabric's design number, with its colour in `color` (set on a Fabric item). */
+  designNo?: string | null
   style: { id: string; code: string; name: string; colors: string[] } | null
 }
 
@@ -115,7 +118,25 @@ function columnsFor(
   return [
     // A code is one token; broken over two lines it reads as two.
     { key: 'code', header: 'Code', sortable: true, className: 'whitespace-nowrap font-mono text-xs text-teal-400' },
-    { key: 'name', header: 'Item', sortable: true, className: 'min-w-56 font-medium' },
+    {
+      key: 'name',
+      header: 'Item',
+      sortable: true,
+      className: 'min-w-56 font-medium',
+      // A fabric is one design and colour per item: said under its name, so
+      // the several items of one fabric can be told apart.
+      render: (i: Item) =>
+        !i.style && (i.designNo || i.color) ? (
+          <div>
+            <div>{i.name}</div>
+            <div className="text-muted-foreground text-xs font-normal">
+              {itemShade(i)}
+            </div>
+          </div>
+        ) : (
+          i.name
+        ),
+    },
     ...(tab === 'RAW_MATERIALS'
       ? [
           {

@@ -1,5 +1,6 @@
 import type { Panel, ReportDefinition } from '../types'
 import { materialGaps, orderReconciliation } from '../../services/reconciliation.service'
+import { shadeColumns, shadeOf } from './shared'
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
 
@@ -32,6 +33,7 @@ export const jobWorkOrders: ReportDefinition = {
     { key: 'customer', label: 'Customer', type: 'text', width: 26 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Their Material', type: 'text', width: 28 },
+    ...shadeColumns,
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'received', label: 'Received', type: 'qty', total: 'sum' },
     { key: 'rejected', label: 'Rejected at Gate', type: 'qty', total: 'sum' },
@@ -93,6 +95,7 @@ export const jobWorkOrders: ReportDefinition = {
           customer: r.order.customer,
           itemCode: f.item.code,
           item: f.item.name,
+          ...shadeOf(f.item),
           uom: f.item.uom ?? '',
           received: r3(f.received),
           rejected: r3(f.rejected),

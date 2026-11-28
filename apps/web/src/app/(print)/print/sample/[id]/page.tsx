@@ -48,6 +48,8 @@ import {
   rateFigure,
 } from '@/components/sampling/specRules'
 import type { Lookups, SampleRequest, SampleRound } from '@/components/sampling/types'
+import { SubLine } from '@/components/print/doc'
+import { itemShade } from '@/lib/items'
 
 /** A file as the printed record has it: what it is and when it came, never where it is kept. */
 interface PrintedFile {
@@ -114,7 +116,7 @@ export default function PrintSample() {
         add(
           round.revision,
           'Material reconciliation',
-          `${m.component ? `${m.component}: ` : ''}${m.item?.name ?? 'No material picked'} · ${lineColour(m.colour)} · ${m.warehouse?.name ?? 'Store not picked yet'}\nIssued ${qty(m.issuedQty)}; used ${qty(m.usedQty)}; waste ${qty(m.wasteQty)}; returned ${qty(m.returnedQty)} ${unit}`,
+          `${m.component ? `${m.component}: ` : ''}${m.item?.name ?? 'No material picked'}${itemShade(m.item) ? ` (${itemShade(m.item)})` : ''} · ${lineColour(m.colour)} · ${m.warehouse?.name ?? 'Store not picked yet'}\nIssued ${qty(m.issuedQty)}; used ${qty(m.usedQty)}; waste ${qty(m.wasteQty)}; returned ${qty(m.returnedQty)} ${unit}`,
           `Held ${qty(materialHeld(m))} ${unit}`
         )
       }
@@ -533,7 +535,13 @@ function SpecBlock({ round, lookups }: { round: SampleRound; lookups: Lookups })
             const it = lineItem(l, round, lookups.items)
             return {
               part: l.component || '—',
-              material: it.code ? `${it.name} (${it.code})` : it.name,
+              material: (
+                <>
+                  {it.code ? `${it.name} (${it.code})` : it.name}
+                  {/* The material's own design and colour, when its item has them. */}
+                  {itemShade(it) && <SubLine>{itemShade(it)}</SubLine>}
+                </>
+              ),
               colour: lineColour(l.colour),
               perPiece: l.qtyPerPiece ? figure(l.qtyPerPiece) : '—',
               wastage: l.wastagePct ? `${figure(l.wastagePct)}%` : '—',

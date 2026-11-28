@@ -1,6 +1,7 @@
 import { prisma } from '@ld-erp/database'
 import type { StockOwnership } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE } from '../lib/fabric'
 
 /*
  * Stock going out, as the stickers see it: what left on which document, from
@@ -30,6 +31,10 @@ export interface OutwardLine {
   itemId: string
   itemCode: string
   item: string
+  /** A fabric's design and colour, a thread's colour: on the label too. */
+  designNo: string | null
+  color: string | null
+  styleId: string | null
   unit: string
   qty: number
   warehouseId: string
@@ -50,7 +55,7 @@ export interface OutwardDoc {
   lines: OutwardLine[]
 }
 
-const item = { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } } as const
+const item = { select: { id: true, code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } as const
 
 /**
  * "line:qty" or "line:qty:store", comma separated: what one issue handed over,
@@ -113,6 +118,9 @@ export async function loadOutward(type: OutwardType, id: string, q?: string | nu
         itemId: l.itemId,
         itemCode: l.item.code,
         item: l.item.name,
+        designNo: l.item.designNo,
+        color: l.item.color,
+        styleId: l.item.styleId,
         unit: l.item.uom?.symbol ?? '',
         qty,
         warehouseId: wh,
@@ -151,6 +159,9 @@ export async function loadOutward(type: OutwardType, id: string, q?: string | nu
           itemId: l.itemId,
           itemCode: l.item.code,
           item: l.item.name,
+          designNo: l.item.designNo,
+          color: l.item.color,
+          styleId: l.item.styleId,
           unit: l.item.uom?.symbol ?? '',
           qty: Number(l.qty),
           warehouseId: c.fromWarehouse.id,
@@ -183,6 +194,9 @@ export async function loadOutward(type: OutwardType, id: string, q?: string | nu
         itemId: l.itemId,
         itemCode: l.item.code,
         item: l.item.name,
+        designNo: l.item.designNo,
+        color: l.item.color,
+        styleId: l.item.styleId,
         unit: l.item.uom?.symbol ?? '',
         qty: Number(l.qty),
         warehouseId: l.warehouse.id,
@@ -217,6 +231,9 @@ export async function loadOutward(type: OutwardType, id: string, q?: string | nu
         itemId: l.itemId,
         itemCode: l.item.code,
         item: l.item.name,
+        designNo: l.item.designNo,
+        color: l.item.color,
+        styleId: l.item.styleId,
         unit: l.item.uom?.symbol ?? '',
         qty: Number(l.qty),
         warehouseId: r.warehouse.id,
@@ -261,6 +278,9 @@ export async function loadOutward(type: OutwardType, id: string, q?: string | nu
         itemId: l.itemId,
         itemCode: l.item.code,
         item: l.item.name,
+        designNo: l.item.designNo,
+        color: l.item.color,
+        styleId: l.item.styleId,
         unit: l.item.uom?.symbol ?? '',
         qty: Number(l.qty),
         warehouseId: t.fromWarehouse.id,

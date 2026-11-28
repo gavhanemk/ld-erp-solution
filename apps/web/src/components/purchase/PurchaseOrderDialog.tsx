@@ -60,6 +60,7 @@ import {
 } from '@/components/purchase/sampleLines'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 import { priceDocument, chargeConfigOf, chargeSnapshot, savedChargeConfig, SAMPLE_OVER_REASON_MIN, type ChargeMasterConfig, type ChargeTaxSnapshot, type ChargeGstMode, type SampleNeed } from '@ld-erp/shared'
 import { type HsnOption } from '@/components/purchase/TaxBreakdown'
 
@@ -196,8 +197,39 @@ export interface PoLine {
     hsnCode: string | null
     uom?: { symbol: string } | null
     category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
+    /** A fabric's design and colour, as set on the item in the Items master. */
+    designNo?: string | null
+    color?: string | null
+    /** Set on a finished good, whose colour is already in its name. */
+    styleId?: string | null
   }
 }
+
+/**
+ * Whether an order may be deleted (to the recycle bin or for good): a draft
+ * never sent to the supplier (the user's rule, 27 Nov 2026). Anything else is
+ * cancelled. `wasSent` comes from the list, which also knows drafts sent
+ * before `sentAt` was kept.
+ */
+export const neverSentDraft = (po: Pick<PurchaseOrder, 'status' | 'sentAt' | 'approvedAt' | 'wasSent'>) =>
+  po.status === 'DRAFT' && !po.sentAt && !po.approvedAt && !po.wasSent
+
+/** Fabric shows its design number and colour; thread its colour; nothing else either. */
+const FABRIC = /fabric/i
+const THREAD = /thread/i
+
+/**
+ * A picker option's sub-line with the item's design and colour after it, so
+ * three "Cotton Twill" in the list read as three and typing 1164 finds one.
+ */
+const withShade = (sub: string | null | undefined, it: ShadeFields) =>
+  [sub, itemShade(it)].filter(Boolean).join(' · ') || undefined
+
+/** An item named in a list or a heading: its name, then its design and colour when it has them. */
+const nameWithShade = (it: { name: string } & ShadeFields) => [it.name, itemShade(it)].filter(Boolean).join(' · ')
+
+/** An item named in a sentence: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const nameInWords = (it: { name: string } & ShadeFields) => (itemShade(it) ? `${it.name} (${itemShade(it)})` : it.name)
 
 export interface PurchaseOrder {
   id: string
@@ -210,9 +242,19 @@ export interface PurchaseOrder {
   deliveryDate: string | null
   deliveryWarehouseId: string | null
   deliveryCustomerId: string | null
+  /** When it was first sent to the supplier; never cleared (27 Nov 2026). */
+  sentAt?: string | null
+  approvedAt?: string | null
+  /** From the order list: it has been with the supplier at some point. */
+  wasSent?: boolean
+  /** The in-house brand the purchase is for; null for a common purchase. */
+  brandId?: string | null
+  brand?: { id: string; name: string } | null
   enquiryNo: string | null
   enquiryDate: string | null
   reference: string | null
+  /** Who at the supplier it is for; printed as "Kind Attention". */
+  kindAttention?: string | null
   /** What this order was billed to, as it read the day it was raised. */
   supplierAddress?: string | null
   remark: string | null
@@ -348,6 +390,9 @@ interface Option {
   buyUnits?: Array<{ factor: string | number; isDefault: boolean; uom: { id: string; symbol: string; decimalPlaces?: number } }>
   categoryId?: string | null
   category?: { id: string; name: string } | null
+  /** A fabric's design number and colour, set in the Items master. */
+  designNo?: string | null
+  color?: string | null
   parentId?: string | null
   address?: string | null
   city?: string | null
@@ -355,6 +400,8 @@ interface Option {
   pincode?: string | null
   phone?: string | null
   email?: string | null
+  /** A supplier's contact person: fills the order's "Kind attention". */
+  contactPerson?: string | null
   paymentTerms?: string | null
   creditDays?: number | null
   // A customer keeps two addresses. Goods are taxed where they land, so the
@@ -639,6 +686,13 @@ export function PurchaseOrderDialog({
   /// not be shown the same number as though it were theirs.
   const [nextPoNumber, setNextPoNumber] = useState('')
   const [reference, setReference] = useState('')
+  const [kindAttention, setKindAttention] = useState('')
+  // The contact person last filled in, so choosing another supplier replaces
+  // it — but never what somebody typed.
+  const filledAttention = useRef('')
+  // The in-house brand this purchase is for (Masters → In House Brands); blank for a common one.
+  const [brandId, setBrandId] = useState('')
+  const [brands, setBrands] = useState<Array<{ id: string; name: string }>>([])
   /// The indent lines taken onto this order, and the reference they last wrote:
   /// the box follows them until somebody types in it themselves.
   const [indentRows, setIndentRows] = useState<IndentRow[]>([])
@@ -653,6 +707,10 @@ export function PurchaseOrderDialog({
   const [discountAmount, setDiscountAmount] = useState('')
   const [notes, setNotes] = useState('')
   const [terms, setTerms] = useState('')
+  // Today's standard terms from Settings → Documents. A saved order keeps the
+  // terms it was made with; this is what the box offers to bring it up to date.
+  const [standardTerms, setStandardTerms] = useState<string | null>(null)
+  const termsDiffer = !!standardTerms?.trim() && terms.trim() !== standardTerms.trim()
 
   /*
    * What has been typed against each kind of charge, keyed by charge type id.
@@ -845,6 +903,9 @@ export function PurchaseOrderDialog({
     // lines added after, until somebody types over it.
     const sampleRefText = sampleSource ? sampleReference(sampleSource.needs) : ''
     setReference(record?.reference ?? sampleRefText)
+    setKindAttention(record?.kindAttention ?? '')
+    filledAttention.current = ''
+    setBrandId(record?.brandId ?? '')
     setIndentRows([])
     setSampleTaken(
       (sampleSource?.needs ?? []).map((n) => ({ sampleMaterialId: n.sampleMaterialId, requestNumber: n.requestNumber }))
@@ -1129,7 +1190,8 @@ export function PurchaseOrderDialog({
 
     void Promise.all([
       masterResource<Option>('suppliers').list({ limit: 500, active: true }),
-      masterResource<Option>('items').list({ limit: 500, active: true }),
+      // Every item, not the first page: one item per design and colour fills 200 fast.
+      everyItem<Option>({ active: true }),
       masterResource<Option>('warehouses').list({ limit: 100, active: true }),
       masterResource<Option>('customers').list({ limit: 500, active: true }),
       masterResource<Option>('item-categories')
@@ -1178,10 +1240,15 @@ export function PurchaseOrderDialog({
           '/purchase/order-defaults'
         )
         .catch(() => null),
-    ]).then(([s, i, w, cust, c, st, ct, hc, co, ns, dflt]) => {
+      // The mill's own brands, for the Brand box.
+      masterResource<{ id: string; name: string }>('brands')
+        .list({ limit: 100, active: true, type: 'LD_COTTON_MILLS,VHAGAR' })
+        .catch(() => null),
+    ]).then(([s, i, w, cust, c, st, ct, hc, co, ns, dflt, br]) => {
       if (cancelled) return
+      setBrands(br?.data ?? [])
       setSuppliers((s as Paginated<Option>).data)
-      setItems((i as Paginated<Option>).data)
+      setItems(i)
       setWarehouses((w as Paginated<Option>).data)
       setCustomers((cust as Paginated<Option>).data)
       setCategories(c ? (c as Paginated<Option>).data : [])
@@ -1211,6 +1278,7 @@ export function PurchaseOrderDialog({
        * typing in the meantime should not lose it.
        */
       if (!record) setTerms((cur) => cur || (dflt?.data.terms ?? ''))
+      setStandardTerms(dflt?.data.terms ?? null)
     })
 
     return () => {
@@ -1298,6 +1366,16 @@ export function PurchaseOrderDialog({
     )
   }
   const supplier = suppliers.find((s) => s.id === supplierId)
+
+  // "Kind attention" follows the supplier's contact person — on a new order
+  // and when the supplier is changed — until somebody types over it.
+  useEffect(() => {
+    const contact = supplier?.contactPerson?.trim() ?? ''
+    // Read now: the update below runs at the next render, after the ref has moved on.
+    const previous = filledAttention.current
+    setKindAttention((cur) => (cur.trim() === '' || cur === previous ? contact : cur))
+    filledAttention.current = contact
+  }, [supplier?.id, supplier?.contactPerson])
 
   /**
    * Everything about finding an item now lives on the row it belongs to.
@@ -1791,7 +1869,10 @@ export function PurchaseOrderDialog({
   const unfinished = activeLines
     .map((l) => ({
       line: l,
-      name: itemById.get(l.itemId)?.name ?? 'A line',
+      name: (() => {
+        const it = itemById.get(l.itemId)
+        return it ? nameWithShade(it) : 'A line'
+      })(),
       noQty: num(l.qty) <= 0,
       // 2.5 cartons: a whole number for an item counted whole.
       badQty: !!lineQtyProblem(l),
@@ -1813,6 +1894,50 @@ export function PurchaseOrderDialog({
 
   const setLine = (index: number, patch: Partial<PoLine>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
+
+  /**
+   * Design No. and Colour, under a fabric row only (27 Nov 2026).
+   *
+   * A fabric item is one design and colour, set in the Items master, so they
+   * come filled in from the item the row picks and are not typed here —
+   * another design or colour is another item (+ Add a new item… asks for
+   * both). Any other item shows nothing here.
+   */
+  const fabricBoxes = (line: PoLine, i: number, cell: string) => {
+    const it = itemById.get(line.itemId)
+    if (!it) return null
+    const filed = categories.find((c) => c.id === it.categoryId)
+    const parent = filed?.parentId ? categories.find((c) => c.id === filed.parentId) : null
+    const under = (re: RegExp) => re.test(filed?.name ?? '') || re.test(parent?.name ?? '')
+    const fabric = under(FABRIC)
+    // Thread has a colour and no design number.
+    if (!fabric && !under(THREAD)) return null
+    const box = `${cell} bg-muted/40 cursor-default`
+    return (
+      <div className="mt-1 grid grid-cols-2 gap-1" title="From the item in Masters → Items">
+        {fabric && (
+          <input
+            className={box}
+            readOnly
+            tabIndex={-1}
+            placeholder="No design no."
+            value={it.designNo ?? ''}
+            title="Design No., from Masters → Items"
+            aria-label={`Row ${i + 1} design number`}
+          />
+        )}
+        <input
+          className={box}
+          readOnly
+          tabIndex={-1}
+          placeholder="No colour"
+          value={it.color ?? ''}
+          title="Colour, from Masters → Items"
+          aria-label={`Row ${i + 1} colour`}
+        />
+      </div>
+    )
+  }
 
   /**
    * "Why more than the sample needs", under a row bought for a sample.
@@ -1924,7 +2049,7 @@ export function PurchaseOrderDialog({
     if (lines.some((l, i) => i !== index && l.itemId === itemId)) {
       const clash = itemById.get(itemId)
       setError(
-        `${clash?.name ?? 'That item'} is already on another row. Change the quantity there instead of adding it twice.`
+        `${clash ? nameInWords(clash) : 'That item'} is already on another row. Change the quantity there instead of adding it twice.`
       )
       return
     }
@@ -2425,6 +2550,7 @@ export function PurchaseOrderDialog({
     // row and keeps it on the order, so the words cannot come from here.
     supplierAddressId: supplierAddressId || null,
     reference: reference.trim() || null,
+    kindAttention: kindAttention.trim() || null,
     remark: remark.trim() || null,
     // Only an order-level order has one. Sending whatever is in the box on an
     // item-level order would take the discount twice.
@@ -2452,6 +2578,7 @@ export function PurchaseOrderDialog({
     otherCharges: num(legacyOther),
     notes: notes.trim() || null,
     terms: terms.trim() || null,
+    brandId: brandId || null,
     /*
      * Only rows that have an item, and only the fields the API knows about.
      * The category narrowing and the code box are how a row found its item;
@@ -3041,6 +3168,51 @@ export function PurchaseOrderDialog({
                 </div>
 
                 <div>
+                  <label className="form-label" htmlFor="po-brand">
+                    Brand
+                  </label>
+                  {/* Optional. A purchase for one of the mill's own brands is
+                    tagged to it, for purchase and accounts reference; blank is
+                    a common purchase. It does not split stock. */}
+                  <SmartSelect
+                    id="po-brand"
+                    className="form-input"
+                    value={brandId}
+                    onChange={(e) => setBrandId(e.target.value)}
+                  >
+                    <option value="">Common — no brand</option>
+                    {brands.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </SmartSelect>
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-attention">
+                    Kind attention
+                  </label>
+                  {/* Who at the supplier the order is for, printed in the "To"
+                    block. Filled from the supplier's contact person; what is
+                    typed here stays on this order and leaves the supplier alone. */}
+                  <div className="relative">
+                    <User
+                      size={14}
+                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
+                    />
+                    <input
+                      id="po-attention"
+                      className="form-input pl-9"
+                      placeholder="The supplier's contact person"
+                      maxLength={100}
+                      value={kindAttention}
+                      onChange={(e) => setKindAttention(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div>
                   <label className="form-label" htmlFor="po-remark">
                     Remark
                   </label>
@@ -3402,7 +3574,7 @@ export function PurchaseOrderDialog({
                               >
                                 <option value="">Item code</option>
                                 {choices.map((it) => (
-                                  <option key={it.id} value={it.id} data-sub={it.name}>
+                                  <option key={it.id} value={it.id} data-sub={withShade(it.name, it)}>
                                     {it.code ?? it.name}
                                   </option>
                                 ))}
@@ -3423,7 +3595,7 @@ export function PurchaseOrderDialog({
                                     the item, code and all. */}
                                 {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
                                 {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
-                                  <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
+                                  <option key={it.id} value={it.id} data-sub={withShade(it.code, it)}>
                                     {it.name}
                                   </option>
                                 ))}
@@ -3457,6 +3629,7 @@ export function PurchaseOrderDialog({
                                 )}
                               </p>
                             )}
+                            {fabricBoxes(line, i, cell)}
                             {sampleWhyBox(line, i, cell)}
                           </td>
 
@@ -3745,7 +3918,7 @@ export function PurchaseOrderDialog({
                           >
                             <option value="">Code</option>
                             {choices.map((it) => (
-                              <option key={it.id} value={it.id} data-sub={it.name}>
+                              <option key={it.id} value={it.id} data-sub={withShade(it.name, it)}>
                                 {it.code ?? it.name}
                               </option>
                             ))}
@@ -3763,7 +3936,7 @@ export function PurchaseOrderDialog({
                                 item is offered only on an empty row. */}
                             {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
                             {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
-                              <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
+                              <option key={it.id} value={it.id} data-sub={withShade(it.code, it)}>
                                 {it.name}
                               </option>
                             ))}
@@ -3789,6 +3962,7 @@ export function PurchaseOrderDialog({
                             )}
                           </p>
                         )}
+                        {fabricBoxes(line, i, cell)}
                         {sampleWhyBox(line, i, cell)}
                       </div>
 
@@ -4384,10 +4558,29 @@ export function PurchaseOrderDialog({
                     openByDefault={false}
                     summary={
                       terms.trim()
-                        ? `Printed on the order — ${terms.trim().length} characters`
-                        : 'None — nothing will be printed'
+                        ? `Printed on the order — ${terms.trim().length} characters${termsDiffer ? ' · not the current terms in Settings' : ''}`
+                        : standardTerms?.trim()
+                          ? 'The current terms from Settings will be printed'
+                          : 'None — nothing will be printed'
                     }
                   >
+                    {/* An order keeps the terms it was saved with — Settings
+                      changing later never rewrites it silently. One press brings
+                      it up to today's wording when that is wanted. */}
+                    {termsDiffer && terms.trim() && (
+                      <div className="border-border bg-muted/40 mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+                        <span className="text-muted-foreground">
+                          {record ? 'This order was saved with different terms from the ones now in Settings.' : 'These are not the standard terms from Settings.'}
+                        </span>
+                        <button
+                          type="button"
+                          className="text-primary font-medium hover:underline"
+                          onClick={() => setTerms(standardTerms ?? '')}
+                        >
+                          Use the current terms from Settings
+                        </button>
+                      </div>
+                    )}
                     <textarea
                       rows={3}
                       maxLength={TERMS_MAX}
@@ -4440,7 +4633,10 @@ export function PurchaseOrderDialog({
                   <PurchaseSummary
                     result={totals.result}
                     split={taxMode}
-                    itemNames={activeLines.map((l) => itemById.get(l.itemId)?.name ?? 'Item')}
+                    itemNames={activeLines.map((l) => {
+                      const it = itemById.get(l.itemId)
+                      return it ? nameWithShade(it) : 'Item'
+                    })}
                     chargeNames={totals.chargeRows.map((c) => c.name)}
                   />
                 </Section>
@@ -4820,7 +5016,10 @@ export function PurchaseOrderDialog({
                         Previous purchases
                       </h3>
                       <p className="text-muted-foreground mt-0.5 text-[13px]">
-                        {itemById.get(historyFor)?.name ?? 'This item'}
+                        {(() => {
+                          const it = itemById.get(historyFor)
+                          return it ? nameWithShade(it) : 'This item'
+                        })()}
                       </p>
                     </div>
                   </div>
@@ -4996,6 +5195,7 @@ export function PurchaseOrderDialog({
              * id flat while the master returns the category nested, and the
              * item box reads the flat one for the "Category › Sub" line.
              */
+            const shade = created as NewItem & ShadeFields
             const option: Option = {
               id: created.id,
               code: created.code,
@@ -5006,6 +5206,11 @@ export function PurchaseOrderDialog({
                 ? { id: created.category.id, name: created.category.name }
                 : null,
               categoryId: created.category?.id ?? null,
+              // The master sends the new item whole: its design and colour
+              // fill the row's boxes at once, as a listed item's would.
+              designNo: shade.designNo ?? null,
+              color: shade.color ?? null,
+              styleId: shade.styleId ?? null,
             }
             setItems((prev) => [...prev, option])
 

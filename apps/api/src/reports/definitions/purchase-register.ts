@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportAnalysis, ReportDefinition, Tone } from '../types'
+import { ITEM_SHADE } from '../../lib/fabric'
 import {
   byMonth,
   dateRangeFilters,
@@ -9,6 +10,8 @@ import {
   supplierFilter,
   searchFilter,
   itemFilter,
+  shadeColumns,
+  shadeOf,
   topWithRest,
 } from './shared'
 
@@ -94,6 +97,7 @@ export const purchaseRegister: ReportDefinition = {
     { key: 'grnNumber', label: 'GRN No.', type: 'text', width: 15 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 13 },
     { key: 'item', label: 'Item / Quality', type: 'text', width: 28 },
+    ...shadeColumns,
     { key: 'description', label: 'Description', type: 'text', width: 24 },
     { key: 'hsn', label: 'HSN', type: 'text', width: 9 },
     { key: 'gstRate', label: 'GST %', type: 'percent', width: 7 },
@@ -153,6 +157,8 @@ export const purchaseRegister: ReportDefinition = {
       'grnNumber',
       'itemCode',
       'item',
+      'designNo',
+      'colour',
       'description',
       'hsn',
       'gstRate',
@@ -162,12 +168,15 @@ export const purchaseRegister: ReportDefinition = {
       'gross',
     ],
     /*
-     * Eighteen columns across a landscape A4, which is only possible because
+     * Twenty columns across a landscape A4, which is only possible because
      * the figures that are read together share a column: the date under the
      * entry number, the GSTIN under the supplier, SGST under CGST, the due
      * date under the status. What still does not fit — the add/less broken
      * down, round off, TDS, reverse charge, the narration — prints as a note
      * under the bill. The workbook keeps every one in its own column.
+     *
+     * A fabric's Design No. and Colour print in two columns of their own
+     * beside the item (27 Nov 2026): one quality in two designs is two lines.
      */
     print: [
       { key: 'sr', label: 'Sr.' },
@@ -180,6 +189,8 @@ export const purchaseRegister: ReportDefinition = {
       },
       { key: 'supplier', sub: ['gstin'], subLabel: 'GSTIN', wrap: true, wide: true },
       { key: 'item', sub: ['itemCode', 'description'], subLabel: 'Code', wrap: true, wide: true },
+      { key: 'designNo' },
+      { key: 'colour', wrap: true },
       { key: 'hsn', sub: ['gstRate'], subLabel: 'GST %' },
       { key: 'qty' },
       { key: 'rate' },
@@ -292,7 +303,7 @@ export const purchaseRegister: ReportDefinition = {
             unitPrice: true,
             uomFactor: true,
             gstRate: true,
-            item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+            item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
             grnLine: { select: { grn: { select: { grnNumber: true } } } },
           },
         },
@@ -399,6 +410,7 @@ export const purchaseRegister: ReportDefinition = {
           grnNumber: l.grnLine?.grn.grnNumber ?? '',
           itemCode: l.item.code,
           item: l.item.name,
+          ...shadeOf(l.item),
           // Only when it says something the item's own name does not.
           description: description && description !== l.item.name ? description : '',
           hsn: l.hsnCode ?? '',

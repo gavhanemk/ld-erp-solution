@@ -6,6 +6,7 @@ import type { Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { termsOn } from '../services/tds.service'
 import { formatDocumentNumber } from '../lib/docNumber'
+import { numbersInUse, peekNextNumber, seriesIsChecked } from '../lib/numberSeries'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -728,7 +729,8 @@ async function resolvePermissionIds(keys: string[]): Promise<string[]> {
 /** What each seeded document type is called in conversation. */
 const DOC_TYPE_LABELS: Record<string, string> = {
   SO: 'Sales order',
-  PO: 'Purchase order',
+  // Purchase orders and service purchase orders share this one series.
+  PO: 'Purchase & service order',
   MO: 'Manufacturing order',
   GRN: 'Goods receipt',
   INV: 'Sales invoice',
@@ -770,12 +772,18 @@ router.get('/number-series', requirePermission(SETTINGS, 'view'), async (_req, r
     orderBy: [{ financialYear: 'desc' }, { docType: 'asc' }],
   })
 
+  // What each series gives next — for purchase orders the one after the last
+  // number an order holds, which is what the order form previews too.
+  const next = await Promise.all(series.map((s) => peekNextNumber(prisma, s)))
   res.json({
     success: true,
-    data: series.map((s) => ({
+    data: series.map((s, i) => ({
       ...s,
       label: DOC_TYPE_LABELS[s.docType] ?? s.docType,
-      nextNumber: sampleNumber(s),
+      // The current running series (27 Nov 2026): the last number this series
+      // has issued, and the one it gives next.
+      lastUsedNumber: s.lastNumber > 0 ? formatDocumentNumber(s) : null,
+      nextNumber: next[i],
     })),
   })
 })
@@ -814,6 +822,66 @@ router.post('/number-series', requirePermission(SETTINGS, 'create'), async (req:
   res.status(201).json({ success: true, data: { ...created, nextNumber: sampleNumber(created) } })
 })
 
+/**
+ * Sets the number a series gives next (27 Nov 2026) — to skip ahead, or to
+ * start it again from a lower number. Never so that a number already on a
+ * document would be issued again: every number from the new one up to the
+ * last issued is checked against the documents of that series first. A
+ * series whose documents cannot be checked may only be moved forward.
+ */
+router.patch('/number-series/:id/next', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
+  const { nextNumber } = z
+    .object({ nextNumber: z.number().int('A whole number').min(1, 'Start from 1 or more').max(99_999_999) })
+    .parse(req.body)
+  const before = await prisma.numberSeries.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('Number series not found', 404, 'NOT_FOUND')
+  const label = DOC_TYPE_LABELS[before.docType] ?? before.docType
+  if (nextNumber - 1 < before.lastNumber) {
+    if (!seriesIsChecked(before.docType)) {
+      throw new AppError(`${label} numbers can only be moved forward.`, 409, 'SERIES_FORWARD_ONLY')
+    }
+    if (before.lastNumber - nextNumber + 1 > 10_000) {
+      throw new AppError('That is too far back to check. Move it back in smaller steps.', 409, 'SERIES_TOO_FAR')
+    }
+    const wanted = Array.from({ length: before.lastNumber - nextNumber + 1 }, (_, i) =>
+      formatDocumentNumber({ ...before, lastNumber: nextNumber + i }),
+    )
+    const used = await numbersInUse(prisma, before.docType, wanted)
+    if (used.length) {
+      const highest = used.sort().at(-1)!
+      throw new AppError(
+        `${highest} is already on a ${label.toLowerCase()}, so the next number cannot be ${wanted[0]}. The lowest it can start from is the one after ${highest}.`,
+        409,
+        'NUMBER_IN_USE',
+      )
+    }
+  }
+  // Moved ahead, what it skipped stays skipped: a purchase order deleted for
+  // good never steps the count back past it (lib/numberSeries). Moved back,
+  // it may run on from there again.
+  const after = await prisma.numberSeries.update({
+    where: { id: before.id },
+    data: {
+      lastNumber: nextNumber - 1,
+      reuseFloor: nextNumber - 1 > before.lastNumber ? nextNumber - 1 : Math.min(before.reuseFloor, nextNumber - 1),
+    },
+  })
+  const nextAfter = await peekNextNumber(prisma, after)
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'UPDATE',
+    entityType: 'NumberSeries',
+    entityId: after.id,
+    before,
+    after,
+  })
+  res.json({
+    success: true,
+    data: { ...after, lastUsedNumber: after.lastNumber > 0 ? formatDocumentNumber(after) : null, nextNumber: nextAfter },
+    message: `The next ${label.toLowerCase()} will be ${nextAfter}.`,
+  })
+})
+
 router.patch('/number-series/:id', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
   const data = updateNumberSeriesSchema.parse(req.body)
 
@@ -841,8 +909,15 @@ router.patch('/number-series/:id', requirePermission(SETTINGS, 'edit'), async (r
   }
 
   // Changing the prefix once documents exist produces two different formats in
-  // the same year, which is legal but confusing, so it is called out.
-  const after = await prisma.numberSeries.update({ where: { id: before.id }, data })
+  // the same year, which is legal but confusing, so it is called out. Deleting
+  // a new-format order for good never steps the count back into the old ones.
+  const reformatted =
+    before.lastNumber > 0 &&
+    (merged.prefix !== before.prefix || merged.separator !== before.separator || merged.padding !== before.padding)
+  const after = await prisma.numberSeries.update({
+    where: { id: before.id },
+    data: { ...data, ...(reformatted ? { reuseFloor: before.lastNumber } : {}) },
+  })
 
   await writeAuditLog(req, {
     module: SETTINGS,
@@ -855,7 +930,7 @@ router.patch('/number-series/:id', requirePermission(SETTINGS, 'edit'), async (r
 
   res.json({
     success: true,
-    data: { ...after, nextNumber: sampleNumber(after) },
+    data: { ...after, lastUsedNumber: after.lastNumber > 0 ? formatDocumentNumber(after) : null, nextNumber: await peekNextNumber(prisma, after) },
     message:
       before.lastNumber > 0 && data.prefix && data.prefix !== before.prefix
         ? `${before.lastNumber} document(s) already use the old prefix. They keep their existing numbers.`

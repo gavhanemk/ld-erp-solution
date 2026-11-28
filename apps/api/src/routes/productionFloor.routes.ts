@@ -6,6 +6,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { getPrintHeader } from '../lib/printData'
+import { ITEM_SHADE } from '../lib/fabric'
 import { applyRouting, assertSameStages, editRoute, editRouteSchema, passedBy, routeFromRouting, routeStepSchema, routingsFor } from '../services/route.service'
 import {
   billSchema,
@@ -1007,7 +1008,8 @@ router.get('/cutting/:id/print', requirePermission(MODULE, 'view'), async (req, 
       notes: true,
       createdAt: true,
       createdBy: { select: { name: true } },
-      fabricItem: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+      // With the fabric's own design and colour, printed beside the garment's.
+      fabricItem: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
       moLine: { select: { color: true, totalQty: true, style: { select: { code: true, name: true } }, sizes: { select: { sizeId: true, qty: true, size: { select: { code: true, sequence: true } } } } } },
       mo: {
         select: {

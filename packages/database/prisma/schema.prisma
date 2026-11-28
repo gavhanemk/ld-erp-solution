@@ -994,6 +994,7 @@ model Brand {
   quotations          SalesQuotation[] @relation("QuoteBrand")
   styles              Style[]
   costCentre          CostCentre?
+  purchaseOrders      PurchaseOrder[]  @relation("PurchaseOrderBrand")
 
   @@map("brands")
 }
@@ -1009,6 +1010,11 @@ model NumberSeries {
   lastNumber    Int     @default(0)
   padding       Int     @default(4)
   isActive      Boolean @default(true)
+  /// A purchase order deleted for good, when it was the newest, steps the
+  /// count back to the last number an order still holds (27 Nov 2026) — but
+  /// never to this or below: the series was moved ahead or renamed in
+  /// Settings, and what it skipped stays skipped.
+  reuseFloor    Int     @default(0)
 
   @@unique([companyId, docType, financialYear])
   @@map("number_series")
@@ -1275,6 +1281,10 @@ model Item {
   styleId      String?
   style        Style?       @relation(fields: [styleId], references: [id])
   color        String?
+  /// A fabric's design number (27 Nov 2026), with its colour in `color`: set in
+  /// the Items master for an item filed under Fabric, one design and colour per
+  /// item, and shown on every purchase order that picks it.
+  designNo     String?
   imageUrl     String?
   /// Its stickers, remembered from the last time somebody ticked "remember":
   /// what one package is, and how much one sticker holds. Empty means the
@@ -1696,6 +1706,9 @@ model Supplier {
   gstin          String?
   pan            String?
   phone          String?
+  /// Who the mill deals with at the supplier (27 Nov 2026). A purchase order's
+  /// "Kind Attention" is filled from it, and can be changed on the order.
+  contactPerson  String?
   email          String?
   address        String?
   city           String?
@@ -2762,6 +2775,10 @@ model PurchaseOrder {
   /// is holding. Correcting a typo in the master, or retiring an address,
   /// must not quietly change what an order already sent says.
   supplierAddress     String?
+  /// Who at the supplier the order is for, printed as "Kind Attention"
+  /// (27 Nov 2026). Filled from the supplier's contact person; can be changed
+  /// on the order without touching the supplier.
+  kindAttention       String?
   notes               String?
   terms               String?
   createdById         String
@@ -2769,6 +2786,11 @@ model PurchaseOrder {
   approvedById        String?
   approvedBy          User?                 @relation("POApprovedBy", fields: [approvedById], references: [id])
   approvedAt          DateTime?
+  /// When it was first sent to the supplier, kept from 27 Nov 2026 (earlier
+  /// orders: their status and the activity log). Never cleared: an order put
+  /// back to Draft afterwards has still been sent, so it can only be cancelled
+  /// and its number stays on record.
+  sentAt              DateTime?
   createdAt           DateTime              @default(now())
   updatedAt           DateTime              @updatedAt
 
@@ -2797,7 +2819,14 @@ model PurchaseOrder {
   @@index([enquiryId])
   @@index([enquiryQuoteId])
   /// Every list of orders filters on this, so it earns an index of its own.
+  /// The in-house brand the purchase is for (27 Nov 2026): a purchase and
+  /// accounting reference. Optional: blank is a common purchase. No stock
+  /// effect yet; the multi-brand allocation will earmark what arrives to it.
+  brandId String?
+  brand   Brand?  @relation("PurchaseOrderBrand", fields: [brandId], references: [id], onDelete: SetNull)
+
   @@index([deletedAt])
+  @@index([brandId])
   @@map("purchase_orders")
 }
 

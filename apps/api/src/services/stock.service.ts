@@ -829,6 +829,10 @@ export async function reorderStatus(
     itemId: string
     itemCode: string
     itemName: string
+    /** The fabric's design no. and colour: same-name items told apart (27 Nov 2026). */
+    designNo: string | null
+    color: string | null
+    styleId: string | null
     uom: string
     categoryId: string
     categoryName: string
@@ -842,6 +846,9 @@ export async function reorderStatus(
       itemId: string
       itemCode: string
       itemName: string
+      designNo: string | null
+      color: string | null
+      styleId: string | null
       uom: string
       categoryId: string
       categoryName: string
@@ -853,6 +860,9 @@ export async function reorderStatus(
       i.id                                   AS "itemId",
       i.code                                 AS "itemCode",
       i.name                                 AS "itemName",
+      i."designNo"                           AS "designNo",
+      i.color                                AS "color",
+      i."styleId"                            AS "styleId",
       u.symbol                               AS "uom",
       i."categoryId"                         AS "categoryId",
       c.name                                 AS "categoryName",
@@ -868,7 +878,7 @@ export async function reorderStatus(
     WHERE i."isActive" = true
       AND i."reorderLevel" > 0
       AND (${filters.itemId ?? null}::text IS NULL OR i.id = ${filters.itemId ?? null})
-    GROUP BY i.id, i.code, i.name, u.symbol, i."categoryId", c.name, i."reorderLevel"
+    GROUP BY i.id, i.code, i.name, i."designNo", i.color, i."styleId", u.symbol, i."categoryId", c.name, i."reorderLevel"
     ORDER BY i.name ASC
   `
   return rows.map((r) => {
@@ -899,7 +909,8 @@ export async function onHand(
     lowOnly?: boolean
     search?: string
     /**
-     * Every word must appear somewhere in the name or code, in any order.
+     * Every word must appear somewhere in the name, code, design no. or
+     * colour, in any order.
      *
      * A single substring is enough for a person typing into a search box, who
      * watches the list narrow and stops. It is not enough for the assistant,
@@ -914,6 +925,10 @@ export async function onHand(
     itemId: string
     itemCode: string
     itemName: string
+    /** The fabric's design no. and colour: same-name items told apart (27 Nov 2026). */
+    designNo: string | null
+    color: string | null
+    styleId: string | null
     uom: string
     categoryName: string
     reorderLevel: number | null
@@ -947,6 +962,9 @@ export async function onHand(
       itemId: string
       itemCode: string
       itemName: string
+      designNo: string | null
+      color: string | null
+      styleId: string | null
       uom: string
       categoryName: string
       reorderLevel: number | null
@@ -969,6 +987,9 @@ export async function onHand(
       i.id                                   AS "itemId",
       i.code                                 AS "itemCode",
       i.name                                 AS "itemName",
+      i."designNo"                           AS "designNo",
+      i.color                                AS "color",
+      i."styleId"                            AS "styleId",
       u.symbol                               AS "uom",
       c.name                                 AS "categoryName",
       i."reorderLevel"::float8               AS "reorderLevel",
@@ -998,17 +1019,20 @@ export async function onHand(
       AND (${filters.ownership ?? null}::text   IS NULL OR s."ownership"::text = ${filters.ownership ?? null})
       AND (${filters.search ?? null}::text      IS NULL
            OR i.name ILIKE '%' || ${filters.search ?? null} || '%'
-           OR i.code ILIKE '%' || ${filters.search ?? null} || '%')
-      -- Every word has to appear somewhere in the name and code together, in
-      -- any order. Passed as an array so the number of words cannot change the
-      -- shape of the query.
+           OR i.code ILIKE '%' || ${filters.search ?? null} || '%'
+           OR COALESCE(i."designNo", '') ILIKE '%' || ${filters.search ?? null} || '%'
+           OR COALESCE(i.color, '') ILIKE '%' || ${filters.search ?? null} || '%')
+      -- Every word has to appear somewhere in the name, code, design no. and
+      -- colour together, in any order. Passed as an array so the number of
+      -- words cannot change the shape of the query.
       AND (${filters.searchWords ?? null}::text[] IS NULL
-           OR (SELECT bool_and(i.name || ' ' || i.code ILIKE '%' || w || '%')
+           OR (SELECT bool_and(i.name || ' ' || i.code || ' ' || COALESCE(i."designNo", '') || ' ' || COALESCE(i.color, '') ILIKE '%' || w || '%')
                FROM unnest(${filters.searchWords ?? null}::text[]) AS w))
-    GROUP BY i.id, i.code, i.name, u.symbol, c.name, i."reorderLevel",
+    GROUP BY i.id, i.code, i.name, i."designNo", i.color, i."styleId", u.symbol, c.name, i."reorderLevel",
              w.id, w.name, w.kind, w.purpose, s."ownership", s."ownerCustomerId", cust.name
     HAVING SUM(s."inQty" - s."outQty") <> 0
-    ORDER BY i.name ASC, w.name ASC
+    -- Same-name fabric design by design, then store by store.
+    ORDER BY i.name ASC, i."designNo" ASC NULLS FIRST, i.color ASC NULLS FIRST, w.name ASC
   `
 
   const status = new Map((await reorderStatus(tx, { itemId: filters.itemId })).map((r) => [r.itemId, r]))
@@ -1055,12 +1079,16 @@ export async function onHand(
       if (!item.isLow || shown.has(item.itemId)) continue
       if (filters.categoryId && item.categoryId !== filters.categoryId) continue
       const hay = `${item.itemName} ${item.itemCode}`.toLowerCase()
-      if (text && !hay.includes(text)) continue
-      if (words.length && !words.every((w) => hay.includes(w))) continue
+      const shade = `${item.designNo ?? ''} ${item.color ?? ''}`.toLowerCase()
+      if (text && !hay.includes(text) && !shade.includes(text)) continue
+      if (words.length && !words.every((w) => `${hay} ${shade}`.includes(w))) continue
       out.push({
         itemId: item.itemId,
         itemCode: item.itemCode,
         itemName: item.itemName,
+        designNo: item.designNo,
+        color: item.color,
+        styleId: item.styleId,
         uom: item.uom,
         categoryName: item.categoryName,
         reorderLevel: item.reorderLevel,
@@ -1083,7 +1111,12 @@ export async function onHand(
         lastMovedAt: null,
       })
     }
-    out.sort((a, b) => a.itemName.localeCompare(b.itemName))
+    out.sort(
+      (a, b) =>
+        a.itemName.localeCompare(b.itemName) ||
+        (a.designNo ?? '').localeCompare(b.designNo ?? '') ||
+        (a.color ?? '').localeCompare(b.color ?? ''),
+    )
   }
 
   return out

@@ -236,10 +236,15 @@ const supplierFields = z.object({
   // somebody does supply one, so an imported code cannot be malformed.
   code: code.optional(),
   name,
-  category: SupplierCategoryEnum,
+  // Optional on the form and the import. Every supplier still has one (the
+  // column is required), so a new one without it, or one whose category is
+  // cleared, is Other. Left out of an edit, it stays as it was.
+  category: z.preprocess((v) => (v === '' || v === null ? 'OTHER' : v), SupplierCategoryEnum).default('OTHER'),
   gstin,
   pan,
   phone,
+  /** Who the mill deals with there; fills a purchase order's "Kind attention". */
+  contactPerson: z.string().trim().max(100).optional().nullable(),
   email,
   address: optionalText,
   city: z.string().max(100).optional().nullable(),
@@ -324,6 +329,8 @@ export const createItemSchema = z
     // lookup, so that lives in assertItemStyleColorValid instead.
     styleId: z.string().min(1, 'Choose a style').optional().nullable(),
     color: z.string().min(1, 'Choose a colour').max(50).optional().nullable(),
+    // A fabric's design number (lib/fabric). Only for an item filed under Fabric.
+    designNo: z.string().trim().max(40).optional().nullable(),
     // On an expense head: the TDS section a bill for it usually falls under.
     tdsSectionId: z.string().min(1).optional().nullable(),
     isActive,
@@ -347,11 +354,13 @@ export const createItemSchema = z
         path: ['styleId'],
       })
     }
-    // With no type sent it comes from the category, and the save checks style and colour against that.
-    if (v.type && v.type !== 'FINISHED_GOOD' && (v.styleId || v.color)) {
+    // With no type sent it comes from the category, and the save checks the
+    // style against that. A colour on anything else is a fabric's or thread's
+    // (lib/fabric), checked against its category when it is saved.
+    if (v.type && v.type !== 'FINISHED_GOOD' && v.styleId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'Style and colour only apply to finished goods — clear them, or file it under Finished Goods',
+        message: 'A style only applies to finished goods — clear it, or file the item under Finished Goods',
         path: ['styleId'],
       })
     }

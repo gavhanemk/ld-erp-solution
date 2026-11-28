@@ -32,6 +32,7 @@ import { newPack, PackagingDialog, type PackValue } from '@/components/packages/
 import { ChangeStickers, type StickerLine } from '@/components/packages/ChangeStickers'
 import { openPrintTab, printLabels, qtyText } from '@/components/packages/packageTypes'
 import { EntryControls, RateCell } from '@/components/inventory/opening/EntryControls'
+import { itemShadeCols, type ShadeFields } from '@/lib/items'
 
 /*
  * Inventory → Stock → Opening Stock: what the mill had on the day it started
@@ -73,7 +74,7 @@ interface Line {
   openingStock: { id: string; number: string; fileName: string | null; reversedAt?: string | null }
   /** Came in without a rate: valued at nought until its rate is set. */
   valuationPending?: boolean
-  item: {
+  item: ShadeFields & {
     code: string
     name: string
     type: string
@@ -176,6 +177,8 @@ const COLUMNS: Array<{ head: string; right?: boolean; pin?: 'style' | 'code' | '
       </span>
     ),
   },
+  // A fabric's own design number, exactly as in Items, beside its colour.
+  { head: 'Design No.', cell: (l) => itemShadeCols(l.item).designNo || muted },
   { head: 'Colour', cell: (l) => l.colour ?? l.item.color ?? muted },
   { head: 'Size', cell: (l) => <span className="font-semibold">{l.size?.code ?? l.sizeText ?? muted}</span> },
   { head: 'Process', cell: (l) => l.department?.name ?? l.processText ?? 'Store' },

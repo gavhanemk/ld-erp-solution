@@ -125,7 +125,7 @@ const COLUMNS: Record<Choice, Array<[string, boolean]>> = {
     ['Opening Date', true], ['Process', false], ['Department / Location', false], ['Order No.', false], ['Style / Article No.', false], ['Item Code', false],
     ['Item Description', true], ['Item Category', false], ['Fabric / Material', false], ['Colour', false], ['Size', false], ['Lot / Batch / Roll No.', false],
     ['Bundle / Barcode No.', false], ['UOM', false], ['Opening Qty', true], ['Unit Rate', false], ['Opening Value', false], ['Stock Status', false], ['Remarks', false],
-    ['HSN Code', false], ['GST %', false],
+    ['HSN Code', false], ['GST %', false], ['Design No.', false],
   ],
   FG: [['Style / Article No.', true], ['Item Code', false], ['Colour', true], ['Size', true], ['Opening Quantity', true], ['Rate Per Piece', false], ['Location', false], ['Stock Status', false], ['Remarks', false]],
   SFG: [
@@ -136,6 +136,7 @@ const COLUMNS: Record<Choice, Array<[string, boolean]>> = {
     ['Material Category', false], ['Item Code', false], ['Item Name', true], ['Lot / Batch / Roll Number', false], ['Bundle / Barcode Number', false], ['UOM', false],
     ['Opening Quantity', true], ['Unit Rate', false], ['Location', false], ['Package Type', false], ['Package Count', false], ['Qty per Package', false],
     ['Package Quantities', false], ['Package References', false], ['Stock Status', false], ['Remarks', false], ['HSN Code', false], ['GST %', false],
+    ['Design No.', false], ['Colour', false],
   ],
   FA: [
     ['Asset Category', false], ['Item Code', false], ['Item Name', true], ['Serial Numbers', false], ['Quantity', true], ['Cost Each', false], ['Location', false],

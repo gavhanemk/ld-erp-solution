@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportContext, ReportDefinition, Tone } from '../types'
+import { ITEM_SHADE } from '../../lib/fabric'
 import {
   byMonth,
   dateRangeFilters,
@@ -8,6 +9,8 @@ import {
   ratio,
   round2,
   searchFilter,
+  shadeColumns,
+  shadeOf,
   supplierFilter,
   topWithRest,
 } from './shared'
@@ -79,7 +82,7 @@ async function qcRows({ tx, params, rowCap }: ReportContext) {
             select: {
               id: true,
               unitRate: true,
-              item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+              item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
               warehouse: { select: { name: true } },
             },
           },
@@ -148,6 +151,7 @@ async function qcRows({ tx, params, rowCap }: ReportContext) {
           challanNo: c.grn.challanNo ?? '',
           itemCode: info?.item.code ?? '',
           item: info?.item.name ?? '',
+          ...shadeOf(info?.item),
           itemId: l.itemId,
           uom: info?.item.uom?.symbol ?? '',
           received: l.receivedQty,
@@ -230,6 +234,7 @@ export const grnQcRegister: ReportDefinition = {
     { key: 'supplier', label: 'Supplier', type: 'text', width: 28 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'received', label: 'Received', type: 'qty', total: 'sum' },
     { key: 'approved', label: 'Approved', type: 'qty', total: 'sum' },

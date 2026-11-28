@@ -28,6 +28,7 @@ import { StickerNote, type StickerNews } from '@/components/inventory/StockInNex
 import { StickersReady, printDocStickers } from '@/components/packages/StickersReady'
 import { TransitStepDialog, onTheWay, type TransitStep } from '@/components/inventory/TransitStepDialog'
 import { OutwardStickers } from '@/components/packages/OutwardStickers'
+import { itemShadeCols, type ShadeFields } from '@/lib/items'
 
 /**
  * The stock documents: what was moved between stores, and what was corrected
@@ -44,7 +45,7 @@ import { OutwardStickers } from '@/components/packages/OutwardStickers'
 
 interface Line {
   id: string
-  item: { id: string; code: string; name: string; uom: { symbol: string } | null }
+  item: ShadeFields & { id: string; code: string; name: string; uom: { symbol: string } | null }
   ownership?: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomer?: { id: string; name: string } | null
   size?: { id: string; code: string } | null
@@ -123,12 +124,17 @@ type Kind = 'transfers' | 'adjustments'
 const qty = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
 
-/** The item panels' columns, as shares of the row, so each table fits the panel it opens in. */
+/**
+ * The item panels' columns, as shares of the row, so each table fits the panel it opens in.
+ * A fabric's own Design No. and Colour sit beside its name: same-name items told apart.
+ */
 const TRANSFER_COLS = [
-  { label: 'Code', width: '16%' },
-  { label: 'Item', width: '44%' },
-  { label: 'Quantity', width: '20%', numeric: true },
-  { label: 'Carried at', width: '20%', numeric: true },
+  { label: 'Code', width: '14%' },
+  { label: 'Item', width: '34%' },
+  { label: 'Design No.', width: '12%' },
+  { label: 'Colour', width: '12%' },
+  { label: 'Quantity', width: '14%', numeric: true },
+  { label: 'Carried at', width: '14%', numeric: true },
 ]
 /** Sent in transit: what was sent, and what became of it. */
 const TRANSIT_COLS = [
@@ -142,21 +148,36 @@ const TRANSIT_COLS = [
   { label: 'Carried at', width: '10%', numeric: true },
 ]
 const ADJUSTMENT_COLS = [
-  { label: 'Code', width: '14%' },
-  { label: 'Item', width: '38%' },
-  { label: 'Book said', width: '16%', numeric: true },
-  { label: 'Counted', width: '16%', numeric: true },
-  { label: 'Difference', width: '16%', numeric: true },
+  { label: 'Code', width: '12%' },
+  { label: 'Item', width: '30%' },
+  { label: 'Design No.', width: '10%' },
+  { label: 'Colour', width: '10%' },
+  { label: 'Book said', width: '12%', numeric: true },
+  { label: 'Counted', width: '13%', numeric: true },
+  { label: 'Difference', width: '13%', numeric: true },
 ]
 /** A stock-in is what is coming in and what it is worth, not a count. */
 const STOCK_IN_COLS = [
-  { label: 'Code', width: '14%' },
-  { label: 'Item', width: '34%' },
-  { label: 'In store now', width: '13%', numeric: true },
-  { label: 'Coming in', width: '13%', numeric: true },
-  { label: 'Rate', width: '12%', numeric: true },
-  { label: 'Worth', width: '14%', numeric: true },
+  { label: 'Code', width: '12%' },
+  { label: 'Item', width: '26%' },
+  { label: 'Design No.', width: '9%' },
+  { label: 'Colour', width: '9%' },
+  { label: 'In store now', width: '11%', numeric: true },
+  { label: 'Coming in', width: '11%', numeric: true },
+  { label: 'Rate', width: '10%', numeric: true },
+  { label: 'Worth', width: '12%', numeric: true },
 ]
+
+/** A line's Design No. and Colour cells. */
+function ShadeCells({ item }: { item: ShadeFields }) {
+  const c = itemShadeCols(item)
+  return (
+    <>
+      <td className="truncate text-xs">{c.designNo || <span className="text-muted-foreground">—</span>}</td>
+      <td className="truncate text-xs">{c.colour || <span className="text-muted-foreground">—</span>}</td>
+    </>
+  )
+}
 
 export default function StockDocumentsPage() {
   const [kind, setKind] = useState<Kind>('transfers')
@@ -523,6 +544,7 @@ export default function StockDocumentsPage() {
                                             </div>
                                             {whoseLabel(l) && <div className="text-muted-foreground truncate text-[10px]">{whoseLabel(l)}</div>}
                                           </td>
+                                          <ShadeCells item={l.item} />
                                           <td className="whitespace-nowrap text-right text-xs tabular-nums">
                                             {qty(l.qty)} {l.item.uom?.symbol ?? ''}
                                           </td>
@@ -693,6 +715,7 @@ export default function StockDocumentsPage() {
                                                   {l.item.name}
                                                 </div>
                                               </td>
+                                              <ShadeCells item={l.item} />
                                               <td className="whitespace-nowrap text-right text-xs tabular-nums">{qty(l.bookQty)}</td>
                                               <td className="whitespace-nowrap text-right text-xs tabular-nums text-emerald-400">
                                                 +{qty(d)} {l.item.uom?.symbol ?? ''}
@@ -711,6 +734,7 @@ export default function StockDocumentsPage() {
                                               </div>
                                               {whoseLabel(l) && <div className="text-muted-foreground truncate text-[10px]">{whoseLabel(l)}</div>}
                                             </td>
+                                            <ShadeCells item={l.item} />
                                             <td className="whitespace-nowrap text-right text-xs tabular-nums">
                                               {qty(l.bookQty)}
                                             </td>

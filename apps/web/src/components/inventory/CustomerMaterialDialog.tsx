@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X, Loader2, AlertCircle, Plus, Trash2, Copy, PackageOpen, FileText, Truck, Boxes, Save, Send } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 import { useEscape } from '@/lib/useEscape'
 import { useDialogFocus } from '@/lib/keys'
 import { StepInput } from '@/components/ui/StepInput'
@@ -41,7 +42,7 @@ interface Category {
   parent?: { id: string; name: string } | null
 }
 
-interface ItemOption extends Option {
+interface ItemOption extends Option, ShadeFields {
   uom?: { symbol: string } | null
   category?: Category | null
 }
@@ -162,7 +163,8 @@ export function CustomerMaterialDialog({
         const [c, i, w, so] = await Promise.all([
           masterResource<Option>('customers').list({ limit: 300 }),
           // Active only: a switched-off item or store is not offered for anything new.
-          masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
+          // Every item, not the first 200: one fabric item a design and colour reaches that soon.
+          everyItem<ItemOption>({ active: true, sort: 'name', order: 'asc' }),
           masterResource<Option>('warehouses').list({ limit: 100, active: true }),
           // The picker list, open to the store, which has no sales permission.
           // Open job-work orders only: the customer's material comes in for those.
@@ -172,7 +174,7 @@ export function CustomerMaterialDialog({
         ])
         if (cancelled) return
         setCustomers(c.data)
-        setItems(i.data)
+        setItems(i)
         setWarehouses(w.data)
         // One store to choose from: chosen already.
         if (w.data.length === 1) setWarehouseId(w.data[0].id)
@@ -657,7 +659,7 @@ export function CustomerMaterialDialog({
                           >
                             <option value="">Choose an item… ({choices.length})</option>
                             {choices.map((it) => (
-                              <option key={it.id} value={it.id}>
+                              <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                                 {it.code ? `${it.code} · ` : ''}
                                 {it.name}
                               </option>

@@ -4,6 +4,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, IndianRupee, Loader2, Paperclip, Receipt, X } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
+import { itemShade } from '@/lib/items'
 import { useEscape } from '@/lib/useEscape'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { Section } from '@/components/purchase/Section'
@@ -136,7 +137,9 @@ export function RecordQuoteDialog({
     for (const l of lines) {
       const o = rows[l.id]?.offeredQty
       if (o !== '' && o != null && num(o) > Number(l.qty)) {
-        out.push('He cannot offer more of ' + l.item.name + ' than was asked for')
+        // Named with its design and colour: two lines can share a fabric's name.
+        const shade = itemShade(l.item)
+        out.push('He cannot offer more of ' + l.item.name + (shade ? ` (${shade})` : '') + ' than was asked for')
         break
       }
     }
@@ -335,6 +338,9 @@ export function RecordQuoteDialog({
                       <tr key={l.id}>
                         <td>
                           <p className="text-xs font-medium">{l.item.name}</p>
+                          {itemShade(l.item) && (
+                            <p className="text-muted-foreground text-[10px]">{itemShade(l.item)}</p>
+                          )}
                           <p className="text-muted-foreground font-mono text-[10px]">
                             {l.item.code}
                           </p>

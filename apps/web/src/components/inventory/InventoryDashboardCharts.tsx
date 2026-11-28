@@ -11,6 +11,10 @@ import {
   ChartTip, EmptyChart, IN_COLOUR, OUT_COLOUR, PALETTE, inr, markLabel, qtyFmt,
 } from '@/components/dashboard/DashKit'
 import { ChartKeys } from '@/components/ui/ChartKeys'
+import { itemShade, type ShadeFields } from '@/lib/items'
+
+/** An item's label on a chart: its name, and a fabric's design and colour, so same-name items read apart. */
+const itemLabel = (d: ShadeFields & { name: string }) => (itemShade(d) ? `${d.name} · ${itemShade(d)}` : d.name)
 
 /**
  * The inventory dashboard's charts, each a different kind for a different
@@ -250,7 +254,7 @@ export function AgeingBars({ data }: { data: Array<{ key: string; label: string;
  * Items by value with the running share as a line. The A bars carry their
  * value; the line is labelled where A ends and at the last item only.
  */
-export function ParetoChart({ data }: { data: Array<{ code: string; name: string; value: number; cumPct: number; cls: string }> }) {
+export function ParetoChart({ data }: { data: Array<ShadeFields & { code: string; name: string; value: number; cumPct: number; cls: string }> }) {
   if (!data.length) return <EmptyChart h={280} />
   const colour: Record<string, string> = { A: PALETTE[0], B: PALETTE[1], C: PALETTE[2] }
   const lastA = data.map((d) => d.cls).lastIndexOf('A')
@@ -262,7 +266,7 @@ export function ParetoChart({ data }: { data: Array<{ code: string; name: string
           <XAxis dataKey="code" tick={{ ...axis, fontSize: 9 }} tickLine={false} axisLine={false} interval={0} angle={-40} textAnchor="end" height={54} />
           <YAxis yAxisId="v" tick={axis} tickLine={false} axisLine={false} tickFormatter={inrAxis} width={64} />
           <YAxis yAxisId="p" orientation="right" domain={[0, 100]} tick={axis} tickLine={false} axisLine={false} tickFormatter={(v: number) => `${v}%`} width={38} />
-          <Tooltip content={<ChartTip labelOf={(p: any) => `${p.code} · ${p.name} · class ${p.cls}`} />} cursor={{ fill: 'currentColor', fillOpacity: 0.04 }} />
+          <Tooltip content={<ChartTip labelOf={(p: any) => `${p.code} · ${itemLabel(p)} · class ${p.cls}`} />} cursor={{ fill: 'currentColor', fillOpacity: 0.04 }} />
           <ReferenceLine yAxisId="p" y={80} stroke="#f59e0b" strokeDasharray="4 4" strokeOpacity={0.7} />
           <Bar yAxisId="v" dataKey="value" name="Value" radius={[4, 4, 0, 0]} maxBarSize={24}>
             {data.map((d) => (
@@ -357,7 +361,7 @@ export function MixRadar({ data }: { data: Array<{ label: string; moves: number 
 }
 
 /** The items that moved the most value, in and out stacked, value and count at the end. */
-export function MoversBars({ data: raw }: { data: Array<{ code: string; name: string; inValue: number; outValue: number; moves: number }> }) {
+export function MoversBars({ data: raw }: { data: Array<ShadeFields & { code: string; name: string; inValue: number; outValue: number; moves: number }> }) {
   if (!raw.length) return <EmptyChart h={260} text="No movement in this period." />
   const data = raw.map((d) => ({ ...d, tag: `${inr(d.inValue + d.outValue)} · ${d.moves}×` }))
   return (
@@ -367,7 +371,7 @@ export function MoversBars({ data: raw }: { data: Array<{ code: string; name: st
           <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.1} horizontal={false} />
           <XAxis type="number" tick={axis} tickLine={false} axisLine={false} tickFormatter={inrAxis} />
           <YAxis type="category" dataKey="code" tick={{ ...axis, fontSize: 10 }} tickLine={false} axisLine={false} width={96} />
-          <Tooltip content={<ChartTip labelOf={(p: any) => `${p.code} · ${p.name} · ${p.moves} movements`} />} cursor={{ fill: 'currentColor', fillOpacity: 0.04 }} />
+          <Tooltip content={<ChartTip labelOf={(p: any) => `${p.code} · ${itemLabel(p)} · ${p.moves} movements`} />} cursor={{ fill: 'currentColor', fillOpacity: 0.04 }} />
           <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
           <Bar dataKey="inValue" name="Value in" stackId="m" fill={IN_COLOUR} barSize={14} />
           <Bar dataKey="outValue" name="Value out" stackId="m" fill={OUT_COLOUR} radius={[0, 4, 4, 0]} barSize={14}>

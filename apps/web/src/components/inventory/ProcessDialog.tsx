@@ -18,6 +18,7 @@ import { PickList } from '@/components/packages/PickList'
 import { LinkMoBox } from './LinkMoBox'
 import { noBuyBox, planRows, r3, shortOf, spread, startingQty, coveredByPo, type FulfilData, type FulfilOrder, type ProcessLine } from './processPlan'
 import { isAdminRole } from '@/lib/access'
+import { itemShade } from '@/lib/items'
 
 /**
  * Working on an approved requisition: three forms in one window, one tab each.
@@ -172,7 +173,8 @@ export function ProcessDialog({
     const work: Array<{ r: Row; v: number }> = []
     for (const r of rows) {
       const v = num(qty[tab][r.l.id] ?? '')
-      const name = r.l.item.name
+      // A fabric's design and colour beside its name: two "Cotton Twill" lines are told apart.
+      const name = itemShade(r.l.item) ? `${r.l.item.name} (${itemShade(r.l.item)})` : r.l.item.name
       if (Number.isNaN(v) || v < 0) {
         problems.push(`${name}: enter a number.`)
         continue
@@ -519,6 +521,7 @@ export function ProcessDialog({
     return (
       <>
         <div className="font-medium text-foreground">{r.l.item.name}</div>
+        {itemShade(r.l.item) && <div className={small}>{itemShade(r.l.item)}</div>}
         <div className={small}>
           <span className="font-mono">{r.l.item.code}</span>
           {r.category ? ` · ${r.category}` : ''}
@@ -847,7 +850,7 @@ export function ProcessDialog({
         (check.work.length
           ? `${
               check.work.length <= 2
-                ? check.work.map((w) => `${w.r.l.item.name} (${fmt(w.v)} ${w.r.unit})`).join(' and ')
+                ? check.work.map((w) => `${w.r.l.item.name}${itemShade(w.r.l.item) ? `, ${itemShade(w.r.l.item)}` : ''} (${fmt(w.v)} ${w.r.unit})`).join(' and ')
                 : `${check.work.length} items`
             } will be ${tab === 'issue' ? 'issued' : tab === 'reserve' ? 'kept aside' : 'put on the indent'} when you press ${current.button}.`
           : tab === 'issue'
@@ -1059,6 +1062,7 @@ export function ProcessDialog({
                         <li key={r.l.id} className="flex flex-wrap items-baseline gap-x-2 text-sm">
                           <span className="font-mono text-xs text-muted-foreground">{r.l.item.code}</span>
                           <span className="font-semibold text-foreground">{r.l.item.name}</span>
+                          {itemShade(r.l.item) && <span className="text-xs text-muted-foreground">{itemShade(r.l.item)}</span>}
                           <span className="text-muted-foreground">
                             · {fmt(r.owed)} {r.unit} to give
                             {r.stores[0] ? ` · from ${r.stores[0].name}` : ''}
@@ -1099,6 +1103,7 @@ export function ProcessDialog({
                           key={r.l.id}
                           item={r.l.item.name}
                           code={r.l.item.code}
+                          shade={itemShade(r.l.item) || undefined}
                           itemId={r.l.item.id}
                           warehouseId={r.stores[0].id}
                           store={r.stores[0].name}

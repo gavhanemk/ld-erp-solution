@@ -26,6 +26,7 @@ import {
   type MaterialBreakRow, type UnitQty,
 } from '@/components/inventory/MaterialCharts'
 import { formatDate } from '@/lib/utils'
+import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import type { InwardRef } from '@/components/packages/InwardStickers'
 import { StickersReady } from '@/components/packages/StickersReady'
@@ -46,7 +47,7 @@ import type { OutwardRef } from '@/components/packages/packageTypes'
  * from the ledger, since that is what the customer will ask about.
  */
 
-interface LineRow {
+interface LineRow extends ShadeFields {
   id: string
   receiptId: string
   grnNumber: string
@@ -102,7 +103,7 @@ interface LineRow {
   markings: string | null
 }
 
-interface HeldRow {
+interface HeldRow extends ShadeFields {
   itemId: string
   itemCode: string
   itemName: string
@@ -123,7 +124,7 @@ interface HeldRow {
 }
 
 /** One item on a return to the customer. */
-interface ReturnRow {
+interface ReturnRow extends ShadeFields {
   id: string
   returnId: string
   returnNumber: string
@@ -192,6 +193,8 @@ const FILTERS: Array<{ key: FilterKey; label: string; labelOf: (r: AnyRow) => st
 ]
 
 const qtyFmt = (v: number) => v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
+/** An item named in a sentence, with its design and colour when it has them: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const named = (r: { itemName: string } & ShadeFields) => (itemShade(r) ? `${r.itemName} (${itemShade(r)})` : r.itemName)
 
 // Days are India's days.
 const dayKey = (d: Date | string) => new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
@@ -328,8 +331,8 @@ function CustomerMaterialScreen() {
       if (!words.length) return true
       const hay = (
         isReceipt(r)
-          ? `${r.grnNumber} ${r.challanNumber ?? ''} ${r.customerName} ${r.itemCode} ${r.itemName} ${r.warehouseName} ${r.markings ?? ''} ${r.vehicleNo ?? ''}`
-          : `${r.returnNumber} ${r.grnNumber ?? ''} ${r.customerName} ${r.itemCode} ${r.itemName} ${r.warehouseName} ${r.reasonLabel} ${r.vehicleNo ?? ''} ${r.lrNumber ?? ''}`
+          ? `${r.grnNumber} ${r.challanNumber ?? ''} ${r.customerName} ${r.itemCode} ${r.itemName} ${itemShade(r)} ${r.warehouseName} ${r.markings ?? ''} ${r.vehicleNo ?? ''}`
+          : `${r.returnNumber} ${r.grnNumber ?? ''} ${r.customerName} ${r.itemCode} ${r.itemName} ${itemShade(r)} ${r.warehouseName} ${r.reasonLabel} ${r.vehicleNo ?? ''} ${r.lrNumber ?? ''}`
       ).toLowerCase()
       return words.every((w) => hay.includes(w))
     },
@@ -429,7 +432,7 @@ function CustomerMaterialScreen() {
         only('category', h.mainCategoryId) &&
         only('department', h.departmentId ?? 'none') &&
         (!words.length ||
-          words.every((w) => `${h.customerName} ${h.itemCode} ${h.itemName} ${h.warehouseName}`.toLowerCase().includes(w))),
+          words.every((w) => `${h.customerName} ${h.itemCode} ${h.itemName} ${itemShade(h)} ${h.warehouseName}`.toLowerCase().includes(w))),
     )
   }, [held, picked, words])
 
@@ -481,7 +484,7 @@ function CustomerMaterialScreen() {
         }
         by.set(r.receiptId, w)
       }
-      w.lines.push({ itemName: r.itemName, uom: r.uom, received: r.receivedQty, rejected: r.rejectedQty ?? 0, rejectReason: r.rejectReason ?? null })
+      w.lines.push({ itemName: named(r), uom: r.uom, received: r.receivedQty, rejected: r.rejectedQty ?? 0, rejectReason: r.rejectReason ?? null })
     }
     return [...by.values()].sort((a, b) => a.receiptDate.localeCompare(b.receiptDate) || a.grnNumber.localeCompare(b.grnNumber))
   }, [rows])
@@ -547,7 +550,7 @@ function CustomerMaterialScreen() {
   const post = (r: LineRow) => {
     const lines = rows.filter((x) => x.receiptId === r.receiptId)
     const said = lines
-      .map((x) => `• ${x.itemName}: ${qtyFmt(x.receivedQty - (x.rejectedQty ?? 0))} ${x.uom} passed${x.rejectedQty ? `, ${qtyFmt(x.rejectedQty)} rejected (${x.rejectReason ?? 'no reason'})` : ''}`)
+      .map((x) => `• ${named(x)}: ${qtyFmt(x.receivedQty - (x.rejectedQty ?? 0))} ${x.uom} passed${x.rejectedQty ? `, ${qtyFmt(x.rejectedQty)} rejected (${x.rejectReason ?? 'no reason'})` : ''}`)
       .join('\n')
     if (!confirm(`Approve ${r.grnNumber} into stock?\n\n${fromSheet(r) ? 'From a sheet, with no QC' : `QC${r.inspectedByName ? ` (${r.inspectedByName})` : ''} found`}:\n${said}\n\nWhat passed becomes ${r.customerName}'s usable stock; anything rejected is held apart. Its stickers are made now, and it is never edited again.`)) return
     return act(
@@ -587,7 +590,7 @@ function CustomerMaterialScreen() {
   }
   const release = (r: LineRow) => {
     const held = r.heldQty ?? 0
-    const qtyText = prompt(`How much of the ${qtyFmt(held)} ${r.uom} of ${r.itemName} held on ${r.grnNumber} can be used after all?`, String(held))
+    const qtyText = prompt(`How much of the ${qtyFmt(held)} ${r.uom} of ${named(r)} held on ${r.grnNumber} can be used after all?`, String(held))
     if (!qtyText) return
     const qty = Number(qtyText)
     if (!(qty > 0) || qty > held + 1e-9) return setError(`Enter a quantity above nought and no more than the ${qtyFmt(held)} ${r.uom} held.`)
@@ -613,6 +616,8 @@ function CustomerMaterialScreen() {
             'From Store': r.warehouseName,
             'Item Code': r.itemCode,
             'Item Name': r.itemName,
+            'Design No.': itemShadeCols(r).designNo,
+            Colour: itemShadeCols(r).colour,
             Category: r.mainCategoryName,
             'Sub Category': r.subCategoryName ?? '',
             HSN: r.hsnCode ?? '',
@@ -627,7 +632,7 @@ function CustomerMaterialScreen() {
             Note: [r.notes, r.lineNotes].filter(Boolean).join(' · '),
           })),
         )
-        sheet['!cols'] = [14, 12, 26, 15, 26, 20, 14, 30, 18, 18, 10, 10, 7, 13, 16, 12, 10, 26, 18, 30].map((wch) => ({ wch }))
+        sheet['!cols'] = [14, 12, 26, 15, 26, 20, 14, 30, 12, 14, 18, 18, 10, 10, 7, 13, 16, 12, 10, 26, 18, 30].map((wch) => ({ wch }))
         XLSX.utils.book_append_sheet(book, sheet, 'Returned To Customers')
         XLSX.writeFile(book, `customer-returns-${dayKey(new Date())}.xlsx`)
         return
@@ -649,6 +654,8 @@ function CustomerMaterialScreen() {
           Transport: r.transporter ?? '',
           'Item Code': r.itemCode,
           'Item Name': r.itemName,
+          'Design No.': itemShadeCols(r).designNo,
+          Colour: itemShadeCols(r).colour,
           Category: r.mainCategoryName,
           'Sub Category': r.subCategoryName ?? '',
           Department: r.departmentName ?? '',
@@ -665,7 +672,7 @@ function CustomerMaterialScreen() {
           Note: r.notes ?? '',
         })),
       )
-      sheet['!cols'] = [15, 12, 26, 16, 14, 14, 20, 13, 13, 13, 13, 13, 16, 14, 30, 18, 18, 14, 12, 12, 12, 11, 11, 7, 18, 10, 26, 18, 30].map((wch) => ({ wch }))
+      sheet['!cols'] = [15, 12, 26, 16, 14, 14, 20, 13, 13, 13, 13, 13, 16, 14, 30, 12, 14, 18, 18, 14, 12, 12, 12, 11, 11, 7, 18, 10, 26, 18, 30].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Customer Material')
       if (heldShown.length) {
@@ -676,6 +683,8 @@ function CustomerMaterialScreen() {
               Customer: h.customerName,
               'Item Code': h.itemCode,
               'Item Name': h.itemName,
+              'Design No.': itemShadeCols(h).designNo,
+              Colour: itemShadeCols(h).colour,
               Category: h.mainCategoryName,
               Store: h.warehouseName,
               'Still Here': h.qty,
@@ -915,7 +924,7 @@ function CustomerMaterialScreen() {
         tone: ageOf(oldest) > 90 ? TONE.rose : TONE.amber,
         text: (
           <>
-            {oldest.customerName}&apos;s <span className="font-semibold">{oldest.itemName}</span> has not moved for {ageOf(oldest)}{' '}
+            {oldest.customerName}&apos;s <span className="font-semibold">{named(oldest)}</span> has not moved for {ageOf(oldest)}{' '}
             {ageOf(oldest) === 1 ? 'day' : 'days'}
           </>
         ),
@@ -1238,6 +1247,7 @@ function CustomerMaterialScreen() {
                             <Link href={`/inventory/stock/${r.itemId}`} className="text-sm font-medium text-foreground hover:text-teal-400">
                               {r.itemName}
                             </Link>
+                            {itemShade(r) && <div className="text-xs text-muted-foreground">{itemShade(r)}</div>}
                           </td>
                           <td className="text-xs">{r.mainCategoryName}</td>
                           <td className="text-xs">{r.subCategoryName ?? <span className="text-muted-foreground">—</span>}</td>
@@ -1433,6 +1443,7 @@ function CustomerMaterialScreen() {
                           <Link href={`/inventory/stock/${r.itemId}`} className="text-sm font-medium text-foreground hover:text-teal-400">
                             {r.itemName}
                           </Link>
+                          {itemShade(r) && <div className="text-xs text-muted-foreground">{itemShade(r)}</div>}
                           {r.lineNotes && <div className="text-[10px] text-muted-foreground">{r.lineNotes}</div>}
                         </td>
                         <td className="text-xs">{r.mainCategoryName}</td>
@@ -1712,7 +1723,10 @@ function CustomerMaterialScreen() {
                         <tr key={`${h.customerId}-${h.itemId}-${h.warehouseId}`}>
                           <td className="text-sm text-sky-400">{h.customerName}</td>
                           <td className="whitespace-nowrap font-mono text-xs text-teal-500">{h.itemCode}</td>
-                          <td className="min-w-[180px] text-sm font-medium text-foreground">{h.itemName}</td>
+                          <td className="min-w-[180px] text-sm font-medium text-foreground">
+                            {h.itemName}
+                            {itemShade(h) && <div className="text-xs font-normal text-muted-foreground">{itemShade(h)}</div>}
+                          </td>
                           <td className="text-xs">{h.mainCategoryName}</td>
                           <td className="text-xs">{h.warehouseName}</td>
                           <td className="whitespace-nowrap text-right font-semibold tabular-nums">

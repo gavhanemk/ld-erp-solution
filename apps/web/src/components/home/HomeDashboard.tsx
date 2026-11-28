@@ -16,6 +16,7 @@ import {
 } from './HomeCharts'
 import { ApprovalsPanel, AttentionPanel, LiveFeed, MillFlow, useApprovals } from './HomePanels'
 import type { Check, HomeData } from './types'
+import { itemShade } from '@/lib/items'
 
 /**
  * The home screen: the whole mill on one page.
@@ -590,7 +591,10 @@ export function HomeDashboard() {
                     {inv.reorder.slice(0, stockWide ? 6 : 4).map((r) => (
                       <Link key={r.itemId} href={`/inventory/stock/${r.itemId}`} className="block">
                         <div className="flex items-baseline justify-between gap-2 text-xs">
-                          <span className="min-w-0 truncate text-foreground hover:text-primary">{r.name}</span>
+                          <span className="min-w-0 truncate text-foreground hover:text-primary">
+                            {r.name}
+                            {itemShade(r) && <span className="text-muted-foreground"> · {itemShade(r)}</span>}
+                          </span>
                           <span className="shrink-0 tabular-nums text-muted-foreground">
                             {r.onHand.toLocaleString('en-IN')} / {r.reorderLevel.toLocaleString('en-IN')} {r.uom}
                           </span>

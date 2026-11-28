@@ -24,6 +24,7 @@ import type { BillAttachment, PurchaseBill } from './PurchaseBillDialog'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
+import { itemShade } from '@/lib/items'
 import { DOC_WORDS, NOTE_STATUS, REASON_WORDS, type NoteStatus } from './noteTypes'
 
 const inr = (v: string | number | null | undefined) =>
@@ -98,6 +99,9 @@ export function BillItems({ bill }: { bill: PurchaseBill }) {
               <td className="text-muted-foreground col-roomy font-mono">{l.item?.code ?? '—'}</td>
               <td className="text-foreground">
                 {l.item?.name ?? '—'}
+                {itemShade(l.item) && (
+                  <div className="text-muted-foreground text-[10px]">{itemShade(l.item)}</div>
+                )}
                 {l.description && (
                   <div className="text-muted-foreground text-[10px]">{l.description}</div>
                 )}

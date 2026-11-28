@@ -1,5 +1,6 @@
 import type { ReportColumn, ReportDefinition, RegisterSpec } from './types'
 import { asDate, istDay, type RegisterTotal, type UnitTotal } from './register'
+import { distinctLabels, rowItemLabel } from './definitions/shared'
 
 /**
  * A report's figures added up by what it is about — the supplier, the
@@ -95,16 +96,31 @@ export function summaryGrids(
   }
 
   return keys.map((key) => {
+    /*
+     * An item is grouped by its code, not its name (27 Nov 2026). Fabric is
+     * set up one design and colour per item, so three "Cotton Twill" items are
+     * three lines here, each named with the Design No. and Colour the register
+     * prints beside it; by name they would add up into one.
+     */
+    const byCode = key === 'item' && byKey.has('itemCode')
     const groups = new Map<
       string,
-      { documents: Set<unknown>; sums: Map<string, number>; units: Map<string, Map<string, number>> }
+      {
+        name: string
+        code: string
+        documents: Set<unknown>
+        sums: Map<string, number>
+        units: Map<string, Map<string, number>>
+      }
     >()
     rows.forEach((r, i) => {
-      const name = groupName(byKey.get(key), r[key])
-      let g = groups.get(name)
+      const code = byCode ? String(r.itemCode ?? '') : ''
+      const name = code ? rowItemLabel(r) || code : groupName(byKey.get(key), r[key])
+      const id = code ? `code:${code}` : name
+      let g = groups.get(id)
       if (!g) {
-        g = { documents: new Set(), sums: new Map(), units: new Map() }
-        groups.set(name, g)
+        g = { name, code, documents: new Set(), sums: new Map(), units: new Map() }
+        groups.set(id, g)
       }
       if (!isVoid(r)) g.documents.add(spec.documentKey ? r[spec.documentKey] : i)
       for (const c of figures) {
@@ -124,8 +140,10 @@ export function summaryGrids(
       }
     })
 
-    const list = [...groups.entries()].map(([name, g]) => ({
-      name,
+    // Two items that still read the same are told apart by their code.
+    const named = distinctLabels([...groups.values()].map((g) => ({ code: g.code, label: g.name, g })))
+    const list = named.map(({ label, g }) => ({
+      name: label,
       documents: g.documents.size,
       size: money ? (g.sums.get(money.key) ?? 0) : g.documents.size,
       values: figures.map((c) => valueOf(c, g.sums, g.units)),

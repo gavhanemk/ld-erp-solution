@@ -39,6 +39,7 @@ import { ExpenseHeadDialog } from '@/components/purchase/ExpenseHeadDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
 import { StepInput } from '@/components/ui/StepInput'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 import { ExpenseTdsPanel, type TdsChoice } from '@/components/purchase/ExpenseTdsPanel'
 import { type HsnOption } from '@/components/purchase/TaxBreakdown'
 import { chargeConfigOf, chargeSnapshot, savedChargeConfig, type ChargeMasterConfig, type ChargeTaxSnapshot, priceDocument, type ChargeGstMode, type GstSplit } from '@ld-erp/shared'
@@ -186,7 +187,7 @@ export interface PurchaseBill {
         name: string
         hsnCode: string | null
         uom?: { symbol: string } | null
-      }
+      } & ShadeFields
       hsnCode?: string | null
       taxableValue?: string | number
       cgst?: string | number
@@ -250,7 +251,8 @@ export interface PurchaseBill {
   noteAdjustment?: string | number
 }
 
-interface Option extends Partial<ChargeMasterConfig> {
+/** An item's design and colour (ShadeFields) tell same-name fabrics apart in the picker and under the line. */
+interface Option extends Partial<ChargeMasterConfig>, ShadeFields {
   /** The packs an item is bought in (a box of 20 pcs), the usual one first. */
   buyUnits?: Array<{ factor: string | number; isDefault: boolean; uom: { id: string; symbol: string; decimalPlaces?: number } }>
   id: string
@@ -280,6 +282,10 @@ interface Option extends Partial<ChargeMasterConfig> {
   /** The TDS section a supplier's or an expense head's bills usually fall under. */
   tdsSectionId?: string | null
 }
+
+/** An item named in a sentence: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const nameInWords = (it: Option | null | undefined) =>
+  it ? (itemShade(it) ? `${it.name} (${itemShade(it)})` : it.name) : undefined
 
 /** A service purchase order, as much of it as a bill is filled from. */
 interface ServiceOrder {
@@ -748,7 +754,8 @@ export function PurchaseBillDialog({
 
     void Promise.all([
       masterResource<Option>('suppliers').list({ limit: 500, active: true }),
-      masterResource<Option>('items').list({ limit: 500, active: true }),
+      // Every item, not the first page: one item per design and colour fills 200 fast.
+      everyItem<Option>({ active: true }),
       masterResource<Option>('charge-types')
         .list({ limit: 100, active: true })
         .catch(() => null),
@@ -763,7 +770,7 @@ export function PurchaseBillDialog({
     ]).then(([s, i, c, hc, co]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
-      setItems((i as Paginated<Option>).data)
+      setItems(i)
       // The charge master may have no screen yet; a bill without freight is
       // still a bill, so this degrades rather than breaking the form.
       setChargeTypes(
@@ -901,7 +908,7 @@ export function PurchaseBillDialog({
         {expenseHeads.length > 0 && (
           <optgroup label="Expense heads">
             {expenseHeads.map((it) => (
-              <option key={it.id} value={it.id}>
+              <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                 {it.code ? `${it.code} — ${it.name}` : it.name}
               </option>
             ))}
@@ -911,7 +918,7 @@ export function PurchaseBillDialog({
         {others.length > 0 && (
           <optgroup label="Other items">
             {others.map((it) => (
-              <option key={it.id} value={it.id}>
+              <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                 {it.code ? `${it.code} — ${it.name}` : it.name}
               </option>
             ))}
@@ -921,8 +928,9 @@ export function PurchaseBillDialog({
     ) : (
       <>
         <option value="">Select...</option>
+        {/* A fabric's design and colour under its name: typing 1164 finds it. */}
         {items.map((it) => (
-          <option key={it.id} value={it.id}>
+          <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
             {it.code ? `${it.code} — ${it.name}` : it.name}
           </option>
         ))}
@@ -2836,7 +2844,7 @@ export function PurchaseBillDialog({
                 <div className="warn-text space-y-1 text-xs">
                   {overBilled.map((l, i) => (
                     <p key={`o${i}`}>
-                      {itemById.get(l.itemId)?.name ?? 'A line'}: the bill claims {Number(pcsOf(l).toFixed(3))} {itemById.get(l.itemId)?.uom?.symbol ?? ''} but
+                      {nameInWords(itemById.get(l.itemId)) ?? 'A line'}: the bill claims {Number(pcsOf(l).toFixed(3))} {itemById.get(l.itemId)?.uom?.symbol ?? ''} but
                       only {l.pendingQty} is left to bill on {l.grnNumber ?? l.poNumber}. Saving this will be
                       refused.
                     </p>
@@ -2882,6 +2890,9 @@ export function PurchaseBillDialog({
                       <p className="text-foreground text-sm">
                         {itemById.get(l.itemId)?.name ?? 'A line'}
                       </p>
+                      {itemShade(itemById.get(l.itemId)) && (
+                        <p className="text-muted-foreground text-[11px]">{itemShade(itemById.get(l.itemId))}</p>
+                      )}
                       <p className="text-muted-foreground mt-0.5 text-xs">
                         Order ₹{inr(ordered)} · billed ₹{inr(billed)} ·{' '}
                         <span className={higher ? 'text-amber-400' : 'text-emerald-400'}>
@@ -3016,6 +3027,9 @@ export function PurchaseBillDialog({
                             >
                               {itemChoices(line.itemId)}
                             </SmartSelect>
+                            {itemShade(item) && (
+                              <p className="text-muted-foreground mt-0.5 text-[10px]">{itemShade(item)}</p>
+                            )}
                             {item?.hsnCode && (
                               <p className="text-muted-foreground mt-0.5 font-mono text-[10px]">
                                 {expenseMode ? 'HSN/SAC' : 'HSN'} {item.hsnCode}
@@ -3202,6 +3216,7 @@ export function PurchaseBillDialog({
                         >
                           {itemChoices(line.itemId)}
                         </SmartSelect>
+                        {itemShade(item) && <p className="text-muted-foreground text-[10px]">{itemShade(item)}</p>}
                         {item?.hsnCode && (
                           <p className="text-muted-foreground font-mono text-[10px]">
                             {expenseMode ? 'HSN/SAC' : 'HSN'} {item.hsnCode}
@@ -3499,7 +3514,10 @@ export function PurchaseBillDialog({
                     result={priced}
                     split={taxMode}
                     totalLabel="Bill total"
-                    itemNames={lines.map((l) => itemById.get(l.itemId)?.name ?? l.description ?? 'Line')}
+                    itemNames={lines.map((l) => {
+                      const it = itemById.get(l.itemId)
+                      return it ? [it.name, itemShade(it)].filter(Boolean).join(' · ') : (l.description ?? 'Line')
+                    })}
                     chargeNames={charges.map((c, i) => c.taxSnapshot?.name ?? chargeTypes.find((ct) => ct.id === c.chargeTypeId)?.name ?? `Charge ${i + 1}`)}
                     extra={
                       <>

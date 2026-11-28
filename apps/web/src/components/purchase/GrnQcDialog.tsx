@@ -23,6 +23,7 @@ import {
   returnReasonFields,
   type ReasonOption,
 } from '@/components/purchase/returnReasons'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * Quality check on a goods receipt — optional, after the goods are in.
@@ -38,7 +39,8 @@ import {
  * recorded again.
  */
 
-interface QcFormLine {
+/** The item's design and colour come flat on the line, beside its code and name. */
+interface QcFormLine extends ShadeFields {
   grnLineId: string
   itemId: string
   itemCode: string
@@ -50,7 +52,7 @@ interface QcFormLine {
   onHand: number
 }
 
-interface QcRecordLine {
+interface QcRecordLine extends ShadeFields {
   grnLineId: string
   itemCode?: string
   itemName?: string
@@ -185,12 +187,14 @@ export function GrnQcDialog({
     const out: string[] = []
     for (const l of lines) {
       const r = num(rejected[l.grnLineId] ?? '')
-      if (r < 0) out.push(`${l.itemName}: a rejected quantity cannot be negative`)
+      // Named with its design and colour: two lines can both be "Cotton Twill".
+      const name = itemShade(l) ? `${l.itemName} (${itemShade(l)})` : l.itemName
+      if (r < 0) out.push(`${name}: a rejected quantity cannot be negative`)
       if (r > l.receivedQty + 0.0005) {
-        out.push(`${l.itemName}: only ${l.receivedQty} ${l.uom ?? ''} was received`)
+        out.push(`${name}: only ${l.receivedQty} ${l.uom ?? ''} was received`)
       }
       if (r > 0 && !reasonCodes[l.grnLineId]) {
-        out.push(`${l.itemName}: pick why it was rejected`)
+        out.push(`${name}: pick why it was rejected`)
       }
     }
     return out
@@ -380,6 +384,7 @@ export function GrnQcDialog({
                         className="border-border bg-card rounded-lg border p-3"
                       >
                         <p className="text-foreground text-sm font-medium">{l.itemName}</p>
+                        {itemShade(l) && <p className="text-muted-foreground text-[11px]">{itemShade(l)}</p>}
                         <p className="text-muted-foreground font-mono text-[10px]">
                           {l.itemCode}
                         </p>
@@ -500,6 +505,9 @@ export function GrnQcDialog({
                           >
                             <td>
                               <p className="text-foreground truncate font-medium">{l.itemName}</p>
+                              {itemShade(l) && (
+                                <p className="text-muted-foreground truncate text-[10px]">{itemShade(l)}</p>
+                              )}
                               <p className="text-muted-foreground font-mono text-[10px]">
                                 {l.itemCode}
                               </p>
@@ -700,6 +708,7 @@ function StandingCheck({
             <div key={l.grnLineId} className="flex items-start justify-between gap-3 p-2.5">
               <div className="min-w-0">
                 <p className="text-xs font-medium">{l.itemName}</p>
+                {itemShade(l) && <p className="text-muted-foreground text-[10px]">{itemShade(l)}</p>}
                 <p className="text-muted-foreground font-mono text-[10px]">
                   {l.itemCode}
                 </p>

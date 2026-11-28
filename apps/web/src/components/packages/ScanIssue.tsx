@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { CheckCircle2, Loader2, Printer, ScanLine } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { newRequestId } from '@/lib/utils'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { StepInput } from '@/components/ui/StepInput'
 import { StickerScanner } from './StickerSearch'
 import { FifoOverride, isFifoStop } from './FifoOverride'
@@ -11,10 +12,15 @@ import { STATUS, packCount, printLabels, qtyText, type PackageDetail } from './p
 
 type Waiting = PackageDetail['requisitions'][number]
 
+/** An item in a sentence, with its design and colour: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const named = (i: { name: string } & ShadeFields) => (itemShade(i) ? `${i.name} (${itemShade(i)})` : i.name)
+
 interface Issued {
   id: string
   code: string
   item: string
+  /** Its design and colour, when it is a fabric or thread. */
+  shade: string
   qty: number
   /** What is left on the same sticker: nought when the whole of it went. */
   left: number
@@ -85,8 +91,8 @@ export function ScanIssue({
       } else if (!waiting) {
         setError(
           itemIds.includes(p.item.id)
-            ? `${mrNumber} has already been given all the ${p.item.name} it asked for.`
-            : `${p.code} is ${p.item.name}, which is not on ${mrNumber}.`,
+            ? `${mrNumber} has already been given all the ${named(p.item)} it asked for.`
+            : `${p.code} is ${named(p.item)}, which is not on ${mrNumber}.`,
         )
       } else {
         setPkg(p)
@@ -137,6 +143,7 @@ export function ScanIssue({
           id: pkg.id,
           code: pkg.code,
           item: pkg.item.name,
+          shade: itemShade(pkg.item),
           qty: n,
           left: fresh?.qty ?? (res.data.status === 'IN_STOCK' ? res.data.qty : 0),
           newSticker: fresh ? { id: fresh.id, code: fresh.code } : null,
@@ -183,6 +190,7 @@ export function ScanIssue({
         <div className="flex flex-wrap items-end gap-3 rounded-lg border border-primary/40 bg-primary/5 p-3">
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold text-foreground">{pkg.item.name}</div>
+            {itemShade(pkg.item) && <div className="text-xs text-muted-foreground">{itemShade(pkg.item)}</div>}
             <div className="text-xs text-muted-foreground">
               A {packCount(1, pkg.packType).replace(/^1 /, '')} of {qtyText(pkg.qty)} {pkg.unit}
               {pkg.lotNo ? ` · lot ${pkg.lotNo}` : ''} · {pkg.warehouse.name}
@@ -244,6 +252,7 @@ export function ScanIssue({
                 <span className="font-semibold text-foreground">
                   {qtyText(d.qty)} {d.unit} {d.item}
                 </span>{' '}
+                {d.shade && <span className="text-muted-foreground">({d.shade}) </span>}
                 <span className="text-muted-foreground">
                   {d.newSticker
                     ? `issued from a ${d.kind}${d.lot ? ` (lot ${d.lot})` : ''} — the ${qtyText(d.left)} ${d.unit} left in ${d.store} is now ${d.newSticker.code}; ${d.code} is retired`

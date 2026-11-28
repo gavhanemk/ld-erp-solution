@@ -67,7 +67,7 @@ function Sheet() {
         <>
           <Fact label="Fabric quality" value={c.fabricQuality} />
           <Fact label="Colour" value={d.line?.color ?? null} />
-          <Fact label="Design no." value={c.designNo} mono />
+          <Fact label="Print / design" value={c.designNo} mono />
           <Fact label="Lot no." value={lotOf(d)?.lot ?? null} />
         </>
       ),

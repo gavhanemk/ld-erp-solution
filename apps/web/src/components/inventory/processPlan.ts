@@ -1,5 +1,6 @@
 import { packCount } from '@/components/packages/packageTypes'
 import { qtyPlaces, roundDownToPlaces, roundUpToPlaces } from '@ld-erp/shared'
+import type { ShadeFields } from '@/lib/items'
 
 /**
  * What the store can do with a requisition, line by line: what is still owed,
@@ -17,7 +18,8 @@ export interface ProcessLine {
   styleNo?: string | null
   ownership?: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomer?: { id: string; name: string } | null
-  item: {
+  /** With a fabric's design no. and colour: same-name items told apart. */
+  item: ShadeFields & {
     id: string
     code: string
     name: string

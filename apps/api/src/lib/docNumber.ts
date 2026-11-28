@@ -38,6 +38,23 @@ export async function nextDocumentNumber(
   /** The date on the document. A back-dated one belongs to its own year's series. */
   documentDate: Date = new Date(),
 ): Promise<string> {
+  const series = await seriesFor(tx, docType, documentDate)
+
+  const updated = await tx.numberSeries.update({
+    where: { id: series.id },
+    data: { lastNumber: { increment: 1 } },
+    select: { prefix: true, separator: true, financialYear: true, lastNumber: true, padding: true },
+  })
+
+  return checkedNumber(formatDocumentNumber(updated))
+}
+
+/** The series a document dated `documentDate` is numbered from — its own financial year's. */
+export async function seriesFor(
+  tx: Prisma.TransactionClient,
+  docType: string,
+  documentDate: Date = new Date(),
+) {
   const company = await tx.company.findFirst({
     select: { id: true, currentFY: true, fyStartMonth: true },
   })
@@ -67,14 +84,11 @@ export async function nextDocumentNumber(
     candidates.find((c) => normaliseFy(c.financialYear) === normaliseFy(company.currentFY ?? '')) ??
     [...candidates].sort((a, b) => normaliseFy(b.financialYear).localeCompare(normaliseFy(a.financialYear)))[0]
 
-  const updated = await tx.numberSeries.update({
-    where: { id: series.id },
-    data: { lastNumber: { increment: 1 } },
-    select: { prefix: true, separator: true, financialYear: true, lastNumber: true, padding: true },
-  })
+  return series
+}
 
-  const number = formatDocumentNumber(updated)
-
+/** A number as it will be printed, refused if a GST officer could reject it. */
+export function checkedNumber(number: string): string {
   // Refusing here is better than issuing a number that a GST officer can
   // reject. The settings screen validates the same rule when the series is
   // saved, so this should never fire in practice.

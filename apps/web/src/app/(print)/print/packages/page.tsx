@@ -7,8 +7,9 @@ import { PrintToolbar } from '@/components/print/PrintSheet'
 import { QrCode } from '@/components/packages/QrCode'
 import { Code128 } from '@/components/packages/Code128'
 import { packLabel, qtyText } from '@/components/packages/packageTypes'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
-interface Label {
+interface Label extends ShadeFields {
   id: string
   code: string
   packType: string
@@ -58,7 +59,7 @@ interface Payload {
   packages: Label[]
 }
 /** A label for stock going out: what left, on which document, to whom. */
-interface OutLabel {
+interface OutLabel extends ShadeFields {
   key: string
   tag: string
   docNumber: string
@@ -132,9 +133,17 @@ function Sticker({
   const roll = p.packType === 'ROLL'
   const tight = base === 'small'
   const qrSize = codes === 'both' ? d.qrBoth : d.qr
+  // A fabric's design and colour, a thread's colour: the store picks the roll
+  // or box by them, and same-name fabrics differ only there (27 Nov 2026).
+  const shade = itemShade(p)
+  // Its own line under the name, made room for in the same text area: the name
+  // keeps to one line and the small lines sit closer. Stickers without one are
+  // unchanged. The small sticker has no room for a line, so it rides on the last.
+  const fit = Boolean(shade) && !tight
+  const lh = fit ? 1.2 : undefined
   // With a barcode along the bottom there is less height: one line of name
   // where the sticker is wide enough.
-  const nameLines = tight || codes === 'bar' || (layout === 'sheet' && codes === 'both') ? 1 : 2
+  const nameLines = fit || tight || codes === 'bar' || (layout === 'sheet' && codes === 'both') ? 1 : 2
   const foot = codes === 'qr' && d.foot
   // What the kind is set to show (Stickers → Sticker settings); everything when not set.
   const codeLine = [shows(t, 'itemCode') ? p.itemCode : null, shows(t, 'style') && p.styleNo ? `Style ${p.styleNo}` : null].filter(Boolean).join(' · ')
@@ -184,9 +193,16 @@ function Sticker({
           </div>
         )}
         <div className="pk-info">
-          <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: nameLines }}>{p.item}</div>
-          {!tight && <div style={{ fontSize: d.code, fontFamily: 'ui-monospace, monospace', ...clip }}>{codeLine}</div>}
-          <div className="pk-qty">
+          {fit ? (
+            <div>
+              <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: nameLines }}>{p.item}</div>
+              <div style={{ fontSize: d.line, fontWeight: 600, lineHeight: lh, ...clip }}>{shade}</div>
+            </div>
+          ) : (
+            <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: nameLines }}>{p.item}</div>
+          )}
+          {!tight && <div style={{ fontSize: d.code, fontFamily: 'ui-monospace, monospace', lineHeight: lh, ...clip }}>{codeLine}</div>}
+          <div className="pk-qty" style={fit ? { margin: 0 } : undefined}>
             <span style={{ fontSize: d.qty, fontWeight: 800, lineHeight: 1 }}>{roll ? p.qty.toFixed(2) : qtyText(p.qty)}</span>
             <span style={{ fontSize: d.unit, fontWeight: 700 }}>{p.unit}</span>
             {/* What is inside: "1 box · 144 pcs". */}
@@ -197,21 +213,23 @@ function Sticker({
             )}
           </div>
           {tight ? (
-            // Room for one line: the lot first, as it is what a roll is picked by.
+            // Room for one line: the lot first, as it is what a roll is picked by,
+            // then its design and colour; the document gives way first.
             <div style={{ fontSize: d.line, ...clip }}>
               {p.lotNo && shows(t, 'lot') ? <b>Lot {p.lotNo} · </b> : null}
+              {shade ? `${shade}${shows(t, 'document') ? ' · ' : ''}` : null}
               {shows(t, 'document') ? (p.grnNumber ?? day(p.date)) : null}
             </div>
           ) : (
             <>
               {/* The receipt's note on this package rides on the lot line, so no other line is pushed off. */}
               {(lotLine || note) && (
-                <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>
+                <div style={{ fontSize: d.line, fontWeight: 700, lineHeight: lh, ...clip }}>
                   {lotLine}
                   {note && <i>{lotLine ? ' · ' : ''}{note}</i>}
                 </div>
               )}
-              {docLine && <div style={{ fontSize: d.line, ...clip }}>{docLine}</div>}
+              {docLine && <div style={{ fontSize: d.line, lineHeight: lh, ...clip }}>{docLine}</div>}
             </>
           )}
         </div>
@@ -245,6 +263,11 @@ function OutSticker({ o, company, layout, codes: chosen, custom }: { o: OutLabel
   const codes: Exclude<Codes, 'kind'> = chosen === 'kind' ? 'both' : chosen
   const qrSize = codes === 'both' ? d.qrBoth : d.qr
   const foot = codes === 'qr' && d.foot
+  // Its design and colour as on the package sticker: a line of its own, or on the code line of a small one.
+  const shade = itemShade(o)
+  const fit = Boolean(shade) && base !== 'small'
+  const lh = fit ? 1.2 : undefined
+  const nameLines = fit || base === 'small' || codes === 'bar' || (base === 'sheet' && codes === 'both') ? 1 : 2
   return (
     <div className="sticker pk">
       {o.owner && (
@@ -265,15 +288,25 @@ function OutSticker({ o, company, layout, codes: chosen, custom }: { o: OutLabel
           </div>
         )}
         <div className="pk-info">
-          <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: base === 'small' || codes === 'bar' || (base === 'sheet' && codes === 'both') ? 1 : 2 }}>{o.item}</div>
-          <div style={{ fontSize: d.code, fontFamily: 'ui-monospace, monospace', ...clip }}>{o.itemCode}</div>
-          <div className="pk-qty">
+          {fit ? (
+            <div>
+              <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: nameLines }}>{o.item}</div>
+              <div style={{ fontSize: d.line, fontWeight: 600, lineHeight: lh, ...clip }}>{shade}</div>
+            </div>
+          ) : (
+            <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: nameLines }}>{o.item}</div>
+          )}
+          <div style={{ fontSize: d.code, fontFamily: 'ui-monospace, monospace', lineHeight: lh, ...clip }}>
+            {o.itemCode}
+            {shade && !fit && <span style={{ fontFamily: 'Inter, system-ui, sans-serif' }}> · {shade}</span>}
+          </div>
+          <div className="pk-qty" style={fit ? { margin: 0 } : undefined}>
             <span style={{ fontSize: d.qty, fontWeight: 800, lineHeight: 1 }}>{qtyText(o.qty)}</span>
             <span style={{ fontSize: d.unit, fontWeight: 700 }}>{o.unit}</span>
           </div>
-          <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>To {o.to}</div>
+          <div style={{ fontSize: d.line, fontWeight: 700, lineHeight: lh, ...clip }}>To {o.to}</div>
           {base !== 'small' && (
-            <div style={{ fontSize: d.line, ...clip }}>
+            <div style={{ fontSize: d.line, lineHeight: lh, ...clip }}>
               From {o.from} · {day(o.date)}
             </div>
           )}

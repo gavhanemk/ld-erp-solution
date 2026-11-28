@@ -28,6 +28,7 @@ import { OutwardStickers } from '@/components/packages/OutwardStickers'
 import type { OutwardRef } from '@/components/packages/packageTypes'
 import { BrandTag } from '@/components/sales/brand'
 import { isAdminRole } from '@/lib/access'
+import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
 
 /**
  * Material requisitions: asked for, allowed, handed over.
@@ -53,7 +54,7 @@ interface Line {
   /** How much of the line the store decided to buy. Null on lines decided before it could be set. */
   purchaseQty?: string | number | null
   purpose: string | null
-  item: {
+  item: ShadeFields & {
     id: string
     code: string
     name: string
@@ -217,17 +218,26 @@ type UnitGroup = ReturnType<typeof qtyByUnit>[number]
 
 /** The item panel's columns, as shares of the row, so the table fits the panel it opens in. */
 const ITEM_COLS = [
-  { label: 'Item', width: '21%' },
-  { label: 'Code', width: '9%' },
-  { label: 'Style no.', width: '8%' },
-  { label: 'What for', width: '9%' },
-  { label: 'In stock', width: '9%', numeric: true },
-  { label: 'Asked', width: '8%', numeric: true },
-  { label: 'Issued', width: '9%', numeric: true },
-  { label: 'Reserved', width: '9%', numeric: true },
-  { label: 'Buying', width: '9%', numeric: true },
-  { label: 'Still needed', width: '9%', numeric: true },
+  { label: 'Item', width: '17%' },
+  // A fabric's own design and colour: same-name items told apart.
+  { label: 'Design No.', width: '7%' },
+  { label: 'Colour', width: '7%' },
+  { label: 'Code', width: '8%' },
+  { label: 'Style no.', width: '7%' },
+  { label: 'What for', width: '8%' },
+  { label: 'In stock', width: '8%', numeric: true },
+  { label: 'Asked', width: '7%', numeric: true },
+  { label: 'Issued', width: '8%', numeric: true },
+  { label: 'Reserved', width: '8%', numeric: true },
+  { label: 'Buying', width: '7%', numeric: true },
+  { label: 'Still needed', width: '8%', numeric: true },
 ]
+
+/** An item's name with its design no. and colour, for one-line lists and hints. */
+const itemText = (i: ShadeFields & { name: string }) => {
+  const shade = itemShade(i)
+  return shade ? `${i.name} (${shade})` : i.name
+}
 /** One figure per unit on one line: "1,000 mtr · 250 pcs", or null when all are nil. */
 const unitLine = (groups: UnitGroup[], pick: (g: UnitGroup) => number) => {
   const parts = groups
@@ -623,6 +633,8 @@ function RequisitionsScreen() {
               'Waiting On': STAGE[f.stage].who,
               'Item Code': l.item.code,
               'Item Name': l.item.name,
+              'Design No.': itemShadeCols(l.item).designNo,
+              Colour: itemShadeCols(l.item).colour,
               Category: l.item.category?.parent?.name ?? l.item.category?.name ?? '',
               'Sub Category': l.item.category?.parent ? l.item.category.name : '',
               Whose: l.ownership === 'CUSTOMER_OWNED' ? (l.ownerCustomer?.name ?? 'Customer') : 'Our own',
@@ -639,7 +651,7 @@ function RequisitionsScreen() {
           })
         }),
       )
-      sheet['!cols'] = [16, 11, 16, 18, 18, 14, 24, 11, 20, 10, 14, 30, 16, 16, 16, 22, 6, 9, 9, 10, 9, 22, 24, 26].map((wch) => ({ wch }))
+      sheet['!cols'] = [16, 11, 16, 18, 18, 14, 24, 11, 20, 10, 14, 30, 12, 12, 16, 16, 16, 22, 6, 9, 9, 10, 9, 22, 24, 26].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Requisitions')
       XLSX.writeFile(book, `material-requisitions-${today}.xlsx`)
@@ -739,6 +751,12 @@ function RequisitionsScreen() {
                     {l.ownership === 'CUSTOMER_OWNED' && (
                       <div className="truncate text-[10px] text-sky-500">{l.ownerCustomer?.name ?? 'Customer'}&apos;s material</div>
                     )}
+                  </td>
+                  <td className="truncate text-xs" title={itemShadeCols(l.item).designNo || undefined}>
+                    {itemShadeCols(l.item).designNo || <span className="text-muted-foreground">—</span>}
+                  </td>
+                  <td className="truncate text-xs" title={itemShadeCols(l.item).colour || undefined}>
+                    {itemShadeCols(l.item).colour || <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
                   <td className="truncate font-mono text-xs" title={l.styleNo ?? undefined}>
@@ -965,7 +983,7 @@ function RequisitionsScreen() {
             const f = rowFacts(m)
             const owed = unitLine(f.groups, (g) => g.owed)
             const here = m.id === currentId
-            const p = itemsPreview(m.lines.map((l) => l.item.name))
+            const p = itemsPreview(m.lines.map((l) => itemText(l.item)))
             return (
               <button
                 key={m.id}
@@ -1344,7 +1362,7 @@ function RequisitionsScreen() {
                       const r = rowFacts(mr)
                       const expanded = open === mr.id
                       const live = OPEN_STAGES.includes(r.stage)
-                      const p = itemsPreview(mr.lines.map((l) => l.item.name))
+                      const p = itemsPreview(mr.lines.map((l) => itemText(l.item)))
                       // Lines still needed that the stores cannot cover in full.
                       const openLines = live ? mr.lines.filter((l) => Number(l.requestedQty) - Number(l.issuedQty) > 1e-9) : []
                       const short = openLines.filter((l) => (l.available ?? 0) + 1e-9 < Number(l.requestedQty) - Number(l.issuedQty))
@@ -1399,7 +1417,7 @@ function RequisitionsScreen() {
                             <td className="whitespace-nowrap text-right text-xs tabular-nums">
                               {live ? unitStack(r.groups, (g) => g.owed, 'font-medium text-amber-500') : dash}
                             </td>
-                            <td className="whitespace-nowrap text-xs" title={short.map((l) => `${l.item.name}: ${qtyFmt(l.available ?? 0)} ${l.item.uom.symbol} in stock`).join('\n') || undefined}>
+                            <td className="whitespace-nowrap text-xs" title={short.map((l) => `${itemText(l.item)}: ${qtyFmt(l.available ?? 0)} ${l.item.uom.symbol} in stock`).join('\n') || undefined}>
                               {!openLines.length ? (
                                 dash
                               ) : short.length ? (

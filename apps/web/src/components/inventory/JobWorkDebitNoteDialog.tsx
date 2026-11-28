@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Loader2, FileMinus, Boxes } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { StepInput } from '@/components/ui/StepInput'
@@ -28,7 +29,7 @@ interface Challan {
     returnDate: string
     theirChallanNo: string | null
     debitNotes?: Array<{ noteNumber: string }>
-    lines: Array<{ id: string; challanLineId: string; damagedQty: string | number; item: { name: string } }>
+    lines: Array<{ id: string; challanLineId: string; damagedQty: string | number; item: { name: string } & ShadeFields }>
   }>
 }
 
@@ -122,7 +123,10 @@ export function JobWorkDebitNoteDialog({ challanId, onClose, onSaved }: { challa
                     <tbody>
                       {damaged.map((l) => (
                         <tr key={l.id}>
-                          <td className="text-xs">{l.item.name}</td>
+                          <td className="text-xs">
+                            {l.item.name}
+                            {itemShade(l.item) && <div className="text-muted-foreground">{itemShade(l.item)}</div>}
+                          </td>
                           <td className="text-right text-xs tabular-nums">{Number(l.damagedQty)} damaged ×</td>
                           <td className="w-32">
                             <StepInput

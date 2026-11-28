@@ -2,7 +2,7 @@
 
 import { Fragment } from 'react'
 import { ChevronRight, Truck } from 'lucide-react'
-import { fabricQty, pcs, whoHas, type FabricRecord, type StepFigures } from './types'
+import { fabricLine, fabricName, fabricQty, pcs, whoHas, type FabricRecord, type StepFigures } from './types'
 
 /**
  * A job card's route as a line of stages, in the route's order, each saying in
@@ -66,7 +66,9 @@ export function stepRecord(s: StripStep, fabric: FabricRecord[] = []): RecordLin
   const passedOn = [f.sentOn ? `${pcs(f.sentOn)} on` : null, f.packed ? `${pcs(f.packed)} packed` : null].filter(Boolean).join(' · ') || '0 on'
   if (s.kind === 'CUTTING') {
     for (const r of fabric) {
-      if (r.given) out.push({ text: `${fabricQty(r.given, r.unit)} fabric given` })
+      // The strip keeps the unit's total; on hover, which fabric — design and colour — and how much of each.
+      const which = (r.items ?? []).filter((i) => i.name).map((i) => ((r.items?.length ?? 0) > 1 ? `${fabricName(i)}: ${fabricLine({ ...i, unit: r.unit })}` : fabricName(i)))
+      if (r.given) out.push({ text: `${fabricQty(r.given, r.unit)} fabric given`, title: which.length ? which.join('\n') : undefined })
       if (r.used || r.waste) out.push({ text: `${fabricQty(r.used, r.unit)} used · ${fabricQty(r.waste, r.unit)} waste` })
       if (r.withCutters) out.push({ text: `${fabricQty(r.withCutters, r.unit)} with cutters` })
       if (r.leftOver) out.push({ text: `${fabricQty(r.leftOver, r.unit)} left over`, warn: true, title: `Left over with ${whoHas(r.leftWith, r.unit)}` })

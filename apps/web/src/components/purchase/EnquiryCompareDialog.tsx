@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { itemShade } from '@/lib/items'
 import { RecordQuoteDialog } from '@/components/purchase/RecordQuoteDialog'
 import { handEnquiryToOrder } from '@/components/purchase/enquiryHandoff'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
@@ -539,6 +540,9 @@ export function EnquiryCompareDialog({
                     <tr key={l.id}>
                       <td>
                         <p className="text-xs font-medium">{l.item.name}</p>
+                        {itemShade(l.item) && (
+                          <p className="text-muted-foreground text-[10px]">{itemShade(l.item)}</p>
+                        )}
                         <p className="text-muted-foreground font-mono text-[10px]">{l.item.code}</p>
                       </td>
                       <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">

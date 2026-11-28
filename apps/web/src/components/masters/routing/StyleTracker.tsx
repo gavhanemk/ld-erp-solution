@@ -34,6 +34,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { itemShade } from '@/lib/items'
 import { RoutingFormDialog, type Routing } from '@/components/masters/RoutingFormDialog'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { moStatus } from '@/components/production/status'
@@ -422,6 +423,8 @@ export function StyleTracker({ styleId }: { styleId: string }) {
               <span className="inline-flex items-center gap-1.5">
                 <Layers size={13} className="shrink-0" aria-hidden />
                 {routing.fabric ? <span className="text-foreground">{routing.fabric.name}</span> : 'No fabric set'}
+                {/* Which of several same-name fabrics. */}
+                {routing.fabric && itemShade(routing.fabric) && <span>· {itemShade(routing.fabric)}</span>}
               </span>
               {stamp && (
                 <span className="inline-flex items-center gap-1.5">

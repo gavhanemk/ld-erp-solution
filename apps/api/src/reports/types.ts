@@ -71,7 +71,7 @@ export interface ReportFilter {
   type: FilterType
   required?: boolean
   /** For `select`: where the picker gets its options. */
-  optionsFrom?: 'suppliers' | 'customers' | 'items' | 'warehouses' | 'itemCategories'
+  optionsFrom?: 'suppliers' | 'customers' | 'items' | 'warehouses' | 'itemCategories' | 'brands'
   /** For `select` with a fixed list. */
   options?: Array<{ value: string; label: string }>
   /** For `select`: what choosing nothing means, when it is not "All …". */

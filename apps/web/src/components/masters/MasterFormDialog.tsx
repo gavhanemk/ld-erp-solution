@@ -166,9 +166,11 @@ export interface FormField {
   /**
    * Only rendered, and only required, while this returns true for the
    * form's current values — a colour field with nothing to choose from until
-   * a style is picked.
+   * a style is picked. `rows` holds the records loaded for the form's
+   * dropdowns, by field name — a fabric's Design No. shows when the category
+   * picked is a Fabric one.
    */
-  showIf?: (values: Record<string, unknown>) => boolean
+  showIf?: (values: Record<string, unknown>, rows: Record<string, Record<string, unknown>[]>) => boolean
   /** Shown in place of "Select..." when a filtered list has nothing in it. */
   emptyLabel?: string
   /** What the empty choice of a select says, in place of "Select...": "None — this is a main category". */
@@ -661,7 +663,7 @@ export function MasterFormDialog<T extends { id: string }>({
       // leaving it out would let the server keep whatever it held before the
       // field was hidden, which is exactly the stale value hiding it was
       // meant to clear.
-      if (f.showIf && !f.showIf(values)) {
+      if (f.showIf && !f.showIf(values, remoteRows)) {
         payload[f.name] = null
         continue
       }
@@ -800,7 +802,7 @@ export function MasterFormDialog<T extends { id: string }>({
   // rather than as a greyed-out box taking a place in the grid. Before the
   // record exists there is nothing to show at all. A showIf field has nothing
   // to show until its own condition is met.
-  const visibleFields = fields.filter((f) => !f.generated && (!f.showIf || f.showIf(values)))
+  const visibleFields = fields.filter((f) => !f.generated && (!f.showIf || f.showIf(values, remoteRows)))
 
   // The Active tick goes in the footer beside Save rather than in a panel: it
   // is about the whole record, and in a panel it took a row of its own.

@@ -22,6 +22,7 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * The three ways stock moves without a purchase or a sale behind it.
@@ -60,7 +61,7 @@ const SOURCES = [
   ['OTHER', 'Other'],
 ] as const
 
-interface ItemOption {
+interface ItemOption extends ShadeFields {
   id: string
   code: string
   name: string
@@ -240,11 +241,12 @@ export function StockMoveDialog({
       try {
         const [i, w] = await Promise.all([
           // Active only: a deactivated item or store is not offered for new stock.
-          masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
+          // Every page: one item per fabric design and colour soon passes 200.
+          everyItem<ItemOption>({ active: true, sort: 'name', order: 'asc' }),
           masterResource<WarehouseOption>('warehouses').list({ limit: 100, active: true }),
         ])
         if (cancelled) return
-        setItems(i.data)
+        setItems(i)
         setWarehouses(w.data)
         // One store is the overwhelmingly common case, so choosing it for them
         // removes a click without ever choosing wrongly. A transit store is
@@ -673,11 +675,14 @@ export function StockMoveDialog({
                       >
                         <option value="">Choose an item...</option>
                         {items.map((it) => (
-                          <option key={it.id} value={it.id}>
+                          <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                             {it.code} — {it.name}
                           </option>
                         ))}
                       </SmartSelect>
+                      {itemShade(itemsById.get(line.itemId)) && (
+                        <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{itemShade(itemsById.get(line.itemId))}</span>
+                      )}
                     </td>
                     {mode !== 'opening' && mode !== 'stockin' && (
                       <td className="px-3 py-2">

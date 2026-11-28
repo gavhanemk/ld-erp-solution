@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 import { BillItems, BillDetailDialog, BillFilesDialog } from '@/components/purchase/BillDetail'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
@@ -111,7 +112,7 @@ function PurchaseBillsTable() {
    * filter needs here, fetched once rather than on every keystroke.
    */
   const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([])
-  const [items, setItems] = useState<Array<{ id: string; name: string }>>([])
+  const [items, setItems] = useState<Array<{ id: string; name: string } & ShadeFields>>([])
 
   useEffect(() => {
     let cancelled = false
@@ -119,11 +120,13 @@ function PurchaseBillsTable() {
       try {
         const [s, i] = await Promise.all([
           masterResource<{ id: string; name: string }>('suppliers').list({ limit: 500 }),
-          masterResource<{ id: string; name: string }>('items').list({ limit: 500 }),
+          // Every item, not the first 200 — switched-off ones too, as before,
+          // since an old bill can still be looked up by them.
+          everyItem<{ id: string; name: string } & ShadeFields>(),
         ])
         if (cancelled) return
         setSuppliers([...s.data].sort((a, b) => a.name.localeCompare(b.name)))
-        setItems([...i.data].sort((a, b) => a.name.localeCompare(b.name)))
+        setItems([...i].sort((a, b) => a.name.localeCompare(b.name) || itemShade(a).localeCompare(itemShade(b))))
       } catch {
         // The filters just come up empty — the list itself still loads and
         // still works without them.
@@ -585,7 +588,7 @@ function PurchaseBillsTable() {
             >
               <option value="">All items</option>
               {items.map((it) => (
-                <option key={it.id} value={it.id}>
+                <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                   {it.name}
                 </option>
               ))}

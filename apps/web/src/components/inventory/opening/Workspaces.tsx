@@ -9,6 +9,7 @@ import { StyleGrid, ReloadButton } from './StyleGrid'
 import { MiniField } from './Frame'
 import { cellKey, money, num, styleRows, type FormOptions, type MaterialOption, type StyleItem, type StyleOption } from './kinds'
 import { newPack, packText, PackagingDialog, planOf, type PackValue } from '@/components/packages/PackagingEditor'
+import { itemShade } from '@/lib/items'
 
 /*
  * The three entry screens. Each shows only its own kind's fields, and every
@@ -420,7 +421,7 @@ export function RawMaterials({ materials, onChange, asset = false, ...shared }: 
         <SmartSelect className="form-input h-9 w-full" value={itemId} onChange={(e) => setItemId(e.target.value)} disabled={!categoryId} aria-label="Item">
           <option value="">{categoryId ? (inCategory.length ? '2. The item…' : 'Every item here is already added') : '2. Pick a category first'}</option>
           {inCategory.map((i) => (
-            <option key={i.id} value={i.id} data-sub={`${i.code}${i.unit ? ` · in ${i.unit}` : ''}`}>
+            <option key={i.id} value={i.id} data-sub={`${i.code}${i.unit ? ` · in ${i.unit}` : ''}${itemShade(i) ? ` · ${itemShade(i)}` : ''}`}>
               {i.name}
             </option>
           ))}
@@ -451,6 +452,7 @@ export function RawMaterials({ materials, onChange, asset = false, ...shared }: 
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <span className="text-foreground text-base font-semibold leading-tight">{it.name}</span>
+                  {itemShade(it) && <span className="text-muted-foreground text-sm">{itemShade(it)}</span>}
                   <span className="bg-primary/10 rounded-md px-1.5 py-0.5 font-mono text-xs font-semibold text-teal-400">{it.code}</span>
                   {it.tracked && (
                     <span className="badge-neutral">

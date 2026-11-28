@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { stepFigures } from './floor.service'
 
 /**
@@ -36,7 +37,8 @@ export const trackRoutingSelect = {
   createdAt: true,
   updatedAt: true,
   style: { select: { id: true, code: true, name: true } },
-  fabric: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
+  // With its design and colour: several fabric items share a name.
+  fabric: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } }, ...ITEM_SHADE } },
   createdBy: person,
   updatedBy: person,
   steps: {
@@ -265,6 +267,8 @@ export async function listStyles(db: Db, opts: { q?: string; state?: string; pag
             steps: t.routing.steps.length,
             alternatives: t.alternatives,
             fabric: t.routing.fabric?.name ?? null,
+            /** Which of several same-name fabrics; '' when it has no design or colour. */
+            fabricShade: itemShadeText(t.routing.fabric),
           }
         : null,
       overall: overallOf(stepsOnFloor(t?.routing ?? null, f), f?.planned ?? 0),

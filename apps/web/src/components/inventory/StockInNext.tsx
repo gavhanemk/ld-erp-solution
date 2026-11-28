@@ -8,11 +8,12 @@ import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { formatRupees } from '@/lib/utils'
 import { StickersReady } from '@/components/packages/StickersReady'
 import { isAdminRole } from '@/lib/access'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /** Which items of an approved stock-in need stickers, and which are not kept in packages. */
 export interface StickerNews {
-  tracked: Array<{ itemId: string; code: string; name: string; qty: number }>
-  untracked: Array<{ itemId: string; code: string; name: string; category: string }>
+  tracked: Array<ShadeFields & { itemId: string; code: string; name: string; qty: number }>
+  untracked: Array<ShadeFields & { itemId: string; code: string; name: string; category: string }>
 }
 
 /** A stock-in just saved, as the server sent it back. */
@@ -31,7 +32,9 @@ export interface SavedStockIn {
  */
 export function StickerNote({ stickers }: { stickers: StickerNews }) {
   const byCategory = new Map<string, string[]>()
-  for (const u of stickers.untracked) byCategory.set(u.category, [...(byCategory.get(u.category) ?? []), u.name])
+  // A fabric named with its design and colour: two "Cotton Twill" read apart.
+  for (const u of stickers.untracked)
+    byCategory.set(u.category, [...(byCategory.get(u.category) ?? []), itemShade(u) ? `${u.name} (${itemShade(u)})` : u.name])
 
   return (
     <div className="mt-2 space-y-2">

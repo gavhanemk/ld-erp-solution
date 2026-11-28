@@ -17,12 +17,14 @@ import {
   type SheetColumn,
 } from '@/components/print/StoreSheet'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { SubLine } from '@/components/print/doc'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 interface Payload {
   company: Record<string, string | null>
   template: { title: string; footerNote: string | null }
   warehouse: { id: string; name: string; code: string; address: string | null }
-  rows: Array<{ itemId: string; code: string; name: string; category: string; uom: string; bookQty: number }>
+  rows: Array<ShadeFields & { itemId: string; code: string; name: string; category: string; uom: string; bookQty: number }>
   printedAt: string
 }
 
@@ -123,7 +125,13 @@ function CountSheet() {
     cells: {
       sn: i + 1,
       code: <span style={CODE}>{r.code}</span>,
-      desc: <div style={{ fontWeight: 600 }}>{r.name}</div>,
+      desc: (
+        <>
+          <div style={{ fontWeight: 600 }}>{r.name}</div>
+          {/* A fabric's design and colour: each same-name roll counted on its own line. */}
+          {itemShade(r) && <SubLine>{itemShade(r)}</SubLine>}
+        </>
+      ),
       cat: <span style={{ fontSize: '9px', color: GREY }}>{r.category}</span>,
       uom: <span style={{ fontSize: '9px', color: GREY }}>{r.uom}</span>,
       book: r.bookQty ? qty(r.bookQty) : '—',

@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { byMonth, dateRangeFilters, periodLabel, round2 } from './shared'
+import { byMonth, dateRangeFilters, periodLabel, round2, shadeColumns, sumByItem } from './shared'
 import {
   BUCKET_LABEL,
   BUCKET_TONE,
@@ -36,6 +36,7 @@ export const stockMovement: ReportDefinition = {
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'store', label: 'Store', type: 'text', width: 18 },
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'opening', label: 'Opening', type: 'qty', total: 'sum' },
@@ -79,6 +80,8 @@ export const stockMovement: ReportDefinition = {
         itemCode: string
         itemName: string
         categoryId: string
+        designNo: string | null
+        colour: string | null
         uom: string
         warehouseId: string
         store: string
@@ -92,6 +95,7 @@ export const stockMovement: ReportDefinition = {
       }>
     >`
       SELECT i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", i."categoryId",
+             i."designNo", CASE WHEN i."styleId" IS NULL THEN i.color END AS colour,
              u.symbol AS uom, w.id AS "warehouseId", w.name AS store,
              s."transactionType"::text AS type, s."referenceType" AS ref,
              (s."transactionDate" < ${from}) AS before,
@@ -109,13 +113,15 @@ export const stockMovement: ReportDefinition = {
         AND (${catIds}::text[] IS NULL OR i."categoryId" = ANY(${catIds}::text[]))
       -- By position: the "before" column is a parameter, and Postgres will not
       -- match a second copy of it in GROUP BY to the one in SELECT.
-      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
     `
 
     type Row = {
       category: string
       itemCode: string
       item: string
+      designNo: string
+      colour: string
       store: string
       uom: string
       opening: number
@@ -137,6 +143,8 @@ export const stockMovement: ReportDefinition = {
           category: cats.names(f.categoryId).category,
           itemCode: f.itemCode,
           item: f.itemName,
+          designNo: f.designNo ?? '',
+          colour: f.colour ?? '',
           store: f.store,
           uom: f.uom,
           opening: 0,
@@ -194,7 +202,7 @@ export const stockMovement: ReportDefinition = {
         outValue: round2(r.outValue),
       }))
       .filter((r) => r.opening || r.closing || r.inValue || r.outValue)
-      .sort((a, b) => a.item.localeCompare(b.item) || a.store.localeCompare(b.store))
+      .sort((a, b) => a.item.localeCompare(b.item) || a.itemCode.localeCompare(b.itemCode) || a.store.localeCompare(b.store))
     const rows = all.slice(0, rowCap)
 
     const openingValue = round2(all.reduce((s, r) => s + r.openingValue, 0))
@@ -219,9 +227,8 @@ export const stockMovement: ReportDefinition = {
     })
     const monthly = byMonth(issues, (r) => r.transactionDate, (r) => (Number(r.outQty) - Number(r.inQty)) * Number(r.unitRate ?? 0))
 
-    const movers = all
-      .map((r) => ({ label: r.item, value: r.outValue }))
-      .reduce((m, e) => m.set(e.label, (m.get(e.label) ?? 0) + e.value), new Map<string, number>())
+    // By item code: one name in two designs is two items.
+    const movers = sumByItem(all, (r) => r.outValue)
     const idle = all.filter((r) => r.closing > 0 && r.inValue === 0 && r.outValue === 0)
     const idleValue = round2(idle.reduce((s, r) => s + r.closingValue, 0))
 
@@ -279,7 +286,7 @@ export const stockMovement: ReportDefinition = {
               title: 'Most value issued, by item',
               question: 'ranking',
               format: 'money',
-              points: [...movers].map(([label, value]) => ({ label, value: round2(value) })).sort((a, b) => b.value - a.value).slice(0, 10),
+              points: movers.sort((a, b) => b.value - a.value).slice(0, 10),
             },
           ] as Panel[]
         ).filter((p) => p.points.some((x) => x.value > 0)),

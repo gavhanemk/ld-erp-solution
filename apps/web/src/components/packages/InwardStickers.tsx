@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Info, Loader2, Printer, Tags } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { StepInput } from '@/components/ui/StepInput'
 import { PACK_TYPES, openPrintTab, printLabels, qtyText } from './packageTypes'
@@ -27,7 +28,7 @@ export interface InwardRef {
 }
 
 /** Stock to sticker: one item in one store, and how much of it can be. */
-export interface LabelTarget {
+export interface LabelTarget extends ShadeFields {
   itemId: string
   item: string
   itemCode: string
@@ -70,6 +71,8 @@ interface Row {
 }
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
+/** An item in a sentence, with its design and colour: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const named = (t: { item: string } & ShadeFields) => (itemShade(t) ? `${t.item} (${itemShade(t)})` : t.item)
 
 /** Everything, at so much a sticker: 12 at 1 → twelve 1s; 25 at 10 → 10, 10, 5. */
 function cover(max: number, each: number): number[] {
@@ -194,9 +197,9 @@ export function InwardStickers({
           const qtys = qtysOf(t, r)
           const total = r3(qtys.reduce((s, q) => s + q, 0))
           const problem = !qtys.length
-            ? `${t.item}: ${r.sizes ? 'type what is in each, one a line' : 'say how many stickers'}.`
+            ? `${named(t)}: ${r.sizes ? 'type what is in each, one a line' : 'say how many stickers'}.`
             : total > t.max + 1e-9
-              ? `${t.item}: that is ${qtyText(total)} ${t.unit}, but only ${qtyText(t.max)} can have stickers.`
+              ? `${named(t)}: that is ${qtyText(total)} ${t.unit}, but only ${qtyText(t.max)} can have stickers.`
               : null
           return { t, r, qtys, problem }
         }),
@@ -313,6 +316,7 @@ export function InwardStickers({
                   {t.owner ? ` · ${t.owner}'s` : ''}
                 </span>
               </div>
+              {itemShade(t) && <div className="text-muted-foreground text-xs">{itemShade(t)}</div>}
 
               <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                 <span className={`flex items-center gap-1.5 text-sm ${r.skip ? 'text-muted-foreground line-through' : 'text-foreground'}`}>

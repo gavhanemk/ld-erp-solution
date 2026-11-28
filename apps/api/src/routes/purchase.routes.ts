@@ -10,7 +10,18 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { expenseLinesWithoutDepartment, postWithin } from '../services/accounts/posting.service'
-import { nextDocumentNumber } from '../lib/docNumber'
+import { nextDocumentNumber, seriesFor } from '../lib/docNumber'
+import {
+  neverSent,
+  nextPurchaseOrderNumber,
+  peekNextNumber,
+  reclaimDocumentNumber,
+  releaseDocumentNumber,
+  sentInHistory,
+  shownNumber,
+  stepBackPurchaseOrderNumber,
+} from '../lib/numberSeries'
+import { ITEM_SHADE, assertInHouseBrand, itemShadeText } from '../lib/fabric'
 import { priceNote, notedQtyByGrnLine, syncBillAdjustments } from '../services/purchaseNote.service'
 import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
@@ -61,6 +72,15 @@ const MODULE = 'purchase'
 
 /** Money is stored to two decimals; accumulating floats without rounding drifts. */
 const round2 = (n: number) => Math.round(n * 100) / 100
+
+/**
+ * An item named in a message: "Cotton Twill (Design No: 1164 · Colour: Navy)",
+ * so a refusal about one of three same-name fabrics on a document says which.
+ */
+const itemInWords = (i: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null }) => {
+  const shade = itemShadeText(i)
+  return shade ? `${i.name} (${shade})` : i.name
+}
 
 const lineSchema = z.object({
   itemId: z.string().min(1, 'Pick an item'),
@@ -192,6 +212,9 @@ const createSchema = z.object({
    */
   supplierAddressId: z.string().optional().nullable(),
   reference: z.string().max(100).optional().nullable(),
+  // Who at the supplier the order is for, printed as "Kind Attention". Left
+  // out, a new order takes the supplier's contact person.
+  kindAttention: z.string().trim().max(100).optional().nullable(),
   // Internal. `notes` is printed on the supplier's copy; this is not.
   remark: z.string().max(1000).optional().nullable(),
   discountAmount: z.number().min(0).optional(),
@@ -208,6 +231,8 @@ const createSchema = z.object({
   otherCharges: z.number().min(0).optional(),
   notes: z.string().max(1000).optional().nullable(),
   terms: z.string().max(4000).optional().nullable(),
+  // The in-house brand the purchase is for; blank for a common purchase.
+  brandId: z.string().optional().nullable(),
   lines: z.array(lineSchema).min(1, 'An order needs at least one line'),
 })
 
@@ -241,6 +266,7 @@ const poInclude = {
   },
   deliveryWarehouse: { select: { id: true, name: true, address: true } },
   deliveryCustomer: { select: { id: true, name: true, code: true, gstin: true } },
+  brand: { select: { id: true, name: true } },
   createdBy: { select: { id: true, name: true } },
   approvedBy: { select: { id: true, name: true } },
   // A count, not the rows. The list only needs to say whether an order has
@@ -270,6 +296,10 @@ const poInclude = {
           code: true,
           name: true,
           hsnCode: true,
+          // A fabric's design and colour, from the Items master, printed in
+          // the order's Design / Colour column and shown under the item on
+          // the order list and the goods-in queue.
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
           // The category, and its parent where it has one. An item sits in
           // whichever level it was filed under, so the parent is what the list
@@ -323,6 +353,8 @@ const poReceivingInclude = {
           code: true,
           name: true,
           hsnCode: true,
+          // Which design and colour is arriving: same-name fabrics differ only by these.
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
           category: {
             select: { id: true, name: true, parent: { select: { id: true, name: true } } },
@@ -827,6 +859,8 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
           // The rate the form should offer for this item, so a line lifted off
           // an indent arrives taxed rather than at zero.
           taxRate: { select: { id: true, rate: true } },
+          // Which design and colour the indent asks for.
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
         },
       },
@@ -1015,14 +1049,19 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
   let data: unknown = rows
   if (!picker) {
     const withLines = rows as unknown as Array<{
+      id: string
       lines: Array<Record<string, unknown> & { id: string }>
     }>
     const rejected = await rejectedByPoLine(
       prisma,
       withLines.flatMap((po) => po.lines.map((l) => l.id))
     )
-    data = withLines.map((po) => ({
+    // Whether it has ever been with the supplier, so the list offers Delete
+    // only for a draft never sent — counting drafts sent before `sentAt` was kept.
+    const history = await sentInHistory(prisma, rows.filter((r) => neverSent(r)).map((r) => r.id))
+    data = withLines.map((po, i) => ({
       ...po,
+      wasSent: !neverSent(rows[i]) || history.has(po.id),
       lines: po.lines.map((l) => ({ ...l, rejectedQty: rejected.get(l.id) ?? 0 })),
     }))
   }
@@ -1195,7 +1234,7 @@ export async function assertIndentLines(
       requestedQty: true,
       purchaseQty: true,
       ownership: true,
-      item: { select: { name: true } },
+      item: { select: { name: true, ...ITEM_SHADE } },
       mr: { select: { mrNumber: true, status: true, closedAt: true } },
       poLines: { where: { po: { status: { not: 'CANCELLED' }, deletedAt: null, ...(exceptPoId ? { id: { not: exceptPoId } } : {}) } }, select: { qty: true } },
     },
@@ -1204,11 +1243,11 @@ export async function assertIndentLines(
     const m = mrLines.find((x) => x.id === id)
     if (!m) throw new AppError('One of the requisition lines this order buys for no longer exists. Pick it again from the indents.', 400, 'BAD_INDENT')
     const asked = linked.filter((l) => l.mrLineId === id)
-    if (asked.some((l) => l.itemId !== m.itemId)) throw new AppError(`${m.mr.mrNumber} asks for ${m.item.name}, not the item on this line.`, 400, 'BAD_INDENT')
+    if (asked.some((l) => l.itemId !== m.itemId)) throw new AppError(`${m.mr.mrNumber} asks for ${itemInWords(m.item)}, not the item on this line.`, 400, 'BAD_INDENT')
     if (m.mr.status !== 'APPROVED' || m.mr.closedAt) {
       throw new AppError(`${m.mr.mrNumber} is ${m.mr.closedAt ? 'closed' : 'not approved'}, so nothing is bought against it.`, 400, 'INDENT_NOT_OPEN')
     }
-    if (m.ownership === 'CUSTOMER_OWNED') throw new AppError(`${m.item.name} on ${m.mr.mrNumber} is the customer's material; it is never bought.`, 400, 'CUSTOMER_MATERIAL')
+    if (m.ownership === 'CUSTOMER_OWNED') throw new AppError(`${itemInWords(m.item)} on ${m.mr.mrNumber} is the customer's material; it is never bought.`, 400, 'CUSTOMER_MATERIAL')
     const toBuy = Number(m.purchaseQty ?? m.requestedQty)
     const ordered = m.poLines.reduce((s, l) => s + Number(l.qty), 0)
     // Ordering more than the indent asked is allowed — a full roll, the
@@ -1217,7 +1256,7 @@ export async function assertIndentLines(
     // left to buy against it; more goes on a line of its own.
     if (toBuy - ordered <= 1e-9) {
       throw new AppError(
-        `${m.item.name}: everything ${m.mr.mrNumber} asked to buy is already on order. Order more on a line of its own, not against the indent.`,
+        `${itemInWords(m.item)}: everything ${m.mr.mrNumber} asked to buy is already on order. Order more on a line of its own, not against the indent.`,
         400,
         'INDENT_ORDERED',
       )
@@ -1352,8 +1391,10 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
   }
 
   const po = await prisma.$transaction(async (tx) => {
-    // A back-dated order belongs to its own financial year's series.
-    const poNumber = await nextDocumentNumber(tx, 'PO', data.poDate ?? new Date())
+    // A back-dated order belongs to its own financial year's series. Purchase
+    // and service orders share it, and a new one takes its lowest free number
+    // — a deleted draft's, when there is one (lib/numberSeries).
+    const poNumber = await nextPurchaseOrderNumber(tx, data.poDate ?? new Date())
 
     // Where the goods land is kept on the order for the delivery address. It
     // does not change the tax — see `purchaseTaxContext`.
@@ -1379,6 +1420,9 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
       isService: data.isService ?? false,
       toCustomer: Boolean(data.deliveryCustomerId),
     })
+
+    // The in-house brand the purchase is for: a reference on the order only.
+    const brand = await assertInHouseBrand(tx, data.brandId)
 
     const charges = await resolveCharges(tx, data.charges ?? [], { canOverride: userCan(req.user, 'masters', 'edit') })
 
@@ -1415,6 +1459,11 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         enquiryNo: quote?.piNumber ?? data.enquiryNo ?? null,
         enquiryDate: quote?.piDate ?? data.enquiryDate ?? null,
         reference: data.reference ?? null,
+        kindAttention:
+          data.kindAttention !== undefined
+            ? data.kindAttention || null
+            : ((await tx.supplier.findUnique({ where: { id: data.supplierId }, select: { contactPerson: true } }))
+                ?.contactPerson ?? null),
         remark: data.remark ?? null,
         placeOfSupplyCode: tax.placeOfSupply,
         subtotal: priced.subtotal,
@@ -1428,6 +1477,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         totalAmount: priced.total,
         notes: data.notes ?? null,
         terms: data.terms ?? null,
+        brandId: brand?.id ?? null,
         createdById: req.user!.id,
         charges: { create: priced.chargeRows },
         lines: {
@@ -1585,9 +1635,11 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     ...(data.enquiryNo !== undefined ? { enquiryNo: data.enquiryNo ?? null } : {}),
     ...(data.enquiryDate !== undefined ? { enquiryDate: data.enquiryDate ?? null } : {}),
     ...(data.reference !== undefined ? { reference: data.reference ?? null } : {}),
+    ...(data.kindAttention !== undefined ? { kindAttention: data.kindAttention || null } : {}),
     ...(data.remark !== undefined ? { remark: data.remark ?? null } : {}),
     ...(data.notes !== undefined ? { notes: data.notes ?? null } : {}),
     ...(data.terms !== undefined ? { terms: data.terms ?? null } : {}),
+    ...(data.brandId !== undefined ? { brandId: data.brandId || null } : {}),
   }
 
   // Sent to a customer by a header-only edit: a sample's material still has to come here.
@@ -1600,6 +1652,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
   }
 
   const after = await prisma.$transaction(async (tx) => {
+    if (data.brandId) await assertInHouseBrand(tx, data.brandId)
     if (data.lines) {
       // The delivery address is resolved again rather than carried over from
       // when the order was first raised, as a customer may have been picked or
@@ -1779,7 +1832,8 @@ router.patch(
 
     const after = await prisma.purchaseOrder.update({
       where: { id: before.id },
-      data: { status: 'SENT' },
+      // The first send is kept: put back to Draft later, it has still been sent.
+      data: { status: 'SENT', sentAt: before.sentAt ?? new Date() },
       include: poInclude,
     })
 
@@ -2106,37 +2160,125 @@ router.patch(
   }
 )
 
+/**
+ * What stops a purchase order being deleted, either way (the user's rules,
+ * 27 Nov 2026): it has been with the supplier — sent, even if put back to
+ * Draft since — so it is cancelled instead, stays on record and keeps its
+ * number for good; or a document points at it, which deleting would cut loose.
+ */
+async function refuseIfUndeletable(
+  order: {
+    id: string
+    poNumber: string
+    status: string
+    sentAt: Date | null
+    approvedAt: Date | null
+    _count: { grns: number; invoices: number; purchaseNotes: number }
+  },
+  from: 'list' | 'bin',
+) {
+  const number = shownNumber(order.poNumber)
+  if (!neverSent(order) || (await sentInHistory(prisma, [order.id])).has(order.id)) {
+    throw new AppError(
+      from === 'list'
+        ? `${number} was sent to the supplier, so it cannot be deleted. Cancel it instead — it stays on record and its number is never used again.`
+        : `${number} was sent to the supplier, so it stays on record and cannot be deleted permanently. Restore it and cancel it instead.`,
+      409,
+      'PO_SENT',
+    )
+  }
+
+  // The order's own lines can be pointed at too, by a receipt or bill line.
+  const [receiptLines, billLines] = await Promise.all([
+    prisma.gRNLine.count({ where: { poLine: { poId: order.id } } }),
+    prisma.purchaseInvoiceLine.count({ where: { poLine: { poId: order.id } } }),
+  ])
+  const { grns, invoices, purchaseNotes } = order._count
+  const against = [
+    grns > 0 && `${grns} goods receipt${grns > 1 ? 's' : ''}`,
+    invoices > 0 && `${invoices} bill${invoices > 1 ? 's' : ''}`,
+    purchaseNotes > 0 && `${purchaseNotes} debit or credit note${purchaseNotes > 1 ? 's' : ''}`,
+  ].filter(Boolean)
+  if (!against.length && receiptLines + billLines > 0) against.push('goods receipts or bills')
+  if (against.length) {
+    throw new AppError(
+      from === 'list'
+        ? `${number} has ${against.join(' and ')} against it, so it cannot be deleted. Cancel it instead.`
+        : `${number} has ${against.join(' and ')} against it now, so it cannot be deleted permanently. Restore it instead.`,
+      409,
+      'PO_HAS_DOCUMENTS',
+    )
+  }
+}
+
+/**
+ * Removes a purchase order for good — "Delete permanently", from an order list
+ * or from the recycle bin. Its lines, charges and attachment rows go with it
+ * (they cascade); the files after, best effort, because a file with no row is
+ * merely wasted space while a row pointing at a missing file is a broken
+ * download. When it carried the last number, the count steps back and the
+ * next order takes that number (lib/numberSeries).
+ */
+async function deleteOrderForGood(
+  req: AuthRequest,
+  order: { id: string; poNumber: string; enquiryId: string | null; attachments: Array<{ storagePath: string }> },
+) {
+  await prisma.$transaction(async (tx) => {
+    await tx.purchaseOrder.delete({ where: { id: order.id } })
+    // A bin row re-labelled under the earlier rule gave its number back then.
+    if (order.poNumber === shownNumber(order.poNumber)) await stepBackPurchaseOrderNumber(tx, order.poNumber)
+  })
+  // Its enquiry has no order standing on it any more.
+  if (order.enquiryId) await syncEnquiryStatus(prisma, order.enquiryId)
+  for (const file of order.attachments) {
+    await removeObject(file.storagePath).catch(() => {})
+  }
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'DELETE',
+    entityType: 'PurchaseOrder',
+    entityId: order.id,
+    before: order,
+  })
+}
+
+/** What to say once an order is gone for good: who gets its number. */
+async function deletedForGoodMessage(number: string, poDate: Date) {
+  let next: string | null = null
+  try {
+    next = await peekNextNumber(prisma, await seriesFor(prisma, 'PO', poDate))
+  } catch {
+    // Only the message needs it; the order is gone either way.
+  }
+  if (next === number) return `${number} deleted permanently. The next purchase or service order takes ${number}.`
+  return `${number} deleted permanently.${next ? ` New orders carry on from the last number — the next is ${next}.` : ''}`
+}
+
+/*
+ * Deleting, two ways (the user's rules, 27 Nov 2026) — the screen asks which.
+ *
+ * To the recycle bin, the default: the order is marked, not removed, and keeps
+ * its number — no new order takes it while it is in the bin — so restoring it
+ * puts it back exactly as it was. With `?permanent=1` it is removed for good at
+ * once, without a second trip through the bin, and its number is freed.
+ */
 router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
+  const permanent = req.query.permanent === '1' || req.query.permanent === 'true'
   const order = await prisma.purchaseOrder.findUnique({
     where: { id: req.params.id },
-    include: { _count: { select: { grns: true, invoices: true } } },
+    include: {
+      ...poInclude,
+      attachments: true,
+      _count: { select: { grns: true, invoices: true, purchaseNotes: true } },
+    },
   })
   if (!order || order.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+  await refuseIfUndeletable(order, 'list')
 
-  // No status check here any more. An order the supplier holds used to be
-  // refused outright, but the check below is the one that actually protects
-  // anything: an order nothing has arrived against and nothing has been
-  // billed against holds no history worth keeping. This is a soft delete —
-  // the order goes to the recycle bin and its number is still never reused —
-  // so an order sent by mistake can be taken off the list, and recovered if
-  // that turns out to be wrong. Cancelling stays the right answer for an
-  // order that was real and fell through, and the wording on the button says
-  // which is which.
-
-  if (order._count.grns > 0 || order._count.invoices > 0) {
-    const against = [
-      order._count.grns > 0 &&
-        `${order._count.grns} goods receipt${order._count.grns > 1 ? 's' : ''}`,
-      order._count.invoices > 0 &&
-        `${order._count.invoices} bill${order._count.invoices > 1 ? 's' : ''}`,
-    ]
-      .filter(Boolean)
-      .join(' and ')
-    throw new AppError(
-      `${order.poNumber} has ${against} against it, so it cannot be deleted. Cancel it instead.`,
-      409,
-      'PO_HAS_DOCUMENTS'
-    )
+  if (permanent) {
+    await deleteOrderForGood(req, order)
+    res.json({ success: true, message: await deletedForGoodMessage(order.poNumber, order.poDate) })
+    return
   }
 
   const after = await prisma.purchaseOrder.update({
@@ -2156,7 +2298,10 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
     after,
   })
 
-  res.json({ success: true, message: `${order.poNumber} moved to the recycle bin.` })
+  res.json({
+    success: true,
+    message: `${order.poNumber} moved to the recycle bin. Its number stays reserved until it is restored or deleted permanently.`,
+  })
 })
 
 /**
@@ -2185,12 +2330,13 @@ router.get('/recycle-bin', requirePermission(MODULE, 'view'), async (_req, res) 
     select: { id: true, name: true },
   })
   const nameById = new Map(users.map((u) => [u.id, u.name]))
+  const history = await sentInHistory(prisma, rows.filter((r) => neverSent(r)).map((r) => r.id))
 
   res.json({
     success: true,
     data: rows.map((r) => ({
       id: r.id,
-      poNumber: r.poNumber,
+      poNumber: shownNumber(r.poNumber),
       poDate: r.poDate,
       status: r.status,
       totalAmount: r.totalAmount,
@@ -2198,6 +2344,9 @@ router.get('/recycle-bin', requirePermission(MODULE, 'view'), async (_req, res) 
       supplier: r.supplier,
       deletedAt: r.deletedAt,
       deletedBy: r.deletedById ? (nameById.get(r.deletedById) ?? 'Someone since removed') : null,
+      // Sent to the supplier before it was binned: it stays on record (restore
+      // and cancel it), so it is never deleted for good and its number never reused.
+      wasSent: !neverSent(r) || history.has(r.id),
     })),
   })
 })
@@ -2236,7 +2385,7 @@ router.post(
           // Putting it back takes no edits, so the advice is a new order, not a reason.
           if (err instanceof AppError && ['SAMPLE_OVER_ORDER', 'SAMPLE_NOT_OPEN'].includes(err.code ?? '')) {
             throw new AppError(
-              `${order.poNumber} cannot be put back: ${
+              `${shownNumber(order.poNumber)} cannot be put back: ${
                 err.code === 'SAMPLE_OVER_ORDER'
                   ? 'the sample it bought for has been ordered on other orders since'
                   : err.message.replace(/\.$/, '').replace(/^./, (c) => c.toLowerCase())
@@ -2248,9 +2397,17 @@ router.post(
           throw err
         }
       }
+      // A binned order kept its number, so it has it still. One re-labelled
+      // under the earlier rule takes its own back while that is free, or a
+      // fresh one when another order has had it since.
+      const own = shownNumber(order.poNumber)
+      const poNumber =
+        order.poNumber === own || (await reclaimDocumentNumber(tx, 'PO', own))
+          ? own
+          : await nextPurchaseOrderNumber(tx, new Date())
       return tx.purchaseOrder.update({
         where: { id: order.id },
-        data: { deletedAt: null, deletedById: null },
+        data: { deletedAt: null, deletedById: null, poNumber },
       })
     })
 
@@ -2266,22 +2423,25 @@ router.post(
       after,
     })
 
-    res.json({ success: true, message: `${order.poNumber} restored.` })
+    const own = shownNumber(order.poNumber)
+    res.json({
+      success: true,
+      message:
+        after.poNumber === own
+          ? `${own} restored.`
+          : `Restored as ${after.poNumber} — ${own} was taken by a new order while this one was in the recycle bin.`,
+    })
   }
 )
 
 /**
- * Empties one order out of the bin for good.
- *
- * This is the only route in the module that actually removes a purchase order.
- * The lines, charges and attachment rows cascade; the attachment files are
- * swept up after, best effort, because a file with no row is invisible and
- * merely wastes space while a row pointing at a missing file is a broken
- * download.
+ * Deletes one order in the bin for good, which frees its number.
  *
  * The guards are checked again rather than trusted from when it was binned: an
  * order can sit in the bin while a goods receipt is written against it by
- * someone who never opened the bin, and there is no undoing this one.
+ * someone who never opened the bin, and there is no undoing this one. One
+ * binned after it was sent (before the rule) stays on record: restore and
+ * cancel it.
  */
 router.delete(
   '/recycle-bin/:id',
@@ -2292,35 +2452,15 @@ router.delete(
       include: {
         ...poInclude,
         attachments: true,
-        _count: { select: { grns: true, invoices: true } },
+        _count: { select: { grns: true, invoices: true, purchaseNotes: true } },
       },
     })
     if (!order || !order.deletedAt) {
       throw new AppError('That order is not in the recycle bin', 404, 'NOT_IN_BIN')
     }
-    if (order._count.grns > 0 || order._count.invoices > 0) {
-      throw new AppError(
-        `${order.poNumber} has stock or bills against it now, so it cannot be destroyed. Restore it instead.`,
-        409,
-        'PO_HAS_DOCUMENTS'
-      )
-    }
-
-    await writeAuditLog(req, {
-      module: MODULE,
-      action: 'DELETE',
-      entityType: 'PurchaseOrder',
-      entityId: order.id,
-      before: order,
-    })
-
-    await prisma.purchaseOrder.delete({ where: { id: order.id } })
-
-    for (const file of order.attachments ?? []) {
-      await removeObject(file.storagePath).catch(() => {})
-    }
-
-    res.json({ success: true, message: `${order.poNumber} destroyed.` })
+    await refuseIfUndeletable(order, 'bin')
+    await deleteOrderForGood(req, order)
+    res.json({ success: true, message: await deletedForGoodMessage(shownNumber(order.poNumber), order.poDate) })
   }
 )
 
@@ -2518,6 +2658,7 @@ const grnInclude = {
           code: true,
           name: true,
           hsnCode: true,
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
         },
       },
@@ -2813,7 +2954,7 @@ async function checkServiceLines(
       id: true,
       qty: true,
       shortClosed: true,
-      item: { select: { name: true } },
+      item: { select: { name: true, ...ITEM_SHADE } },
       po: {
         select: {
           id: true,
@@ -2868,8 +3009,8 @@ async function checkServiceLines(
     if (want > room + 0.0005) {
       throw new AppError(
         room > 0
-          ? `The bill claims ${want} of ${ol.item.name}, but only ${room} is left to bill on ${ol.po.poNumber}. Add the extra to the order first if it was agreed.`
-          : `${ol.item.name} on ${ol.po.poNumber} is already billed in full.`,
+          ? `The bill claims ${want} of ${itemInWords(ol.item)}, but only ${room} is left to bill on ${ol.po.poNumber}. Add the extra to the order first if it was agreed.`
+          : `${itemInWords(ol.item)} on ${ol.po.poNumber} is already billed in full.`,
         409,
         'BILLED_MORE_THAN_ORDERED'
       )
@@ -2919,7 +3060,8 @@ interface BookablePoLine {
   uomId?: string | null
   uomFactor?: Prisma.Decimal | number | string
   shortClosed: boolean
-  item: { name: string }
+  /** With its design and colour, so a refusal names which of two same-name fabrics. */
+  item: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null }
   /** Set when the line buys for a sample: it is received into a sample store only. */
   sampleMaterialId?: string | null
 }
@@ -2980,7 +3122,7 @@ function prepareGrnLines(
       const total = round3((already.get(poLineId) ?? 0) + booking)
       if (total > round3(ordered * (1 + OVER_RECEIPT_ALLOWANCE))) {
         throw new AppError(
-          `${poLine.item.name}: ${total} received against ${ordered} ordered — more than ` +
+          `${itemInWords(poLine.item)}: ${total} received against ${ordered} ordered — more than ` +
             `${OVER_RECEIPT_ALLOWANCE * 100}% over the order. Check the quantity; if it is right, ` +
             `say why in "Why more than ordered".`,
           400,
@@ -3002,7 +3144,7 @@ function prepareGrnLines(
 
     if (poLine.shortClosed) {
       throw new AppError(
-        `${poLine.item.name} was closed short — reopen that line on the order before receiving more against it.`,
+        `${itemInWords(poLine.item)} was closed short — reopen that line on the order before receiving more against it.`,
         400,
         'LINE_SHORT_CLOSED'
       )
@@ -3071,7 +3213,7 @@ async function grnLinesToStock<L extends { poLineId: string; receivedQty: number
 ): Promise<L[]> {
   const poLines = await db.purchaseOrderLine.findMany({
     where: { id: { in: [...new Set(lines.map((l) => l.poLineId))] } },
-    select: { id: true, itemId: true, uomFactor: true, uom: { select: { symbol: true, decimalPlaces: true } }, item: { select: { name: true, decimalPlaces: true, uom: { select: { symbol: true, decimalPlaces: true } } } } },
+    select: { id: true, itemId: true, uomFactor: true, uom: { select: { symbol: true, decimalPlaces: true } }, item: { select: { name: true, ...ITEM_SHADE, decimalPlaces: true, uom: { select: { symbol: true, decimalPlaces: true } } } } },
   })
   const byId = new Map(poLines.map((l) => [l.id, l]))
   return lines.map((l) => {
@@ -3083,7 +3225,7 @@ async function grnLinesToStock<L extends { poLineId: string; receivedQty: number
     const unit = loose ? po.item.uom.symbol : po.uom!.symbol
     for (const [what, v] of [['received', l.receivedQty], ['rejected', l.rejectedQty], ...(l.packQtys ?? []).map((q) => ['one package', q] as const)] as const) {
       if (v == null || !(Number(v) > 0)) continue
-      if (!fitsPlaces(Number(v), places)) throw new AppError(`${po.item.name} (${what}): ${Number(v)} ${unit}. ${placesMessage(places)}`, 400, 'QTY_NOT_IN_UNIT')
+      if (!fitsPlaces(Number(v), places)) throw new AppError(`${itemInWords(po.item)} (${what}): ${Number(v)} ${unit}. ${placesMessage(places)}`, 400, 'QTY_NOT_IN_UNIT')
     }
     const x = (q: number | undefined) => (q == null ? q : Math.round(Number(q) * factor * 1000) / 1000)
     return { ...l, receivedQty: x(l.receivedQty)!, rejectedQty: x(l.rejectedQty), packQtys: l.packQtys?.map((q) => x(q)!) }
@@ -3299,7 +3441,8 @@ router.get('/grn/filter-options', requirePermission(MODULE, 'view'), async (_req
     }),
     prisma.item.findMany({
       where: { grnLines: { some: {} } },
-      select: { id: true, code: true, name: true },
+      // With its design and colour: three "Cotton Twill" in the filter are three items.
+      select: { id: true, code: true, name: true, ...ITEM_SHADE },
       orderBy: { name: 'asc' },
     }),
   ])
@@ -3326,6 +3469,8 @@ router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res)
               code: true,
               name: true,
               hsnCode: true,
+              // Printed under the item: which design and colour came in.
+              ...ITEM_SHADE,
               uom: { select: { symbol: true } },
             },
           },
@@ -3518,7 +3663,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
     const po = await tx.purchaseOrder.findUnique({
       where: { id: data.poId },
       include: {
-        lines: { include: { item: { select: { name: true } } } },
+        lines: { include: { item: { select: { name: true, ...ITEM_SHADE } } } },
         deliveryWarehouse: { select: { id: true, name: true, address: true } },
       },
     })
@@ -3747,7 +3892,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     const po = await tx.purchaseOrder.findUnique({
       where: { id: before.poId },
       include: {
-        lines: { include: { item: { select: { name: true } } } },
+        lines: { include: { item: { select: { name: true, ...ITEM_SHADE } } } },
         deliveryWarehouse: { select: { id: true, name: true, address: true } },
       },
     })
@@ -3901,7 +4046,8 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       if (claimedQty <= 0) continue
 
       const match = pairs.find((pair) => pair.old?.id === line.id)
-      const itemName = poLines.get(line.poLineId ?? '')?.item?.name ?? 'That item'
+      const lineItem = poLines.get(line.poLineId ?? '')?.item
+      const itemName = lineItem ? itemInWords(lineItem) : 'That item'
       // Named by whichever document is actually holding it, so the message
       // points at the thing that has to be dealt with.
       const heldBy = claim?.bills.length
@@ -4115,6 +4261,8 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
 
     try {
       await tx.gRN.delete({ where: { id: grn.id } })
+      // The newest receipt gives its number back (27 Nov 2026; lib/numberSeries).
+      await releaseDocumentNumber(tx, 'GRN', grn.grnNumber)
     } catch (err) {
       if (err instanceof Error && err.name === 'PrismaClientKnownRequestError') {
         const code = (err as unknown as { code?: string }).code
@@ -4440,6 +4588,8 @@ const billInclude = {
           code: true,
           name: true,
           hsnCode: true,
+          // The bill, its list row and its print say which design and colour was billed.
+          ...ITEM_SHADE,
           uom: { select: { symbol: true } },
         },
       },
@@ -4779,7 +4929,7 @@ async function checkAgainstReceipts(
       id: true,
       receivedQty: true,
       itemId: true,
-      item: { select: { name: true } },
+      item: { select: { name: true, ...ITEM_SHADE } },
       grn: { select: { grnNumber: true, status: true, po: { select: { supplierId: true } } } },
     },
   })
@@ -4875,7 +5025,7 @@ async function checkAgainstReceipts(
     // Quantities are held to three decimals; comparing raw floats would refuse
     // a bill that is short by a millionth of a metre.
     if (round3(wanted) > room + 0.0005) {
-      const name = receipt.item.name
+      const name = itemInWords(receipt.item)
       throw new AppError(
         already > 0
           ? `The bill claims ${round3(wanted)} of ${name}, but only ${room} is left to bill on ${receipt.grn.grnNumber} — ${already} of the ${delivered} delivered has already been billed.`
@@ -5024,6 +5174,7 @@ router.get('/bills/match/:grnId', requirePermission(MODULE, 'view'), async (req,
               code: true,
               name: true,
               hsnCode: true,
+              ...ITEM_SHADE,
               uom: { select: { symbol: true } },
             },
           },
@@ -5151,7 +5302,7 @@ async function findRateVariances(
 
   const receiptLines = await tx.gRNLine.findMany({
     where: { id: { in: grnLineIds } },
-    select: { id: true, unitRate: true, uomFactor: true, item: { select: { id: true, name: true } } },
+    select: { id: true, unitRate: true, uomFactor: true, item: { select: { id: true, name: true, ...ITEM_SHADE } } },
   })
   const byId = new Map(receiptLines.map((r) => [r.id, r]))
 
@@ -5174,7 +5325,8 @@ async function findRateVariances(
 
     out.push({
       lineIndex,
-      itemName: receipt.item.name,
+      // Named with its design and colour: the refusal lists each line by it.
+      itemName: itemInWords(receipt.item),
       itemId: receipt.item.id,
       poRate,
       billedRate,

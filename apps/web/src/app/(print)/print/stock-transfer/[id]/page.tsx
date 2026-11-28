@@ -19,6 +19,8 @@ import {
   RULE,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
+import { SubLine } from '@/components/print/doc'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 interface Store {
   name: string
@@ -58,7 +60,7 @@ interface Payload {
       damagedQty?: string
       returnedQty?: string
       lostQty?: string
-      item: { code: string; name: string; hsnCode: string | null; uom: { symbol: string } }
+      item: ShadeFields & { code: string; name: string; hsnCode: string | null; uom: { symbol: string } }
     }>
   }
 }
@@ -141,7 +143,13 @@ export default function PrintStockTransfer() {
     cells: {
       sn: i + 1,
       code: <span style={CODE}>{l.item.code}</span>,
-      desc: <div style={{ fontWeight: 600 }}>{l.item.name}</div>,
+      desc: (
+        <>
+          <div style={{ fontWeight: 600 }}>{l.item.name}</div>
+          {/* A fabric's design and colour: the receiving store knows which roll it is. */}
+          {itemShade(l.item) && <SubLine>{itemShade(l.item)}</SubLine>}
+        </>
+      ),
       hsn: <span style={{ fontSize: '9px', color: GREY }}>{l.item.hsnCode ?? '—'}</span>,
       uom: <span style={{ fontSize: '9px', color: GREY }}>{l.item.uom.symbol}</span>,
       qty: <strong>{qty(l.qty)}</strong>,
@@ -206,7 +214,7 @@ export default function PrintStockTransfer() {
               justifyContent: 'space-between',
               alignItems: 'center',
               padding: '7px 11px',
-              background: NAVY,
+              borderTop: '1.5pt solid #000',
               color: '#fff',
             }}
           >

@@ -31,6 +31,7 @@ import {
 import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { cn, formatDate, formatRupees } from '@/lib/utils'
 import { fetchEveryPage } from '@/lib/export'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
@@ -61,7 +62,8 @@ export interface BomLine {
   totalCost?: number | string | null
   notes?: string | null
   sizes?: BomLineSize[]
-  componentItem?: {
+  /** With its design and colour (ShadeFields): several fabric items share a name. */
+  componentItem?: ShadeFields & {
     id: string
     code: string
     name: string
@@ -130,6 +132,8 @@ export interface Bom {
     brandType: string
     sizeGroupId: string | null
     colors: string[]
+    /** The BOM's brand: its style's. A BOM has none of its own. */
+    brand?: { id: string; name: string } | null
   }
   baseSize?: { id: string; code: string; label: string } | null
   approvedBy?: { id: string; name: string } | null
@@ -138,7 +142,8 @@ export interface Bom {
   lines?: BomLine[]
 }
 
-interface ItemOption {
+/** An item as /masters/items sends it, with its design and colour (ShadeFields). */
+interface ItemOption extends ShadeFields {
   id: string
   code: string
   name: string
@@ -167,6 +172,8 @@ interface StyleOption {
   code: string
   name: string
   colors: string[]
+  /** The style's brand, which is the BOM's too: a BOM has no brand of its own. */
+  brand?: { id: string; name: string } | null
 }
 
 /** A process from Routing Masters: what a labour row is paid for, and the department that does it. */
@@ -577,7 +584,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
     for (const l of record?.lines ?? []) {
       const c = l.componentItem
       if (c && !map.has(c.id)) {
-        map.set(c.id, { id: c.id, code: c.code, name: c.name, standardRate: c.standardRate, uom: c.uom })
+        map.set(c.id, { id: c.id, code: c.code, name: c.name, standardRate: c.standardRate, uom: c.uom, designNo: c.designNo, color: c.color, styleId: c.styleId })
       }
     }
     return map
@@ -896,7 +903,8 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
     )
     if (unfinished >= 0) {
       const l = lines[unfinished]
-      const name = itemsById.get(l.componentItemId)?.name
+      const it = itemsById.get(l.componentItemId)
+      const name = it ? [it.name, itemShade(it)].filter(Boolean).join(', ') : undefined
       setError(
         l.componentItemId
           ? `Line ${unfinished + 1}${name ? ` (${name})` : ''} has no quantity. Enter how much one piece uses, or remove the line.`
@@ -1193,6 +1201,12 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
               ))}
             </SmartSelect>
             {fieldErrors.styleId && <p className="mt-1 text-xs text-red-400">{fieldErrors.styleId}</p>}
+            {/* A BOM has no brand of its own: it is the style's, set in Masters → Styles. */}
+            {style && (
+              <p className="mt-1 text-xs text-muted-foreground" title="From the style in Masters → Styles">
+                Brand: <span className="text-foreground">{style.brand?.name ?? 'not set on the style'}</span>
+              </p>
+            )}
           </div>
 
           <div>
@@ -1365,7 +1379,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
                           className={cn(field, 'min-w-0')}
                           value={line.componentItemId}
                           disabled={frozen}
-                          title={item?.name}
+                          title={item ? [item.name, itemShade(item)].filter(Boolean).join(' · ') : undefined}
                           aria-label={`Line ${index + 1} item`}
                           createNoun="item"
                           onCreate={mayAddItem && !frozen ? (typed) => setAddingItem({ rowKey: line.rowKey, typed }) : undefined}
@@ -1383,13 +1397,18 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
                           }}
                         >
                           <option value="">Select item...</option>
+                          {/* A fabric's design and colour under its name, and searched: same-name fabrics differ by them. */}
                           {itemsFor(line).map((i) => (
-                            <option key={i.id} value={i.id}>
+                            <option key={i.id} value={i.id} data-sub={itemShade(i) || undefined}>
                               {i.code} — {i.name}
                             </option>
                           ))}
                         </SmartSelect>
                       </div>
+                      {item && itemShade(item) && (
+                        // Under the box, past its icon (40px icon + 8px gap).
+                        <p className="mt-0.5 truncate pl-12 text-[11px] text-muted-foreground">{itemShade(item)}</p>
+                      )}
                     </td>
                     <td className="px-2 py-2 align-middle">
                       <SmartSelect
@@ -2049,7 +2068,7 @@ export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1 }:
       )}
 
       {step === 1 && !current && <BomReusePanel key={copyVersion} ref={reuseRef} styleId={styleId} color={color} source={copySource} disabled={saving} onCopy={loadSource}
-        itemLabels={Object.fromEntries(items.map(i => [i.id, { name: i.name, unit: i.uom?.symbol, category: [i.category?.parent?.name, i.category?.name].filter(Boolean).join(' / ') }]))}
+        itemLabels={Object.fromEntries(items.map(i => [i.id, { name: i.name, shade: itemShade(i), unit: i.uom?.symbol, category: [i.category?.parent?.name, i.category?.name].filter(Boolean).join(' / ') }]))}
         processLabels={Object.fromEntries(departments.map(d => [d.id, d.name]))}
         lines={lines.filter(l => l.componentItemId).map(l => ({ componentItemId: l.componentItemId, departmentId: l.departmentId || null,
           component: l.carried.component, qtyPerUnit: Number(l.qtyPerUnit) || 0, wastagePercent: l.carried.wastagePercent,

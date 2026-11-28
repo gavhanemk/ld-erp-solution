@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient, ProcessKind, WipBucket, WipEventType } from '@prisma/client'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { fabricRecord } from './fabricRecord'
 import { figuresFrom, type FigureStep, type Flows } from './floor.service'
 import { flowSummary } from './floorView.service'
@@ -49,7 +50,16 @@ export async function ensureJobCards(tx: Tx, moId: string) {
           totalQty: true,
           style: { select: { name: true, category: true } },
           soLine: { select: { description: true, fabric: true, printName: true } },
-          bom: { select: { lines: { select: { effectiveQty: true, componentItem: { select: { name: true, category: { select: { name: true, parent: { select: { name: true } } } } } } } } } },
+          bom: {
+            select: {
+              lines: {
+                select: {
+                  effectiveQty: true,
+                  componentItem: { select: { name: true, ...ITEM_SHADE, category: { select: { name: true, parent: { select: { name: true } } } } } },
+                },
+              },
+            },
+          },
           jobCard: { select: { id: true } },
         },
       },
@@ -62,6 +72,10 @@ export async function ensureJobCards(tx: Tx, moId: string) {
     // The main fabric on the line's BOM: its quality, and what one garment takes.
     const fabric = l.bom?.lines.find((b) => /fabric/i.test(b.componentItem.category?.name ?? '') || /fabric/i.test(b.componentItem.category?.parent?.name ?? ''))
     const average = fabric ? Number(fabric.effectiveQty) : null
+    // Its quality with its design and colour (27 Nov 2026): one fabric item per
+    // design and colour, so "Cotton Twill" alone could be any of three.
+    // Kept within the 200 the job card's box takes.
+    const quality = fabric ? [fabric.componentItem.name, itemShadeText(fabric.componentItem)].filter(Boolean).join(' · ').slice(0, 200) : null
     n += 1
     await tx.jobCard.create({
       data: {
@@ -71,7 +85,7 @@ export async function ensureJobCards(tx: Tx, moId: string) {
         // Our own order no. (LDCM-06 on the paper sheets): the sales order, or the MO when made for stock.
         orderNo: mo.so?.soNumber ?? mo.moNumber,
         description: l.soLine?.description || l.style.category || l.style.name,
-        fabricQuality: l.soLine?.fabric || fabric?.componentItem.name || null,
+        fabricQuality: l.soLine?.fabric || quality || null,
         designNo: l.soLine?.printName ?? null,
         average,
         meters: average != null ? round3(average * l.totalQty) : null,
@@ -302,7 +316,8 @@ const layFabricSelect = {
   fabricIssued: true,
   fabricUsed: true,
   wastage: true,
-  fabricItem: { select: { uom: { select: { symbol: true } } } },
+  // The fabric itself too: the record is kept fabric by fabric, with each one's design and colour.
+  fabricItem: { select: { id: true, code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
 } satisfies Prisma.CuttingOrderSelect
 
 /** Job cards with each stage's figures for their own line, what is with cutting contractors, and the fabric record of their cutting. */
@@ -693,7 +708,7 @@ export async function jobCardDetail(db: Db, id: string) {
         plannedBreakup: true,
         sizeBreakup: true,
         notes: true,
-        fabricItem: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
+        fabricItem: { select: { id: true, code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
         createdBy: { select: { name: true } },
         _count: { select: { bundles: { where: { parentId: null } } } },
       },

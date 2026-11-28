@@ -5,9 +5,11 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { StoreSheet, Fact, Eyebrow, qty, money, longDate, CODE, GREY, INK, MUTED, NAVY, RED, RULE, type SheetColumn } from '@/components/print/StoreSheet'
 import { StatementTable, type StatementRow } from '@/components/print/StatementTable'
+import { SubLine } from '@/components/print/doc'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
 
-interface Line {
+interface Line extends ShadeFields {
   id: string
   code: string
   item: string
@@ -29,6 +31,8 @@ interface Line {
     received: number
     receivedCode: string
     receivedItem: string
+    /** "Design No: 120 · Colour: Navy" of what it came back as, when that has one. */
+    receivedShade?: string
     receivedUom: string
     wasted: number
     damaged: number
@@ -65,7 +69,7 @@ interface Payload {
     state: 'OPEN' | 'OVERDUE' | 'SETTLED'
     lines: Line[]
   }>
-  items: Array<{ code: string; item: string; uom: string; sent: number; accounted: number; wasted: number; damaged: number; pending: number; pendingValue: number }>
+  items: Array<{ code: string; item: string; uom: string; sent: number; accounted: number; wasted: number; damaged: number; pending: number; pendingValue: number } & ShadeFields>
   totals: { challans: number; open: number; overdue: number; pendingValue: number }
 }
 
@@ -148,7 +152,7 @@ function Statement() {
       book,
       XLSX.utils.json_to_sheet(
         data.items.map((i) => ({
-          'Item Code': i.code, Item: i.item, Unit: i.uom, Sent: i.sent, 'Accounted for': i.accounted,
+          'Item Code': i.code, Item: i.item, 'Design No.': itemShadeCols(i).designNo, Colour: itemShadeCols(i).colour, Unit: i.uom, Sent: i.sent, 'Accounted for': i.accounted,
           Wasted: i.wasted, Damaged: i.damaged, 'Still with them': i.pending, 'Value with them': i.pendingValue,
         })),
       ),
@@ -161,14 +165,14 @@ function Statement() {
           c.lines.flatMap((l): Array<Record<string, string | number | null>> => {
             const base = {
               Challan: c.challanNumber, 'Sent on': longDate(c.challanDate), Process: c.process, State: STATE[c.state].text,
-              'Item Code': l.code, Item: l.item, Size: l.size ?? '', "Customer's": l.customer ?? '', Sent: l.sent, Unit: l.uom,
+              'Item Code': l.code, Item: l.item, 'Design No.': itemShadeCols(l).designNo, Colour: itemShadeCols(l).colour, Size: l.size ?? '', "Customer's": l.customer ?? '', Sent: l.sent, Unit: l.uom,
             }
             if (!l.returns.length) return [{ ...base, 'Still with them': l.pending }]
             return l.returns.map((r, n) => ({
               ...base,
               ...(n ? { Sent: '' } : {}),
               Return: r.returnNumber, 'Back on': longDate(r.returnDate), 'Their challan': r.theirChallanNo ?? '',
-              'Accounted for': r.accounted, 'Came back as': r.receivedItem, Received: r.received, 'Received unit': r.receivedUom,
+              'Accounted for': r.accounted, 'Came back as': r.receivedShade ? `${r.receivedItem} (${r.receivedShade})` : r.receivedItem, Received: r.received, 'Received unit': r.receivedUom,
               Wasted: r.wasted, Damaged: r.damaged, 'Still with them': n === l.returns.length - 1 ? l.pending : '',
             }))
           }),
@@ -235,6 +239,7 @@ function Statement() {
       item: (
         <>
           <div style={{ fontWeight: 600 }}>{i.item}</div>
+          {itemShade(i) && <SubLine>{itemShade(i)}</SubLine>}
           <div style={{ ...CODE, fontSize: '8.5px', color: GREY }}>{i.code}</div>
         </>
       ),
@@ -269,6 +274,7 @@ function Statement() {
             {l.item}
             {l.size ? ` · ${l.size}` : ''}
           </div>
+          {itemShade(l) && <SubLine>{itemShade(l)}</SubLine>}
           {l.customer && <div style={{ color: GREY, fontSize: '8.5px', fontWeight: 700 }}>CUSTOMER MATERIAL · {l.customer}</div>}
         </>
       )
@@ -294,7 +300,7 @@ function Statement() {
             ),
             what: (
               <span style={{ color: GREY }}>
-                Back: {qty(r.received)} {r.receivedUom} {r.receivedCode !== l.code ? `as ${r.receivedItem}` : ''} into {r.store}
+                Back: {qty(r.received)} {r.receivedUom} {r.receivedCode !== l.code ? `as ${r.receivedItem}${r.receivedShade ? ` (${r.receivedShade})` : ''}` : ''} into {r.store}
                 {extra ? ` · ${extra}` : ''}
               </span>
             ),

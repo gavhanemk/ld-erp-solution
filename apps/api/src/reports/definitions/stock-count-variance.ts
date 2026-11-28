@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { byMonth, dateRangeFilters, periodLabel, round2, topWithRest } from './shared'
+import { ITEM_SHADE } from '../../lib/fabric'
+import { byMonth, dateRangeFilters, periodLabel, round2, rowItemLabel, shadeColumns, shadeOf, topWithRest } from './shared'
 import { categoryFilter, loadCategories, pctOf, rupees, warehouseFilter } from './inventory-shared'
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
@@ -30,6 +31,7 @@ export const stockCountVariance: ReportDefinition = {
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'book', label: 'Book', type: 'qty', total: 'none' },
     { key: 'counted', label: 'Counted', type: 'qty', total: 'none' },
@@ -86,7 +88,7 @@ export const stockCountVariance: ReportDefinition = {
         countedQty: true,
         difference: true,
         unitRate: true,
-        item: { select: { code: true, name: true, categoryId: true, standardRate: true, uom: { select: { symbol: true } } } },
+        item: { select: { code: true, name: true, ...ITEM_SHADE, categoryId: true, standardRate: true, uom: { select: { symbol: true } } } },
         adjustment: { select: { adjustmentNumber: true, adjustmentDate: true, reason: true, warehouse: { select: { name: true } } } },
       },
     })
@@ -105,6 +107,7 @@ export const stockCountVariance: ReportDefinition = {
         category: cats.names(l.item.categoryId).category,
         itemCode: l.item.code,
         item: l.item.name,
+        ...shadeOf(l.item),
         uom: l.item.uom?.symbol ?? '',
         book: r3(book),
         counted: r3(Number(l.countedQty)),
@@ -135,7 +138,7 @@ export const stockCountVariance: ReportDefinition = {
     if (lost) insights.push(`Counts found ${rupees(lost)} of stock missing and ${rupees(found)} extra, a net ${net < 0 ? 'loss' : 'gain'} of ${rupees(Math.abs(net))}.`)
     if (byStore.length > 1) insights.push(`${byStore[0].label} accounts for ${pctOf(byStore[0].value, lost)} of the value missing.`)
     const worst = [...rows].sort((a, b) => b.loss - a.loss)[0]
-    if (worst?.loss) insights.push(`The biggest shortage was ${worst.item} in ${worst.store}: ${Math.abs(worst.difference).toLocaleString('en-IN')} ${worst.uom}, ${rupees(worst.loss)}.`)
+    if (worst?.loss) insights.push(`The biggest shortage was ${rowItemLabel(worst)} in ${worst.store}: ${Math.abs(worst.difference).toLocaleString('en-IN')} ${worst.uom}, ${rupees(worst.loss)}.`)
 
     return {
       rows,

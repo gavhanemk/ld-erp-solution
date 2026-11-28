@@ -11,6 +11,7 @@ import { Pagination } from '@/components/tables/Pagination'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { formatDate } from '@/lib/utils'
+import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
 
 /**
  * Stock held on the racks for requisitions, and who it is held for — the
@@ -23,7 +24,7 @@ import { formatDate } from '@/lib/utils'
  * requisition is closed. The customer comes from the requisition's sales order.
  */
 
-interface Row {
+interface Row extends ShadeFields {
   id: string
   status: 'ACTIVE' | 'CONSUMED' | 'RELEASED'
   qty: number
@@ -135,7 +136,7 @@ export function ReservationsView() {
     (r: Row, skip?: FilterKey) =>
       (!words.length ||
         words.every((w) =>
-          `${r.itemCode} ${r.itemName} ${r.mrNumber} ${r.soNumber ?? ''} ${r.customerName ?? ''} ${r.departmentName} ${r.warehouseName}`
+          `${r.itemCode} ${r.itemName} ${itemShadeCols(r).designNo} ${itemShadeCols(r).colour} ${r.mrNumber} ${r.soNumber ?? ''} ${r.customerName ?? ''} ${r.departmentName} ${r.warehouseName}`
             .toLowerCase()
             .includes(w),
         )) &&
@@ -217,6 +218,8 @@ export function ReservationsView() {
           Status: STATUS[r.status].label,
           'Item Code': r.itemCode,
           'Item Name': r.itemName,
+          'Design No.': itemShadeCols(r).designNo,
+          Colour: itemShadeCols(r).colour,
           Category: r.mainCategoryName,
           'Sub Category': r.subCategoryName ?? '',
           Store: r.warehouseName,
@@ -235,7 +238,7 @@ export function ReservationsView() {
           'Release Reason': r.releaseReason ?? '',
         })),
       )
-      sheet['!cols'] = [9, 14, 30, 16, 16, 18, 6, 10, 11, 24, 14, 16, 16, 11, 18, 11, 18, 11, 30].map((wch) => ({ wch }))
+      sheet['!cols'] = [9, 14, 30, 12, 12, 16, 16, 18, 6, 10, 11, 24, 14, 16, 16, 11, 18, 11, 18, 11, 30].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Reservations')
       XLSX.writeFile(book, `reservations-${today}.xlsx`)
@@ -367,6 +370,8 @@ export function ReservationsView() {
                 <thead>
                   <tr className="bg-secondary">
                     <th className="whitespace-nowrap">Item</th>
+                    <th className="whitespace-nowrap">Design No.</th>
+                    <th className="whitespace-nowrap">Colour</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Reserved</th>
                     <th className="whitespace-nowrap">In store</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>On hand there</th>
@@ -386,6 +391,8 @@ export function ReservationsView() {
                           <div className="text-sm font-medium text-foreground">{r.itemName}</div>
                           <div className="font-mono text-[11px] text-muted-foreground">{r.itemCode}</div>
                         </td>
+                        <td className="whitespace-nowrap text-sm">{itemShadeCols(r).designNo || <span className="text-muted-foreground">—</span>}</td>
+                        <td className="whitespace-nowrap text-sm">{itemShadeCols(r).colour || <span className="text-muted-foreground">—</span>}</td>
                         <td className="whitespace-nowrap text-right tabular-nums">
                           {r.status === 'ACTIVE' ? (
                             <span className="font-semibold text-violet-500">
@@ -441,7 +448,7 @@ export function ReservationsView() {
 
       {releasing && (
         <ReasonDialog
-          title={`Release ${qtyFmt(releasing.qty)} ${releasing.uom} ${releasing.itemName}?`}
+          title={`Release ${qtyFmt(releasing.qty)} ${releasing.uom} ${releasing.itemName}${itemShade(releasing) ? ` (${itemShade(releasing)})` : ''}?`}
           description={`It was held in ${releasing.warehouseName} for ${releasing.mrNumber}${releasing.customerName ? ` (${releasing.customerName})` : ''}. Released, it is free for any requisition. The requisition itself stays as it is.`}
           confirmLabel="Release it"
           minLength={3}

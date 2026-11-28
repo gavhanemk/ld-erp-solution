@@ -11,6 +11,11 @@ import { useDialogFocus } from '@/lib/keys'
 import { formatDate } from '@/lib/utils'
 import { StepInput } from '@/components/ui/StepInput'
 import { needsOverReason } from '@/components/purchase/sampleLines'
+import { itemShade, type ShadeFields } from '@/lib/items'
+
+/** The API sends the item's design and colour as well (the shared type has not caught up). */
+const itemOfNeed = (n: SampleNeed) => n.item as SampleNeed['item'] & ShadeFields
+const shadeOf = (n: SampleNeed) => itemShade(itemOfNeed(n))
 
 /**
  * Picking the order's items off what the samples still need bought.
@@ -133,6 +138,9 @@ export function SampleNeedsDialog({
         n.colour,
         n.item.code,
         n.item.name,
+        // The item's own design and colour, as typed in Masters → Items.
+        itemOfNeed(n).designNo,
+        itemOfNeed(n).color,
         ...n.orders.map((o) => o.poNumber),
       ]
         .filter(Boolean)
@@ -260,6 +268,7 @@ export function SampleNeedsDialog({
   const itemOf = (n: SampleNeed) => (
     <>
       <div className="text-foreground text-sm font-medium leading-snug">{n.item.name}</div>
+      {shadeOf(n) && <div className="text-muted-foreground text-[11px]">{shadeOf(n)}</div>}
       <div className="text-muted-foreground font-mono text-[11px]">{n.item.code}</div>
     </>
   )

@@ -24,6 +24,7 @@ import {
 import Link from 'next/link'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import {
+  neverSentDraft,
   PurchaseOrderDialog,
   type PurchaseOrder,
   type PoLine,
@@ -32,6 +33,7 @@ import type { EnquiryQuote, EnquiryRecord } from '@/components/purchase/enquiryT
 import { takeHandedEnquiry } from '@/components/purchase/enquiryHandoff'
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
 import { GoodsReceiptHistoryDialog } from '@/components/purchase/GoodsReceiptHistoryDialog'
+import { DeleteOrderDialog, type DeleteChoice } from '@/components/purchase/DeleteOrderDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { describeReport, downloadReport } from '@/lib/reportDownload'
@@ -51,6 +53,15 @@ import { formatDate, itemsPreview } from '@/lib/utils'
 import { shortCloseNoun, shortCloseVerb, wasNeverReceived } from '@/components/purchase/shortClose'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
+
+/** An item in a list of names: its name, then its design and colour when it has them. */
+const nameWithShade = (it: ({ name: string } & ShadeFields) | null | undefined) =>
+  it ? [it.name, itemShade(it)].filter(Boolean).join(' · ') : undefined
+
+/** An item named in a sentence: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const nameInWords = (it: ({ name: string } & ShadeFields) | null | undefined) =>
+  it ? (itemShade(it) ? `${it.name} (${itemShade(it)})` : it.name) : undefined
 
 const qty = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
@@ -151,6 +162,7 @@ export default function PurchaseOrdersPage() {
   /** Which order's files are open in the read-only viewer, or null when closed. */
   const [filesFor, setFilesFor] = useState<PurchaseOrder | null>(null)
   const [historyFor, setHistoryFor] = useState<PurchaseOrder | null>(null)
+  const [deleting, setDeleting] = useState<PurchaseOrder | null>(null)
 
   /*
    * Arriving from an enquiry's Order button.
@@ -224,7 +236,7 @@ export default function PurchaseOrdersPage() {
    * fetched once rather than on every keystroke.
    */
   const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([])
-  const [items, setItems] = useState<Array<{ id: string; name: string }>>([])
+  const [items, setItems] = useState<Array<{ id: string; name: string } & ShadeFields>>([])
 
   useEffect(() => {
     let cancelled = false
@@ -232,11 +244,13 @@ export default function PurchaseOrdersPage() {
       try {
         const [s, i] = await Promise.all([
           masterResource<{ id: string; name: string }>('suppliers').list({ limit: 500 }),
-          masterResource<{ id: string; name: string }>('items').list({ limit: 500 }),
+          // Every item, not the first 200 — switched-off ones too, as before,
+          // since an old order can still be looked up by them.
+          everyItem<{ id: string; name: string } & ShadeFields>(),
         ])
         if (cancelled) return
         setSuppliers([...s.data].sort((a, b) => a.name.localeCompare(b.name)))
-        setItems([...i.data].sort((a, b) => a.name.localeCompare(b.name)))
+        setItems([...i].sort((a, b) => a.name.localeCompare(b.name) || itemShade(a).localeCompare(itemShade(b))))
       } catch {
         // The filters just come up empty — the list itself still loads and
         // still works without them.
@@ -483,33 +497,20 @@ export default function PurchaseOrdersPage() {
    * Deleting is not cancelling, and the wording says so.
    *
    * Cancelling keeps the order and records that it was called off, which is
-   * what the file should show for a real order that fell through. Deleting is
-   * for the ones that should never have been raised — a duplicate, a slip, the
-   * rows left over from setting the system up — and it takes the lines,
-   * charges and attachments with it.
-   *
-   * The number is spelled out in the prompt because it is the only thing that
-   * cannot be undone: the series counts up and will not hand that number out
-   * again.
+   * what the file should show for a real order that fell through — and the
+   * only way for one the supplier has had. Deleting is for a draft that should
+   * never have been raised: a duplicate, a slip. The window asks which way
+   * (27 Nov 2026): to the recycle bin, where it keeps its number, or for good,
+   * which frees the number.
    */
-  const remove = async (po: PurchaseOrder) => {
-    const warning =
-      `Delete ${po.poNumber} for good? This removes the order, its lines and anything ` +
-      'attached to it, and is not the same as cancelling — nothing will be left saying ' +
-      `it was called off. The number ${po.poNumber} will not be reused.` +
-      // Deleting one the supplier holds leaves them working from paper for an
-      // order that is no longer on the list. Cancelling is usually what was
-      // meant, so the prompt says so rather than quietly allowing it.
-      (po.status === 'SENT'
-        ? `
-
-The supplier already has this order. If it was real and fell through, cancel it instead so the file still shows what happened.`
-        : '')
-    if (!confirm(warning)) return
+  const remove = async (po: PurchaseOrder, choice: DeleteChoice) => {
+    setDeleting(null)
     setBusy(true)
     setMessage(null)
     try {
-      const res = await api.delete<{ message?: string }>(`/purchase/orders/${po.id}`)
+      const res = await api.delete<{ message?: string }>(
+        `/purchase/orders/${po.id}${choice === 'permanent' ? '?permanent=1' : ''}`
+      )
       await load()
       if (res.message) setMessage(res.message)
     } catch (err) {
@@ -593,16 +594,15 @@ The supplier already has this order. If it was real and fell through, cancel it 
       })
     }
 
-    // The server allows this only while nothing has been received or billed
-    // against the order, and those two are exactly the statuses that can still
-    // be true. Offering it on a partly or fully received order would be a
-    // button that always failed.
-    if (po.status === 'DRAFT' || po.status === 'SENT' || po.status === 'CANCELLED') {
+    // Only a draft never sent to the supplier can be deleted — to the recycle
+    // bin or for good (27 Nov 2026). An order the supplier has had is
+    // cancelled instead, so it stays on record and keeps its number.
+    if (neverSentDraft(po)) {
       items.push({
         key: 'delete',
         label: 'Delete order',
         icon: <Trash2 size={15} />,
-        onClick: () => void remove(po),
+        onClick: () => setDeleting(po),
         danger: true,
       })
     }
@@ -749,7 +749,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
             >
               <option value="">All items</option>
               {items.map((it) => (
-                <option key={it.id} value={it.id}>
+                <option key={it.id} value={it.id} data-sub={itemShade(it) || undefined}>
                   {it.name}
                 </option>
               ))}
@@ -891,7 +891,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
                           <>
                             {lines.length} {lines.length === 1 ? 'item' : 'items'}
                             {(() => {
-                              const p = itemsPreview(lines.map((l) => l.item?.name))
+                              const p = itemsPreview(lines.map((l) => nameWithShade(l.item)))
                               return (
                                 p.shown && (
                                   <span className="text-muted-foreground" title={p.full}>
@@ -956,6 +956,9 @@ The supplier already has this order. If it was real and fell through, cancel it 
                               <p className="text-foreground text-sm font-medium leading-snug">
                                 {line.item?.name ?? '—'}
                               </p>
+                              {itemShade(line.item) && (
+                                <p className="text-muted-foreground mt-0.5 text-[11px]">{itemShade(line.item)}</p>
+                              )}
                               <p className="text-muted-foreground mt-0.5 truncate text-[10px]">
                                 <span className="font-mono">{line.item?.code ?? '—'}</span>
                                 {parent?.name || cat?.name ? (
@@ -1142,7 +1145,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
                                   {lines.length} {lines.length === 1 ? 'item' : 'items'}
                                 </div>
                                 {(() => {
-                                  const p = itemsPreview(lines.map((l) => l.item?.name))
+                                  const p = itemsPreview(lines.map((l) => nameWithShade(l.item)))
                                   return (
                                     <div
                                       className="text-muted-foreground truncate text-[10px] leading-tight"
@@ -1246,6 +1249,11 @@ The supplier already has this order. If it was real and fell through, cancel it 
                                             <div className="text-foreground truncate text-xs">
                                               {line.item?.name ?? '—'}
                                             </div>
+                                            {itemShade(line.item) && (
+                                              <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                {itemShade(line.item)}
+                                              </div>
+                                            )}
                                             {(line.description || line.item?.hsnCode) && (
                                               <div className="text-muted-foreground truncate text-[10px] leading-tight">
                                                 {line.description}
@@ -1309,7 +1317,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
                                                           type: 'reopen',
                                                           po,
                                                           lineId: line.id!,
-                                                          itemName: line.item?.name ?? 'this line',
+                                                          itemName: nameInWords(line.item) ?? 'this line',
                                                           receivedQty: line.receivedQty,
                                                         })
                                                       }
@@ -1337,11 +1345,11 @@ The supplier already has this order. If it was real and fell through, cancel it 
                                                           type: 'close',
                                                           po,
                                                           lineId: line.id!,
-                                                          itemName: line.item?.name ?? 'this line',
+                                                          itemName: nameInWords(line.item) ?? 'this line',
                                                           receivedQty: line.receivedQty,
                                                         })
                                                       }
-                                                      title={`Say the rest of ${line.item?.name ?? 'this line'} is not coming`}
+                                                      title={`Say the rest of ${nameInWords(line.item) ?? 'this line'} is not coming`}
                                                     >
                                                       {shortCloseVerb(line.receivedQty)}
                                                     </button>
@@ -1459,6 +1467,14 @@ The supplier already has this order. If it was real and fell through, cancel it 
           poNumber={historyFor.poNumber}
           supplierName={historyFor.supplier?.name}
           onClose={() => setHistoryFor(null)}
+        />
+      )}
+
+      {deleting && (
+        <DeleteOrderDialog
+          poNumber={deleting.poNumber}
+          onChoose={(choice) => void remove(deleting, choice)}
+          onCancel={() => setDeleting(null)}
         />
       )}
 

@@ -8,6 +8,7 @@ import { api, ApiError } from '@/lib/api'
 import { useEscape } from '@/lib/useEscape'
 import { formatDate } from '@/lib/utils'
 import { StepInput } from '@/components/ui/StepInput'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * Picking the order's items off the indents that asked for them.
@@ -47,6 +48,7 @@ export interface IndentRow {
   /** The garment style the material is for, as given on the requisition. */
   styleNo?: string | null
   remark: string | null
+  /** With its design and colour, which tell same-name fabrics apart. */
   item: {
     id: string
     code: string
@@ -54,7 +56,7 @@ export interface IndentRow {
     hsnCode: string | null
     taxRate: { id: string; rate: string | number } | null
     uom: { symbol: string } | null
-  }
+  } & ShadeFields
   warehouse: { id: string; name: string } | null
   indentQty: number
   orderedQty: number
@@ -172,7 +174,7 @@ export function IndentItemsDialog({
     const q = search.trim().toLowerCase()
     if (!q) return rows
     return rows.filter((r) =>
-      [r.mrNumber, r.item.code, r.item.name, r.moNumber, r.soNumber, r.customerName, r.styleNo, r.department?.name, r.remark]
+      [r.mrNumber, r.item.code, r.item.name, r.item.designNo, r.item.color, r.moNumber, r.soNumber, r.customerName, r.styleNo, r.department?.name, r.remark]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q))
     )
@@ -296,6 +298,7 @@ export function IndentItemsDialog({
     return (
       <>
         <div className="text-foreground text-sm font-medium leading-snug">{r.item.name}</div>
+        {itemShade(r.item) && <div className="text-muted-foreground text-[11px]">{itemShade(r.item)}</div>}
         <div className="text-muted-foreground text-[11px]">
           <span className="font-mono">{r.item.code}</span>
           {!g.styleNo && r.styleNo ? ` · style ${r.styleNo}` : ''}

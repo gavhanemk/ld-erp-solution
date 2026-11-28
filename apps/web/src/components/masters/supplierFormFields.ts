@@ -39,7 +39,9 @@ export const supplierFormFields: FormField[] = [
     name: 'category',
     label: 'Category',
     type: 'select',
-    required: true,
+    // Optional: left empty, the supplier is filed under Other.
+    noneLabel: 'Not chosen (saved as Other)',
+    nullWhenEmpty: true,
     section: 'Identity & Contact',
     options: Object.entries(SUPPLIER_CATEGORY_LABEL).map(([value, label]) => ({ value, label })),
   },
@@ -55,6 +57,7 @@ export const supplierFormFields: FormField[] = [
   },
   { name: 'stateCode', label: 'GST State Code', section: 'Identity & Contact', placeholder: '27 (from the GSTIN)' },
   { name: 'pan', label: 'PAN', section: 'Identity & Contact', placeholder: 'AAACL1234M', uppercase: true },
+  { name: 'contactPerson', label: 'Contact Person', section: 'Identity & Contact', placeholder: 'Printed as Kind Attention on orders' },
   { name: 'phone', label: 'Phone', section: 'Identity & Contact', placeholder: '+91 98765 43210' },
   { name: 'email', label: 'Email', section: 'Identity & Contact', placeholder: 'sales@example.com' },
   { name: 'address', label: 'Address', type: 'textarea', section: 'Address & Terms', span: 2, rows: 1 },

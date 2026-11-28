@@ -2,6 +2,7 @@ import type { MOStatus, Prisma, PrismaClient } from '@prisma/client'
 import { offeredStock, offeringStore } from './availability.service'
 import { qtyPlaces, roundUpToPlaces } from '@ld-erp/shared'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE } from '../lib/fabric'
 import { netSizeChanges } from './sizeChanges.service'
 
 type Db = PrismaClient | Prisma.TransactionClient
@@ -237,6 +238,8 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
                       id: true,
                       code: true,
                       name: true,
+                      // Same-name fabrics told apart by their design and colour.
+                      ...ITEM_SHADE,
                       type: true,
                       decimalPlaces: true,
                       uom: { select: { symbol: true, decimalPlaces: true } },
@@ -279,7 +282,19 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     /** Whose the plan would say without the switch. */
     defaultOwnership: 'OWNED' | 'CUSTOMER_OWNED'
     /** places: how many after the point its quantities may carry (0: whole numbers only). */
-    item: { id: string; code: string; name: string; type: string; uom: string | null; places: number; category: string }
+    item: {
+      id: string
+      code: string
+      name: string
+      /** A fabric's design and colour, a thread's colour (styleId: a finished good, left alone). */
+      designNo: string | null
+      color: string | null
+      styleId: string | null
+      type: string
+      uom: string | null
+      places: number
+      category: string
+    }
     ownership: 'OWNED' | 'CUSTOMER_OWNED'
     ownerCustomerId: string | null
     department: { id: string; name: string } | null
@@ -325,6 +340,9 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
           id: b.componentItem.id,
           code: b.componentItem.code,
           name: b.componentItem.name,
+          designNo: b.componentItem.designNo,
+          color: b.componentItem.color,
+          styleId: b.componentItem.styleId,
           type: b.componentItem.type,
           uom: b.componentItem.uom?.symbol ?? null,
           places: qtyPlaces(b.componentItem),

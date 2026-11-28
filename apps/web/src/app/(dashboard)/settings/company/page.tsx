@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Plus, Pencil, X, Check, Ban, Building2, Hash, Percent, Receipt, Landmark, MapPin, Tag, CalendarDays } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, can } from '@/lib/api'
 import { loadAppSettings } from '@/lib/appSettings'
 import { cn } from '@/lib/utils'
 import {
@@ -14,6 +14,7 @@ import {
 } from '@/lib/settingsApi'
 import { Field, FieldGrid, LoadingRow, Notice, SaveBar, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { StepInput } from '@/components/ui/StepInput'
 import { TdsSections } from '@/components/settings/TdsSections'
 import { SectionHeader } from '@/components/settings/sections'
 
@@ -41,7 +42,7 @@ function describeFY(fy: string | null, startMonth: number): string {
  */
 const SECTIONS = [
   { key: 'profile', label: 'Company Profile', icon: Building2 },
-  { key: 'numbering', label: 'Document Numbering', icon: Hash },
+  { key: 'numbering', label: 'Running Series', icon: Hash },
   { key: 'gst', label: 'GST Rates', icon: Percent },
   { key: 'tds', label: 'TDS Sections', icon: Receipt },
 ] as const
@@ -494,7 +495,20 @@ function CompanyProfile() {
 
 // ── Document numbering ───────────────────────────────────────────────────────
 
+/** The number a series would print for `n`, the same way the server writes it (empty parts left out). */
+function seriesNumber(s: Pick<NumberSeries, 'prefix' | 'separator' | 'financialYear' | 'padding'>, n: number) {
+  return [s.prefix, s.financialYear, String(n).padStart(s.padding, '0')].filter(Boolean).join(s.separator)
+}
+
+/**
+ * The current running series (27 Nov 2026): for every document, the last
+ * number given out and the next one. A user who may edit settings can set
+ * where a series carries on from — ahead to skip numbers, or back to start
+ * again — and the server refuses any number already on a document.
+ */
 function DocumentNumbering() {
+  const mayEdit = can('settings', 'edit')
+  const [nextEdit, setNextEdit] = useState<{ id: string; value: string; error: string | null } | null>(null)
   const [series, setSeries] = useState<NumberSeries[]>([])
   const [loading, setLoading] = useState(true)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -526,6 +540,7 @@ function DocumentNumbering() {
   }, [load])
 
   const startEdit = (s: NumberSeries) => {
+    setNextEdit(null)
     setEditingId(s.id)
     setDraft({ prefix: s.prefix, separator: s.separator, padding: String(s.padding) })
     setMessage(null)
@@ -553,6 +568,32 @@ function DocumentNumbering() {
     }
   }
 
+  const startNext = (s: NumberSeries) => {
+    setEditingId(null)
+    setNextEdit({ id: s.id, value: String(s.lastNumber + 1), error: null })
+    setMessage(null)
+  }
+
+  const saveNext = async (s: NumberSeries) => {
+    if (!nextEdit) return
+    const n = Number(nextEdit.value)
+    if (!nextEdit.value.trim() || !Number.isInteger(n) || n < 1) {
+      setNextEdit({ ...nextEdit, error: 'Type the number to carry on from — 1 or more.' })
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await settingsApi.numberSeries.setNext(s.id, n)
+      setSeries((rows) => rows.map((r) => (r.id === s.id ? { ...r, ...res.data } : r)))
+      setNextEdit(null)
+      setMessage({ kind: 'success', text: res.message ?? `The next ${s.label.toLowerCase()} will be ${res.data.nextNumber}.` })
+    } catch (err) {
+      setNextEdit({ ...nextEdit, error: err instanceof ApiError ? err.message : 'Could not save.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const toggleActive = async (s: NumberSeries) => {
     setBusy(true)
     try {
@@ -568,8 +609,8 @@ function DocumentNumbering() {
   return (
     <SettingsCard
       icon={Hash}
-      title="Document numbering"
-      description="What a sales order, invoice or purchase order is called when it is created."
+      title="Current running series"
+      description="How each document is numbered, the last number it has used, and the number the next one will take."
     >
       {message && (
         <div className="mb-4">
@@ -592,8 +633,8 @@ function DocumentNumbering() {
                 <th>Prefix</th>
                 <th>Between</th>
                 <th style={{ textAlign: "right" }}>Digits</th>
+                <th>Last used</th>
                 <th>Next number</th>
-                <th style={{ textAlign: "right" }}>Used so far</th>
                 <th style={{ textAlign: "center" }}>In use</th>
                 <th />
               </tr>
@@ -601,13 +642,19 @@ function DocumentNumbering() {
             <tbody>
               {series.map((s) => {
                 const isEditing = editingId === s.id
+                const settingNext = nextEdit?.id === s.id ? nextEdit : null
                 const preview = isEditing
-                  ? [
-                      draft.prefix || s.prefix,
-                      s.financialYear,
-                      String(s.lastNumber + 1).padStart(Number(draft.padding) || s.padding, '0'),
-                    ].join(draft.separator)
+                  ? seriesNumber(
+                      {
+                        prefix: draft.prefix || s.prefix,
+                        separator: draft.separator,
+                        financialYear: s.financialYear,
+                        padding: Number(draft.padding) || s.padding,
+                      },
+                      s.lastNumber + 1,
+                    )
                   : s.nextNumber
+                const typedNext = settingNext ? Number(settingNext.value) : NaN
 
                 return (
                   <tr key={s.id}>
@@ -658,8 +705,66 @@ function DocumentNumbering() {
                         s.padding
                       )}
                     </td>
-                    <td className="font-mono text-xs">{preview}</td>
-                    <td className="text-right text-muted-foreground">{s.lastNumber}</td>
+                    <td className="font-mono text-xs whitespace-nowrap">
+                      {s.lastUsedNumber ??<span className="font-sans text-muted-foreground">None yet</span>}
+                    </td>
+                    <td className="text-xs">
+                      {settingNext ? (
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-1">
+                            <StepInput
+                              className="form-input h-8 w-24 text-right"
+                              min={1}
+                              value={settingNext.value}
+                              onValueChange={(value) => setNextEdit({ ...settingNext, value, error: null })}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') void saveNext(s)
+                                if (e.key === 'Escape') setNextEdit(null)
+                              }}
+                              autoFocus
+                              aria-label={`${s.label} next number`}
+                            />
+                            <button
+                              className="btn-ghost p-1.5 text-emerald-400"
+                              onClick={() => void saveNext(s)}
+                              disabled={busy}
+                              title="Save"
+                              aria-label={`Save ${s.label} next number`}
+                            >
+                              <Check size={15} />
+                            </button>
+                            <button
+                              className="btn-ghost p-1.5"
+                              onClick={() => setNextEdit(null)}
+                              disabled={busy}
+                              title="Cancel"
+                              aria-label="Cancel"
+                            >
+                              <X size={15} />
+                            </button>
+                          </div>
+                          {Number.isInteger(typedNext) && typedNext >= 1 && (
+                            <p className="text-muted-foreground">
+                              Next will be <span className="font-mono text-foreground">{seriesNumber(s, typedNext)}</span>
+                            </p>
+                          )}
+                          {settingNext.error && <p className="max-w-xs text-red-500">{settingNext.error}</p>}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2 whitespace-nowrap">
+                          <span className="font-mono">{preview}</span>
+                          {mayEdit && !isEditing && (
+                            <button
+                              className="text-primary text-xs hover:underline"
+                              onClick={() => startNext(s)}
+                              aria-label={`Set the next ${s.label} number`}
+                            >
+                              Set
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
                     <td className="text-center">
                       <div className="flex justify-center">
                         <Toggle
@@ -712,8 +817,10 @@ function DocumentNumbering() {
       )}
 
       <p className="text-xs text-muted-foreground mt-4">
-        The counter itself is moved by the ERP and cannot be edited here — documents already issued
-        keep the numbers they were given.
+        Deleting the newest document of a series gives its number back, so the next one takes it again.
+        Deleting one in the middle leaves a gap. <span className="font-medium">Set</span> moves where a
+        series carries on from — ahead to skip numbers, or back to start again — but never to a number
+        already on a document. Documents already made keep the numbers they were given.
       </p>
     </SettingsCard>
   )

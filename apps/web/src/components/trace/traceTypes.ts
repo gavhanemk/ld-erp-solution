@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { ShadeFields } from '@/lib/items'
 import {
   ClipboardList,
   Factory,
@@ -107,8 +108,8 @@ export interface Pieces {
   list: Array<{ id: string; code: string; status: string; grade: string; printed: boolean; style: string; color: string; size: string; store: string; dcNumber: string | null; moNumber: string }>
 }
 
-/** One line of a material request, and what was bought for it. */
-export interface MaterialLine {
+/** One line of a material request, and what was bought for it; a fabric with its design and colour. */
+export interface MaterialLine extends ShadeFields {
   mrNumber: string
   department: string
   status: string

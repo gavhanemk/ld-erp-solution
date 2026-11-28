@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { Boxes, Factory, Printer, Search, ShoppingCart } from 'lucide-react'
+import { itemShade } from '@/lib/items'
 import { GARMENT_STATUS, badge, fmtDay, printLabels, qty, type MaterialLine, type Pieces, type Target } from './traceTypes'
 
 /** A named fact: "SIZE" small and grey, the value under it. */
@@ -241,6 +242,7 @@ export function MaterialsUsed({ lines, note }: { lines: MaterialLine[]; note?: s
                 <tr key={i}>
                   <td>
                     <div className="font-medium text-foreground">{l.item}</div>
+                    {itemShade(l) && <div className="text-xs text-muted-foreground">{itemShade(l)}</div>}
                     <div className="font-mono text-[11px] text-muted-foreground">{l.code}</div>
                   </td>
                   <td className="whitespace-nowrap">

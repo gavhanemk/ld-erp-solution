@@ -9,6 +9,7 @@ import type { OutwardRef } from '@/components/packages/packageTypes'
 import type { ProcessRequisition } from './ProcessDialog'
 import { noBuyBox, planRows, r3, spread, startingQty, type FulfilData } from './processPlan'
 import { isAdminRole } from '@/lib/access'
+import { itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * Several requisitions at once — an MO raises one per department, and taking
@@ -59,6 +60,8 @@ interface Plan {
 type Result = { ok: boolean; message: string; outward?: OutwardRef }
 
 const fmt = (v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 3 })
+/** An item's name, its design no. and colour beside it when it has them: two "Cotton Twill" lines told apart. */
+const named = (i: ShadeFields & { name: string }) => (itemShade(i) ? `${i.name} (${itemShade(i)})` : i.name)
 
 export function BulkRequisitionDialog({
   action,
@@ -94,7 +97,7 @@ export function BulkRequisitionDialog({
       if (action === 'approve') {
         if (mr.status !== 'PENDING') return { ...base, why: 'Already decided.' }
         if (mr.raisedBy?.id === me?.id && !admin) return { ...base, why: 'You raised it, so somebody else approves it.' }
-        return { ...base, lines: mr.lines.map((l) => `${l.item.name}: ${fmt(Number(l.requestedQty))} ${l.item.uom.symbol}`), call: { method: 'patch', path: `/inventory/requisitions/${mr.id}/approve`, body: {} } }
+        return { ...base, lines: mr.lines.map((l) => `${named(l.item)}: ${fmt(Number(l.requestedQty))} ${l.item.uom.symbol}`), call: { method: 'patch', path: `/inventory/requisitions/${mr.id}/approve`, body: {} } }
       }
       if (mr.status !== 'APPROVED' || mr.closedAt || mr.issuedAt) return { ...base, why: mr.status === 'PENDING' ? 'Waiting for approval first.' : 'Nothing more is owed on it.' }
       const canIssue = admin || (me?.id !== mr.raisedBy?.id && me?.id !== mr.approvedBy?.id)
@@ -109,7 +112,7 @@ export function BulkRequisitionDialog({
         if (!buy.length) return { ...base, why: 'Nothing short: the store has it, or it is already with Purchase.' }
         return {
           ...base,
-          lines: buy.map(({ r, v }) => `${r.l.item.name}: ${fmt(v)} ${r.unit} to buy`),
+          lines: buy.map(({ r, v }) => `${named(r.l.item)}: ${fmt(v)} ${r.unit} to buy`),
           call: { method: 'patch', path: `/inventory/requisitions/${mr.id}/plan`, body: { lines: buy.map(({ r, v }) => ({ lineId: r.l.id, buyQty: r3(v) })) } },
         }
       }
@@ -119,7 +122,7 @@ export function BulkRequisitionDialog({
       const storeName = (r: (typeof rows)[number], id: string) => r.stores.find((s) => s.id === id)?.name ?? 'store'
       return {
         ...base,
-        lines: give.map(({ r, v }) => `${r.l.item.name}: ${fmt(v)} ${r.unit} from ${[...spread(r, v).keys()].map((id) => storeName(r, id)).join(' and ')}`),
+        lines: give.map(({ r, v }) => `${named(r.l.item)}: ${fmt(v)} ${r.unit} from ${[...spread(r, v).keys()].map((id) => storeName(r, id)).join(' and ')}`),
         call: { method: 'post', path: `/inventory/requisitions/${mr.id}/issue`, body: { lines, requestId: newRequestId() } },
         outward: { type: 'MR', id: mr.id, q: lines.map((l) => `${l.lineId}:${l.issueQty}:${l.warehouseId}`).join(',') },
       }

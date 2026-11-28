@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { prisma } from '@ld-erp/database'
 import { userCan, type AuthRequest } from '../middleware/auth'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 
 /*
  * One search for the Ctrl+K palette: a few letters of a document number, a
@@ -159,7 +160,7 @@ router.get('/', async (req: AuthRequest, res) => {
       prisma.stockPackage
         .findMany({
           where: { OR: [{ code: has(q) }, { lotNo: has(q) }] },
-          select: { code: true, status: true, lotNo: true, item: { select: { name: true } }, warehouse: { select: { name: true } } },
+          select: { code: true, status: true, lotNo: true, item: { select: { name: true, ...ITEM_SHADE } }, warehouse: { select: { name: true } } },
           orderBy: newest,
           take: TAKE,
         })
@@ -168,7 +169,8 @@ router.get('/', async (req: AuthRequest, res) => {
             kind: 'Packet',
             number: r.code,
             title: r.item.name,
-            sub: [said(r.status), r.warehouse.name, r.lotNo ? `lot ${r.lotNo}` : null].filter(Boolean).join(' · '),
+            // The item's design and colour first: same-name fabrics differ only by them.
+            sub: [itemShadeText(r.item), said(r.status), r.warehouse.name, r.lotNo ? `lot ${r.lotNo}` : null].filter(Boolean).join(' · '),
             // Opened as a scan: the packet's card, with what can be done with it.
             path: `/inventory/scan?code=${encodeURIComponent(r.code)}`,
             term: r.code,
@@ -233,9 +235,25 @@ router.get('/', async (req: AuthRequest, res) => {
       prisma.supplier
         .findMany({ where: party, select: { code: true, name: true, isActive: true }, orderBy: { name: 'asc' }, take: TAKE })
         .then((rows) => rows.map((r) => ({ kind: 'Supplier', number: r.code, title: r.name, sub: r.isActive ? null : 'inactive', path: '/masters/suppliers', term: r.code }))),
+      // A fabric is found by its design number or colour too ("1164", "Navy"),
+      // and says them under its name: several fabric items share a name.
       prisma.item
-        .findMany({ where: party, select: { code: true, name: true, isActive: true }, orderBy: { name: 'asc' }, take: TAKE })
-        .then((rows) => rows.map((r) => ({ kind: 'Item', number: r.code, title: r.name, sub: r.isActive ? null : 'inactive', path: '/masters/items', term: r.code }))),
+        .findMany({
+          where: { OR: [...party.OR, { designNo: has(q) }, { color: has(q) }] },
+          select: { code: true, name: true, isActive: true, ...ITEM_SHADE },
+          orderBy: [{ name: 'asc' }, { code: 'asc' }],
+          take: TAKE,
+        })
+        .then((rows) =>
+          rows.map((r) => ({
+            kind: 'Item',
+            number: r.code,
+            title: r.name,
+            sub: [itemShadeText(r), r.isActive ? null : 'inactive'].filter(Boolean).join(' · ') || null,
+            path: '/masters/items',
+            term: r.code,
+          })),
+        ),
       prisma.style
         .findMany({ where: party, select: { code: true, name: true, isActive: true }, orderBy: { name: 'asc' }, take: TAKE })
         .then((rows) => rows.map((r) => ({ kind: 'Style', number: r.code, title: r.name, sub: r.isActive ? null : 'inactive', path: '/masters/styles', term: r.code }))),

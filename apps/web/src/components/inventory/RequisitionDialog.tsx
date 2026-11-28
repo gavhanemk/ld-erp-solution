@@ -11,6 +11,7 @@ import { StepInput } from '@/components/ui/StepInput'
 import { QtyProblem } from '@/components/ui/QtyProblem'
 import { qtyPlaces, qtyProblem, roundDownToPlaces, roundUpToPlaces } from '@ld-erp/shared'
 import { isAdminRole } from '@/lib/access'
+import { everyItem, itemShade, type ShadeFields } from '@/lib/items'
 
 /**
  * A department asking the store for material.
@@ -35,7 +36,7 @@ interface Category {
   parent?: { id: string; name: string; departmentId?: string | null } | null
 }
 
-interface ItemOption {
+interface ItemOption extends ShadeFields {
   id: string
   code: string
   name: string
@@ -130,8 +131,9 @@ export function RequisitionDialog({
       try {
         const [i, d, w, st, mo, sty] = await Promise.all([
           // Active only: a deactivated item, department or store is not offered
-          // for anything new.
-          masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
+          // for anything new. Every page of items: one per fabric design and
+          // colour soon passes the 200 one page holds.
+          everyItem<ItemOption>({ active: true, sort: 'name', order: 'asc' }).then((data) => ({ data })),
           masterResource<{ id: string; name: string }>('departments').list({ limit: 100, active: true }),
           masterResource<{ id: string; name: string }>('warehouses').list({ limit: 100, active: true }),
           // What is on each rack, ours and customers' apart.
@@ -611,18 +613,19 @@ export function RequisitionDialog({
                       {choices.map((c) => {
                         const total = storesHolding(c.id).reduce((t, s) => t + s.ours, 0)
                         return (
-                          <option key={c.id} value={c.id}>
+                          <option key={c.id} value={c.id} data-sub={itemShade(c) || undefined}>
                             {c.code} — {c.name} · {total ? `${fmt(total)} ${c.uom?.symbol ?? ''} in stock` : 'none in stock'}
                           </option>
                         )
                       })}
                       {/* Kept if the filters above no longer include it, so a choice is never lost silently. */}
                       {it && !choices.some((c) => c.id === it.id) && (
-                        <option value={it.id}>
+                        <option value={it.id} data-sub={itemShade(it) || undefined}>
                           {it.code} — {it.name}
                         </option>
                       )}
                     </SmartSelect>
+                    {it && itemShade(it) && <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{itemShade(it)}</span>}
                   </label>
                   {/* Optional: the garment style the material is for. Suggests style codes; anything typed is kept. */}
                   <label className="block min-w-0 sm:col-span-2">

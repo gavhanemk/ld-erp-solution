@@ -18,6 +18,7 @@ import { ImportItemsDialog } from '@/components/masters/ImportItemsDialog'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { OutwardStickers } from '@/components/packages/OutwardStickers'
 import type { OutwardRef } from '@/components/packages/packageTypes'
+import { itemShadeCols, type ShadeFields } from '@/lib/items'
 
 /**
  * What is on hand, right now, everywhere.
@@ -31,7 +32,8 @@ import type { OutwardRef } from '@/components/packages/packageTypes'
  * the figures are for what the filters leave, and each is also a filter.
  */
 
-interface ItemAbout {
+/** What each item is, with a fabric's design no. and colour: same-name items told apart. */
+interface ItemAbout extends ShadeFields {
   itemType: string
   mainCategoryId: string
   mainCategoryName: string
@@ -247,7 +249,8 @@ function StockScreen() {
   const matchesSearch = useCallback(
     (r: StockRow) => {
       if (!words.length) return true
-      const hay = `${r.itemName} ${r.itemCode} ${r.categoryName} ${r.warehouseName} ${r.departmentName ?? ''}`.toLowerCase()
+      const shade = itemShadeCols(r)
+      const hay = `${r.itemName} ${r.itemCode} ${shade.designNo} ${shade.colour} ${r.categoryName} ${r.warehouseName} ${r.departmentName ?? ''}`.toLowerCase()
       return words.every((w) => hay.includes(w))
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -333,6 +336,8 @@ function StockScreen() {
         shown.map((r) => ({
           'Item Code': r.itemCode,
           'Item Name': r.itemName,
+          'Design No.': itemShadeCols(r).designNo,
+          Colour: itemShadeCols(r).colour,
           Type: TYPE_LABEL[r.itemType] ?? r.itemType,
           Category: r.mainCategoryName,
           'Sub Category': r.subCategoryName ?? '',
@@ -353,7 +358,7 @@ function StockScreen() {
           'Last Moved': r.lastMovedAt ? r.lastMovedAt.slice(0, 10) : '',
         })),
       )
-      sheet['!cols'] = [12, 34, 14, 18, 18, 16, 24, 20, 10, 10, 10, 12, 10, 10, 8, 10, 14, 12, 12, 12].map((wch) => ({ wch }))
+      sheet['!cols'] = [12, 34, 12, 12, 14, 18, 18, 16, 24, 20, 10, 10, 10, 12, 10, 10, 8, 10, 14, 12, 12, 12].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Stock')
       XLSX.writeFile(book, `stock-${new Date().toISOString().slice(0, 10)}.xlsx`)
@@ -556,6 +561,8 @@ function StockScreen() {
                 <tr className="bg-secondary">
                   <th className="whitespace-nowrap">Code</th>
                   <th className="whitespace-nowrap">Item</th>
+                  <th className="whitespace-nowrap">Design No.</th>
+                  <th className="whitespace-nowrap">Colour</th>
                   <th className="whitespace-nowrap">Category</th>
                   <th className="whitespace-nowrap">Sub-category</th>
                   <th className="whitespace-nowrap">Department</th>
@@ -581,6 +588,8 @@ function StockScreen() {
                         {r.itemName}
                       </Link>
                     </td>
+                    <td className="whitespace-nowrap text-sm">{itemShadeCols(r).designNo || <span className="text-muted-foreground">—</span>}</td>
+                    <td className="whitespace-nowrap text-sm">{itemShadeCols(r).colour || <span className="text-muted-foreground">—</span>}</td>
                     <td className="text-sm">{r.mainCategoryName}</td>
                     <td className="text-sm">
                       {r.subCategoryName ?? <span className="text-muted-foreground">—</span>}

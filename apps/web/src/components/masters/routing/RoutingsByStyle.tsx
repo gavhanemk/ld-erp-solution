@@ -67,6 +67,8 @@ interface StyleRouting {
   isActive: boolean
   isLocked: boolean
   fabric: string | null
+  /** The fabric's "Design No: 1164 · Colour: Navy": which of several same-name fabrics. '' when it has neither. */
+  fabricShade?: string
   steps: Array<{ sequence: number; name: string; isQcStep: boolean; execution: string; skip: string }>
   updatedAt: string
   updatedBy: string | null
@@ -640,6 +642,12 @@ function RoutingRow({ styleCell, styleId, routing: r, orders, first, last, open,
               {r.fabric && <span>· {r.fabric}</span>}
               {shared && <span className="text-primary">· {shared}</span>}
             </div>
+            {/* The fabric's design and colour on a line of its own, so a narrow column never clips the number. */}
+            {r.fabric && r.fabricShade && (
+              <div className="text-muted-foreground truncate text-[11px]" title={`${r.fabric} · ${r.fabricShade}`}>
+                {r.fabricShade}
+              </div>
+            )}
           </div>
         </div>
       </td>

@@ -58,8 +58,11 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
         FROM ld_erp.stock_ledger s
         WHERE s."transactionDate" >= ${since} ${store}
         GROUP BY 1`,
-      prisma.$queryRaw<Array<{ itemId: string; code: string; name: string; uom: string; moves: number; inValue: number; outValue: number }>>`
+      prisma.$queryRaw<
+        Array<{ itemId: string; code: string; name: string; designNo: string | null; color: string | null; styleId: string | null; uom: string; moves: number; inValue: number; outValue: number }>
+      >`
         SELECT s."itemId", MAX(i.code) AS code, MAX(i.name) AS name, MAX(u.symbol) AS uom, COUNT(*)::int AS moves,
+          MAX(i."designNo") AS "designNo", MAX(i.color) AS color, MAX(i."styleId") AS "styleId",
           COALESCE(SUM(s."inQty"  * COALESCE(s."unitRate", 0)), 0)::float8 AS "inValue",
           COALESCE(SUM(s."outQty" * COALESCE(s."unitRate", 0)), 0)::float8 AS "outValue"
         FROM ld_erp.stock_ledger s
@@ -257,9 +260,11 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
   const deadValue = dead.reduce((t, r) => t + r.value, 0)
 
   // ── ABC: the few items that hold most of the value ──
-  const perItem = new Map<string, { itemId: string; code: string; name: string; value: number }>()
+  // By item, never by name: same-name fabrics in different designs stay apart.
+  type Shade = { designNo: string | null; color: string | null; styleId: string | null }
+  const perItem = new Map<string, { itemId: string; code: string; name: string; value: number } & Shade>()
   for (const r of owned) {
-    const cur = perItem.get(r.itemId) ?? { itemId: r.itemId, code: r.itemCode, name: r.itemName, value: 0 }
+    const cur = perItem.get(r.itemId) ?? { itemId: r.itemId, code: r.itemCode, name: r.itemName, designNo: r.designNo, color: r.color, styleId: r.styleId, value: 0 }
     cur.value += r.value
     perItem.set(r.itemId, cur)
   }
@@ -283,6 +288,9 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
       itemId: r.itemId,
       code: r.itemCode,
       name: r.itemName,
+      designNo: r.designNo,
+      color: r.color,
+      styleId: r.styleId,
       uom: r.uom,
       category: about.get(r.itemId)?.category ?? r.categoryName,
       onHand: r.onHand,
@@ -380,7 +388,7 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
     byType,
     ageing,
     dead: dead.slice(0, 8).map((r) => ({
-      itemId: r.itemId, code: r.itemCode, name: r.itemName, store: r.warehouseName,
+      itemId: r.itemId, code: r.itemCode, name: r.itemName, designNo: r.designNo, color: r.color, styleId: r.styleId, store: r.warehouseName,
       qty: r.qty, uom: r.uom, value: round2(r.value), days: age(r.lastMovedAt),
     })),
     abc: { top: abcAll.slice(0, 20), summary: abcSummary, total: abcAll.length },

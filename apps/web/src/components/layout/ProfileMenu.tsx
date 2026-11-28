@@ -1,21 +1,30 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
+  CalendarDays,
   CheckCircle2,
   ChevronDown,
+  Clock,
   Crown,
   Eye,
   EyeOff,
+  SquareUser,
+  Info,
   KeyRound,
   Keyboard,
+  LayoutGrid,
   Loader2,
   LogOut,
+  Mail,
+  Phone,
   Settings,
   ShieldCheck,
   UserRound,
+  X,
   type LucideIcon,
 } from 'lucide-react'
 import { api, ApiError, currentUser } from '@/lib/api'
@@ -23,6 +32,7 @@ import { canDo, canOpen, SUPER_ROLE, useAccess } from '@/lib/access'
 import { settingsApi } from '@/lib/settingsApi'
 import { signOut } from '@/lib/session'
 import { useEscape } from '@/lib/useEscape'
+import { useDialogFocus } from '@/lib/keys'
 import { cn } from '@/lib/utils'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Field } from '@/components/settings/ui'
@@ -186,12 +196,12 @@ export function ProfileMenu() {
   )
 }
 
-function Avatar({ name, size = 'md' }: { name?: string; size?: 'md' | 'lg' | 'xl' }) {
+function Avatar({ name, size = 'md' }: { name?: string; size?: 'md' | 'lg' | 'xl' | 'xxl' }) {
   return (
     <span
       className={cn(
         'flex shrink-0 items-center justify-center rounded-full border border-teal-500/30 bg-teal-500/20 font-bold text-teal-400',
-        size === 'xl' ? 'h-14 w-14 text-lg' : size === 'lg' ? 'h-10 w-10 text-sm' : 'h-8 w-8 text-xs',
+        size === 'xxl' ? 'h-20 w-20 text-2xl' : size === 'xl' ? 'h-14 w-14 text-lg' : size === 'lg' ? 'h-10 w-10 text-sm' : 'h-8 w-8 text-xs',
       )}
     >
       {name ? initialsOf(name) : '—'}
@@ -266,10 +276,32 @@ const when = (d: string | null, withTime = true) =>
 
 // ── My profile ───────────────────────────────────────────────────────────────
 
+/**
+ * A card about the person signed in, not a form: their name and role over a
+ * soft band, then what the ERP holds about them in three short lists.
+ *
+ * It was a data-entry frame, see-through like every glass window, with the
+ * email three times over and six grey tiles that read as boxes to fill in.
+ * Solid here, and each fact once, with its label beside it.
+ */
 function ProfileDialog({ onClose, onChangePassword }: { onClose: () => void; onChangePassword: () => void }) {
   const access = useAccess()
   const [me, setMe] = useState<Me | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // The copy in this browser draws the head straight away; the server's fills the rest.
+  const [stored] = useState<StoredUser | null>(() => currentUser())
+  const cardRef = useRef<HTMLDivElement>(null)
+  const titleId = useId()
+
+  useEscape(onClose)
+  useDialogFocus(cardRef)
+  useEffect(() => {
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [])
 
   // Read fresh: the copy kept in this browser may be from before an
   // administrator changed the name or the role.
@@ -280,88 +312,147 @@ function ProfileDialog({ onClose, onChangePassword }: { onClose: () => void; onC
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load your details.'))
   }, [])
 
-  const superAdmin = Boolean(me?.superAdmin) || me?.role === SUPER_ROLE
+  const name = me?.name ?? stored?.name ?? ''
+  const email = me?.email ?? stored?.email ?? ''
+  const role = me?.role ?? access.role ?? stored?.role ?? null
+  const superAdmin = Boolean(me?.superAdmin) || access.superAdmin || role === SUPER_ROLE
   const screens = access.screens ?? []
   const openable = screens.filter((s) => canDo(s.key, 'view')).length
   const managePeople = canOpen('/settings/people')
 
-  return (
-    <FormFrame
-      icon={UserRound}
-      title="My profile"
-      subtitle={me?.email}
-      width="max-w-xl"
-      primaryInHeader={false}
-      primary={
-        <button type="button" className="btn-primary" onClick={onChangePassword}>
-          <KeyRound size={15} />
-          Change password
-        </button>
-      }
-      footer={
-        <button type="button" className="btn-ghost" onClick={onClose}>
-          Close
-        </button>
-      }
-      error={error}
-      onClose={onClose}
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm sm:left-[var(--sidebar-current-width)]"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
     >
-      {!me && !error && (
-        <div className="text-muted-foreground flex items-center gap-2 py-6 text-sm">
-          <Loader2 size={15} className="animate-spin" /> Loading your details…
+      <div
+        ref={cardRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="animate-fade-in border-border bg-card flex max-h-full w-full max-w-md flex-col overflow-hidden rounded-2xl border shadow-2xl"
+      >
+        <div className="relative h-24 shrink-0 bg-gradient-to-br from-teal-500/30 via-teal-500/10 to-transparent">
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground hover:bg-background/60 absolute right-3 top-3 rounded-lg p-1.5 transition-colors"
+            aria-label="Close"
+          >
+            <X size={18} />
+          </button>
         </div>
-      )}
 
-      {me && (
-        <div className="space-y-4">
-          <div className="border-border flex items-center gap-4 rounded-xl border p-4">
-            <Avatar name={me.name} size="xl" />
-            <div className="min-w-0">
-              <p className="text-foreground truncate text-base font-semibold">{me.name}</p>
-              <p className="text-muted-foreground truncate text-sm">{me.email}</p>
-              <RoleBadge role={me.role} superAdmin={superAdmin} className="mt-2" />
-            </div>
+        <div className="-mt-12 shrink-0 px-6">
+          <span className="bg-card inline-flex rounded-full p-1 shadow-sm">
+            <Avatar name={name} size="xxl" />
+          </span>
+          <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+            <h2 id={titleId} className="text-foreground text-xl font-semibold leading-tight">
+              {name || 'My profile'}
+            </h2>
+            {role && <RoleBadge role={role} superAdmin={superAdmin} />}
           </div>
-
-          <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Detail label="Sign-in email" value={me.email} />
-            <Detail label="Phone" value={me.phone} />
-            <Detail label="Employee code" value={me.employeeCode} />
-            <Detail
-              label="What you can open"
-              value={
-                superAdmin
-                  ? 'Every screen and action'
-                  : screens.length
-                    ? `${openable} of ${screens.length} screens`
-                    : null
-              }
-            />
-            <Detail label="Signed in" value={when(me.lastLoginAt)} />
-            <Detail label="Account made" value={when(me.createdAt, false)} />
-          </dl>
-
-          <p className="text-muted-foreground text-xs">
-            Your name, email, phone and role are kept in Settings → People.{' '}
-            {managePeople ? (
-              <Link href="/settings/people" onClick={onClose} className="text-primary font-medium hover:underline">
-                Open People
-              </Link>
-            ) : (
-              'Ask an administrator to change them.'
-            )}
-          </p>
+          {email && (
+            <p className="text-muted-foreground mt-1 flex items-center gap-1.5 text-sm">
+              <Mail size={14} className="shrink-0" />
+              <span className="truncate" title="You sign in with this">
+                {email}
+              </span>
+            </p>
+          )}
         </div>
-      )}
-    </FormFrame>
+
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-5 pt-5">
+          {error && (
+            <p className="rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-500">{error}</p>
+          )}
+          {!me && !error && (
+            <div className="text-muted-foreground flex items-center gap-2 py-4 text-sm">
+              <Loader2 size={15} className="animate-spin" /> Loading your details…
+            </div>
+          )}
+
+          {me && (
+            <>
+              <ProfileSection title="Account">
+                <ProfileRow icon={Phone} label="Phone" value={me.phone} />
+                <ProfileRow icon={SquareUser} label="Employee code" value={me.employeeCode} />
+              </ProfileSection>
+              {/* The role is the badge under the name; this says what it means. */}
+              <ProfileSection title="Access">
+                <ProfileRow
+                  icon={superAdmin ? Crown : LayoutGrid}
+                  label="Can open"
+                  value={
+                    superAdmin
+                      ? 'Every screen and action'
+                      : screens.length
+                        ? `${openable} of ${screens.length} screens`
+                        : null
+                  }
+                />
+              </ProfileSection>
+              <ProfileSection title="Activity">
+                <ProfileRow icon={Clock} label="Signed in" value={when(me.lastLoginAt)} />
+                <ProfileRow icon={CalendarDays} label="Member since" value={when(me.createdAt, false)} />
+              </ProfileSection>
+
+              <p className="bg-secondary/60 text-muted-foreground flex gap-2 rounded-lg px-3 py-2.5 text-xs leading-relaxed">
+                <Info size={14} className="mt-px shrink-0" />
+                <span>
+                  Your name, email, phone and role are kept in Settings → People.{' '}
+                  {managePeople ? (
+                    <Link href="/settings/people" onClick={onClose} className="text-primary font-medium hover:underline">
+                      Open People
+                    </Link>
+                  ) : (
+                    'Ask an administrator to change them.'
+                  )}
+                </span>
+              </p>
+            </>
+          )}
+        </div>
+
+        <div className="border-border flex shrink-0 items-center justify-end gap-2 border-t px-6 py-3.5">
+          <button type="button" className="btn-ghost" onClick={onClose}>
+            Close
+          </button>
+          <button type="button" className="btn-primary" onClick={onChangePassword}>
+            <KeyRound size={15} />
+            Change password
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }
 
-function Detail({ label, value }: { label: string; value: string | null | undefined }) {
+function ProfileSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-secondary/50 min-w-0 rounded-lg px-3 py-2">
-      <dt className="text-muted-foreground text-[11px]">{label}</dt>
-      <dd className={cn('truncate text-sm', value ? 'text-foreground font-medium' : 'text-muted-foreground')} title={value ?? undefined}>
+    <section>
+      <h3 className="text-muted-foreground mb-1.5 px-0.5 text-[11px] font-semibold uppercase tracking-wider">{title}</h3>
+      <dl className="border-border divide-border/70 divide-y rounded-xl border">{children}</dl>
+    </section>
+  )
+}
+
+function ProfileRow({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string | null | undefined }) {
+  return (
+    <div className="flex items-center gap-3 px-3.5 py-2.5">
+      <Icon size={15} className="text-muted-foreground shrink-0" />
+      <dt className="text-muted-foreground shrink-0 text-sm">{label}</dt>
+      <dd
+        className={cn(
+          'min-w-0 flex-1 truncate text-right text-sm',
+          value ? 'text-foreground font-medium' : 'text-muted-foreground/70 italic',
+        )}
+        title={value ?? undefined}
+      >
         {value || 'Not given'}
       </dd>
     </div>

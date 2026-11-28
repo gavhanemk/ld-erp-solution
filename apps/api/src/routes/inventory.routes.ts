@@ -81,6 +81,23 @@ import { fillJobCardBlanks } from '../services/jobCard.service'
 import { assertGeneralStores } from '../lib/sampleStore'
 import { assertLineQtyFitsUnits, assertQtyFitsUnits, assertRequisitionFitsUnits } from '../services/unitQuantity.service'
 import { orderBrand } from '../lib/orderBrand'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
+
+/**
+ * An item's design no. and colour, flat on a row the screens read (27 Nov
+ * 2026): three "Cotton Twill" items differ only by these.
+ */
+const shadeOf = (i: { designNo: string | null; color: string | null; styleId: string | null }) => ({
+  designNo: i.designNo,
+  color: i.color,
+  styleId: i.styleId,
+})
+
+/** An item's name for a message or the trail, its design no. and colour beside it when it has them. */
+const nameWithShade = (i: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null }) => {
+  const shade = itemShadeText(i)
+  return shade ? `${i.name} (${shade})` : i.name
+}
 
 /** A customer's receipt's quantities, each against its item: what their challan said, what came, what was refused. */
 const customerGrnQtys = (data: { lines: Array<{ itemId: string; challanQty?: number | null; receivedQty: number; rejectedQty?: number | null }> }) =>
@@ -335,6 +352,7 @@ function ledgerQuery(query: Record<string, unknown>) {
     const like = `%${word}%`
     base.push(Prisma.sql`(
       i.name ILIKE ${like} OR i.code ILIKE ${like} OR w.name ILIKE ${like}
+      OR COALESCE(i."designNo", '') ILIKE ${like} OR COALESCE(i.color, '') ILIKE ${like}
       OR COALESCE(s.notes, '') ILIKE ${like} OR COALESCE(oc.name, '') ILIKE ${like}
       OR c.name ILIKE ${like} OR COALESCE(pc.name, '') ILIKE ${like} OR COALESCE(d.name, '') ILIKE ${like}
       OR COALESCE(p.doc, '') ILIKE ${like} OR COALESCE(p."partyName", '') ILIKE ${like})`)
@@ -469,8 +487,11 @@ async function ledgerAnalysis(all: Prisma.Sql) {
     ORDER BY ${moved} DESC, moves DESC`
   const [byStore, byCategory, byDepartment, byDocument, topItems] = await Promise.all([
     by('store'), by('category'), by('department'), by('document'),
-    prisma.$queryRaw<Array<LedgerGroup & { code: string; uom: string; inQty: number; outQty: number }>>`
+    prisma.$queryRaw<
+      Array<LedgerGroup & { code: string; uom: string; inQty: number; outQty: number; designNo: string | null; color: string | null; styleId: string | null }>
+    >`
       SELECT s."itemId" AS value, MAX(i.name) AS label, MAX(i.code) AS code, MAX(u.symbol) AS uom,
+        MAX(i."designNo") AS "designNo", MAX(i.color) AS color, MAX(i."styleId") AS "styleId",
         COALESCE(SUM(s."inQty"), 0)::float8 AS "inQty", COALESCE(SUM(s."outQty"), 0)::float8 AS "outQty", ${sums}
       ${LEDGER_FROM}
       JOIN ld_erp.uom u ON u.id = i."uomId"
@@ -490,7 +511,7 @@ async function ledgerRows(ids: string[]) {
     include: {
       item: {
         select: {
-          id: true, code: true, name: true, type: true,
+          id: true, code: true, name: true, type: true, ...ITEM_SHADE,
           uom: { select: { symbol: true } },
           category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
           department: { select: { id: true, name: true } },
@@ -560,7 +581,7 @@ router.get('/valuation', requirePermission(MODULE, 'view'), async (_req, res) =>
 // ── Documents that move stock ───────────────────────────────────────────────
 
 const itemSelect = {
-  select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
+  select: { id: true, code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } },
 }
 
 /** Whose stock a line moved, and its size, for every document that shows its lines. */
@@ -630,9 +651,9 @@ async function refuseRepeatedItems(
     const key = typeof k === 'string' ? k : [k.itemId, k.ownerCustomerId ?? '', k.sizeId ?? '', k.grade ?? 'A'].join('|')
     const first = seen.get(key)
     if (first !== undefined) {
-      const item = await tx.item.findUnique({ where: { id: itemId }, select: { name: true } })
+      const item = await tx.item.findUnique({ where: { id: itemId }, select: { name: true, ...ITEM_SHADE } })
       throw new AppError(
-        `${item?.name ?? 'An item'} is on lines ${first + 1} and ${i + 1}. Enter it once, with the total.`,
+        `${item ? nameWithShade(item) : 'An item'} is on lines ${first + 1} and ${i + 1}. Enter it once, with the total.`,
         400,
         'REPEATED_ITEM',
       )
@@ -676,12 +697,13 @@ router.post('/opening', requirePermission(MODULE, 'create'), async (req: AuthReq
       if (history > 0) {
         const item = await tx.item.findUnique({
           where: { id: line.itemId },
-          select: { name: true },
+          select: { name: true, ...ITEM_SHADE },
         })
+        const what = item ? nameWithShade(item) : 'That item'
         throw new AppError(
           existing.qty !== 0
-            ? `${item?.name ?? 'That item'} already has ${existing.qty} in ${warehouse.name}. Opening stock can only be entered once. To add stock that came in without a purchase order, use Stock in.`
-            : `${item?.name ?? 'That item'} already has stock history in ${warehouse.name}, so its opening stock was entered before. To add stock that came in without a purchase order, use Stock in.`,
+            ? `${what} already has ${existing.qty} in ${warehouse.name}. Opening stock can only be entered once. To add stock that came in without a purchase order, use Stock in.`
+            : `${what} already has stock history in ${warehouse.name}, so its opening stock was entered before. To add stock that came in without a purchase order, use Stock in.`,
           409,
           'OPENING_ALREADY_SET',
         )
@@ -749,10 +771,10 @@ export async function createAdjustment(tx: Prisma.TransactionClient, data: z.inf
     if (!customers && difference > 0 && before.qty === 0 && line.unitRate === undefined) {
       const item = await tx.item.findUnique({
         where: { id: line.itemId },
-        select: { name: true },
+        select: { name: true, ...ITEM_SHADE },
       })
       throw new AppError(
-        `${item?.name ?? 'That item'} has nothing on hand to take a rate from. Enter a rate so the stock found can be valued.`,
+        `${item ? nameWithShade(item) : 'That item'} has nothing on hand to take a rate from. Enter a rate so the stock found can be valued.`,
         400,
         'NO_RATE',
       )
@@ -922,16 +944,17 @@ router.post('/adjustments', requirePermission(MODULE, 'create'), async (req: Aut
 async function stickersFor(lines: Array<{ itemId: string; difference: Prisma.Decimal | number }>) {
   const items = await prisma.item.findMany({
     where: { id: { in: lines.map((l) => l.itemId) } },
-    select: { id: true, code: true, name: true, categoryId: true, category: { select: { name: true, parent: { select: { name: true } } } } },
+    select: { id: true, code: true, name: true, ...ITEM_SHADE, categoryId: true, category: { select: { name: true, parent: { select: { name: true } } } } },
   })
-  const tracked: Array<{ itemId: string; code: string; name: string; qty: number }> = []
-  const untracked: Array<{ itemId: string; code: string; name: string; category: string }> = []
+  type Shade = ReturnType<typeof shadeOf>
+  const tracked: Array<{ itemId: string; code: string; name: string; qty: number } & Shade> = []
+  const untracked: Array<{ itemId: string; code: string; name: string; category: string } & Shade> = []
   for (const it of items) {
     const rule = await packageRule(prisma, it.categoryId)
     const qty = Number(lines.find((l) => l.itemId === it.id)?.difference ?? 0)
-    if (rule.tracked) tracked.push({ itemId: it.id, code: it.code, name: it.name, qty })
+    if (rule.tracked) tracked.push({ itemId: it.id, code: it.code, name: it.name, ...shadeOf(it), qty })
     // The main category is where "Track by package" is usually switched on.
-    else untracked.push({ itemId: it.id, code: it.code, name: it.name, category: it.category.parent?.name ?? it.category.name })
+    else untracked.push({ itemId: it.id, code: it.code, name: it.name, ...shadeOf(it), category: it.category.parent?.name ?? it.category.name })
   }
   return { tracked, untracked }
 }
@@ -1517,6 +1540,8 @@ const mrInclude = {
       item: {
         select: {
           id: true, code: true, name: true, decimalPlaces: true, uom: { select: { symbol: true, decimalPlaces: true } },
+          // Same-name fabrics told apart on every requisition screen and the slip.
+          ...ITEM_SHADE,
           // For the list's item panel: category and sub-category in their own columns.
           category: { select: { name: true, parent: { select: { name: true } } } },
         },
@@ -2239,7 +2264,7 @@ router.patch(
       await lockRequisition(tx, req.params.id)
       const mr = await tx.materialRequisition.findUnique({
         where: { id: req.params.id },
-        include: { lines: { include: { item: { select: { name: true, uom: { select: { symbol: true } } } } } } },
+        include: { lines: { include: { item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } } } },
       })
       if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
       if (mr.status !== 'APPROVED') {
@@ -2269,12 +2294,12 @@ router.patch(
         if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}. Reopen it and try again.`, 400, 'WRONG_LINE')
         // A customer's cloth is theirs to send, never ours to buy.
         if (line.ownership === 'CUSTOMER_OWNED' && l.buyQty > 0) {
-          throw new AppError(`${line.item.name} is a customer's material, so it cannot be bought. Ask them to send the rest.`, 400, 'CUSTOMER_MATERIAL')
+          throw new AppError(`${nameWithShade(line.item)} is a customer's material, so it cannot be bought. Ask them to send the rest.`, 400, 'CUSTOMER_MATERIAL')
         }
         const already = orderedOf.get(l.lineId) ?? 0
         if (l.buyQty + 1e-9 < already) {
           throw new AppError(
-            `${line.item.name}: ${qtyText(already)} ${line.item.uom?.symbol ?? ''} is already ordered, so the quantity to buy cannot go below that. Cancel the order first to buy less.`.replace(/\s+/g, ' '),
+            `${nameWithShade(line.item)}: ${qtyText(already)} ${line.item.uom?.symbol ?? ''} is already ordered, so the quantity to buy cannot go below that. Cancel the order first to buy less.`.replace(/\s+/g, ' '),
             400,
             'ALREADY_ORDERED',
           )
@@ -2504,7 +2529,7 @@ export async function issueRequisition(
     where: { id: mrId },
     include: {
       lines: {
-        include: { item: { select: { name: true, uom: { select: { symbol: true } } } } },
+        include: { item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } },
       },
       department: true,
     },
@@ -2626,7 +2651,7 @@ export async function issueRequisition(
     const total = round3(parts.reduce((t, a) => t + a.qty, 0))
     if (total > owed + 1e-9) {
       throw new AppError(
-        `${line.item.name}: only ${qtyText(owed)} ${unit} is still to be issued on this line, not ${qtyText(total)}. Raise a new requisition for more.`.replace(
+        `${nameWithShade(line.item)}: only ${qtyText(owed)} ${unit} is still to be issued on this line, not ${qtyText(total)}. Raise a new requisition for more.`.replace(
           /\s+/g,
           ' ',
         ),
@@ -2644,7 +2669,7 @@ export async function issueRequisition(
         const loose = Math.max(0, pos.loose)
         if (pos.inPackages > 0 && a.qty > loose + 1e-9) {
           throw new AppError(
-            `${line.item.name}: ${qtyText(pos.inPackages)} ${unit} of it in ${storeNames.get(a.warehouseId) ?? 'that store'} is in stickered packages, and stickered stock is issued by scan. ` +
+            `${nameWithShade(line.item)}: ${qtyText(pos.inPackages)} ${unit} of it in ${storeNames.get(a.warehouseId) ?? 'that store'} is in stickered packages, and stickered stock is issued by scan. ` +
               (loose > 0 ? `Scan the packages to issue them; only ${qtyText(loose)} ${unit} without a sticker can be typed.` : 'Scan the packages to issue them.'),
             400,
             'SCAN_TO_ISSUE',
@@ -2658,7 +2683,7 @@ export async function issueRequisition(
           warehouseId: a.warehouseId,
           mrLineId: line.id,
           qty: a.qty,
-          what: `${line.item.name} in ${storeNames.get(a.warehouseId) ?? 'that store'}`,
+          what: `${nameWithShade(line.item)} in ${storeNames.get(a.warehouseId) ?? 'that store'}`,
           unit,
         })
       }
@@ -2681,7 +2706,7 @@ export async function issueRequisition(
         reservedFor: [line.id],
         stickers: opts.stickers ?? 'window',
       })
-      handedOver.push(`${qtyText(a.qty)} ${unit} ${line.item.name}${a.warehouseId !== line.warehouseId ? ` from ${storeNames.get(a.warehouseId)}` : ''}`.replace(/\s+/g, ' '))
+      handedOver.push(`${qtyText(a.qty)} ${unit} ${nameWithShade(line.item)}${a.warehouseId !== line.warehouseId ? ` from ${storeNames.get(a.warehouseId)}` : ''}`.replace(/\s+/g, ' '))
     }
 
     await tx.materialRequisitionLine.update({
@@ -2885,7 +2910,7 @@ router.post(
           so: { select: { id: true, customerId: true } },
           lines: {
             include: {
-              item: { select: { name: true, uom: { select: { symbol: true } } } },
+              item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
               reservations: { where: { status: 'ACTIVE' } },
             },
           },
@@ -2943,7 +2968,7 @@ router.post(
         const unit = line.item.uom?.symbol ?? ''
         if (line.ownership === 'CUSTOMER_OWNED' && a.qty > 0) {
           throw new AppError(
-            `${line.item.name} is the customer's own material — it is already theirs, so it is not reserved.`,
+            `${nameWithShade(line.item)} is the customer's own material — it is already theirs, so it is not reserved.`,
             400,
             'CUSTOMER_MATERIAL',
           )
@@ -2961,7 +2986,7 @@ router.post(
           )
           if (qty + elsewhere > owed + 1e-9) {
             throw new AppError(
-              `${line.item.name}: ${qtyText(owed)} ${unit} is still owed${elsewhere ? `, and ${qtyText(elsewhere)} is already held in another store` : ''}, so ${qtyText(qty)} cannot be held.`,
+              `${nameWithShade(line.item)}: ${qtyText(owed)} ${unit} is still owed${elsewhere ? `, and ${qtyText(elsewhere)} is already held in another store` : ''}, so ${qtyText(qty)} cannot be held.`,
               400,
               'OVER_RESERVE',
             )
@@ -2972,7 +2997,7 @@ router.post(
           const free = round3(Math.max(0, onRack - held.qty))
           if (qty > free + 1e-9) {
             throw new AppError(
-              `${line.item.name}: ${storeName} has ${qtyText(free)} ${unit} free${held.qty ? ` (${qtyText(held.qty)} is held for other requisitions)` : ''}, so ${qtyText(qty)} cannot be held.`,
+              `${nameWithShade(line.item)}: ${storeName} has ${qtyText(free)} ${unit} free${held.qty ? ` (${qtyText(held.qty)} is held for other requisitions)` : ''}, so ${qtyText(qty)} cannot be held.`,
               400,
               'NOT_ENOUGH_FREE',
             )
@@ -3004,8 +3029,8 @@ router.post(
         }
         changed.push(
           qty > 0
-            ? `${qtyText(qty)} ${unit} ${line.item.name} in ${storeName}`.replace(/\s+/g, ' ')
-            : `released ${line.item.name} in ${storeName}`,
+            ? `${qtyText(qty)} ${unit} ${nameWithShade(line.item)} in ${storeName}`.replace(/\s+/g, ' ')
+            : `released ${nameWithShade(line.item)} in ${storeName}`,
         )
       }
 
@@ -3050,6 +3075,7 @@ router.get('/indents', requirePermission(MODULE, 'view'), async (_req, res) => {
       ownership: string; ownerCustomerId: string | null; fulfilment: string; reserved: number
       departmentId: string; departmentName: string; soNumber: string | null; customerId: string | null; customerName: string | null
       itemId: string; itemCode: string; itemName: string; uom: string | null; purpose: string | null; styleNo: string | null
+      designNo: string | null; color: string | null; styleId: string | null
       asked: number; issued: number; purchaseQty: number | null
       ordered: number; received: number; poNumbers: string | null
     }>
@@ -3059,6 +3085,7 @@ router.get('/indents', requirePermission(MODULE, 'view'), async (_req, res) => {
            COALESCE((SELECT SUM(r.qty) FROM ld_erp.stock_reservations r WHERE r."mrLineId" = l.id AND r.status::text = 'ACTIVE'), 0)::float8 AS "reserved",
            d.id AS "departmentId", d.name AS "departmentName", so."soNumber", cu.id AS "customerId", cu.name AS "customerName",
            i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", u.symbol AS "uom", l.purpose, l."styleNo",
+           i."designNo", i.color, i."styleId",
            l."requestedQty"::float8 AS "asked", l."issuedQty"::float8 AS "issued", l."purchaseQty"::float8 AS "purchaseQty",
            COALESCE(o.ordered, 0)::float8 AS "ordered", COALESCE(g.received, 0)::float8 AS "received", o."poNumbers"
     FROM ld_erp.material_requisition_lines l
@@ -3107,6 +3134,7 @@ router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) 
     Array<{
       id: string; status: string; qty: number; reservedQty: number
       itemId: string; itemCode: string; itemName: string; uom: string | null
+      designNo: string | null; color: string | null; styleId: string | null
       catName: string | null; parentName: string | null
       warehouseId: string; warehouseName: string
       mrId: string; mrNumber: string; neededBy: Date | null; departmentId: string; departmentName: string
@@ -3118,6 +3146,7 @@ router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) 
   >`
     SELECT r.id, r.status::text AS "status", r.qty::float8 AS "qty", r."reservedQty"::float8 AS "reservedQty",
            i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", u.symbol AS "uom",
+           i."designNo", i.color, i."styleId",
            c.name AS "catName", cp.name AS "parentName",
            w.id AS "warehouseId", w.name AS "warehouseName",
            m.id AS "mrId", m."mrNumber", m."requiredDate" AS "neededBy", d.id AS "departmentId", d.name AS "departmentName",
@@ -3165,7 +3194,7 @@ router.patch(
     const { reason } = releaseReservationSchema.parse(req.body ?? {})
     const before = await prisma.stockReservation.findUnique({
       where: { id: req.params.id },
-      include: { mr: { select: { id: true, mrNumber: true } }, item: { select: { name: true, uom: { select: { symbol: true } } } } },
+      include: { mr: { select: { id: true, mrNumber: true } }, item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } },
     })
     if (!before) throw new AppError('Reservation not found', 404, 'NOT_FOUND')
     if (before.status !== 'ACTIVE') throw new AppError('That reservation is no longer held.', 409, 'NOT_ACTIVE')
@@ -3173,7 +3202,7 @@ router.patch(
       where: { id: before.id },
       data: { status: 'RELEASED', qty: 0, releasedAt: new Date(), releasedById: req.user!.id, releaseReason: reason },
     })
-    const what = `released ${qtyText(Number(before.qty))} ${before.item.uom?.symbol ?? ''} ${before.item.name}`.replace(/\s+/g, ' ')
+    const what = `released ${qtyText(Number(before.qty))} ${before.item.uom?.symbol ?? ''} ${nameWithShade(before.item)}`.replace(/\s+/g, ' ')
     await writeAuditLog(req, {
       module: MODULE,
       action: 'UPDATE',
@@ -3207,7 +3236,7 @@ router.get('/requisitions/:id/print', requirePermission(MODULE, 'view'), async (
     select: {
       transactionDate: true,
       outQty: true,
-      item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+      item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
       warehouse: { select: { name: true } },
     },
     orderBy: [{ transactionDate: 'asc' }, { createdAt: 'asc' }],
@@ -3232,6 +3261,7 @@ router.get('/transfers/:id/print', requirePermission(MODULE, 'view'), async (req
               code: true,
               name: true,
               hsnCode: true,
+              ...ITEM_SHADE,
               uom: { select: { symbol: true } },
             },
           },
@@ -3268,6 +3298,7 @@ router.get('/count-sheet', requirePermission(MODULE, 'view'), async (req, res) =
     itemId: r.itemId,
     code: r.itemCode,
     name: r.itemName,
+    ...shadeOf(r),
     category: r.categoryName,
     uom: r.uom,
     bookQty: r.qty,
@@ -3281,6 +3312,7 @@ router.get('/count-sheet', requirePermission(MODULE, 'view'), async (req, res) =
         id: true,
         code: true,
         name: true,
+        ...ITEM_SHADE,
         category: { select: { name: true } },
         uom: { select: { symbol: true } },
       },
@@ -3290,6 +3322,7 @@ router.get('/count-sheet', requirePermission(MODULE, 'view'), async (req, res) =
         itemId: i.id,
         code: i.code,
         name: i.name,
+        ...shadeOf(i),
         category: i.category.name,
         uom: i.uom.symbol,
         bookQty: 0,
@@ -3297,7 +3330,14 @@ router.get('/count-sheet', requirePermission(MODULE, 'view'), async (req, res) =
     }
   }
 
-  rows.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name))
+  // Same-name fabric one design after another, so the keeper finds each roll's line.
+  rows.sort(
+    (a, b) =>
+      a.category.localeCompare(b.category) ||
+      a.name.localeCompare(b.name) ||
+      (a.designNo ?? '').localeCompare(b.designNo ?? '', undefined, { numeric: true }) ||
+      (a.color ?? '').localeCompare(b.color ?? ''),
+  )
 
   const header = await getPrintHeader('COUNT')
   res.json({ success: true, data: { ...header, warehouse, rows, printedAt: new Date() } })
@@ -3314,7 +3354,7 @@ router.get('/count-sheet', requirePermission(MODULE, 'view'), async (req, res) =
 
 const partySelect = { select: { id: true, name: true, code: true } }
 const itemLineSelect = {
-  select: { id: true, code: true, name: true, hsnCode: true, uom: { select: { symbol: true } } },
+  select: { id: true, code: true, name: true, hsnCode: true, ...ITEM_SHADE, uom: { select: { symbol: true } } },
 }
 
 const customerGrnInclude = {
@@ -3678,7 +3718,7 @@ router.post('/customer-grn/:id/inspect', requirePermission(MODULE, 'edit'), asyn
   const before = await prisma.customerGRN.findUnique({ where: { id: req.params.id }, include: { lines: true } })
   const grn = await prisma.$transaction(async (tx) => {
     await lockRow(tx, 'customerGrn', req.params.id)
-    const was = await tx.customerGRN.findUnique({ where: { id: req.params.id }, include: { lines: { include: { item: { select: { name: true, uom: { select: { symbol: true } } } } } } } })
+    const was = await tx.customerGRN.findUnique({ where: { id: req.params.id }, include: { lines: { include: { item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } } } } })
     if (!was) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
     if (was.status !== 'SUBMITTED' && was.status !== 'INSPECTED') {
       throw new AppError(
@@ -3697,12 +3737,12 @@ router.post('/customer-grn/:id/inspect', requirePermission(MODULE, 'edit'), asyn
       throw new AppError(`You received ${was.grnNumber}, so someone else does its QC.`, 403, 'QC_NOT_RECEIVER')
     }
     const missing = was.lines.filter((l) => !data.lines.some((d) => d.lineId === l.id))
-    if (missing.length) throw new AppError(`QC every line: ${missing.map((l) => l.item.name).join(', ')} ${missing.length === 1 ? 'is' : 'are'} not checked.`, 400, 'QC_EVERY_LINE')
+    if (missing.length) throw new AppError(`QC every line: ${missing.map((l) => nameWithShade(l.item)).join(', ')} ${missing.length === 1 ? 'is' : 'are'} not checked.`, 400, 'QC_EVERY_LINE')
     for (const d of data.lines) {
       const line = was.lines.find((l) => l.id === d.lineId)
       if (!line) throw new AppError(`That line is not on ${was.grnNumber}.`, 400, 'WRONG_LINE')
       if (d.rejectedQty > Number(line.receivedQty) + 1e-9) {
-        throw new AppError(`Only ${Number(line.receivedQty)} ${line.item.uom?.symbol ?? ''} of ${line.item.name} arrived, so ${d.rejectedQty} cannot be rejected.`.replace(/\s+/g, ' '), 400, 'OVER_REJECTED')
+        throw new AppError(`Only ${Number(line.receivedQty)} ${line.item.uom?.symbol ?? ''} of ${nameWithShade(line.item)} arrived, so ${d.rejectedQty} cannot be rejected.`.replace(/\s+/g, ' '), 400, 'OVER_REJECTED')
       }
       await tx.customerGRNLine.update({
         where: { id: line.id },
@@ -3865,7 +3905,7 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
           include: {
             item: {
               select: {
-                id: true, code: true, name: true, type: true, uom: { select: { symbol: true } },
+                id: true, code: true, name: true, type: true, ...ITEM_SHADE, uom: { select: { symbol: true } },
                 category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
                 department: { select: { id: true, name: true } },
               },
@@ -3942,6 +3982,7 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       itemId: l.item.id,
       itemCode: l.item.code,
       itemName: l.item.name,
+      ...shadeOf(l.item),
       uom: l.item.uom?.symbol ?? '',
       ...about(l.item),
       challanQty: Number(l.challanQty),
@@ -3977,6 +4018,7 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       itemId: h.itemId,
       itemCode: h.itemCode,
       itemName: h.itemName,
+      ...shadeOf(h),
       uom: h.uom,
       warehouseId: h.warehouseId,
       warehouseName: h.warehouseName,
@@ -4246,7 +4288,7 @@ router.post('/customer-grn/:id/release', requirePermission(MODULE, 'approve'), a
       await lockRow(tx, 'customerGrn', req.params.id)
       const grn = await tx.customerGRN.findUnique({
         where: { id: req.params.id },
-        include: { lines: { include: { item: { select: { name: true, uom: { select: { symbol: true } } } } } } },
+        include: { lines: { include: { item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } } } },
       })
       if (!grn) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
       if (grn.status !== 'POSTED') throw new AppError(`${grn.grnNumber} is not on the books, so nothing on it is held.`, 409, 'NOT_POSTED')
@@ -4267,7 +4309,7 @@ router.post('/customer-grn/:id/release', requirePermission(MODULE, 'approve'), a
   })
   res.json({
     success: true,
-    message: `${data.qty} ${result.unit} of ${result.line.item.name} on ${result.grn.grnNumber} released for use${result.done.packages.length ? ` (stickers ${result.done.packages.join(', ')})` : ''}.`,
+    message: `${data.qty} ${result.unit} of ${nameWithShade(result.line.item)} on ${result.grn.grnNumber} released for use${result.done.packages.length ? ` (stickers ${result.done.packages.join(', ')})` : ''}.`,
     data: result.done,
   })
 })
@@ -4312,7 +4354,7 @@ export async function createCustomerReturn(tx: Prisma.TransactionClient, data: z
     // "Rejected" return, the usable part for any other.
     const rejectedReturn = data.reason === 'REJECTED'
     const [gl, back] = await Promise.all([
-      tx.customerGRNLine.findMany({ where: { grnId: data.grnId }, select: { itemId: true, receivedQty: true, rejectedQty: true, releasedQty: true, item: { select: { name: true } } } }),
+      tx.customerGRNLine.findMany({ where: { grnId: data.grnId }, select: { itemId: true, receivedQty: true, rejectedQty: true, releasedQty: true, item: { select: { name: true, ...ITEM_SHADE } } } }),
       tx.customerMaterialReturnLine.findMany({ where: { return: { grnId: data.grnId, cancelledAt: null } }, select: { itemId: true, qty: true, return: { select: { reason: true } } } }),
     ])
     for (const l of data.lines) {
@@ -4325,8 +4367,8 @@ export async function createCustomerReturn(tx: Prisma.TransactionClient, data: z
       if (l.qty > came - gone + 1e-9) {
         throw new AppError(
           rejectedReturn
-            ? `${inLines[0].item.name}: ${Math.round(Math.max(0, came - gone) * 1000) / 1000} is still held as rejected on ${grn.grnNumber}, so ${l.qty} cannot go back as rejected.`
-            : `${inLines[0].item.name}: ${Math.round(came * 1000) / 1000} usable came in on ${grn.grnNumber} and ${gone} has gone back, so ${l.qty} more is too much.`,
+            ? `${nameWithShade(inLines[0].item)}: ${Math.round(Math.max(0, came - gone) * 1000) / 1000} is still held as rejected on ${grn.grnNumber}, so ${l.qty} cannot go back as rejected.`
+            : `${nameWithShade(inLines[0].item)}: ${Math.round(came * 1000) / 1000} usable came in on ${grn.grnNumber} and ${gone} has gone back, so ${l.qty} more is too much.`,
           400,
           'MORE_THAN_RECEIVED',
         )
@@ -4451,7 +4493,7 @@ router.get('/customer-return/lines', requirePermission(MODULE, 'view'), async (_
         include: {
           item: {
             select: {
-              id: true, code: true, name: true, uom: { select: { symbol: true } },
+              id: true, code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } },
               category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
               department: { select: { id: true, name: true } },
             },
@@ -4485,6 +4527,7 @@ router.get('/customer-return/lines', requirePermission(MODULE, 'view'), async (_
       itemId: l.item.id,
       itemCode: l.item.code,
       itemName: l.item.name,
+      ...shadeOf(l.item),
       uom: l.item.uom?.symbol ?? '',
       hsnCode: l.hsnCode,
       mainCategoryId: l.item.category.parent?.id ?? l.item.category.id,
@@ -4807,7 +4850,7 @@ router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, re
         include: {
           item: {
             select: {
-              id: true, code: true, name: true, type: true, uom: { select: { symbol: true } },
+              id: true, code: true, name: true, type: true, ...ITEM_SHADE, uom: { select: { symbol: true } },
               category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
               department: { select: { id: true, name: true } },
             },
@@ -4815,7 +4858,7 @@ router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, re
           returnLines: {
             where: { jobWorkReturn: { cancelledAt: null } },
             include: {
-              item: { select: { id: true, name: true, uom: { select: { symbol: true } } } },
+              item: { select: { id: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
               jobWorkReturn: { select: { id: true, returnNumber: true, returnDate: true, _count: { select: { debitNotes: { where: { status: { notIn: ['CANCELLED', 'REJECTED'] as Array<'CANCELLED' | 'REJECTED'> } } } } } } },
             },
           },
@@ -4835,10 +4878,10 @@ router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, re
       // Damaged pieces not yet charged to the job worker on a debit note.
       const damagedUncharged = l.returnLines.filter((r) => Number(r.damagedQty) > 0 && r.jobWorkReturn._count.debitNotes === 0).reduce((t, r) => t + Number(r.damagedQty), 0)
       // What came back as itself, and what came back made into something else.
-      const madeBy = new Map<string, { itemName: string; uom: string; qty: number }>()
+      const madeBy = new Map<string, { itemName: string; uom: string; qty: number } & ReturnType<typeof shadeOf>>()
       for (const r of l.returnLines) {
         if (r.itemId === l.itemId) continue
-        const cur = madeBy.get(r.itemId) ?? { itemName: r.item.name, uom: r.item.uom?.symbol ?? '', qty: 0 }
+        const cur = madeBy.get(r.itemId) ?? { itemName: r.item.name, ...shadeOf(r.item), uom: r.item.uom?.symbol ?? '', qty: 0 }
         cur.qty += Number(r.receivedQty)
         madeBy.set(r.itemId, cur)
       }
@@ -4868,6 +4911,7 @@ router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, re
         itemId: it.id,
         itemCode: it.code,
         itemName: it.name,
+        ...shadeOf(it),
         itemType: it.type,
         uom: it.uom?.symbol ?? '',
         hsnCode: l.hsnCode,
@@ -4949,7 +4993,7 @@ router.get('/job-work/:id', requirePermission(MODULE, 'view'), async (req, res) 
 async function stillOut(tx: Prisma.TransactionClient, challanId: string) {
   const challan = await tx.jobWorkChallan.findUnique({
     where: { id: challanId },
-    include: { lines: { include: { item: { select: { name: true } } } } },
+    include: { lines: { include: { item: { select: { name: true, ...ITEM_SHADE } } } } },
   })
   if (!challan) throw new AppError('That challan does not exist', 404, 'NOT_FOUND')
 
@@ -5012,7 +5056,7 @@ export async function createJobWorkReturn(tx: Prisma.TransactionClient, data: z.
       const accounted = round3(line.receivedQty + (line.damagedQty ?? 0) + (line.wastedQty ?? 0))
       if (accounted !== round3(line.consumedQty)) {
         throw new AppError(
-          `${o.line.item.name}: ${line.receivedQty} good + ${line.damagedQty ?? 0} damaged + ${line.wastedQty ?? 0} wasted is ${accounted}, but ${line.consumedQty} is being settled. They have to add up.`,
+          `${nameWithShade(o.line.item)}: ${line.receivedQty} good + ${line.damagedQty ?? 0} damaged + ${line.wastedQty ?? 0} wasted is ${accounted}, but ${line.consumedQty} is being settled. They have to add up.`,
           400,
           'RETURN_NOT_ACCOUNTED',
         )
@@ -5022,8 +5066,8 @@ export async function createJobWorkReturn(tx: Prisma.TransactionClient, data: z.
     if (total > o.outstanding) {
       throw new AppError(
         o.outstanding > 0
-          ? `${o.line.item.name}: only ${o.outstanding} is still out at ${challan.jobWorker.name}, and you are settling ${total}.`
-          : `${o.line.item.name}: everything sent has already come back.`,
+          ? `${nameWithShade(o.line.item)}: only ${o.outstanding} is still out at ${challan.jobWorker.name}, and you are settling ${total}.`
+          : `${nameWithShade(o.line.item)}: everything sent has already come back.`,
         400,
         'OVER_RETURN',
       )
@@ -5189,7 +5233,7 @@ export async function returnFromFloor(tx: Prisma.TransactionClient, mrId: string
   await tx.$queryRaw`SELECT id FROM ld_erp.material_requisitions WHERE id = ${mrId} FOR UPDATE`
   const mr = await tx.materialRequisition.findUnique({
     where: { id: mrId },
-    include: { lines: { include: { item: { select: { name: true, uom: { select: { symbol: true } } } } } }, department: { select: { name: true } } },
+    include: { lines: { include: { item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } } }, department: { select: { name: true } } },
   })
   if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
   const back: string[] = []
@@ -5216,7 +5260,9 @@ export async function returnFromFloor(tx: Prisma.TransactionClient, mrId: string
     const open = round3(Number(line.issuedQty) - Number(line.returnedQty))
     if (r.qty > open + 1e-9) {
       throw new AppError(
-        open > 0 ? `${line.item.name}: only ${open} was issued and not yet returned, and ${r.qty} is coming back.` : `${line.item.name}: nothing issued on ${mr.mrNumber} is left to return.`,
+        open > 0
+          ? `${nameWithShade(line.item)}: only ${open} was issued and not yet returned, and ${r.qty} is coming back.`
+          : `${nameWithShade(line.item)}: nothing issued on ${mr.mrNumber} is left to return.`,
         400,
         'MORE_THAN_ISSUED',
       )
@@ -5244,7 +5290,7 @@ export async function returnFromFloor(tx: Prisma.TransactionClient, mrId: string
       notes: `${returnNumber}: back from ${mr.department.name} on ${mr.mrNumber}${data.reason ? `: ${data.reason}` : ''}`,
     })
     await tx.materialRequisitionLine.update({ where: { id: line.id }, data: { returnedQty: { increment: r.qty } } })
-    back.push(`${round3(r.qty)} ${line.item.uom?.symbol ?? ''} ${line.item.name} into ${wh.name}`.replace(/\s+/g, ' '))
+    back.push(`${round3(r.qty)} ${line.item.uom?.symbol ?? ''} ${nameWithShade(line.item)} into ${wh.name}`.replace(/\s+/g, ' '))
   }
   return { mrNumber: mr.mrNumber, back, returnNumber, returnId: doc.id }
 }
@@ -5260,7 +5306,7 @@ export async function cancelFloorReturn(tx: Prisma.TransactionClient, id: string
   const fr = await tx.floorReturn.findUnique({
     where: { id },
     include: {
-      lines: { include: { mrLine: { select: { id: true, ownership: true, ownerCustomerId: true, returnedQty: true, item: { select: { name: true, uom: { select: { symbol: true } } } } } } } },
+      lines: { include: { mrLine: { select: { id: true, ownership: true, ownerCustomerId: true, returnedQty: true, item: { select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } } } } },
       mr: { select: { id: true, mrNumber: true } },
     },
   })
@@ -5287,7 +5333,7 @@ export async function cancelFloorReturn(tx: Prisma.TransactionClient, id: string
     const used = round3(Math.min(qty, Math.max(0, Number(b.outs) - Number(b.before))))
     if (used > 0.0005) {
       throw new AppError(
-        `${used} ${unit} of the ${l.mrLine.item.name} that came back on ${fr.returnNumber} has already gone out of the store again, so the return cannot be taken back. Correct the stock with a stock adjustment instead.`,
+        `${used} ${unit} of the ${nameWithShade(l.mrLine.item)} that came back on ${fr.returnNumber} has already gone out of the store again, so the return cannot be taken back. Correct the stock with a stock adjustment instead.`,
         409,
         'STOCK_ALREADY_USED',
       )
@@ -5368,7 +5414,7 @@ router.get('/requisitions/:id/floor-returns', requirePermission(MODULE, 'view'),
     include: {
       createdBy: { select: { name: true } },
       cancelledBy: { select: { name: true } },
-      lines: { include: { mrLine: { select: { item: { select: { name: true, code: true, uom: { select: { symbol: true } } } } } } } },
+      lines: { include: { mrLine: { select: { item: { select: { name: true, code: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } } } } } },
     },
   })
   const stores = new Map(
@@ -5385,7 +5431,14 @@ router.get('/requisitions/:id/floor-returns', requirePermission(MODULE, 'view'),
       cancelledAt: r.cancelledAt,
       cancelledBy: r.cancelledBy?.name ?? null,
       cancelReason: r.cancelReason,
-      lines: r.lines.map((l) => ({ item: l.mrLine.item.name, code: l.mrLine.item.code, unit: l.mrLine.item.uom?.symbol ?? '', qty: Number(l.qty), store: stores.get(l.warehouseId) ?? '' })),
+      lines: r.lines.map((l) => ({
+        item: l.mrLine.item.name,
+        code: l.mrLine.item.code,
+        ...shadeOf(l.mrLine.item),
+        unit: l.mrLine.item.uom?.symbol ?? '',
+        qty: Number(l.qty),
+        store: stores.get(l.warehouseId) ?? '',
+      })),
     })),
   })
 })
@@ -5831,6 +5884,7 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
         code: true,
         name: true,
         type: true,
+        ...ITEM_SHADE,
         categoryId: true,
         decimalPlaces: true,
         packType: true,
@@ -5880,6 +5934,7 @@ router.get('/opening-stock/form', requirePermission(MODULE, 'view'), async (_req
         code: i.code,
         name: i.name,
         type: i.type,
+        ...shadeOf(i),
         categoryId: i.categoryId,
         unit: i.uom?.symbol ?? null,
         decimals: i.decimalPlaces ?? i.uom?.decimalPlaces ?? 0,
@@ -6102,7 +6157,7 @@ function openingLinesWhere(query: Record<string, unknown>): Prisma.OpeningStockL
         { bundleNo: like(q) },
         { colour: like(q) },
         { remarks: like(q) },
-        { item: { OR: [{ code: like(q) }, { name: like(q) }, { color: like(q) }, { style: { code: like(q) } }] } },
+        { item: { OR: [{ code: like(q) }, { name: like(q) }, { designNo: like(q) }, { color: like(q) }, { style: { code: like(q) } }] } },
         { openingStock: { number: like(q) } },
       ],
     })
@@ -6118,9 +6173,10 @@ function openingLinesWhere(query: Record<string, unknown>): Prisma.OpeningStockL
 router.get('/opening-stock/filters', requirePermission(MODULE, 'view'), async (_req, res) => {
   type Opt = { value: string; label: string; sub?: string | null; lines: number }
   const [items, categories, styles, colours, sizes, processes, locations, orders, lots] = await Promise.all([
-    prisma.$queryRaw<Array<{ id: string; code: string; name: string; lines: number }>>`
-      SELECT i.id, i.code, i.name, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
-      GROUP BY i.id, i.code, i.name ORDER BY i.name`,
+    prisma.$queryRaw<Array<{ id: string; code: string; name: string; designNo: string | null; color: string | null; styleId: string | null; lines: number }>>`
+      SELECT i.id, i.code, i.name, i."designNo", i.color, i."styleId", COUNT(*)::int AS lines
+      FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
+      GROUP BY i.id, i.code, i.name, i."designNo", i.color, i."styleId" ORDER BY i.name`,
     prisma.$queryRaw<Array<{ id: string; name: string; lines: number }>>`
       SELECT c.id, c.name, COUNT(*)::int AS lines FROM ld_erp.opening_stock_lines l JOIN ld_erp.items i ON i.id = l."itemId"
       JOIN ld_erp.item_categories c ON c.id = i."categoryId" GROUP BY c.id, c.name ORDER BY c.name`,
@@ -6152,8 +6208,11 @@ router.get('/opening-stock/filters', requirePermission(MODULE, 'view'), async (_
   res.json({
     success: true,
     data: {
-      item: items.map((i) => ({ value: i.id, label: i.name, sub: i.code, lines: i.lines })),
-      code: [...items].sort((a, b) => a.code.localeCompare(b.code)).map((i) => ({ value: i.id, label: i.code, sub: i.name, lines: i.lines })),
+      // Same-name fabrics told apart by their design no. and colour beside the code.
+      item: items.map((i) => ({ value: i.id, label: i.name, sub: [i.code, itemShadeText(i)].filter(Boolean).join(' · '), lines: i.lines })),
+      code: [...items]
+        .sort((a, b) => a.code.localeCompare(b.code))
+        .map((i) => ({ value: i.id, label: i.code, sub: [i.name, itemShadeText(i)].filter(Boolean).join(' · '), lines: i.lines })),
       category: categories.map((c) => ({ value: c.id, label: c.name, lines: c.lines })),
       style: plain(styles),
       colour: plain(colours),
@@ -6185,7 +6244,7 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
         rowNo: true,
         value: true,
         openingStock: { select: { createdAt: true } },
-        item: { select: { name: true, color: true, style: { select: { code: true } } } },
+        item: { select: { name: true, designNo: true, color: true, style: { select: { code: true } } } },
         size: { select: { sequence: true } },
       },
     }),
@@ -6206,6 +6265,8 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
     if (sa !== sb) return !sa ? 1 : !sb ? -1 : sa.localeCompare(sb, undefined, { numeric: true })
     return (
       a.item.name.localeCompare(b.item.name) ||
+      // Same-name fabric, design by design.
+      (a.item.designNo ?? '').localeCompare(b.item.designNo ?? '', undefined, { numeric: true }) ||
       colourOf(a).localeCompare(colourOf(b)) ||
       (a.size?.sequence ?? 0) - (b.size?.sequence ?? 0) ||
       b.openingStock.createdAt.getTime() - a.openingStock.createdAt.getTime() ||
@@ -6224,7 +6285,7 @@ router.get('/opening-stock/lines', requirePermission(MODULE, 'view'), async (req
           code: true,
           name: true,
           type: true,
-          color: true,
+          ...ITEM_SHADE,
           categoryId: true,
           packType: true,
           packQty: true,
@@ -6367,7 +6428,7 @@ router.get('/opening-stock/:id', requirePermission(MODULE, 'view'), async (req, 
               code: true,
               name: true,
               type: true,
-              color: true,
+              ...ITEM_SHADE,
               uom: { select: { symbol: true } },
               style: { select: { code: true } },
               category: { select: { name: true } },

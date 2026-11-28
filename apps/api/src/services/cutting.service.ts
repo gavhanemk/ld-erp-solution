@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
 import { recordMovement } from './stock.service'
 import { lockMo, postEvent, reverseEvent } from './wip.service'
 import { nextChallanNo } from './challanNo'
@@ -35,6 +36,11 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000
 const round2 = (n: number) => Math.round(n * 100) / 100
 const isFabric = (cat: { name: string; parent: { name: string } | null } | null) =>
   /fabric/i.test(cat?.name ?? '') || /fabric/i.test(cat?.parent?.name ?? '')
+/** A fabric as a message names it: with its design and colour, as two of one name can be issued to an order. */
+const fabricWords = (f: { name: string; designNo: string | null; color: string | null; styleId: string | null }) => {
+  const shade = itemShadeText(f)
+  return shade ? `${f.name} (${shade})` : f.name
+}
 
 /** Pieces to a bundle when nothing else is said. */
 export const DEFAULT_BUNDLE_SIZE = 20
@@ -123,7 +129,7 @@ export async function cuttingPrep(db: Db, moId: string) {
           bundleSize: true,
           status: true,
           notes: true,
-          fabricItem: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+          fabricItem: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
           panelItem: { select: { code: true, name: true } },
           panelWarehouse: { select: { name: true } },
           createdBy: { select: { name: true } },
@@ -144,16 +150,36 @@ export async function cuttingPrep(db: Db, moId: string) {
       ownership: true,
       ownerCustomerId: true,
       ownerCustomer: { select: { name: true } },
-      item: { select: { code: true, name: true, uom: { select: { symbol: true } }, category: { select: { name: true, parent: { select: { name: true } } } } } },
+      item: {
+        select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } }, category: { select: { name: true, parent: { select: { name: true } } } } },
+      },
     },
   })
   type Owner = { ownerCustomerId: string | null; name: string; issued: number }
-  const byItem = new Map<string, { itemId: string; code: string; name: string; uom: string | null; fabric: boolean; issued: number; owners: Map<string, Owner> }>()
+  const byItem = new Map<
+    string,
+    {
+      itemId: string
+      code: string
+      name: string
+      designNo: string | null
+      color: string | null
+      styleId: string | null
+      uom: string | null
+      fabric: boolean
+      issued: number
+      owners: Map<string, Owner>
+    }
+  >()
   for (const l of issued) {
     const row = byItem.get(l.itemId) ?? {
       itemId: l.itemId,
       code: l.item.code,
       name: l.item.name,
+      // Its design and colour, so two fabrics of one name issued to the order are told apart.
+      designNo: l.item.designNo,
+      color: l.item.color,
+      styleId: l.item.styleId,
       uom: l.item.uom?.symbol ?? null,
       fabric: isFabric(l.item.category),
       issued: 0,
@@ -183,6 +209,9 @@ export async function cuttingPrep(db: Db, moId: string) {
         itemId: f.itemId,
         code: f.code,
         name: f.name,
+        designNo: f.designNo,
+        color: f.color,
+        styleId: f.styleId,
         uom: f.uom,
         fabric: f.fabric,
         issued: f.issued,
@@ -193,7 +222,8 @@ export async function cuttingPrep(db: Db, moId: string) {
         left: round3(f.issued - accounted),
       }
     })
-    .sort((a, b) => Number(b.fabric) - Number(a.fabric) || a.name.localeCompare(b.name))
+    // Same-name fabrics (one per design and colour) side by side, in code order.
+    .sort((a, b) => Number(b.fabric) - Number(a.fabric) || a.name.localeCompare(b.name) || a.code.localeCompare(b.code))
 
   // Pieces by size, for the whole order (cuttings made before lines were
   // recorded count here) and line by line.
@@ -566,7 +596,7 @@ export async function correctLayFabric(tx: Db, id: string, d: z.infer<typeof lay
     const room = round3(fabric.left + wasUsed + wasWaste)
     const now = round3(d.fabricUsed + d.wastage)
     if (now > room + 1e-9) {
-      throw new AppError(`Only ${room} ${fabric.uom ?? ''} of ${fabric.name} issued to ${prep.mo.moNumber} is free for this lay; used with waste come to ${now}.`.replace(/\s+/g, ' '), 400, 'MORE_THAN_ISSUED')
+      throw new AppError(`Only ${room} ${fabric.uom ?? ''} of ${fabricWords(fabric)} issued to ${prep.mo.moNumber} is free for this lay; used with waste come to ${now}.`.replace(/\s+/g, ' '), 400, 'MORE_THAN_ISSUED')
     }
   }
   const after = await tx.cuttingOrder.update({
@@ -623,7 +653,7 @@ export async function createCutting(
   }
   if (fabric.mixed) {
     throw new AppError(
-      `${fabric.name} issued to ${mo.moNumber} is partly ${fabric.mixed.map((n) => (n === 'ours' ? 'ours' : `${n}'s`)).join(' and partly ')}, so a panel cut from it cannot be booked to one owner. Return one of them to the store before recording this cutting.`,
+      `${fabricWords(fabric)} issued to ${mo.moNumber} is partly ${fabric.mixed.map((n) => (n === 'ours' ? 'ours' : `${n}'s`)).join(' and partly ')}, so a panel cut from it cannot be booked to one owner. Return one of them to the store before recording this cutting.`,
       409,
       'MIXED_OWNERS',
     )
@@ -632,7 +662,7 @@ export async function createCutting(
   // is made from it must stay theirs.
   if (fabric.theirs && (!mo.so?.isJobWork || mo.so.customerId !== fabric.ownerCustomerId)) {
     throw new AppError(
-      `${fabric.name} issued to ${mo.moNumber} is a customer's fabric, but ${mo.so ? `${mo.so.soNumber} is not their job-work order` : 'the order is not a job-work order of theirs'}. Return it to the store; it cannot be cut here.`,
+      `${fabricWords(fabric)} issued to ${mo.moNumber} is a customer's fabric, but ${mo.so ? `${mo.so.soNumber} is not their job-work order` : 'the order is not a job-work order of theirs'}. Return it to the store; it cannot be cut here.`,
       409,
       'WRONG_OWNER',
     )
@@ -640,7 +670,7 @@ export async function createCutting(
   const wastage = data.wastage ?? 0
   if (round3(data.fabricUsed + wastage) > fabric.left + 1e-9) {
     throw new AppError(
-      `Only ${fabric.left} ${fabric.uom ?? ''} of ${fabric.name} issued to ${mo.moNumber} is not yet accounted for; this cutting uses ${round3(data.fabricUsed + wastage)} with the waste.`.replace(/\s+/g, ' '),
+      `Only ${fabric.left} ${fabric.uom ?? ''} of ${fabricWords(fabric)} issued to ${mo.moNumber} is not yet accounted for; this cutting uses ${round3(data.fabricUsed + wastage)} with the waste.`.replace(/\s+/g, ' '),
       400,
       'MORE_THAN_ISSUED',
     )

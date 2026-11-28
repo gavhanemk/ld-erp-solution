@@ -7,6 +7,7 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { itemShade, type ShadeFields } from '@/lib/items'
 import { ContractorPicker, type KnownContractor } from './floor/ContractorPicker'
 
 /**
@@ -67,7 +68,8 @@ interface Details {
   detailsBlock: string | null
   jobCards: JobCardRow[]
   cuttingIssues: IssueRow[]
-  fabrics: Array<{ itemId: string; code: string; name: string; uom: string | null }>
+  /** The fabric issued to the order, with each one's design and colour: several can share a name. */
+  fabrics: Array<{ itemId: string; code: string; name: string; uom: string | null } & ShadeFields>
 }
 
 type Form = Record<string, string>
@@ -373,11 +375,14 @@ export function MoDetailsDialog({
           <SmartSelect className="form-input" value={f.fabricItemId} onChange={(e) => set('fabricItemId')(e.target.value)} aria-label={`Fabric for ${i.cutOrderNumber}`}>
             <option value="">—</option>
             {d.fabrics.map((x) => (
-              <option key={x.itemId} value={x.itemId}>
+              // The code and the design and colour under the name, searched too.
+              <option key={x.itemId} value={x.itemId} data-sub={[x.code, itemShade(x)].filter(Boolean).join(' · ')}>
                 {x.name}
               </option>
             ))}
           </SmartSelect>
+          {/* The box shows the name only: which design and colour was picked, under it. */}
+          {fabric && itemShade(fabric) && <span className="text-muted-foreground mt-1 block text-xs">{itemShade(fabric)}</span>}
         </label>
         {number(f.fabricGiven, set('fabricGiven'), `Fabric given${fabric?.uom ? ` (${fabric.uom})` : ''}`)}
         {text(f.notes, set('notes'), 'Note', { span: true })}
@@ -568,7 +573,7 @@ export function MoDetailsDialog({
                   {number(f.average, set('average'), 'Average (m per piece)')}
                   {text(f.ratio, set('ratio'), 'Ratio', { placeholder: 'M1 L2 XL2 2XL1' })}
                   {text(f.fabricQuality, set('fabricQuality'), 'Fabric quality', { span: true })}
-                  {text(f.designNo, set('designNo'), 'Design no.')}
+                  {text(f.designNo, set('designNo'), 'Print / design')}
                   {text(f.orderNo, set('orderNo'), 'Order no.')}
                   {text(f.projectId, set('projectId'), 'Project ID')}
                   {text(f.description, set('description'), 'Description', { span: true })}

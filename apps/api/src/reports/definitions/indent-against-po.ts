@@ -1,12 +1,17 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition, Tone } from '../types'
+import { ITEM_SHADE } from '../../lib/fabric'
 import {
   dateRangeFilters,
   dayRange,
   itemFilter,
   ratio,
   round2,
+  rowItemLabel,
   searchFilter,
+  shadeColumns,
+  shadeOf,
+  sumByItem,
   supplierFilter,
 } from './shared'
 
@@ -68,6 +73,7 @@ export const indentAgainstPo: ReportDefinition = {
     { key: 'requiredDate', label: 'Needed By', type: 'date', width: 13 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    ...shadeColumns,
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'indentQty', label: 'Indent Qty', type: 'qty', total: 'sum' },
     { key: 'orderedQty', label: 'Ordered', type: 'qty', total: 'sum' },
@@ -155,7 +161,7 @@ export const indentAgainstPo: ReportDefinition = {
         requestedQty: true,
         issuedQty: true,
         purchaseQty: true,
-        item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+        item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
         warehouse: { select: { name: true } },
         mr: {
           select: {
@@ -216,6 +222,7 @@ export const indentAgainstPo: ReportDefinition = {
         requiredDate: l.mr.requiredDate,
         itemCode: l.item.code,
         item: l.item.name,
+        ...shadeOf(l.item),
         uom: l.item.uom?.symbol ?? '',
         indentQty,
         orderedQty,
@@ -247,8 +254,8 @@ export const indentAgainstPo: ReportDefinition = {
     const fullyOrdered = rows.filter((r) => r.stage === 'ORDERED' || r.stage === 'RECEIVED').length
     const indents = new Set(rows.map((r) => r.mrNumber)).size
 
-    const waitingByItem = new Map<string, number>()
-    for (const r of waiting) waitingByItem.set(r.item, (waitingByItem.get(r.item) ?? 0) + 1)
+    // Lines per item, by item code: one name in two designs is two items.
+    const waitingByItem = sumByItem(waiting, () => 1)
     const waitingByDept = new Map<string, number>()
     for (const r of waiting) {
       const d = r.department || 'No department'
@@ -264,7 +271,7 @@ export const indentAgainstPo: ReportDefinition = {
     const longest = [...waiting].sort((a, b) => b.daysWaiting - a.daysWaiting)[0]
     if (longest && longest.daysWaiting > 0) {
       insights.push(
-        `The longest wait is ${longest.mrNumber} for ${longest.item} — ${longest.daysWaiting} days, ${longest.toOrder.toLocaleString('en-IN')} ${longest.uom} still to order.`
+        `The longest wait is ${longest.mrNumber} for ${rowItemLabel(longest)} — ${longest.daysWaiting} days, ${longest.toOrder.toLocaleString('en-IN')} ${longest.uom} still to order.`
       )
     }
     if (late.length) {
@@ -343,10 +350,7 @@ export const indentAgainstPo: ReportDefinition = {
               title: 'Items waiting to be ordered',
               question: 'ranking',
               format: 'integer',
-              points: [...waitingByItem]
-                .map(([label, value]) => ({ label, value }))
-                .sort((a, b) => b.value - a.value)
-                .slice(0, 8),
+              points: waitingByItem.sort((a, b) => b.value - a.value).slice(0, 8),
               note: 'Counted in indent lines, because the items are in different units.',
             },
             {

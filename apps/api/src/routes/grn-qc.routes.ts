@@ -13,6 +13,13 @@ import { z } from 'zod'
 import { cancelQcSchema, createQcSchema } from '../schemas/grn-qc.schemas'
 import { REASON_RULES } from '../services/purchaseNote.service'
 import { returnReasonOptions } from '../lib/returnReasons'
+import { ITEM_SHADE, itemShadeText } from '../lib/fabric'
+
+/** An item named in a message: "Cotton Twill (Design No: 1164 · Colour: Navy)". */
+const itemInWords = (i: { name: string; designNo?: string | null; color?: string | null; styleId?: string | null }) => {
+  const shade = itemShadeText(i)
+  return shade ? `${i.name} (${shade})` : i.name
+}
 
 /** A reason code in words, or null for a check recorded before there was one. */
 const reasonLabel = (code?: string | null) =>
@@ -148,7 +155,8 @@ const grnSelect = {
       receivedQty: true,
       acceptedQty: true,
       unitRate: true,
-      item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+      // Its design and colour, so the checker can tell same-name fabrics apart.
+      item: { select: { code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } },
       warehouse: { select: { id: true, name: true } },
     },
   },
@@ -168,7 +176,15 @@ async function shapeQc(
   },
   lineInfo: Map<
     string,
-    { itemCode: string; itemName: string; uom: string | null; warehouseName: string }
+    {
+      itemCode: string
+      itemName: string
+      designNo: string | null
+      color: string | null
+      styleId: string | null
+      uom: string | null
+      warehouseName: string
+    }
   >
 ) {
   const d = readQc(row.checklistData)
@@ -210,6 +226,9 @@ router.get('/grn/:grnId', requirePermission(MODULE, 'view'), async (req, res) =>
       {
         itemCode: l.item.code,
         itemName: l.item.name,
+        designNo: l.item.designNo,
+        color: l.item.color,
+        styleId: l.item.styleId,
         uom: l.item.uom?.symbol ?? null,
         warehouseName: l.warehouse.name,
       },
@@ -222,6 +241,9 @@ router.get('/grn/:grnId', requirePermission(MODULE, 'view'), async (req, res) =>
       itemId: l.itemId,
       itemCode: l.item.code,
       itemName: l.item.name,
+      designNo: l.item.designNo,
+      color: l.item.color,
+      styleId: l.item.styleId,
       uom: l.item.uom?.symbol ?? null,
       warehouseId: l.warehouseId,
       warehouseName: l.warehouse.name,
@@ -308,7 +330,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       const rejected = round3(sent.get(l.id)?.rejectedQty ?? 0)
       if (rejected > accepted + 0.0005) {
         throw new AppError(
-          `${l.item.name}: ${rejected} rejected, but only ${accepted} ${l.item.uom?.symbol ?? ''} came into stock on ${grn.grnNumber}.`.replace(
+          `${itemInWords(l.item)}: ${rejected} rejected, but only ${accepted} ${l.item.uom?.symbol ?? ''} came into stock on ${grn.grnNumber}.`.replace(
             /\s+/g,
             ' '
           ),
@@ -363,7 +385,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       }
       const same = rejecting.find((l) => l.warehouseId === target.id)
       if (same) {
-        const name = grn.lines.find((g) => g.id === same.grnLineId)?.item.name ?? 'An item'
+        const sameItem = grn.lines.find((g) => g.id === same.grnLineId)?.item
+        const name = sameItem ? itemInWords(sameItem) : 'An item'
         throw new AppError(
           `${name} was received into ${target.name} itself. Rejected goods have to move to a different godown, or they would still be issued as good stock.`,
           400,
@@ -654,7 +677,7 @@ router.get('/rejected', requirePermission(MODULE, 'view'), async (req, res) => {
   const storeIds = [...new Set(rows.flatMap((r) => [r.l.warehouseId, r.d.rejectWarehouseId].filter((x): x is string => !!x)))]
   const grnLineIds = rows.map((r) => r.l.grnLineId)
   const [items, stores, billLines] = await Promise.all([
-    prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } }),
+    prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, code: true, name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } }),
     prisma.warehouse.findMany({ where: { id: { in: storeIds } }, select: { id: true, name: true } }),
     prisma.purchaseInvoiceLine.findMany({
       where: { grnLineId: { in: grnLineIds }, bill: { status: { not: 'CANCELLED' } } },
@@ -676,7 +699,15 @@ router.get('/rejected', requirePermission(MODULE, 'view'), async (req, res) => {
         checkedBy: check.inspectedBy,
         grn: { id: check.grn.id, grnNumber: check.grn.grnNumber, grnDate: check.grn.grnDate, challanNo: check.grn.challanNo, poNumber: check.grn.po.poNumber },
         supplier: check.grn.po.supplier,
-        item: { id: l.itemId, code: item?.code ?? '', name: item?.name ?? '', unit: item?.uom?.symbol ?? '' },
+        item: {
+          id: l.itemId,
+          code: item?.code ?? '',
+          name: item?.name ?? '',
+          designNo: item?.designNo ?? null,
+          color: item?.color ?? null,
+          styleId: item?.styleId ?? null,
+          unit: item?.uom?.symbol ?? '',
+        },
         store: { id: l.warehouseId, name: storeOf.get(l.warehouseId) ?? '' },
         // Where they are kept: held in the same store, or moved to a reject godown.
         heldIn: d.hold === 'SAME_STORE' ? 'SAME_STORE' : d.rejectWarehouseId ? 'GODOWN' : 'NOTED',
@@ -692,7 +723,8 @@ router.get('/rejected', requirePermission(MODULE, 'view'), async (req, res) => {
       }
     })
     .filter((r) => !heldOnly || (r.held ?? r.rejected) > 0.0005)
-    .filter((r) => !q || [r.grn.grnNumber, r.grn.challanNo, r.grn.poNumber, r.supplier.name, r.item.code, r.item.name, r.store.name, r.reason].some((v) => (v ?? '').toLowerCase().includes(q)))
+    // A fabric's design number or colour finds it too.
+    .filter((r) => !q || [r.grn.grnNumber, r.grn.challanNo, r.grn.poNumber, r.supplier.name, r.item.code, r.item.name, r.item.designNo, r.item.color, r.store.name, r.reason].some((v) => (v ?? '').toLowerCase().includes(q)))
   const all = rows.filter(({ d, l }) => (d.hold === 'SAME_STORE' || !!d.rejectWarehouseId) && heldOf(l) > 0.0005)
   res.json({
     success: true,
@@ -739,14 +771,14 @@ router.post('/:id/use', requirePermission(MODULE, 'edit'), async (req: AuthReque
     l.usedQty = round3((l.usedQty ?? 0) + qty)
     l.events = [...(l.events ?? []), { at: now.toISOString(), by: req.user?.name ?? '', kind: 'USED', qty, note: data.reason }]
     await tx.inwardQC.update({ where: { id: row.id }, data: { checklistData: d as unknown as Prisma.InputJsonValue } })
-    const item = await tx.item.findUnique({ where: { id: l.itemId }, select: { name: true, uom: { select: { symbol: true } } } })
+    const item = await tx.item.findUnique({ where: { id: l.itemId }, select: { name: true, ...ITEM_SHADE, uom: { select: { symbol: true } } } })
     return { row, qty, item, left: heldOf(l) }
   })
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'InwardQC', entityId: out.row.id, after: { used: out.qty, grnLineId: data.grnLineId, reason: data.reason } })
   const unit = out.item?.uom?.symbol ?? ''
   res.json({
     success: true,
-    message: `${out.qty} ${unit} of ${out.item?.name ?? 'the item'} from ${out.row.grn.grnNumber} is back in good stock.${out.left > 0 ? ` ${out.left} ${unit} is still held as rejected.` : ''}`,
+    message: `${out.qty} ${unit} of ${out.item ? itemInWords(out.item) : 'the item'} from ${out.row.grn.grnNumber} is back in good stock.${out.left > 0 ? ` ${out.left} ${unit} is still held as rejected.` : ''}`,
   })
 })
 

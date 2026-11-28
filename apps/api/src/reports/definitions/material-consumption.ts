@@ -1,7 +1,8 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { byMonth, dateRangeFilters, itemFilter, periodLabel, round2, topWithRest } from './shared'
-import { categoryFilter, loadCategories, pctOf, rupees, warehouseFilter } from './inventory-shared'
+import { itemShadeText } from '../../lib/fabric'
+import { byMonth, dateRangeFilters, itemFilter, periodLabel, round2, sumByItem, topWithRest } from './shared'
+import { brandFilter, categoryFilter, loadCategories, pctOf, rupees, warehouseFilter } from './inventory-shared'
 
 /**
  * What the floor used: material issued against requisitions.
@@ -27,6 +28,8 @@ export const materialConsumption: ReportDefinition = {
     warehouseFilter,
     categoryFilter,
     itemFilter,
+    // The brand the material was used for: its manufacturing order's.
+    brandFilter,
   ],
   columns: [
     { key: 'date', label: 'Issued On', type: 'date', width: 14 },
@@ -38,6 +41,12 @@ export const materialConsumption: ReportDefinition = {
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
+    // A fabric's design and colour (lib/fabric), and the brand it was used for
+    // (its MO's) — so material cost can be read brand by brand and fabric by fabric.
+    { key: 'designNo', label: 'Design No.', type: 'text', width: 12 },
+    { key: 'colour', label: 'Colour', type: 'text', width: 12 },
+    { key: 'brand', label: 'Brand', type: 'text', width: 16 },
+    { key: 'moNumber', label: 'MO', type: 'text', width: 16 },
     { key: 'store', label: 'From Store', type: 'text', width: 18 },
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'qty', label: 'Qty', type: 'qty', total: 'sum' },
@@ -53,7 +62,7 @@ export const materialConsumption: ReportDefinition = {
   pivot: {
     rows: ['department', 'item'],
     values: ['qty', 'value'],
-    slicers: ['category', 'customer', 'store'],
+    slicers: ['category', 'brand', 'customer', 'store'],
     note: 'Open a department to see what it used. Read quantities per item.',
   },
 
@@ -102,7 +111,17 @@ export const materialConsumption: ReportDefinition = {
         unitRate: true,
         ownership: true,
         transactionDate: true,
-        item: { select: { code: true, name: true, categoryId: true, uom: { select: { symbol: true } } } },
+        item: {
+          select: {
+            code: true,
+            name: true,
+            categoryId: true,
+            designNo: true,
+            color: true,
+            styleId: true,
+            uom: { select: { symbol: true } },
+          },
+        },
         warehouse: { select: { name: true } },
       },
     })
@@ -114,15 +133,17 @@ export const materialConsumption: ReportDefinition = {
         id: true,
         mrNumber: true,
         department: { select: { name: true } },
+        mo: { select: { moNumber: true, brand: { select: { id: true, name: true } } } },
         so: { select: { soNumber: true, customer: { select: { name: true } } } },
         lines: { select: { itemId: true, styleNo: true, ownerCustomer: { select: { name: true } } } },
       },
     })
     const mrById = new Map(mrs.map((m) => [m.id, m]))
 
-    const rows = issues.map((i) => {
+    const all = issues.map((i) => {
       const mr = i.referenceId ? mrById.get(i.referenceId) : undefined
       const line = mr?.lines.find((l) => l.itemId === i.itemId)
+      const brand = mr?.mo?.brand ?? null
       const qty = Math.round((Number(i.outQty) - Number(i.inQty)) * 1000) / 1000
       const rate = Number(i.unitRate ?? 0)
       return {
@@ -135,6 +156,14 @@ export const materialConsumption: ReportDefinition = {
         category: cats.names(i.item.categoryId).category,
         itemCode: i.item.code,
         item: i.item.name,
+        designNo: i.item.designNo ?? '',
+        colour: i.item.color ?? '',
+        // The words a chart or summary line names the item with; a finished
+        // good's colour is in its name already.
+        itemShade: itemShadeText(i.item),
+        brand: brand?.name ?? '',
+        brandId: brand?.id ?? null,
+        moNumber: mr?.mo?.moNumber ?? '',
         store: i.warehouse.name,
         uom: i.item.uom?.symbol ?? '',
         qty,
@@ -144,6 +173,8 @@ export const materialConsumption: ReportDefinition = {
       }
     })
 
+    const rows = (params.brandId ? all.filter((r) => r.brandId === params.brandId) : all).map(({ brandId: _b, ...r }) => r)
+
     const total = round2(rows.reduce((s, r) => s + r.value, 0))
     const by = (key: (r: (typeof rows)[number]) => string) => {
       const m = new Map<string, number>()
@@ -152,7 +183,8 @@ export const materialConsumption: ReportDefinition = {
     }
     const byDept = by((r) => r.department)
     const byCustomer = by((r) => r.customer)
-    const byItem = by((r) => r.item)
+    // By item code, not name: one fabric in two designs is two items.
+    const byItem = sumByItem(rows, (r) => r.value).sort((a, b) => b.value - a.value)
     const requisitions = new Set(rows.map((r) => r.mrNumber)).size
     const monthly = byMonth(rows, (r) => r.date, (r) => r.value)
     const forOrders = round2(rows.filter((r) => r.soNumber).reduce((s, r) => s + r.value, 0))
@@ -169,7 +201,7 @@ export const materialConsumption: ReportDefinition = {
 
     return {
       rows,
-      totalRows: totalRows > rows.length ? totalRows : undefined,
+      totalRows: !params.brandId && totalRows > rows.length ? totalRows : undefined,
       analysis: {
         headline: rows.length
           ? `${rupees(total)} of material issued on ${requisitions} requisitions, ${periodLabel(params).toLowerCase()}.`
@@ -187,6 +219,7 @@ export const materialConsumption: ReportDefinition = {
             { title: 'Material used, by category', question: 'composition', format: 'money', points: topWithRest(by((r) => r.category), 4) },
             { title: 'Biggest items used', question: 'pareto', format: 'money', points: byItem.slice(0, 12) },
             { title: 'Material used, by customer order', question: 'ranking', format: 'money', points: topWithRest(byCustomer, 8) },
+            { title: 'Material used, by brand', question: 'ranking', format: 'money', points: topWithRest(by((r) => r.brand), 6) },
           ] as Panel[]
         ).filter((p) => p.points.some((x) => x.value > 0)),
         insights,

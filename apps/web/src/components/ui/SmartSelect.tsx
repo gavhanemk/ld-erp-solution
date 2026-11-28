@@ -236,6 +236,12 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
       const i = (from + n) % visible.length
       if (!visible[i].disabled && fold(visible[i].label).startsWith(t.text)) return setActive(i)
     }
+    // Nothing starts with it: what the second line says — a fabric's design
+    // number or colour ("1165") tells two fabrics of one name apart.
+    for (let n = 0; n < visible.length; n++) {
+      const i = (from + n) % visible.length
+      if (!visible[i].disabled && fold(visible[i].sub ?? '').includes(t.text)) return setActive(i)
+    }
   }
 
   const move = (step: number) => {

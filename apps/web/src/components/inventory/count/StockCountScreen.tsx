@@ -11,6 +11,7 @@ import { RackInput, useRacks } from '@/components/packages/RackInput'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { useEscape } from '@/lib/useEscape'
+import { itemShade, itemShadeCols, type ShadeFields } from '@/lib/items'
 import {
   ADJ_STATUS,
   COUNT_STATUS,
@@ -319,7 +320,9 @@ function StillToFind({ count }: { count: OpenCount }) {
       {byItem.map((group) => (
         <div key={group[0].itemId} className="px-4 py-3">
           <p className="text-foreground text-sm font-semibold">
-            {group[0].item} <span className="text-muted-foreground font-normal">· {group.length} to find, {qty(group.reduce((s, p) => s + p.qty, 0))} {group[0].unit}</span>
+            {group[0].item}
+            {itemShade(group[0]) && <span className="text-muted-foreground font-normal"> · {itemShade(group[0])}</span>}{' '}
+            <span className="text-muted-foreground font-normal">· {group.length} to find, {qty(group.reduce((s, p) => s + p.qty, 0))} {group[0].unit}</span>
           </p>
           <div className="mt-1.5 flex flex-wrap gap-1.5">
             {group.map((p) => (
@@ -339,6 +342,17 @@ function StillToFind({ count }: { count: OpenCount }) {
   )
 }
 
+/** A fabric's Design No. and Colour cells: same-name items counted apart. */
+function ShadeCells({ item }: { item: ShadeFields }) {
+  const c = itemShadeCols(item)
+  return (
+    <>
+      <td className="whitespace-nowrap">{c.designNo || <span className="text-muted-foreground">—</span>}</td>
+      <td className="whitespace-nowrap">{c.colour || <span className="text-muted-foreground">—</span>}</td>
+    </>
+  )
+}
+
 /** Item by item: stickers found against those booked, and what the count would make of it. */
 function ByItem({ lines }: { lines: CountLine[] }) {
   if (!lines.length) return <p className="text-muted-foreground px-4 py-8 text-center text-sm">No stock with stickers in this store.</p>
@@ -348,6 +362,8 @@ function ByItem({ lines }: { lines: CountLine[] }) {
         <thead>
           <tr className="bg-secondary">
             <th>Item</th>
+            <th>Design No.</th>
+            <th>Colour</th>
             <th style={{ textAlign: 'right' }}>Stickers found</th>
             <th style={{ textAlign: 'right' }}>In them</th>
             <th style={{ textAlign: 'right' }}>Without stickers</th>
@@ -366,6 +382,7 @@ function ByItem({ lines }: { lines: CountLine[] }) {
                   {l.owner ? ` · ${l.owner}'s` : ''}
                 </span>
               </td>
+              <ShadeCells item={l} />
               <td className="text-right tabular-nums">
                 {l.scanned} <span className="text-muted-foreground">of {l.packages}</span>
               </td>
@@ -464,6 +481,7 @@ function Loose({ count, lines, editable, reload, onError }: { count: OpenCount; 
             <div key={l.key} className="grid grid-cols-[minmax(0,1fr)_8rem] items-center gap-x-3 gap-y-1 px-4 py-2.5 sm:grid-cols-[minmax(0,1fr)_9rem_9rem_7rem]">
               <div className="min-w-0">
                 <p className="text-foreground truncate text-sm font-medium">{l.name}</p>
+                {itemShade(l) && <p className="text-muted-foreground truncate text-[11px]">{itemShade(l)}</p>}
                 <p className="text-muted-foreground text-[11px]">
                   {l.code}
                   {l.owner ? ` · ${l.owner}'s` : ''}
@@ -618,6 +636,8 @@ function Finished({ count }: { count: DoneCount }) {
               <thead>
                 <tr className="bg-secondary">
                   <th>Item</th>
+                  <th>Design No.</th>
+                  <th>Colour</th>
                   <th style={{ textAlign: 'right' }}>Book</th>
                   <th style={{ textAlign: 'right' }}>Counted</th>
                   <th style={{ textAlign: 'right' }}>Difference</th>
@@ -633,6 +653,7 @@ function Finished({ count }: { count: DoneCount }) {
                         {l.owner ? ` · ${l.owner}'s` : ''}
                       </span>
                     </td>
+                    <ShadeCells item={l} />
                     <td className="whitespace-nowrap text-right tabular-nums">
                       {qty(l.book)} {l.unit}
                     </td>
@@ -665,6 +686,7 @@ function Finished({ count }: { count: DoneCount }) {
                 <span className="font-mono font-semibold">{p.code}</span>{' '}
                 <span className="text-muted-foreground">
                   {p.item}
+                  {itemShade(p) ? ` (${itemShade(p)})` : ''}
                   {p.status === 'VOID' ? ' · withdrawn' : ` · ${qty(p.qty)} ${p.unit}`}
                   {p.rack ? ` · rack ${p.rack}` : ''}
                 </span>
