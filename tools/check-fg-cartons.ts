@@ -9,6 +9,7 @@
  *   E2E_EMAIL=... E2E_PASSWORD=... E2E_API=http://localhost:5105/api npx tsx ../../tools/check-fg-cartons.ts
  */
 import { prisma } from '../packages/database/src/index'
+import { checksCustomer, closeTestOrder } from './test-orders'
 
 const API = (process.env.E2E_API || 'http://localhost:5101/api').replace(/\/+$/, '')
 let pass = 0, fail = 0
@@ -37,6 +38,8 @@ async function main() {
   token = (await fetch(`${API}/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) }).then((r) => r.json())).accessToken
   if (!token) throw new Error('login failed')
   const stamp = Date.now().toString().slice(-6)
+  // This run's order, closed in the finally below so it never counts against anyone's credit.
+  let soId: string | undefined
   const today = new Date(Date.now() + 330 * 60 * 1000).toISOString().slice(0, 10)
 
   // The test style, on for the run, with a colour of this run's own.
@@ -82,7 +85,7 @@ async function main() {
     }
 
     // 2. An order for the item, and a carton packed for it.
-    const customer = await prisma.customer.findFirstOrThrow({ where: { name: { startsWith: 'ZZTEST' } }, select: { id: true } })
+    const customer = await checksCustomer(prisma, call)
     const so = await call('POST', '/sales/orders', {
       customerId: customer.id,
       isJobWork: false,
@@ -91,7 +94,7 @@ async function main() {
       creditReleaseReason: 'Demo test order',
       lines: [{ itemId: item.id, totalQty: 50, unitPrice: 300, sizes: [{ sizeId: s1.id, qty: 30 }, { sizeId: s2.id, qty: 20 }] }],
     })
-    const soId = so.body?.data?.id
+    soId = so.body?.data?.id
     check('an order for the item, confirmed', so.status === 201 && !!soId, so.body?.message ?? so.body)
     const c2 = await call('POST', '/fg-cartons', { warehouseId: store.id, soId, lines: [{ itemId: item.id, sizeId: s1.id, qty: 10 }] })
     check('carton packed for the order: its number said', c2.status === 201 && c2.body?.data?.order?.soNumber && new RegExp(c2.body.data.order.soNumber).test(c2.body?.message ?? ''), c2.body)
@@ -161,6 +164,7 @@ async function main() {
     check('the list finds the cartons by item: 4 of them', (list.body?.data ?? []).length === 4, (list.body?.data ?? []).map((c: any) => [c.code, c.status]))
   } finally {
     await prisma.style.update({ where: { id: st.id }, data: { isActive: st.isActive } })
+    console.log(`clean-up: the test order ${await closeTestOrder(call, soId)}`)
   }
 
   console.log(`\n${pass} passed, ${fail} failed`)

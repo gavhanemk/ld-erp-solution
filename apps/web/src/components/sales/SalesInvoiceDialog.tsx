@@ -23,7 +23,7 @@ import {
   Truck,
   X,
 } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, can } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { useEscape } from '@/lib/useEscape'
@@ -709,7 +709,7 @@ export function SalesInvoiceDialog({
                               <div className="flex justify-end" role="group" aria-label={`Charge ${i + 1} amount type`}>
                                 {(['FIXED', 'PERCENT'] as const).map(mode => <button key={mode} type="button" className="btn-ghost px-2 text-xs" aria-pressed={(c.amountMode ?? 'FIXED') === mode} onClick={() => setCharge(c.key, { amountMode: mode })}>{mode === 'FIXED' ? '₹' : '%'}</button>)}
                               </div>
-                              <ChargeTaxDetails config={c.config} priced={{ ...c.priced, amount: c.priced.net }} onOverride={value => setCharge(c.key, { taxOverride: value })} />
+                              <ChargeTaxDetails mayOverride={can('sales.charge-gst', 'edit')} requireReason config={c.config} priced={{ ...c.priced, amount: c.priced.net }} onOverride={value => setCharge(c.key, { taxOverride: value })} />
                             </>}
                             </div>
                           )

@@ -3,6 +3,8 @@ import { Router } from 'express'
 import type { Prisma, SalesOrderStatus } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { AuthRequest, isAdmin, requirePermission, userCan } from '../middleware/auth'
+import { mayOverrideSaleChargeGst } from '../middleware/auth'
+import { overridesMade } from '../services/salesCharges'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { assertJobWorkBrand, assertOneBrand, suggestedBrandId } from '../lib/brandRules'
@@ -915,13 +917,20 @@ router.get('/orders/:id/close-check', requirePermission(MODULE, 'view'), async (
   res.json({ success: true, data: { ...check, mayException: userCan(req.user, MODULE, 'approve') && userCan(req.user, 'inventory', 'approve') } })
 })
 
+/** One audit entry for each change of a charge's GST a save made: who, when, why, from what to what. */
+async function auditChargeOverrides(req: AuthRequest, doc: { id: string; number: string }, after: Array<{ chargeTypeId: string; taxSnapshot?: unknown }>, before: Array<{ taxSnapshot?: unknown }> = []) {
+  for (const o of overridesMade(after, before)) {
+    await writeAuditLog(req, { module: 'sales', action: 'UPDATE', entityType: 'SalesChargeGstOverride', entityId: doc.id, after: { document: doc.number, ...o } })
+  }
+}
+
 // POST /api/sales/orders
 router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSalesOrderSchema.parse(req.body)
 
   const { order, confirmed } = await prisma.$transaction(async (tx) => {
     // Checked and priced first, so a refused order never takes a number.
-    const { header, lines, charges } = await prepareOrder(tx, data, { canOverride: userCan(req.user, 'masters', 'edit') })
+    const { header, lines, charges } = await prepareOrder(tx, data, { canOverride: mayOverrideSaleChargeGst(req.user), by: { id: req.user!.id } })
     if (data.quotationId) await winQuote(tx, data.quotationId, data.customerId)
     const soNumber = await nextDocumentNumber(tx, 'SO', data.orderDate ?? new Date())
 
@@ -952,6 +961,9 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
     entityId: order.id,
     after: order,
   })
+  // An override carried from the quotation was recorded there, under whoever made it; only a new one is this user's.
+  const fromQuote = data.quotationId ? await prisma.salesQuotationCharge.findMany({ where: { quoteId: data.quotationId }, select: { taxSnapshot: true } }) : []
+  await auditChargeOverrides(req, { id: order.id, number: order.soNumber }, order.charges, fromQuote)
 
   res.status(201).json({
     success: true,
@@ -985,7 +997,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
 
     // A form that leaves it out keeps how the order bills our own material.
     data.ownMaterialBilling = data.ownMaterialBilling ?? (before.ownMaterialBilling as 'IN_JOB_CHARGE' | 'BILLED')
-    const { header, lines, charges } = await prepareOrder(tx, data, { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
+    const { header, lines, charges } = await prepareOrder(tx, data, { saved: before.charges, canOverride: mayOverrideSaleChargeGst(req.user), by: { id: req.user!.id } })
 
     // The lines are replaced whole. A draft has nothing pointing at its lines
     // yet — no production, no challan — so nothing is cut loose.
@@ -1015,6 +1027,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     before,
     after,
   })
+  await auditChargeOverrides(req, { id: after.id, number: after.soNumber }, after.charges, before.charges)
 
   res.json({
     success: true,
@@ -1238,7 +1251,7 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       }
     }
 
-    const { header, lines, charges } = await prepareOrder(tx, data, { saved: before.charges, canOverride: userCan(req.user, 'masters', 'edit') })
+    const { header, lines, charges } = await prepareOrder(tx, data, { saved: before.charges, canOverride: mayOverrideSaleChargeGst(req.user), by: { id: req.user!.id } })
 
     // A change that raises the order's value meets the credit limit, as confirming it did.
     const release = await creditForAmendment(
@@ -1322,6 +1335,7 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
     before,
     after,
   })
+  await auditChargeOverrides(req, { id: after.id, number: after.soNumber }, after.charges, before.charges)
 
   res.json({
     success: true,

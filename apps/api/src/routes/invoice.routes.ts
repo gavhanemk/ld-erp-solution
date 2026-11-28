@@ -4,6 +4,8 @@ import type { InvoiceStatus, Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { AuthRequest, requirePermission, userCan } from '../middleware/auth'
+import { mayOverrideSaleChargeGst } from '../middleware/auth'
+import { overridesMade } from '../services/salesCharges'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { postWithin } from '../services/accounts/posting.service'
@@ -233,7 +235,7 @@ export function chargesStillToBill(dc: Billable) {
  * Prices an invoice for a challan. The server's figures are the record; the
  * form shows the same sums as a preview.
  */
-async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: InvoiceInput, canOverride = false) {
+async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: InvoiceInput, canOverride = false, by: { id: string } | null = null) {
   const order = dc.so
   const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, order.customerId, order.placeOfSupplyCode)
   const bills = billLines(dc)
@@ -290,7 +292,7 @@ async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: In
   // the rest — exactly the figure typed when that figure includes GST.
   const goods = lines.map((l) => ({ taxable: l.taxableValue, gstRate: l.gstRate }))
   const treatmentByType = new Map(order.charges.map((c) => [c.chargeTypeId, c.taxTreatment]))
-  const charges = await priceSalesCharges(tx, data.charges, isIntraState, goods, { split: true, treatmentByType, saved: order.charges, canOverride })
+  const charges = await priceSalesCharges(tx, data.charges, isIntraState, goods, { split: true, treatmentByType, saved: order.charges, canOverride, by })
   const chargeTotal = round2(charges.reduce((s, c) => s + c.netAmount, 0))
   const sum = (k: 'cgst' | 'sgst' | 'igst') =>
     round2(lines.reduce((s, l) => s + l[k], 0) + charges.reduce((s, c) => s + c[k], 0))
@@ -671,10 +673,17 @@ router.get('/:id/print', async (req: AuthRequest, res) => {
  * never takes a number.
  */
 /** Bills a challan inside the caller's transaction. Exported for the checks that roll it back. */
+/** One audit entry for each change of a charge's GST a save made: who, when, why, from what to what. */
+async function auditChargeOverrides(req: AuthRequest, doc: { id: string; number: string }, after: Array<{ chargeTypeId: string; taxSnapshot?: unknown }>, before: Array<{ taxSnapshot?: unknown }> = []) {
+  for (const o of overridesMade(after, before)) {
+    await writeAuditLog(req, { module: 'sales', action: 'UPDATE', entityType: 'SalesChargeGstOverride', entityId: doc.id, after: { document: doc.number, ...o } })
+  }
+}
+
 export async function createInvoice(tx: Prisma.TransactionClient, data: InvoiceInput, userId: string, canOverride = false) {
   const dc = await loadBillable(tx, data.dcId)
   const order = dc.so
-  const priced = await priceInvoice(tx, dc, data, canOverride)
+  const priced = await priceInvoice(tx, dc, data, canOverride, { id: userId })
   const invoiceDate = data.invoiceDate ?? new Date()
   if (invoiceDate < new Date(order.orderDate.toDateString())) {
     throw new AppError(`The invoice cannot be dated before the order, ${order.soNumber}`, 400, 'BEFORE_ORDER')
@@ -747,8 +756,14 @@ export async function createInvoice(tx: Prisma.TransactionClient, data: InvoiceI
  */
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = invoiceSchema.parse(req.body)
-  const invoice = await prisma.$transaction((tx) => createInvoice(tx, data, req.user!.id, userCan(req.user, 'masters', 'edit')), { timeout: 30_000 })
+  const invoice = await prisma.$transaction((tx) => createInvoice(tx, data, req.user!.id, mayOverrideSaleChargeGst(req.user)), { timeout: 30_000 })
   await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'SalesInvoice', entityId: invoice.id, after: invoice })
+  // An invoice's charges came from its order's: only a change made on the invoice itself is new here.
+  {
+    const own = await prisma.salesInvoiceCharge.findMany({ where: { invoiceId: invoice.id }, select: { chargeTypeId: true, taxSnapshot: true } })
+    const fromOrder = invoice.soId ? await prisma.salesOrderCharge.findMany({ where: { soId: invoice.soId }, select: { taxSnapshot: true } }) : []
+    await auditChargeOverrides(req, { id: invoice.id, number: invoice.invoiceNumber }, own, fromOrder)
+  }
   res.status(201).json({
     success: true,
     message: `${invoice.invoiceNumber} raised for ${invoice.dc?.dcNumber ?? 'the challan'} — ₹${Number(invoice.totalAmount).toLocaleString('en-IN')}`,

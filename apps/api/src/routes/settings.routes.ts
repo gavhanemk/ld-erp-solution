@@ -484,6 +484,7 @@ const ACTION_LABELS: Record<string, string> = {
  * ticked box here hands somebody the ability to edit master data from a chat.
  */
 const ACTION_LABEL_OVERRIDES: Record<string, string> = {
+  'sales.charge-gst:edit': 'Allow',
   'ai:create': 'May change records',
   'ai:edit': 'May change records',
   'ai:delete': 'May change records',
@@ -505,6 +506,8 @@ router.get('/permissions', requirePermission(ADMIN, 'view'), async (_req, res) =
       key: sc.key,
       label: sc.label,
       hint: sc.hint ?? null,
+      // Given only by ticking its own box: "Allow all" and a column's switch leave it alone.
+      explicit: sc.explicit === true,
       actions: sc.actions.map((action) => ({
         action,
         label: ACTION_LABEL_OVERRIDES[`${sc.key}:${action}`] ?? CATALOG_ACTION_LABELS[action],

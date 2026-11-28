@@ -149,7 +149,31 @@ export interface ChargeTaxSnapshot {
   inputAmount: number
   basis: 'GOODS_AFTER_DISCOUNT'
   overrideReason?: string
+  /**
+   * Every change of this document's charge GST from what it would otherwise
+   * be, oldest first: who, when, why, and the setting before and after. The
+   * charge master is never changed by it.
+   */
+  overrides?: ChargeTaxOverrideRecord[]
   parts?: SaleChargePart[]
+}
+/** A charge's GST as an override found it and left it. */
+export interface ChargeTaxSetting {
+  gstApplicable: boolean
+  treatment: ChargeTaxTreatment
+  followsGoodsRate: boolean
+  ownRate: number
+  hsnCode: string | null
+  taxCategory: ChargeTaxCategory
+}
+/** One override of a document's charge GST. */
+export interface ChargeTaxOverrideRecord {
+  at: string
+  by: string | null
+  byName: string | null
+  reason: string
+  from: ChargeTaxSetting
+  to: ChargeTaxSetting
 }
 /** Read only a version we understand; old records are deliberately not inferred. */
 export function chargeSnapshot(value: unknown): ChargeTaxSnapshot | null {

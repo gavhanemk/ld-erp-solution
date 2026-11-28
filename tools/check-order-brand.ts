@@ -10,6 +10,7 @@
  *   E2E_EMAIL=... E2E_PASSWORD=... E2E_API=http://localhost:5105/api npx tsx ../../tools/check-order-brand.ts
  */
 import { prisma } from '../packages/database/src/index'
+import { checksCustomer, closeTestOrder } from './test-orders'
 
 const API = (process.env.E2E_API || 'http://localhost:5101/api').replace(/\/+$/, '')
 let pass = 0, fail = 0
@@ -36,6 +37,8 @@ async function main() {
   token = (await fetch(`${API}/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) }).then((r) => r.json())).accessToken
   if (!token) throw new Error('login failed')
   const stamp = Date.now().toString().slice(-6)
+  // This run's order, closed in the finally below so it never counts against anyone's credit.
+  let soId: string | undefined
 
   // 1. Brands of this run's own: one in-house, one a customer's.
   const own = await call('POST', '/masters/brands', { name: `ZZTEST Own ${stamp}`, type: 'LD_COTTON_MILLS', isActive: true })
@@ -56,7 +59,7 @@ async function main() {
   try {
     const item = await prisma.item.findFirstOrThrow({ where: { styleId: st.id, type: 'FINISHED_GOOD', isActive: true }, select: { id: true, hsnCode: true } })
     if (!item.hsnCode) await prisma.item.update({ where: { id: item.id }, data: { hsnCode: '6205' } })
-    const customer = await prisma.customer.findFirstOrThrow({ where: { name: { startsWith: 'ZZTEST' }, isActive: true }, select: { id: true } })
+    const customer = await checksCustomer(prisma, call)
     const sizes = await prisma.size.findMany({ where: { sizeGroupId: st.sizeGroupId! }, orderBy: { sequence: 'asc' }, take: 2, select: { id: true } })
 
     // 2. The quotation: a customer's brand refused; an in-house one kept; none, the styles'.
@@ -79,7 +82,7 @@ async function main() {
       creditReleaseReason: 'Demo test order',
       lines: [{ itemId: item.id, totalQty: 20, unitPrice: 250, sizes: [{ sizeId: sizes[0].id, qty: 12 }, { sizeId: sizes[1].id, qty: 8 }] }],
     })
-    const soId = so.body?.data?.id
+    soId = so.body?.data?.id
     check('a sales order under the picked brand, confirmed', so.status === 201 && so.body?.data?.brandId === ownId, so.body?.message ?? so.body)
     const custSo = await call('POST', '/sales/orders', { customerId: customer.id, brandId: cust.body.data.id, lines: [{ itemId: item.id, totalQty: 1, unitPrice: 1, sizes: [{ sizeId: sizes[0].id, qty: 1 }] }] })
     check("a sales order under a customer's brand: refused", custSo.status === 400 && custSo.body?.code === 'NOT_OWN_BRAND', custSo.body)
@@ -146,6 +149,7 @@ async function main() {
     // This run's brands are switched off, not left in the lists.
     await call('PATCH', `/masters/brands/${ownId}`, { isActive: false })
     await call('PATCH', `/masters/brands/${cust.body?.data?.id}`, { isActive: false })
+    console.log(`clean-up: the test order ${await closeTestOrder(call, soId)}`)
   }
 
   console.log(`\n${pass} passed, ${fail} failed`)

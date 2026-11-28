@@ -93,14 +93,20 @@ const STAFF_ROLES = {
     description: 'Demo only: approves orders, not stock',
     permissions: ['inventory:view', 'sales:approve', 'sales:create', 'sales:delete', 'sales:edit', 'sales:export', 'sales:post', 'sales:view'],
   },
+  // The same, plus the one right given only by name (28 Nov 2026). No Masters rights at all.
+  'ZZTEST Sales GST Approver': {
+    description: 'Demo only: sales, and may change a sales charge’s GST on one document',
+    permissions: ['inventory:view', 'sales:approve', 'sales:create', 'sales:delete', 'sales:edit', 'sales:export', 'sales:post', 'sales:view', 'sales.charge-gst:edit'],
+  },
 }
 const STAFF = {
   KEEPER: { email: 'zztest.keeper@ldcottonmills.com', name: 'ZZTEST Keeper', role: 'ZZTEST Store Keeper' },
   QC: { email: 'zztest.qc@ldcottonmills.com', name: 'ZZTEST QC Checker', role: 'ZZTEST Store Keeper' },
   SALES: { email: 'zztest.sales@ldcottonmills.com', name: 'ZZTEST Sales Manager', role: 'ZZTEST Sales Manager' },
+  SALESGST: { email: 'zztest.sales.gst@ldcottonmills.com', name: 'ZZTEST Sales GST Approver', role: 'ZZTEST Sales GST Approver' },
 }
 
-/** Makes sure the test users exist (through the API, as the admin) and signs each in: { KEEPER, QC, SALES }. */
+/** Makes sure the test users exist (through the API, as the admin) and signs each in: { KEEPER, QC, SALES, SALESGST }. */
 export async function staffLogins(adminToken) {
   const password = process.env.E2E_STAFF_PASSWORD || required('E2E_PASSWORD')
   const call = async (m, p, b) => {

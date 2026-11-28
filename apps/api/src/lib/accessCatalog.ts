@@ -46,6 +46,12 @@ export interface Screen {
   api: string[]
   /** A line under the name in the matrix, where the name alone could mislead. */
   hint?: string
+  /**
+   * Granted only by name: a module-wide grant ("sales:edit") never includes
+   * it, and saving a role with one does not spell it out. For a right that
+   * must be given on purpose, like changing a sales charge's GST.
+   */
+  explicit?: boolean
 }
 
 export interface AccessModule {
@@ -118,6 +124,17 @@ export const ACCESS_CATALOG: AccessModule[] = [
       s('sales.invoices', 'Invoices', DOC, ['/sales/invoices'], ['/api/sales/invoices']),
       s('sales.payments', 'Payments Received', DOC, ['/sales/payments'], ['/api/sales/receipts']),
       s('sales.returns', 'Returns & Credit Notes', DOC, ['/sales/returns'], ['/api/sales/credit-notes']),
+      {
+        ...s(
+          'sales.charge-gst',
+          'Override Sales Charge GST',
+          ['edit'],
+          [],
+          [],
+          'Change an extra charge’s GST on one quotation, order or invoice, with a reason kept on it. The GST master is not changed. Given only by ticking it here: a Sales-wide grant does not include it.',
+        ),
+        explicit: true,
+      },
     ],
   },
   {

@@ -217,6 +217,9 @@ export function masterResource<T>(resource: string) {
  * answer costs one confusing message, where failing closed would silently
  * remove a button somebody needs and give them nothing to go on.
  */
+/** The access catalogue's rights given only by name (apps/api/src/lib/accessCatalog.ts `explicit`). */
+const EXPLICIT_RIGHTS = new Set(['sales.charge-gst'])
+
 export const can = (module: string, action: string): boolean => {
   const user = currentUser() as { role?: string; superAdmin?: boolean; permissions?: string[] } | null
   if (!user) return true
@@ -226,6 +229,8 @@ export const can = (module: string, action: string): boolean => {
   // module's; a module by its own grant or the same action on any screen in it.
   const grants = user.permissions
   const mod = module.split('.')[0]
+  // Rights given only by name (the access catalogue's `explicit`): a module-wide grant never includes them.
+  if (EXPLICIT_RIGHTS.has(module)) return grants.includes(`${module}:${action}`)
   if (grants.includes(`${module}:${action}`) || grants.includes(`${mod}:${action}`) || grants.includes(`${mod}:*`)) return true
   return module === mod && grants.some((g) => g.startsWith(`${mod}.`) && g.endsWith(`:${action}`))
 }

@@ -3,6 +3,7 @@
 import { ChevronDown } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { can, masterResource } from '@/lib/api'
+import { StepInput } from '@/components/ui/StepInput'
 import type { ChargeTaxSnapshot, PricedCharge } from '@ld-erp/shared'
 import type { HsnOption } from './TaxBreakdown'
 
@@ -26,19 +27,38 @@ export function taxOverridePayload(c?: ChargeTaxSnapshot) {
   }
 }
 
-/** Routine entry is amount-only. Changing tax requires an explicit, explained override. */
+/**
+ * Routine entry is amount-only. Changing tax requires an explicit, explained override.
+ *
+ * `mayOverride`: who may change it here — on a sales document the dedicated
+ * "Override Sales Charge GST" right, on a purchase document Masters edit (the
+ * default). `requireReason`: switching GST on or off asks for a reason too,
+ * before it takes effect (sales documents); otherwise it applies at once with
+ * a standard note.
+ */
 export function ChargeTaxDetails({
   config,
   priced,
   hsnOptions = [],
   onOverride,
+  mayOverride,
+  requireReason = false,
 }: {
   config: ChargeTaxSnapshot
   priced?: Pick<PricedCharge, 'amount' | 'tax' | 'payable' | 'gstRate' | 'parts'>
   hsnOptions?: HsnOption[]
   onOverride?: (value: ChargeTaxSnapshot) => void
+  mayOverride?: boolean
+  requireReason?: boolean
 }) {
+  const allowed = mayOverride ?? can('masters', 'edit')
   const [draft, setDraft] = useState<ChargeTaxSnapshot | null>(null)
+  // A GST on/off switch waiting for its reason (requireReason), and what is missing from an override.
+  const [switching, setSwitching] = useState(false)
+  const [problem, setProblem] = useState<string | null>(null)
+  const [outerOpen, setOuterOpen] = useState(false)
+  const [advOpen, setAdvOpen] = useState(false)
+  const shown = switching && draft ? draft : config
   const [remoteHsn, setRemoteHsn] = useState<HsnOption[]>([])
   const options = hsnOptions.length ? hsnOptions : remoteHsn
   useEffect(() => {
@@ -65,23 +85,32 @@ export function ChargeTaxDetails({
             aria-label={`${config.name} GST applicability`}
             className="form-input !bg-secondary/60 focus:!border-primary h-7 !w-auto max-w-full !rounded-md !border-transparent py-0 pl-2 pr-7 text-xs"
             value={
-              config.gstApplicable === false || config.treatment === 'NON_TAXABLE'
+              shown.gstApplicable === false || shown.treatment === 'NON_TAXABLE'
                 ? 'NONE'
                 : 'APPLICABLE'
             }
-            disabled={!can('masters', 'edit') || !onOverride}
-            onChange={(e) =>
-              onOverride?.({
+            disabled={!allowed || !onOverride}
+            onChange={(e) => {
+              const switched = {
                 ...config,
                 gstApplicable: e.target.value === 'APPLICABLE',
                 treatment:
                   e.target.value === 'APPLICABLE' && config.treatment === 'NON_TAXABLE'
-                    ? 'EXCLUSIVE'
+                    ? ('EXCLUSIVE' as const)
                     : config.treatment,
                 applicabilityOverride: config.applicabilityOverride === false ? false : true,
-                overrideReason: 'GST applicability changed for this transaction',
-              })
-            }
+              }
+              if (!requireReason) {
+                onOverride?.({ ...switched, overrideReason: 'GST applicability changed for this transaction' })
+                return
+              }
+              // Not yet: the reason first, in the panel below.
+              setDraft({ ...switched, overrideReason: '' })
+              setSwitching(true)
+              setProblem(null)
+              setOuterOpen(true)
+              setAdvOpen(true)
+            }}
           >
             <option value="APPLICABLE">GST Applicable</option>
             <option value="NONE">No GST</option>
@@ -94,7 +123,7 @@ export function ChargeTaxDetails({
           ₹{money(priced?.payable ?? 0)}
         </span>
       </div>
-      <details className="group/charge-details">
+      <details className="group/charge-details" open={outerOpen} onToggle={(e) => setOuterOpen(e.currentTarget.open)}>
         <summary className="hover:text-foreground flex w-fit cursor-pointer list-none items-center gap-1 text-[11px] transition-colors [&::-webkit-details-marker]:hidden">
           <ChevronDown
             size={12}
@@ -131,16 +160,67 @@ export function ChargeTaxDetails({
               {money(p.igst)}
             </p>
           ))}
-          {can('masters', 'edit') && onOverride && (
+          {allowed && onOverride && (
             <details
+              open={advOpen}
               onToggle={(e) => {
-                if (e.currentTarget.open && !draft) setDraft({ ...config, overrideReason: '' })
+                const open = e.currentTarget.open
+                setAdvOpen(open)
+                if (open && !draft) {
+                  setDraft({ ...config, overrideReason: '' })
+                  setSwitching(false)
+                }
               }}
             >
               <summary className="hover:text-foreground cursor-pointer py-1 text-[11px]">
                 Advanced Tax Settings
               </summary>
-              {draft && (
+              {draft && switching && (
+                <div className="mt-2 grid gap-2 rounded border p-2">
+                  <p className="text-foreground">
+                    GST {draft.gstApplicable === false ? 'switched off' : 'switched on'} for this document only. The charge’s master setting stays as it is.
+                  </p>
+                  <label>
+                    Reason
+                    <input
+                      className="form-input h-8"
+                      value={draft.overrideReason ?? ''}
+                      placeholder="Why this document differs"
+                      onChange={(e) => setDraft({ ...draft, overrideReason: e.target.value })}
+                    />
+                  </label>
+                  {problem && <p className="warn-text">{problem}</p>}
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => {
+                        if ((draft.overrideReason?.trim().length ?? 0) < 5) return setProblem('Say why, in a few words (at least 5 letters).')
+                        onOverride({ ...draft, applicabilityOverride: true })
+                        setSwitching(false)
+                        setDraft(null)
+                        setProblem(null)
+                        setAdvOpen(false)
+                      }}
+                    >
+                      Apply
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      onClick={() => {
+                        setSwitching(false)
+                        setDraft(null)
+                        setProblem(null)
+                        setAdvOpen(false)
+                      }}
+                    >
+                      Keep as it was
+                    </button>
+                  </div>
+                </div>
+              )}
+              {draft && !switching && (
                 <div className="mt-2 grid gap-2 rounded border p-2">
                   <label>
                     GST treatment
@@ -208,14 +288,11 @@ export function ChargeTaxDetails({
                     draft.treatment !== 'NON_TAXABLE' && (
                       <label>
                         GST %
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          step="0.01"
+                        <StepInput
+                          decimals
                           className="form-input h-8"
-                          value={draft.ownRate}
-                          onChange={(e) => setDraft({ ...draft, ownRate: Number(e.target.value) })}
+                          value={String(draft.ownRate)}
+                          onValueChange={(v) => setDraft({ ...draft, ownRate: Math.min(100, Number(v) || 0) })}
                         />
                       </label>
                     )}
@@ -264,14 +341,17 @@ export function ChargeTaxDetails({
                       onChange={(e) => setDraft({ ...draft, overrideReason: e.target.value })}
                     />
                   </label>
+                  {problem && <p className="warn-text">{problem}</p>}
                   <button
                     type="button"
                     className="btn-secondary"
-                    disabled={
-                      (draft.overrideReason?.trim().length ?? 0) < 5 ||
-                      draft.taxCategory === 'UNSPECIFIED'
-                    }
-                    onClick={() => onOverride({ ...draft, applicabilityOverride: false })}
+                    onClick={() => {
+                      // Kept enabled: what is missing is said here, not hidden behind a faded button.
+                      if (draft.taxCategory === 'UNSPECIFIED') return setProblem('Choose a tax classification.')
+                      if ((draft.overrideReason?.trim().length ?? 0) < 5) return setProblem('Say why, in a few words (at least 5 letters).')
+                      setProblem(null)
+                      onOverride({ ...draft, applicabilityOverride: false })
+                    }}
                   >
                     Apply tax override
                   </button>

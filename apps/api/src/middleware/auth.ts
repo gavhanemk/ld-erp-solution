@@ -100,6 +100,13 @@ export function userCan(user: AuthRequest['user'], key: string, action: string):
   return grantsAllow(user.permissions ?? [], key, action)
 }
 
+/**
+ * The dedicated right to change an extra charge's GST on a sales document
+ * (Settings → People: "Override Sales Charge GST"). Granted only by name;
+ * Masters edit rights have nothing to do with it.
+ */
+export const mayOverrideSaleChargeGst = (user: AuthRequest['user']) => userCan(user, 'sales.charge-gst', 'edit')
+
 const ACTION_WORDS: Record<string, string> = {
   view: 'open',
   create: 'add to',

@@ -20,8 +20,9 @@ const db = await demoDb()
 const q = async (sql, p = []) => (await db.query(sql, p)).rows
 if ((await q(`SELECT current_database() d`))[0].d !== 'lderp_demo') { console.log('not the demo database'); process.exit(1) }
 const ADMIN = await adminLogin(db)
-const { KEEPER, SALES } = await staffLogins(ADMIN)
-if (!ADMIN || !KEEPER || !SALES) { console.log('login failed'); process.exit(1) }
+// SALESGST: a sales colleague who also holds "Override Sales Charge GST" (and no Masters rights).
+const { KEEPER, SALES, SALESGST } = await staffLogins(ADMIN)
+if (!ADMIN || !KEEPER || !SALES || !SALESGST) { console.log('login failed'); process.exit(1) }
 const RUN = String(Date.now() % 1000000)
 const call = async (m, p, b, tok = ADMIN) => {
   const r = await fetch(`${API}${p}`, { method: m, headers: { 'content-type': 'application/json', authorization: `Bearer ${tok}` }, body: b ? JSON.stringify(b) : undefined })
@@ -81,11 +82,14 @@ const customer = (name) => one(`SELECT id, name, "billingStateCode" state, "cred
 const ORIENT = await customer('Orient Overseas Sourcing'), METRO = await customer('Metro Menswear Wholesale')
 const BANK = await one(`SELECT id FROM bank_accounts WHERE "accountName" = 'LD Cotton Mills — Current' AND "isActive"`, [], 'the current account')
 const TRANSPORT = await one(`SELECT id, "defaultGstRate"::float8 rate FROM charge_types WHERE name = 'Transport Charges' AND "isActive" AND "applyOnSale"`, [], 'Transport Charges')
+// Every column of the two rows, so any change at all shows.
+const chargeMasters = async () => (await q(`SELECT row_to_json(c)::text j FROM charge_types c WHERE name IN ('Transport Charges', 'Packing Charges') ORDER BY name`)).map((r) => r.j)
+const MASTERS_BEFORE = await chargeMasters()
 const CO = await one(`SELECT "stateCode" state, gstin, "bankAccount", "bankIFSC" FROM company LIMIT 1`, [], 'the company')
 const HSN = Object.fromEntries((await q(`SELECT code, "gstRate"::float8 rate, "priceLimit"::float8 lim, "rateAbove"::float8 above FROM hsn_codes WHERE "isActive"`)).map((h) => [h.code, h]))
 const rateFor = (code, perPiece) => { const h = HSN[code]; return h.lim != null && h.above != null && perPiece > h.lim ? h.above : h.rate }
 const userId = async (email) => (await one(`SELECT id FROM users WHERE lower(email) = $1`, [email], email)).id
-const SALES_ID = await userId('zztest.sales@ldcottonmills.com')
+const SALES_ID = await userId('zztest.sales@ldcottonmills.com'), SALESGST_ID = await userId('zztest.sales.gst@ldcottonmills.com')
 const ADMIN_ID = await userId(process.env.E2E_EMAIL.toLowerCase())
 if (ORIENT.state !== CO.state || METRO.state === CO.state) { console.log(`setup failed: expected Orient in the company's state (${CO.state}) and Metro outside it`); process.exit(1) }
 
@@ -97,9 +101,16 @@ if (!CW) {
   console.log(`setup: made the test customer ${CW_NAME}`)
 }
 must(await call('PATCH', `/masters/customers/${CW.id}`, { isActive: true, isBlacklisted: false, creditLimit: CW_LIMIT, creditDays: 30 }), 'reset the test customer')
-// Orders an earlier, interrupted run left open would count against its limit.
-for (const o of await q(`SELECT id FROM sales_orders WHERE "customerId" = $1 AND status IN ('CONFIRMED','IN_PRODUCTION','PARTIALLY_DISPATCHED')`, [CW.id])) {
-  await call('POST', `/sales/orders/${o.id}/cancel`, { reason: 'Left open by an earlier test run' })
+// Orders an earlier, interrupted run left open would count against its limit: cancelled, short-closed
+// once something was sent, or cancelled by request when a manufacturing order stands on them.
+for (const o of await q(`SELECT id, "soNumber" no FROM sales_orders WHERE "customerId" = $1 AND status IN ('CONFIRMED','IN_PRODUCTION','PARTIALLY_DISPATCHED')`, [CW.id])) {
+  const why = { reason: 'Left open by an earlier test run' }
+  if ((await call('POST', `/sales/orders/${o.id}/cancel`, why)).status === 200) continue
+  const short = await call('POST', `/sales/orders/${o.id}/short-close`, why)
+  if (short.status === 200) continue
+  const asked = short.body?.code === 'NOTHING_STARTED' ? await call('POST', `/sales/orders/${o.id}/cancellation/request`, why) : short
+  if (asked.status === 200 && (await call('POST', `/sales/orders/${o.id}/cancellation/approve`, {})).status === 200) continue
+  note('setup', `${o.no}, left open on ${CW_NAME} by an earlier run, could not be closed: ${err(asked)}`)
 }
 
 // Reads: stock by size, a series' last number, an invoice as stored.
@@ -210,20 +221,32 @@ for (const x of [QC, qd.body?.data, qe.body?.data]) if (x?.id) await call('POST'
 
 // ════════════════ O. The sales order from the won quotation ════════════════
 const SO1_SIZES = { [TRO.id]: { 30: 10, 32: 20, 34: 20, 36: 10 }, [SHI.id]: { S: 5, M: 10, L: 10, XL: 5 } }
+// GST added on top of the ₹500 for this order only: Transport Charges itself is set up GST-included
+// (section G). Changing a charge's GST on a sales document takes the "Override Sales Charge GST" right
+// and a reason (28 Nov 2026). Once saved, the form sends the charge back by its id, as it was approved.
+const ON_TOP = { gstApplicable: true, mode: 'INHERIT', treatment: 'EXCLUSIVE', gstRate: N(TRANSPORT.rate), taxCategory: 'TAXABLE', reason: 'Buyer agreed ₹500 transport plus GST' }
+let SO1 = null
+const so1Transport = () => {
+  const saved = SO1?.charges?.find((c) => c.chargeTypeId === TRANSPORT.id)
+  return saved ? { chargeTypeId: TRANSPORT.id, amount: 500, sourceChargeId: saved.id } : { chargeTypeId: TRANSPORT.id, amount: 500, taxOverride: ON_TOP }
+}
 const so1Body = (extra = {}) => ({
   customerId: ORIENT.id, quotationId: QB?.id, reference: QB?.quoteNumber, customerPORef: `ORS-PO-${RUN}`, customerPODate: day(-1).toISOString(), deliveryDate: day(20).toISOString(),
-  // GST added on top of the ₹500, said outright: Transport Charges itself is set up GST-included (section G).
-  discountAmount: 1000, charges: [{ chargeTypeId: TRANSPORT.id, amount: 500, taxTreatment: 'EXCLUSIVE' }], terms: QB?.terms,
+  discountAmount: 1000, charges: [so1Transport()], terms: QB?.terms,
   // As the order form fills it from the quotation: its rates, split into sizes.
   lines: QB_LINES.map((l) => ({ itemId: l.itemId, totalQty: l.qty, unitPrice: Number(QB?.lines?.find((x) => x.itemId === l.itemId)?.unitPrice ?? l.unitPrice), sizes: sizes(l.itemId === TRO.id ? TS : SS, SO1_SIZES[l.itemId]) })),
   ...extra,
 })
 const so1Want = priceOrder({ lines: [{ qty: 60, price: 520, hsn: TRO.hsn }, { qty: 30, price: 2600, hsn: SHI.hsn }], discountAmount: 1000, charges: [{ amount: 500, rate: TRANSPORT.rate }], intra: true })
-const wrongQuote = await call('POST', '/sales/orders', { ...so1Body(), customerId: METRO.id }, SALES)
+const wrongQuote = await call('POST', '/sales/orders', { ...so1Body(), customerId: METRO.id }, SALESGST)
 check('O1', "another customer's quotation cannot be made into an order", wrongQuote.status === 400 && wrongQuote.body?.code === 'WRONG_CUSTOMER', err(wrongQuote))
-const so1r = await call('POST', '/sales/orders', so1Body(), SALES)
-let SO1 = so1r.body?.data
+const so1No = await call('POST', '/sales/orders', so1Body(), SALES)
+check('O2', 'the sales manager cannot put GST on top of the transport: changing a charge\'s GST needs the "Override Sales Charge GST" right', so1No.status === 403 && so1No.body?.code === 'CHARGE_TAX_FORBIDDEN' && /Override Sales Charge GST/.test(so1No.body?.message ?? ''), err(so1No))
+const so1r = await call('POST', '/sales/orders', so1Body(), SALESGST)
+SO1 = so1r.body?.data
 check('O2', 'the order is saved as a draft from the quotation', so1r.status === 201 && SO1?.status === 'DRAFT' && SO1?.quotationId === QB?.id, err(so1r))
+const so1Ov = SO1?.charges?.find((c) => c.chargeTypeId === TRANSPORT.id)?.taxSnapshot?.overrides ?? []
+check('O2', 'made by a sales colleague given that right (no Masters rights): the transport keeps who, when, why, and the setting before and after', so1Ov.length === 1 && so1Ov[0].by === SALESGST_ID && so1Ov[0].reason === ON_TOP.reason && !!so1Ov[0].at && so1Ov[0].from?.treatment === 'INCLUSIVE' && so1Ov[0].to?.treatment === 'EXCLUSIVE', JSON.stringify(so1Ov))
 const qbAfter = (await call('GET', `/sales/quotations/${QB?.id}`)).body?.data
 check('O2', 'the quotation is marked won and points at the order', qbAfter?.status === 'WON' && qbAfter?.orders?.some((o) => o.id === SO1?.id), JSON.stringify(qbAfter && { s: qbAfter.status, o: qbAfter.orders }))
 check('O2', "the quotation's rates and GST rates carry onto the order lines", QB_LINES.every((l) => { const ql = QB?.lines?.find((x) => x.itemId === l.itemId), ol = lineOf(SO1, l.itemId); return ol && near(ol.unitPrice, ql?.unitPrice) && near(ol.gstRate, ql?.gstRate) }), JSON.stringify(SO1?.lines?.map((l) => ({ p: l.unitPrice, g: l.gstRate }))))
@@ -419,6 +442,7 @@ check('I3', `unpaid, balance the whole ₹${inv1Want.total}, due in ${ORIENT.day
 const lineTaxable = r2(sum(INV1.lines, (l) => N(l.taxableValue)))
 check('I4', 'the lines\' taxable values add up to the invoice\'s taxable value', near(lineTaxable, INV1.taxableAmount), `lines ${lineTaxable} vs invoice ${N(INV1.taxableAmount)}`)
 check('I4', 'the transport is billed as its order priced it: GST added on top of the ₹500, though the form sent no treatment', (INV1.charges ?? []).length > 0 && INV1.charges.every((c) => c.taxTreatment === 'EXCLUSIVE' && near(c.netAmount, c.amount)), JSON.stringify(INV1.charges?.map((c) => [c.taxTreatment, c.amount, c.netAmount])))
+check('I4', '…raised by the sales manager, who may not change it: the order\'s override record goes with it, nothing new is recorded', INV1.charges.every((c) => c.taxSnapshot?.overrides?.length === 1 && c.taxSnapshot.overrides[0].by === SALESGST_ID && c.taxSnapshot.overrides[0].reason === ON_TOP.reason), JSON.stringify(INV1.charges?.map((c) => c.taxSnapshot?.overrides)))
 const again = await call('POST', '/sales/invoices', { dcId: DC1.id }, SALES)
 check('I5', 'a challan is billed once', again.status === 409 && again.body?.code === 'ALREADY_INVOICED', err(again))
 const dcInv = await call('POST', `/sales/challans/${DC1.id}/cancel`, { reason: 'Trying to cancel a billed challan' }, SALES)
@@ -498,25 +522,42 @@ gWant.raw = gGoods + gIn.net + 300 + gWant.cgst + gWant.sgst
 gWant.total = Math.round(gWant.raw)
 gWant.roundOff = Number((gWant.total - gWant.raw).toFixed(2))
 const gTwice = Math.round(gGoods + gGoodsTax + 1200 + (1200 * G_RATE) / 100 + 300)
-const G_CHARGES = [{ chargeTypeId: TRANSPORT.id, amount: 1200 }, { chargeTypeId: PACKING.id, amount: 300, taxTreatment: 'NON_TAXABLE' }]
-const QG = must(await call('POST', '/sales/quotations', { customerId: ORIENT.id, send: true, customerRef: `ORS-ENQ3-${RUN}`, validUntil: day(15).toISOString(), lines: [{ itemId: FGS.id, qty: G_QTY, unitPrice: G_PRICE }], charges: G_CHARGES }, SALES), 'the quotation with charges')
+// The packing goes without GST on this quotation only (its master has GST on it): the form's GST switch, with its reason.
+const NO_GST_HERE = { gstApplicable: false, applicabilityOnly: true, mode: 'INHERIT', treatment: 'INCLUSIVE', gstRate: 18, taxCategory: 'TAXABLE', reason: 'Packing at cost, agreed without GST' }
+const G_CHARGES = [{ chargeTypeId: TRANSPORT.id, amount: 1200 }, { chargeTypeId: PACKING.id, amount: 300, taxOverride: NO_GST_HERE }]
+const qgBody = { customerId: ORIENT.id, send: true, customerRef: `ORS-ENQ3-${RUN}`, validUntil: day(15).toISOString(), lines: [{ itemId: FGS.id, qty: G_QTY, unitPrice: G_PRICE }], charges: G_CHARGES }
+const qgNo = await call('POST', '/sales/quotations', qgBody, SALES)
+check('G2', 'the sales manager cannot quote the packing without its GST: refused, naming the right to ask for', qgNo.status === 403 && qgNo.body?.code === 'CHARGE_TAX_FORBIDDEN' && /Override Sales Charge GST/.test(qgNo.body?.message ?? ''), err(qgNo))
+const QG = must(await call('POST', '/sales/quotations', qgBody, SALESGST), 'the quotation with charges')
 const chargeOf = (doc, typeId) => (doc?.charges ?? []).filter((c) => c.chargeTypeId === typeId)
 const gstOf = (c) => N(c?.cgst) + N(c?.sgst) + N(c?.igst)
 const [qgT] = chargeOf(QG, TRANSPORT.id), [qgP] = chargeOf(QG, PACKING.id)
 check('G2', `quotation: ₹1,200 transport sent with no treatment takes its type's GST-included: value ₹${gIn.net}, CGST ₹${gIn.cgst} + SGST ₹${gIn.sgst} inside it`, qgT?.taxTreatment === 'INCLUSIVE' && near(qgT?.amount, 1200) && near(qgT?.netAmount, gIn.net) && near(qgT?.cgst, gIn.cgst) && near(qgT?.sgst, gIn.sgst) && N(qgT?.igst) === 0, JSON.stringify(qgT))
 check('G2', 'quotation: ₹300 packing with no GST is kept as it is, no tax on it', qgP?.taxTreatment === 'NON_TAXABLE' && near(qgP?.amount, 300) && near(qgP?.netAmount, 300) && gstOf(qgP) === 0, JSON.stringify(qgP))
+const qgPOv = qgP?.taxSnapshot?.overrides ?? []
+check('G2', 'the packing keeps its override (by the colleague with the right, the reason, GST on → off); the transport, not changed, has none', qgPOv.length === 1 && qgPOv[0].by === SALESGST_ID && qgPOv[0].reason === NO_GST_HERE.reason && qgPOv[0].from?.gstApplicable === true && qgPOv[0].to?.gstApplicable === false && !qgT?.taxSnapshot?.overrides?.length, JSON.stringify({ p: qgPOv, t: qgT?.taxSnapshot?.overrides }))
 check('G2', `quotation total ₹${gWant.total} = ₹${gGoods} + ₹${r2(gGoodsTax)} GST + ₹1,200 + ₹300 (not ₹${gTwice}, GST added on the transport again)`, near(QG.totalAmount, gWant.total) && near(QG.cgst, gWant.cgst) && near(QG.sgst, gWant.sgst) && near(QG.taxableAmount, gGoods) && near(QG.roundOff, gWant.roundOff), showMoney(QG, { totalAmount: gWant.total, cgst: gWant.cgst, sgst: gWant.sgst, roundOff: gWant.roundOff }, ['totalAmount', 'cgst', 'sgst', 'roundOff']))
 const qgBack = (await call('GET', `/sales/quotations/${QG.id}`, null, SALES)).body?.data
 check('G2', 'reopened, the quotation reads its charges back with their treatments, in order', qgBack?.charges?.map((c) => `${c.chargeType?.name}:${c.taxTreatment}`).join() === 'Transport Charges:INCLUSIVE,Packing Charges:NON_TAXABLE', JSON.stringify(qgBack?.charges?.map((c) => [c.chargeType?.name, c.taxTreatment])))
-// The order as its form makes it from the quotation: the charges carried as they are, each with its treatment.
-const SOG = must(await call('POST', '/sales/orders', { customerId: ORIENT.id, quotationId: QG.id, customerPORef: `ORS-PO3-${RUN}`, deliveryDate: day(10).toISOString(), lines: [{ itemId: FGS.id, totalQty: G_QTY, unitPrice: G_PRICE }], charges: qgBack.charges.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: N(c.amount), taxTreatment: c.taxTreatment })) }, SALES), 'the order from the quotation with charges')
+// The order as its form makes it from the quotation: each charge carried by its id, as it was quoted.
+// Carrying an approved setting needs no right; changing it does.
+const SOG = must(await call('POST', '/sales/orders', { customerId: ORIENT.id, quotationId: QG.id, customerPORef: `ORS-PO3-${RUN}`, deliveryDate: day(10).toISOString(), lines: [{ itemId: FGS.id, totalQty: G_QTY, unitPrice: G_PRICE }], charges: qgBack.charges.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: N(c.amount), sourceChargeId: c.id })) }, SALES), 'the order from the quotation with charges')
 const [sogT] = chargeOf(SOG, TRANSPORT.id), [sogP] = chargeOf(SOG, PACKING.id)
 check('G3', `${SOG.soNumber} from ${QG.quoteNumber}: the charges as quoted (GST included, no GST), the same total ₹${gWant.total} and GST`, SOG.status === 'DRAFT' && sogT?.taxTreatment === 'INCLUSIVE' && near(sogT?.netAmount, gIn.net) && sogP?.taxTreatment === 'NON_TAXABLE' && near(SOG.totalAmount, QG.totalAmount) && near(SOG.cgst, QG.cgst) && near(SOG.sgst, QG.sgst), JSON.stringify({ s: SOG.status, t: SOG.totalAmount, c: SOG.charges?.map((c) => [c.taxTreatment, c.amount, c.netAmount]) }))
-const sogEdit = await call('PATCH', `/sales/orders/${SOG.id}`, { customerId: ORIENT.id, quotationId: QG.id, customerPORef: `ORS-PO3-${RUN}`, deliveryDate: day(10).toISOString(), lines: [{ itemId: FGS.id, totalQty: G_QTY, unitPrice: G_PRICE }], charges: [{ chargeTypeId: TRANSPORT.id, amount: 1200, taxTreatment: 'EXCLUSIVE' }, { chargeTypeId: PACKING.id, amount: 300, taxTreatment: 'NON_TAXABLE' }] }, SALES)
+check('G3', '…the sales manager carried them from the quotation without the right: the packing\'s override goes with it, nothing new recorded', sogP?.taxSnapshot?.overrides?.length === 1 && sogP.taxSnapshot.overrides[0].reason === NO_GST_HERE.reason && !sogT?.taxSnapshot?.overrides?.length, JSON.stringify(sogP?.taxSnapshot?.overrides))
+// The order edited whole, as its form sends it: each saved charge by its id; the transport's GST changed.
+const G_ON_TOP = { gstApplicable: true, mode: 'INHERIT', treatment: 'EXCLUSIVE', gstRate: N(TRANSPORT.rate), taxCategory: 'TAXABLE', reason: 'Buyer asked for transport plus GST' }
+const G_ALL_IN = { ...G_ON_TOP, treatment: 'INCLUSIVE', reason: 'Back to the agreed ₹1,200 all-in' }
+const sogBody = (doc, transport = {}) => ({ customerId: ORIENT.id, quotationId: QG.id, customerPORef: `ORS-PO3-${RUN}`, deliveryDate: day(10).toISOString(), lines: [{ itemId: FGS.id, totalQty: G_QTY, unitPrice: G_PRICE }], charges: [{ chargeTypeId: TRANSPORT.id, amount: 1200, sourceChargeId: chargeOf(doc, TRANSPORT.id)[0]?.id, ...transport }, { chargeTypeId: PACKING.id, amount: 300, sourceChargeId: chargeOf(doc, PACKING.id)[0]?.id }] })
+const sogNo = await call('PATCH', `/sales/orders/${SOG.id}`, sogBody(SOG, { taxOverride: G_ON_TOP }), SALES)
+check('G3', 'the sales manager cannot change the transport to GST on top: refused', sogNo.status === 403 && sogNo.body?.code === 'CHARGE_TAX_FORBIDDEN', err(sogNo))
+const sogEdit = await call('PATCH', `/sales/orders/${SOG.id}`, sogBody(SOG, { taxOverride: G_ON_TOP }), SALESGST)
 const sogX = sogEdit.body?.data
 check('G3', `edited to GST added on top, the order goes to ₹${gTwice}; set back to included it returns to ₹${gWant.total}`, sogEdit.status === 200 && near(sogX?.totalAmount, gTwice) && chargeOf(sogX, TRANSPORT.id)[0]?.taxTreatment === 'EXCLUSIVE', `${err(sogEdit)} ${sogX?.totalAmount}`)
-const sogBack = await call('PATCH', `/sales/orders/${SOG.id}`, { customerId: ORIENT.id, quotationId: QG.id, customerPORef: `ORS-PO3-${RUN}`, deliveryDate: day(10).toISOString(), lines: [{ itemId: FGS.id, totalQty: G_QTY, unitPrice: G_PRICE }], charges: qgBack.charges.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: N(c.amount), taxTreatment: c.taxTreatment })) }, SALES)
+const sogBack = await call('PATCH', `/sales/orders/${SOG.id}`, sogBody(sogX, { taxOverride: G_ALL_IN }), SALESGST)
 check('G3', '…and back', sogBack.status === 200 && near(sogBack.body?.data?.totalAmount, gWant.total) && chargeOf(sogBack.body?.data, TRANSPORT.id)[0]?.taxTreatment === 'INCLUSIVE', `${err(sogBack)} ${sogBack.body?.data?.totalAmount}`)
+const sogHist = chargeOf(sogBack.body?.data, TRANSPORT.id)[0]?.taxSnapshot?.overrides ?? []
+check('G3', 'the transport keeps both changes, in order (included → on top → included), each with who and why; the packing still its one', sogHist.length === 2 && sogHist[0].to?.treatment === 'EXCLUSIVE' && sogHist[1].from?.treatment === 'EXCLUSIVE' && sogHist[1].to?.treatment === 'INCLUSIVE' && sogHist.every((o) => o.by === SALESGST_ID && o.reason?.length >= 5) && chargeOf(sogBack.body?.data, PACKING.id)[0]?.taxSnapshot?.overrides?.length === 1, JSON.stringify(sogHist))
 const sogC = await call('POST', `/sales/orders/${SOG.id}/confirm`, {}, SALES)
 check('G3', `${SOG.soNumber} confirmed at ₹${gWant.total}`, sogC.status === 200 && sogC.body?.data?.status === 'CONFIRMED' && near(sogC.body?.data?.totalAmount, gWant.total), err(sogC))
 must(await call('POST', '/finished-goods', { warehouseId: STORE.id, notes: `Packed for the charges test (run ${RUN})`, lines: [{ itemId: FGS.id, qty: G_QTY }] }, KEEPER), 'finished goods for the order with charges')
@@ -529,10 +570,15 @@ const INVG = must(await call('POST', '/sales/invoices', { dcId: DCG.id, charges:
 const [ingT] = chargeOf(INVG, TRANSPORT.id), [ingP] = chargeOf(INVG, PACKING.id)
 check('G4', `${INVG.invoiceNumber}: total ₹${gWant.total}, CGST ₹${gWant.cgst} + SGST ₹${gWant.sgst} (₹${gIn.cgst} of each inside the transport), taxable goods ₹${gGoods}`, near(INVG.totalAmount, gWant.total) && near(INVG.cgst, gWant.cgst) && near(INVG.sgst, gWant.sgst) && near(INVG.taxableAmount, gGoods) && near(INVG.roundOff, gWant.roundOff), showMoney(INVG, { totalAmount: gWant.total, cgst: gWant.cgst, sgst: gWant.sgst, taxableAmount: gGoods }, ['totalAmount', 'cgst', 'sgst', 'taxableAmount']))
 check('G4', `the invoice keeps the transport at ₹1,200 typed, value ₹${gIn.net}, GST included; the packing ₹300 with no GST`, chargeOf(INVG, TRANSPORT.id).length === 1 && ingT?.taxTreatment === 'INCLUSIVE' && near(ingT?.amount, 1200) && near(ingT?.netAmount, gIn.net) && near(gstOf(ingT), 2 * gIn.cgst) && ingP?.taxTreatment === 'NON_TAXABLE' && near(ingP?.netAmount, 300) && gstOf(ingP) === 0, JSON.stringify(INVG.charges))
+check('G4', '…as the order approved them, raised by the sales manager without the right: both override records carried, nothing new', ingT?.taxSnapshot?.overrides?.length === 2 && ingP?.taxSnapshot?.overrides?.length === 1, JSON.stringify([ingT?.taxSnapshot?.overrides, ingP?.taxSnapshot?.overrides]))
 // The voucher is written from these figures (posting.service): customer debited the total; sales, each
 // charge at its value without GST, output GST and round-off credited. They must balance to the paisa.
 const credits = r2(N(INVG.taxableAmount) + sum(INVG.charges, (c) => N(c.netAmount)) + N(INVG.otherCharges) + N(INVG.cgst) + N(INVG.sgst) + N(INVG.igst) + N(INVG.roundOff))
 check('G5', `its accounting entry balances: customer ₹${N(INVG.totalAmount)} = sales ₹${N(INVG.taxableAmount)} + transport ₹${gIn.net} + packing ₹300 + GST ₹${r2(N(INVG.cgst) + N(INVG.sgst))} + rounding`, near(credits, INVG.totalAmount), `credits ₹${credits} vs total ₹${N(INVG.totalAmount)}`)
+// …and the voucher actually posted carries the same GST: the rate approved on the order, through to the books.
+const vG = await q(`SELECT l.debit::float8 d, l.credit::float8 c, g."systemKey" k FROM acc_vouchers v JOIN acc_voucher_lines l ON l."voucherId" = v.id JOIN ledgers g ON g.id = l."ledgerId" WHERE v."sourceType" = 'SALES_INVOICE' AND v."sourceId" = $1 AND v.status = 'POSTED'`, [INVG.id])
+const vGst = r2(sum(vG.filter((l) => /^OUTPUT_(CGST|SGST|IGST)$/.test(l.k ?? '')), (l) => l.c - l.d))
+check('G5', `the posted voucher: output GST ₹${vGst} = the invoice's ₹${r2(N(INVG.cgst) + N(INVG.sgst))} (none on the packing), debits = credits`, vG.length > 0 && near(vGst, N(INVG.cgst) + N(INVG.sgst)) && near(sum(vG, (l) => l.d), sum(vG, (l) => l.c)), JSON.stringify(vG))
 const pInvG = (await call('GET', `/sales/invoices/${INVG.id}/print`, null, SALES)).body?.data
 const hsG = pInvG?.hsnSummary ?? []
 check('G6', `invoice print, HSN summary: taxable ₹${r2(gGoods + gIn.net)} (the goods + the transport without its GST; the packing outside), tax = the invoice's GST`, near(sum(hsG, (h) => h.taxable), r2(gGoods + gIn.net), 0.02) && near(sum(hsG, (h) => h.cgst + h.sgst + h.igst), r2(N(INVG.cgst) + N(INVG.sgst)), 0.02) && !hsG.some((h) => /packing/i.test(h.hsn)), JSON.stringify(hsG))
@@ -541,6 +587,12 @@ check('G6', 'quotation print carries the charges with their treatments and value
 const pSoG = (await call('GET', `/sales/orders/${SOG.id}/print`, null, SALES)).body?.data
 const soPrintSum = r2(N(pSoG?.order?.taxableAmount) + sum(pSoG?.order?.charges ?? [], (c) => N(c.netAmount)) + N(pSoG?.order?.otherCharges) + N(pSoG?.order?.cgst) + N(pSoG?.order?.sgst) + N(pSoG?.order?.igst) + N(pSoG?.order?.roundOff))
 check('G6', `order print: the rows it prints (goods, each charge without its GST, CGST, SGST, rounding) add up to the total ₹${gWant.total}`, near(soPrintSum, pSoG?.order?.totalAmount) && near(pSoG?.order?.totalAmount, gWant.total), `rows ₹${soPrintSum} vs ₹${N(pSoG?.order?.totalAmount)}`)
+// ── G7. The trail of every change, and the masters untouched ──
+const ovAudit = await q(`SELECT "entityId" id, "userId" u, after FROM audit_logs WHERE "entityType" = 'SalesChargeGstOverride' AND "entityId" = ANY($1)`, [[QG.id, SO1.id, SOG.id, INV1.id, INVG.id]])
+const nOf = (id) => ovAudit.filter((a) => a.id === id).length
+check('G7', `the audit trail: one entry per change, by whoever made it (quotation 1, ${SO1.soNumber} 1, ${SOG.soNumber} 2); the two invoices none`, nOf(QG.id) === 1 && nOf(SO1.id) === 1 && nOf(SOG.id) === 2 && nOf(INV1.id) === 0 && nOf(INVG.id) === 0 && ovAudit.every((a) => a.u === SALESGST_ID && (a.after?.reason ?? '').length >= 5 && !!a.after?.from && !!a.after?.to), JSON.stringify(ovAudit.map((a) => [a.id, a.after?.document, a.after?.reason])))
+const mastersAfter = await chargeMasters()
+check('G7', "the charge masters are not changed by any of it (Packing, Transport: every field as it was)", MASTERS_BEFORE.length === 2 && JSON.stringify(mastersAfter) === JSON.stringify(MASTERS_BEFORE), JSON.stringify({ before: MASTERS_BEFORE, after: mastersAfter }))
 
 // ════════════════ P. Payments received ════════════════
 const kR = await call('POST', '/sales/receipts', { customerId: ORIENT.id, mode: 'CASH', amount: 100 }, KEEPER)

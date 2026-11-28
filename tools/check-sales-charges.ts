@@ -25,7 +25,9 @@ import { findHsn, gstRateFor, loadHsnIndex } from '../apps/api/src/lib/hsn'
 import { chargesStillToBill, createInvoice, invoiceSchema, loadBillable } from '../apps/api/src/routes/invoice.routes'
 import { gstr1 } from '../apps/api/src/services/accounts/gst.service'
 import { postDocument } from '../apps/api/src/services/accounts/posting.service'
-import { chargeRowOf } from '../apps/api/src/services/salesCharges'
+import { chargeRowOf, overridesMade } from '../apps/api/src/services/salesCharges'
+import { expandGrants, grantsAllow } from '../apps/api/src/lib/access'
+import { chargeSnapshot } from '../packages/shared/src/index'
 
 let pass = 0
 let fail = 0
@@ -76,6 +78,7 @@ async function main() {
           { treatment: transport.taxTreatment, follows: transport.followsGoodsRate },
         )
 
+        const overrider = await tx.user.findFirstOrThrow({ select: { id: true, name: true } })
         const order = (charges: unknown[], extra: Record<string, unknown> = {}) =>
           prepareOrder(
             tx,
@@ -86,8 +89,8 @@ async function main() {
               charges,
               ...extra,
             }),
-            // As a person who may change a charge's GST (Masters: Edit), since #71.
-            { piecesOnly: true, canOverride: true },
+            // As a person with the "Override Sales Charge GST" right (28 Nov 2026), who is recorded on it.
+            { piecesOnly: true, canOverride: true, by: { id: overrider.id } },
           )
 
         // A row's GST changed on the form (Advanced Tax Settings, #71): an override with its reason.
@@ -158,6 +161,8 @@ async function main() {
         const userId = (await tx.user.findFirstOrThrow({ select: { id: true } })).id
         const co = await tx.company.findFirstOrThrow({ select: { id: true } })
         await tx.company.update({ where: { id: co.id }, data: { booksStartDate: new Date(Date.now() - 3 * 86_400_000), booksLockedUpTo: null } })
+        // The packing charge's master as it stands before the order below overrides its GST.
+        const packingBefore = await tx.chargeType.findUniqueOrThrow({ where: { id: packing.id } })
         const io = await order([
           { chargeTypeId: transport.id, amount: 1200 },
           { chargeTypeId: packing.id, amount: 300, taxOverride: NO_GST },
@@ -183,6 +188,37 @@ async function main() {
         const ip1 = inv.charges.find((x) => x.chargeTypeId === packing.id)
         check('invoice: total ₹3,19,020, CGST = SGST = ₹7,588.57, goods taxable ₹3,02,400 — the same as the order', N(inv.totalAmount) === 319020 && N(inv.totalAmount) === N(so.totalAmount) && N(inv.cgst) === 7588.57 && N(inv.sgst) === 7588.57 && N(inv.taxableAmount) === 302400, { total: inv.totalAmount, cgst: inv.cgst, taxable: inv.taxableAmount })
         check('invoice: transport ₹1,200 kept as typed, value ₹1,142.86, GST included; packing ₹300, no GST', it1?.taxTreatment === 'INCLUSIVE' && N(it1?.amount) === 1200 && N(it1?.netAmount) === 1142.86 && N(it1?.cgst) === 28.57 && ip1?.taxTreatment === 'NON_TAXABLE' && N(ip1?.netAmount) === 300 && N(ip1?.cgst) + N(ip1?.sgst) + N(ip1?.igst) === 0, inv.charges)
+
+
+        // ── The "Override Sales Charge GST" right (28 Nov 2026) ──
+        const packOrder = io.charges.find((x) => x.chargeTypeId === packing.id)
+        const rec = chargeSnapshot(packOrder?.taxSnapshot)?.overrides?.[0]
+        check(
+          'override: kept on the order\'s charge with who, when, why, and the setting before and after',
+          !!rec && rec.by === overrider.id && rec.byName === overrider.name && rec.reason === 'check: no GST on it' && !!rec.at && rec.from.gstApplicable === true && rec.to.gstApplicable === false && rec.to.treatment === 'NON_TAXABLE',
+          rec,
+        )
+        check('override: one audit entry for it, none for the transport (not changed)', overridesMade(io.charges as never).length === 1 && overridesMade(io.charges as never)[0].chargeTypeId === packing.id, overridesMade(io.charges as never))
+        const packingAfter = await tx.chargeType.findUniqueOrThrow({ where: { id: packing.id } })
+        check('override: the charge master is not changed', JSON.stringify({ ...packingAfter, updatedAt: null }) === JSON.stringify({ ...packingBefore, updatedAt: null }), { before: packingBefore.taxTreatment, after: packingAfter.taxTreatment })
+        check(
+          'override: carried onto the invoice as the order approved it, by someone without the right, with its record',
+          ip1?.taxTreatment === 'NON_TAXABLE' && chargeSnapshot(ip1?.taxSnapshot)?.overrides?.length === 1 && overridesMade(inv.charges as never, io.charges as never).length === 0,
+          ip1?.taxSnapshot,
+        )
+        let refused = ''
+        try {
+          await prepareOrder(
+            tx,
+            createSalesOrderSchema.parse({ customerId: customer.id, placeOfSupplyCode: home, lines: [{ itemId: item.id, totalQty: 800, unitPrice: 378 }], charges: [{ chargeTypeId: packing.id, amount: 300, taxOverride: NO_GST }] }),
+            { piecesOnly: true, canOverride: false },
+          )
+        } catch (e) {
+          refused = `${(e as { code?: string }).code}: ${(e as Error).message}`
+        }
+        check('override without the right: refused, naming the right to ask for', refused.startsWith('CHARGE_TAX_FORBIDDEN') && refused.includes('Override Sales Charge GST'), refused)
+        check('the right is given only by name: Sales-wide edit does not include it, nor Masters edit', !grantsAllow(['sales:edit', 'sales:*', 'masters:edit'], 'sales.charge-gst', 'edit') && grantsAllow(['sales.charge-gst:edit'], 'sales.charge-gst', 'edit'))
+        check('…a role saved with Sales-wide edit is not given it, and it alone does not open the rest of Sales', !expandGrants(['sales:edit']).includes('sales.charge-gst:edit') && !grantsAllow(['sales.charge-gst:edit'], 'sales', 'edit'))
 
         const v = await tx.voucher.findUnique({
           where: { sourceType_sourceId: { sourceType: 'SALES_INVOICE', sourceId: inv.id } },
