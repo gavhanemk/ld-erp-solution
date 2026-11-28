@@ -938,8 +938,9 @@ router.post('/outward/apply', allowedOnAnyOf(['inventory.stickers', 'inventory.r
         }
         taken.set(key, round3(room - t.qty))
         // FIFO: a newer package taken while an older one stays on the rack
-        // needs the store manager's reason.
-        const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit, whole)
+        // needs the store manager's reason. Within its own share: an older roll
+        // of central stock or another brand did not go out for this share.
+        const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit, whole, [pkg.brandId ?? null])
 
         const ref = { referenceType: OUTWARD[data.type].ledger, referenceId: doc.id, referenceNumber: doc.number, userId: req.user?.id ?? null }
         if (!moves) {
@@ -1498,9 +1499,9 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
       if (pkg.grade === 'R') throw new AppError(`${pkg.code} is on hold (rejected at receipt), so it stays where it is until it is released or sent back.`, 409, 'HELD')
       if (data.toWarehouseId === pkg.warehouseId) throw new AppError(`${pkg.code} is already in ${pkg.warehouse.name}.`, 400, 'SAME_STORE')
       if (data.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
-      // FIFO: an older package of the same item in this store goes first,
-      // unless the store manager lets this one go, with a reason.
-      const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit)
+      // FIFO: an older package of the same item in this store, of the same
+      // share, goes first, unless the store manager lets this one go, with a reason.
+      const fifo = await checkFifo(tx, pkg, req.user, data.fifoReason, unit, [], [pkg.brandId ?? null])
 
       const note = await createTransfer(
         tx,

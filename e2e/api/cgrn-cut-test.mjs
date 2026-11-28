@@ -74,6 +74,15 @@ const mr = must(await call('POST', '/inventory/requisitions', {
 }), 'requisition')
 check('B2', 'a requisition with only an MO named takes its order', mr.soId === so.id, `soId=${mr.soId}`)
 must(await call('PATCH', `/inventory/requisitions/${mr.id}/approve`, {}), 'approve')
+// The MO's plan (its BOM) does not call for this poplin: since 28 Nov 2026 material the plan does not
+// call for is issued only once a production manager approves it as extra, material by material and
+// owner by owner. The test's admin approves its own, as an Admin may, with the override's reason.
+const notYet = await call('POST', `/inventory/requisitions/${mr.id}/issue`, {})
+check('SET', 'material the plan does not call for is not issued until approved as extra', notYet.status === 409 && notYet.body?.code === 'EXTRA_NEEDED', err(notYet))
+for (const [itemId, qty, ownership, what] of [[FAB, 10, 'CUSTOMER_OWNED', 'their poplin'], [FAB, 5, 'OWNED', 'our poplin'], [BTN, 20, 'OWNED', 'our buttons']]) {
+  const ex = must(await call('POST', `/production/orders/${mo.id}/extras`, { itemId, qty, ownership, reason: `Demo test: ${what} for the cutting test` }), `extra: ${what}`)
+  must(await call('POST', `/production/orders/extras/${ex.id}/approve`, { overrideReason: 'Demo test: the admin approves the test run’s own extra material' }), `extra approved: ${what}`)
+}
 const iss = await call('POST', `/inventory/requisitions/${mr.id}/issue`, {})
 check('SET', 'issued: 10 of theirs, 5 of ours, 20 buttons', iss.status === 200, err(iss))
 
