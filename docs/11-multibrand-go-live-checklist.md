@@ -162,7 +162,7 @@ On 28 Nov 2026 the owner decided that nothing in this release removes anything. 
 | Before the migrations | Nothing to undo. |
 | Migrations on, old code still running | Leave the migrations. They only add, and the old code ignores them. |
 | New code live, a problem found, no brand transfer yet | Plain `main` is safe only if all three counts are 0: `stock_ledger` rows of type `REALLOCATION`; package moves `EARMARKED`; garment events `EARMARKED`. |
-| Any brand transfer already posted | Deploy the **rollback build**: branch `rollback/compat-schema` (local, 82b5614d), worktree `LD ERP Rollback`. It is `main`'s code on the multi-brand schema. Note the time it goes live. |
+| Any brand transfer already posted | Deploy the **rollback build**: branch `rollback/compat-schema` on GitHub (7bbb3760; no PR, never merged), worktree `LD ERP Rollback`. It is `main`'s code as of #90, on the multi-brand schema with its migrations, so it keeps #89/#90 and still reads brand-era data. It was rebuilt on 28 Nov after #89/#90 merged, and proven on the restored copy: every everyday screen answers. Note the time it goes live. |
 | Data damaged | A restore is a Supabase-level operation, with owner approval only. Restore into a new database first and compare snapshots. `restore-db.ts` writes only to local scratch databases. |
 
 **While the rollback build runs:**
@@ -221,7 +221,7 @@ Delete none of these until the owner confirms that production is stable:
 
 - the live backups and snapshots in `Desktop/LD ERP Backups` (`live-<date>.json`, `live-before.json`, `live-after.json`), and the Supabase backup;
 - the restored copy of the live backup (`lderp_restore_<date>`, demo server);
-- the rollback build: branch `rollback/compat-schema` and worktree `LD ERP Rollback`, with its packages installed;
+- the rollback build: branch `rollback/compat-schema` (on GitHub) and worktree `LD ERP Rollback`, with its packages installed;
 - the rehearsal evidence: `Desktop/LD ERP Backups/demo-rehearsal-multibrand-2026-11-28` (demo only) and the copy `lderp_restore_20261128` (demo server);
 - the test branch `integration/release-20261128` and worktree `LD ERP Integration`.
 
