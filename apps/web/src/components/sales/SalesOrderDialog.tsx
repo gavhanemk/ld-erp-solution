@@ -1490,7 +1490,7 @@ export function SalesOrderDialog({
           placeholder={JOB_WORK_SAC}
           onChange={(e) => setLine(line.key, { jobHsn: e.target.value.replace(/[^\d]/g, '') })}
           aria-label={`Row ${i + 1} SAC or HSN for the job charge`}
-          title="Job work is billed as a service. Leave empty for SAC 9988."
+          title="Job work is billed as a service. Leave empty for SAC 998822."
         />
       ),
       jobGst: (

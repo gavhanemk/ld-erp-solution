@@ -45,7 +45,7 @@ const lineSchema = z.object({
   qty: z.number().positive('Quantity must be more than zero'),
   unitPrice: z.number().min(0, 'Rate cannot be negative'),
   discount: z.number().min(0).max(100).optional(),
-  /** On a job-work quotation: the SAC and GST rate of the job charge (SAC 9988 when empty). */
+  /** On a job-work quotation: the SAC and GST rate of the job charge (SAC 998822 when empty). */
   jobHsnCode: z.string().trim().max(20).optional().nullable(),
   jobGstRate: z.number().min(0).max(28).optional().nullable(),
   /**

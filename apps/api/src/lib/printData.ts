@@ -1,5 +1,6 @@
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
+import { fromGstin } from './gstStates'
 
 /**
  * The letterhead and wording a printed document needs.
@@ -144,7 +145,9 @@ export async function getPrintHeader(docType: string): Promise<PrintHeader> {
       pincode: company.pincode,
       address2: company.address2,
       gstin: company.gstin,
-      pan: company.pan,
+      // A PAN never entered is still the one inside the GSTIN (characters 3–12),
+      // so the header prints it rather than a dash (28 Nov 2026).
+      pan: company.pan || (company.gstin && company.gstin.length >= 12 ? fromGstin(company.gstin)?.pan : null) || null,
       phone: company.phone,
       email: company.email,
       website: company.website,
