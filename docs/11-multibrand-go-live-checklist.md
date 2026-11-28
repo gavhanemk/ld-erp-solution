@@ -39,7 +39,7 @@ Final version, 28 Nov 2026, for branch `feat/multibrand-p5` (all eight phases do
 | Branch | Its migrations | Where it overlaps this branch | Resolved |
 | --- | --- | --- | --- |
 | `feat/sales-print-sizes` | `20261129190500_quotation_line_sizes`, `20261129203000_invoice_old_erp_fields` | stock-transfer print; invoice dialog; quotation dialog | their layout and fields, plus this branch's in-transit lines ("Goes", status, "On arrival" note) and style groups |
-| `feat/challan-job-format` (up to 273f354b) | `20261130150000_job_challan_rolls` | challan routes and roll stickers | merged cleanly. Its rules survive: rolls are replaced only when sent, `GET /rolls` is matched before `/:id`, and the job-work SAC is 998822. Every challan now prints "DELIVERY CHALLAN". |
+| `feat/challan-job-format` (up to 28ec3c49) | `20261130150000_job_challan_rolls` | challan routes, roll stickers, the access list | one conflict, in the access list: Brand Stock kept beside "Job Work Out". Its rules survive: rolls are replaced only when sent, `GET /rolls` is matched before `/:id`, and the job-work SAC is 998822. The Sales challan prints "DELIVERY CHALLAN" and the job-worker's "JOB WORK CHALLAN"; the challan window counts loose pieces only. |
 
 ## 2. Test data stays off live
 
